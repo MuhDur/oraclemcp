@@ -1,0 +1,50 @@
+# OS/Editor artifacts
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
+*.sublime-*
+
+# Environment/secrets (never commit these)
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build artifacts (add project-specific patterns below)
+dist/
+build/
+target/
+*.pyc
+__pycache__/
+node_modules/
+.venv/
+venv/
+*.profraw
+*.profdata
+
+# bv (beads viewer) local config and caches
+.bv/
+
+# Agent state (never commit)
+.claude/
+.ntm/
+
+# Beads compliance audit dir (managed by /beads-compliance-and-completion-verification skill)
+/beads_compliance_audit/
+
+# USR loop (PLSQL-USR-001 P2): content-addressed store of synthetic,
+# privacy-proven MinFixtures. Never contains original estate bytes,
+# but is run-output churn — gitignored from normal commits (committed
+# only at release tags per spec §4). Matches the store wherever the
+# loop's cwd places it (repo root, tools/usr-loop, …).
+.usr/
