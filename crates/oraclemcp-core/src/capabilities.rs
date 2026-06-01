@@ -5,6 +5,7 @@
 //! Kept serializable as a **standalone document** (no rmcp/session types) so the
 //! move to per-request `_meta` in a later MCP spec is cheap (§2.5).
 
+use oraclemcp_db::PrivilegeProfile;
 use oraclemcp_guard::OperatingLevel;
 use serde::{Deserialize, Serialize};
 
@@ -75,6 +76,11 @@ pub struct CapabilitiesReport {
     pub connection: ConnectionStatus,
     /// Feature tiers.
     pub features: FeatureTiers,
+    /// The connected account's probed privilege profile (dictionary tier,
+    /// Diagnostics Pack, PL/Scope), once a session exists (§5.11, bead P2-9).
+    /// `None` before connect — the agent learns which tiers degrade and why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privileges: Option<PrivilegeProfile>,
 }
 
 impl CapabilitiesReport {
@@ -105,7 +111,15 @@ impl CapabilitiesReport {
             transports,
             connection: ConnectionStatus::default(),
             features,
+            privileges: None,
         }
+    }
+
+    /// Attach the probed privilege profile (from [`oraclemcp_db::probe_privileges`]).
+    #[must_use]
+    pub fn with_privileges(mut self, profile: PrivilegeProfile) -> Self {
+        self.privileges = Some(profile);
+        self
     }
 }
 
@@ -174,6 +188,41 @@ mod tests {
         );
         assert!(!report.operating_level.protected);
         assert_eq!(report.operating_level.max, OperatingLevel::Ddl);
+    }
+
+    #[test]
+    fn privileges_absent_until_probed_then_surfaced() {
+        let base = CapabilitiesReport::new(
+            "0.1.0",
+            sample_tools(),
+            OperatingLevel::ReadOnly,
+            FeatureTiers {
+                live_db: true,
+                engine: true,
+                http_transport: false,
+            },
+        );
+        // Pre-connect: omitted from the document entirely.
+        assert!(base.privileges.is_none());
+        let json = serde_json::to_value(&base).expect("serialize");
+        assert!(json.get("privileges").is_none(), "skipped when None");
+
+        // Post-probe: the tier is surfaced so the agent knows what degrades.
+        let probed = base.with_privileges(PrivilegeProfile {
+            dictionary_tier: oraclemcp_db::DictionaryTier::All,
+            diagnostics_pack: false,
+            plscope: true,
+        });
+        let json = serde_json::to_value(&probed).expect("serialize");
+        assert_eq!(
+            json["privileges"]["dictionary_tier"],
+            serde_json::json!("all")
+        );
+        assert_eq!(json["privileges"]["plscope"], serde_json::json!(true));
+        assert_eq!(
+            json["privileges"]["diagnostics_pack"],
+            serde_json::json!(false)
+        );
     }
 
     #[test]

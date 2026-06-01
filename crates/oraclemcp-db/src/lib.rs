@@ -20,6 +20,7 @@ mod doctor;
 mod error;
 mod intelligence;
 mod lease;
+mod privileges;
 mod query;
 mod serialize;
 mod standby;
@@ -36,6 +37,9 @@ pub use intelligence::{
     sample_rows, search_source,
 };
 pub use lease::{LeaseId, LeaseInfo, LeaseManager, PreviewImpact, require_lease_id};
+pub use privileges::{
+    DictionaryTier, PrivilegeProfile, ToolRequirement, probe_privileges, requirement_matrix,
+};
 pub use query::{QueryCaps, QueryResponse, cursor_to_offset, paginated_sql, read_query};
 pub use serialize::{
     SerializeOptions, TypeRepr, base64_encode, canonical_nls_statements, canonicalize_datetime,
