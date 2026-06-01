@@ -341,7 +341,15 @@ pub fn render_prompt(name: &str, args: &Value) -> Result<Vec<PromptMessage>, Err
              Mark it DDL-level (step-up required).",
             s("description")
         ),
-        _ => unreachable!("name was found in the catalog above"),
+        // Unreachable today (the name was validated against the catalog above),
+        // but degrade gracefully rather than panic if the catalog and this match
+        // ever drift (e.g. a 6th playbook added to the catalog but not here).
+        _ => {
+            return Err(ErrorEnvelope::new(
+                ErrorClass::Internal,
+                format!("prompt '{name}' is in the catalog but has no template"),
+            ));
+        }
     };
     Ok(vec![PromptMessage {
         role: "user".to_owned(),
