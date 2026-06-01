@@ -114,7 +114,9 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn env(map: &HashMap<&'static str, &'static str>) -> impl Fn(&str) -> Option<String> + '_ {
+    fn env<'a>(
+        map: &'a HashMap<&'static str, &'static str>,
+    ) -> impl Fn(&str) -> Option<String> + 'a {
         move |k| map.get(k).map(|v| (*v).to_owned())
     }
 
