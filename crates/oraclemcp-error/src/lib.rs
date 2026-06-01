@@ -19,6 +19,9 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod fuzzy;
+pub use fuzzy::{enrich_oracle_error, fuzzy_suggest, levenshtein};
+
 /// Machine-stable classification of an agent-facing error.
 ///
 /// Serialized as `SCREAMING_SNAKE_CASE` so the wire value is a stable string
