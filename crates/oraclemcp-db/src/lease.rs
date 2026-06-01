@@ -280,6 +280,19 @@ impl LeaseManager {
     pub fn active_count(&self) -> usize {
         self.leases.lock().expect("lease map mutex poisoned").len()
     }
+
+    /// Force-roll-back and drop every lease (graceful shutdown / crash cleanup,
+    /// §5.7). Returns the number released. Idempotent.
+    pub fn release_all(&self) -> usize {
+        let drained: Vec<Arc<Mutex<Lease>>> = {
+            let mut map = self.leases.lock().expect("lease map mutex poisoned");
+            map.drain().map(|(_, v)| v).collect()
+        };
+        for arc in &drained {
+            arc.lock().expect("lease mutex poisoned").force_rollback();
+        }
+        drained.len()
+    }
 }
 
 /// Require a `lease_id` for a stateful (transaction/savepoint) operation —

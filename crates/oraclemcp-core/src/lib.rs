@@ -21,12 +21,14 @@ pub mod connect;
 pub mod init_token;
 pub mod resilience;
 pub mod server;
+pub mod shutdown;
 pub mod tools;
 
 pub use resilience::{
     CircuitBreaker, CircuitState, RetryPolicy, is_transient_error, run_with_timeout,
 };
 pub use server::{CAPABILITIES_TOOL, OracleMcpServer, ToolDispatch};
+pub use shutdown::{CancelOutcome, ShutdownCoordinator, install_panic_hook};
 
 pub use admission::{AdmissionController, AdmissionPermit};
 pub use capabilities::{
