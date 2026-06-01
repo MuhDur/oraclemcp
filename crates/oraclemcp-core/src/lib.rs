@@ -22,6 +22,7 @@ pub mod custom_tools;
 pub mod doctor;
 pub mod http;
 pub mod init_token;
+pub mod plugin;
 pub mod query_execute;
 pub mod resilience;
 pub mod resources;
@@ -54,6 +55,10 @@ pub use http::{
     build_router, serve_http,
 };
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
+pub use plugin::{
+    PluginCapability, PluginError, PluginManifest, PluginRequest, PluginResponse, SubprocessPlugin,
+    check_capability,
+};
 pub use query_execute::{ExecuteParams, StatementExecutor, oracle_query_execute};
 pub use resources::{
     PromptArg, PromptDef, PromptMessage, ResourceContents, ResourceProvider, ResourceTemplate,
