@@ -16,6 +16,8 @@
 //! (P1-13a / 2.12.1); classify-at-load (2.12.2), Form A/B execution (2.12.3/4),
 //! HMAC signing (2.12.5), and meta-dispatch registration (2.12.6) layer on here.
 
+use oraclemcp_db::OracleBind;
+use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{Classifier, OperatingLevel};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -482,6 +484,95 @@ pub fn load_tools_for_profile(
         .collect()
 }
 
+// ── Form A / Form B execution: bind-only param binding (P1-13c / 2.12.3) ──────
+
+/// Bind the agent's JSON arguments to typed Oracle bind variables — the
+/// injection defense. Values are **bound, never interpolated** into the SQL.
+/// Returns `(name, bind)` pairs (the body references `:name`). Enforces required
+/// params, type-checks each value, and rejects unknown args (`additionalProperties:false`).
+pub fn bind_params(
+    def: &CustomToolDef,
+    args: &Value,
+) -> Result<Vec<(String, OracleBind)>, ErrorEnvelope> {
+    let empty = Map::new();
+    let obj = match args {
+        Value::Object(m) => m,
+        Value::Null => &empty,
+        _ => {
+            return Err(ErrorEnvelope::new(
+                ErrorClass::InvalidArguments,
+                "arguments must be a JSON object",
+            ));
+        }
+    };
+    let invalid = |msg: String| ErrorEnvelope::new(ErrorClass::InvalidArguments, msg);
+
+    // Reject unknown args (no silent drop — additionalProperties:false).
+    for key in obj.keys() {
+        if !def.params.iter().any(|p| &p.name == key) {
+            return Err(invalid(format!("unknown argument '{key}'")));
+        }
+    }
+
+    let mut binds = Vec::with_capacity(def.params.len());
+    for p in &def.params {
+        let bind = match obj.get(&p.name) {
+            None | Some(Value::Null) => {
+                if p.required {
+                    return Err(invalid(format!("missing required argument '{}'", p.name)));
+                }
+                OracleBind::Null
+            }
+            Some(v) => coerce_bind(p, v).ok_or_else(|| {
+                invalid(format!("argument '{}' is not a valid {:?}", p.name, p.ty))
+            })?,
+        };
+        binds.push((p.name.clone(), bind));
+    }
+    Ok(binds)
+}
+
+fn coerce_bind(p: &ParamDef, v: &Value) -> Option<OracleBind> {
+    match p.ty {
+        ParamType::String => v.as_str().map(|s| OracleBind::String(s.to_owned())),
+        ParamType::Integer => v.as_i64().map(OracleBind::I64),
+        // A number accepts integers too.
+        ParamType::Number => v.as_f64().map(OracleBind::F64),
+        ParamType::Boolean => v.as_bool().map(OracleBind::Bool),
+    }
+}
+
+/// Runs a custom tool's body with bound params at the granted level (engine/DB
+/// side). Injected so this module stays engine-free and unit-testable; the
+/// implementation reuses the Phase-1 read/exec path + type/NLS serializer.
+pub trait CustomToolExecutor: Send + Sync {
+    /// Execute `body` at `level` with the bound params; return structured JSON.
+    fn run(
+        &self,
+        body: ToolBody<'_>,
+        level: OperatingLevel,
+        binds: &[(String, OracleBind)],
+    ) -> Result<Value, ErrorEnvelope>;
+}
+
+/// Execute a loaded custom tool: bind the agent args (bind-only) and run the
+/// body at its classify-derived level. PL/SQL blocks are ≥ Guarded, so the
+/// caller's level gate / step-up applies before the executor runs them.
+pub fn execute_custom_tool(
+    loaded: &LoadedTool,
+    args: &Value,
+    executor: &dyn CustomToolExecutor,
+) -> Result<Value, ErrorEnvelope> {
+    let binds = bind_params(&loaded.def, args)?;
+    let body = loaded.def.body().map_err(|e| {
+        ErrorEnvelope::new(
+            ErrorClass::InvalidArguments,
+            format!("invalid tool body: {e}"),
+        )
+    })?;
+    executor.run(body, loaded.required_level, &binds)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -789,5 +880,122 @@ mod tests {
             load_tools_for_profile(&[unsigned], &c, OperatingLevel::ReadOnly, KEY, true),
             Err(LoadError::SignatureRequired { .. })
         ));
+    }
+
+    // ── Form A bind-only execution (2.12.3) ───────────────────────────────────
+
+    fn def_with_params(sql: &str, params: Vec<ParamDef>) -> CustomToolDef {
+        CustomToolDef {
+            name: "t".to_owned(),
+            description: "t".to_owned(),
+            sql: Some(sql.to_owned()),
+            call: None,
+            params,
+            output_mode: OutputMode::Rows,
+            declared_level: None,
+            signature: None,
+        }
+    }
+
+    fn p(name: &str, ty: ParamType, required: bool) -> ParamDef {
+        ParamDef {
+            name: name.to_owned(),
+            ty,
+            required,
+            description: None,
+        }
+    }
+
+    #[test]
+    fn bind_params_typechecks_and_binds() {
+        let d = def_with_params(
+            "SELECT * FROM t WHERE id = :id AND name = :name AND ratio = :r AND flag = :f",
+            vec![
+                p("id", ParamType::Integer, true),
+                p("name", ParamType::String, true),
+                p("r", ParamType::Number, false),
+                p("f", ParamType::Boolean, false),
+            ],
+        );
+        let binds = bind_params(&d, &json!({"id": 42, "name": "acme", "r": 1.5, "f": true}))
+            .expect("binds");
+        assert_eq!(binds.len(), 4);
+        assert_eq!(binds[0], ("id".to_owned(), OracleBind::I64(42)));
+        assert_eq!(
+            binds[1],
+            ("name".to_owned(), OracleBind::String("acme".to_owned()))
+        );
+        assert_eq!(binds[2], ("r".to_owned(), OracleBind::F64(1.5)));
+        assert_eq!(binds[3], ("f".to_owned(), OracleBind::Bool(true)));
+    }
+
+    #[test]
+    fn bind_params_enforces_required_and_types_and_unknown() {
+        let d = def_with_params(
+            "SELECT :id FROM dual",
+            vec![p("id", ParamType::Integer, true)],
+        );
+        assert_eq!(
+            bind_params(&d, &json!({})).unwrap_err().error_class,
+            ErrorClass::InvalidArguments
+        );
+        assert_eq!(
+            bind_params(&d, &json!({"id": "not-a-number"}))
+                .unwrap_err()
+                .error_class,
+            ErrorClass::InvalidArguments
+        );
+        assert_eq!(
+            bind_params(&d, &json!({"id": 1, "extra": 2}))
+                .unwrap_err()
+                .error_class,
+            ErrorClass::InvalidArguments
+        );
+    }
+
+    #[test]
+    fn optional_missing_param_binds_null() {
+        let d = def_with_params(
+            "SELECT :a FROM dual",
+            vec![p("a", ParamType::String, false)],
+        );
+        let binds = bind_params(&d, &json!({})).expect("ok");
+        assert_eq!(binds[0], ("a".to_owned(), OracleBind::Null));
+    }
+
+    struct EchoExecutor;
+    impl CustomToolExecutor for EchoExecutor {
+        fn run(
+            &self,
+            body: ToolBody<'_>,
+            level: OperatingLevel,
+            binds: &[(String, OracleBind)],
+        ) -> Result<Value, ErrorEnvelope> {
+            // Bind-only: the executor receives the body + typed binds, never an
+            // interpolated SQL string.
+            let body_str = match body {
+                ToolBody::InlineSql(s) => s.to_owned(),
+                ToolBody::PackageCall(c) => c.to_owned(),
+            };
+            Ok(json!({
+                "body": body_str,
+                "level": level.as_str(),
+                "bind_count": binds.len(),
+            }))
+        }
+    }
+
+    #[test]
+    fn execute_custom_tool_binds_and_runs_at_derived_level() {
+        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        let d = def_with_params(
+            "SELECT * FROM t WHERE id = :id",
+            vec![p("id", ParamType::Integer, true)],
+        );
+        let loaded = classify_at_load(&d, &c, OperatingLevel::ReadOnly).expect("loads");
+        let out = execute_custom_tool(&loaded, &json!({"id": 7}), &EchoExecutor).expect("runs");
+        assert_eq!(out["level"], json!("READ_ONLY"));
+        assert_eq!(out["bind_count"], json!(1));
+        assert_eq!(out["body"], json!("SELECT * FROM t WHERE id = :id"));
     }
 }

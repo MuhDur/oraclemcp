@@ -40,9 +40,9 @@ pub use capabilities::{
 };
 pub use connect::{SessionContext, build_session_context, profile_to_options, session_level_state};
 pub use custom_tools::{
-    CustomToolDef, LoadError, LoadedTool, OutputMode, ParamDef, ParamType, ToolBody,
-    classify_at_load, enforce_signature, load_tools, load_tools_for_profile, parse_tools_file,
-    register_custom_tools, sign, verify_signature,
+    CustomToolDef, CustomToolExecutor, LoadError, LoadedTool, OutputMode, ParamDef, ParamType,
+    ToolBody, bind_params, classify_at_load, enforce_signature, execute_custom_tool, load_tools,
+    load_tools_for_profile, parse_tools_file, register_custom_tools, sign, verify_signature,
 };
 pub use doctor::{CheckResult, CheckStatus, DoctorContext, DoctorReport, run_doctor};
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
