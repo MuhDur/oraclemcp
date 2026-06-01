@@ -20,6 +20,7 @@ mod doctor;
 mod error;
 mod intelligence;
 mod lease;
+mod oci;
 mod privileges;
 mod query;
 mod serialize;
@@ -37,6 +38,10 @@ pub use intelligence::{
     sample_rows, search_source,
 };
 pub use lease::{LeaseId, LeaseInfo, LeaseManager, PreviewImpact, require_lease_id};
+pub use oci::{
+    AdbConnectInfo, CloudStatus, IamToken, IamTokenSource, OciError, WalletContents,
+    classify_wallet, discover_wallet, ensure_fresh_token, validate_adb_connect_string,
+};
 pub use privileges::{
     DictionaryTier, PrivilegeProfile, ToolRequirement, probe_privileges, requirement_matrix,
 };

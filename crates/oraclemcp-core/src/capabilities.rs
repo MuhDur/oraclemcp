@@ -5,7 +5,7 @@
 //! Kept serializable as a **standalone document** (no rmcp/session types) so the
 //! move to per-request `_meta` in a later MCP spec is cheap (§2.5).
 
-use oraclemcp_db::PrivilegeProfile;
+use oraclemcp_db::{CloudStatus, PrivilegeProfile};
 use oraclemcp_guard::OperatingLevel;
 use serde::{Deserialize, Serialize};
 
@@ -81,6 +81,10 @@ pub struct CapabilitiesReport {
     /// `None` before connect — the agent learns which tiers degrade and why.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privileges: Option<PrivilegeProfile>,
+    /// Cloud / Autonomous DB connectivity status (wallet vs IAM token; §9.1,
+    /// bead P1-11). `None` when not a cloud target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<CloudStatus>,
 }
 
 impl CapabilitiesReport {
@@ -112,6 +116,7 @@ impl CapabilitiesReport {
             connection: ConnectionStatus::default(),
             features,
             privileges: None,
+            cloud: None,
         }
     }
 
@@ -119,6 +124,13 @@ impl CapabilitiesReport {
     #[must_use]
     pub fn with_privileges(mut self, profile: PrivilegeProfile) -> Self {
         self.privileges = Some(profile);
+        self
+    }
+
+    /// Attach the cloud / Autonomous DB connectivity status (§9.1, P1-11).
+    #[must_use]
+    pub fn with_cloud(mut self, cloud: CloudStatus) -> Self {
+        self.cloud = Some(cloud);
         self
     }
 }
@@ -223,6 +235,29 @@ mod tests {
             json["privileges"]["diagnostics_pack"],
             serde_json::json!(false)
         );
+    }
+
+    #[test]
+    fn cloud_status_absent_until_set_then_surfaced() {
+        let base = CapabilitiesReport::new(
+            "0.1.0",
+            sample_tools(),
+            OperatingLevel::ReadOnly,
+            FeatureTiers {
+                live_db: true,
+                engine: true,
+                http_transport: false,
+            },
+        );
+        assert!(serde_json::to_value(&base).unwrap().get("cloud").is_none());
+        let report = base.with_cloud(oraclemcp_db::CloudStatus {
+            mode: "wallet".to_owned(),
+            autonomous: true,
+            wallet_dir: Some("/wallets/adb".to_owned()),
+        });
+        let json = serde_json::to_value(&report).expect("serialize");
+        assert_eq!(json["cloud"]["mode"], serde_json::json!("wallet"));
+        assert_eq!(json["cloud"]["autonomous"], serde_json::json!(true));
     }
 
     #[test]
