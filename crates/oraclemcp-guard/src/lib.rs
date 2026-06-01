@@ -16,6 +16,7 @@ pub mod classifier;
 pub mod clock;
 pub mod enforcement;
 pub mod levels;
+pub mod policy;
 pub mod purity;
 
 pub use enforcement::{
@@ -29,6 +30,7 @@ pub use clock::MonotonicDeadline;
 pub use levels::{
     BlockReason, DangerLevel, EscalationError, LevelDecision, OperatingLevel, SessionLevelState,
 };
+pub use policy::{DefaultMode, PolicyDecision, SchemaPolicy, SchemaPolicyRaw, SchemaPolicySet};
 pub use purity::{ObjectRef, Purity, SideEffectOracle, UnknownOracle};
 
 /// Re-export the shared agent-facing error envelope.
