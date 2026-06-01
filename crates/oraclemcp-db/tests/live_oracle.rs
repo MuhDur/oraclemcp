@@ -13,7 +13,9 @@
 #![cfg(feature = "live-xe")]
 
 use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
-use oraclemcp_db::{OracleBind, OracleConnectOptions, OracleConnection, RustOracleConnection};
+use oraclemcp_db::{
+    OracleBind, OracleConnectOptions, OracleConnection, QueryCaps, RustOracleConnection,
+};
 use serde_json::json;
 use std::time::Duration;
 
@@ -138,6 +140,39 @@ fn live_lease_lifecycle_on_a_pinned_session() {
     mgr.release(&id);
     assert_eq!(mgr.active_count(), 0);
     assert!(mgr.info(&id).is_err(), "released lease is gone");
+}
+
+#[tokio::test]
+async fn live_query_pagination_caps_and_cursor() {
+    let pool = match OraclePool::connect(test_opts(), PoolSettings::default()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[live-xe] SKIP live_query_pagination: {e}");
+            return;
+        }
+    };
+    let caps = QueryCaps {
+        max_rows: 5,
+        max_result_bytes: 1_000_000,
+    };
+    // Deterministic source of >5 rows.
+    let sql = "SELECT object_name FROM all_objects ORDER BY object_name";
+    let page1 = pool
+        .read_query(sql, vec![], caps, 0, SerializeOptions::default())
+        .await
+        .expect("page1");
+    assert_eq!(page1.row_count, 5);
+    assert!(page1.truncated, "all_objects has > 5 rows");
+    let offset: usize = page1.next_cursor.as_deref().unwrap().parse().unwrap();
+    assert_eq!(offset, 5);
+
+    let page2 = pool
+        .read_query(sql, vec![], caps, offset, SerializeOptions::default())
+        .await
+        .expect("page2");
+    assert_eq!(page2.row_count, 5);
+    // Page 2 is a disjoint window (OFFSET/FETCH wrapping is valid Oracle SQL).
+    assert_ne!(page1.rows[0], page2.rows[0], "page 2 starts after page 1");
 }
 
 #[tokio::test]

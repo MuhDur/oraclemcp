@@ -123,6 +123,25 @@ impl OraclePool {
         .await
     }
 
+    /// Run one page of a read query (bind-first, paginated, capped) on a pooled
+    /// connection, off the async executor (plan §8.2, bead P1-2).
+    pub async fn read_query(
+        &self,
+        sql: impl Into<String>,
+        binds: Vec<OracleBind>,
+        caps: crate::query::QueryCaps,
+        offset: usize,
+        serialize_opts: crate::serialize::SerializeOptions,
+    ) -> Result<crate::query::QueryResponse, DbError> {
+        let pool = self.pool.clone();
+        let sql = sql.into();
+        spawn_blocking_db(move || {
+            let conn = pool.get().map_err(|e| DbError::Pool(e.to_string()))?;
+            crate::query::read_query(&*conn, &sql, &binds, caps, offset, &serialize_opts)
+        })
+        .await
+    }
+
     /// Describe a pooled connection (version / role / open-mode / schema).
     pub async fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
         let pool = self.pool.clone();
