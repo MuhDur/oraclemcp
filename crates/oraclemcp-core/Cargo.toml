@@ -17,6 +17,7 @@ oraclemcp-auth = { path = "../oraclemcp-auth" }
 oraclemcp-telemetry = { path = "../oraclemcp-telemetry" }
 rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server"] }
 axum = "0.8"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -28,6 +29,7 @@ tracing.workspace = true
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
 tower = { version = "0.5", features = ["util"] }
+rcgen = "0.13"
 
 [lints]
 workspace = true

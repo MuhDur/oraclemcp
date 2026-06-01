@@ -28,6 +28,7 @@ pub mod resources;
 pub mod server;
 pub mod session_tool;
 pub mod shutdown;
+pub mod tls;
 pub mod tools;
 
 pub use resilience::{
@@ -59,6 +60,7 @@ pub use resources::{
     ResourceUri, prompt_catalog, read_resource, render_prompt, resource_templates,
 };
 pub use session_tool::{LeaseAcquirer, SessionAction, SessionDeps, oracle_session};
+pub use tls::{TlsError, TlsMaterial, build_server_config, requires_mtls};
 pub use tools::{ToolDescriptor, ToolRegistry, ToolTier};
 
 /// Re-export the shared agent-facing error envelope.
