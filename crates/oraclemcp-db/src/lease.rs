@@ -54,6 +54,15 @@ pub struct LeaseInfo {
     pub in_transaction: bool,
 }
 
+/// The ground-truth impact of a previewed (and rolled-back) DML.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewImpact {
+    /// Rows the statement would actually affect (`SQL%ROWCOUNT`).
+    pub rows_affected: u64,
+    /// Always `true` — the preview rolled back; the DB is unchanged.
+    pub rolled_back: bool,
+}
+
 struct Lease {
     profile: String,
     agent_identity: String,
@@ -244,6 +253,46 @@ impl LeaseManager {
         self.with_lease(&id.0, |lease| {
             lease.conn.execute(&format!("SAVEPOINT {name}"), &[])?;
             lease.in_transaction = true;
+            Ok(())
+        })
+    }
+
+    /// Execute-in-savepoint **preview** (plan §5.4, bead P2-3): inside an
+    /// autonomous savepoint on the leased session, actually run `sql`, capture
+    /// `SQL%ROWCOUNT` (ground-truth blast radius — not optimizer cardinality),
+    /// then **unconditionally `ROLLBACK TO SAVEPOINT`** so the DB is left
+    /// unchanged. The rollback runs even if the statement errored.
+    pub fn preview_dml(
+        &self,
+        id: &LeaseId,
+        sql: &str,
+        binds: &[crate::types::OracleBind],
+    ) -> Result<PreviewImpact, DbError> {
+        const SP: &str = "oraclemcp_preview";
+        self.with_lease(&id.0, |lease| {
+            lease.conn.execute(&format!("SAVEPOINT {SP}"), &[])?;
+            lease.in_transaction = true;
+            let result = lease.conn.execute(sql, binds);
+            // Always roll back to the savepoint, regardless of the outcome.
+            let rollback = lease
+                .conn
+                .execute(&format!("ROLLBACK TO SAVEPOINT {SP}"), &[]);
+            let rows_affected = result?;
+            rollback?;
+            Ok(PreviewImpact {
+                rows_affected,
+                rolled_back: true,
+            })
+        })
+    }
+
+    /// Enable `DBMS_OUTPUT` on the leased session (full line capture is the
+    /// `oracle_session` tool's job, P1-SESS).
+    pub fn enable_dbms_output(&self, id: &LeaseId) -> Result<(), DbError> {
+        self.with_lease(&id.0, |lease| {
+            lease
+                .conn
+                .execute("BEGIN DBMS_OUTPUT.ENABLE(NULL); END;", &[])?;
             Ok(())
         })
     }

@@ -175,6 +175,65 @@ async fn live_query_pagination_caps_and_cursor() {
     assert_ne!(page1.rows[0], page2.rows[0], "page 2 starts after page 1");
 }
 
+#[test]
+fn live_savepoint_preview_is_ground_truth_and_rolls_back() {
+    let setup = match RustOracleConnection::connect(test_opts()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[live-xe] SKIP live_savepoint_preview: {e}");
+            return;
+        }
+    };
+    let table = "ORACLEMCP_PREVIEW_T";
+    // Best-effort clean slate, then create + seed 3 rows + commit.
+    let _ = setup.execute(&format!("DROP TABLE {table}"), &[]);
+    setup
+        .execute(&format!("CREATE TABLE {table} (id NUMBER)"), &[])
+        .expect("create");
+    for i in 1..=3 {
+        setup
+            .execute(&format!("INSERT INTO {table} VALUES ({i})"), &[])
+            .expect("insert");
+    }
+    setup.commit().expect("commit");
+
+    // Preview a whole-table DELETE on a leased session.
+    let conn = RustOracleConnection::connect(test_opts()).expect("lease conn");
+    let mgr = LeaseManager::new();
+    let id = mgr
+        .acquire(
+            "live",
+            "agent",
+            Duration::from_secs(300),
+            &[],
+            Box::new(conn),
+        )
+        .expect("lease");
+    let impact = mgr
+        .preview_dml(&id, &format!("DELETE FROM {table}"), &[])
+        .expect("preview");
+    assert_eq!(
+        impact.rows_affected, 3,
+        "ground-truth blast radius, not an estimate"
+    );
+    assert!(impact.rolled_back);
+    mgr.release(&id);
+
+    // The DB is unchanged — all 3 rows still present.
+    let rows = setup
+        .query_rows(&format!("SELECT COUNT(*) AS n FROM {table}"), &[])
+        .expect("count");
+    assert_eq!(
+        rows[0].parse_i64("N"),
+        Some(3),
+        "preview rolled back; DB unchanged"
+    );
+    setup
+        .execute(&format!("DROP TABLE {table}"), &[])
+        .expect("drop");
+    setup.commit().ok();
+}
+
 #[tokio::test]
 async fn live_pool_spawn_blocking_roundtrip() {
     let pool = match OraclePool::connect(test_opts(), PoolSettings::default()) {

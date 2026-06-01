@@ -30,7 +30,7 @@ mod pool;
 pub use connection::{OracleConnection, RustOracleConnection};
 pub use doctor::{InstantClientPosture, detect_instant_client, oracle_driver_compiled};
 pub use error::DbError;
-pub use lease::{LeaseId, LeaseInfo, LeaseManager, require_lease_id};
+pub use lease::{LeaseId, LeaseInfo, LeaseManager, PreviewImpact, require_lease_id};
 pub use query::{QueryCaps, QueryResponse, cursor_to_offset, paginated_sql, read_query};
 pub use serialize::{
     SerializeOptions, TypeRepr, base64_encode, canonical_nls_statements, canonicalize_datetime,
