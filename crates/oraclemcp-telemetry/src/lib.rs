@@ -6,9 +6,11 @@
 
 mod health;
 mod logging;
+mod metrics;
 
 pub use health::{HealthReport, HealthState};
 pub use logging::init_json_logging;
+pub use metrics::{ErrorCount, HistogramSnapshot, Metrics, MetricsSnapshot, RequestCount};
 
 /// Re-export the shared agent-facing error envelope.
 pub use oraclemcp_error as error;
