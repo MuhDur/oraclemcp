@@ -20,6 +20,7 @@ pub mod capabilities;
 pub mod connect;
 pub mod custom_tools;
 pub mod doctor;
+pub mod http;
 pub mod init_token;
 pub mod query_execute;
 pub mod resilience;
@@ -47,6 +48,9 @@ pub use custom_tools::{
     register_custom_tools, sign, verify_signature,
 };
 pub use doctor::{CheckResult, CheckStatus, DoctorContext, DoctorReport, run_doctor};
+pub use http::{
+    HttpTransportConfig, MCP_PATH, PROTECTED_RESOURCE_METADATA_PATH, build_router, serve_http,
+};
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
 pub use query_execute::{ExecuteParams, StatementExecutor, oracle_query_execute};
 pub use resources::{

@@ -15,7 +15,8 @@ oraclemcp-guard = { path = "../oraclemcp-guard" }
 oraclemcp-audit = { path = "../oraclemcp-audit" }
 oraclemcp-auth = { path = "../oraclemcp-auth" }
 oraclemcp-telemetry = { path = "../oraclemcp-telemetry" }
-rmcp = { version = "1.7", features = ["server", "transport-io"] }
+rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server"] }
+axum = "0.8"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -25,7 +26,8 @@ toml = "0.8"
 tracing.workspace = true
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true
