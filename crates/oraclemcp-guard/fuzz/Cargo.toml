@@ -1,0 +1,27 @@
+# cargo-fuzz target for the fail-closed classifier (bead T-CORPUS / 6.2).
+# A standing artifact: run with `cargo +nightly fuzz run classify_fuzz` (needs
+# nightly + cargo-fuzz). The empty [workspace] table detaches this from the
+# parent workspace so it is not built by `cargo build --workspace`.
+[package]
+name = "oraclemcp-guard-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oraclemcp-guard]
+path = ".."
+
+[[bin]]
+name = "classify_fuzz"
+path = "fuzz_targets/classify_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
