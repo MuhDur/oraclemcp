@@ -21,6 +21,7 @@ mod error;
 mod lease;
 mod query;
 mod serialize;
+mod standby;
 mod types;
 
 #[cfg(feature = "oracle-driver")]
@@ -35,6 +36,7 @@ pub use serialize::{
     SerializeOptions, TypeRepr, base64_encode, canonical_nls_statements, canonicalize_datetime,
     classify_type, serialize_cell, serialize_row,
 };
+pub use standby::{StandbyStatus, detect_standby};
 pub use types::{
     OracleBackend, OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow,
 };
