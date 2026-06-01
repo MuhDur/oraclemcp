@@ -24,6 +24,7 @@ mod lease;
 mod oci;
 mod privileges;
 mod query;
+mod schema_diff;
 mod serialize;
 mod standby;
 mod types;
@@ -48,6 +49,10 @@ pub use privileges::{
     DictionaryTier, PrivilegeProfile, ToolRequirement, probe_privileges, requirement_matrix,
 };
 pub use query::{QueryCaps, QueryResponse, cursor_to_offset, paginated_sql, read_query};
+pub use schema_diff::{
+    ChangeKind, MigrationStep, SchemaDiff, SchemaObject, SchemaSnapshot, StepKind, compare_schemas,
+    migration_plan,
+};
 pub use serialize::{
     SerializeOptions, TypeRepr, base64_encode, canonical_nls_statements, canonicalize_datetime,
     classify_type, serialize_cell, serialize_row,
