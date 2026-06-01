@@ -13,11 +13,13 @@
 
 mod record;
 mod sink;
+mod unified;
 
 pub use record::{
     AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord, GENESIS_HASH, sha256_hex,
 };
 pub use sink::{AuditError, AuditSink, Auditor, FileAuditSink, MemoryAuditSink};
+pub use unified::{UnifiedAuditError, UnifiedAuditPolicy, is_simple_identifier};
 
 /// Re-export the shared agent-facing error envelope.
 pub use oraclemcp_error as error;
