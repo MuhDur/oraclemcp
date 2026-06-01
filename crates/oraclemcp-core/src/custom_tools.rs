@@ -144,6 +144,18 @@ pub enum LoadError {
         /// The profile ceiling.
         max: OperatingLevel,
     },
+    /// A `protected` profile requires every definition to be HMAC-signed (2.12.5).
+    #[error("tool '{name}' is unsigned; protected profiles require an HMAC signature")]
+    SignatureRequired {
+        /// The offending tool name.
+        name: String,
+    },
+    /// The HMAC signature did not verify (tampered definition).
+    #[error("tool '{name}' has an invalid HMAC signature (tampered?)")]
+    SignatureInvalid {
+        /// The offending tool name.
+        name: String,
+    },
 }
 
 /// The on-disk file shape: `[[tool]]` array-of-tables.
@@ -341,6 +353,132 @@ pub fn load_tools(
 ) -> Result<Vec<LoadedTool>, LoadError> {
     defs.iter()
         .map(|d| classify_at_load(d, classifier, max_level))
+        .collect()
+}
+
+// ── HMAC signing on protected profiles (P1-13e / 2.12.5) ──────────────────────
+
+/// The canonical byte sequence a tool's HMAC signs: the security-relevant
+/// fields, in a fixed order, length-prefixed so no field can absorb another's
+/// content. The `signature` field itself is excluded.
+fn canonical_bytes(def: &CustomToolDef) -> Vec<u8> {
+    let mut out = Vec::new();
+    let field = |label: &str, value: &str, out: &mut Vec<u8>| {
+        out.extend_from_slice(label.as_bytes());
+        out.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        out.extend_from_slice(value.as_bytes());
+    };
+    field("name", &def.name, &mut out);
+    field("description", &def.description, &mut out);
+    field("sql", def.sql.as_deref().unwrap_or(""), &mut out);
+    field("call", def.call.as_deref().unwrap_or(""), &mut out);
+    field(
+        "declared_level",
+        def.declared_level.as_deref().unwrap_or(""),
+        &mut out,
+    );
+    out.extend_from_slice(&(def.params.len() as u64).to_le_bytes());
+    for p in &def.params {
+        field("param.name", &p.name, &mut out);
+        field("param.type", p.ty.json_type(), &mut out);
+        out.push(u8::from(p.required));
+    }
+    out
+}
+
+/// HMAC-SHA256 (RFC 2104) over `sha2`.
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    const BLOCK: usize = 64;
+    let mut k = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        k[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; BLOCK];
+    let mut opad = [0x5cu8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(msg);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner);
+    outer.finalize().into()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Compute the hex HMAC signature for a definition (operator-side signing).
+#[must_use]
+pub fn sign(def: &CustomToolDef, hmac_key: &[u8]) -> String {
+    hex(&hmac_sha256(hmac_key, &canonical_bytes(def)))
+}
+
+/// Whether `def.signature` is present and a valid HMAC over its canonical bytes.
+#[must_use]
+pub fn verify_signature(def: &CustomToolDef, hmac_key: &[u8]) -> bool {
+    let Some(sig) = &def.signature else {
+        return false;
+    };
+    // Constant-time-ish compare on the hex strings (equal length expected).
+    let expected = sign(def, hmac_key);
+    sig.len() == expected.len()
+        && sig
+            .bytes()
+            .zip(expected.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
+}
+
+/// Enforce signing policy: on a `protected` profile every definition MUST carry
+/// a valid HMAC signature (a tampered/unsigned `tools.toml` is rejected). On an
+/// unprotected profile signing is optional (verified if present).
+pub fn enforce_signature(
+    def: &CustomToolDef,
+    hmac_key: &[u8],
+    protected: bool,
+) -> Result<(), LoadError> {
+    if protected {
+        if def.signature.is_none() {
+            return Err(LoadError::SignatureRequired {
+                name: def.name.clone(),
+            });
+        }
+        if !verify_signature(def, hmac_key) {
+            return Err(LoadError::SignatureInvalid {
+                name: def.name.clone(),
+            });
+        }
+    } else if def.signature.is_some() && !verify_signature(def, hmac_key) {
+        return Err(LoadError::SignatureInvalid {
+            name: def.name.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Classify-at-load + signing enforcement for a profile. Use this in production:
+/// `protected` profiles require a valid HMAC on every definition.
+pub fn load_tools_for_profile(
+    defs: &[CustomToolDef],
+    classifier: &Classifier,
+    max_level: OperatingLevel,
+    hmac_key: &[u8],
+    protected: bool,
+) -> Result<Vec<LoadedTool>, LoadError> {
+    defs.iter()
+        .map(|d| {
+            enforce_signature(d, hmac_key, protected)?;
+            classify_at_load(d, classifier, max_level)
+        })
         .collect()
 }
 
@@ -571,5 +709,85 @@ mod tests {
             def_sql("evil", "BEGIN EXECUTE IMMEDIATE 'x'; END;", None),
         ];
         assert!(load_tools(&defs, &c, OperatingLevel::Admin).is_err());
+    }
+
+    // ── HMAC signing (2.12.5) ─────────────────────────────────────────────────
+
+    const KEY: &[u8] = b"operator-hmac-key";
+
+    #[test]
+    fn sign_then_verify_roundtrips() {
+        let mut d = def_sql("rep", "SELECT 1 FROM dual", None);
+        d.params = vec![ParamDef {
+            name: "x".to_owned(),
+            ty: ParamType::Integer,
+            required: true,
+            description: None,
+        }];
+        d.signature = Some(sign(&d, KEY));
+        assert!(verify_signature(&d, KEY));
+        // Wrong key fails.
+        assert!(!verify_signature(&d, b"other-key"));
+    }
+
+    #[test]
+    fn tampering_invalidates_the_signature() {
+        let mut d = def_sql("rep", "SELECT 1 FROM dual", None);
+        d.signature = Some(sign(&d, KEY));
+        // Tamper the body after signing.
+        d.sql = Some("SELECT secret FROM admin_only".to_owned());
+        assert!(!verify_signature(&d, KEY));
+    }
+
+    #[test]
+    fn protected_profile_requires_a_valid_signature() {
+        let d = def_sql("rep", "SELECT 1 FROM dual", None);
+        // Unsigned on protected -> SignatureRequired.
+        assert!(matches!(
+            enforce_signature(&d, KEY, true),
+            Err(LoadError::SignatureRequired { .. })
+        ));
+        // Tampered/forged signature on protected -> SignatureInvalid.
+        let mut forged = d.clone();
+        forged.signature = Some("deadbeef".to_owned());
+        assert!(matches!(
+            enforce_signature(&forged, KEY, true),
+            Err(LoadError::SignatureInvalid { .. })
+        ));
+        // Correctly signed -> ok.
+        let mut signed = d.clone();
+        signed.signature = Some(sign(&signed, KEY));
+        assert!(enforce_signature(&signed, KEY, true).is_ok());
+    }
+
+    #[test]
+    fn unprotected_profile_allows_unsigned_but_rejects_bad_signature() {
+        let d = def_sql("rep", "SELECT 1 FROM dual", None);
+        // Unsigned on an unprotected profile is fine.
+        assert!(enforce_signature(&d, KEY, false).is_ok());
+        // But a present-yet-invalid signature is still rejected.
+        let mut bad = d.clone();
+        bad.signature = Some("00".to_owned());
+        assert!(matches!(
+            enforce_signature(&bad, KEY, false),
+            Err(LoadError::SignatureInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn load_tools_for_profile_enforces_signing_then_classifies() {
+        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        let mut d = def_sql("rep", "SELECT 1 FROM dual", None);
+        d.signature = Some(sign(&d, KEY));
+        // Protected: signed + read-only -> loads.
+        let loaded = load_tools_for_profile(&[d.clone()], &c, OperatingLevel::ReadOnly, KEY, true)
+            .expect("loads");
+        assert_eq!(loaded[0].required_level, OperatingLevel::ReadOnly);
+        // Protected + unsigned -> refuses before classification.
+        let unsigned = def_sql("rep2", "SELECT 1 FROM dual", None);
+        assert!(matches!(
+            load_tools_for_profile(&[unsigned], &c, OperatingLevel::ReadOnly, KEY, true),
+            Err(LoadError::SignatureRequired { .. })
+        ));
     }
 }
