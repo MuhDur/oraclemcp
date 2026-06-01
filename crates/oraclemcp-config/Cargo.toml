@@ -9,9 +9,14 @@ publish = false
 
 [dependencies]
 oraclemcp-error = { path = "../oraclemcp-error" }
+oraclemcp-guard = { path = "../oraclemcp-guard" }
+figment = { version = "0.10", features = ["toml", "env"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+figment = { version = "0.10", features = ["toml", "env", "test"] }
 
 [lints]
 workspace = true
