@@ -1,0 +1,16 @@
+#![forbid(unsafe_code)]
+
+//! The safety guard for the `oraclemcp` server: the fail-closed, engine-aware
+//! statement classifier (§5.3), the ordered operating-level model (§6.6), the
+//! `SideEffectOracle` purity port (default `Unknown` = fail-closed), per-schema
+//! policy (§6.2), and the monotonic-deadline approval/elevation tokens
+//! (§5.5, §5.10) — beads P0-7, P0-CLK, P1-1, P1-10, P1-POLICY.
+//!
+//! Phase-A skeleton. The guard ships fully functional with **no** engine
+//! dependency: the `SideEffectOracle` port's default impl returns `Unknown`, so
+//! a statement is cleared to `Safe` only on an explicit `ProvenReadOnly`
+//! verdict the engine binds from the consumer side (keeps the one-way boundary
+//! intact — §0 hard rule 1).
+
+/// Re-export the shared agent-facing error envelope.
+pub use oraclemcp_error as error;

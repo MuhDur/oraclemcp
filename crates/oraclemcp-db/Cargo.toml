@@ -1,0 +1,22 @@
+[package]
+name = "oraclemcp-db"
+version = "0.1.0"
+description = "Oracle connectivity, pooling, session leases and the type/NLS serializer for oraclemcp (Apache-2.0 OR MIT)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+# Pulls in the Oracle driver (ODPI-C). Off = pure offline build, no native deps.
+oracle-driver = []
+
+[dependencies]
+oraclemcp-error = { path = "../oraclemcp-error" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

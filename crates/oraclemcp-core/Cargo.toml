@@ -1,0 +1,24 @@
+[package]
+name = "oraclemcp-core"
+version = "0.1.0"
+description = "MCP protocol surface, Tool/ToolRegistry contract and capabilities for the oraclemcp server (Apache-2.0 OR MIT)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+oraclemcp-error = { path = "../oraclemcp-error" }
+oraclemcp-config = { path = "../oraclemcp-config" }
+oraclemcp-db = { path = "../oraclemcp-db" }
+oraclemcp-guard = { path = "../oraclemcp-guard" }
+oraclemcp-audit = { path = "../oraclemcp-audit" }
+oraclemcp-auth = { path = "../oraclemcp-auth" }
+oraclemcp-telemetry = { path = "../oraclemcp-telemetry" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

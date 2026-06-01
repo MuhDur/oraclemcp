@@ -1,0 +1,19 @@
+[package]
+name = "oraclemcp-guard"
+version = "0.1.0"
+description = "Fail-closed statement classifier, operating levels, policy and approval tokens for oraclemcp (Apache-2.0 OR MIT)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+oraclemcp-error = { path = "../oraclemcp-error" }
+oraclemcp-audit = { path = "../oraclemcp-audit" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

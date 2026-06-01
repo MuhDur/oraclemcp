@@ -1,0 +1,17 @@
+[package]
+name = "oraclemcp-config"
+version = "0.1.0"
+description = "Layered configuration + connection profiles for the oraclemcp Oracle MCP server (Apache-2.0 OR MIT)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+oraclemcp-error = { path = "../oraclemcp-error" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "oraclemcp-audit"
+version = "0.1.0"
+description = "Out-of-band durable audit sink (fsync-before-execute, hash chain) for oraclemcp (Apache-2.0 OR MIT)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+oraclemcp-error = { path = "../oraclemcp-error" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

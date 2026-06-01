@@ -1,0 +1,17 @@
+[package]
+name = "oraclemcp-telemetry"
+version = "0.1.0"
+description = "tracing / OpenTelemetry / health-endpoint observability for oraclemcp (Apache-2.0 OR MIT)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+oraclemcp-error = { path = "../oraclemcp-error" }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

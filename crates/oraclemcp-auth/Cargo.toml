@@ -1,0 +1,19 @@
+[package]
+name = "oraclemcp-auth"
+version = "0.1.0"
+description = "Transport auth (OAuth 2.1 RS, mTLS, init token), step-up confirmation delivery and secrets for oraclemcp (Apache-2.0 OR MIT)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+oraclemcp-error = { path = "../oraclemcp-error" }
+oraclemcp-guard = { path = "../oraclemcp-guard" }
+oraclemcp-audit = { path = "../oraclemcp-audit" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
