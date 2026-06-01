@@ -40,8 +40,8 @@ pub use capabilities::{
 };
 pub use connect::{SessionContext, build_session_context, profile_to_options, session_level_state};
 pub use custom_tools::{
-    CustomToolDef, LoadError, OutputMode, ParamDef, ParamType, ToolBody, parse_tools_file,
-    register_custom_tools,
+    CustomToolDef, LoadError, LoadedTool, OutputMode, ParamDef, ParamType, ToolBody,
+    classify_at_load, load_tools, parse_tools_file, register_custom_tools,
 };
 pub use doctor::{CheckResult, CheckStatus, DoctorContext, DoctorReport, run_doctor};
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};

@@ -16,6 +16,7 @@
 //! (P1-13a / 2.12.1); classify-at-load (2.12.2), Form A/B execution (2.12.3/4),
 //! HMAC signing (2.12.5), and meta-dispatch registration (2.12.6) layer on here.
 
+use oraclemcp_guard::{Classifier, OperatingLevel};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -124,6 +125,24 @@ pub enum LoadError {
         name: String,
         /// Why.
         reason: String,
+    },
+    /// The body classified `Forbidden` — refuses to load (2.12.2).
+    #[error("tool '{name}' refuses to load: forbidden body ({reason})")]
+    Forbidden {
+        /// The offending tool name.
+        name: String,
+        /// The classifier's reason.
+        reason: String,
+    },
+    /// The body's required level exceeds the profile ceiling — refuses to load.
+    #[error("tool '{name}' requires {required} but the profile ceiling is {max}; refuses to load")]
+    OverCeiling {
+        /// The offending tool name.
+        name: String,
+        /// The level the body requires.
+        required: OperatingLevel,
+        /// The profile ceiling.
+        max: OperatingLevel,
     },
 }
 
@@ -241,6 +260,88 @@ pub fn register_custom_tools(registry: &mut ToolRegistry, defs: &[CustomToolDef]
     for d in defs {
         registry.register(d.to_descriptor());
     }
+}
+
+// ── Classify-at-load (P1-13b / 2.12.2): the safety gate ───────────────────────
+
+/// Parse a flat operating-level string.
+fn parse_level(s: &str) -> Option<OperatingLevel> {
+    match s.trim().to_ascii_uppercase().as_str() {
+        "READ_ONLY" => Some(OperatingLevel::ReadOnly),
+        "READ_WRITE" => Some(OperatingLevel::ReadWrite),
+        "DDL" => Some(OperatingLevel::Ddl),
+        "ADMIN" => Some(OperatingLevel::Admin),
+        _ => None,
+    }
+}
+
+/// A custom tool that passed classify-at-load, with its derived required level.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadedTool {
+    /// The definition.
+    pub def: CustomToolDef,
+    /// The operating level the body actually requires (≥ the author's declared
+    /// level — the author may only make it stricter).
+    pub required_level: OperatingLevel,
+}
+
+impl CustomToolDef {
+    /// The string the classifier sees: Form A is the SQL/PLSQL as-is; Form B is
+    /// the package call wrapped in an anonymous block.
+    fn classify_input(&self) -> Result<String, LoadError> {
+        Ok(match self.body()? {
+            ToolBody::InlineSql(s) => s.to_owned(),
+            ToolBody::PackageCall(c) => format!("BEGIN {c}; END;"),
+        })
+    }
+}
+
+/// Classify a definition at load and enforce the zero-new-privilege rules
+/// (2.12.2): a `Forbidden` body refuses to load; the required level is derived
+/// from behavior (the author's `declared_level` can only make it STRICTER); a
+/// tool whose required level exceeds `max_level` refuses to load (fail-fast).
+pub fn classify_at_load(
+    def: &CustomToolDef,
+    classifier: &Classifier,
+    max_level: OperatingLevel,
+) -> Result<LoadedTool, LoadError> {
+    def.validate()?;
+    let decision = classifier.classify(&def.classify_input()?);
+    // `required_level == None` ⇒ Forbidden (fail-closed): refuse to load.
+    let derived = decision
+        .required_level
+        .ok_or_else(|| LoadError::Forbidden {
+            name: def.name.clone(),
+            reason: decision.reason.clone(),
+        })?;
+    // The author may only raise the floor, never lower the derived level.
+    let effective = match def.declared_level.as_deref().and_then(parse_level) {
+        Some(declared) => derived.max(declared),
+        None => derived,
+    };
+    if effective > max_level {
+        return Err(LoadError::OverCeiling {
+            name: def.name.clone(),
+            required: effective,
+            max: max_level,
+        });
+    }
+    Ok(LoadedTool {
+        def: def.clone(),
+        required_level: effective,
+    })
+}
+
+/// Classify + gate a whole `tools.d` set. Fail-fast: the first refusal aborts
+/// the load (a misconfigured tool must never silently appear).
+pub fn load_tools(
+    defs: &[CustomToolDef],
+    classifier: &Classifier,
+    max_level: OperatingLevel,
+) -> Result<Vec<LoadedTool>, LoadError> {
+    defs.iter()
+        .map(|d| classify_at_load(d, classifier, max_level))
+        .collect()
 }
 
 #[cfg(test)]
@@ -392,5 +493,83 @@ mod tests {
             parse_tools_file("this is not = = toml"),
             Err(LoadError::Parse(_))
         ));
+    }
+
+    // ── classify-at-load (2.12.2) ─────────────────────────────────────────────
+
+    fn def_sql(name: &str, sql: &str, declared: Option<&str>) -> CustomToolDef {
+        CustomToolDef {
+            name: name.to_owned(),
+            description: "t".to_owned(),
+            sql: Some(sql.to_owned()),
+            call: None,
+            params: vec![],
+            output_mode: OutputMode::Rows,
+            declared_level: declared.map(str::to_owned),
+            signature: None,
+        }
+    }
+
+    #[test]
+    fn read_only_tool_loads_at_read_only() {
+        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        let d = def_sql("cust", "SELECT * FROM t WHERE id = :id", None);
+        let loaded = classify_at_load(&d, &c, OperatingLevel::ReadOnly).expect("loads");
+        assert_eq!(loaded.required_level, OperatingLevel::ReadOnly);
+    }
+
+    #[test]
+    fn write_block_refuses_on_a_read_only_profile() {
+        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        // A PL/SQL block is >= Guarded (ReadWrite); on a READ_ONLY ceiling it
+        // refuses to load (fail-fast).
+        let d = def_sql(
+            "bump",
+            "BEGIN UPDATE t SET x = 1 WHERE id = :id; END;",
+            None,
+        );
+        let err = classify_at_load(&d, &c, OperatingLevel::ReadOnly).unwrap_err();
+        assert!(
+            matches!(err, LoadError::OverCeiling { required, .. } if required >= OperatingLevel::ReadWrite)
+        );
+        // But it loads on a READ_WRITE profile.
+        let loaded = classify_at_load(&d, &c, OperatingLevel::ReadWrite).expect("loads at RW");
+        assert!(loaded.required_level >= OperatingLevel::ReadWrite);
+    }
+
+    #[test]
+    fn forbidden_body_refuses_to_load() {
+        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        // Dynamic SQL in a PL/SQL block is Forbidden (fail-closed).
+        let d = def_sql("evil", "BEGIN EXECUTE IMMEDIATE 'DROP TABLE x'; END;", None);
+        let err = classify_at_load(&d, &c, OperatingLevel::Admin).unwrap_err();
+        assert!(matches!(err, LoadError::Forbidden { .. }));
+    }
+
+    #[test]
+    fn declared_level_can_only_make_stricter() {
+        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        // A read-only SELECT the author declares DDL: the floor is raised to DDL,
+        // so it refuses on a READ_ONLY ceiling.
+        let d = def_sql("sel", "SELECT 1 FROM dual", Some("DDL"));
+        let err = classify_at_load(&d, &c, OperatingLevel::ReadOnly).unwrap_err();
+        assert!(
+            matches!(err, LoadError::OverCeiling { required, .. } if required == OperatingLevel::Ddl)
+        );
+        // The author CANNOT loosen: declaring READ_ONLY on a write block keeps
+        // the derived (write) level.
+        let w = def_sql("w", "BEGIN UPDATE t SET x=1; END;", Some("READ_ONLY"));
+        let loaded = classify_at_load(&w, &c, OperatingLevel::Admin).expect("loads");
+        assert!(loaded.required_level >= OperatingLevel::ReadWrite);
+    }
+
+    #[test]
+    fn load_tools_is_fail_fast() {
+        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        let defs = vec![
+            def_sql("ok", "SELECT 1 FROM dual", None),
+            def_sql("evil", "BEGIN EXECUTE IMMEDIATE 'x'; END;", None),
+        ];
+        assert!(load_tools(&defs, &c, OperatingLevel::Admin).is_err());
     }
 }
