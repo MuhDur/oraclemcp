@@ -12,13 +12,19 @@
 //! verdict the engine binds from the consumer side (keeps the one-way boundary
 //! intact — §0 hard rule 1).
 
+pub mod classifier;
 pub mod clock;
 pub mod levels;
+pub mod purity;
 
+pub use classifier::{
+    BatchShape, Classifier, ClassifierConfig, GuardDecision, StageA, analyze_batch, stage_a,
+};
 pub use clock::MonotonicDeadline;
 pub use levels::{
     BlockReason, DangerLevel, EscalationError, LevelDecision, OperatingLevel, SessionLevelState,
 };
+pub use purity::{ObjectRef, Purity, SideEffectOracle, UnknownOracle};
 
 /// Re-export the shared agent-facing error envelope.
 pub use oraclemcp_error as error;

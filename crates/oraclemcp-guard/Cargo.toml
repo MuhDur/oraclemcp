@@ -13,6 +13,8 @@ oraclemcp-audit = { path = "../oraclemcp-audit" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+sqlparser = "0.62"
+regex = "1"
 thiserror.workspace = true
 
 [lints]
