@@ -49,7 +49,8 @@ pub use custom_tools::{
 };
 pub use doctor::{CheckResult, CheckStatus, DoctorContext, DoctorReport, run_doctor};
 pub use http::{
-    HttpTransportConfig, MCP_PATH, PROTECTED_RESOURCE_METADATA_PATH, build_router, serve_http,
+    HttpTransportConfig, MCP_PATH, OAuthEnforcement, PROTECTED_RESOURCE_METADATA_PATH, ScopeGrant,
+    build_router, serve_http,
 };
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
 pub use query_execute::{ExecuteParams, StatementExecutor, oracle_query_execute};
