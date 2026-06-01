@@ -24,6 +24,8 @@ yarn-error.log*
 dist/
 build/
 target/
+# Sibling Cargo target dirs (e.g. target-miri/ from Miri runs, target-fuzz/, …)
+target-*/
 *.pyc
 __pycache__/
 node_modules/
