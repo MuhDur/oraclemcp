@@ -22,6 +22,7 @@ pub mod init_token;
 pub mod query_execute;
 pub mod resilience;
 pub mod server;
+pub mod session_tool;
 pub mod shutdown;
 pub mod tools;
 
@@ -38,6 +39,7 @@ pub use capabilities::{
 pub use connect::{SessionContext, build_session_context, profile_to_options, session_level_state};
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
 pub use query_execute::{ExecuteParams, StatementExecutor, oracle_query_execute};
+pub use session_tool::{LeaseAcquirer, SessionAction, SessionDeps, oracle_session};
 pub use tools::{ToolDescriptor, ToolRegistry, ToolTier};
 
 /// Re-export the shared agent-facing error envelope.

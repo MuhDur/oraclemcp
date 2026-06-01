@@ -297,6 +297,18 @@ impl LeaseManager {
         })
     }
 
+    /// Apply an `ALTER SESSION` statement on the leased session (the
+    /// `oracle_session` `set_session` action body, P1-SESS). The caller MUST
+    /// have validated `statement` against the guard's allowlist
+    /// (`oraclemcp_guard::is_allowed_alter_session`) first — this layer does not
+    /// import the guard (one-way boundary) and only enforces the lease binding.
+    pub fn apply_session_statement(&self, id: &LeaseId, statement: &str) -> Result<(), DbError> {
+        self.with_lease(&id.0, |lease| {
+            lease.conn.execute(statement, &[])?;
+            Ok(())
+        })
+    }
+
     /// A snapshot of a lease's state.
     pub fn info(&self, id: &LeaseId) -> Result<LeaseInfo, DbError> {
         self.with_lease(&id.0, |lease| Ok(lease.info(&id.0)))
