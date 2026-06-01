@@ -10,9 +10,11 @@
 //! here on the same one-way dependency.
 
 pub mod scope;
+pub mod secrets;
 pub mod stepup_delivery;
 
 pub use scope::{apply_oauth_scopes, scope_to_level, scopes_ceiling};
+pub use secrets::{Secret, SecretError, SecretRef, resolve_secret};
 pub use stepup_delivery::{
     ChallengeRequired, ElicitationRequest, SelectorChoice, to_challenge_required, to_elicitation,
 };
