@@ -25,6 +25,12 @@ pub trait OracleConnection: Send {
     /// Run a DML/DDL statement; returns rows affected (`SQL%ROWCOUNT`).
     fn execute(&self, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError>;
 
+    /// Commit the current transaction on this session.
+    fn commit(&self) -> Result<(), DbError>;
+
+    /// Roll back the current transaction on this session.
+    fn rollback(&self) -> Result<(), DbError>;
+
     /// Run a query expecting at most one row.
     fn query_optional_row(
         &self,
@@ -217,6 +223,18 @@ mod driver {
                 .execute(sql, &refs)
                 .map_err(|e| DbError::Execute(e.to_string()))?;
             stmt.row_count()
+                .map_err(|e| DbError::Execute(e.to_string()))
+        }
+
+        fn commit(&self) -> Result<(), DbError> {
+            self.inner
+                .commit()
+                .map_err(|e| DbError::Execute(e.to_string()))
+        }
+
+        fn rollback(&self) -> Result<(), DbError> {
+            self.inner
+                .rollback()
                 .map_err(|e| DbError::Execute(e.to_string()))
         }
     }

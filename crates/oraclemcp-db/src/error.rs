@@ -35,6 +35,13 @@ pub enum DbError {
     /// An auth mode is configured that this build cannot satisfy yet.
     #[error("unsupported auth mode: {0}")]
     UnsupportedAuth(String),
+    /// A stateful operation (transaction / savepoint) was attempted without a
+    /// session lease (§5.1) — never a silent best-effort.
+    #[error("session lease required: {0}")]
+    LeaseRequired(String),
+    /// The referenced lease does not exist or has expired.
+    #[error("lease not found or expired: {0}")]
+    LeaseNotFound(String),
     /// An internal error (e.g. a blocking task join failure).
     #[error("internal db error: {0}")]
     Internal(String),
@@ -65,6 +72,10 @@ impl DbError {
                 ErrorEnvelope::new(ErrorClass::Busy, msg).with_retry_after_ms(250)
             }
             DbError::UnsupportedAuth(msg) => ErrorEnvelope::new(ErrorClass::InvalidArguments, msg),
+            DbError::LeaseRequired(msg) => ErrorEnvelope::new(ErrorClass::LeaseRequired, msg)
+                .with_next_step("call oracle_session(acquire_lease) and pass the lease_id"),
+            DbError::LeaseNotFound(msg) => ErrorEnvelope::new(ErrorClass::LeaseRequired, msg)
+                .with_next_step("acquire a fresh lease via oracle_session(acquire_lease)"),
             DbError::Internal(msg) => ErrorEnvelope::new(ErrorClass::Internal, msg),
         }
     }

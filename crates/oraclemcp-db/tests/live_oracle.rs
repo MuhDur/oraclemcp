@@ -12,9 +12,10 @@
 //! Override target with ORACLEMCP_TEST_DSN / _USER / _PASSWORD.
 #![cfg(feature = "live-xe")]
 
+use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use oraclemcp_db::{OracleBind, OracleConnectOptions, OracleConnection, RustOracleConnection};
-use oraclemcp_db::{OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use serde_json::json;
+use std::time::Duration;
 
 fn test_opts() -> OracleConnectOptions {
     OracleConnectOptions {
@@ -99,6 +100,44 @@ fn live_type_fidelity_number_string_and_iso_date() {
     assert_eq!(v["D"], json!("2026-06-01T12:00:00"));
     // BINARY_DOUBLE is a JSON number.
     assert_eq!(v["BD"], json!(3.5));
+}
+
+#[test]
+fn live_lease_lifecycle_on_a_pinned_session() {
+    let conn = match RustOracleConnection::connect(test_opts()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[live-xe] SKIP live_lease_lifecycle: {e}");
+            return;
+        }
+    };
+    let mgr = LeaseManager::new();
+    // acquire applies the (empty) login script + stamps DBMS_APPLICATION_INFO.
+    let id = mgr
+        .acquire(
+            "live",
+            "agent-live",
+            Duration::from_secs(900),
+            &[],
+            Box::new(conn),
+        )
+        .expect("acquire lease");
+    assert_eq!(mgr.active_count(), 1);
+    let info = mgr.info(&id).expect("info");
+    assert_eq!(info.agent_identity, "agent-live");
+    assert!(info.expires_in_ms > 0);
+
+    // Side-effect-free transaction lifecycle on the pinned session.
+    mgr.begin_transaction(&id).expect("begin");
+    mgr.savepoint(&id, "oraclemcp_sp1").expect("savepoint");
+    mgr.rollback(&id).expect("rollback");
+    mgr.commit(&id).expect("commit (no-op)");
+    let renewed = mgr.renew(&id).expect("renew");
+    assert!(renewed.expires_in_ms > 0);
+
+    mgr.release(&id);
+    assert_eq!(mgr.active_count(), 0);
+    assert!(mgr.info(&id).is_err(), "released lease is gone");
 }
 
 #[tokio::test]
