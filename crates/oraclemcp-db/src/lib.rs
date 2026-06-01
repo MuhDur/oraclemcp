@@ -1,14 +1,37 @@
 #![forbid(unsafe_code)]
 
-//! Oracle connectivity for the `oraclemcp` server: the `OracleConnection`
-//! trait and `RustOracleConnection` driver wrapper (lifted from
-//! `plsql-catalog` in P0-3), an `r2d2-oracle` pool behind a `spawn_blocking`
-//! boundary, the session-lease primitive (P0-4), and the deterministic
-//! type/NLS serializer (P0-5) — plan §4.3, §5.1, §5.2.
+//! Oracle connectivity for the `oraclemcp` server (plan §4.3, §5.1, §5.2; bead
+//! P0-3).
 //!
-//! Phase-A skeleton. An `oracle::Connection` is never held across an `.await`
-//! (compiler-enforced by ownership); all DB I/O crosses an explicit
-//! `spawn_blocking` boundary.
+//! Layers:
+//! - [`OracleConnection`] — the backend-independent sync connection trait, with
+//!   the `oracle`-crate-backed [`RustOracleConnection`].
+//! - [`OraclePool`] — an `r2d2` pool behind a `tokio::task::spawn_blocking`
+//!   boundary so DB I/O never blocks the async executor and an
+//!   `oracle::Connection` is never held across an `.await` (`oracle-driver`).
+//! - [`detect_instant_client`] — the offline-safe Instant Client posture probe
+//!   for `doctor`.
+//!
+//! The session-lease primitive (P0-4) and the deterministic NUMBER→string /
+//! ISO-8601 / NLS serializer (P0-5) build on these.
+
+mod connection;
+mod doctor;
+mod error;
+mod types;
+
+#[cfg(feature = "oracle-driver")]
+mod pool;
+
+pub use connection::{OracleConnection, RustOracleConnection};
+pub use doctor::{InstantClientPosture, detect_instant_client, oracle_driver_compiled};
+pub use error::DbError;
+pub use types::{
+    OracleBackend, OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow,
+};
+
+#[cfg(feature = "oracle-driver")]
+pub use pool::{OracleConnectionManager, OraclePool, PoolSettings};
 
 /// Re-export the shared agent-facing error envelope.
-pub use oraclemcp_error as error;
+pub use oraclemcp_error as error_envelope;
