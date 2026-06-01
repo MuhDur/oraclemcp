@@ -18,6 +18,7 @@ pub mod enforcement;
 pub mod levels;
 pub mod policy;
 pub mod purity;
+pub mod stepup;
 pub mod token;
 
 pub use enforcement::{
@@ -33,6 +34,9 @@ pub use levels::{
 };
 pub use policy::{DefaultMode, PolicyDecision, SchemaPolicy, SchemaPolicyRaw, SchemaPolicySet};
 pub use purity::{ObjectRef, Purity, SideEffectOracle, UnknownOracle};
+pub use stepup::{
+    ChallengeStatus, CiToken, StepUpChallenge, StepUpOption, StepUpRegistry, StepUpResolution,
+};
 pub use token::{ALLOW_ONCE_TTL, AllowOnceError, AllowOnceStore, sql_digest};
 
 /// Re-export the shared agent-facing error envelope.
