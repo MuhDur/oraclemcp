@@ -16,6 +16,7 @@
 //! internals (the one-way boundary, §0 hard rule 1).
 
 pub mod capabilities;
+pub mod connect;
 pub mod init_token;
 pub mod server;
 pub mod tools;
@@ -25,6 +26,7 @@ pub use server::{CAPABILITIES_TOOL, OracleMcpServer, ToolDispatch};
 pub use capabilities::{
     CapabilitiesReport, ConnectionStatus, FeatureTiers, OperatingLevelReport, PROTOCOL_VERSION,
 };
+pub use connect::{SessionContext, build_session_context, profile_to_options, session_level_state};
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
 pub use tools::{ToolDescriptor, ToolRegistry, ToolTier};
 

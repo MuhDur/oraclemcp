@@ -18,6 +18,7 @@ pub mod enforcement;
 pub mod levels;
 pub mod policy;
 pub mod purity;
+pub mod token;
 
 pub use enforcement::{
     SET_TRANSACTION_READ_ONLY, is_allowed_alter_session, read_only_setup_statements,
@@ -32,6 +33,7 @@ pub use levels::{
 };
 pub use policy::{DefaultMode, PolicyDecision, SchemaPolicy, SchemaPolicyRaw, SchemaPolicySet};
 pub use purity::{ObjectRef, Purity, SideEffectOracle, UnknownOracle};
+pub use token::{ALLOW_ONCE_TTL, AllowOnceError, AllowOnceStore, sql_digest};
 
 /// Re-export the shared agent-facing error envelope.
 pub use oraclemcp_error as error;
