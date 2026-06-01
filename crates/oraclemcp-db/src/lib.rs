@@ -18,6 +18,7 @@
 mod connection;
 mod doctor;
 mod error;
+mod serialize;
 mod types;
 
 #[cfg(feature = "oracle-driver")]
@@ -26,6 +27,10 @@ mod pool;
 pub use connection::{OracleConnection, RustOracleConnection};
 pub use doctor::{InstantClientPosture, detect_instant_client, oracle_driver_compiled};
 pub use error::DbError;
+pub use serialize::{
+    SerializeOptions, TypeRepr, base64_encode, canonical_nls_statements, canonicalize_datetime,
+    classify_type, serialize_cell, serialize_row,
+};
 pub use types::{
     OracleBackend, OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow,
 };

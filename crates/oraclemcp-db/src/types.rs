@@ -82,15 +82,30 @@ pub struct OracleCell {
     pub oracle_type: String,
     /// The value as text, or `None` for SQL NULL.
     pub value: Option<String>,
+    /// Raw bytes for binary columns (BLOB / RAW) fetched in binary mode; the
+    /// serializer base64-encodes these. `None` for text/NULL cells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<Vec<u8>>,
 }
 
 impl OracleCell {
-    /// Construct a cell.
+    /// Construct a text cell.
     #[must_use]
     pub fn new(oracle_type: impl Into<String>, value: Option<String>) -> Self {
         OracleCell {
             oracle_type: oracle_type.into(),
             value,
+            bytes: None,
+        }
+    }
+
+    /// Construct a binary cell carrying raw bytes (BLOB / RAW).
+    #[must_use]
+    pub fn binary(oracle_type: impl Into<String>, bytes: Vec<u8>) -> Self {
+        OracleCell {
+            oracle_type: oracle_type.into(),
+            value: None,
+            bytes: Some(bytes),
         }
     }
 

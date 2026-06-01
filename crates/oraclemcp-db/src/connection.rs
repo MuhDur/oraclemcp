@@ -115,6 +115,14 @@ mod driver {
             oracle::Connection::connect(user, pass, &connect_string)
                 .map_err(|e| DbError::Connect(e.to_string()))?
         };
+        // Pin canonical, NLS-decoupled output (ISO-8601 dates, period decimals)
+        // so identical queries return identical values regardless of host NLS
+        // (plan §5.2, P0-5b). ALTER SESSION is non-mutating and session-scoped.
+        for stmt in crate::serialize::canonical_nls_statements() {
+            inner
+                .execute(stmt, &[])
+                .map_err(|e| DbError::Connect(e.to_string()))?;
+        }
         Ok(RustOracleConnection { opts, inner })
     }
 

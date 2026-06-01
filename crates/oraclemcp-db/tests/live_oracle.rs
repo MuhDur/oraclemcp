@@ -13,7 +13,8 @@
 #![cfg(feature = "live-xe")]
 
 use oraclemcp_db::{OracleBind, OracleConnectOptions, OracleConnection, RustOracleConnection};
-use oraclemcp_db::{OraclePool, PoolSettings};
+use oraclemcp_db::{OraclePool, PoolSettings, SerializeOptions, serialize_row};
+use serde_json::json;
 
 fn test_opts() -> OracleConnectOptions {
     OracleConnectOptions {
@@ -70,6 +71,34 @@ fn live_connect_ping_query_bind_describe() {
         "[live-xe] connected: version={:?} role={:?} open_mode={:?} schema={:?}",
         info.server_version, info.database_role, info.open_mode, info.current_schema
     );
+}
+
+#[test]
+fn live_type_fidelity_number_string_and_iso_date() {
+    let conn = match RustOracleConnection::connect(test_opts()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[live-xe] SKIP live_type_fidelity: {e}");
+            return;
+        }
+    };
+    // A 20-digit NUMBER (overflows f64), a DATE, and a BINARY_DOUBLE.
+    let rows = conn
+        .query_rows(
+            "SELECT 12345678901234567890 AS big_num, \
+             TO_DATE('2026-06-01 12:00:00','YYYY-MM-DD HH24:MI:SS') AS d, \
+             CAST(3.5 AS BINARY_DOUBLE) AS bd FROM dual",
+            &[],
+        )
+        .expect("query");
+    let v = serialize_row(&rows[0], &SerializeOptions::default());
+    eprintln!("[live-xe] type-fidelity row: {v}");
+    // NUMBER serializes losslessly as a STRING (never f64-truncated).
+    assert_eq!(v["BIG_NUM"], json!("12345678901234567890"));
+    // DATE comes back ISO-8601 thanks to the canonical session NLS.
+    assert_eq!(v["D"], json!("2026-06-01T12:00:00"));
+    // BINARY_DOUBLE is a JSON number.
+    assert_eq!(v["BD"], json!(3.5));
 }
 
 #[tokio::test]
