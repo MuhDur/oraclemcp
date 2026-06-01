@@ -37,7 +37,7 @@ fn process_generation() -> u64 {
 }
 
 /// A monotonic expiry deadline. Cheap to copy; not serializable by design.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MonotonicDeadline {
     deadline: Instant,
     generation: u64,
