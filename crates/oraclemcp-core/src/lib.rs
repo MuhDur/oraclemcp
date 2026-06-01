@@ -10,5 +10,9 @@
 //! the registry's `Tool` contract — the core never reaches into engine
 //! internals (the one-way boundary, §0 hard rule 1).
 
+pub mod tools;
+
+pub use tools::{ToolDescriptor, ToolRegistry, ToolTier};
+
 /// Re-export the shared agent-facing error envelope.
 pub use oraclemcp_error as error;
