@@ -578,6 +578,112 @@ pub fn execute_custom_tool(
     executor.run(body, loaded.required_level, &binds)
 }
 
+// ── Catalog: first-class vs meta-dispatch registration (P1-13f / 2.12.6) ──────
+
+/// The single meta-dispatch tool name (large-catalog mode).
+pub const RUN_NAMED_TOOL: &str = "oracle_run_named";
+
+/// A loaded, gated catalog of operator tools. Operators choose per profile
+/// between **first-class** registration (small catalog → each tool is its own
+/// MCP tool with a proper `inputSchema`) and **meta-dispatch** (large catalog →
+/// a single [`RUN_NAMED_TOOL`] keeps the top-level surface tiny; the full
+/// catalog is discoverable via `oracle_capabilities` and the `oracle://tools`
+/// resource). This keeps the ≤12 core-tool ergonomic budget intact — operator
+/// tools are additive.
+#[derive(Clone, Debug, Default)]
+pub struct CustomToolCatalog {
+    tools: Vec<LoadedTool>,
+}
+
+impl CustomToolCatalog {
+    /// Build a catalog from the loaded (classified + gated) tools.
+    #[must_use]
+    pub fn new(tools: Vec<LoadedTool>) -> Self {
+        CustomToolCatalog { tools }
+    }
+
+    /// Number of tools.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.tools.len()
+    }
+
+    /// Whether the catalog is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+    }
+
+    /// Look up a tool by name.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&LoadedTool> {
+        self.tools.iter().find(|t| t.def.name == name)
+    }
+
+    /// Register each tool as a first-class MCP tool (small-catalog mode).
+    pub fn register_first_class(&self, registry: &mut ToolRegistry) {
+        for t in &self.tools {
+            registry.register(t.def.to_descriptor());
+        }
+    }
+
+    /// Register a single [`RUN_NAMED_TOOL`] meta-dispatch tool (large-catalog
+    /// mode) — the catalog stays discoverable via [`Self::catalog_json`].
+    pub fn register_meta_dispatch(&self, registry: &mut ToolRegistry) {
+        registry.register(ToolDescriptor {
+            name: RUN_NAMED_TOOL.to_owned(),
+            tier: ToolTier::FoundationLiveDb,
+            summary: format!(
+                "Run one of {} operator-defined tools by name: {{ name, params }}. \
+                 Discover the catalog via oracle_capabilities or the oracle://tools resource.",
+                self.tools.len()
+            ),
+        });
+    }
+
+    /// Meta-dispatch: run the named tool with `params`. `args` is the
+    /// `oracle_run_named` payload `{ "name": "...", "params": { … } }`.
+    pub fn run_named(
+        &self,
+        args: &Value,
+        executor: &dyn CustomToolExecutor,
+    ) -> Result<Value, ErrorEnvelope> {
+        let name = args["name"].as_str().ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorClass::InvalidArguments,
+                "oracle_run_named requires a 'name'",
+            )
+        })?;
+        let loaded = self.get(name).ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorClass::ObjectNotFound,
+                format!("no custom tool named '{name}'"),
+            )
+        })?;
+        let params = args.get("params").cloned().unwrap_or(Value::Null);
+        execute_custom_tool(loaded, &params, executor)
+    }
+
+    /// The catalog document for `oracle_capabilities` and the `oracle://tools`
+    /// resource (P2-RES / 3.10): name, description, required level, inputSchema.
+    #[must_use]
+    pub fn catalog_json(&self) -> Value {
+        let entries: Vec<Value> = self
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "name": t.def.name,
+                    "description": t.def.description,
+                    "required_level": t.required_level.as_str(),
+                    "input_schema": t.def.input_schema(),
+                })
+            })
+            .collect();
+        json!({ "tools": entries })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1051,5 +1157,81 @@ mod tests {
         );
         let loaded = classify_at_load(&d, &c, OperatingLevel::ReadWrite).expect("loads at RW");
         assert!(loaded.required_level >= OperatingLevel::ReadWrite);
+    }
+
+    // ── Catalog: first-class + meta-dispatch (2.12.6) ─────────────────────────
+
+    fn catalog() -> CustomToolCatalog {
+        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        let defs = vec![
+            def_with_params(
+                "SELECT * FROM v WHERE id = :id",
+                vec![p("id", ParamType::Integer, true)],
+            ),
+            {
+                let mut d = def_with_params(
+                    "SELECT name FROM t WHERE k = :k",
+                    vec![p("k", ParamType::String, true)],
+                );
+                d.name = "lookup".to_owned();
+                d
+            },
+        ];
+        let loaded = load_tools(&defs, &c, OperatingLevel::ReadOnly).expect("load");
+        CustomToolCatalog::new(loaded)
+    }
+
+    #[test]
+    fn first_class_registers_each_tool() {
+        let cat = catalog();
+        let mut reg = ToolRegistry::new();
+        cat.register_first_class(&mut reg);
+        assert!(reg.tools.iter().any(|t| t.name == "t"));
+        assert!(reg.tools.iter().any(|t| t.name == "lookup"));
+        assert!(!reg.tools.iter().any(|t| t.name == RUN_NAMED_TOOL));
+    }
+
+    #[test]
+    fn meta_dispatch_registers_a_single_tool() {
+        let cat = catalog();
+        let mut reg = ToolRegistry::new();
+        cat.register_meta_dispatch(&mut reg);
+        assert_eq!(reg.tools.len(), 1);
+        assert_eq!(reg.tools[0].name, RUN_NAMED_TOOL);
+    }
+
+    #[test]
+    fn run_named_dispatches_and_rejects_unknown() {
+        let cat = catalog();
+        let out = cat
+            .run_named(
+                &json!({"name": "lookup", "params": {"k": "x"}}),
+                &EchoExecutor,
+            )
+            .expect("dispatches");
+        assert_eq!(out["bind_count"], json!(1));
+        let err = cat
+            .run_named(&json!({"name": "nope", "params": {}}), &EchoExecutor)
+            .unwrap_err();
+        assert_eq!(err.error_class, ErrorClass::ObjectNotFound);
+        let err = cat
+            .run_named(&json!({"params": {}}), &EchoExecutor)
+            .unwrap_err();
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+    }
+
+    #[test]
+    fn catalog_json_lists_the_tools() {
+        let cat = catalog();
+        let doc = cat.catalog_json();
+        let tools = doc["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert!(
+            tools
+                .iter()
+                .all(|t| t["required_level"] == json!("READ_ONLY"))
+        );
+        assert!(tools.iter().any(|t| t["name"] == json!("lookup")));
+        assert_eq!(tools[0]["input_schema"]["type"], json!("object"));
     }
 }
