@@ -18,8 +18,10 @@ oraclemcp-telemetry = { path = "../oraclemcp-telemetry" }
 rmcp = { version = "1.7", features = ["server", "transport-io"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync", "time"] }
+toml = "0.8"
 tracing.workspace = true
 
 [dev-dependencies]

@@ -18,6 +18,7 @@
 pub mod admission;
 pub mod capabilities;
 pub mod connect;
+pub mod custom_tools;
 pub mod doctor;
 pub mod init_token;
 pub mod query_execute;
@@ -38,6 +39,10 @@ pub use capabilities::{
     CapabilitiesReport, ConnectionStatus, FeatureTiers, OperatingLevelReport, PROTOCOL_VERSION,
 };
 pub use connect::{SessionContext, build_session_context, profile_to_options, session_level_state};
+pub use custom_tools::{
+    CustomToolDef, LoadError, OutputMode, ParamDef, ParamType, ToolBody, parse_tools_file,
+    register_custom_tools,
+};
 pub use doctor::{CheckResult, CheckStatus, DoctorContext, DoctorReport, run_doctor};
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
 pub use query_execute::{ExecuteParams, StatementExecutor, oracle_query_execute};
