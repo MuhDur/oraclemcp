@@ -14,6 +14,7 @@ pub mod oauth_rs;
 pub mod scope;
 pub mod secrets;
 pub mod stepup_delivery;
+pub mod vault_dynamic;
 
 pub use http_guard::{HttpGuardError, HttpGuardPolicy, authority_is_loopback};
 pub use oauth_rs::{
@@ -23,6 +24,10 @@ pub use scope::{apply_oauth_scopes, scope_to_level, scopes_ceiling};
 pub use secrets::{Secret, SecretError, SecretRef, resolve_secret};
 pub use stepup_delivery::{
     ChallengeRequired, ElicitationRequest, SelectorChoice, to_challenge_required, to_elicitation,
+};
+pub use vault_dynamic::{
+    DynamicCredential, DynamicSecretsSource, NextAction, RotationDecision, RotationOutcome,
+    rotate_if_due,
 };
 
 /// Re-export the shared agent-facing error envelope.
