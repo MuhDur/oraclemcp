@@ -23,6 +23,7 @@ mod error;
 mod intelligence;
 mod lease;
 mod oci;
+mod plscope;
 mod privileges;
 mod query;
 mod schema_diff;
@@ -46,6 +47,10 @@ pub use lease::{LeaseId, LeaseInfo, LeaseManager, PreviewImpact, require_lease_i
 pub use oci::{
     AdbConnectInfo, CloudStatus, IamToken, IamTokenSource, OciError, WalletContents,
     classify_wallet, discover_wallet, ensure_fresh_token, validate_adb_connect_string,
+};
+pub use plscope::{
+    PlscopeIdentifier, PlscopeStatement, execute_immediate_audit, find_unused_declarations,
+    plscope_identifiers, plscope_statements, recompile_with_plscope_statements,
 };
 pub use privileges::{
     DictionaryTier, PrivilegeProfile, ToolRequirement, probe_privileges, requirement_matrix,
