@@ -234,6 +234,47 @@ fn live_savepoint_preview_is_ground_truth_and_rolls_back() {
     setup.commit().ok();
 }
 
+#[test]
+fn live_tier1_intelligence_dictionary_tools() {
+    let conn = match RustOracleConnection::connect(test_opts()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[live-xe] SKIP live_tier1_intelligence: {e}");
+            return;
+        }
+    };
+    // schema_inspect: DEMO packages (the synthetic lab ships PKG_AUTONOMOUS etc.).
+    let pkgs = oraclemcp_db::list_objects(&conn, "demo", Some("PACKAGE")).expect("list");
+    assert!(!pkgs.is_empty(), "DEMO should have packages");
+    assert!(
+        pkgs.iter()
+            .any(|r| r.text("OBJECT_NAME") == Some("PKG_AUTONOMOUS"))
+    );
+
+    // get_ddl of a package returns DDL text.
+    let ddl = oraclemcp_db::get_ddl(&conn, "PACKAGE", "demo", "PKG_AUTONOMOUS").expect("ddl");
+    let ddl = ddl.expect("some ddl");
+    assert!(
+        ddl.to_uppercase().contains("PACKAGE"),
+        "DDL: {}",
+        &ddl[..ddl.len().min(60)]
+    );
+
+    // compile_errors runs (valid package -> empty is fine).
+    let _ =
+        oraclemcp_db::compile_errors(&conn, "demo", "PKG_AUTONOMOUS").expect("errors query runs");
+
+    // search_source over ALL_SOURCE.
+    let hits = oraclemcp_db::search_source(&conn, "demo", "AUTONOMOUS", 50).expect("search");
+    assert!(
+        !hits.is_empty(),
+        "PKG_AUTONOMOUS source should mention AUTONOMOUS"
+    );
+
+    // get_ddl rejects an unsupported (injection-shaped) object type.
+    assert!(oraclemcp_db::get_ddl(&conn, "TABLE; DROP", "demo", "x").is_err());
+}
+
 #[tokio::test]
 async fn live_pool_spawn_blocking_roundtrip() {
     let pool = match OraclePool::connect(test_opts(), PoolSettings::default()) {

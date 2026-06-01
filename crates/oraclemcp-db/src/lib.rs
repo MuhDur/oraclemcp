@@ -18,6 +18,7 @@
 mod connection;
 mod doctor;
 mod error;
+mod intelligence;
 mod lease;
 mod query;
 mod serialize;
@@ -30,6 +31,10 @@ mod pool;
 pub use connection::{OracleConnection, RustOracleConnection};
 pub use doctor::{InstantClientPosture, detect_instant_client, oracle_driver_compiled};
 pub use error::DbError;
+pub use intelligence::{
+    compile_errors, describe_columns, explain_plan, get_ddl, is_ddl_object_type, list_objects,
+    sample_rows, search_source,
+};
 pub use lease::{LeaseId, LeaseInfo, LeaseManager, PreviewImpact, require_lease_id};
 pub use query::{QueryCaps, QueryResponse, cursor_to_offset, paginated_sql, read_query};
 pub use serialize::{
