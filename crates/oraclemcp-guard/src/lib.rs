@@ -12,5 +12,13 @@
 //! verdict the engine binds from the consumer side (keeps the one-way boundary
 //! intact — §0 hard rule 1).
 
+pub mod clock;
+pub mod levels;
+
+pub use clock::MonotonicDeadline;
+pub use levels::{
+    BlockReason, DangerLevel, EscalationError, LevelDecision, OperatingLevel, SessionLevelState,
+};
+
 /// Re-export the shared agent-facing error envelope.
 pub use oraclemcp_error as error;
