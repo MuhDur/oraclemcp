@@ -1,10 +1,14 @@
 #![forbid(unsafe_code)]
 
-//! Observability for the `oraclemcp` Oracle MCP server: structured `tracing`
-//! JSON logs, an OpenTelemetry metrics/traces bridge, and the `/healthz`
-//! `/readyz` health endpoint (plan §10; beads P0-1 scaffold, P1-8, P2-6).
-//!
-//! Phase-A skeleton. Logs never carry bind values or secrets.
+//! Observability for the `oraclemcp` server (plan §10; bead P1-8): structured
+//! `tracing` JSON logging and liveness/readiness health state. OpenTelemetry
+//! metrics/traces (P2-6) build on this; logs never carry bind values or secrets.
+
+mod health;
+mod logging;
+
+pub use health::{HealthReport, HealthState};
+pub use logging::init_json_logging;
 
 /// Re-export the shared agent-facing error envelope.
 pub use oraclemcp_error as error;

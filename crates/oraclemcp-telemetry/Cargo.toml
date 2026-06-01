@@ -12,6 +12,7 @@ oraclemcp-error = { path = "../oraclemcp-error" }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter", "fmt"] }
 
 [lints]
 workspace = true
