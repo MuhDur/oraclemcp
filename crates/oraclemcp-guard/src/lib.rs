@@ -15,6 +15,7 @@
 pub mod classifier;
 pub mod clock;
 pub mod enforcement;
+pub mod exec_grant;
 pub mod levels;
 pub mod policy;
 pub mod purity;
@@ -29,6 +30,7 @@ pub use classifier::{
     BatchShape, Classifier, ClassifierConfig, GuardDecision, StageA, analyze_batch, stage_a,
 };
 pub use clock::MonotonicDeadline;
+pub use exec_grant::{ExecGrantError, ExecGrantStore};
 pub use levels::{
     BlockReason, DangerLevel, EscalationError, LevelDecision, OperatingLevel, SessionLevelState,
 };
