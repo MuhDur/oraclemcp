@@ -15,6 +15,7 @@
 //! The session-lease primitive (P0-4) and the deterministic NUMBER→string /
 //! ISO-8601 / NLS serializer (P0-5) build on these.
 
+mod auth_adapter;
 mod awr;
 mod connection;
 mod doctor;
@@ -32,6 +33,7 @@ mod types;
 #[cfg(feature = "oracle-driver")]
 mod pool;
 
+pub use auth_adapter::{AuthAdapter, AuthAdapterError};
 pub use awr::{DiagnosticsSource, detect_statspack, select_diagnostics_source, top_sql_query};
 pub use connection::{OracleConnection, RustOracleConnection};
 pub use doctor::{InstantClientPosture, detect_instant_client, oracle_driver_compiled};
