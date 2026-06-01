@@ -305,7 +305,12 @@ impl CustomToolDef {
     fn classify_input(&self) -> Result<String, LoadError> {
         Ok(match self.body()? {
             ToolBody::InlineSql(s) => s.to_owned(),
-            ToolBody::PackageCall(c) => format!("BEGIN {c}; END;"),
+            // Form B wraps the call in a SELECT so the classifier consults the
+            // SideEffectOracle on the routine (P1-13d): the engine can PROVE the
+            // package read-only → Safe/auto-approved, or flag writes → ≥ Guarded.
+            // With the default Unknown oracle (no engine) it is fail-closed to
+            // Guarded — never silently Safe.
+            ToolBody::PackageCall(c) => format!("SELECT {c} FROM dual"),
         })
     }
 }
@@ -997,5 +1002,54 @@ mod tests {
         assert_eq!(out["level"], json!("READ_ONLY"));
         assert_eq!(out["bind_count"], json!(1));
         assert_eq!(out["body"], json!("SELECT * FROM t WHERE id = :id"));
+    }
+
+    // ── Form B package wrapper (2.12.4) ───────────────────────────────────────
+
+    fn def_call(name: &str, call: &str) -> CustomToolDef {
+        CustomToolDef {
+            name: name.to_owned(),
+            description: "wrap a package".to_owned(),
+            sql: None,
+            call: Some(call.to_owned()),
+            params: vec![p("id", ParamType::Integer, true)],
+            output_mode: OutputMode::Rows,
+            declared_level: None,
+            signature: None,
+        }
+    }
+
+    #[test]
+    fn form_b_proven_readonly_package_classifies_safe() {
+        use oraclemcp_guard::{ObjectRef, Purity, SideEffectOracle};
+        use std::sync::Arc;
+        struct ProvenOracle;
+        impl SideEffectOracle for ProvenOracle {
+            fn routine_purity(&self, _r: &ObjectRef) -> Purity {
+                Purity::ProvenReadOnly
+            }
+        }
+        let c = oraclemcp_guard::Classifier::default().with_oracle(Arc::new(ProvenOracle));
+        let d = def_call("cust360", "billing_api.get_360(:id)");
+        // The engine proves the package read-only -> Safe -> loads at READ_ONLY
+        // (auto-approved) even on a READ_ONLY profile.
+        let loaded =
+            classify_at_load(&d, &c, OperatingLevel::ReadOnly).expect("proven read-only loads");
+        assert_eq!(loaded.required_level, OperatingLevel::ReadOnly);
+    }
+
+    #[test]
+    fn form_b_unproven_package_is_fail_closed_to_guarded() {
+        // The default classifier has no engine oracle -> the package call cannot
+        // be proven read-only -> Guarded (>= ReadWrite), so it refuses on a
+        // READ_ONLY profile and only loads with write headroom.
+        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        let d = def_call("cust360", "billing_api.get_360(:id)");
+        let err = classify_at_load(&d, &c, OperatingLevel::ReadOnly).unwrap_err();
+        assert!(
+            matches!(err, LoadError::OverCeiling { required, .. } if required >= OperatingLevel::ReadWrite)
+        );
+        let loaded = classify_at_load(&d, &c, OperatingLevel::ReadWrite).expect("loads at RW");
+        assert!(loaded.required_level >= OperatingLevel::ReadWrite);
     }
 }
