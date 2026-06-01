@@ -19,6 +19,7 @@ mod auth_adapter;
 mod awr;
 mod connection;
 mod doctor;
+mod drcp;
 mod error;
 mod intelligence;
 mod lease;
@@ -38,6 +39,7 @@ pub use auth_adapter::{AuthAdapter, AuthAdapterError};
 pub use awr::{DiagnosticsSource, detect_statspack, select_diagnostics_source, top_sql_query};
 pub use connection::{OracleConnection, RustOracleConnection};
 pub use doctor::{InstantClientPosture, detect_instant_client, oracle_driver_compiled};
+pub use drcp::{DrcpConfig, SessionPurity};
 pub use error::DbError;
 pub use intelligence::{
     compile_errors, describe_columns, explain_plan, get_ddl, is_ddl_object_type, list_objects,

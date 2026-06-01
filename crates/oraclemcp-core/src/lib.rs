@@ -15,6 +15,7 @@
 //! the registry's `Tool` contract — the core never reaches into engine
 //! internals (the one-way boundary, §0 hard rule 1).
 
+pub mod admin_auth;
 pub mod admission;
 pub mod capabilities;
 pub mod connect;
@@ -29,8 +30,10 @@ pub mod resources;
 pub mod server;
 pub mod session_tool;
 pub mod shutdown;
+pub mod subscriptions;
 pub mod tls;
 pub mod tools;
+pub mod trace;
 
 pub use resilience::{
     CircuitBreaker, CircuitState, RetryPolicy, is_transient_error, run_with_timeout,
@@ -38,6 +41,7 @@ pub use resilience::{
 pub use server::{CAPABILITIES_TOOL, OracleMcpServer, ToolDispatch};
 pub use shutdown::{CancelOutcome, ShutdownCoordinator, install_panic_hook};
 
+pub use admin_auth::{AdminAssertionVerifier, AdminAuthError, AdminAuthPolicy};
 pub use admission::{AdmissionController, AdmissionPermit};
 pub use capabilities::{
     CapabilitiesReport, ConnectionStatus, FeatureTiers, OperatingLevelReport, PROTOCOL_VERSION,
@@ -65,8 +69,10 @@ pub use resources::{
     ResourceUri, prompt_catalog, read_resource, render_prompt, resource_templates,
 };
 pub use session_tool::{LeaseAcquirer, SessionAction, SessionDeps, oracle_session};
+pub use subscriptions::SubscriptionRegistry;
 pub use tls::{TlsError, TlsMaterial, build_server_config, requires_mtls};
 pub use tools::{ToolDescriptor, ToolRegistry, ToolTier};
+pub use trace::TraceContext;
 
 /// Re-export the shared agent-facing error envelope.
 pub use oraclemcp_error as error;
