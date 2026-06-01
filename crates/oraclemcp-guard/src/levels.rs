@@ -50,6 +50,20 @@ impl OperatingLevel {
         }
     }
 
+    /// Parse a flat operating-level string (trimmed, case-insensitive) — the
+    /// inverse of [`Self::as_str`]. `None` for an unrecognized level. The single
+    /// source of truth for the operating-level vocabulary across the server.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<OperatingLevel> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "READ_ONLY" => Some(OperatingLevel::ReadOnly),
+            "READ_WRITE" => Some(OperatingLevel::ReadWrite),
+            "DDL" => Some(OperatingLevel::Ddl),
+            "ADMIN" => Some(OperatingLevel::Admin),
+            _ => None,
+        }
+    }
+
     /// All levels, ascending.
     #[must_use]
     pub fn all() -> [OperatingLevel; 4] {

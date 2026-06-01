@@ -45,16 +45,15 @@ pub struct ExecuteParams {
 fn parse_level(s: Option<&str>) -> Result<OperatingLevel, ErrorEnvelope> {
     match s {
         None => Ok(OperatingLevel::ReadWrite),
-        Some(raw) => match raw.trim().to_ascii_uppercase().as_str() {
-            "READ_ONLY" => Ok(OperatingLevel::ReadOnly),
-            "READ_WRITE" => Ok(OperatingLevel::ReadWrite),
-            "DDL" => Ok(OperatingLevel::Ddl),
-            "ADMIN" => Ok(OperatingLevel::Admin),
-            other => Err(ErrorEnvelope::new(
+        Some(raw) => OperatingLevel::parse(raw).ok_or_else(|| {
+            ErrorEnvelope::new(
                 ErrorClass::InvalidArguments,
-                format!("unknown operating level '{other}'"),
-            )),
-        },
+                format!(
+                    "unknown operating level '{}'",
+                    raw.trim().to_ascii_uppercase()
+                ),
+            )
+        }),
     }
 }
 

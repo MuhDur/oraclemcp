@@ -278,17 +278,6 @@ pub fn register_custom_tools(registry: &mut ToolRegistry, defs: &[CustomToolDef]
 
 // ── Classify-at-load (P1-13b / 2.12.2): the safety gate ───────────────────────
 
-/// Parse a flat operating-level string.
-fn parse_level(s: &str) -> Option<OperatingLevel> {
-    match s.trim().to_ascii_uppercase().as_str() {
-        "READ_ONLY" => Some(OperatingLevel::ReadOnly),
-        "READ_WRITE" => Some(OperatingLevel::ReadWrite),
-        "DDL" => Some(OperatingLevel::Ddl),
-        "ADMIN" => Some(OperatingLevel::Admin),
-        _ => None,
-    }
-}
-
 /// A custom tool that passed classify-at-load, with its derived required level.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadedTool {
@@ -334,7 +323,11 @@ pub fn classify_at_load(
             reason: decision.reason.clone(),
         })?;
     // The author may only raise the floor, never lower the derived level.
-    let effective = match def.declared_level.as_deref().and_then(parse_level) {
+    let effective = match def
+        .declared_level
+        .as_deref()
+        .and_then(OperatingLevel::parse)
+    {
         Some(declared) => derived.max(declared),
         None => derived,
     };
