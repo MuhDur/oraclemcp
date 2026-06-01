@@ -14,8 +14,13 @@
 
 pub mod classifier;
 pub mod clock;
+pub mod enforcement;
 pub mod levels;
 pub mod purity;
+
+pub use enforcement::{
+    SET_TRANSACTION_READ_ONLY, is_allowed_alter_session, read_only_setup_statements,
+};
 
 pub use classifier::{
     BatchShape, Classifier, ClassifierConfig, GuardDecision, StageA, analyze_batch, stage_a,
