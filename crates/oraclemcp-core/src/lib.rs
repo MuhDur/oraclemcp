@@ -15,6 +15,7 @@
 //! the registry's `Tool` contract — the core never reaches into engine
 //! internals (the one-way boundary, §0 hard rule 1).
 
+pub mod admission;
 pub mod capabilities;
 pub mod connect;
 pub mod init_token;
@@ -23,6 +24,7 @@ pub mod tools;
 
 pub use server::{CAPABILITIES_TOOL, OracleMcpServer, ToolDispatch};
 
+pub use admission::{AdmissionController, AdmissionPermit};
 pub use capabilities::{
     CapabilitiesReport, ConnectionStatus, FeatureTiers, OperatingLevelReport, PROTOCOL_VERSION,
 };
