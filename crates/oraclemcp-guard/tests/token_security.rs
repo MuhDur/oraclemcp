@@ -80,6 +80,30 @@ fn ci_token_is_scope_and_ttl_bound() {
 }
 
 #[test]
+fn ci_token_secret_is_compared_in_constant_time() {
+    // oracle-rwjl.10: the CI escalation secret is compared with a constant-time
+    // byte comparison (no per-byte short-circuit timing side channel), matching
+    // the codebase convention for the init token (oraclemcp-core) and OAuth HMAC
+    // (oraclemcp-auth). Behavioural regression: a wrong secret that shares a
+    // long prefix with the real one — and one of a different length — must both
+    // be rejected exactly like any other wrong secret.
+    let token = CiToken::issue(
+        "ci-escalation-secret",
+        OperatingLevel::ReadWrite,
+        Duration::from_secs(3600),
+    );
+    assert!(token.authorizes("ci-escalation-secret", OperatingLevel::ReadWrite));
+    // Shares all but the final byte with the real secret → rejected.
+    assert!(!token.authorizes("ci-escalation-secreX", OperatingLevel::ReadWrite));
+    // Correct prefix, truncated → rejected.
+    assert!(!token.authorizes("ci-escalation", OperatingLevel::ReadWrite));
+    // Longer than the real secret → rejected.
+    assert!(!token.authorizes("ci-escalation-secret-extra", OperatingLevel::ReadWrite));
+    // Empty → rejected.
+    assert!(!token.authorizes("", OperatingLevel::ReadWrite));
+}
+
+#[test]
 fn sql_is_hashed_at_rest_not_stored_clear() {
     // The approval binds to a sha256 digest, never the clear SQL.
     let sql = "UPDATE secret_table SET pw='hunter2' WHERE id=1";

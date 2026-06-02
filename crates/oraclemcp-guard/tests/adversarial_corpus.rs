@@ -94,6 +94,33 @@ const CORPUS: &[(&str, DangerLevel)] = &[
         "DECLARE PRAGMA AUTONOMOUS_TRANSACTION; BEGIN COMMIT; END;",
         DangerLevel::Forbidden,
     ),
+    // oracle-rwjl.1: a comment / extra space / tab / newline wedged between the
+    // two keywords of a multi-word marker must NOT split it and downgrade the
+    // Forbidden block to Guarded — the Stage A scan canonicalizes first.
+    (
+        "BEGIN EXECUTE/**/IMMEDIATE 'DELETE FROM orders'; END;",
+        DangerLevel::Forbidden,
+    ),
+    (
+        "BEGIN EXECUTE  IMMEDIATE 'DELETE FROM orders'; END;",
+        DangerLevel::Forbidden,
+    ),
+    (
+        "BEGIN EXECUTE\tIMMEDIATE 'DELETE FROM orders'; END;",
+        DangerLevel::Forbidden,
+    ),
+    (
+        "BEGIN EXECUTE\nIMMEDIATE 'DELETE FROM orders'; END;",
+        DangerLevel::Forbidden,
+    ),
+    (
+        "DECLARE PRAGMA/**/AUTONOMOUS_TRANSACTION; BEGIN COMMIT; END;",
+        DangerLevel::Forbidden,
+    ),
+    (
+        "DECLARE PRAGMA\tAUTONOMOUS_TRANSACTION; BEGIN COMMIT; END;",
+        DangerLevel::Forbidden,
+    ),
     // --- Multi-statement: the batch takes the max danger ---
     (
         "SELECT 1 FROM dual; DROP TABLE orders",

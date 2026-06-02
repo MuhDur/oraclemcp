@@ -144,6 +144,54 @@ pub enum StageA {
     PureSql,
 }
 
+/// Canonicalize PL/SQL text for the Stage A marker scan: tokenize with the
+/// Oracle dialect (so string/`q'[…]'`/quoted-identifier literals are single
+/// tokens and their contents are never mistaken for keywords), drop all
+/// whitespace **and comment** tokens (both are `Token::Whitespace(_)` —
+/// `--`/`/* … */`), uppercase every *bare* word token, and join the
+/// significant tokens with a single space. Every non-word significant token
+/// (punctuation, operator, string/number/quoted-identifier literal) collapses
+/// to a sentinel (`\u{1}`) that can never appear inside a marker, so two words
+/// separated by punctuation (`EXECUTE; IMMEDIATE`) never read as adjacent.
+///
+/// This is what closes the headline evasion (oracle-rwjl.1): a comment, extra
+/// space, tab, or newline wedged between the two keywords of a multi-word
+/// marker (`EXECUTE/**/IMMEDIATE`, `PRAGMA  AUTONOMOUS_TRANSACTION`) used to
+/// defeat the literal substring scan over the merely-uppercased source and
+/// silently downgrade a Forbidden dynamic-SQL / autonomous-transaction block to
+/// Guarded. The canonical form makes the two keywords adjacent again, so the
+/// marker scan re-catches them. Tokenization failure (e.g. an unterminated
+/// literal) is fail-closed: we fall back to the raw uppercase source so the
+/// scan still sees whatever markers survived in the clear.
+///
+/// The result is space-padded on both ends so a marker is found whether it sits
+/// at the start, middle, or end of the block.
+fn canonical_marker_scan(upper_source: &str) -> String {
+    let dialect = OracleDialect {};
+    let Ok(tokens) = Tokenizer::new(&dialect, upper_source).tokenize() else {
+        // Fail-closed: an untokenizable block falls back to the raw uppercase
+        // text so the literal substring scan still runs against what survives.
+        return format!(" {upper_source} ");
+    };
+    // Sentinel for any significant non-word token: a control char that can
+    // never appear inside a marker, keeping punctuation-separated words apart.
+    const SEP: &str = "\u{1}";
+    let mut parts: Vec<String> = Vec::with_capacity(tokens.len());
+    for token in &tokens {
+        match token {
+            // Whitespace AND comments (`--`, `/* */`) are token separators only.
+            Token::Whitespace(_) => {}
+            // A bare (un-quoted) word contributes its uppercase value; a quoted
+            // identifier (`"EXECUTE"`) is data, never a keyword → sentinel.
+            Token::Word(w) if w.quote_style.is_none() => {
+                parts.push(w.value.to_ascii_uppercase());
+            }
+            _ => parts.push(SEP.to_owned()),
+        }
+    }
+    format!(" {} ", parts.join(" "))
+}
+
 /// Run Stage A: allow-list → block-list → PL/SQL-block detection.
 #[must_use]
 pub fn stage_a(sql: &str, config: &ClassifierConfig) -> StageA {
@@ -164,7 +212,13 @@ pub fn stage_a(sql: &str, config: &ClassifierConfig) -> StageA {
         || upper.starts_with("CREATE FUNCTION")
         || upper.starts_with("CREATE PROCEDURE")
         || upper.starts_with("CREATE TRIGGER");
-    let dangerous = PLSQL_SIDE_EFFECT_MARKERS.iter().any(|m| upper.contains(m));
+    // Scan a canonicalized (comment-stripped, whitespace-collapsed, token-aware)
+    // form so a comment/space/tab/newline wedged between the two keywords of a
+    // multi-word marker cannot split it and evade the fail-closed scan
+    // (oracle-rwjl.1). Single-token markers (DBMS_SQL/UTL_FILE/…) match either
+    // way; they contain no internal whitespace.
+    let scan = canonical_marker_scan(&upper);
+    let dangerous = PLSQL_SIDE_EFFECT_MARKERS.iter().any(|m| scan.contains(m));
     if starts_block || dangerous {
         return StageA::PlSqlBlock { dangerous };
     }
@@ -1112,6 +1166,54 @@ mod tests {
         let d = classify("BEGIN EXECUTE IMMEDIATE 'DELETE FROM orders'; END;");
         assert_eq!(d.danger, DangerLevel::Forbidden);
         assert_eq!(d.required_level, None);
+    }
+
+    #[test]
+    fn whitespace_or_comment_split_marker_is_still_forbidden() {
+        // oracle-rwjl.1: a comment / extra space / tab / newline wedged between
+        // the two keywords of a multi-word side-effect marker must NOT split it
+        // and downgrade the Forbidden dynamic-SQL / autonomous-transaction block
+        // to Guarded. The Stage A scan canonicalizes (comment-strip + whitespace
+        // collapse + token-aware) before matching, so every evasion re-catches.
+        for sql in [
+            // EXECUTE IMMEDIATE separated by a block comment / double space / tab
+            // / newline / line comment.
+            "BEGIN EXECUTE/**/IMMEDIATE 'DELETE FROM orders'; END;",
+            "BEGIN EXECUTE  IMMEDIATE 'DELETE FROM orders'; END;",
+            "BEGIN EXECUTE\tIMMEDIATE 'DELETE FROM orders'; END;",
+            "BEGIN EXECUTE\nIMMEDIATE 'DELETE FROM orders'; END;",
+            "BEGIN EXECUTE --x\nIMMEDIATE 'DELETE FROM orders'; END;",
+            // PRAGMA AUTONOMOUS_TRANSACTION likewise.
+            "DECLARE PRAGMA/**/AUTONOMOUS_TRANSACTION; BEGIN COMMIT; END;",
+            "DECLARE PRAGMA  AUTONOMOUS_TRANSACTION; BEGIN COMMIT; END;",
+            "DECLARE PRAGMA\tAUTONOMOUS_TRANSACTION; BEGIN COMMIT; END;",
+            "DECLARE PRAGMA\nAUTONOMOUS_TRANSACTION; BEGIN COMMIT; END;",
+        ] {
+            let d = classify(sql);
+            assert_eq!(
+                d.danger,
+                DangerLevel::Forbidden,
+                "whitespace/comment-split marker must stay Forbidden: {sql:?}"
+            );
+            assert_eq!(d.required_level, None, "{sql:?}");
+        }
+    }
+
+    #[test]
+    fn marker_keywords_separated_by_punctuation_do_not_false_trigger() {
+        // The contrapositive: two marker keywords separated by a *real* token
+        // boundary (not just whitespace) must NOT be read as adjacent. A bare
+        // block that merely mentions the words across statement boundaries — or
+        // a quoted-identifier `"EXECUTE"` next to IMMEDIATE — is not a dynamic
+        // EXECUTE IMMEDIATE and stays at most Guarded (still fail-closed for the
+        // plain block, but never wrongly hard-Forbidden by a phantom marker).
+        // EXECUTE and IMMEDIATE on opposite sides of a `;` are not adjacent.
+        let d = classify("BEGIN x := EXECUTE; y := IMMEDIATE; END;");
+        assert_ne!(
+            d.danger,
+            DangerLevel::Forbidden,
+            "punctuation-separated marker words must not trigger the dynamic-SQL marker"
+        );
     }
 
     #[test]

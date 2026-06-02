@@ -125,10 +125,35 @@ impl CiToken {
     }
 
     /// Whether this token authorizes `target` right now.
+    ///
+    /// The secret is compared with [`constant_time_eq`] (not `&str ==`, which
+    /// short-circuits on the first mismatched byte and leaks the matching-prefix
+    /// length via timing). This matches the codebase's own constant-time
+    /// convention for caller-presented credentials over the MCP transport
+    /// (`oraclemcp-core::init_token`, `oraclemcp-auth::oauth_rs`) — defense in
+    /// depth for a real CI escalation credential (oracle-rwjl.10).
     #[must_use]
     pub fn authorizes(&self, presented_secret: &str, target: OperatingLevel) -> bool {
-        !self.deadline.is_expired() && presented_secret == self.secret && target <= self.scope
+        !self.deadline.is_expired()
+            && constant_time_eq(presented_secret.as_bytes(), self.secret.as_bytes())
+            && target <= self.scope
     }
+}
+
+/// Constant-time byte comparison (no early return on first mismatch). The
+/// length comparison can leak length, which is acceptable for an
+/// operator-issued CI secret. Mirrors `oraclemcp-core::init_token::constant_time_eq`
+/// / `oraclemcp-auth::oauth_rs::constant_time_eq` (the codebase convention).
+#[must_use]
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 struct Pending {
@@ -379,6 +404,41 @@ mod tests {
         assert!(!token.authorizes("wrong", OperatingLevel::ReadWrite));
         let expired = CiToken::issue("s", OperatingLevel::Admin, Duration::from_secs(0));
         assert!(!expired.authorizes("s", OperatingLevel::ReadOnly));
+    }
+
+    #[test]
+    fn constant_time_eq_correctness() {
+        // oracle-rwjl.10: the secret comparison must reject every wrong secret,
+        // whether it matches a prefix, differs in one byte, or is a different
+        // length — and accept only an exact match (mirrors the init-token test).
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd")); // last byte differs
+        assert!(!constant_time_eq(b"abc", b"abcd")); // longer
+        assert!(!constant_time_eq(b"abcd", b"abc")); // shorter
+        assert!(!constant_time_eq(b"abc", b"xbc")); // first byte differs
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn ci_token_rejects_prefix_and_length_mismatched_secrets() {
+        // oracle-rwjl.10: the secret is compared in constant time, so a wrong
+        // secret sharing a prefix with the real one, and a wrong-length secret,
+        // are both rejected — no per-byte short-circuit side channel.
+        let token = CiToken::issue(
+            "super-secret-value",
+            OperatingLevel::ReadWrite,
+            Duration::from_secs(3600),
+        );
+        // Correct secret authorizes.
+        assert!(token.authorizes("super-secret-value", OperatingLevel::ReadWrite));
+        // Matching prefix, wrong suffix → rejected.
+        assert!(!token.authorizes("super-secret-valuX", OperatingLevel::ReadWrite));
+        // Matching prefix, truncated → rejected.
+        assert!(!token.authorizes("super-secret", OperatingLevel::ReadWrite));
+        // Empty presented secret → rejected.
+        assert!(!token.authorizes("", OperatingLevel::ReadWrite));
+        // Longer than the real secret → rejected.
+        assert!(!token.authorizes("super-secret-value-extra", OperatingLevel::ReadWrite));
     }
 
     #[test]
