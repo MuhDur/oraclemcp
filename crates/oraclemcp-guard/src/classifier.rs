@@ -287,6 +287,15 @@ pub struct BatchShape {
     pub has_plsql_block: bool,
     /// Count of depth-0 statements (non-empty segments between `;` boundaries).
     pub statement_count: usize,
+    /// Whether a `;` was seen at block depth > 0. In a *pure-SQL* batch (StageA
+    /// returned `PureSql`, i.e. no PL/SQL block) this is always a desync: a `;`
+    /// can only legitimately nest inside a real `BEGIN`/`DECLARE` block, so a
+    /// buried `;` here means a keyword-collision identifier or an unbalanced SQL
+    /// `CASE`/`IF`/`LOOP` swallowed a real top-level boundary. The pure-SQL
+    /// caller forces `Forbidden` on this (oracle-73t1.1 / oracle-73t1.5). The
+    /// internal `has_plsql_block` flag is NOT trusted for this decision because a
+    /// bare `BEGIN`/`DECLARE` used as a SQL alias falsely flips it.
+    pub saw_buried_semicolon: bool,
 }
 
 /// Tokenize with the Oracle dialect (so `'…'`/`q'[…]'`/`N'…'`/`"…"` are single
@@ -302,6 +311,7 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
             balanced: false,
             has_plsql_block: false,
             statement_count: 0,
+            saw_buried_semicolon: false,
         };
     };
     let mut depth: i64 = 0;
@@ -309,6 +319,17 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
     let mut has_plsql_block = false;
     let mut segment_has_content = false;
     let mut statement_count = 0usize;
+    // A `;` seen while `depth > 0`. In pure SQL (StageA::PureSql) a `;` is
+    // *always* a top-level statement terminator — it never legitimately nests
+    // inside a `CASE`/`IF`/`LOOP` expression. A buried `;` in that context means
+    // the depth counter was inflated by a keyword-collision identifier (e.g.
+    // `SELECT 1 AS loop FROM dual; DROP TABLE orders; END;`) or an unbalanced SQL
+    // `CASE` (`SELECT CASE WHEN 1=1 THEN 1 FROM dual ; DROP TABLE t END`),
+    // swallowing the real top-level `;` boundary and letting a trailing `END`
+    // rebalance the batch to a single Guarded statement. We surface it on
+    // `BatchShape` so the pure-SQL caller can fire the fail-closed desync law
+    // (oracle-73t1.1 / oracle-73t1.5).
+    let mut saw_buried_semicolon = false;
     // `END IF` / `END LOOP` / `END CASE` close one opener: the `END` decrements
     // and the trailing IF/LOOP/CASE must NOT re-increment. `expecting_close`
     // tracks "previous significant token was END" (whitespace does not reset it).
@@ -360,6 +381,13 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
                         statement_count += 1;
                     }
                     segment_has_content = false;
+                } else {
+                    // A `;` nested inside CASE/IF/LOOP/BEGIN depth. Only a real
+                    // PL/SQL block (StageA::PlSqlBlock) can legitimately carry a
+                    // nested statement-terminator `;`; the pure-SQL caller treats
+                    // this as a hidden top-level boundary the counter swallowed
+                    // and forces Forbidden.
+                    saw_buried_semicolon = true;
                 }
             }
             // Whitespace must NOT reset `expecting_close` (END <ws> IF).
@@ -377,6 +405,7 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
         balanced: depth == 0 && !went_negative,
         has_plsql_block,
         statement_count,
+        saw_buried_semicolon,
     }
 }
 
@@ -904,6 +933,23 @@ impl Classifier {
         if !shape.balanced {
             return forbidden_decision(
                 "lexer desync (unbalanced BEGIN/END or unterminated literal) — fail-closed"
+                    .to_owned(),
+            );
+        }
+        // We reached this branch via `StageA::PureSql`, so there is no PL/SQL
+        // block — yet the lexer saw a `;` nested at block depth > 0. In pure SQL
+        // a `;` is always a top-level statement terminator; a buried one means a
+        // keyword-collision identifier alias (e.g. `SELECT 1 AS loop … ; DROP …;
+        // END;`) or an unbalanced SQL `CASE`/`IF`/`LOOP` inflated the depth
+        // counter and swallowed a real top-level boundary, letting a trailing
+        // `END` rebalance the batch to a single Guarded statement and hide a
+        // DROP/GRANT/TRUNCATE. Fail closed (oracle-73t1.1 / oracle-73t1.5). The
+        // internal `has_plsql_block` flag is deliberately NOT trusted here: a
+        // bare `BEGIN`/`DECLARE` used as a SQL alias falsely flips it, but StageA
+        // already authoritatively determined this is pure SQL.
+        if shape.saw_buried_semicolon {
+            return forbidden_decision(
+                "pure-SQL batch hides a `;` boundary inside CASE/IF/LOOP depth (desync) — fail-closed"
                     .to_owned(),
             );
         }
@@ -1498,6 +1544,97 @@ mod tests {
             classify(r#"SELECT "BEGIN" FROM dual; END;"#).danger,
             DangerLevel::Forbidden,
             "quoted keyword identifiers must not defeat the fail-closed desync law"
+        );
+    }
+
+    #[test]
+    fn keyword_collision_alias_cannot_hide_a_destructive_boundary() {
+        // oracle-73t1.1: a bare unquoted word that collides with a PL/SQL
+        // structural keyword (LOOP/IF/CASE/BEGIN), used as a column alias in
+        // pure SQL, must NOT inflate the block-depth counter and swallow the
+        // real top-level `;` boundaries. Before the fix, `loop` pushed depth to
+        // 1, the two inner `;` were counted as nested (uncounted), a trailing
+        // top-level END netted depth back to 0 (balanced=true, count=1), and the
+        // whole batch — hiding a DROP TABLE — collapsed to a single Guarded
+        // statement, defeating the fail-closed desync law and the Destructive
+        // step-up gate.
+        for alias in ["loop", "if", "case", "begin"] {
+            let sql = format!("SELECT 1 AS {alias} FROM dual; DROP TABLE orders; END;");
+            let shape = analyze_batch(&sql);
+            assert!(
+                shape.saw_buried_semicolon,
+                "keyword-collision alias `{alias}` inflated depth and buried a top-level `;`: {sql:?} -> {shape:?}"
+            );
+            assert_eq!(
+                classify(&sql).danger,
+                DangerLevel::Forbidden,
+                "a keyword-alias batch hiding DROP TABLE must be Forbidden, never Guarded: {sql:?}"
+            );
+        }
+        // Control: the SAME batch with a non-keyword alias has both `;` at
+        // depth 0, splits cleanly into two statements, and surfaces the DROP as
+        // Destructive (never collapses to a single Guarded statement).
+        let control = classify("SELECT 1 AS foo FROM dual; DROP TABLE orders");
+        assert_eq!(
+            control.danger,
+            DangerLevel::Destructive,
+            "non-keyword alias must still surface the DROP as Destructive"
+        );
+        // Control: a genuine balanced SQL CASE with no buried `;` stays balanced
+        // with no buried boundary (the fix must not over-trigger on legitimate
+        // CASE expressions).
+        let ok = analyze_batch("SELECT CASE WHEN x = 1 THEN 'a' ELSE 'b' END FROM dual");
+        assert!(
+            ok.balanced && !ok.saw_buried_semicolon && ok.statement_count == 1,
+            "a legitimate balanced CASE with no buried `;` must stay balanced: {ok:?}"
+        );
+    }
+
+    #[test]
+    fn buried_semicolon_in_pure_sql_case_is_forbidden() {
+        // oracle-73t1.5: a malformed batch whose unbalanced SQL CASE/IF/LOOP
+        // hides a top-level `;` boundary (no BEGIN/DECLARE anywhere) must fail
+        // closed to Forbidden, not be downgraded to Guarded/ReadWrite. The `;`
+        // nested at depth > 0 in a pure-SQL context is illegitimate — it can
+        // only be a swallowed top-level boundary.
+        for payload in [
+            "SELECT CASE WHEN 1=1 THEN 1 FROM dual ; DROP TABLE t END",
+            "SELECT CASE WHEN 1=1 THEN 1 FROM dual ; GRANT DBA TO scott END",
+            "SELECT CASE WHEN 1=1 THEN 1 FROM dual ; TRUNCATE TABLE t END",
+        ] {
+            let shape = analyze_batch(payload);
+            assert!(
+                shape.saw_buried_semicolon,
+                "a buried `;` inside a pure-SQL CASE must be detected: {payload:?} -> {shape:?}"
+            );
+            assert_eq!(
+                classify(payload).danger,
+                DangerLevel::Forbidden,
+                "a buried-`;` CASE desync must be Forbidden (fail-closed law): {payload:?}"
+            );
+        }
+        // Control: a VALID balanced CASE in a multi-statement batch still splits
+        // cleanly and surfaces the trailing DROP as Destructive — legitimate
+        // multi-statement detection must not regress.
+        let control = classify("SELECT CASE WHEN 1=1 THEN 1 ELSE 0 END FROM dual; DROP TABLE t");
+        assert_eq!(
+            control.danger,
+            DangerLevel::Destructive,
+            "a balanced CASE followed by a real top-level DROP must still be Destructive"
+        );
+        // Control: a buried `;` inside a *real* PL/SQL block (StageA routes it
+        // via PlSqlBlock, not PureSql) is a legitimate nested statement
+        // terminator — the buried-`;` desync rule only fires on the PureSql path,
+        // so the block stays balanced and Guarded, never Forbidden.
+        let plsql = analyze_batch("BEGIN UPDATE t SET x = 1 WHERE id = 2; END;");
+        assert!(
+            plsql.balanced,
+            "a `;` nested in a real BEGIN..END block must stay depth-balanced: {plsql:?}"
+        );
+        assert_eq!(
+            classify("BEGIN UPDATE t SET x = 1 WHERE id = 2; END;").danger,
+            DangerLevel::Guarded,
+            "a balanced PL/SQL block with a nested `;` must stay Guarded, not Forbidden"
         );
     }
 
