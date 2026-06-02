@@ -296,6 +296,19 @@ pub struct BatchShape {
     /// internal `has_plsql_block` flag is NOT trusted for this decision because a
     /// bare `BEGIN`/`DECLARE` used as a SQL alias falsely flips it.
     pub saw_buried_semicolon: bool,
+    /// Whether — after a PL/SQL block body has *opened* (a `BEGIN` drove depth to
+    /// ≥ 1) and its `END` returned depth to 0 — any further *significant*
+    /// top-level token (a word/punctuation/literal that is not the SQL*Plus `/`
+    /// run terminator, a statement-terminating `;`, whitespace, or a comment)
+    /// appears at depth 0. This is the trailing-SQL-after-`END` signature
+    /// (oracle-lokg.1): `BEGIN NULL; END; GRANT DBA TO scott` parses as a single
+    /// balanced anonymous block to the depth counter, so the trailing
+    /// `GRANT`/`DROP`/`TRUNCATE` would be silently dropped from classification and
+    /// run with no Admin/DDL step-up. The `StageA::PlSqlBlock` caller forces
+    /// `Forbidden` on this. Unlike `has_plsql_block`, this only arms once a real
+    /// block body opened and closed, so a leading `DECLARE … ;` section (which
+    /// sets `has_plsql_block` but never raises depth) can never falsely trip it.
+    pub saw_top_level_after_block_close: bool,
 }
 
 /// Tokenize with the Oracle dialect (so `'…'`/`q'[…]'`/`N'…'`/`"…"` are single
@@ -312,6 +325,7 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
             has_plsql_block: false,
             statement_count: 0,
             saw_buried_semicolon: false,
+            saw_top_level_after_block_close: false,
         };
     };
     let mut depth: i64 = 0;
@@ -330,6 +344,17 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
     // `BatchShape` so the pure-SQL caller can fire the fail-closed desync law
     // (oracle-73t1.1 / oracle-73t1.5).
     let mut saw_buried_semicolon = false;
+    // Trailing-SQL-after-`END` tracking (oracle-lokg.1). `block_body_opened`
+    // arms once a `BEGIN` drives depth to ≥ 1 (a *real* anonymous-block body,
+    // not a leading `DECLARE` section, which never raises depth). Once such a
+    // body's `END` returns depth to 0, any further significant top-level token
+    // (not the SQL*Plus `/` terminator, a statement `;`, whitespace, or a
+    // comment) is trailing top-level SQL smuggled after the block close — the
+    // depth counter rebalanced to 0 and would otherwise hide a
+    // GRANT/DROP/TRUNCATE from classification. We surface it so the
+    // `StageA::PlSqlBlock` caller can fail closed.
+    let mut block_body_opened = false;
+    let mut saw_top_level_after_block_close = false;
     // `END IF` / `END LOOP` / `END CASE` close one opener: the `END` decrements
     // and the trailing IF/LOOP/CASE must NOT re-increment. `expecting_close`
     // tracks "previous significant token was END" (whitespace does not reset it).
@@ -347,10 +372,20 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
                     .quote_style
                     .is_none()
                     .then(|| w.value.to_ascii_uppercase());
+                // A bare word at depth 0 *after* a block body opened and closed is
+                // trailing top-level SQL smuggled after `END` (oracle-lokg.1). This
+                // is evaluated against the depth *before* this token's own
+                // structural effect, so a re-opening `BEGIN` (a second stacked
+                // block) is caught too; a stray top-level `END` is already a desync
+                // via `went_negative`.
+                if block_body_opened && depth == 0 {
+                    saw_top_level_after_block_close = true;
+                }
                 match keyword.as_deref() {
                     Some("BEGIN") => {
                         depth += 1;
                         has_plsql_block = true;
+                        block_body_opened = true;
                         expecting_close = false;
                     }
                     Some("DECLARE") => {
@@ -392,7 +427,21 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
             }
             // Whitespace must NOT reset `expecting_close` (END <ws> IF).
             Token::Whitespace(_) => {}
+            // The SQL*Plus `/` run terminator (`END; /`) is a benign batch
+            // terminator, never trailing SQL — it must NOT trip the
+            // trailing-after-`END` desync (oracle-lokg.1). It still resets
+            // `expecting_close` and (defensively) does not count as statement
+            // content so a lone `/` after a closed block stays a clean terminator.
+            Token::Div => {
+                expecting_close = false;
+            }
             _ => {
+                // Any other significant token (punctuation, operator, literal,
+                // number, string) at depth 0 after a block body has opened and
+                // closed is trailing top-level SQL after `END` (oracle-lokg.1).
+                if block_body_opened && depth == 0 {
+                    saw_top_level_after_block_close = true;
+                }
                 expecting_close = false;
                 segment_has_content = true;
             }
@@ -406,6 +455,7 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
         has_plsql_block,
         statement_count,
         saw_buried_semicolon,
+        saw_top_level_after_block_close,
     }
 }
 
@@ -914,6 +964,18 @@ impl Classifier {
                         "PL/SQL block has unbalanced BEGIN/END (desync) — fail-closed".to_owned(),
                     );
                 }
+                // oracle-lokg.1: a balanced anonymous block followed by trailing
+                // top-level SQL after `END` (`BEGIN NULL; END; GRANT DBA TO scott`)
+                // rebalances the depth counter to 0, so the trailing
+                // GRANT/DROP/TRUNCATE would be silently dropped from classification
+                // and run with no Admin/DDL step-up. Fail closed — the trailing SQL
+                // must be submitted as its own statement so Stage B can level it.
+                if shape.saw_top_level_after_block_close {
+                    return forbidden_decision(
+                        "PL/SQL block followed by trailing top-level SQL after END — fail-closed"
+                            .to_owned(),
+                    );
+                }
                 return GuardDecision {
                     danger: DangerLevel::Guarded,
                     required_level: Some(OperatingLevel::ReadWrite),
@@ -1012,6 +1074,7 @@ fn forbidden_decision(reason: String) -> GuardDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::levels::BlockReason;
 
     fn classify(sql: &str) -> GuardDecision {
         Classifier::default().classify(sql)
@@ -1636,6 +1699,97 @@ mod tests {
             DangerLevel::Guarded,
             "a balanced PL/SQL block with a nested `;` must stay Guarded, not Forbidden"
         );
+    }
+
+    #[test]
+    fn trailing_sql_after_block_close_is_forbidden() {
+        // oracle-lokg.1: a *balanced* anonymous block followed by trailing
+        // top-level SQL after `END` (`BEGIN NULL; END; GRANT DBA TO scott`)
+        // rebalances the BEGIN/END depth counter back to 0, so the old
+        // StageA::PlSqlBlock arm — which consulted only `shape.balanced` — silently
+        // classified the whole batch as a single Guarded/ReadWrite block and DROPPED
+        // the trailing GRANT/DROP/TRUNCATE from classification. A ReadWrite-elevated
+        // session (whose ceiling reaches Admin) would then Allow the
+        // privilege-escalation DCL/DDL with NO Admin/DDL step-up. It must fail closed.
+        //
+        // A session whose ceiling is Admin, currently elevated only to ReadWrite —
+        // the exact escalation the bead describes (layer B is off at ReadWrite, so
+        // the classifier is the active gate).
+        let mut session = SessionLevelState::new(OperatingLevel::Admin, false);
+        session
+            .set_current_level(OperatingLevel::ReadWrite)
+            .expect("step current level to ReadWrite");
+        for sql in [
+            "BEGIN NULL; END; GRANT DBA TO scott",
+            "BEGIN NULL; END; DROP TABLE orders",
+            "BEGIN UPDATE t SET x=1 WHERE id=2; END; TRUNCATE TABLE orders",
+            // The trailing SQL after a SQL*Plus `/` terminator is still smuggled
+            // top-level SQL that the depth counter rebalances away.
+            "BEGIN NULL; END;\n/\nDROP TABLE orders",
+        ] {
+            let shape = analyze_batch(sql);
+            assert!(
+                shape.saw_top_level_after_block_close,
+                "trailing top-level SQL after END must be detected: {sql:?} -> {shape:?}"
+            );
+            let d = classify(sql);
+            assert_eq!(
+                d.danger,
+                DangerLevel::Forbidden,
+                "a block followed by trailing top-level SQL must be Forbidden, never \
+                 Guarded: {sql:?} -> {d:?}"
+            );
+            assert_ne!(
+                d.gate(&session),
+                LevelDecision::Allow,
+                "a ReadWrite-elevated session must NOT Allow a block hiding trailing \
+                 DCL/DDL: {sql:?}"
+            );
+            assert_eq!(
+                d.gate(&session),
+                LevelDecision::Blocked {
+                    reason: BlockReason::Forbidden
+                },
+                "the trailing-SQL block must gate to Blocked(Forbidden): {sql:?}"
+            );
+        }
+
+        // Distinguishability controls (a naive fix that keyed only on
+        // statement_count / saw_buried_semicolon would regress every one of these):
+        // legitimate single anonymous blocks — including a leading `DECLARE … ;`
+        // section, which sets has_plsql_block but never raises depth — and a block
+        // followed only by the SQL*Plus `/` run terminator must STAY balanced,
+        // Guarded/ReadWrite, and gate to Allow at ReadWrite.
+        for sql in [
+            "DECLARE x NUMBER; BEGIN x := 1; END;",
+            "BEGIN NULL; END;",
+            "BEGIN UPDATE t SET x=1 WHERE id=2; END;",
+            "BEGIN NULL; END; /",
+            "BEGIN NULL; END;\n/",
+        ] {
+            let shape = analyze_batch(sql);
+            assert!(
+                shape.balanced && !shape.saw_top_level_after_block_close,
+                "a legitimate single block (incl. trailing `/`) must not be flagged \
+                 as trailing-after-END: {sql:?} -> {shape:?}"
+            );
+            let d = classify(sql);
+            assert_eq!(
+                d.danger,
+                DangerLevel::Guarded,
+                "a legitimate single anonymous block must stay Guarded: {sql:?} -> {d:?}"
+            );
+            assert_eq!(
+                d.required_level,
+                Some(OperatingLevel::ReadWrite),
+                "a legitimate single anonymous block must require ReadWrite: {sql:?}"
+            );
+            assert_eq!(
+                d.gate(&session),
+                LevelDecision::Allow,
+                "a ReadWrite-elevated session must still Allow a legitimate block: {sql:?}"
+            );
+        }
     }
 
     #[test]
