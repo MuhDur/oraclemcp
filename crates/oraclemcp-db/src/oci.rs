@@ -157,7 +157,11 @@ pub fn validate_adb_connect_string(s: &str) -> Result<AdbConnectInfo, OciError> 
 
     // Full connect descriptor: (DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)...)).
     if lower.starts_with("(description") || lower.contains("(address") {
-        let uses_tls = lower.contains("protocol=tcps");
+        // Tolerate conventional Oracle Net spacing: (PROTOCOL = TCPS). Match the
+        // protocol against a whitespace-stripped copy so `PROTOCOL = TCPS` is
+        // accepted as TLS and `PROTOCOL = TCP` is still rejected as plaintext.
+        let compact: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+        let uses_tls = compact.contains("protocol=tcps");
         if !uses_tls {
             return Err(OciError::InvalidAdbConnectString(
                 "ADB descriptor must use PROTOCOL=TCPS (TLS)".to_owned(),
@@ -165,7 +169,10 @@ pub fn validate_adb_connect_string(s: &str) -> Result<AdbConnectInfo, OciError> 
         }
         return Ok(AdbConnectInfo {
             uses_tls: true,
-            wallet_location: wallet_param(&lower),
+            // Preserve the original case of the extracted path (case-sensitive
+            // filesystems): wallet_param lowercases internally only to locate the
+            // `wallet_location=` needle, so pass the case-preserving `t`.
+            wallet_location: wallet_param(t),
             alias: None,
             descriptor: true,
         });
@@ -205,12 +212,29 @@ pub fn validate_adb_connect_string(s: &str) -> Result<AdbConnectInfo, OciError> 
 }
 
 /// Extract a `wallet_location=` value from a connect string, if present.
+///
+/// Quote-aware: if the value is quoted (`wallet_location="/opt/My Wallet"`), the
+/// path is read to the matching closing quote so interior spaces are preserved;
+/// otherwise the value terminates on a delimiter or whitespace.
 fn wallet_param(s: &str) -> Option<String> {
     let needle = "wallet_location=";
     let idx = s.to_ascii_lowercase().find(needle)? + needle.len();
     let rest = &s[idx..];
-    let end = rest.find(['&', ')', '?', ' ']).unwrap_or(rest.len());
-    let v = rest[..end].trim_matches(|c| c == '"' || c == '\'');
+    let v = match rest.chars().next() {
+        // Quoted value: read to the matching closing quote (interior spaces kept).
+        Some(q @ ('"' | '\'')) => {
+            let body = &rest[q.len_utf8()..];
+            let end = body.find(q).unwrap_or(body.len());
+            &body[..end]
+        }
+        // Unquoted value: terminate on a delimiter or whitespace.
+        _ => {
+            let end = rest
+                .find(|c: char| matches!(c, '&' | ')' | '?') || c.is_whitespace())
+                .unwrap_or(rest.len());
+            rest[..end].trim_matches(|c| c == '"' || c == '\'')
+        }
+    };
     (!v.is_empty()).then(|| v.to_owned())
 }
 
@@ -333,6 +357,51 @@ mod tests {
         // Bare wallet alias.
         let i = validate_adb_connect_string("mydb_high").expect("alias ok");
         assert_eq!(i.alias.as_deref(), Some("mydb_high"));
+    }
+
+    #[test]
+    fn descriptor_wallet_location_preserves_case() {
+        // oracle-ajm2.12: the descriptor branch must keep the original path case
+        // (case-sensitive Linux mTLS auto-login) — not fold to lowercase.
+        let i = validate_adb_connect_string(
+            "(description=(address=(protocol=tcps)(host=h)(port=1522))(connect_data=(service_name=svc))(wallet_location=/home/Oracle/Wallet))",
+        )
+        .expect("descriptor with wallet_location ok");
+        assert!(i.uses_tls && i.descriptor);
+        assert_eq!(i.wallet_location.as_deref(), Some("/home/Oracle/Wallet"));
+    }
+
+    #[test]
+    fn spaced_descriptor_tls_check_is_whitespace_tolerant() {
+        // oracle-ajm2.13 (trigger 1): conventional Oracle Net spacing must not
+        // cause a legitimate TLS descriptor to be rejected as plaintext.
+        let i = validate_adb_connect_string(
+            "(DESCRIPTION = (ADDRESS = (PROTOCOL = TCPS)(HOST = adb)(PORT = 1522)))",
+        )
+        .expect("spaced TCPS descriptor accepted as TLS");
+        assert!(i.uses_tls && i.descriptor);
+        // ...but a spaced plaintext descriptor is still rejected (fail-closed).
+        assert!(matches!(
+            validate_adb_connect_string("(DESCRIPTION = (ADDRESS = (PROTOCOL = TCP)(HOST = h)))"),
+            Err(OciError::InvalidAdbConnectString(_))
+        ));
+    }
+
+    #[test]
+    fn quoted_wallet_location_with_space_round_trips() {
+        // oracle-ajm2.13 (trigger 2): a quoted wallet path containing a space
+        // must not be truncated at the first space.
+        let i = validate_adb_connect_string(
+            "tcps://adb.eu.oraclecloud.com:1522/svc?wallet_location=\"/opt/My Wallet/dir\"",
+        )
+        .expect("quoted wallet path ok");
+        assert_eq!(i.wallet_location.as_deref(), Some("/opt/My Wallet/dir"));
+        // Unquoted values still terminate on whitespace / delimiters.
+        let i = validate_adb_connect_string(
+            "tcps://adb.eu.oraclecloud.com:1522/svc?wallet_location=/w&foo=bar",
+        )
+        .expect("unquoted wallet path ok");
+        assert_eq!(i.wallet_location.as_deref(), Some("/w"));
     }
 
     #[test]
