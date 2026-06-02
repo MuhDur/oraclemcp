@@ -261,6 +261,45 @@ const LEADING_DDL_VERBS: &[&str] = &[
     "FLASHBACK ",
     "ASSOCIATE STATISTICS ",
     "DISASSOCIATE STATISTICS ",
+    // Any leading `CREATE <object>` that reaches the parse-failure branch is an
+    // unparseable object DDL form sqlparser 0.62 cannot handle (CREATE [OR
+    // REPLACE] SYNONYM / DIRECTORY / TYPE / CONTEXT / MATERIALIZED VIEW / …).
+    // Without this it under-levelled to Guarded/ReadWrite, the same fail-open
+    // class as the RENAME/PURGE forms above (oracle-y54x.1). Admin-level CREATE
+    // forms (CREATE USER / CREATE ROLE) are caught by the admin scan that runs
+    // FIRST in the parse-failure arm, so they resolve to Admin before this
+    // broader leading `CREATE ` match can fire. PL/SQL-bearing creates
+    // (PROCEDURE/FUNCTION/PACKAGE/TRIGGER) are intercepted by Stage A and never
+    // reach this branch; parseable creates (VIEW/TABLE/INDEX) are tiered Ddl by
+    // Stage B.
+    "CREATE ",
+];
+
+/// Leading `CREATE [OR REPLACE] <object>` forms whose object body carries
+/// PL/SQL and must take the fail-closed PL/SQL-block path in [`stage_a`].
+/// Matched against the canonical token stream produced by
+/// [`canonical_marker_scan`] (uppercased bare words joined by single spaces,
+/// word-boundaried by the trailing space) so inter-keyword whitespace/comments
+/// (`CREATE  OR /*x*/ REPLACE  PROCEDURE`) cannot split the multi-word marker.
+///
+/// PURE-DDL replace forms (VIEW / SYNONYM / TYPE / DIRECTORY / …) are
+/// deliberately ABSENT: they carry no PL/SQL, so routing them through the
+/// non-dangerous PL/SQL-block arm floored them at Guarded/ReadWrite — strictly
+/// below the Destructive/Ddl their plain `CREATE …` counterparts earn via Stage
+/// B (`Statement::CreateView`) / the parse-failure leading-`CREATE ` DDL floor.
+/// That inverted, fail-open tier for an object-clobbering replace is the defect
+/// this set fixes (oracle-y54x.1). A side-effect-bearing object body (e.g. a
+/// `CREATE TYPE BODY` containing `EXECUTE IMMEDIATE`) is still caught by the
+/// `dangerous` marker scan in [`stage_a`], independent of this list.
+const PLSQL_BEARING_CREATE_FORMS: &[&str] = &[
+    "CREATE PACKAGE ",
+    "CREATE OR REPLACE PACKAGE ",
+    "CREATE FUNCTION ",
+    "CREATE OR REPLACE FUNCTION ",
+    "CREATE PROCEDURE ",
+    "CREATE OR REPLACE PROCEDURE ",
+    "CREATE TRIGGER ",
+    "CREATE OR REPLACE TRIGGER ",
 ];
 
 /// Whether the (already-uppercased) statement text begins with an admin/DCL verb
@@ -304,20 +343,26 @@ pub fn stage_a(sql: &str, config: &ClassifierConfig) -> StageA {
         }
     }
     let upper = sql.trim_start().to_ascii_uppercase();
-    let starts_block = upper.starts_with("DECLARE")
-        || upper.starts_with("BEGIN")
-        || sql.trim() == "/"
-        || upper.starts_with("CREATE OR REPLACE")
-        || upper.starts_with("CREATE PACKAGE")
-        || upper.starts_with("CREATE FUNCTION")
-        || upper.starts_with("CREATE PROCEDURE")
-        || upper.starts_with("CREATE TRIGGER");
     // Scan a canonicalized (comment-stripped, whitespace-collapsed, token-aware)
     // form so a comment/space/tab/newline wedged between the two keywords of a
     // multi-word marker cannot split it and evade the fail-closed scan
     // (oracle-rwjl.1). Single-token markers (DBMS_SQL/UTL_FILE/…) match either
     // way; they contain no internal whitespace.
     let scan = canonical_marker_scan(&upper);
+    // `scan` is `" TOK1 TOK2 … "`; strip the leading pad so a leading marker
+    // sits at offset 0 and the trailing space in each pattern enforces a word
+    // boundary, exactly as the admin/DDL leading-verb scans do.
+    let leading = scan.strip_prefix(' ').unwrap_or(&scan);
+    // Only PL/SQL-bearing CREATE forms take the fail-closed PL/SQL-block path;
+    // pure-DDL replace forms fall through so Stage B / the DDL floor tiers them
+    // Destructive/Ddl rather than under-levelling them to Guarded/ReadWrite (see
+    // [`PLSQL_BEARING_CREATE_FORMS`] — oracle-y54x.1).
+    let starts_block = upper.starts_with("DECLARE")
+        || upper.starts_with("BEGIN")
+        || sql.trim() == "/"
+        || PLSQL_BEARING_CREATE_FORMS
+            .iter()
+            .any(|f| leading.starts_with(f));
     let dangerous = PLSQL_SIDE_EFFECT_MARKERS.iter().any(|m| scan.contains(m));
     if starts_block || dangerous {
         return StageA::PlSqlBlock { dangerous };
@@ -1405,6 +1450,96 @@ mod tests {
         let d = classify("GRANT SELECT ON orders TO scott");
         assert_eq!(d.danger, DangerLevel::Destructive);
         assert_eq!(d.required_level, Some(OperatingLevel::Admin));
+    }
+
+    #[test]
+    fn create_or_replace_pure_ddl_is_not_under_tiered_below_plain_create() {
+        // oracle-y54x.1: Stage A's broad `CREATE OR REPLACE` prefix used to
+        // swallow pure-DDL replace forms (VIEW/SYNONYM/TYPE/DIRECTORY) into the
+        // non-dangerous PL/SQL-block arm → Guarded/ReadWrite, STRICTLY BELOW the
+        // Destructive/Ddl their (less destructive) plain `CREATE …` counterparts
+        // earn. An object-clobbering replace must never tier below the plain
+        // create. Each replace form must classify Destructive/Ddl and at least as
+        // high as its plain counterpart.
+        let pairs = [
+            (
+                "CREATE VIEW v AS SELECT 1 FROM dual", // parses → Stage B
+                "CREATE OR REPLACE VIEW v AS SELECT 1 FROM dual",
+            ),
+            (
+                "CREATE SYNONYM s FOR hr.emp", // unparseable → parse-failure floor
+                "CREATE OR REPLACE SYNONYM s FOR hr.emp",
+            ),
+            (
+                "CREATE TYPE t AS OBJECT (x NUMBER)",
+                "CREATE OR REPLACE TYPE t AS OBJECT (x NUMBER)",
+            ),
+            (
+                "CREATE DIRECTORY d AS '/tmp'",
+                "CREATE OR REPLACE DIRECTORY d AS '/tmp'",
+            ),
+        ];
+        for (plain, replace) in pairs {
+            let dp = classify(plain);
+            let dr = classify(replace);
+            assert_eq!(
+                dr.danger,
+                DangerLevel::Destructive,
+                "CREATE OR REPLACE pure-DDL must be Destructive: {replace:?}"
+            );
+            assert_eq!(
+                dr.required_level,
+                Some(OperatingLevel::Ddl),
+                "CREATE OR REPLACE pure-DDL must require Ddl: {replace:?}"
+            );
+            assert!(
+                dr.required_level >= dp.required_level,
+                "the OR REPLACE form must never tier below its plain counterpart: \
+                 {replace:?} ({:?}) vs {plain:?} ({:?})",
+                dr.required_level,
+                dp.required_level,
+            );
+        }
+    }
+
+    #[test]
+    fn create_user_and_role_still_admin_not_just_ddl() {
+        // The generic leading-`CREATE ` DDL floor must NOT down-shadow the
+        // admin-level CREATE forms: the admin scan runs FIRST in the
+        // parse-failure arm, so CREATE USER / CREATE ROLE stay Destructive/Admin.
+        for sql in ["CREATE USER evil IDENTIFIED BY pw", "CREATE ROLE evil"] {
+            let d = classify(sql);
+            assert_eq!(d.danger, DangerLevel::Destructive, "{sql:?}");
+            assert_eq!(
+                d.required_level,
+                Some(OperatingLevel::Admin),
+                "CREATE USER/ROLE must require Admin, not Ddl: {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plsql_bearing_create_still_takes_block_path() {
+        // The narrowing must not stop PL/SQL-bearing creates from being
+        // side-effect-scanned. A clean CREATE OR REPLACE PROCEDURE stays on the
+        // PL/SQL-block path (Guarded/ReadWrite); one carrying a dynamic-SQL marker
+        // must still fail closed to Forbidden — even with inter-keyword spacing.
+        let clean = classify("CREATE OR REPLACE PROCEDURE p IS BEGIN NULL; END;");
+        assert_eq!(
+            clean.danger,
+            DangerLevel::Guarded,
+            "clean proc → block path"
+        );
+        assert_eq!(clean.required_level, Some(OperatingLevel::ReadWrite));
+
+        let dynamic = classify(
+            "CREATE  OR  REPLACE  PROCEDURE p IS BEGIN EXECUTE IMMEDIATE 'DROP TABLE t'; END;",
+        );
+        assert_eq!(
+            dynamic.danger,
+            DangerLevel::Forbidden,
+            "a dynamic-SQL-bearing proc body must fail closed regardless of spacing"
+        );
     }
 
     #[test]
