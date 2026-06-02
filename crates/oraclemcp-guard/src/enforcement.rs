@@ -21,9 +21,31 @@ pub const SET_TRANSACTION_READ_ONLY: &str = "SET TRANSACTION READ ONLY";
 
 /// Session-setup statements to apply for a session at `level` on a profile
 /// (`protected` = production). At `READ_ONLY` this issues
-/// `SET TRANSACTION READ ONLY` (layer B). `SET ROLE` and non-allowlisted
-/// `ALTER SESSION` are blocked by the classifier (layer C), so a session cannot
-/// enable a write-bearing role post-connect.
+/// `SET TRANSACTION READ ONLY` (layer B).
+///
+/// Layering of `SET ROLE` / `ALTER SESSION` (the precise, code-true picture —
+/// oracle-clgt.13):
+///
+/// - **`SET ROLE`** is mapped by the classifier (layer C) to
+///   `Destructive` / `OperatingLevel::Admin`, so the operating-level gate
+///   ([`crate::levels::SessionLevelState::evaluate`]) never *Allows* it below
+///   `ADMIN`: a `READ_ONLY` *or* `READ_WRITE` session is forced to step up to
+///   `ADMIN` (and on a profile whose ceiling is below `ADMIN`, it is hard
+///   `Blocked`). It is **not** classified `Forbidden`, so an operator who has
+///   genuinely provisioned an `ADMIN` ceiling can still run it after step-up.
+/// - **`ALTER SESSION SET <param>`** does *not* parse under sqlparser's
+///   `OracleDialect`, so in [`crate::classifier`] it falls through the
+///   parse-failure branch to `Guarded` / `READ_WRITE` (it requires step-up from
+///   a `READ_ONLY` session but is allowed once a session is at `READ_WRITE`).
+///   The allowlist below ([`is_allowed_alter_session`]) is **not** consulted on
+///   the `classify()` path — it is enforced only on the dedicated `oracle_session`
+///   `SetSession` action (`oraclemcp-core::session_tool`), which is the
+///   supported way for an agent to change session parameters.
+///
+/// The hard guarantee that a session cannot enable a write-bearing role
+/// post-connect rests on **layer A** (the least-privilege Oracle user, which has
+/// no write-bearing role to enable); layers B and C are defense-in-depth that
+/// refuse to silently *Allow* the attempt.
 #[must_use]
 pub fn read_only_setup_statements(level: OperatingLevel) -> Vec<&'static str> {
     if level == OperatingLevel::ReadOnly {

@@ -192,6 +192,58 @@ fn canonical_marker_scan(upper_source: &str) -> String {
     format!(" {} ", parts.join(" "))
 }
 
+/// Statement-leading admin/DCL verb sequences that require `OperatingLevel::Admin`
+/// (levels.rs:37 — "GRANT / REVOKE, ALTER USER/SYSTEM, cross-schema DCL"). These
+/// are matched against the *canonicalized* token stream produced by
+/// [`canonical_marker_scan`] — uppercased bare words joined by single spaces and
+/// space-padded on both ends — and only when they sit at the **start** of the
+/// statement (the canonical form begins with `" "` then the first token). Each
+/// entry is therefore the leading-token sequence with a single trailing space, so
+/// the match is WORD-BOUNDARED: `"GRANT "` matches `GRANT DBA TO scott` but never
+/// a column/identifier whose name merely begins with the letters `GRANT`
+/// (`GRANTED_FLAG` tokenizes to the single word `GRANTED_FLAG`, not `GRANT`), and
+/// never a non-leading occurrence buried inside a larger statement. Quoted
+/// identifiers and literals are already collapsed to a sentinel by
+/// `canonical_marker_scan`, so they can never smuggle a keyword into this scan.
+///
+/// This is the fail-CLOSED admin floor for the parse-failure branch
+/// (oracle-clgt.3): sqlparser 0.62 cannot parse most Oracle admin/DCL
+/// (`GRANT DBA`, `ALTER USER … IDENTIFIED BY`, `ALTER SYSTEM/DATABASE/PROFILE`,
+/// `AUDIT`/`NOAUDIT`, `CREATE/ALTER USER`, `ALTER ROLE`, …), and the old
+/// parse-failure default under-levelled every one of them to `ReadWrite`, letting
+/// a ReadWrite-elevated session run privilege-escalation DCL with no Admin
+/// step-up. A leading admin verb here forces `Destructive` / `Admin` instead.
+const LEADING_ADMIN_VERBS: &[&str] = &[
+    "GRANT ",
+    "REVOKE ",
+    "AUDIT ",
+    "NOAUDIT ",
+    "CREATE USER ",
+    "ALTER USER ",
+    "DROP USER ",
+    "CREATE ROLE ",
+    "ALTER ROLE ",
+    "DROP ROLE ",
+    "ALTER SYSTEM ",
+    "ALTER DATABASE ",
+    "ALTER PROFILE ",
+    "SET ROLE ",
+];
+
+/// Whether the (already-uppercased) statement text begins with an admin/DCL verb
+/// requiring `OperatingLevel::Admin`. Runs over [`canonical_marker_scan`] so the
+/// match is literal/quote-aware and word-boundaried (see [`LEADING_ADMIN_VERBS`]).
+/// Used by the parse-failure branch of [`classify_statement`] so an unparseable
+/// admin statement fails CLOSED to Admin rather than under-levelling to ReadWrite
+/// (oracle-clgt.3).
+fn starts_with_admin_verb(upper_source: &str) -> bool {
+    let scan = canonical_marker_scan(upper_source);
+    // `scan` is `" TOK1 TOK2 … "`; strip the leading pad so a leading verb sits
+    // at offset 0 and the trailing space in each pattern enforces a word boundary.
+    let leading = scan.strip_prefix(' ').unwrap_or(&scan);
+    LEADING_ADMIN_VERBS.iter().any(|v| leading.starts_with(v))
+}
+
 /// Run Stage A: allow-list → block-list → PL/SQL-block detection.
 #[must_use]
 pub fn stage_a(sql: &str, config: &ClassifierConfig) -> StageA {
@@ -614,8 +666,25 @@ fn classify_statement(sql: &str, oracle: &dyn SideEffectOracle) -> StatementClas
     let dialect = OracleDialect {};
     let parsed = match Parser::parse_sql(&dialect, sql) {
         Ok(stmts) if stmts.len() == 1 => stmts.into_iter().next().expect("len 1"),
-        // Unparseable or unexpectedly multi → fail-closed.
+        // Unparseable or unexpectedly multi → fail-closed. Before settling on the
+        // ReadWrite default, run a leading admin/DCL verb scan over the
+        // canonicalized (literal/quote-aware, word-boundaried) text: sqlparser
+        // 0.62 cannot parse most Oracle admin statements (`GRANT DBA`, `ALTER
+        // USER … IDENTIFIED BY`, `ALTER SYSTEM/DATABASE/PROFILE`, `AUDIT`/
+        // `NOAUDIT`, `CREATE/ALTER/DROP USER|ROLE`, …), and under-levelling every
+        // one of them to ReadWrite lets a ReadWrite-elevated session run
+        // privilege escalation with no Admin step-up. A leading admin verb forces
+        // Destructive / Admin; genuinely non-admin unparseable SQL keeps the
+        // ReadWrite fail-closed default (oracle-clgt.3).
         _ => {
+            let upper = sql.trim_start().to_ascii_uppercase();
+            if starts_with_admin_verb(&upper) {
+                return StatementClass {
+                    danger: DangerLevel::Destructive,
+                    required: Some(OperatingLevel::Admin),
+                    objects: Vec::new(),
+                };
+            }
             return StatementClass {
                 danger: DangerLevel::Guarded,
                 required: Some(OperatingLevel::ReadWrite),
@@ -705,6 +774,13 @@ fn classify_statement(sql: &str, oracle: &dyn SideEffectOracle) -> StatementClas
             required: Some(OperatingLevel::ReadWrite),
             objects: Vec::new(),
         },
+        // DROP USER / DROP ROLE is account/role administration (cross-schema
+        // DCL, levels.rs:37), NOT ordinary object DDL — it requires Admin, not
+        // Ddl. Other DROPs (TABLE/VIEW/INDEX/…) stay Ddl (oracle-clgt.3).
+        Statement::Drop {
+            object_type: sqlparser::ast::ObjectType::User | sqlparser::ast::ObjectType::Role,
+            ..
+        } => destructive(OperatingLevel::Admin, Vec::new()),
         // DDL.
         Statement::CreateTable(_)
         | Statement::CreateView { .. }
@@ -712,8 +788,18 @@ fn classify_statement(sql: &str, oracle: &dyn SideEffectOracle) -> StatementClas
         | Statement::AlterTable { .. }
         | Statement::Drop { .. }
         | Statement::Truncate { .. } => destructive(OperatingLevel::Ddl, Vec::new()),
-        // DCL / admin.
-        Statement::Grant { .. } | Statement::Revoke { .. } => {
+        // DCL / admin: GRANT/REVOKE, role creation/alteration, and SET ROLE all
+        // touch the privilege model and require Admin. CREATE ROLE parses to
+        // Statement::CreateRole, ALTER ROLE to Statement::AlterRole, and
+        // `SET [SESSION|LOCAL] ROLE …` to Statement::Set(Set::SetRole) — all
+        // previously fell through to the catch-all and under-levelled to
+        // ReadWrite, letting a ReadWrite-elevated session enable a write-bearing
+        // role post-connect (oracle-clgt.3 / oracle-clgt.13).
+        Statement::Grant { .. }
+        | Statement::Revoke { .. }
+        | Statement::CreateRole(_)
+        | Statement::AlterRole { .. } => destructive(OperatingLevel::Admin, Vec::new()),
+        Statement::Set(sqlparser::ast::Set::SetRole { .. }) => {
             destructive(OperatingLevel::Admin, Vec::new())
         }
         // Standalone transaction control is Guarded (lease-bound).
@@ -1147,6 +1233,160 @@ mod tests {
         let d = classify("GRANT SELECT ON orders TO scott");
         assert_eq!(d.danger, DangerLevel::Destructive);
         assert_eq!(d.required_level, Some(OperatingLevel::Admin));
+    }
+
+    #[test]
+    fn unparseable_admin_dcl_fails_closed_to_admin_not_readwrite() {
+        // oracle-clgt.3: sqlparser 0.62 cannot parse most Oracle admin/DCL, and
+        // the old parse-failure default under-levelled every one of them to
+        // ReadWrite — letting a ReadWrite-elevated session run privilege
+        // escalation (GRANT DBA, ALTER USER … IDENTIFIED BY, ALTER SYSTEM, …)
+        // with NO Admin step-up. Each of these must classify Destructive/Admin so
+        // a session at ReadWrite is forced to step up to Admin (RequireStepUp),
+        // not Allowed. Mix of parse-failure-branch statements and statements that
+        // DO parse (CREATE/DROP ROLE, DROP USER, SET ROLE) that previously hit the
+        // ReadWrite catch-all.
+        let admin_dcl = [
+            // --- parse-failure branch (leading admin-verb scan) ---
+            "GRANT DBA TO scott",
+            "REVOKE DBA FROM scott",
+            "ALTER USER sys IDENTIFIED BY hacked",
+            "ALTER SYSTEM SET sga_target = 0",
+            "ALTER DATABASE OPEN",
+            "ALTER PROFILE default LIMIT sessions_per_user 10",
+            "CREATE USER evil IDENTIFIED BY pw",
+            "ALTER ROLE evil",
+            "AUDIT SELECT ON orders",
+            "NOAUDIT SELECT ON orders",
+            // --- parse successfully but previously hit the ReadWrite catch-all ---
+            "CREATE ROLE evil",
+            "DROP ROLE evil",
+            "DROP USER evil",
+            "SET ROLE dba",
+        ];
+        // A session whose ceiling is Admin, currently elevated only to ReadWrite
+        // (the exact escalation the bead describes).
+        let mut session = SessionLevelState::new(OperatingLevel::Admin, false);
+        session
+            .set_current_level(OperatingLevel::ReadWrite)
+            .expect("step current level to ReadWrite");
+        for sql in admin_dcl {
+            let d = classify(sql);
+            assert_eq!(
+                d.danger,
+                DangerLevel::Destructive,
+                "admin/DCL must be Destructive, not Guarded: {sql:?}"
+            );
+            assert_eq!(
+                d.required_level,
+                Some(OperatingLevel::Admin),
+                "admin/DCL must require Admin, not ReadWrite: {sql:?}"
+            );
+            assert_eq!(
+                d.gate(&session),
+                LevelDecision::RequireStepUp {
+                    target: OperatingLevel::Admin
+                },
+                "a ReadWrite-elevated session must be forced to step up to Admin, \
+                 never Allowed, for: {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_verb_scan_is_word_boundaried_and_leading_only() {
+        // The contrapositive of the admin-verb scan: a verb that merely appears as
+        // a *prefix of an identifier* (DELETED_FLAG, GRANTED_FLAG), or NOT at the
+        // statement-leading position, must NOT be mis-escalated to Admin. The
+        // canonical token scan tokenizes DELETED_FLAG / GRANTED_FLAG as single
+        // word tokens (never the verb), and the patterns only match at offset 0.
+        // None of these is admin/DCL; none may classify Admin.
+        for sql in [
+            "SELECT deleted_flag FROM t",
+            "SELECT granted_flag, revoked_at FROM audit_log",
+            "UPDATE t SET granted_flag = 1 WHERE id = 1",
+            "SELECT * FROM grants_audit WHERE auditor = 'x'",
+            // A quoted identifier "GRANT" is data, never the verb.
+            r#"SELECT "GRANT" FROM t"#,
+        ] {
+            let d = classify(sql);
+            assert_ne!(
+                d.required_level,
+                Some(OperatingLevel::Admin),
+                "word-boundary / leading-only: {sql:?} must not require Admin"
+            );
+            assert_ne!(
+                d.danger,
+                DangerLevel::Destructive,
+                "word-boundary / leading-only: {sql:?} must not be Destructive"
+            );
+        }
+    }
+
+    #[test]
+    fn set_role_and_create_role_require_admin_step_up() {
+        // oracle-clgt.13: SET ROLE and CREATE/ALTER/DROP ROLE touch the privilege
+        // model and require Admin. A session at ReadWrite must NOT be allowed to
+        // enable a write-bearing role post-connect via SET ROLE; it must be forced
+        // to step up to Admin. (The hard guarantee on a correctly-provisioned
+        // deployment still rests on layer A, but layer C now refuses to Allow it.)
+        let mut session = SessionLevelState::new(OperatingLevel::Admin, false);
+        session
+            .set_current_level(OperatingLevel::ReadWrite)
+            .expect("step current level to ReadWrite");
+        for sql in ["SET ROLE dba", "SET ROLE ALL", "CREATE ROLE evil"] {
+            let d = classify(sql);
+            assert_eq!(d.required_level, Some(OperatingLevel::Admin), "{sql:?}");
+            assert_eq!(
+                d.gate(&session),
+                LevelDecision::RequireStepUp {
+                    target: OperatingLevel::Admin
+                },
+                "{sql:?} must require Admin step-up from a ReadWrite session"
+            );
+        }
+    }
+
+    #[test]
+    fn alter_session_classifies_guarded_readwrite_matching_doc() {
+        // oracle-clgt.13: locks the enforcement.rs module doc to reality. ALTER
+        // SESSION SET <param> does NOT parse under sqlparser's OracleDialect, so
+        // it falls through the parse-failure branch to Guarded/ReadWrite — it is
+        // NOT classified Admin (it is not a leading admin verb) and NOT Forbidden,
+        // and the ALTER SESSION allowlist is never consulted on the classify path.
+        // A READ_ONLY session must step up; a READ_WRITE session is Allowed.
+        let read_only = SessionLevelState::new(OperatingLevel::ReadWrite, false);
+        let mut read_write = SessionLevelState::new(OperatingLevel::ReadWrite, false);
+        read_write
+            .set_current_level(OperatingLevel::ReadWrite)
+            .expect("step to ReadWrite");
+        for sql in [
+            // Non-allowlisted (security/trace) AND allowlisted params both behave
+            // identically on the classify path — the allowlist is not consulted.
+            "ALTER SESSION SET SQL_TRACE = TRUE",
+            "ALTER SESSION SET CURRENT_SCHEMA = hr",
+            "ALTER SESSION SET CONTAINER = CDB$ROOT",
+        ] {
+            let d = classify(sql);
+            assert_eq!(
+                d.danger,
+                DangerLevel::Guarded,
+                "ALTER SESSION must classify Guarded (not Admin/Forbidden): {sql:?}"
+            );
+            assert_eq!(d.required_level, Some(OperatingLevel::ReadWrite), "{sql:?}");
+            assert_eq!(
+                d.gate(&read_only),
+                LevelDecision::RequireStepUp {
+                    target: OperatingLevel::ReadWrite
+                },
+                "a READ_ONLY session must step up for: {sql:?}"
+            );
+            assert_eq!(
+                d.gate(&read_write),
+                LevelDecision::Allow,
+                "a READ_WRITE session is Allowed (allowlist not consulted in classify): {sql:?}"
+            );
+        }
     }
 
     #[test]
