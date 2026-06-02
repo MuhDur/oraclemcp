@@ -228,6 +228,39 @@ const LEADING_ADMIN_VERBS: &[&str] = &[
     "ALTER DATABASE ",
     "ALTER PROFILE ",
     "SET ROLE ",
+    // FLASHBACK of an entire (pluggable) database is a server-wide point-in-time
+    // rewind — strictly an Admin operation, not object DDL. The shorter
+    // `FLASHBACK TABLE`/`FLASHBACK STANDBY …` forms stay at the Ddl floor below
+    // (see LEADING_DDL_VERBS). The admin scan runs FIRST in the parse-failure
+    // arm, so `FLASHBACK DATABASE` / `FLASHBACK PLUGGABLE DATABASE` resolve here
+    // (Admin) before the broader leading `FLASHBACK ` Ddl match could fire.
+    "FLASHBACK DATABASE ",
+    "FLASHBACK PLUGGABLE DATABASE ",
+];
+
+/// Statement-leading object-level destructive DDL verb sequences that require
+/// `OperatingLevel::Ddl` (levels.rs:36/115 — Destructive maps to the Ddl floor).
+/// Matched against the *canonicalized* token stream produced by
+/// [`canonical_marker_scan`] (uppercased bare words joined by single spaces,
+/// space-padded), word-boundaried, and only at the statement-leading position —
+/// exactly like [`LEADING_ADMIN_VERBS`].
+///
+/// sqlparser 0.62 cannot parse these irreversible Oracle DDL forms, so the
+/// parse-failure branch of [`classify_statement`] used to under-level every one
+/// of them to Guarded/ReadWrite — letting a ReadWrite-elevated session RENAME a
+/// table, PURGE a table/recyclebin/tablespace, FLASHBACK a table back, or
+/// (DIS)ASSOCIATE optimizer statistics with NO forced Ddl step-up, bypassing the
+/// schema deny_ddl / guarded-destructive policy (oracle-j1ep.3). A leading DDL
+/// verb here forces `Destructive` / `Ddl`. The trailing space enforces a word
+/// boundary so a column/identifier whose name merely begins with these letters
+/// (`PURGED_AT`, `RENAMED_FLAG`) never matches, and the leading-only anchor keeps
+/// a non-leading occurrence (`SELECT billing.purge() FROM dual`) at Guarded.
+const LEADING_DDL_VERBS: &[&str] = &[
+    "RENAME ",
+    "PURGE ",
+    "FLASHBACK ",
+    "ASSOCIATE STATISTICS ",
+    "DISASSOCIATE STATISTICS ",
 ];
 
 /// Whether the (already-uppercased) statement text begins with an admin/DCL verb
@@ -242,6 +275,21 @@ fn starts_with_admin_verb(upper_source: &str) -> bool {
     // at offset 0 and the trailing space in each pattern enforces a word boundary.
     let leading = scan.strip_prefix(' ').unwrap_or(&scan);
     LEADING_ADMIN_VERBS.iter().any(|v| leading.starts_with(v))
+}
+
+/// Whether the (already-uppercased) statement text begins with an object-level
+/// destructive DDL verb requiring `OperatingLevel::Ddl`. Runs over
+/// [`canonical_marker_scan`] so the match is literal/quote-aware and
+/// word-boundaried (see [`LEADING_DDL_VERBS`]). Used by the parse-failure branch
+/// of [`classify_statement`], AFTER the admin-verb scan, so an unparseable
+/// destructive DDL statement fails CLOSED to Destructive/Ddl rather than
+/// under-levelling to Guarded/ReadWrite (oracle-j1ep.3).
+fn starts_with_ddl_verb(upper_source: &str) -> bool {
+    let scan = canonical_marker_scan(upper_source);
+    // `scan` is `" TOK1 TOK2 … "`; strip the leading pad so a leading verb sits
+    // at offset 0 and the trailing space in each pattern enforces a word boundary.
+    let leading = scan.strip_prefix(' ').unwrap_or(&scan);
+    LEADING_DDL_VERBS.iter().any(|v| leading.starts_with(v))
 }
 
 /// Run Stage A: allow-list → block-list → PL/SQL-block detection.
@@ -761,6 +809,21 @@ fn classify_statement(sql: &str, oracle: &dyn SideEffectOracle) -> StatementClas
                 return StatementClass {
                     danger: DangerLevel::Destructive,
                     required: Some(OperatingLevel::Admin),
+                    objects: Vec::new(),
+                };
+            }
+            // Object-level destructive DDL that sqlparser 0.62 cannot parse —
+            // RENAME / PURGE / FLASHBACK <table> / (DIS)ASSOCIATE STATISTICS —
+            // would otherwise under-level to Guarded/ReadWrite, letting a
+            // ReadWrite-elevated session run irreversible DDL with no Ddl
+            // step-up and bypassing the schema deny_ddl / guarded-destructive
+            // policy. Force Destructive / Ddl (oracle-j1ep.3). Runs AFTER the
+            // admin scan so the database-level FLASHBACK forms already escalated
+            // to Admin above.
+            if starts_with_ddl_verb(&upper) {
+                return StatementClass {
+                    danger: DangerLevel::Destructive,
+                    required: Some(OperatingLevel::Ddl),
                     objects: Vec::new(),
                 };
             }
@@ -1398,6 +1461,121 @@ mod tests {
                 },
                 "a ReadWrite-elevated session must be forced to step up to Admin, \
                  never Allowed, for: {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unparseable_destructive_ddl_fails_closed_to_ddl_not_readwrite() {
+        // oracle-j1ep.3: sqlparser 0.62 cannot parse these irreversible Oracle
+        // DDL forms, and the old parse-failure default under-levelled every one
+        // of them to Guarded/ReadWrite — letting a ReadWrite-elevated session
+        // RENAME a table, PURGE a table/recyclebin/tablespace, FLASHBACK a table
+        // back, or (DIS)ASSOCIATE optimizer statistics with NO forced Ddl
+        // step-up, bypassing the schema deny_ddl / guarded-destructive policy.
+        // Each must classify Destructive/Ddl so a session at ReadWrite is forced
+        // to step up to Ddl (RequireStepUp), not Allowed.
+        let destructive_ddl = [
+            "RENAME orders TO orders_old",
+            "PURGE TABLE orders",
+            "PURGE RECYCLEBIN",
+            "PURGE TABLESPACE ts1",
+            "FLASHBACK TABLE orders TO BEFORE DROP",
+            "ASSOCIATE STATISTICS WITH COLUMNS orders.id DEFAULT SELECTIVITY 5",
+            "DISASSOCIATE STATISTICS FROM COLUMNS orders.id",
+        ];
+        // A session whose ceiling is Admin, currently elevated only to ReadWrite
+        // (the exact escalation the bead describes).
+        let mut session = SessionLevelState::new(OperatingLevel::Admin, false);
+        session
+            .set_current_level(OperatingLevel::ReadWrite)
+            .expect("step current level to ReadWrite");
+        for sql in destructive_ddl {
+            let d = classify(sql);
+            assert_eq!(
+                d.danger,
+                DangerLevel::Destructive,
+                "destructive DDL must be Destructive, not Guarded: {sql:?}"
+            );
+            assert_eq!(
+                d.required_level,
+                Some(OperatingLevel::Ddl),
+                "destructive DDL must require Ddl, not ReadWrite: {sql:?}"
+            );
+            assert_eq!(
+                d.gate(&session),
+                LevelDecision::RequireStepUp {
+                    target: OperatingLevel::Ddl
+                },
+                "a ReadWrite-elevated session must be forced to step up to Ddl, \
+                 never Allowed, for: {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn flashback_database_escalates_to_admin_not_ddl() {
+        // oracle-j1ep.3: FLASHBACK of an entire (pluggable) database is a
+        // server-wide point-in-time rewind — an Admin operation, not object DDL.
+        // The admin-verb scan runs before the broader leading-`FLASHBACK ` Ddl
+        // match, so these resolve to Destructive/Admin while `FLASHBACK TABLE`
+        // stays at Ddl (covered above).
+        let mut session = SessionLevelState::new(OperatingLevel::Admin, false);
+        session
+            .set_current_level(OperatingLevel::ReadWrite)
+            .expect("step current level to ReadWrite");
+        for sql in [
+            "FLASHBACK DATABASE TO RESTORE POINT before_upgrade",
+            "FLASHBACK PLUGGABLE DATABASE pdb1 TO RESTORE POINT rp1",
+        ] {
+            let d = classify(sql);
+            assert_eq!(
+                d.danger,
+                DangerLevel::Destructive,
+                "database FLASHBACK must be Destructive: {sql:?}"
+            );
+            assert_eq!(
+                d.required_level,
+                Some(OperatingLevel::Admin),
+                "database FLASHBACK must require Admin, not Ddl: {sql:?}"
+            );
+            assert_eq!(
+                d.gate(&session),
+                LevelDecision::RequireStepUp {
+                    target: OperatingLevel::Admin
+                },
+                "{sql:?} must require Admin step-up from a ReadWrite session"
+            );
+        }
+    }
+
+    #[test]
+    fn ddl_verb_scan_is_word_boundaried_and_leading_only() {
+        // The contrapositive of the DDL-verb scan: a verb that merely appears as
+        // a *prefix of an identifier* (PURGED_AT, RENAMED_FLAG), or NOT at the
+        // statement-leading position (a non-leading `purge()` call), must NOT be
+        // mis-escalated to Destructive/Ddl. The canonical token scan tokenizes
+        // PURGED_AT / RENAMED_FLAG as single word tokens (never the verb), and
+        // the patterns only match at offset 0.
+        for sql in [
+            "SELECT purged_at FROM t",
+            "SELECT renamed_flag FROM t",
+            "UPDATE t SET purged_at = SYSDATE WHERE id = 1",
+            // A non-leading package-member call named `purge` is data, not a verb.
+            "SELECT billing.purge() FROM dual",
+            // A quoted identifier "PURGE" is data, never the verb.
+            r#"SELECT "PURGE" FROM t"#,
+        ] {
+            let d = classify(sql);
+            assert_ne!(
+                d.required_level,
+                Some(OperatingLevel::Ddl),
+                "word-boundary / leading-only: {sql:?} must not require Ddl"
+            );
+            assert_ne!(
+                d.danger,
+                DangerLevel::Destructive,
+                "word-boundary / leading-only: {sql:?} must not be Destructive"
             );
         }
     }
