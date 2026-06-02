@@ -15,11 +15,14 @@ use std::sync::Arc;
 
 use oraclemcp_core::capabilities::{CapabilitiesReport, FeatureTiers};
 use oraclemcp_core::http::{HttpTransportConfig, MCP_PATH, build_router};
-use oraclemcp_core::server::ToolDispatch;
+use oraclemcp_core::init_token::StdioAuthPolicy;
+use oraclemcp_core::server::{INIT_TOKEN_META_KEY, ToolDispatch};
 use oraclemcp_core::tools::{ToolDescriptor, ToolRegistry, ToolTier};
 use oraclemcp_core::{OracleMcpServer, error::ErrorEnvelope};
 use oraclemcp_guard::OperatingLevel;
+use rmcp::ServiceExt as _;
 use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tower::ServiceExt;
 
 /// A trivial engine-free dispatcher for the harness (the live tools are
@@ -167,4 +170,127 @@ async fn concurrent_http_clients_are_isolated() {
         "client B isolated + served"
     );
     log_step("concurrent_clients_ok", json!({ "both": 200 }));
+}
+
+// ---------------------------------------------------------------------------
+// Regression for oracle-qm3q.10: the stdio init-token gate must be enforced on
+// the live `initialize` request path (it was previously only logged — a silent
+// no-op, so a Required token accepted any/no token). These tests drive a REAL
+// rmcp `initialize` handshake over a duplex transport (the same transport
+// family `serve_stdio` uses) and assert the gate fails closed.
+// ---------------------------------------------------------------------------
+
+/// Build a raw JSON-RPC `initialize` frame, optionally carrying a `_meta` token.
+fn init_frame(token: Option<&str>) -> Vec<u8> {
+    let mut params = json!({
+        "protocolVersion": "2025-11-25",
+        "capabilities": {},
+        "clientInfo": { "name": "stdio-e2e", "version": "1.0" }
+    });
+    if let Some(t) = token {
+        params["_meta"] = json!({ INIT_TOKEN_META_KEY: t });
+    }
+    let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params });
+    let mut bytes = serde_json::to_vec(&req).unwrap();
+    bytes.push(b'\n');
+    bytes
+}
+
+/// Drive a real `initialize` handshake against a server carrying the given
+/// stdio auth policy and presenting the given token; return the parsed JSON-RPC
+/// reply (a `result` on success, an `error` on a refused handshake).
+async fn drive_initialize(auth: Option<StdioAuthPolicy>, token: Option<&str>) -> Value {
+    let mut server = harness_server();
+    if let Some(policy) = auth {
+        server = server.with_stdio_auth(policy);
+    }
+
+    let (server_io, client_io) = tokio::io::duplex(8 * 1024);
+    // Run the rmcp serve loop on the server half (the same `serve` call
+    // `serve_stdio` makes, exercising the `initialize` override end to end).
+    let serve = tokio::spawn(async move {
+        match server.serve(server_io).await {
+            Ok(running) => {
+                // Handshake accepted; tear down cleanly so the task ends.
+                let _ = running.cancel().await;
+                true
+            }
+            // Handshake refused (e.g. fail-closed token rejection).
+            Err(_) => false,
+        }
+    });
+
+    let (read_half, mut write_half) = tokio::io::split(client_io);
+    write_half.write_all(&init_frame(token)).await.unwrap();
+
+    // Read exactly one newline-delimited JSON-RPC reply.
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        reader.read_line(&mut line).await.unwrap();
+        serde_json::from_str::<Value>(&line).unwrap()
+    })
+    .await
+    .expect("server replies to initialize within 5s");
+
+    // Let the serve task settle (success path cancels itself).
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), serve).await;
+    reply
+}
+
+#[tokio::test]
+async fn stdio_initialize_required_rejects_missing_token() {
+    let policy = StdioAuthPolicy::Required {
+        expected: "s3cr3t".to_owned(),
+    };
+    let reply = drive_initialize(Some(policy), None).await;
+    log_step("stdio_init_missing_token", reply.clone());
+    assert!(
+        reply.get("error").is_some(),
+        "missing token under Required must be refused, got: {reply}"
+    );
+    assert!(
+        reply.get("result").is_none(),
+        "a refused handshake must not return a result"
+    );
+}
+
+#[tokio::test]
+async fn stdio_initialize_required_rejects_wrong_token() {
+    let policy = StdioAuthPolicy::Required {
+        expected: "s3cr3t".to_owned(),
+    };
+    let reply = drive_initialize(Some(policy), Some("nope")).await;
+    log_step("stdio_init_wrong_token", reply.clone());
+    assert!(
+        reply.get("error").is_some(),
+        "wrong token under Required must be refused, got: {reply}"
+    );
+}
+
+#[tokio::test]
+async fn stdio_initialize_required_accepts_correct_token() {
+    let policy = StdioAuthPolicy::Required {
+        expected: "s3cr3t".to_owned(),
+    };
+    let reply = drive_initialize(Some(policy), Some("s3cr3t")).await;
+    log_step("stdio_init_correct_token", reply.clone());
+    assert!(
+        reply.get("result").is_some(),
+        "correct token under Required must complete the handshake, got: {reply}"
+    );
+    assert!(
+        reply["result"]["serverInfo"]["name"] == json!("oraclemcp"),
+        "the accepted handshake advertises the server"
+    );
+}
+
+#[tokio::test]
+async fn stdio_initialize_disabled_accepts_any() {
+    let reply = drive_initialize(Some(StdioAuthPolicy::Disabled), None).await;
+    log_step("stdio_init_disabled", reply.clone());
+    assert!(
+        reply.get("result").is_some(),
+        "Disabled policy accepts a handshake with no token, got: {reply}"
+    );
 }

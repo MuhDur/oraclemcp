@@ -81,11 +81,24 @@ impl ShutdownCoordinator {
     }
 
     /// Await the shutdown signal (returns immediately if already shutting down).
+    ///
+    /// Registers the [`Notify`] waiter *before* the flag check (and re-checks
+    /// after) so a `begin_shutdown` that races between the check and the await
+    /// cannot be lost. `notify_waiters` (used by `begin_shutdown`) stores no
+    /// permit for future waiters, so a naive "check flag, then `notified().await`"
+    /// has a TOCTOU window: shutdown fires after the flag reads `false` but
+    /// before the waiter registers, and the task then parks forever. Enabling
+    /// the `Notified` future first closes that window (tokio >= 1.52).
     pub async fn wait_for_shutdown(&self) {
+        let notified = self.inner.notify.notified();
+        tokio::pin!(notified);
+        // Register this waiter now, so a concurrent `begin_shutdown` after the
+        // flag check below still wakes us.
+        notified.as_mut().enable();
         if self.is_shutting_down() {
             return;
         }
-        self.inner.notify.notified().await;
+        notified.await;
     }
 }
 
@@ -135,5 +148,48 @@ mod tests {
         waiter.await.expect("waiter joins");
         // Already shutting down -> immediate return.
         coord.wait_for_shutdown().await;
+    }
+
+    // Regression for oracle-qm3q.15 (lost-wakeup TOCTOU): signal shutdown
+    // *before* the waiter ever polls — no pre-sleep to let it register first
+    // (the old test at the call site masked the race with a 20ms sleep). The
+    // waiter must still return promptly rather than park on a notification that
+    // already fired. `begin_shutdown` here completes before the poll, so the
+    // post-`enable()` flag re-check is what guarantees the prompt return.
+    #[tokio::test]
+    async fn wait_returns_promptly_when_signalled_before_waiting() {
+        let coord = ShutdownCoordinator::new(HealthState::new("0.1.0"));
+        coord.begin_shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(5), coord.wait_for_shutdown())
+            .await
+            .expect("wait_for_shutdown returns promptly after a prior begin_shutdown");
+    }
+
+    // Regression for oracle-qm3q.15: stress the check-then-register window by
+    // racing `begin_shutdown` against a freshly spawned waiter across many
+    // iterations on a multi-thread runtime. The fix (enable the `Notified`
+    // future before the flag check) makes the wakeup race-free; a gross
+    // regression that re-opened the window would eventually trip the per-waiter
+    // timeout here. NOTE: the genuine lost-wakeup window is sub-poll (between
+    // the flag read and the waiter registration inside a single `poll`), so a
+    // *deterministic* repro is not expressible through the public future — this
+    // guards the invariant rather than pinning the exact interleaving.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wait_does_not_lose_wakeup_under_signal_race() {
+        for _ in 0..1_000 {
+            let coord = ShutdownCoordinator::new(HealthState::new("0.1.0"));
+            let waiter = {
+                let c = coord.clone();
+                tokio::spawn(async move { c.wait_for_shutdown().await })
+            };
+            // Yield once so the waiter has a chance to begin its first poll,
+            // then fire the signal to interleave with registration.
+            tokio::task::yield_now().await;
+            coord.begin_shutdown();
+            tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+                .await
+                .expect("waiter must not lose the shutdown wakeup")
+                .expect("waiter task joins");
+        }
     }
 }
