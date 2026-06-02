@@ -207,23 +207,33 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
     for token in &tokens {
         match token {
             Token::Word(w) => {
-                match w.value.to_ascii_uppercase().as_str() {
-                    "BEGIN" => {
+                // A double-quoted (delimited) identifier — `w.quote_style.is_some()`,
+                // e.g. `"BEGIN"` / `"END"` — is a column/table name, NOT a PL/SQL
+                // structural keyword, so it must NEVER move the block-depth counter.
+                // Ignoring quote_style let a quoted "BEGIN" inflate depth so a stray
+                // top-level END rebalanced the batch and the fail-closed desync law
+                // downgraded a Forbidden batch to Guarded. Only bare words count.
+                let keyword = w
+                    .quote_style
+                    .is_none()
+                    .then(|| w.value.to_ascii_uppercase());
+                match keyword.as_deref() {
+                    Some("BEGIN") => {
                         depth += 1;
                         has_plsql_block = true;
                         expecting_close = false;
                     }
-                    "DECLARE" => {
+                    Some("DECLARE") => {
                         has_plsql_block = true;
                         expecting_close = false;
                     }
-                    "IF" | "CASE" | "LOOP" => {
+                    Some("IF") | Some("CASE") | Some("LOOP") => {
                         if !expecting_close {
                             depth += 1;
                         }
                         expecting_close = false;
                     }
-                    "END" => {
+                    Some("END") => {
                         depth -= 1;
                         if depth < 0 {
                             went_negative = true;
@@ -758,6 +768,31 @@ mod tests {
             "q-quoted literal must not affect BEGIN/END depth"
         );
         assert_eq!(shape.statement_count, 1);
+    }
+
+    #[test]
+    fn quoted_keyword_identifier_does_not_move_block_depth() {
+        // A double-quoted identifier like "BEGIN"/"END" is a column name, NOT a
+        // PL/SQL structural keyword, so it must never move the fail-closed desync
+        // counter. Before the quote_style fix, the quoted "BEGIN" inflated depth so
+        // the stray top-level END netted back to 0 and the batch was wrongly
+        // downgraded from Forbidden to Guarded.
+        // Baseline: a bare stray top-level END desyncs → Forbidden.
+        assert_eq!(
+            classify("SELECT 1 FROM dual; END;").danger,
+            DangerLevel::Forbidden
+        );
+        // Regression: the quoted "BEGIN" must NOT balance the stray END.
+        let shape = analyze_batch(r#"SELECT "BEGIN" FROM dual; END;"#);
+        assert!(
+            !shape.balanced,
+            "quoted \"BEGIN\" must not balance the stray top-level END"
+        );
+        assert_eq!(
+            classify(r#"SELECT "BEGIN" FROM dual; END;"#).danger,
+            DangerLevel::Forbidden,
+            "quoted keyword identifiers must not defeat the fail-closed desync law"
+        );
     }
 
     #[test]
