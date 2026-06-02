@@ -28,6 +28,12 @@ pub enum AuditError {
     /// Chain verification failed at the given sequence number.
     #[error("audit chain broken at seq {0}")]
     ChainBroken(u64),
+    /// A previous durable flush failed, leaving a non-durably-synced record at
+    /// the head of the on-disk byte stream. The auditor is poisoned: it refuses
+    /// further appends rather than re-issue that sequence number and fork the
+    /// hash chain. Operator action (inspect/repair the audit log) is required.
+    #[error("audit sink poisoned after durable flush failure")]
+    Poisoned,
 }
 
 /// An append-only, durable audit sink.
@@ -120,6 +126,13 @@ impl AuditSink for MemoryAuditSink {
 struct ChainState {
     seq: u64,
     last_hash: String,
+    /// Set once a durable flush has failed. The seq=N line was already written
+    /// (visible in the page cache / on-disk byte stream) but not durably
+    /// `fsync`ed, so the in-memory state was NOT advanced. Re-issuing seq=N
+    /// from the un-advanced state would fork the tamper-evident hash chain
+    /// (two records with the same seq off the same prev_hash). Once poisoned,
+    /// every subsequent `append` fails closed rather than forking the chain.
+    poisoned: bool,
 }
 
 /// The audit orchestrator: assigns monotonic sequence numbers, maintains the
@@ -138,6 +151,7 @@ impl Auditor {
             state: Mutex::new(ChainState {
                 seq: 0,
                 last_hash: GENESIS_HASH.to_owned(),
+                poisoned: false,
             }),
         }
     }
@@ -153,11 +167,26 @@ impl Auditor {
         durable: bool,
     ) -> Result<AuditRecord, AuditError> {
         let mut state = self.state.lock().expect("audit state poisoned");
+        // Fail closed: once a durable flush has failed, the head of the on-disk
+        // byte stream holds a record that was written but not fsynced. Issuing
+        // any further record would either reuse that seq (forking the chain) or
+        // chain past an un-synced record, so refuse outright.
+        if state.poisoned {
+            return Err(AuditError::Poisoned);
+        }
         let seq = state.seq + 1;
         let record = AuditRecord::chained(draft, seq, &state.last_hash, timestamp);
         self.sink.append(&record)?;
         if durable {
-            self.sink.flush()?;
+            // The seq=N line is now in the byte stream but not yet durable. If
+            // the fsync fails we must NOT advance state (that would claim a
+            // non-durable record as committed) and must NOT later re-issue
+            // seq=N off the same prev_hash (that would fork the chain). Poison
+            // the auditor so every subsequent append fails closed instead.
+            if let Err(e) = self.sink.flush() {
+                state.poisoned = true;
+                return Err(e);
+            }
         }
         state.seq = seq;
         state.last_hash = record.entry_hash.clone();
@@ -268,10 +297,104 @@ mod tests {
         }
     }
 
+    #[test]
+    fn durable_flush_failure_poisons_auditor_and_never_forks_chain() {
+        // Regression for oracle-ajm2.9: on a transient fsync failure the seq=N
+        // line is already in the byte stream but state was not advanced. A naive
+        // implementation re-issues seq=N off the same prev_hash on the next
+        // durable append, forking the tamper-evident chain. The auditor must
+        // poison instead: the failing call Errs, and every subsequent append
+        // fails closed (no record with a duplicate seq is ever appended).
+        let sink = Arc::new(FlushFailsOnceSink::default());
+        let auditor = Auditor::new(Box::new(SharedFlakySink(sink.clone())));
+
+        // First durable append: the record is written, then flush() fails.
+        let first = auditor.append(
+            &draft("DELETE FROM t WHERE id=1", "GUARDED"),
+            "t0".to_owned(),
+            true,
+        );
+        assert!(
+            matches!(first, Err(AuditError::Io(_))),
+            "durable flush failure propagates the I/O error, got {first:?}"
+        );
+        assert_eq!(sink.records().len(), 1, "seq=1 line is already in the file");
+
+        // Second durable append: must fail closed (poisoned), NOT re-issue seq=1.
+        let second = auditor.append(
+            &draft("DELETE FROM t WHERE id=2", "GUARDED"),
+            "t1".to_owned(),
+            true,
+        );
+        assert!(
+            matches!(second, Err(AuditError::Poisoned)),
+            "auditor is poisoned after a durable flush failure, got {second:?}"
+        );
+
+        // A non-durable read append must also fail closed once poisoned.
+        let third = auditor.append(&draft("SELECT 1 FROM dual", "SAFE"), "t2".to_owned(), false);
+        assert!(
+            matches!(third, Err(AuditError::Poisoned)),
+            "poisoning fails closed for non-durable appends too, got {third:?}"
+        );
+
+        // The on-disk stream never gained a second record, so it can never hold
+        // two records sharing a seq / forking off the same prev_hash.
+        let records = sink.records();
+        assert_eq!(
+            records.len(),
+            1,
+            "no further record appended after poisoning"
+        );
+        let mut seqs: Vec<u64> = records.iter().map(|r| r.seq).collect();
+        let before = seqs.len();
+        seqs.sort_unstable();
+        seqs.dedup();
+        assert_eq!(seqs.len(), before, "no duplicate seq in the audit stream");
+    }
+
     // A sink that forwards to a shared Arc<MemoryAuditSink> (so the test keeps a
     // handle while the Auditor owns its Box<dyn AuditSink>).
     struct SharedSink(Arc<MemoryAuditSink>);
     impl AuditSink for SharedSink {
+        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            self.0.append(record)
+        }
+        fn flush(&self) -> Result<(), AuditError> {
+            self.0.flush()
+        }
+    }
+
+    // A sink that records every appended record but fails its FIRST flush()
+    // (modelling a transient EIO/ENOSPC fsync error), succeeding thereafter.
+    #[derive(Default)]
+    struct FlushFailsOnceSink {
+        records: Mutex<Vec<AuditRecord>>,
+        flush_calls: Mutex<usize>,
+    }
+    impl FlushFailsOnceSink {
+        fn records(&self) -> Vec<AuditRecord> {
+            self.records.lock().expect("poisoned").clone()
+        }
+    }
+    impl AuditSink for FlushFailsOnceSink {
+        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            self.records.lock().expect("poisoned").push(record.clone());
+            Ok(())
+        }
+        fn flush(&self) -> Result<(), AuditError> {
+            let mut calls = self.flush_calls.lock().expect("poisoned");
+            *calls += 1;
+            if *calls == 1 {
+                Err(AuditError::Io("EIO: fsync failed".to_owned()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct SharedFlakySink(Arc<FlushFailsOnceSink>);
+    impl AuditSink for SharedFlakySink {
         fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
             self.0.append(record)
         }
