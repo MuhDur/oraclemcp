@@ -54,8 +54,23 @@ pub struct HttpGuardPolicy {
 fn host_only(authority: &str) -> &str {
     let a = authority.trim();
     if let Some(rest) = a.strip_prefix('[') {
-        // IPv6 literal: take up to the closing bracket.
-        return rest.split(']').next().unwrap_or(rest);
+        // IPv6 literal `[inner]` optionally followed by `:port`. The remainder
+        // after the closing `]` MUST be empty or a valid `:port`; otherwise the
+        // authority carries trailing garbage (e.g. `[::1].attacker.example`,
+        // `[::1]@attacker.example`, `[::1]evil`) and must NOT be reduced to its
+        // inner literal, lest a crafted authority masquerade as loopback. In
+        // that case return the authority unchanged so it cannot match the set.
+        if let Some((inner, after)) = rest.split_once(']') {
+            let after_ok = after.is_empty()
+                || after.strip_prefix(':').is_some_and(|port| {
+                    !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())
+                });
+            if after_ok {
+                return inner;
+            }
+        }
+        // Unterminated bracket or trailing garbage: not a clean IPv6 authority.
+        return a;
     }
     match a.rsplit_once(':') {
         Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) && !port.is_empty() => host,
@@ -221,6 +236,54 @@ mod tests {
         assert!(
             p.check("https", Some("mcp.internal"), Some("https://app.example"))
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn ipv6_bracket_trailing_garbage_is_not_loopback() {
+        // Clean IPv6 loopback authorities still reduce to their inner literal.
+        assert_eq!(host_only("[::1]"), "::1");
+        assert_eq!(host_only("[::1]:443"), "::1");
+        assert!(authority_is_loopback("[::1]"));
+        assert!(authority_is_loopback("[::1]:443"));
+        // Non-loopback IPv6 with a port still parses cleanly.
+        assert_eq!(host_only("[2001:db8::1]:8080"), "2001:db8::1");
+        assert!(!authority_is_loopback("[2001:db8::1]:8080"));
+
+        // Crafted authorities with trailing garbage after the closing bracket
+        // must NOT be reduced to "::1" and must NOT be classified as loopback
+        // (DNS-rebinding hardening: `[::1].attacker.example` etc.).
+        for crafted in [
+            "[::1].attacker.example",
+            "[::1]@attacker.example",
+            "[::1]evil",
+            "[::1]:443x",
+            "[::1]:",
+            "[::1", // unterminated bracket
+        ] {
+            assert_eq!(
+                host_only(crafted),
+                crafted,
+                "trailing-garbage authority {crafted:?} should be returned unchanged"
+            );
+            assert!(
+                !authority_is_loopback(crafted),
+                "trailing-garbage authority {crafted:?} must not be loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn check_rejects_ipv6_bracket_trailing_garbage_host() {
+        // With the parser hardened, a crafted `[::1].attacker.example` Host
+        // (not loopback, not on the allowlist) is rejected by the rebinding
+        // guard rather than silently passing as loopback.
+        let p = default_policy();
+        assert_eq!(
+            p.check("https", Some("[::1].attacker.example"), None),
+            Err(HttpGuardError::UntrustedHost(
+                "[::1].attacker.example".to_owned()
+            ))
         );
     }
 
