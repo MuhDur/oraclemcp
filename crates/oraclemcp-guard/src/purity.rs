@@ -83,8 +83,19 @@ pub trait SideEffectOracle: Send + Sync {
     /// The purity of a statement given its resolved base objects — this is where
     /// the engine performs the trigger / VPD (`DBMS_RLS`) walk: a SELECT or DML
     /// can fire a side-effecting trigger or row-level-security function the
-    /// statement text never names. Any reachable object not `ProvenReadOnly`
-    /// forces `Unknown` (→ ≥ Guarded), *including for SELECT*.
+    /// statement text never names.
+    ///
+    /// Wired into the classifier's `SELECT` arm (the base objects are the
+    /// resolved `FROM`/`JOIN` tables + CTE/derived bodies). **Current phase
+    /// (oracle-qm3q.8 / P1-1e):** the classifier escalates a UDF-free SELECT to
+    /// `≥ Guarded` only on an explicit `ProvenSideEffecting` verdict, treating
+    /// `Unknown` as the permissive default so the no-engine baseline (default
+    /// `UnknownOracle` → every plain SELECT stays `Safe`) is preserved. A real
+    /// engine oracle should return `ProvenSideEffecting` for any base object
+    /// reaching a side-effecting trigger/VPD policy. Tightening this to fail
+    /// closed on `Unknown` (any object not `ProvenReadOnly` forces ≥ Guarded,
+    /// *including for SELECT*) is deferred to the engine-binding phase, when a
+    /// real non-default oracle is bound and base-object resolution is trusted.
     fn statement_purity(&self, base_objects: &[ObjectRef]) -> Purity {
         let _ = base_objects;
         Purity::Unknown

@@ -15,7 +15,10 @@
 //!    `Destructive`; `EXPLAIN PLAN` is `Guarded`. (P1-1b)
 //! 4. **Purity consult** — a `SELECT` calling a user-defined function is
 //!    `Guarded` **unless** the [`SideEffectOracle`] proves it `ProvenReadOnly`;
-//!    absence of a write edge is `Unknown`, never `Safe` (P1-1e, R15).
+//!    absence of a write edge is `Unknown`, never `Safe` (P1-1e, R15). A
+//!    UDF-free `SELECT` also consults `statement_purity` over its resolved
+//!    base objects (the engine's trigger/VPD walk): a base object the engine
+//!    proves `ProvenSideEffecting` escalates the `SELECT` to `Guarded`.
 //!
 //! **Fail-closed law:** anything that does not parse, any PL/SQL block, any
 //! desync, and anything the engine cannot prove `ProvenReadOnly` is classified
@@ -33,7 +36,7 @@ use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::levels::{DangerLevel, LevelDecision, OperatingLevel, SessionLevelState};
-use crate::purity::{ObjectRef, SideEffectOracle, UnknownOracle};
+use crate::purity::{ObjectRef, Purity, SideEffectOracle, UnknownOracle};
 
 /// What the guard decided about a statement batch (before the level gate).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -402,6 +405,122 @@ fn user_defined_calls(sql: &str) -> Vec<ObjectRef> {
     calls
 }
 
+/// Convert a parsed `ObjectName` (the `schema.table` of a `FROM`/`JOIN` factor)
+/// into the guard's [`ObjectRef`]. Multi-part names keep the *last* part as the
+/// object name and the *second-to-last* as the schema (`a.b.c` → schema `b`,
+/// name `c`); a bare name has no schema. Empty names are skipped by the caller.
+fn object_name_to_ref(name: &sqlparser::ast::ObjectName) -> Option<ObjectRef> {
+    let parts: Vec<String> = name
+        .0
+        .iter()
+        .filter_map(|p| p.as_ident().map(|i| i.value.clone()))
+        .collect();
+    match parts.as_slice() {
+        [] => None,
+        [n] => Some(ObjectRef::new(None, n.clone())),
+        [.., schema, n] => Some(ObjectRef::new(Some(schema.clone()), n.clone())),
+    }
+}
+
+/// Walk a `Query`'s FROM/JOIN/CTE structure and collect the **base objects**
+/// (real tables/views named in `FROM`/`JOIN` factors and inside CTE bodies and
+/// derived subqueries). CTE *alias* names are not base objects, so a `FROM cte`
+/// reference is filtered out (its body's base tables are already collected).
+///
+/// This is the resolved-object set the engine's [`SideEffectOracle::statement_purity`]
+/// trigger/VPD walk runs over (a `SELECT`/DML can fire a side-effecting trigger
+/// or row-level-security policy function the statement text never names).
+/// Best-effort + fail-closed: missing a factor only *omits* an object (it can
+/// never invent a `ProvenReadOnly`), and over-collection only adds objects the
+/// oracle is free to report `ProvenSideEffecting`.
+fn query_base_objects(query: &sqlparser::ast::Query) -> Vec<ObjectRef> {
+    use sqlparser::ast::{SetExpr, TableFactor};
+
+    let mut objects: Vec<ObjectRef> = Vec::new();
+    let mut cte_aliases: HashSet<String> = HashSet::new();
+
+    fn collect_factor(
+        factor: &TableFactor,
+        objects: &mut Vec<ObjectRef>,
+        cte_aliases: &HashSet<String>,
+    ) {
+        match factor {
+            TableFactor::Table { name, .. } => {
+                if let Some(obj) = object_name_to_ref(name) {
+                    // A single-part name that matches a CTE alias is a CTE
+                    // reference, not a base table.
+                    let is_cte_ref = obj.schema.is_none()
+                        && cte_aliases.contains(&obj.name.to_ascii_lowercase());
+                    if !is_cte_ref {
+                        objects.push(obj);
+                    }
+                }
+            }
+            TableFactor::Derived { subquery, .. } => {
+                collect_query(subquery, objects, cte_aliases);
+            }
+            // Table functions, UNNEST, JSON_TABLE, pivots, etc. name no base
+            // table (or are handled via the UDF/routine consult) — skip.
+            _ => {}
+        }
+    }
+
+    fn collect_set_expr(
+        body: &SetExpr,
+        objects: &mut Vec<ObjectRef>,
+        cte_aliases: &HashSet<String>,
+    ) {
+        match body {
+            SetExpr::Select(select) => {
+                for twj in &select.from {
+                    collect_factor(&twj.relation, objects, cte_aliases);
+                    for join in &twj.joins {
+                        collect_factor(&join.relation, objects, cte_aliases);
+                    }
+                }
+            }
+            SetExpr::Query(q) => collect_query(q, objects, cte_aliases),
+            SetExpr::SetOperation { left, right, .. } => {
+                collect_set_expr(left, objects, cte_aliases);
+                collect_set_expr(right, objects, cte_aliases);
+            }
+            // VALUES / TABLE / nested INSERT|UPDATE|DELETE|MERGE bodies name no
+            // SELECT base table here (DML arms are classified separately).
+            _ => {}
+        }
+    }
+
+    fn collect_query(
+        query: &sqlparser::ast::Query,
+        objects: &mut Vec<ObjectRef>,
+        cte_aliases: &HashSet<String>,
+    ) {
+        let mut local_aliases = cte_aliases.clone();
+        if let Some(with) = &query.with {
+            for cte in &with.cte_tables {
+                local_aliases.insert(cte.alias.name.value.to_ascii_lowercase());
+            }
+            for cte in &with.cte_tables {
+                collect_query(&cte.query, objects, &local_aliases);
+            }
+        }
+        collect_set_expr(&query.body, objects, &local_aliases);
+    }
+
+    // Seed top-level CTE aliases, then walk.
+    if let Some(with) = &query.with {
+        for cte in &with.cte_tables {
+            cte_aliases.insert(cte.alias.name.value.to_ascii_lowercase());
+        }
+    }
+    collect_query(query, &mut objects, &cte_aliases);
+
+    // Deduplicate while preserving order (small N; readability over a HashSet).
+    let mut seen: HashSet<(Option<String>, String)> = HashSet::new();
+    objects.retain(|o| seen.insert((o.schema.clone(), o.name.clone())));
+    objects
+}
+
 /// Classify a single pre-split, pure-SQL statement (Stage B + purity consult).
 fn classify_statement(sql: &str, oracle: &dyn SideEffectOracle) -> StatementClass {
     use sqlparser::ast::Statement;
@@ -428,23 +547,47 @@ fn classify_statement(sql: &str, oracle: &dyn SideEffectOracle) -> StatementClas
         objects,
     };
     match parsed {
-        Statement::Query(_) => {
+        Statement::Query(ref query) => {
             // SELECT/WITH: Safe only if it calls no unproven user-defined
             // function (R15). Any UDF not ProvenReadOnly → Guarded.
             let calls = user_defined_calls(sql);
             let all_proven = calls
                 .iter()
                 .all(|c| oracle.routine_purity(c).permits_safe());
-            // The engine's trigger/VPD walk also gets a say (default Unknown).
-            let stmt_pure = calls.is_empty() || all_proven;
+            // The engine's trigger/VPD walk also gets a say: a UDF-free SELECT
+            // can still fire a side-effecting AFTER-SELECT trigger or VPD
+            // (DBMS_RLS) policy function the SQL text never names. Resolve the
+            // statement's base objects (FROM/JOIN tables + CTE/derived bodies)
+            // and consult `statement_purity`. The default UnknownOracle returns
+            // `Unknown` for any object, so we escalate ONLY on an explicit
+            // `ProvenSideEffecting` verdict — treating statement-level `Unknown`
+            // as the current permissive default. This keeps the no-engine
+            // baseline (every plain SELECT stays Safe) intact while giving a
+            // real bound oracle a genuine say. NOTE (P1-1e, oracle-qm3q.8):
+            // tightening this to fail closed on `Unknown` (forcing Guarded
+            // unless `ProvenReadOnly`) is deferred to the engine-binding phase,
+            // when a real non-default oracle is bound and base-object
+            // resolution can be trusted; doing it now would flip every plain
+            // SELECT to Guarded under UnknownOracle and break the corpus.
+            let base_objects = query_base_objects(query);
+            let stmt_side_effecting = !base_objects.is_empty()
+                && matches!(
+                    oracle.statement_purity(&base_objects),
+                    Purity::ProvenSideEffecting
+                );
+            let stmt_pure = (calls.is_empty() || all_proven) && !stmt_side_effecting;
+            let mut objects: Vec<String> = calls.iter().map(|c| c.name.clone()).collect();
             if stmt_pure {
                 StatementClass {
                     danger: DangerLevel::Safe,
                     required: Some(OperatingLevel::ReadOnly),
-                    objects: calls.iter().map(|c| c.name.clone()).collect(),
+                    objects,
                 }
             } else {
-                guarded_rw(calls.iter().map(|c| c.name.clone()).collect())
+                if stmt_side_effecting {
+                    objects.extend(base_objects.iter().map(|o| o.name.clone()));
+                }
+                guarded_rw(objects)
             }
         }
         Statement::Insert(_) => guarded_rw(Vec::new()),
@@ -644,7 +787,6 @@ fn forbidden_decision(reason: String) -> GuardDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::purity::Purity;
 
     fn classify(sql: &str) -> GuardDecision {
         Classifier::default().classify(sql)
@@ -683,6 +825,122 @@ mod tests {
         let c = Classifier::default().with_oracle(Arc::new(ProvenOracle));
         let d = c.classify("SELECT billing.lookup(x) FROM dual");
         assert_eq!(d.danger, DangerLevel::Safe);
+    }
+
+    #[test]
+    fn select_over_side_effecting_table_is_guarded_not_safe() {
+        // Regression for oracle-qm3q.8 (purity.rs:88 / classifier.rs:438): a
+        // UDF-free SELECT over a table whose AFTER-SELECT trigger / VPD policy
+        // function the engine proves side-effecting must NOT clear to Safe.
+        // Before the statement_purity wiring this returned Safe because the
+        // trigger/VPD verdict was never consulted (the comment was a lie).
+        struct TriggerOnReadOracle;
+        impl SideEffectOracle for TriggerOnReadOracle {
+            fn statement_purity(&self, base_objects: &[ObjectRef]) -> Purity {
+                // `orders` carries a side-effecting AFTER-SELECT trigger.
+                if base_objects
+                    .iter()
+                    .any(|o| o.name.eq_ignore_ascii_case("orders"))
+                {
+                    Purity::ProvenSideEffecting
+                } else {
+                    Purity::ProvenReadOnly
+                }
+            }
+        }
+        let c = Classifier::default().with_oracle(Arc::new(TriggerOnReadOracle));
+        let d = c.classify("SELECT * FROM orders");
+        assert_eq!(
+            d.danger,
+            DangerLevel::Guarded,
+            "a SELECT whose base object is ProvenSideEffecting must be Guarded"
+        );
+        assert_eq!(d.required_level, Some(OperatingLevel::ReadWrite));
+        assert!(
+            d.objects_affected.iter().any(|o| o == "orders"),
+            "the side-effecting base object should be surfaced for audit"
+        );
+        // The verdict reaches the decision through a JOIN factor too.
+        let joined = c.classify("SELECT e.id FROM employees e JOIN orders o ON e.id = o.id");
+        assert_eq!(joined.danger, DangerLevel::Guarded);
+        // ...and through a CTE body, even though the outer FROM names the alias.
+        let cte = c.classify("WITH x AS (SELECT id FROM orders) SELECT * FROM x");
+        assert_eq!(cte.danger, DangerLevel::Guarded);
+    }
+
+    #[test]
+    fn select_over_clean_table_with_proven_readonly_stmt_purity_is_safe() {
+        // The contrapositive: a real oracle whose statement_purity proves the
+        // base objects ProvenReadOnly must still clear a UDF-free SELECT to Safe
+        // (no false positive that would block legitimate reads).
+        struct CleanOracle;
+        impl SideEffectOracle for CleanOracle {
+            fn statement_purity(&self, _base_objects: &[ObjectRef]) -> Purity {
+                Purity::ProvenReadOnly
+            }
+        }
+        let c = Classifier::default().with_oracle(Arc::new(CleanOracle));
+        assert_eq!(
+            c.classify("SELECT id, name FROM employees WHERE id = 42")
+                .danger,
+            DangerLevel::Safe
+        );
+    }
+
+    #[test]
+    fn default_oracle_keeps_plain_select_safe_despite_statement_purity_wiring() {
+        // Baseline preservation: under the default UnknownOracle, statement_purity
+        // returns Unknown (NOT ProvenSideEffecting), so the new consult must not
+        // regress any plain SELECT to Guarded — the corpus depends on this.
+        for sql in [
+            "SELECT id, name FROM employees WHERE id = 42",
+            "WITH d AS (SELECT * FROM dept) SELECT * FROM d",
+            "SELECT * FROM orders",
+            "SELECT e.id FROM employees e JOIN dept d ON e.dept = d.id",
+        ] {
+            assert_eq!(
+                classify(sql).danger,
+                DangerLevel::Safe,
+                "default oracle must keep {sql:?} Safe"
+            );
+        }
+    }
+
+    #[test]
+    fn query_base_objects_resolves_from_join_and_cte_bodies() {
+        use sqlparser::ast::Statement;
+        let parse = |sql: &str| -> Vec<ObjectRef> {
+            let stmts = Parser::parse_sql(&OracleDialect {}, sql).expect("parse");
+            match stmts.into_iter().next().expect("one stmt") {
+                Statement::Query(q) => query_base_objects(&q),
+                other => panic!("expected query, got {other:?}"),
+            }
+        };
+        let names = |objs: &[ObjectRef]| -> Vec<String> {
+            objs.iter().map(|o| o.name.to_ascii_lowercase()).collect()
+        };
+
+        // FROM + JOIN base tables both resolve.
+        let a = parse("SELECT * FROM employees e JOIN orders o ON e.id = o.id");
+        assert_eq!(names(&a), vec!["employees", "orders"]);
+
+        // Schema-qualified name keeps the schema, drops it for the bare table.
+        let b = parse("SELECT * FROM hr.employees");
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].schema.as_deref(), Some("hr"));
+        assert_eq!(b[0].name.to_ascii_lowercase(), "employees");
+
+        // CTE alias is NOT a base object; the CTE body's base table is.
+        let c = parse("WITH x AS (SELECT id FROM orders) SELECT * FROM x");
+        assert_eq!(names(&c), vec!["orders"]);
+
+        // Derived subquery base table resolves through the parenthesized factor.
+        let d = parse("SELECT * FROM (SELECT id FROM orders) t");
+        assert_eq!(names(&d), vec!["orders"]);
+
+        // Set operations on both arms.
+        let e = parse("SELECT id FROM a UNION SELECT id FROM b");
+        assert_eq!(names(&e), vec!["a", "b"]);
     }
 
     #[test]
