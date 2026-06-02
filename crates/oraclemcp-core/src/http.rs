@@ -77,10 +77,25 @@ impl std::fmt::Debug for OAuthEnforcement {
 }
 
 /// The OAuth scopes a validated request carries, attached to the request
-/// extensions by [`oauth_guard`]. The session-setup layer reads this and lowers
-/// the operating-level ceiling via `oraclemcp_auth::apply_oauth_scopes` — a scope
-/// can only LOWER the ceiling, never raise it (P1-9e), so e.g. an `oracle:read`
-/// token cannot reach a write tool.
+/// extensions by [`oauth_guard`].
+///
+/// **NOT YET ENFORCED (captured-only).** This grant is currently *recorded* on
+/// the request extensions but is **not consulted by any dispatch path** — there
+/// is no reader of `ScopeGrant`, and `call_tool`
+/// ([`crate::server::OracleMcpServer`]) discards the request context, so a
+/// validated bearer's scope does **not** lower the session operating-level
+/// ceiling. The intended control (read `ScopeGrant` from the rmcp
+/// `RequestContext` extensions in `call_tool`, feed it through
+/// `oraclemcp_auth::apply_oauth_scopes` — monotone-down: a scope can only LOWER
+/// the ceiling, never raise it, P1-9e — and gate the resolved tool's required
+/// `OperatingLevel` before dispatch) requires a per-session `SessionLevelState`
+/// plumbed into the HTTP dispatch path that does not exist yet.
+///
+/// Until that wiring lands (deferred to the HTTP-transport-wiring phase), do
+/// **not** assume scope-based least-privilege is in effect on the HTTP
+/// transport: a narrowly-scoped token (e.g. `oracle:read`) can still reach
+/// write/DDL tools whenever the profile/session default ceiling permits.
+/// Tracking: bead `oracle-ajm2.5`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScopeGrant(pub Vec<String>);
 
@@ -119,8 +134,14 @@ async fn oauth_guard(
     };
     match decision {
         Ok(scopes) => {
-            // Attach the granted scopes so the session-setup layer can lower the
-            // operating-level ceiling (scope can only LOWER it — P1-9e).
+            // Record the granted scopes on the request extensions. NOTE: this is
+            // captured-only and NOT YET ENFORCED — no dispatch path reads
+            // `ScopeGrant`, so the scope does not currently lower the session
+            // operating-level ceiling. Wiring it through
+            // `oraclemcp_auth::apply_oauth_scopes` (monotone-down) into a
+            // per-session `SessionLevelState` is deferred to the
+            // HTTP-transport-wiring phase. See `ScopeGrant` docs / bead
+            // `oracle-ajm2.5`.
             let mut request = request;
             request.extensions_mut().insert(ScopeGrant(scopes));
             next.run(request).await
@@ -461,6 +482,142 @@ mod tests {
             resp.status(),
             axum::http::StatusCode::OK,
             "metadata route stays open for discovery"
+        );
+    }
+
+    // --- oracle-ajm2.5 regression: ScopeGrant is captured-only, NOT enforced ---
+
+    /// base64url (no padding) — minimal encoder so the test can mint a JWT
+    /// payload without pulling in a base64 crate.
+    fn b64url(bytes: &[u8]) -> String {
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            out.push(T[((n >> 18) & 0x3f) as usize] as char);
+            out.push(T[((n >> 12) & 0x3f) as usize] as char);
+            if chunk.len() > 1 {
+                out.push(T[((n >> 6) & 0x3f) as usize] as char);
+            }
+            if chunk.len() > 2 {
+                out.push(T[(n & 0x3f) as usize] as char);
+            }
+        }
+        out
+    }
+
+    /// A test-only verifier that accepts any HS256 signature, so the test can
+    /// drive `validate` past the signature check without minting a real HMAC.
+    struct AcceptHs256;
+    impl oraclemcp_auth::SignatureVerifier for AcceptHs256 {
+        fn verify(&self, alg: &str, _signing_input: &[u8], _signature: &[u8]) -> bool {
+            alg == "HS256"
+        }
+    }
+
+    /// Mint a structurally-valid JWT carrying the given `scope`, accepted by
+    /// [`AcceptHs256`]. `exp` is far in the future so it never expires in CI.
+    fn jwt_with_scope(scope: &str) -> String {
+        let header = b64url(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let claims = serde_json::json!({
+            "iss": "https://idp.example",
+            "aud": "https://oraclemcp.example/mcp",
+            "exp": 9_999_999_999i64,
+            "scope": scope,
+        });
+        let payload = b64url(serde_json::to_string(&claims).unwrap().as_bytes());
+        // Signature segment is ignored by AcceptHs256; any base64url is fine.
+        format!("{header}.{payload}.{}", b64url(b"sig"))
+    }
+
+    fn accept_enforcement() -> Arc<OAuthEnforcement> {
+        Arc::new(OAuthEnforcement {
+            config: ResourceServerConfig {
+                resource: "https://oraclemcp.example/mcp".to_owned(),
+                allowed_issuers: vec!["https://idp.example".to_owned()],
+                authorization_servers: vec!["https://idp.example".to_owned()],
+                required_scopes: vec![],
+            },
+            verifier: Arc::new(AcceptHs256),
+            metadata_url: "https://oraclemcp.example/.well-known/oauth-protected-resource"
+                .to_owned(),
+        })
+    }
+
+    /// A narrowly-scoped (`oracle:read`) but otherwise-valid bearer is admitted
+    /// by `oauth_guard` and its scope is *captured* into [`ScopeGrant`] on the
+    /// request extensions — but the guard performs NO scope→operating-level
+    /// enforcement: the request reaches the inner handler unblocked. This pins
+    /// the captured-but-not-yet-enforced contract documented on [`ScopeGrant`]
+    /// (bead `oracle-ajm2.5`). If a future change wires real enforcement (so a
+    /// read scope is gated against a write/DDL tool), this test must be revised
+    /// alongside the `ScopeGrant` docs — preventing a silent contract drift in
+    /// either direction (and guarding against the capture being dropped).
+    #[tokio::test]
+    async fn oauth_scope_is_captured_but_not_enforced_at_the_guard() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tower::ServiceExt;
+
+        // Inner handler records whether it was reached and what scope was
+        // captured — proving the guard does not gate on scope.
+        static REACHED: AtomicBool = AtomicBool::new(false);
+        REACHED.store(false, Ordering::SeqCst);
+
+        async fn inner(request: axum::extract::Request) -> Response {
+            REACHED.store(true, Ordering::SeqCst);
+            let grant = request
+                .extensions()
+                .get::<ScopeGrant>()
+                .cloned()
+                .map(|g| g.0.join(","))
+                .unwrap_or_else(|| "<none>".to_owned());
+            (StatusCode::OK, grant).into_response()
+        }
+
+        let enforcement = accept_enforcement();
+        let router = Router::new()
+            .route("/probe", axum::routing::post(inner))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&enforcement),
+                oauth_guard,
+            ));
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/probe")
+            .header("host", "127.0.0.1")
+            .header(
+                "authorization",
+                format!("Bearer {}", jwt_with_scope("oracle:read")),
+            )
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+
+        // The token is valid -> admitted (NOT a 401), and the inner handler is
+        // reached: the guard never gates on the (narrow) scope.
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "valid narrowly-scoped bearer is admitted (no scope gating at the guard)"
+        );
+        assert!(
+            REACHED.load(Ordering::SeqCst),
+            "the request reached the inner handler — scope was not enforced"
+        );
+
+        // The scope is *captured* (so wiring it later is possible) but it is the
+        // dispatch path's job to enforce it — which is not yet done (ajm2.5).
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&body),
+            "oracle:read",
+            "the guard captures ScopeGrant on the extensions (captured-only)"
         );
     }
 }
