@@ -69,7 +69,9 @@ pub enum CircuitState {
     Closed,
     /// Tripped: requests are rejected until the cooldown elapses.
     Open,
-    /// One trial request is allowed to test recovery.
+    /// A single trial request is allowed through to probe recovery; concurrent
+    /// callers are rejected until that probe resolves (success closes the
+    /// circuit, failure re-opens it).
     HalfOpen,
 }
 
@@ -77,10 +79,17 @@ struct Inner {
     consecutive_failures: u32,
     state: CircuitState,
     opened_at: Option<Instant>,
+    /// True while exactly one HalfOpen trial request is outstanding. Set when a
+    /// caller is admitted as the probe (the Open→HalfOpen flip); cleared by the
+    /// next `on_success`/`on_failure`. While set, further HalfOpen callers are
+    /// rejected so a single probe — not a stampede — tests a fragile target.
+    probe_in_flight: bool,
 }
 
 /// A circuit breaker: opens after `failure_threshold` consecutive failures and
-/// stays open for `cooldown`, then half-opens to probe recovery (§10).
+/// stays open for `cooldown`, then half-opens to admit a single trial request
+/// that probes recovery — concurrent callers are shed while that probe is in
+/// flight, so a struggling target is not stampeded (§10).
 pub struct CircuitBreaker {
     failure_threshold: u32,
     cooldown: Duration,
@@ -98,24 +107,40 @@ impl CircuitBreaker {
                 consecutive_failures: 0,
                 state: CircuitState::Closed,
                 opened_at: None,
+                probe_in_flight: false,
             }),
         }
     }
 
-    /// Whether a request may proceed now (transitions Open→HalfOpen after the
-    /// cooldown).
+    /// Whether a request may proceed now. In `Closed` it always admits. In
+    /// `Open` it shed-loads until the cooldown elapses, then flips to
+    /// `HalfOpen` and admits exactly one trial request (the probe). While that
+    /// probe is in flight, further `HalfOpen` callers are rejected; the probe
+    /// resolves via the next `on_success` (closes) or `on_failure` (re-opens).
     #[must_use]
     pub fn allow_request(&self) -> bool {
         let mut inner = self.inner.lock().expect("circuit mutex poisoned");
         match inner.state {
-            CircuitState::Closed | CircuitState::HalfOpen => true,
+            CircuitState::Closed => true,
+            // Already half-open: admit only if no probe is outstanding. The
+            // first admitted caller becomes the probe; the rest are shed.
+            CircuitState::HalfOpen => {
+                if inner.probe_in_flight {
+                    false
+                } else {
+                    inner.probe_in_flight = true;
+                    true
+                }
+            }
             CircuitState::Open => {
                 let elapsed = inner
                     .opened_at
                     .map(|t| t.elapsed())
                     .unwrap_or(self.cooldown);
                 if elapsed >= self.cooldown {
+                    // Flip to half-open and admit this caller as the single probe.
                     inner.state = CircuitState::HalfOpen;
+                    inner.probe_in_flight = true;
                     true
                 } else {
                     false
@@ -124,21 +149,26 @@ impl CircuitBreaker {
         }
     }
 
-    /// Record a success: resets the failure count and closes the circuit.
+    /// Record a success: resets the failure count and closes the circuit. A
+    /// HalfOpen probe that succeeds resolves here, clearing the probe flag.
     pub fn on_success(&self) {
         let mut inner = self.inner.lock().expect("circuit mutex poisoned");
         inner.consecutive_failures = 0;
         inner.state = CircuitState::Closed;
         inner.opened_at = None;
+        inner.probe_in_flight = false;
     }
 
     /// Record a failure: trips the circuit at the threshold (or immediately if
-    /// probing in HalfOpen).
+    /// probing in HalfOpen). A HalfOpen probe that fails resolves here, clearing
+    /// the probe flag and re-opening the circuit (the cooldown must elapse again
+    /// before the next single probe is admitted).
     pub fn on_failure(&self) {
         let mut inner = self.inner.lock().expect("circuit mutex poisoned");
         inner.consecutive_failures += 1;
         let trip = inner.state == CircuitState::HalfOpen
             || inner.consecutive_failures >= self.failure_threshold;
+        inner.probe_in_flight = false;
         if trip {
             inner.state = CircuitState::Open;
             inner.opened_at = Some(Instant::now());
@@ -217,6 +247,63 @@ mod tests {
         // A failure in half-open re-opens immediately.
         cb.on_failure();
         assert_eq!(cb.state(), CircuitState::Open);
+    }
+
+    #[test]
+    fn half_open_admits_a_single_probe_and_sheds_concurrent_callers() {
+        // Open the breaker with a zero cooldown so the next allow flips to
+        // HalfOpen and admits the trial request.
+        let cb = CircuitBreaker::new(1, Duration::from_millis(0));
+        cb.on_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // First allow_request: Open -> HalfOpen, admitted as the single probe.
+        assert!(cb.allow_request(), "first half-open caller is the probe");
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        // A second and third concurrent caller are shed while the probe is in
+        // flight — the breaker must NOT admit a stampede against a fragile
+        // target, matching the "single trial request" contract.
+        assert!(
+            !cb.allow_request(),
+            "second half-open caller is rejected while a probe is outstanding"
+        );
+        assert!(
+            !cb.allow_request(),
+            "third half-open caller is rejected while a probe is outstanding"
+        );
+        // State stays HalfOpen — the rejected callers do not resolve the probe.
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        // The outstanding probe succeeds: circuit closes and the next caller is
+        // admitted normally (probe flag cleared).
+        cb.on_success();
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert!(cb.allow_request(), "closed circuit admits");
+    }
+
+    #[test]
+    fn half_open_probe_failure_re_arms_a_fresh_single_probe() {
+        // A failed probe re-opens; after cooldown the NEXT single probe is
+        // admitted again (the probe flag is cleared on failure, not leaked).
+        let cb = CircuitBreaker::new(1, Duration::from_millis(0));
+        cb.on_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Admit the first probe, then it fails -> re-open.
+        assert!(cb.allow_request(), "first probe admitted");
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+        cb.on_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // After (zero) cooldown a fresh single probe is admitted again — the
+        // probe slot was not left stuck set by the previous failure.
+        assert!(
+            cb.allow_request(),
+            "a fresh probe is admitted after re-open"
+        );
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+        assert!(!cb.allow_request(), "still single-probe after re-arming");
     }
 
     #[test]
