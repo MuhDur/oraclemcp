@@ -49,8 +49,8 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// One audit entry. `seq` + `prev_hash` + `entry_hash` form the tamper-evident
-/// chain; `entry_hash` covers the seq and all content fields, so any edit or
-/// reorder breaks verification.
+/// chain; `entry_hash` covers the seq and all content fields — including the
+/// operator-legible `sql_preview` — so any edit or reorder breaks verification.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditRecord {
     /// Monotonic sequence number — the authoritative order key.
@@ -115,6 +115,7 @@ impl AuditRecord {
             &draft.agent_identity,
             &draft.tool,
             &sql_sha256,
+            &sql_preview,
             &draft.danger_level,
             draft.decision,
             draft.rows_affected,
@@ -147,6 +148,7 @@ impl AuditRecord {
             &self.agent_identity,
             &self.tool,
             &self.sql_sha256,
+            &self.sql_preview,
             &self.danger_level,
             self.decision,
             self.rows_affected,
@@ -166,6 +168,7 @@ fn compute_entry_hash(
     agent_identity: &str,
     tool: &str,
     sql_sha256: &str,
+    sql_preview: &str,
     danger_level: &str,
     decision: AuditDecision,
     rows_affected: Option<u64>,
@@ -174,7 +177,14 @@ fn compute_entry_hash(
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(seq.to_be_bytes());
-    for field in [timestamp, agent_identity, tool, sql_sha256, danger_level] {
+    for field in [
+        timestamp,
+        agent_identity,
+        tool,
+        sql_sha256,
+        sql_preview,
+        danger_level,
+    ] {
         hasher.update((field.len() as u64).to_be_bytes());
         hasher.update(field.as_bytes());
     }
@@ -226,6 +236,23 @@ mod tests {
         assert!(r.hash_is_valid());
         r.danger_level = "SAFE".to_owned(); // someone downgrades the record
         assert!(!r.hash_is_valid(), "tampered record must fail verification");
+    }
+
+    #[test]
+    fn tampering_with_sql_preview_breaks_the_hash() {
+        // The only human-legible record of the statement must be hash-covered:
+        // an actor with write access to the append-only log must not be able to
+        // rewrite "DELETE FROM orders ..." -> "SELECT 1" without breaking
+        // verification, even while leaving sql_sha256 / danger_level intact.
+        let mut r =
+            AuditRecord::chained(&draft(), 1, GENESIS_HASH, "2026-06-01T00:00:00Z".to_owned());
+        assert!(r.hash_is_valid());
+        assert_eq!(r.sql_preview, "DELETE FROM orders WHERE id = 1");
+        r.sql_preview = "SELECT 1".to_owned(); // forge the only operator-legible field
+        assert!(
+            !r.hash_is_valid(),
+            "tampered sql_preview must fail verification"
+        );
     }
 
     #[test]
