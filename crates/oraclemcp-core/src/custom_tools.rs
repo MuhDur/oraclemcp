@@ -231,6 +231,21 @@ impl CustomToolDef {
                 return Err(invalid(&format!("duplicate parameter '{}'", p.name)));
             }
         }
+        // An operator-pinned `declared_level` must be a recognized operating
+        // level. Otherwise `classify_at_load` would silently drop the typo'd
+        // floor (`.and_then(OperatingLevel::parse)` → `None => derived`) and the
+        // tool would load at the looser classifier-derived level — discarding
+        // the operator's intended safety pin without any error. Reject the typo
+        // at load time (fail-fast: a misconfigured tool must never silently
+        // appear).
+        if let Some(lvl) = self.declared_level.as_deref() {
+            if OperatingLevel::parse(lvl).is_none() {
+                return Err(invalid(&format!(
+                    "declared_level '{lvl}' is not a known operating level \
+                     (READ_ONLY | READ_WRITE | DDL | ADMIN)"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -894,6 +909,38 @@ mod tests {
         let w = def_sql("w", "BEGIN UPDATE t SET x=1; END;", Some("READ_ONLY"));
         let loaded = classify_at_load(&w, &c, OperatingLevel::Admin).expect("loads");
         assert!(loaded.required_level >= OperatingLevel::ReadWrite);
+    }
+
+    #[test]
+    fn unparseable_declared_level_is_rejected_not_silently_dropped() {
+        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        // A typo'd declared_level ("DLL" for "DDL") must NOT be silently dropped
+        // and loaded at the looser classifier-derived level (ReadOnly). It is a
+        // structural error surfaced as `LoadError::Invalid` at load time — never
+        // a silent load below the operator's intended pin.
+        let d = def_sql("sel", "SELECT 1 FROM dual", Some("DLL"));
+        let err = classify_at_load(&d, &c, OperatingLevel::ReadOnly).unwrap_err();
+        assert!(
+            matches!(&err, LoadError::Invalid { reason, .. } if reason.contains("declared_level")),
+            "expected LoadError::Invalid mentioning declared_level, got {err:?}"
+        );
+        // Other unrecognized spellings are also rejected (case/format variants).
+        for typo in ["read only", "rw", "readonly", ""] {
+            let d = def_sql("x", "SELECT 1 FROM dual", Some(typo));
+            assert!(
+                matches!(d.validate(), Err(LoadError::Invalid { .. })),
+                "declared_level {typo:?} should be rejected"
+            );
+        }
+        // The recognized tokens (incl. lowercase / surrounding whitespace, which
+        // `OperatingLevel::parse` normalizes) still validate.
+        for ok in ["READ_ONLY", "read_write", " DDL ", "Admin"] {
+            let d = def_sql("x", "SELECT 1 FROM dual", Some(ok));
+            assert!(
+                d.validate().is_ok(),
+                "declared_level {ok:?} should validate"
+            );
+        }
     }
 
     #[test]
