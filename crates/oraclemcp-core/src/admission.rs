@@ -34,6 +34,17 @@ pub struct AdmissionController {
 
 impl AdmissionController {
     /// A controller with a global cap (size the pool) and a per-agent cap.
+    ///
+    /// # Identity contract
+    /// `agent` (the key passed to [`try_admit`]) MUST be a **low-cardinality,
+    /// server-controlled principal** — e.g. a configured agent/client id or a
+    /// validated, enumerable role. It MUST NOT be a raw client-supplied or
+    /// per-request value (an OAuth token subject, a request id, a free-form
+    /// header) whose cardinality an attacker can drive. The per-agent semaphore
+    /// map reclaims idle entries (see [`try_admit`]), but only a low-cardinality
+    /// key keeps the steady-state footprint bounded under churn.
+    ///
+    /// [`try_admit`]: Self::try_admit
     #[must_use]
     pub fn new(global_cap: usize, per_agent_cap: usize) -> Self {
         AdmissionController {
@@ -46,6 +57,17 @@ impl AdmissionController {
 
     fn agent_semaphore(&self, agent: &str) -> Arc<Semaphore> {
         let mut agents = self.agents.lock().expect("admission mutex poisoned");
+        // Reclaim idle entries before inserting so the map tracks *active* agents
+        // rather than every agent ever seen. An entry is idle iff all its permits
+        // are back (available == cap) AND no outstanding permit/clone still holds
+        // the Arc (strong_count == 1, i.e. only the map references it); dropping
+        // such an entry is behaviour-preserving — the next call for that agent
+        // just rebuilds a fresh, fully-available semaphore. The currently-keyed
+        // `agent` is exempt: we are about to use it.
+        let cap = self.per_agent_cap;
+        agents.retain(|key, sem| {
+            key == agent || Arc::strong_count(sem) > 1 || sem.available_permits() < cap
+        });
         Arc::clone(
             agents
                 .entry(agent.to_owned())
@@ -57,6 +79,13 @@ impl AdmissionController {
     /// `BUSY` envelope when over the global or per-agent budget. The per-agent
     /// permit is taken first (a single noisy agent hits its own cap before
     /// starving the global pool).
+    ///
+    /// `agent` MUST be a low-cardinality, server-controlled principal — see the
+    /// identity contract on [`new`]. Idle per-agent entries are reclaimed on
+    /// each call so the backing map tracks active agents, not every agent ever
+    /// seen.
+    ///
+    /// [`new`]: Self::new
     ///
     /// # Errors
     /// Returns [`OracleMcpError::Busy`] when no capacity is available.
@@ -93,6 +122,12 @@ impl AdmissionController {
     #[must_use]
     pub fn available_global(&self) -> usize {
         self.global.available_permits()
+    }
+
+    /// Number of resident per-agent entries (test-only: the reclamation invariant).
+    #[cfg(test)]
+    fn tracked_agents(&self) -> usize {
+        self.agents.lock().expect("admission mutex poisoned").len()
     }
 }
 
@@ -135,6 +170,50 @@ mod tests {
         let ctrl = AdmissionController::new(1, 1);
         let env = ctrl.busy_envelope();
         assert_eq!(env.retry_after_ms, Some(DEFAULT_RETRY_AFTER_MS));
+    }
+
+    #[test]
+    fn idle_agent_entries_are_reclaimed_after_churn() {
+        // REGRESSION (oracle-clgt.12): the per-agent map used to be insert-only,
+        // so a churn of distinct agent strings grew it without bound. With idle
+        // reclamation, the map must return to baseline (~the one currently-keyed
+        // agent) once all churned permits are dropped.
+        let ctrl = AdmissionController::new(1000, 4);
+        // Churn 500 distinct agents, dropping each permit immediately.
+        for i in 0..500 {
+            let p = ctrl.try_admit(&format!("agent-{i}")).expect("admit");
+            drop(p);
+        }
+        // The next call reclaims every now-idle prior entry; only the current
+        // agent remains resident, not 500+ leaked entries.
+        let _final = ctrl.try_admit("agent-final").expect("admit final");
+        assert!(
+            ctrl.tracked_agents() <= 1,
+            "idle entries must be reclaimed; map held {} entries",
+            ctrl.tracked_agents()
+        );
+    }
+
+    #[test]
+    fn active_agent_entries_are_not_reclaimed() {
+        // Reclamation must never evict an agent that still holds a permit, or its
+        // concurrency budget would silently reset. Hold one agent's permit across
+        // another agent's churn and confirm the held agent stays capped.
+        let ctrl = AdmissionController::new(1000, 1);
+        let held = ctrl.try_admit("busy").expect("busy admitted");
+        // Churn other agents (each triggers a reclamation pass).
+        for i in 0..50 {
+            drop(ctrl.try_admit(&format!("other-{i}")).expect("other admit"));
+        }
+        // "busy" still holds its only permit, so a second admit for it is BUSY —
+        // proving its semaphore survived the reclamation passes intact.
+        assert!(
+            matches!(ctrl.try_admit("busy"), Err(OracleMcpError::Busy { .. })),
+            "an active agent's per-agent cap must survive reclamation"
+        );
+        drop(held);
+        // Once released, the agent admits again.
+        let _again = ctrl.try_admit("busy").expect("busy admits after release");
     }
 
     #[test]

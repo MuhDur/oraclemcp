@@ -11,11 +11,13 @@
 //! capability gate ([`check_capability`]), and a crash-isolated subprocess
 //! runner. A plugin crash is an isolated `Err`, never a host panic.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use wait_timeout::ChildExt;
 
 /// A capability a plugin may be granted. The set is **read-mediated only** —
 /// there is no capability that writes, reads secrets, or touches the process /
@@ -111,6 +113,11 @@ pub fn check_capability(
     }
 }
 
+/// Default wall-clock deadline for a single plugin invocation. A plugin that has
+/// not exited by then is killed and reported as an isolated `Crashed` error so a
+/// hung/never-exiting plugin can never wedge the host thread.
+pub const DEFAULT_PLUGIN_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// An out-of-process subprocess plugin. The host spawns it, sends one JSON
 /// request on stdin, and reads one JSON response on stdout. The plugin has **no**
 /// DB/secret/process handle — only what the host passes in the request.
@@ -118,12 +125,39 @@ pub fn check_capability(
 pub struct SubprocessPlugin {
     /// The command + args to spawn (e.g. `["/usr/bin/my-plugin"]`).
     pub command: Vec<String>,
+    /// Wall-clock deadline for a single invocation. A plugin still running at the
+    /// deadline is killed and reported `Crashed("plugin timed out …")` — a
+    /// never-exiting plugin can never block the host forever.
+    pub timeout: Duration,
 }
 
 impl SubprocessPlugin {
+    /// A plugin for `command` with the [`DEFAULT_PLUGIN_TIMEOUT`] deadline.
+    #[must_use]
+    pub fn new(command: Vec<String>) -> Self {
+        SubprocessPlugin {
+            command,
+            timeout: DEFAULT_PLUGIN_TIMEOUT,
+        }
+    }
+
+    /// Override the per-invocation deadline (builder style).
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     /// Spawn the plugin, send `request`, and read its response. A crash / non-zero
-    /// exit / malformed output is an isolated `Err` — never a host panic. The
-    /// caller MUST [`check_capability`] before invoking (scope enforcement).
+    /// exit / malformed output / timeout is an isolated `Err` — never a host
+    /// panic and never an unbounded hang. The caller MUST [`check_capability`]
+    /// before invoking (scope enforcement).
+    ///
+    /// Crash-isolation details: the request is written on a dedicated thread and
+    /// stdout/stderr are drained on their own threads, so the host never blocks
+    /// in `write_all` waiting on a child that is itself blocked writing stdout
+    /// (the synchronous-pipe deadlock). A wall-clock deadline ([`Self::timeout`])
+    /// kills a plugin that never exits.
     pub fn run(&self, request: &PluginRequest) -> Result<PluginResponse, PluginError> {
         let (program, args) = self
             .command
@@ -139,23 +173,85 @@ impl SubprocessPlugin {
 
         let line =
             serde_json::to_string(request).map_err(|e| PluginError::Protocol(e.to_string()))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            // Best-effort write; if the plugin closed stdin early we still wait.
-            let _ = stdin.write_all(line.as_bytes());
-            let _ = stdin.write_all(b"\n");
-            // Dropping stdin sends EOF.
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|e| PluginError::Crashed(e.to_string()))?;
-        if !output.status.success() {
+
+        // Write the request on a dedicated thread so we can drain stdout
+        // concurrently: a >64KB request must not deadlock against a >64KB
+        // response (synchronous pipe back-pressure on both directions).
+        let stdin = child.stdin.take();
+        let writer = std::thread::spawn(move || {
+            if let Some(mut stdin) = stdin {
+                // Best-effort write; if the plugin closed stdin early we still
+                // wait. Dropping `stdin` at end of scope sends EOF.
+                let _ = stdin.write_all(line.as_bytes());
+                let _ = stdin.write_all(b"\n");
+            }
+        });
+
+        // Drain stdout/stderr on their own threads so a chatty plugin can never
+        // fill a pipe buffer and wedge while we are blocked elsewhere.
+        let stdout = child.stdout.take();
+        let stdout_reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut out) = stdout {
+                let _ = out.read_to_end(&mut buf);
+            }
+            buf
+        });
+        let stderr = child.stderr.take();
+        let stderr_reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut err) = stderr {
+                let _ = err.read_to_end(&mut buf);
+            }
+            buf
+        });
+
+        // Bounded wait: a plugin still alive at the deadline is killed and
+        // reported as an isolated crash rather than hanging the host forever.
+        let status = match child
+            .wait_timeout(self.timeout)
+            .map_err(|e| PluginError::Crashed(e.to_string()))?
+        {
+            Some(status) => status,
+            None => {
+                let _ = child.kill();
+                // Reap the direct child so it does not become a zombie.
+                let _ = child.wait();
+                // Do NOT join the reader threads here: a misbehaving plugin can
+                // spawn a grandchild that inherits the stdout/stderr write ends,
+                // so `read_to_end` may stay blocked long after we kill the direct
+                // child. Returning without joining is the whole point — the host
+                // must not block past the deadline. The detached threads finish
+                // on their own when those pipe ends finally close; we drop the
+                // handles explicitly to make that intent unmistakable.
+                drop(writer);
+                drop(stdout_reader);
+                drop(stderr_reader);
+                return Err(PluginError::Crashed(format!(
+                    "plugin timed out after {}s",
+                    self.timeout.as_secs()
+                )));
+            }
+        };
+
+        // Child exited within the deadline: collect its output. The threads
+        // observe EOF once the child's pipe ends close, so the joins return.
+        let _ = writer.join();
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_| PluginError::Crashed("stdout reader thread panicked".to_owned()))?;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| PluginError::Crashed("stderr reader thread panicked".to_owned()))?;
+
+        if !status.success() {
             return Err(PluginError::Crashed(format!(
                 "exit {:?}: {}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr).trim()
+                status.code(),
+                String::from_utf8_lossy(&stderr).trim()
             )));
         }
-        serde_json::from_slice::<PluginResponse>(&output.stdout)
+        serde_json::from_slice::<PluginResponse>(&stdout)
             .map_err(|e| PluginError::Protocol(format!("invalid plugin response: {e}")))
     }
 }
@@ -202,13 +298,11 @@ mod tests {
     fn subprocess_roundtrip_over_the_json_protocol() {
         // A minimal out-of-process "plugin": reads+discards stdin, emits a fixed
         // PluginResponse. Proves the IPC boundary without any DB/secret access.
-        let plugin = SubprocessPlugin {
-            command: vec![
-                "/bin/sh".to_owned(),
-                "-c".to_owned(),
-                "cat >/dev/null; printf '{\"ok\":true,\"data\":{\"rows\":7}}'".to_owned(),
-            ],
-        };
+        let plugin = SubprocessPlugin::new(vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "cat >/dev/null; printf '{\"ok\":true,\"data\":{\"rows\":7}}'".to_owned(),
+        ]);
         let req = PluginRequest {
             capability: PluginCapability::ReadQuery,
             args: serde_json::json!({"sql": "SELECT 1 FROM dual"}),
@@ -220,9 +314,11 @@ mod tests {
 
     #[test]
     fn crashing_plugin_is_isolated_not_a_panic() {
-        let plugin = SubprocessPlugin {
-            command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 3".to_owned()],
-        };
+        let plugin = SubprocessPlugin::new(vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "exit 3".to_owned(),
+        ]);
         let req = PluginRequest {
             capability: PluginCapability::ReadQuery,
             args: Value::Null,
@@ -233,13 +329,11 @@ mod tests {
 
     #[test]
     fn malformed_plugin_output_is_a_protocol_error() {
-        let plugin = SubprocessPlugin {
-            command: vec![
-                "/bin/sh".to_owned(),
-                "-c".to_owned(),
-                "printf 'not json'".to_owned(),
-            ],
-        };
+        let plugin = SubprocessPlugin::new(vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "printf 'not json'".to_owned(),
+        ]);
         let req = PluginRequest {
             capability: PluginCapability::ReadQuery,
             args: Value::Null,
@@ -249,13 +343,77 @@ mod tests {
 
     #[test]
     fn missing_program_is_a_spawn_error_not_a_panic() {
-        let plugin = SubprocessPlugin {
-            command: vec!["/nonexistent/plugin-binary-xyz".to_owned()],
-        };
+        let plugin = SubprocessPlugin::new(vec!["/nonexistent/plugin-binary-xyz".to_owned()]);
         let req = PluginRequest {
             capability: PluginCapability::ReadQuery,
             args: Value::Null,
         };
         assert!(matches!(plugin.run(&req), Err(PluginError::Spawn(_))));
+    }
+
+    #[test]
+    fn large_response_before_draining_stdin_does_not_deadlock() {
+        // REGRESSION (oracle-clgt.9, fix 1 — concurrent I/O): a plugin that emits
+        // a >64KB stdout response *before* reading stdin used to deadlock the
+        // host — the host blocked in write_all (request also >64KB) while the
+        // child blocked writing stdout, and neither side could drain the other.
+        // With the request written on its own thread and stdout drained
+        // concurrently, this must complete (never hang) and round-trip cleanly.
+        //
+        // The plugin writes a valid PluginResponse whose `data.blob` is ~128KB of
+        // 'x', then drains+discards stdin. The host sends a request whose
+        // serialized JSON is ~128KB so both pipe directions are over a 64KB
+        // buffer at once.
+        let plugin = SubprocessPlugin::new(vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            // Emit the big response first, THEN drain stdin (the deadlocking
+            // order). printf builds {"ok":true,"data":{"blob":"xxxx…"}}.
+            "printf '{\"ok\":true,\"data\":{\"blob\":\"'; \
+             head -c 131072 /dev/zero | tr '\\0' x; \
+             printf '\"}}'; cat >/dev/null"
+                .to_owned(),
+        ]);
+        let big_sql = "x".repeat(131_072);
+        let req = PluginRequest {
+            capability: PluginCapability::ReadQuery,
+            args: serde_json::json!({ "sql": big_sql }),
+        };
+        let resp = plugin.run(&req).expect("must complete without deadlocking");
+        assert!(resp.ok);
+        assert_eq!(resp.data["blob"].as_str().map(str::len), Some(131_072));
+    }
+
+    #[test]
+    fn never_exiting_plugin_hits_the_deadline_instead_of_hanging() {
+        // REGRESSION (oracle-clgt.9, fix 2 — wait deadline): a plugin that never
+        // exits (sleeps forever) used to hang wait_with_output() — and thus the
+        // host thread — indefinitely. It must now be killed at the deadline and
+        // reported as an isolated Crashed error.
+        // The plugin sleeps far longer than the deadline (120x margin) and never
+        // closes its stdout, mimicking a grandchild that inherits the pipe.
+        let plugin = SubprocessPlugin::new(vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "sleep 30".to_owned(),
+        ])
+        .with_timeout(Duration::from_millis(250));
+        let req = PluginRequest {
+            capability: PluginCapability::ReadQuery,
+            args: Value::Null,
+        };
+        let start = std::time::Instant::now();
+        let err = plugin.run(&req).expect_err("must time out, not hang");
+        assert!(
+            matches!(err, PluginError::Crashed(ref m) if m.contains("timed out")),
+            "expected a timeout Crashed error, got {err:?}"
+        );
+        // Must return at the deadline, not block for the full sleep. A generous
+        // ceiling (well under the 30s sleep) keeps the test robust under load.
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "must return promptly at the deadline ({:?}), not block for the sleep",
+            start.elapsed()
+        );
     }
 }
