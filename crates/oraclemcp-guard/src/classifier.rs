@@ -360,6 +360,28 @@ fn is_builtin_function(name: &str) -> bool {
     BUILTINS.contains(&name.to_ascii_lowercase().as_str())
 }
 
+/// Keyword-collision identifiers that, when used as a **bare** `name(` call, are
+/// genuine routine-name candidates rather than SQL syntax. These are the
+/// non-reserved Oracle words an agent can legally define a side-effecting UDF /
+/// package member under (PURGE/MERGE/DELETE/COMMENT/ANALYZE/REFRESH/…). The old
+/// blanket `keyword != NoKeyword { continue }` fail-OPENED *all* of them straight
+/// to `Safe`; routing them through `is_builtin_function` + the purity consult
+/// closes that hole (oracle-ajm2.1).
+///
+/// The complement — structural / clause-introducing keywords that legally
+/// precede `(` in well-formed SQL but are never routine names (`AS (` for a CTE,
+/// `IN (…)`, `VALUES (…)`, `OVER (…)`, `OR (…)`, `JOIN (…)`, …) — is left to the
+/// default skip so a plain read is never mis-flagged Guarded. Schema-qualified
+/// `schema.name(` forms are handled separately (always a routine call), so this
+/// set only governs the *bare* case.
+fn is_routine_name_keyword(name: &str) -> bool {
+    const ROUTINE_NAME_KEYWORDS: &[&str] = &[
+        "purge", "merge", "delete", "comment", "analyze", "refresh", "load", "export", "import",
+        "truncate", "replace", "rename", "call",
+    ];
+    ROUTINE_NAME_KEYWORDS.contains(&name.to_ascii_lowercase().as_str())
+}
+
 /// Token-based UDF detection: an identifier (optionally `schema.`-qualified)
 /// immediately followed by `(` that is not a known built-in is a candidate
 /// user-defined function call. Fail-closed: over-detection only adds Guarded.
@@ -383,13 +405,24 @@ fn user_defined_calls(sql: &str) -> Vec<ObjectRef> {
             continue;
         }
         if let Token::Word(name) = toks[i - 1] {
-            if name.keyword != Keyword::NoKeyword {
-                continue; // a keyword like VALUES( / IN( etc.
-            }
-            let (schema, fname) = if i >= 3
+            let is_qualified = i >= 3
                 && matches!(toks[i - 2], Token::Period)
-                && matches!(toks[i - 3], Token::Word(_))
+                && matches!(toks[i - 3], Token::Word(_));
+            // A schema-qualified `schema.name(` is unambiguously a routine call
+            // (SQL constructs like VALUES/IN/CAST/AS are never schema-qualified),
+            // so it is NEVER skipped — closing the headline `billing.purge()`
+            // fail-open. A *bare* keyword-named `name(` is skipped only when the
+            // keyword is a structural / clause word that legally precedes `(`
+            // (AS/IN/VALUES/OVER/OR/JOIN/…); a keyword that is also a plausible
+            // non-reserved Oracle routine name (PURGE/MERGE/DELETE/COMMENT/…) is
+            // still routed through the purity consult (oracle-ajm2.1).
+            if !is_qualified
+                && name.keyword != Keyword::NoKeyword
+                && !is_routine_name_keyword(&name.value)
             {
+                continue;
+            }
+            let (schema, fname) = if is_qualified {
                 let Token::Word(s) = toks[i - 3] else {
                     unreachable!()
                 };
@@ -575,7 +608,13 @@ fn classify_statement(sql: &str, oracle: &dyn SideEffectOracle) -> StatementClas
                     oracle.statement_purity(&base_objects),
                     Purity::ProvenSideEffecting
                 );
-            let stmt_pure = (calls.is_empty() || all_proven) && !stmt_side_effecting;
+            // `SELECT … FOR UPDATE` (incl. OF/NOWAIT/SKIP LOCKED) takes row
+            // locks and holds a transaction open — levels.rs:93 documents it as
+            // Guarded, never Safe. The AST carries `query.locks`; a non-empty
+            // lock list forces the guarded branch (oracle-ajm2.6).
+            let has_row_lock = !query.locks.is_empty();
+            let stmt_pure =
+                (calls.is_empty() || all_proven) && !stmt_side_effecting && !has_row_lock;
             let mut objects: Vec<String> = calls.iter().map(|c| c.name.clone()).collect();
             if stmt_pure {
                 StatementClass {
@@ -812,6 +851,73 @@ mod tests {
     fn select_with_builtin_only_is_safe() {
         let d = classify("SELECT COUNT(*), MAX(salary) FROM employees");
         assert_eq!(d.danger, DangerLevel::Safe);
+    }
+
+    #[test]
+    fn select_calling_keyword_named_udf_is_guarded_not_safe() {
+        // oracle-ajm2.1: a UDF whose name collides with a non-reserved Oracle /
+        // sqlparser keyword (PURGE/MERGE/DELETE/COMMENT/ANALYZE/REFRESH/...) must
+        // still be routed through the purity consult and classified Guarded under
+        // the default UnknownOracle — NOT silently dropped (fail-open) to Safe.
+        for sql in [
+            "SELECT billing.purge() FROM dual",
+            "SELECT app.merge(x) FROM dual",
+            "SELECT app.delete(x) FROM dual",
+            "SELECT app.comment() FROM dual",
+            "SELECT app.analyze() FROM dual",
+            "SELECT app.refresh() FROM dual",
+            // bare (un-qualified) keyword-named UDF too.
+            "SELECT purge() FROM dual",
+        ] {
+            let d = classify(sql);
+            assert_eq!(
+                d.danger,
+                DangerLevel::Guarded,
+                "keyword-named UDF must be Guarded, not Safe: {sql:?}"
+            );
+            assert_eq!(d.required_level, Some(OperatingLevel::ReadWrite), "{sql:?}");
+        }
+    }
+
+    #[test]
+    fn genuine_sql_constructs_are_not_treated_as_udf_calls() {
+        // The contrapositive of the keyword-named-UDF fix: real SQL constructs
+        // (VALUES/IN/CAST/CASE/EXISTS) that legally precede `(` must NOT be
+        // mistaken for user-defined function calls — a plain read stays Safe.
+        for sql in [
+            "SELECT id FROM t WHERE dept IN (1, 2, 3)",
+            "SELECT CAST(x AS NUMBER) FROM t",
+            "SELECT id FROM t WHERE EXISTS (SELECT 1 FROM dual)",
+        ] {
+            assert_eq!(
+                classify(sql).danger,
+                DangerLevel::Safe,
+                "SQL construct must stay Safe: {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn select_for_update_is_guarded_not_safe() {
+        // oracle-ajm2.6: SELECT ... FOR UPDATE (incl. OF/NOWAIT/SKIP LOCKED)
+        // takes row locks + holds a transaction open — levels.rs:93 documents it
+        // as Guarded, never Safe. A plain SELECT (no lock) must stay Safe.
+        assert_eq!(classify("SELECT * FROM t").danger, DangerLevel::Safe);
+        for sql in [
+            "SELECT * FROM t FOR UPDATE",
+            "SELECT * FROM t WHERE id = 1 FOR UPDATE",
+            "SELECT * FROM t FOR UPDATE OF status",
+            "SELECT * FROM t FOR UPDATE NOWAIT",
+            "SELECT * FROM t FOR UPDATE SKIP LOCKED",
+        ] {
+            let d = classify(sql);
+            assert_eq!(
+                d.danger,
+                DangerLevel::Guarded,
+                "SELECT ... FOR UPDATE must be Guarded: {sql:?}"
+            );
+            assert_eq!(d.required_level, Some(OperatingLevel::ReadWrite), "{sql:?}");
+        }
     }
 
     #[test]

@@ -39,6 +39,18 @@ const CORPUS: &[(&str, DangerLevel)] = &[
         "SELECT id, app.recalc(id) FROM orders",
         DangerLevel::Guarded,
     ),
+    // A UDF whose name collides with a non-reserved keyword (oracle-ajm2.1) must
+    // not fail-open: it is still a side-effect-capable routine call -> Guarded.
+    ("SELECT billing.purge() FROM dual", DangerLevel::Guarded),
+    ("SELECT app.merge(x) FROM dual", DangerLevel::Guarded),
+    ("SELECT app.comment() FROM dual", DangerLevel::Guarded),
+    ("SELECT app.refresh() FROM dual", DangerLevel::Guarded),
+    // SELECT ... FOR UPDATE locks rows + holds a txn open (oracle-ajm2.6).
+    ("SELECT * FROM t FOR UPDATE", DangerLevel::Guarded),
+    (
+        "SELECT * FROM t WHERE id = 1 FOR UPDATE OF status NOWAIT",
+        DangerLevel::Guarded,
+    ),
     // --- DML ---
     (
         "INSERT INTO audit_log (msg) VALUES ('x')",

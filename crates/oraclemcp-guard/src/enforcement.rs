@@ -51,18 +51,121 @@ const ALTER_SESSION_ALLOWLIST: &[&str] = &[
     "OPTIMIZER_DYNAMIC_SAMPLING",
 ];
 
-/// Whether an `ALTER SESSION SET <param> = …` statement targets an allowlisted,
-/// safe session parameter (§6.5). Anything outside the allowlist (e.g. statements
-/// that change security/audit context) is rejected. Case-insensitive.
+/// Whether an `ALTER SESSION SET <param> = …` statement targets *only*
+/// allowlisted, safe session parameters (§6.5). Oracle accepts multiple
+/// space-separated `param = value` pairs in a single `ALTER SESSION SET`, so
+/// **every** parameter assigned must be in the allowlist — a single allowlisted
+/// prefix must NOT smuggle a trailing `SQL_TRACE = TRUE` / `EVENTS = '10046 …'`
+/// past the gate (oracle-ajm2.4). Anything outside the allowlist (e.g. statements
+/// that change security/audit/trace context) is rejected. Fail-closed: a
+/// statement that cannot be cleanly parsed into known `param = value` pairs, or
+/// that assigns zero parameters, is rejected. String-literal-aware so an `=` or
+/// whitespace *inside* a quoted value is never mistaken for a parameter name.
+/// Case-insensitive.
 #[must_use]
 pub fn is_allowed_alter_session(stmt: &str) -> bool {
     let upper = stmt.trim().to_ascii_uppercase();
     let Some(rest) = upper.strip_prefix("ALTER SESSION SET ") else {
         return false;
     };
-    // The parameter name is the token up to `=` or whitespace.
-    let param = rest.split(['=', ' ', '\t']).next().unwrap_or("").trim();
-    ALTER_SESSION_ALLOWLIST.contains(&param)
+    match alter_session_params(rest) {
+        // Every assigned parameter must be allowlisted, and there must be at
+        // least one (a statement with no parseable assignment is rejected).
+        Some(params) if !params.is_empty() => params
+            .iter()
+            .all(|p| ALTER_SESSION_ALLOWLIST.contains(&p.as_str())),
+        // Unparseable (e.g. unterminated literal, a top-level `=` with no
+        // preceding identifier) → fail closed.
+        _ => false,
+    }
+}
+
+/// Parse the post-`ALTER SESSION SET ` remainder into the list of parameter
+/// names being assigned. String-literal-aware: a single-quoted value is opaque,
+/// so `=`/whitespace inside it never starts a new clause or parameter name.
+///
+/// The grammar accepted is a whitespace-separated sequence of `IDENT = VALUE`
+/// clauses (Oracle's documented `param = value [param = value]...`). The
+/// parameter name is the identifier token immediately preceding each top-level
+/// `=`. Returns `None` (fail-closed) on anything that does not fit this shape:
+/// an unterminated quote, a top-level `=` with no preceding identifier, or a
+/// value clause that is not cleanly closed before the next parameter.
+fn alter_session_params(rest: &str) -> Option<Vec<String>> {
+    // Top-level tokenizer: words, the `=` sign, and opaque single-quoted strings.
+    // Doubled `''` inside a literal is a quote escape, not a terminator.
+    #[derive(PartialEq)]
+    enum Tok {
+        Word(String),
+        Eq,
+        Str,
+    }
+    let mut toks: Vec<Tok> = Vec::new();
+    let mut chars = rest.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        match c {
+            c if c.is_whitespace() => {
+                chars.next();
+            }
+            '=' => {
+                chars.next();
+                toks.push(Tok::Eq);
+            }
+            '\'' => {
+                // Opaque string literal: consume until the closing quote,
+                // honoring doubled-'' escapes. Unterminated → fail closed.
+                chars.next();
+                loop {
+                    match chars.next() {
+                        Some('\'') => {
+                            if chars.peek() == Some(&'\'') {
+                                chars.next(); // escaped quote, keep scanning
+                            } else {
+                                break;
+                            }
+                        }
+                        Some(_) => {}
+                        None => return None, // unterminated literal
+                    }
+                }
+                toks.push(Tok::Str);
+            }
+            _ => {
+                // A bare word: run of non-whitespace, non-`=`, non-quote chars.
+                let mut word = String::new();
+                while let Some(&w) = chars.peek() {
+                    if w.is_whitespace() || w == '=' || w == '\'' {
+                        break;
+                    }
+                    word.push(w);
+                    chars.next();
+                }
+                toks.push(Tok::Word(word));
+            }
+        }
+    }
+
+    // Walk the token stream as repeated `WORD = (WORD|STR)` clauses; collect the
+    // WORD before each `=` as a parameter name. Reject any other shape.
+    let mut params: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < toks.len() {
+        // param name
+        let Tok::Word(name) = &toks[i] else {
+            return None;
+        };
+        // `=`
+        if toks.get(i + 1) != Some(&Tok::Eq) {
+            return None;
+        }
+        // value: a word or a string literal
+        match toks.get(i + 2) {
+            Some(Tok::Word(_)) | Some(Tok::Str) => {}
+            _ => return None,
+        }
+        params.push(name.trim().to_owned());
+        i += 3;
+    }
+    Some(params)
 }
 
 #[cfg(test)]
@@ -107,5 +210,55 @@ mod tests {
         assert!(!is_allowed_alter_session(
             "ALTER SESSION SET EVENTS '10046'"
         ));
+    }
+
+    #[test]
+    fn alter_session_rejects_smuggled_trailing_param() {
+        // oracle-ajm2.4: an allowlisted prefix must NOT smuggle a
+        // non-allowlisted trailing parameter past the gate. Oracle accepts
+        // multiple `param = value` pairs in one ALTER SESSION SET, so EVERY
+        // assigned parameter must be allowlisted.
+        assert!(
+            !is_allowed_alter_session("ALTER SESSION SET CURRENT_SCHEMA=HR SQL_TRACE=TRUE"),
+            "trailing SQL_TRACE must not be smuggled past an allowlisted prefix"
+        );
+        // ... including when the smuggled value is a quoted literal containing
+        // spaces and `=` (EVENTS '10046 trace name context forever, level 12').
+        assert!(
+            !is_allowed_alter_session(
+                "ALTER SESSION SET CURRENT_SCHEMA = HR EVENTS = '10046 trace name context forever'"
+            ),
+            "trailing EVENTS with a spacey/quoted value must be rejected"
+        );
+        // The order does not matter: a non-allowlisted leading param also fails.
+        assert!(!is_allowed_alter_session(
+            "ALTER SESSION SET SQL_TRACE = TRUE CURRENT_SCHEMA = HR"
+        ));
+    }
+
+    #[test]
+    fn alter_session_permits_multiple_allowlisted_params() {
+        // A genuinely-safe multi-param statement: every assignment is allowlisted.
+        assert!(is_allowed_alter_session(
+            "ALTER SESSION SET CURRENT_SCHEMA = HR OPTIMIZER_MODE = ALL_ROWS"
+        ));
+        assert!(is_allowed_alter_session(
+            "ALTER SESSION SET NLS_DATE_FORMAT='YYYY-MM-DD' NLS_LANGUAGE = AMERICAN"
+        ));
+    }
+
+    #[test]
+    fn alter_session_fails_closed_on_malformed() {
+        // Zero assignments / no `=` → rejected.
+        assert!(!is_allowed_alter_session(
+            "ALTER SESSION SET CURRENT_SCHEMA"
+        ));
+        assert!(!is_allowed_alter_session("ALTER SESSION SET "));
+        // Unterminated string literal → fail closed.
+        assert!(!is_allowed_alter_session(
+            "ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY"
+        ));
+        // A top-level `=` with no preceding parameter name → fail closed.
+        assert!(!is_allowed_alter_session("ALTER SESSION SET = HR"));
     }
 }
