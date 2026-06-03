@@ -335,7 +335,18 @@ fn starts_with_ddl_verb(upper_source: &str) -> bool {
 /// position inside an *unparseable* single SQL segment, signal a buried second
 /// statement smuggled in without a top-level `;` (whitespace / newline / SQL*Plus
 /// `/` separated — e.g. `SELECT 1 FROM dual <nl> DROP TABLE t`). Space-padded so
-/// the match over [`canonical_marker_scan`] is word-boundaried.
+/// the match over [`canonical_marker_scan`] is word-boundaried (the canonicalizer
+/// collapses inter-keyword whitespace, so multi-word markers like `SET ROLE` /
+/// `ASSOCIATE STATISTICS` match too).
+///
+/// This MUST stay symmetric with every verb the leading-position scans escalate
+/// ([`LEADING_ADMIN_VERBS`] + [`LEADING_DDL_VERBS`]): a verb that fails closed
+/// when leading but not when buried is an asymmetric fail-open (oracle-qo1v.1 —
+/// the initial set omitted `SET ROLE`/`PURGE`/`FLASHBACK`/`(DIS)ASSOCIATE
+/// STATISTICS`, letting `SELECT 1 FROM dual <nl> SET ROLE dba` slip through to
+/// Guarded/ReadWrite). `SET` alone is deliberately NOT listed — it would
+/// over-trigger on a benign buried `UPDATE … SET`; only the two-word `SET ROLE`
+/// DCL form is dangerous, mirroring `LEADING_ADMIN_VERBS`.
 const BURIED_DANGEROUS_VERBS: &[&str] = &[
     " GRANT ",
     " REVOKE ",
@@ -350,6 +361,11 @@ const BURIED_DANGEROUS_VERBS: &[&str] = &[
     " DELETE ",
     " INSERT ",
     " MERGE ",
+    " SET ROLE ",
+    " PURGE ",
+    " FLASHBACK ",
+    " ASSOCIATE STATISTICS ",
+    " DISASSOCIATE STATISTICS ",
 ];
 
 /// Whether the canonical token stream of an unparseable single SQL segment
@@ -1353,6 +1369,12 @@ mod tests {
             "SELECT 1 FROM dual\nDROP TABLE orders",
             "SELECT 1 FROM dual\nTRUNCATE TABLE orders",
             "SELECT 1 FROM dual\nUPDATE orders SET x = 1",
+            // oracle-qo1v.1: verbs that fail closed when LEADING must also fail
+            // closed when buried — the set was previously asymmetric.
+            "SELECT 1 FROM dual\nSET ROLE dba",
+            "SELECT 1 FROM dual\nPURGE TABLE orders",
+            "SELECT 1 FROM dual\nDISASSOCIATE STATISTICS FROM COLUMNS orders.id",
+            "SELECT 1 FROM dual\nFLASHBACK TABLE orders TO BEFORE DROP",
         ] {
             assert_eq!(
                 classify(sql).danger,
@@ -1360,6 +1382,11 @@ mod tests {
                 "no-`;` batch with a buried dangerous verb must fail closed: {sql:?}"
             );
         }
+        // A benign buried `UPDATE … SET` must NOT trip on the `SET ROLE` pattern
+        // (the `SET` alone is not dangerous) — but `UPDATE` itself is in the set,
+        // so this whole batch is still (correctly) Forbidden via the UPDATE verb.
+        // The point is `SET ROLE` is a distinct two-word marker, not bare `SET`.
+        assert!(!BURIED_DANGEROUS_VERBS.contains(&" SET "));
         // Control 1: the `;`-delimited equivalent already fails closed (multi-stmt).
         assert_eq!(
             classify("SELECT 1 FROM dual; GRANT DBA TO scott").danger,
