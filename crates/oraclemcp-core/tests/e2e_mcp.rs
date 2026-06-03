@@ -36,11 +36,11 @@ impl ToolDispatch for EchoDispatch {
 
 fn harness_server() -> OracleMcpServer {
     let mut registry = ToolRegistry::new();
-    registry.register(ToolDescriptor {
-        name: "oracle_schema_inspect".to_owned(),
-        tier: ToolTier::FoundationLiveDb,
-        summary: "inspect a schema".to_owned(),
-    });
+    registry.register(ToolDescriptor::new(
+        "oracle_schema_inspect",
+        ToolTier::FoundationLiveDb,
+        "inspect a schema",
+    ));
     let report = CapabilitiesReport::new(
         "0.1.0",
         registry.tools.clone(),

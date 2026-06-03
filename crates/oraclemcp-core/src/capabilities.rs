@@ -58,7 +58,9 @@ pub struct FeatureTiers {
 }
 
 /// The full, standalone capability document.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+// `Eq` dropped with `ToolDescriptor::input_schema: Option<serde_json::Value>`
+// (Value is not Eq); structural `PartialEq` is all this report needs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CapabilitiesReport {
     /// Server name (`oraclemcp`).
     pub server_name: String,
@@ -141,11 +143,11 @@ mod tests {
     use crate::tools::ToolTier;
 
     fn sample_tools() -> Vec<ToolDescriptor> {
-        vec![ToolDescriptor {
-            name: "oracle_capabilities".to_owned(),
-            tier: ToolTier::FoundationStatic,
-            summary: "Zero-arg entry point".to_owned(),
-        }]
+        vec![ToolDescriptor::new(
+            "oracle_capabilities",
+            ToolTier::FoundationStatic,
+            "Zero-arg entry point",
+        )]
     }
 
     #[test]

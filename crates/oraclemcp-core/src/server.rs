@@ -282,11 +282,11 @@ mod tests {
 
     fn server() -> OracleMcpServer {
         let mut registry = ToolRegistry::new();
-        registry.register(ToolDescriptor {
-            name: "oracle_query".to_owned(),
-            tier: ToolTier::FoundationLiveDb,
-            summary: "run a query".to_owned(),
-        });
+        registry.register(ToolDescriptor::new(
+            "oracle_query",
+            ToolTier::FoundationLiveDb,
+            "run a query",
+        ));
         let caps = CapabilitiesReport::new(
             "0.1.0",
             registry.tools.clone(),

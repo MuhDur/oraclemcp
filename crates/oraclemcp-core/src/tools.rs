@@ -23,7 +23,7 @@ pub enum ToolTier {
 }
 
 /// Stable, machine-readable descriptor for a registered tool.
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolDescriptor {
     /// The tool's stable name (e.g. `oracle_query`).
     pub name: String,
@@ -31,10 +31,56 @@ pub struct ToolDescriptor {
     pub tier: ToolTier,
     /// A one-line agent-facing summary.
     pub summary: String,
+    /// The tool's JSON-Schema for its arguments, advertised to agents in
+    /// `tools/list` so a call can be constructed correctly first-try. `None`
+    /// falls back to the permissive `{type:object, additionalProperties:true}`
+    /// (oracle-da9j.1). A `Value` so engine modules can hand-write or
+    /// schemars-derive it without this crate depending on either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<serde_json::Value>,
+    /// Whether the tool performs a destructive / irreversible write (DDL,
+    /// deploy, drop). Surfaced over the wire so an agent (and a gating layer)
+    /// can isolate the destructive cluster from read-only tools
+    /// (oracle-da9j.9). Defaults to `false`.
+    #[serde(default)]
+    pub destructive: bool,
+}
+
+impl ToolDescriptor {
+    /// A read-only, non-destructive descriptor with no advertised arg schema
+    /// (the permissive default). Chain [`Self::with_input_schema`] /
+    /// [`Self::destructive`] to enrich it.
+    #[must_use]
+    pub fn new(name: impl Into<String>, tier: ToolTier, summary: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            tier,
+            summary: summary.into(),
+            input_schema: None,
+            destructive: false,
+        }
+    }
+
+    /// Attach the tool's argument JSON-Schema (advertised in `tools/list`).
+    #[must_use]
+    pub fn with_input_schema(mut self, schema: serde_json::Value) -> Self {
+        self.input_schema = Some(schema);
+        self
+    }
+
+    /// Mark the tool as performing a destructive / irreversible write.
+    #[must_use]
+    pub fn destructive(mut self) -> Self {
+        self.destructive = true;
+        self
+    }
 }
 
 /// Minimal registry that per-tool modules populate; dedups by name.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+// `Eq`/`Hash` were dropped from `ToolDescriptor` when it gained an
+// `input_schema: Option<serde_json::Value>` (Value is not Eq/Hash); the
+// registry only ever needs structural `PartialEq` for tests.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolRegistry {
     /// The registered tool descriptors, in registration order.
     pub tools: Vec<ToolDescriptor>,
@@ -82,11 +128,11 @@ mod tests {
     #[test]
     fn registry_deduplicates_by_name() {
         let mut registry = ToolRegistry::new();
-        let tool = ToolDescriptor {
-            name: String::from("describe_table"),
-            tier: ToolTier::FoundationLiveDb,
-            summary: String::from("Describe a table's columns and constraints"),
-        };
+        let tool = ToolDescriptor::new(
+            "describe_table",
+            ToolTier::FoundationLiveDb,
+            "Describe a table's columns and constraints",
+        );
         registry.register(tool.clone());
         registry.register(tool);
         assert_eq!(registry.len(), 1);

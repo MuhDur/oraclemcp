@@ -276,11 +276,11 @@ impl CustomToolDef {
     /// The registry descriptor for this tool (live-DB tier).
     #[must_use]
     pub fn to_descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
-            name: self.name.clone(),
-            tier: ToolTier::FoundationLiveDb,
-            summary: self.description.clone(),
-        }
+        ToolDescriptor::new(
+            self.name.clone(),
+            ToolTier::FoundationLiveDb,
+            self.description.clone(),
+        )
     }
 }
 
@@ -638,15 +638,15 @@ impl CustomToolCatalog {
     /// Register a single [`RUN_NAMED_TOOL`] meta-dispatch tool (large-catalog
     /// mode) — the catalog stays discoverable via [`Self::catalog_json`].
     pub fn register_meta_dispatch(&self, registry: &mut ToolRegistry) {
-        registry.register(ToolDescriptor {
-            name: RUN_NAMED_TOOL.to_owned(),
-            tier: ToolTier::FoundationLiveDb,
-            summary: format!(
+        registry.register(ToolDescriptor::new(
+            RUN_NAMED_TOOL.to_owned(),
+            ToolTier::FoundationLiveDb,
+            format!(
                 "Run one of {} operator-defined tools by name: {{ name, params }}. \
                  Discover the catalog via oracle_capabilities or the oracle://tools resource.",
                 self.tools.len()
             ),
-        });
+        ));
     }
 
     /// Meta-dispatch: run the named tool with `params`. `args` is the
