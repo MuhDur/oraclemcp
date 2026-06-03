@@ -331,6 +331,54 @@ fn starts_with_ddl_verb(upper_source: &str) -> bool {
     LEADING_DDL_VERBS.iter().any(|v| leading.starts_with(v))
 }
 
+/// Destructive / privilege / DML verbs that, when they appear at a NON-leading
+/// position inside an *unparseable* single SQL segment, signal a buried second
+/// statement smuggled in without a top-level `;` (whitespace / newline / SQL*Plus
+/// `/` separated — e.g. `SELECT 1 FROM dual <nl> DROP TABLE t`). Space-padded so
+/// the match over [`canonical_marker_scan`] is word-boundaried.
+const BURIED_DANGEROUS_VERBS: &[&str] = &[
+    " GRANT ",
+    " REVOKE ",
+    " AUDIT ",
+    " NOAUDIT ",
+    " DROP ",
+    " TRUNCATE ",
+    " ALTER ",
+    " CREATE ",
+    " RENAME ",
+    " UPDATE ",
+    " DELETE ",
+    " INSERT ",
+    " MERGE ",
+];
+
+/// Whether the canonical token stream of an unparseable single SQL segment
+/// carries a destructive/privilege/DML verb at a NON-leading position. This is
+/// the pure-SQL analog of the buried-`;` desync (`saw_buried_semicolon`) and the
+/// trailing-SQL-after-`END` desync (`saw_top_level_after_block_close`): a no-`;`
+/// batch leads with a benign `SELECT` (so the leading admin/DDL scans do not
+/// fire) yet buries a `GRANT DBA`/`DROP`/`TRUNCATE`/no-WHERE `UPDATE`/… after it,
+/// and would otherwise fall through to the Guarded/ReadWrite default. Failing
+/// closed here keeps the `;`-vs-no-`;` forms symmetric (oracle-b6yl.1).
+///
+/// Only the INTERIOR is scanned: a statement's own LEADING verb (its legitimate
+/// DML/DDL head — already tiered by the leading-verb scans or the Guarded
+/// default) is stripped first, so a merely-unparseable but single legitimate
+/// `UPDATE`/`MERGE`/… is not over-restricted to Forbidden.
+fn has_buried_dangerous_verb(upper_source: &str) -> bool {
+    let scan = canonical_marker_scan(upper_source);
+    let leading = scan.strip_prefix(' ').unwrap_or(&scan); // "TOK1 TOK2 … "
+    // The interior is everything from the space after the first token onward
+    // (keeping that space so each pattern's leading space still word-boundaries).
+    match leading.find(' ') {
+        Some(sp) => {
+            let interior = &leading[sp..];
+            BURIED_DANGEROUS_VERBS.iter().any(|v| interior.contains(v))
+        }
+        None => false, // a single token — nothing buried
+    }
+}
+
 /// Run Stage A: allow-list → block-list → PL/SQL-block detection.
 #[must_use]
 pub fn stage_a(sql: &str, config: &ClassifierConfig) -> StageA {
@@ -708,7 +756,17 @@ fn user_defined_calls(sql: &str) -> Vec<ObjectRef> {
             } else {
                 (None, name.value.clone())
             };
-            if !is_builtin_function(&fname) {
+            // A SQL builtin (REPLACE / ROUND / TRUNC / MOD / USER / LENGTH /
+            // EXTRACT / …) is NEVER written schema-qualified, so when the call
+            // IS qualified the builtin name-collision filter must not apply:
+            // `SELECT billing.replace(x)` is unambiguously a routine call on
+            // package BILLING and dropping it (because its bare name "replace"
+            // is in BUILTINS) fail-opened the whole statement to Safe/ReadOnly,
+            // executing the routine's side effects unguarded. This matches the
+            // module's own stated invariant ("a schema-qualified name is never
+            // skipped") and the earlier keyword-named-UDF fix (oracle-ajm2); the
+            // qualified-builtin subcase was the remaining gap (oracle-b6yl.2).
+            if is_qualified || !is_builtin_function(&fname) {
                 calls.push(ObjectRef::new(schema, fname));
             }
         }
@@ -871,6 +929,19 @@ fn classify_statement(sql: &str, oracle: &dyn SideEffectOracle) -> StatementClas
                     required: Some(OperatingLevel::Ddl),
                     objects: Vec::new(),
                 };
+            }
+            // A dangerous verb BURIED after a benign leading clause in an
+            // unparseable single segment (`SELECT 1 FROM dual <nl> DROP TABLE t`)
+            // is a no-`;` desync — the pure-SQL analog of the buried-`;`
+            // (saw_buried_semicolon) and trailing-SQL-after-END
+            // (saw_top_level_after_block_close) arms. The leading SELECT means
+            // the admin/DDL scans above do not fire; without this it falls
+            // through to Guarded/ReadWrite and a ReadWrite session would be
+            // Allowed to run the hidden GRANT/DROP/TRUNCATE/no-WHERE-UPDATE once
+            // any per-statement / savepoint-preview executor splits the batch.
+            // Fail closed, symmetric with the `;`-delimited form (oracle-b6yl.1).
+            if has_buried_dangerous_verb(&upper) {
+                return StatementClass::forbidden();
             }
             return StatementClass {
                 danger: DangerLevel::Guarded,
@@ -1234,6 +1305,73 @@ mod tests {
             );
             assert_eq!(d.required_level, Some(OperatingLevel::ReadWrite), "{sql:?}");
         }
+    }
+
+    #[test]
+    fn select_calling_builtin_named_qualified_udf_is_guarded_not_safe() {
+        // oracle-b6yl.2: a SCHEMA-QUALIFIED routine whose BARE name collides with
+        // a SQL builtin (replace/round/trunc/mod/user/length/extract/...) must
+        // still be routed through the purity consult — `billing.replace(x)` is a
+        // package-member call, not the builtin REPLACE. Dropping it (because the
+        // bare name is in BUILTINS) fail-opened the whole SELECT to Safe/ReadOnly,
+        // running the routine's side effects unguarded. A genuine SQL builtin is
+        // never written schema-qualified, so the qualified form is unambiguous.
+        for sql in [
+            "SELECT billing.replace(x) FROM dual",
+            "SELECT app.trunc(x) FROM dual",
+            "SELECT app.round(x) FROM dual",
+            "SELECT app.user() FROM dual",
+            "SELECT app.mod(x) FROM dual",
+            "SELECT billing.length(x) FROM dual",
+            "SELECT app.extract(x) FROM dual",
+        ] {
+            let d = classify(sql);
+            assert_eq!(
+                d.danger,
+                DangerLevel::Guarded,
+                "builtin-named QUALIFIED UDF must be Guarded, not Safe: {sql:?}"
+            );
+            assert_eq!(d.required_level, Some(OperatingLevel::ReadWrite), "{sql:?}");
+        }
+        // Control: a BARE builtin is a genuine read and stays Safe.
+        assert_eq!(
+            classify("SELECT replace(x, 'a', 'b') FROM dual").danger,
+            DangerLevel::Safe,
+            "bare builtin REPLACE must stay Safe"
+        );
+    }
+
+    #[test]
+    fn no_semicolon_batch_with_buried_dangerous_verb_fails_closed() {
+        // oracle-b6yl.1: a no-`;` pure-SQL batch that buries a dangerous verb
+        // after a benign SELECT prefix must fail closed to Forbidden, symmetric
+        // with the `;`-delimited form — the pure-SQL analog of the buried-`;`
+        // (saw_buried_semicolon) and trailing-SQL-after-END desyncs.
+        for sql in [
+            "SELECT 1 FROM dual GRANT DBA TO scott",
+            "SELECT 1 FROM dual\n/\nGRANT DBA TO scott",
+            "SELECT 1 FROM dual\nDROP TABLE orders",
+            "SELECT 1 FROM dual\nTRUNCATE TABLE orders",
+            "SELECT 1 FROM dual\nUPDATE orders SET x = 1",
+        ] {
+            assert_eq!(
+                classify(sql).danger,
+                DangerLevel::Forbidden,
+                "no-`;` batch with a buried dangerous verb must fail closed: {sql:?}"
+            );
+        }
+        // Control 1: the `;`-delimited equivalent already fails closed (multi-stmt).
+        assert_eq!(
+            classify("SELECT 1 FROM dual; GRANT DBA TO scott").danger,
+            DangerLevel::Forbidden
+        );
+        // Control 2: a benign single SELECT (no buried verb) stays a read, even
+        // when it merely mentions a dangerous keyword inside an identifier.
+        assert_eq!(
+            classify("SELECT update_ts FROM orders WHERE id = 1").danger,
+            DangerLevel::Safe,
+            "a column named update_ts must not trip the buried-verb scan"
+        );
     }
 
     #[test]
