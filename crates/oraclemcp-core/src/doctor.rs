@@ -214,8 +214,8 @@ fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
                 ("TNS_ADMIN", &ctx.tns_admin),
                 ("wallet", &ctx.wallet_location),
             ] {
-                if let Some(d) = dir {
-                    if !std::path::Path::new(d).is_dir() {
+                match dir {
+                    Some(d) if !std::path::Path::new(d).is_dir() => {
                         return CheckResult::new(
                             2,
                             "TNS/wallet",
@@ -224,6 +224,7 @@ fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
                         )
                         .with_fix(format!("create {d} or correct the {label} setting"));
                     }
+                    _ => {}
                 }
             }
             CheckResult::new(

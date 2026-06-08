@@ -238,13 +238,14 @@ impl CustomToolDef {
         // the operator's intended safety pin without any error. Reject the typo
         // at load time (fail-fast: a misconfigured tool must never silently
         // appear).
-        if let Some(lvl) = self.declared_level.as_deref() {
-            if OperatingLevel::parse(lvl).is_none() {
+        match self.declared_level.as_deref() {
+            Some(lvl) if OperatingLevel::parse(lvl).is_none() => {
                 return Err(invalid(&format!(
                     "declared_level '{lvl}' is not a known operating level \
                      (READ_ONLY | READ_WRITE | DDL | ADMIN)"
                 )));
             }
+            _ => {}
         }
         Ok(())
     }
