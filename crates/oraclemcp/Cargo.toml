@@ -1,7 +1,7 @@
 [package]
 name = "oraclemcp"
 version = "0.1.0"
-description = "Engine-free Oracle Database MCP server binary (read-only live-DB tool surface) over oraclemcp-core (Apache-2.0 OR MIT)"
+description = "Unofficial, engine-free Oracle Database MCP server binary (read-only, fail-closed SQL guard). Not affiliated with Oracle Corporation."
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

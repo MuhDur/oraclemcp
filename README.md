@@ -14,6 +14,9 @@
 
 `oraclemcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives an AI agent **read-only** access to an Oracle database — schema introspection, DDL, compile errors, source search, ad-hoc query, and plan analysis — behind a **fail-closed SQL guard**. Every statement the agent submits is classified *before* it can reach Oracle; anything not provably read-only is refused with a structured, actionable error. The core is engine-free and `#![forbid(unsafe_code)]`.
 
+> [!IMPORTANT]
+> **Unofficial — not affiliated with, endorsed by, or sponsored by Oracle Corporation.** "Oracle" is a trademark of Oracle Corporation, used here only descriptively to indicate compatibility. This is an independent, community project. For Oracle's *official* MCP servers (OCI, SQLcl/dbtools), see [github.com/oracle/mcp](https://github.com/oracle/mcp).
+
 ## Why oraclemcp
 
 - **Fail-closed by construction.** A SELECT that an agent dreams up should never silently turn into a `DELETE`. Each raw statement runs through the hardened classifier and only **proven** read-only `SELECT`/`WITH` and dictionary introspection execute. Writes, DDL, DCL, and *forbidden* constructs (multi-statement batches, string-concat dynamic SQL, an unproven function call inside a SELECT) are rejected before touching the database — with an `OperatingLevelTooLow` or `ForbiddenStatement` envelope and a suggested safe alternative.
