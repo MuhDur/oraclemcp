@@ -10,10 +10,8 @@
   },
   "packages": [
     {
-      "registryType": "cargo",
-      "registryBaseUrl": "https://crates.io",
-      "identifier": "oraclemcp",
-      "version": "0.1.0",
+      "registryType": "oci",
+      "identifier": "ghcr.io/muhdur/oraclemcp:0.1.0",
       "transport": {
         "type": "stdio"
       }

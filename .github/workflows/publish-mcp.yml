@@ -4,11 +4,11 @@ name: Publish to MCP Registry
 # under the io.github.MuhDur namespace, authenticated via GitHub OIDC — the
 # repository's own identity proves namespace ownership, so no token/secret.
 #
-# BLOCKED (2026-06): the registry does NOT support `cargo` packages — a publish
-# of the current (crates.io) server.json fails with "unsupported registry type:
-# cargo". Listing requires an `oci` package, i.e. a published Docker image
-# referenced from server.json. Until that image exists, this is dispatch-only
-# (it deliberately does NOT run on `v*` tags, so it can't break the release).
+# server.json references the OCI image ghcr.io/muhdur/oraclemcp (built by
+# docker.yml). The registry validates that the image is PUBLIC and carries the
+# io.modelcontextprotocol.server.name label. Run this AFTER docker.yml has
+# pushed the image and the GHCR package is public. Dispatch-only so it never
+# races the image build on a tag.
 on:
   workflow_dispatch: {}
 
