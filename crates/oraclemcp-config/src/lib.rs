@@ -58,7 +58,7 @@ impl Default for OracleMcpConfig {
 impl OracleMcpConfig {
     /// Build the layered [`Figment`] (defaults < `config.toml` < env), without
     /// extracting. Callers (the binary) may `.merge()` CLI overrides last —
-    /// CLI has the highest precedence — before calling [`from_figment`].
+    /// CLI has the highest precedence — before calling [`Self::from_figment`].
     #[must_use]
     pub fn figment(config_path: Option<&Path>) -> Figment {
         let mut fig = Figment::from(Serialized::defaults(OracleMcpConfig::default()));

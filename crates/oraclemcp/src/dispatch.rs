@@ -19,6 +19,9 @@ use oraclemcp_db::{
     serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
+use oraclemcp_guard::{
+    Classifier, ClassifierConfig, LevelDecision, OperatingLevel, SessionLevelState,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -132,6 +135,48 @@ fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, args: Value) -> Result<T
         .map_err(|e| invalid_args(format!("invalid arguments for {tool}: {e}")))
 }
 
+/// The fail-closed read-only gate for the two tools that accept a raw SQL
+/// statement (`oracle_query`, `oracle_explain_plan`). This binary is read-only
+/// by construction: every such statement is run through the `oraclemcp-guard`
+/// classifier and refused — *before* it can reach Oracle — unless the guard
+/// proves it needs no more than `READ_ONLY`. Writes, DDL/DCL, and any
+/// `Forbidden` construct (multi-statement batch, string-concat dynamic SQL, an
+/// unproven function call in a SELECT, …) are rejected with a structured
+/// envelope. Proven read-only `SELECT`/`WITH` and dictionary introspection pass.
+///
+/// The other five tools build their own parameterized dictionary SQL and never
+/// execute caller-supplied statements, so they need no gate.
+fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
+    let decision = Classifier::new(ClassifierConfig::new()).classify(sql);
+    // A session whose ceiling is READ_ONLY: `gate` returns `Allow` only for
+    // statements the guard proved read-only; everything else is `Blocked` or
+    // `RequireStepUp`, both of which this (step-up-less) server rejects.
+    let session = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+    if matches!(decision.gate(&session), LevelDecision::Allow) {
+        return Ok(());
+    }
+    // `Forbidden` (never dispatchable at any level) vs. merely needs-a-higher-
+    // level — surfaced as distinct, machine-stable error classes.
+    let class = if decision.required_level.is_none() {
+        ErrorClass::ForbiddenStatement
+    } else {
+        ErrorClass::OperatingLevelTooLow
+    };
+    Err(ErrorEnvelope::new(
+        class,
+        format!(
+            "read-only server refused this statement: {}",
+            decision.reason
+        ),
+    )
+    .with_next_step(decision.safe_alternative.unwrap_or_else(|| {
+        "this server accepts only read-only statements — SELECT/WITH plus the \
+         dictionary tools (oracle_schema_inspect, oracle_describe, oracle_get_ddl, \
+         oracle_compile_errors, oracle_search_source)"
+            .to_owned()
+    })))
+}
+
 impl ToolDispatch for OracleDispatcher {
     fn dispatch(&self, name: &str, args: Value) -> Result<Value, ErrorEnvelope> {
         // A poisoned mutex means a prior dispatch panicked while holding the
@@ -145,6 +190,7 @@ impl ToolDispatch for OracleDispatcher {
         let result: Result<Value, DbError> = match name {
             "oracle_query" => {
                 let a: QueryArgs = parse_args(name, args)?;
+                ensure_read_only(&a.sql)?;
                 let binds = a
                     .binds
                     .iter()
@@ -188,6 +234,7 @@ impl ToolDispatch for OracleDispatcher {
             }
             "oracle_explain_plan" => {
                 let a: ExplainPlanArgs = parse_args(name, args)?;
+                ensure_read_only(&a.sql)?;
                 explain_plan(conn, &a.sql, a.read_only_standby)
                     .map(|rows| json!({ "plan": rows_to_json(&rows) }))
             }
@@ -355,5 +402,106 @@ mod tests {
             )
             .expect_err("object bind rejected");
         assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+    }
+
+    /// A connection that MUST never be touched: any query/execute panics. Proves
+    /// the read-only gate refuses a statement *before* it can reach Oracle.
+    struct NoExecMock;
+    impl OracleConnection for NoExecMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+        fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+            panic!("a refused statement must never reach the database (query_rows)")
+        }
+        fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+            panic!("a refused statement must never reach the database (execute)")
+        }
+        fn commit(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        fn rollback(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn writes_ddl_and_dcl_are_refused_before_touching_the_db() {
+        let dispatcher = OracleDispatcher::new(Box::new(NoExecMock));
+        // Each must be refused fail-closed — and NoExecMock panics if any of
+        // them reaches the connection, so a pass here also proves non-execution.
+        for sql in [
+            "INSERT INTO hr.employees (id) VALUES (1)",
+            "UPDATE hr.employees SET salary = 0",
+            "DELETE FROM hr.employees",
+            "DROP TABLE hr.employees",
+            "TRUNCATE TABLE hr.employees",
+            "CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; END;",
+            "GRANT DBA TO scott",
+            "ALTER SYSTEM FLUSH SHARED_POOL",
+        ] {
+            let err = dispatcher
+                .dispatch("oracle_query", json!({ "sql": sql }))
+                .expect_err(&format!("expected a fail-closed refusal for: {sql}"));
+            assert!(
+                matches!(
+                    err.error_class,
+                    ErrorClass::OperatingLevelTooLow | ErrorClass::ForbiddenStatement
+                ),
+                "{sql} -> unexpected class {:?}",
+                err.error_class
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_select_passes_the_gate() {
+        // A plain SELECT (no unproven function call) is proven read-only and runs.
+        let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+        let out = dispatcher
+            .dispatch(
+                "oracle_query",
+                json!({ "sql": "SELECT object_name FROM all_objects WHERE owner = :1", "binds": ["HR"] }),
+            )
+            .expect("a read-only SELECT must pass the gate");
+        assert!(out.is_object());
+    }
+
+    #[test]
+    fn explain_plan_refuses_a_non_read_only_statement() {
+        let dispatcher = OracleDispatcher::new(Box::new(NoExecMock));
+        let err = dispatcher
+            .dispatch(
+                "oracle_explain_plan",
+                json!({ "sql": "DELETE FROM hr.employees" }),
+            )
+            .expect_err("explain of a write is refused fail-closed");
+        assert!(matches!(
+            err.error_class,
+            ErrorClass::OperatingLevelTooLow | ErrorClass::ForbiddenStatement
+        ));
+    }
+
+    #[test]
+    fn multi_statement_batch_with_a_write_is_refused() {
+        // A `;`-joined batch carrying a DROP is refused fail-closed (its danger
+        // is the max over statements; a desynced batch would be ForbiddenStatement).
+        let dispatcher = OracleDispatcher::new(Box::new(NoExecMock));
+        let err = dispatcher
+            .dispatch(
+                "oracle_query",
+                json!({ "sql": "SELECT 1 FROM dual; DROP TABLE hr.employees" }),
+            )
+            .expect_err("a multi-statement batch containing a write is refused");
+        assert!(matches!(
+            err.error_class,
+            ErrorClass::ForbiddenStatement | ErrorClass::OperatingLevelTooLow
+        ));
     }
 }

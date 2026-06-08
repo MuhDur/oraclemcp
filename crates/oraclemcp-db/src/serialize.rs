@@ -64,7 +64,7 @@ pub enum TypeRepr {
     Text,
     /// DATE — ISO-8601 date-time string.
     Date,
-    /// TIMESTAMP [WITH [LOCAL] TIME ZONE] — ISO-8601 string.
+    /// `TIMESTAMP [WITH [LOCAL] TIME ZONE]` — ISO-8601 string.
     Timestamp,
     /// RAW / LONG RAW — hex (when fetched as text) or base64 (when binary).
     Raw,

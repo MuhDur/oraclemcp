@@ -6,7 +6,7 @@
 //! Layers:
 //! - [`OracleConnection`] — the backend-independent sync connection trait, with
 //!   the `oracle`-crate-backed [`RustOracleConnection`].
-//! - [`OraclePool`] — an `r2d2` pool behind a `tokio::task::spawn_blocking`
+//! - `OraclePool` — an `r2d2` pool behind a `tokio::task::spawn_blocking`
 //!   boundary so DB I/O never blocks the async executor and an
 //!   `oracle::Connection` is never held across an `.await` (`oracle-driver`).
 //! - [`detect_instant_client`] — the offline-safe Instant Client posture probe
