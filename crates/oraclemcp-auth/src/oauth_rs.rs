@@ -130,10 +130,8 @@ impl ResourceServerConfig {
         if now_unix >= exp {
             return Err(TokenError::Expired);
         }
-        if let Some(nbf) = claims["nbf"].as_i64() {
-            if now_unix < nbf {
-                return Err(TokenError::NotYetValid);
-            }
+        if claims["nbf"].as_i64().is_some_and(|nbf| now_unix < nbf) {
+            return Err(TokenError::NotYetValid);
         }
         // Scopes.
         let scopes = token_scopes(claims);

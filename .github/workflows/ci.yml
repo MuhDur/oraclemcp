@@ -87,18 +87,9 @@ jobs:
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check
 
-  # Keep the fail-closed classifier's differential fuzz target building. The
-  # adversarial corpus itself runs in `test` (the oraclemcp-guard suite); this
-  # only proves the cargo-fuzz harness still compiles on nightly.
-  classifier-fuzz-smoke:
-    name: classifier fuzz target builds (nightly)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-fuzz
-      - run: cargo +nightly fuzz build classify_fuzz
-        working-directory: crates/oraclemcp-guard
+  # The fail-closed classifier ships a cargo-fuzz target at
+  # `crates/oraclemcp-guard/fuzz` (run locally with
+  # `cargo +nightly fuzz run classify_fuzz`). It is intentionally not built in
+  # CI: the classifier's correctness is already exercised here by the
+  # differential adversarial corpus in the `cargo test` job, and a nightly
+  # sanitizer/`build-std` job adds fragility for little extra signal.
