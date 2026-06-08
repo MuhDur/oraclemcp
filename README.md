@@ -36,6 +36,14 @@ The default build is **offline** (no native dependencies) — ideal for CI and f
 cargo install oraclemcp --features live-db
 ```
 
+**Docker** — a ready-to-run image with Oracle Instant Client bundled (so live-db works out of the box) is published to GHCR and listed in the [official MCP registry](https://registry.modelcontextprotocol.io) as `io.github.MuhDur/oraclemcp`:
+
+```sh
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.1.0   # MCP over stdio
+```
+
+> The Docker image bundles Oracle Instant Client (Oracle Free Use Terms) and is therefore a mixed-license artifact; the crates themselves are Apache-2.0 OR MIT.
+
 Wire it into an MCP client (e.g. Claude Desktop) over stdio:
 
 ```json
