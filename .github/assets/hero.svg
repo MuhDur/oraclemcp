@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-label="oraclemcp — safe-by-default Oracle Database MCP server in pure Rust">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a0f1c"/>
+      <stop offset="1" stop-color="#10203a"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#34d399"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0e2a44"/>
+      <stop offset="1" stop-color="#0a1830"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.78" cy="0.4" r="0.6">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="300" fill="url(#bg)"/>
+  <rect width="1200" height="300" fill="url(#glow)"/>
+  <rect x="0" y="0" width="1200" height="4" fill="url(#accent)"/>
+
+  <!-- Wordmark -->
+  <text x="80" y="138" font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace" font-size="74" font-weight="700" fill="#e8f0ff">oracle<tspan fill="url(#accent)">mcp</tspan></text>
+  <text x="82" y="184" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="27" font-weight="500" fill="#9fb3d1">Safe-by-default Oracle Database MCP server &#183; pure Rust</text>
+
+  <!-- Feature chips -->
+  <g font-family="ui-monospace, monospace" font-size="16" fill="#bfe9e0">
+    <g transform="translate(82,222)">
+      <rect width="232" height="34" rx="17" fill="#0e2a44" stroke="#1d4e63"/>
+      <text x="20" y="22">fail-closed SQL guard</text>
+    </g>
+    <g transform="translate(326,222)">
+      <rect width="246" height="34" rx="17" fill="#0e2a44" stroke="#1d4e63"/>
+      <text x="20" y="22">#![forbid(unsafe_code)]</text>
+    </g>
+    <g transform="translate(584,222)">
+      <rect width="196" height="34" rx="17" fill="#0e2a44" stroke="#1d4e63"/>
+      <text x="20" y="22">stdio &#183; HTTP &#183; MCP</text>
+    </g>
+  </g>
+
+  <!-- Shield + check motif -->
+  <g transform="translate(980,70)">
+    <path d="M85 0 L160 26 L160 96 C160 150 125 180 85 196 C45 180 10 150 10 96 L10 26 Z" fill="url(#shield)" stroke="url(#accent)" stroke-width="3"/>
+    <path d="M52 98 L76 124 L122 64" fill="none" stroke="url(#accent)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

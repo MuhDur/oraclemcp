@@ -1,0 +1,117 @@
+<p align="center">
+  <img src=".github/assets/hero.svg" alt="oraclemcp — safe-by-default Oracle Database MCP server in pure Rust" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://github.com/MuhDur/oraclemcp/actions/workflows/ci.yml"><img src="https://github.com/MuhDur/oraclemcp/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://crates.io/crates/oraclemcp"><img src="https://img.shields.io/crates/v/oraclemcp.svg" alt="crates.io"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg" alt="license"></a>
+  <img src="https://img.shields.io/badge/unsafe-forbidden-success.svg" alt="forbid(unsafe_code)">
+  <img src="https://img.shields.io/badge/rustc-1.85%2B-orange.svg" alt="MSRV 1.85">
+</p>
+
+> **Safe-by-default Oracle Database MCP server, in pure Rust.**
+
+`oraclemcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives an AI agent **read-only** access to an Oracle database — schema introspection, DDL, compile errors, source search, ad-hoc query, and plan analysis — behind a **fail-closed SQL guard**. Every statement the agent submits is classified *before* it can reach Oracle; anything not provably read-only is refused with a structured, actionable error. The core is engine-free and `#![forbid(unsafe_code)]`.
+
+## Why oraclemcp
+
+- **Fail-closed by construction.** A SELECT that an agent dreams up should never silently turn into a `DELETE`. Each raw statement runs through the hardened classifier and only **proven** read-only `SELECT`/`WITH` and dictionary introspection execute. Writes, DDL, DCL, and *forbidden* constructs (multi-statement batches, string-concat dynamic SQL, an unproven function call inside a SELECT) are rejected before touching the database — with an `OperatingLevelTooLow` or `ForbiddenStatement` envelope and a suggested safe alternative.
+- **Agent-first UX.** Every tool ships a real JSON Schema. Errors are structured [`ErrorEnvelope`](crates/oraclemcp-error)s with machine-stable classes, fuzzy suggestions, and next-step hints — not bare strings. A zero-arg `oracle_capabilities` tool lets an agent discover the surface, and an offline build degrades to a `RuntimeStateRequired` contract instead of crashing.
+- **Pure Rust, no `unsafe`.** Every crate is `#![forbid(unsafe_code)]`; the fail-closed classifier carries a differential cargo-fuzz target.
+- **Two transports.** stdio (default) and Streamable HTTP (`--listen`).
+
+## Quick start
+
+```sh
+cargo install oraclemcp
+```
+
+The default build is **offline** (no native dependencies) — ideal for CI and for trying the tool surface. For live database access, build with the `live-db` feature, which pulls the ODPI-C Oracle driver (needs [Oracle Instant Client](https://www.oracle.com/database/technologies/instant-client.html)):
+
+```sh
+cargo install oraclemcp --features live-db
+```
+
+Wire it into an MCP client (e.g. Claude Desktop) over stdio:
+
+```json
+{
+  "mcpServers": {
+    "oracle": {
+      "command": "oraclemcp",
+      "args": ["serve", "--allow-no-auth"]
+    }
+  }
+}
+```
+
+Or run it directly:
+
+```sh
+oraclemcp serve                      # stdio (default); --allow-no-auth for local dev
+oraclemcp serve --listen 127.0.0.1:7070   # Streamable HTTP (bind loopback only)
+oraclemcp capabilities               # the advertised tool surface + feature tiers (JSON)
+oraclemcp doctor                     # offline diagnostics (classifier self-test, NLS, …)
+oraclemcp info                       # build info: version, tools, transports, live-db
+```
+
+Connection profiles are resolved from layered configuration (`oraclemcp-config`); select one with `serve --profile <name>`.
+
+## Tools
+
+| Tool | Purpose |
+| --- | --- |
+| `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |
+| `oracle_schema_inspect` | List objects in a schema (optionally by type) |
+| `oracle_describe` | Column metadata for a table or view |
+| `oracle_get_ddl` | `DBMS_METADATA` DDL for an object |
+| `oracle_compile_errors` | Compile errors for a PL/SQL object |
+| `oracle_search_source` | Search `ALL_SOURCE` for a needle |
+| `oracle_explain_plan` | Execution plan for a read-only statement |
+| `oracle_capabilities` | Zero-arg discovery: tools, operating level, feature tiers |
+
+`oracle_query` and `oracle_explain_plan` accept a raw statement and so pass through the read-only gate; the other five build their own parameterized dictionary SQL and never execute caller-supplied statements.
+
+## Safety model
+
+Statements are graded on an operating-level ladder:
+
+```
+READ_ONLY  <  READ_WRITE  <  DDL  <  ADMIN
+```
+
+This binary runs at **`READ_ONLY`**. For every raw statement, the classifier derives the *minimum* level the statement needs; the level gate then admits it only if that level is `READ_ONLY`. Everything else is refused fail-closed — and a statement the classifier cannot prove safe is treated as dangerous, never the reverse. The classifier is whitespace-, comment-, quote-, and batch-aware (it fails closed on desynchronized multi-statement input), and is continuously exercised by a differential adversarial corpus and a cargo-fuzz target.
+
+The building blocks for *guarded writes* (single-use execution grants, step-up confirmation, an fsync-before-execute audit chain) live in `oraclemcp-guard` / `oraclemcp-audit` / `oraclemcp-auth` and back the broader product; this `0.1` binary deliberately ships the read-only surface only.
+
+## Architecture
+
+The engine-free MCP core is a small, one-way dependency DAG — no crate here imports a PL/SQL analysis engine (a boundary the CI enforces):
+
+```
+oraclemcp-error                          structured, agent-facing error envelope (leaf)
+oraclemcp-telemetry  → error             tracing / health-endpoint observability
+oraclemcp-audit      → error             durable fsync-before-execute audit hash-chain
+oraclemcp-guard      → audit, error      fail-closed SQL classifier + operating levels
+oraclemcp-config     → guard, error      layered configuration + connection profiles
+oraclemcp-db         → guard, error      Oracle connectivity, pooling, NLS-stable serializer, dictionary ops
+oraclemcp-auth       → audit, guard, …   transport auth: OAuth 2.1, mTLS, init token
+oraclemcp-core       → all of the above  MCP protocol surface, server, tool registry, capabilities
+oraclemcp            → core, db, …        this binary
+```
+
+## oraclemcp vs. plsql-mcp
+
+`oraclemcp` is the lean half of a two-binary family:
+
+- **`oraclemcp`** (this repo) — the engine-free Oracle **database** MCP server: safe, read-only DB access for an agent. Reach for it when you want schema introspection and guarded queries.
+- **`plsql-mcp`** (in [plsql-intelligence](https://github.com/MuhDur/plsql-intelligence)) — the full **superset**: everything here *plus* offline PL/SQL code intelligence (parse/analyze, dependency graph, lineage, SAST, impact analysis). Reach for it when you want deep PL/SQL understanding, not just database access.
+
+## Offline behavior
+
+Without `live-db`, `RustOracleConnection::connect` returns `BackendNotCompiled` and `oraclemcp` falls back to a stub connection: `serve`, `capabilities`, and `doctor` all work, and any live tool call returns a structured `RuntimeStateRequired` envelope rather than crashing. This makes the binary safe to install, inspect, and test anywhere — CI included.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
