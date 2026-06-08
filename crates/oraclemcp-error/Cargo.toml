@@ -5,7 +5,10 @@ description = "Structured, agent-facing error envelope for the oraclemcp Oracle 
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-publish = false
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde.workspace = true

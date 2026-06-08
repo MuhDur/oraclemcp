@@ -5,7 +5,10 @@ description = "Oracle connectivity, pooling, session leases and the type/NLS ser
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-publish = false
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 default = []
@@ -17,8 +20,8 @@ oracle-driver = ["dep:oracle", "dep:r2d2", "dep:tokio"]
 live-xe = ["oracle-driver"]
 
 [dependencies]
-oraclemcp-error = { path = "../oraclemcp-error" }
-oraclemcp-guard = { path = "../oraclemcp-guard" }
+oraclemcp-error = { path = "../oraclemcp-error", version = "0.1.0" }
+oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.1.0" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

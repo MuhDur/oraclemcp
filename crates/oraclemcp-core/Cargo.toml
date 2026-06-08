@@ -5,16 +5,19 @@ description = "MCP protocol surface, Tool/ToolRegistry contract and capabilities
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-publish = false
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-oraclemcp-error = { path = "../oraclemcp-error" }
-oraclemcp-config = { path = "../oraclemcp-config" }
-oraclemcp-db = { path = "../oraclemcp-db" }
-oraclemcp-guard = { path = "../oraclemcp-guard" }
-oraclemcp-audit = { path = "../oraclemcp-audit" }
-oraclemcp-auth = { path = "../oraclemcp-auth" }
-oraclemcp-telemetry = { path = "../oraclemcp-telemetry" }
+oraclemcp-error = { path = "../oraclemcp-error", version = "0.1.0" }
+oraclemcp-config = { path = "../oraclemcp-config", version = "0.1.0" }
+oraclemcp-db = { path = "../oraclemcp-db", version = "0.1.0" }
+oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.1.0" }
+oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.1.0" }
+oraclemcp-auth = { path = "../oraclemcp-auth", version = "0.1.0" }
+oraclemcp-telemetry = { path = "../oraclemcp-telemetry", version = "0.1.0" }
 rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server"] }
 axum = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

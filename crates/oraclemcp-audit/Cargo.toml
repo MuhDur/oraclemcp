@@ -5,10 +5,13 @@ description = "Out-of-band durable audit sink (fsync-before-execute, hash chain)
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-publish = false
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-oraclemcp-error = { path = "../oraclemcp-error" }
+oraclemcp-error = { path = "../oraclemcp-error", version = "0.1.0" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

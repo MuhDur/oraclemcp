@@ -5,7 +5,10 @@ description = "Engine-free Oracle Database MCP server binary (read-only live-DB 
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-publish = false
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 default = []
@@ -20,11 +23,11 @@ name = "oraclemcp"
 path = "src/main.rs"
 
 [dependencies]
-oraclemcp-core = { path = "../oraclemcp-core" }
-oraclemcp-db = { path = "../oraclemcp-db" }
-oraclemcp-config = { path = "../oraclemcp-config" }
-oraclemcp-guard = { path = "../oraclemcp-guard" }
-oraclemcp-error = { path = "../oraclemcp-error" }
+oraclemcp-core = { path = "../oraclemcp-core", version = "0.1.0" }
+oraclemcp-db = { path = "../oraclemcp-db", version = "0.1.0" }
+oraclemcp-config = { path = "../oraclemcp-config", version = "0.1.0" }
+oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.1.0" }
+oraclemcp-error = { path = "../oraclemcp-error", version = "0.1.0" }
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
