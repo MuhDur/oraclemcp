@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.MuhDur/oraclemcp",
+  "title": "oraclemcp",
+  "description": "Engine-free, read-only Oracle Database MCP server with a fail-closed SQL guard (unofficial).",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/MuhDur/oraclemcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "cargo",
+      "registryBaseUrl": "https://crates.io",
+      "identifier": "oraclemcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
