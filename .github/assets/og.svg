@@ -23,16 +23,16 @@
   <rect x="0" y="0" width="1280" height="6" fill="url(#accent)"/>
 
   <text x="96" y="210" font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace" font-size="108" font-weight="700" fill="#e8f0ff">oracle<tspan fill="url(#accent)">mcp</tspan></text>
-  <text x="100" y="270" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="36" font-weight="500" fill="#9fb3d1">Safe-by-default Oracle Database MCP server, in pure Rust.</text>
+  <text x="100" y="270" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="36" font-weight="500" fill="#9fb3d1">Safe-by-default Oracle Database MCP server.</text>
 
   <g font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="30" fill="#cde9f5">
     <g transform="translate(100,340)">
       <circle cx="0" cy="-9" r="6" fill="url(#accent)"/>
-      <text x="22" y="0">Fail-closed SQL guard — write/DDL needs explicit, byte-verified approval</text>
+      <text x="22" y="0">Fail-closed SQL guard — writes/DDL need explicit approval</text>
     </g>
     <g transform="translate(100,396)">
       <circle cx="0" cy="-9" r="6" fill="url(#accent)"/>
-      <text x="22" y="0">Agent-first: per-tool JSON Schemas, structured errors, capability discovery</text>
+      <text x="22" y="0">Agent-first: JSON Schemas, structured errors, discovery</text>
     </g>
     <g transform="translate(100,452)">
       <circle cx="0" cy="-9" r="6" fill="url(#accent)"/>
