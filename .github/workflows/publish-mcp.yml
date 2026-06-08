@@ -2,12 +2,14 @@ name: Publish to MCP Registry
 
 # Lists oraclemcp in the official MCP registry (registry.modelcontextprotocol.io)
 # under the io.github.MuhDur namespace, authenticated via GitHub OIDC — the
-# repository's own identity proves namespace ownership, so no token/secret is
-# needed. Runs on a version tag, or on demand. server.json must reference a
-# crate version already live on crates.io.
+# repository's own identity proves namespace ownership, so no token/secret.
+#
+# BLOCKED (2026-06): the registry does NOT support `cargo` packages — a publish
+# of the current (crates.io) server.json fails with "unsupported registry type:
+# cargo". Listing requires an `oci` package, i.e. a published Docker image
+# referenced from server.json. Until that image exists, this is dispatch-only
+# (it deliberately does NOT run on `v*` tags, so it can't break the release).
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch: {}
 
 jobs:
