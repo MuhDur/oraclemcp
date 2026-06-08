@@ -17,7 +17,7 @@ edition = "2024"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/MuhDur/oraclemcp"
 homepage = "https://github.com/MuhDur/oraclemcp"
-rust-version = "1.85"
+rust-version = "1.88"
 keywords = ["oracle", "mcp", "database", "sql"]
 categories = ["database", "development-tools"]
 

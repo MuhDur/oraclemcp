@@ -7,7 +7,7 @@
   <a href="https://crates.io/crates/oraclemcp"><img src="https://img.shields.io/crates/v/oraclemcp.svg" alt="crates.io"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg" alt="license"></a>
   <img src="https://img.shields.io/badge/unsafe-forbidden-success.svg" alt="forbid(unsafe_code)">
-  <img src="https://img.shields.io/badge/rustc-1.85%2B-orange.svg" alt="MSRV 1.85">
+  <img src="https://img.shields.io/badge/rustc-1.88%2B-orange.svg" alt="MSRV 1.88">
 </p>
 
 > **Safe-by-default Oracle Database MCP server, in pure Rust.**

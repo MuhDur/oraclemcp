@@ -45,14 +45,15 @@ jobs:
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --doc
 
-  # Honour the advertised MSRV (rust-version = "1.85" in [workspace.package]).
+  # Honour the advertised MSRV (rust-version = "1.88" in [workspace.package];
+  # set by the floor of the dependency tree — darling 0.23 / time require 1.88).
   # A build (not test) is enough to catch use of newer std/lang features.
   msrv:
-    name: build on MSRV (1.85)
+    name: build on MSRV (1.88)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
 
@@ -96,6 +97,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-fuzz
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       - run: cargo +nightly fuzz build classify_fuzz
         working-directory: crates/oraclemcp-guard
