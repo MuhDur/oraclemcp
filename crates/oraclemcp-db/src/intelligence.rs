@@ -107,23 +107,43 @@ pub fn normalize_source_object_type(t: &str) -> Option<&'static str> {
         .find_map(|(input, normalized)| (*input == ty).then_some(*normalized))
 }
 
-/// `schema_inspect`: objects in a schema, optionally filtered by type. Owner +
-/// type are bound (`:1`, `:2`); a NULL `:2` means "all types".
+/// `schema_inspect`: objects in one schema or all accessible schemas, with
+/// optional type/name filters. Owner, type, and name pattern are all bound; a
+/// NULL owner means "all accessible schemas".
 pub fn list_objects(
     conn: &dyn OracleConnection,
-    owner: &str,
+    owner: Option<&str>,
     object_type: Option<&str>,
+    name_like: Option<&str>,
+    max_rows: usize,
 ) -> Result<Vec<OracleRow>, DbError> {
-    let sql = "SELECT object_name, object_type, status, last_ddl_time \
-               FROM all_objects \
-               WHERE owner = :1 AND (:2 IS NULL OR object_type = :2) \
-               ORDER BY object_type, object_name";
+    let sql = "WITH args AS ( \
+                   SELECT :1 owner_filter, :2 type_filter, :3 name_filter FROM dual \
+               ) \
+               SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
+               FROM all_objects o CROSS JOIN args \
+               WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
+                 AND (args.type_filter IS NULL OR o.object_type = args.type_filter) \
+                 AND (args.name_filter IS NULL OR o.object_name LIKE args.name_filter) \
+               ORDER BY o.owner, o.object_type, o.object_name \
+               FETCH FIRST :4 ROWS ONLY";
+    let owner_bind = owner.map_or(OracleBind::Null, |o| {
+        OracleBind::from(o.to_ascii_uppercase())
+    });
     let type_bind = object_type.map_or(OracleBind::Null, |t| {
         OracleBind::from(t.to_ascii_uppercase())
     });
+    let name_like_bind = name_like.map_or(OracleBind::Null, |n| {
+        OracleBind::from(n.to_ascii_uppercase())
+    });
     conn.query_rows(
         sql,
-        &[OracleBind::from(owner.to_ascii_uppercase()), type_bind],
+        &[
+            owner_bind,
+            type_bind,
+            name_like_bind,
+            OracleBind::from(max_rows as i64),
+        ],
     )
 }
 
@@ -383,6 +403,45 @@ mod tests {
     use super::*;
     use crate::{OracleBackend, OracleCell, OracleConnectionInfo};
 
+    #[derive(Default)]
+    struct CaptureMock {
+        calls: std::sync::Mutex<Vec<(String, Vec<OracleBind>)>>,
+    }
+
+    impl OracleConnection for CaptureMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        fn query_rows(&self, sql: &str, binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+            self.calls
+                .lock()
+                .expect("capture lock")
+                .push((sql.to_owned(), binds.to_vec()));
+            Ok(vec![])
+        }
+
+        fn execute(&self, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        fn commit(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        fn rollback(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
     struct SourceMock;
 
     impl OracleConnection for SourceMock {
@@ -478,6 +537,28 @@ mod tests {
         );
         assert_eq!(normalize_source_object_type("TYPE BODY"), Some("TYPE BODY"));
         assert_eq!(normalize_source_object_type("TABLE"), None);
+    }
+
+    #[test]
+    fn list_objects_binds_filters_and_limit() {
+        let mock = CaptureMock::default();
+        list_objects(&mock, None, Some("package"), Some("emp%"), 25).unwrap();
+
+        let calls = mock.calls.lock().expect("capture lock");
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].0.contains("SELECT o.owner, o.object_name"),
+            "query should include OWNER for cross-schema results"
+        );
+        assert_eq!(
+            calls[0].1,
+            vec![
+                OracleBind::Null,
+                OracleBind::String("PACKAGE".to_owned()),
+                OracleBind::String("EMP%".to_owned()),
+                OracleBind::I64(25),
+            ]
+        );
     }
 
     #[test]

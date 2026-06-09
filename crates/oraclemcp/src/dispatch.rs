@@ -30,6 +30,10 @@ use serde_json::{Value, json};
 const DEFAULT_SEARCH_MAX_ROWS: usize = 200;
 /// Default cap on `oracle_get_source` source text when the caller omits it.
 const DEFAULT_SOURCE_MAX_CHARS: usize = 1_000_000;
+/// Default cap on `oracle_schema_inspect` result rows when the caller omits it.
+const DEFAULT_SCHEMA_INSPECT_MAX_ROWS: usize = 500;
+/// Hard cap on `oracle_schema_inspect` for a single call.
+const MAX_SCHEMA_INSPECT_MAX_ROWS: usize = 5_000;
 /// Default cap on `oracle_sample_rows` when the caller omits it.
 const DEFAULT_SAMPLE_MAX_ROWS: usize = 50;
 /// Hard cap on `oracle_sample_rows` for a single call.
@@ -107,9 +111,14 @@ struct QueryArgs {
 
 #[derive(Deserialize)]
 struct SchemaInspectArgs {
-    owner: String,
+    #[serde(default)]
+    owner: Option<String>,
     #[serde(default)]
     object_type: Option<String>,
+    #[serde(default)]
+    name_like: Option<String>,
+    #[serde(default, alias = "limit")]
+    max_rows: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -226,6 +235,13 @@ fn ensure_no_args(tool: &str, args: Value) -> Result<(), ErrorEnvelope> {
     }
 }
 
+fn non_empty_arg(value: Option<String>) -> Option<String> {
+    value.and_then(|v| {
+        let trimmed = v.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    })
+}
+
 /// The fail-closed read-only gate for the two tools that accept a raw SQL
 /// statement (`oracle_query`, `oracle_explain_plan`). This binary is read-only
 /// by construction: every such statement is run through the `oraclemcp-guard`
@@ -340,8 +356,44 @@ impl ToolDispatch for OracleDispatcher {
             }
             "oracle_schema_inspect" => {
                 let a: SchemaInspectArgs = parse_args(name, args)?;
-                list_objects(conn, &a.owner, a.object_type.as_deref())
-                    .map(|rows| json!({ "objects": rows_to_json(&rows) }))
+                let owner_arg = non_empty_arg(a.owner);
+                let object_type = non_empty_arg(a.object_type);
+                let name_like = non_empty_arg(a.name_like);
+                let max_rows = a
+                    .max_rows
+                    .unwrap_or(DEFAULT_SCHEMA_INSPECT_MAX_ROWS)
+                    .clamp(1, MAX_SCHEMA_INSPECT_MAX_ROWS);
+                let owner_result: Result<Option<String>, DbError> = match owner_arg.as_deref() {
+                    Some("*") => Ok(None),
+                    Some(owner) => Ok(Some(owner.to_owned())),
+                    None => conn.describe().and_then(|info| {
+                        info.current_schema.map(Some).ok_or_else(|| {
+                            DbError::Query(
+                                "owner is required because current_schema could not be detected"
+                                    .to_owned(),
+                            )
+                        })
+                    }),
+                };
+                owner_result.and_then(|owner_filter| {
+                    list_objects(
+                        conn,
+                        owner_filter.as_deref(),
+                        object_type.as_deref(),
+                        name_like.as_deref(),
+                        max_rows,
+                    )
+                    .map(|rows| {
+                        json!({
+                            "objects": rows_to_json(&rows),
+                            "owner": owner_filter.as_deref().unwrap_or("*"),
+                            "object_type": object_type,
+                            "name_like": name_like,
+                            "max_rows": max_rows,
+                            "truncated": rows.len() == max_rows,
+                        })
+                    })
+                })
             }
             "oracle_describe" => {
                 let a: DescribeArgs = parse_args(name, args)?;
@@ -587,6 +639,32 @@ mod tests {
     }
 
     #[test]
+    fn schema_inspect_can_default_to_current_schema() {
+        let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+        let out = dispatcher
+            .dispatch("oracle_schema_inspect", json!({}))
+            .expect("schema inspect defaults owner");
+        assert_eq!(out["owner"], json!("APP"));
+        assert_eq!(out["max_rows"], json!(DEFAULT_SCHEMA_INSPECT_MAX_ROWS));
+        assert!(out["objects"].is_array());
+    }
+
+    #[test]
+    fn schema_inspect_accepts_all_owners_and_limit_alias() {
+        let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+        let out = dispatcher
+            .dispatch(
+                "oracle_schema_inspect",
+                json!({ "owner": "*", "object_type": "package", "name_like": "emp%", "limit": 5 }),
+            )
+            .expect("schema inspect accepts all-owner filters");
+        assert_eq!(out["owner"], json!("*"));
+        assert_eq!(out["object_type"], json!("package"));
+        assert_eq!(out["name_like"], json!("emp%"));
+        assert_eq!(out["max_rows"], json!(5));
+    }
+
+    #[test]
     fn unknown_tool_is_invalid_arguments() {
         let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
         let err = dispatcher
@@ -598,9 +676,9 @@ mod tests {
     #[test]
     fn malformed_args_are_invalid_arguments_not_a_panic() {
         let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
-        // Missing required `owner`.
+        // Missing required `table`.
         let err = dispatcher
-            .dispatch("oracle_schema_inspect", json!({ "wrong": 1 }))
+            .dispatch("oracle_describe", json!({ "owner": "HR" }))
             .expect_err("missing required arg errors");
         assert_eq!(err.error_class, ErrorClass::InvalidArguments);
     }

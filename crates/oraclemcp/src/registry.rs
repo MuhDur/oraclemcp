@@ -104,14 +104,17 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_schema_inspect",
             ToolTier::FoundationLiveDb,
-            "List objects in a schema (ALL_OBJECTS), optionally filtered by object type.",
+            "List objects in the current schema, one owner, or all accessible schemas, with optional type/name filters.",
         )
         .with_input_schema(object_schema(
             json!({
-                "owner": { "type": "string", "description": "Schema owner (case-insensitive)." },
-                "object_type": { "type": "string", "description": "Optional filter, e.g. TABLE, VIEW, PACKAGE." }
+                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Omit for current schema; use * for all accessible schemas." },
+                "object_type": { "type": "string", "description": "Optional object type filter, e.g. TABLE, VIEW, PACKAGE." },
+                "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for object_name, e.g. EMP%." },
+                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum objects to return (default 500, hard cap 5000)." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." }
             }),
-            &["owner"],
+            &[],
         )),
     );
 

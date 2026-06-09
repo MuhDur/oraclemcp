@@ -114,7 +114,7 @@ current connection in place.
 | `oracle_connection_info` | Describe the active connection: backend, version, role, open mode, and current schema |
 | `oracle_switch_profile` | Reconnect the server to another configured profile |
 | `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |
-| `oracle_schema_inspect` | List objects in a schema (optionally by type) |
+| `oracle_schema_inspect` | List objects in the current schema, one owner, or all accessible schemas |
 | `oracle_describe` | Column metadata for a table or view |
 | `oracle_get_ddl` | `DBMS_METADATA` DDL for an object |
 | `oracle_get_source` | Full source text for a package, procedure, function, trigger, or type |

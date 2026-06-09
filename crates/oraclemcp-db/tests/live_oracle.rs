@@ -244,7 +244,8 @@ fn live_tier1_intelligence_dictionary_tools() {
         }
     };
     // schema_inspect: DEMO packages (the synthetic lab ships PKG_AUTONOMOUS etc.).
-    let pkgs = oraclemcp_db::list_objects(&conn, "demo", Some("PACKAGE")).expect("list");
+    let pkgs =
+        oraclemcp_db::list_objects(&conn, Some("demo"), Some("PACKAGE"), None, 500).expect("list");
     assert!(!pkgs.is_empty(), "DEMO should have packages");
     assert!(
         pkgs.iter()
