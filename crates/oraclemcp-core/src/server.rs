@@ -157,6 +157,56 @@ impl OracleMcpServer {
         tool_result_ok(value)
     }
 
+    fn advertises_tool(&self, name: &str) -> bool {
+        name == CAPABILITIES_TOOL || self.registry.tools.iter().any(|t| t.name == name)
+    }
+
+    fn first_advertised_tool(&self, candidates: &[&str]) -> String {
+        candidates
+            .iter()
+            .copied()
+            .find(|candidate| self.advertises_tool(candidate))
+            .unwrap_or(CAPABILITIES_TOOL)
+            .to_owned()
+    }
+
+    fn recovery_tool_for(&self, class: ErrorClass) -> Option<String> {
+        match class {
+            ErrorClass::ConnectionFailed | ErrorClass::RuntimeStateRequired => {
+                Some(self.first_advertised_tool(&[
+                    "oracle_connection_info",
+                    "oracle_list_profiles",
+                    CAPABILITIES_TOOL,
+                ]))
+            }
+            ErrorClass::OperatingLevelTooLow | ErrorClass::ChallengeRequired => {
+                Some(self.first_advertised_tool(&[
+                    "oracle_set_session_level",
+                    "oracle_preview_sql",
+                    CAPABILITIES_TOOL,
+                ]))
+            }
+            ErrorClass::ObjectNotFound => Some(self.first_advertised_tool(&[
+                "oracle_schema_inspect",
+                "list_objects",
+                CAPABILITIES_TOOL,
+            ])),
+            _ => None,
+        }
+    }
+
+    fn sanitize_error_envelope(&self, mut envelope: ErrorEnvelope) -> ErrorEnvelope {
+        if envelope
+            .suggested_tool
+            .as_deref()
+            .is_some_and(|tool| self.advertises_tool(tool))
+        {
+            return envelope;
+        }
+        envelope.suggested_tool = self.recovery_tool_for(envelope.error_class);
+        envelope
+    }
+
     /// Run a tool by name + JSON args, returning a [`CallToolResult`]. Context-
     /// free so it is unit-testable without an rmcp `RequestContext`. Engine/DB
     /// dispatch runs on a blocking worker (§4.3); a join failure becomes a tool
@@ -168,7 +218,7 @@ impl OracleMcpServer {
         let dispatcher = Arc::clone(&self.dispatcher);
         match tokio::task::spawn_blocking(move || dispatcher.dispatch(&name, args)).await {
             Ok(Ok(value)) => tool_result_ok(value),
-            Ok(Err(envelope)) => tool_result_err(&envelope),
+            Ok(Err(envelope)) => tool_result_err(&self.sanitize_error_envelope(envelope)),
             Err(e) => tool_result_err(&ErrorEnvelope::new(
                 ErrorClass::Internal,
                 format!("dispatch task failed: {e}"),
@@ -281,6 +331,18 @@ mod tests {
             if name == "boom" {
                 return Err(ErrorEnvelope::new(ErrorClass::Internal, "boom"));
             }
+            if name == "connect_fail" {
+                return Err(ErrorEnvelope::new(
+                    ErrorClass::ConnectionFailed,
+                    "connection unavailable",
+                ));
+            }
+            if name == "missing_object" {
+                return Err(ErrorEnvelope::new(
+                    ErrorClass::ObjectNotFound,
+                    "object not found",
+                ));
+            }
             Ok(serde_json::json!({ "echoed": name, "args": args }))
         }
     }
@@ -298,6 +360,28 @@ mod tests {
                     "additionalProperties": false
                 })),
         );
+        let caps = CapabilitiesReport::new(
+            "0.1.0",
+            registry.tools.clone(),
+            OperatingLevel::ReadOnly,
+            FeatureTiers {
+                live_db: true,
+                engine: true,
+                http_transport: false,
+            },
+        );
+        OracleMcpServer::new("0.1.0", registry, caps, Arc::new(EchoDispatcher))
+    }
+
+    fn server_with_tools(names: &[&str]) -> OracleMcpServer {
+        let mut registry = ToolRegistry::new();
+        for name in names {
+            registry.register(ToolDescriptor::new(
+                *name,
+                ToolTier::FoundationLiveDb,
+                "test tool",
+            ));
+        }
         let caps = CapabilitiesReport::new(
             "0.1.0",
             registry.tools.clone(),
@@ -377,6 +461,33 @@ mod tests {
         assert_eq!(
             err.structured_content.unwrap()["error_class"],
             serde_json::json!("INTERNAL")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_tool_replaces_unadvertised_suggested_tools() {
+        let s = server_with_tools(&["connect_fail", "oracle_query"]);
+        let err = s.run_tool("connect_fail".to_owned(), Value::Null).await;
+        let structured = err.structured_content.expect("structured error");
+        assert_eq!(err.is_error, Some(true));
+        assert_eq!(
+            structured["error_class"],
+            serde_json::json!("CONNECTION_FAILED")
+        );
+        assert_eq!(
+            structured["suggested_tool"],
+            serde_json::json!(CAPABILITIES_TOOL)
+        );
+    }
+
+    #[tokio::test]
+    async fn run_tool_preserves_advertised_suggested_tools() {
+        let s = server_with_tools(&["missing_object", "oracle_schema_inspect"]);
+        let err = s.run_tool("missing_object".to_owned(), Value::Null).await;
+        let structured = err.structured_content.expect("structured error");
+        assert_eq!(
+            structured["suggested_tool"],
+            serde_json::json!("oracle_schema_inspect")
         );
     }
 
