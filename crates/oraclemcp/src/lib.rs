@@ -7,10 +7,10 @@
 //!
 //! The binary ([`main`](../main.rs)) is a thin CLI over this library: it builds
 //! the [`registry::tool_registry`] + [`registry::capabilities`] and dispatches
-//! the seven read-only live-DB tools through [`dispatch::OracleDispatcher`] on
-//! top of `oraclemcp-core`'s rmcp server. Exposing these here (rather than as
-//! `bin`-private modules) lets the integration suite drive the real server
-//! surface.
+//! the read-only live-DB/config-inspection tools through
+//! [`dispatch::OracleDispatcher`] on top of `oraclemcp-core`'s rmcp server.
+//! Exposing these here (rather than as `bin`-private modules) lets the
+//! integration suite drive the real server surface.
 
 pub mod dispatch;
 pub mod registry;

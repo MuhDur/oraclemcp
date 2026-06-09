@@ -103,6 +103,8 @@ Config discovery order is:
 
 | Tool | Purpose |
 | --- | --- |
+| `oracle_list_profiles` | List configured connection profiles without exposing usernames or credential references |
+| `oracle_connection_info` | Describe the active connection: backend, version, role, open mode, and current schema |
 | `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |
 | `oracle_schema_inspect` | List objects in a schema (optionally by type) |
 | `oracle_describe` | Column metadata for a table or view |
@@ -112,7 +114,7 @@ Config discovery order is:
 | `oracle_explain_plan` | Execution plan for a read-only statement |
 | `oracle_capabilities` | Zero-arg discovery: tools, operating level, feature tiers |
 
-`oracle_query` and `oracle_explain_plan` accept a raw statement and so pass through the read-only gate; the other five build their own parameterized dictionary SQL and never execute caller-supplied statements.
+`oracle_query` and `oracle_explain_plan` accept a raw statement and so pass through the read-only gate; the dictionary tools build their own parameterized SQL and never execute caller-supplied statements.
 
 ## Safety model
 

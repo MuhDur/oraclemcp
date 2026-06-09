@@ -1,7 +1,7 @@
 //! The advertised tool surface for the engine-free `oraclemcp` server.
 //!
-//! Pure data — no database access. [`tool_registry`] builds the seven
-//! read-only, live-DB FoundationLiveDb tools the server dispatches (see
+//! Pure data — no database access. [`tool_registry`] builds the
+//! read-only/config-inspection tools the server dispatches (see
 //! [`crate::dispatch`]); [`capabilities`] assembles the zero-arg
 //! `oracle_capabilities` report from that surface plus the build's feature
 //! tiers. The `oracle_capabilities` discovery tool itself is answered by
@@ -13,9 +13,11 @@ use oraclemcp_core::tools::{ToolDescriptor, ToolRegistry, ToolTier};
 use oraclemcp_guard::OperatingLevel;
 use serde_json::{Value, json};
 
-/// The seven live-DB tool names this server dispatches, in registration order.
+/// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 7] = [
+pub const TOOL_NAMES: [&str; 9] = [
+    "oracle_list_profiles",
+    "oracle_connection_info",
     "oracle_query",
     "oracle_schema_inspect",
     "oracle_describe",
@@ -36,11 +38,29 @@ fn object_schema(props: Value, required: &[&str]) -> Value {
     })
 }
 
-/// Build the read-only live-DB tool registry (the seven FoundationLiveDb tools).
-/// Each descriptor carries a hand-written argument JSON-Schema mirroring the
-/// matching `dispatch` arg struct so an agent can construct a call first-try.
+/// Build the read-only tool registry. Each descriptor carries a hand-written
+/// argument JSON-Schema mirroring the matching `dispatch` arg struct so an
+/// agent can construct a call first-try.
 pub fn tool_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_list_profiles",
+            ToolTier::FoundationStatic,
+            "List configured connection profiles without exposing usernames or credential references.",
+        )
+        .with_input_schema(object_schema(json!({}), &[])),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_connection_info",
+            ToolTier::FoundationLiveDb,
+            "Describe the active Oracle connection: backend, version, role, open mode, and current schema.",
+        )
+        .with_input_schema(object_schema(json!({}), &[])),
+    );
 
     registry.register(
         ToolDescriptor::new(
@@ -180,9 +200,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_lists_exactly_the_seven_read_only_tools() {
+    fn registry_lists_exactly_the_registered_read_only_tools() {
         let registry = tool_registry();
-        assert_eq!(registry.len(), 7, "exactly seven live-DB tools");
+        assert_eq!(registry.len(), TOOL_NAMES.len(), "exact tool surface");
         let names: Vec<&str> = registry.tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, TOOL_NAMES.to_vec());
         // None of the read tools is destructive, and oracle_capabilities is NOT
@@ -215,7 +235,7 @@ mod tests {
         assert!(caps.features.live_db);
         assert!(!caps.features.engine, "engine-free server");
         assert!(!caps.features.http_transport);
-        assert_eq!(caps.tools.len(), 7);
+        assert_eq!(caps.tools.len(), TOOL_NAMES.len());
         // Offline build: live_db false, http true.
         let caps = capabilities("0.1.0", false, true);
         assert!(!caps.features.live_db);

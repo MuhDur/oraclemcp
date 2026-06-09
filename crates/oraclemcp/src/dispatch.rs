@@ -12,6 +12,7 @@
 
 use std::sync::Mutex;
 
+use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::ToolDispatch;
 use oraclemcp_db::{
     DbError, OracleBind, OracleConnection, QueryCaps, SerializeOptions, compile_errors,
@@ -135,6 +136,16 @@ fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, args: Value) -> Result<T
         .map_err(|e| invalid_args(format!("invalid arguments for {tool}: {e}")))
 }
 
+fn ensure_no_args(tool: &str, args: Value) -> Result<(), ErrorEnvelope> {
+    match args {
+        Value::Object(map) if map.is_empty() => Ok(()),
+        Value::Null => Ok(()),
+        other => Err(invalid_args(format!(
+            "invalid arguments for {tool}: expected an empty object, got {other}"
+        ))),
+    }
+}
+
 /// The fail-closed read-only gate for the two tools that accept a raw SQL
 /// statement (`oracle_query`, `oracle_explain_plan`). This binary is read-only
 /// by construction: every such statement is run through the `oraclemcp-guard`
@@ -188,6 +199,16 @@ impl ToolDispatch for OracleDispatcher {
         let conn: &dyn OracleConnection = conn_guard.as_ref();
 
         let result: Result<Value, DbError> = match name {
+            "oracle_list_profiles" => {
+                ensure_no_args(name, args)?;
+                OracleMcpConfig::load(None)
+                    .map(|cfg| json!({ "profiles": cfg.list_profiles() }))
+                    .map_err(|e| DbError::UnsupportedAuth(format!("config load failed: {e}")))
+            }
+            "oracle_connection_info" => {
+                ensure_no_args(name, args)?;
+                conn.describe().map(|info| json!({ "connection": info }))
+            }
             "oracle_query" => {
                 let a: QueryArgs = parse_args(name, args)?;
                 ensure_read_only(&a.sql)?;
@@ -266,7 +287,13 @@ mod tests {
             Ok(())
         }
         fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
-            Ok(OracleConnectionInfo::default())
+            Ok(OracleConnectionInfo {
+                backend: Some(OracleBackend::RustOracle),
+                server_version: Some("23.0.0".to_owned()),
+                database_role: Some("PRIMARY".to_owned()),
+                open_mode: Some("READ WRITE".to_owned()),
+                current_schema: Some("APP".to_owned()),
+            })
         }
         fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
             Ok(vec![OracleRow {
@@ -327,6 +354,8 @@ mod tests {
     /// Minimal valid args for a given tool name (matches the registry schemas).
     fn args_for(name: &str) -> Value {
         match name {
+            "oracle_list_profiles" => json!({}),
+            "oracle_connection_info" => json!({}),
             "oracle_query" => json!({ "sql": "SELECT 1 FROM dual" }),
             "oracle_schema_inspect" => json!({ "owner": "HR" }),
             "oracle_describe" => json!({ "owner": "HR", "table": "EMPLOYEES" }),

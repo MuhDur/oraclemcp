@@ -9,10 +9,10 @@
 //!
 //! A thin consumer of `oraclemcp-core` (the rmcp [`OracleMcpServer`] +
 //! `oracle_capabilities`) and `oraclemcp-db` (the read-only dictionary ops). It
-//! advertises seven read-only live-DB tools ([`registry`]) and dispatches them
-//! through [`dispatch::OracleDispatcher`]. There is NO engine, NO `plsql-*`
-//! dependency, and NO write/DDL surface — reads only, gated by the live-DB
-//! build feature.
+//! advertises read-only live-DB/config-inspection tools ([`registry`]) and
+//! dispatches them through [`dispatch::OracleDispatcher`]. There is NO engine,
+//! NO `plsql-*` dependency, and NO write/DDL surface — reads only, gated by the
+//! live-DB build feature.
 //!
 //! CLI shape (mirrors `plsql-mcp`): a top-level `--robot-json` flag plus
 //! `serve` (stdio default, `--listen <ADDR>` for Streamable HTTP), `info`,
@@ -40,11 +40,11 @@ const LIVE_DB: bool = cfg!(feature = "live-db");
     version,
     about = "Engine-free, read-only-by-default Oracle Database MCP server",
     long_about = "Speaks the Model Context Protocol over stdio (default) or \
-                  Streamable HTTP (--listen). Exposes seven read-only live-DB \
-                  tools (query, schema_inspect, describe, get_ddl, \
-                  compile_errors, search_source, explain_plan) plus the zero-arg \
-                  oracle_capabilities discovery tool. No PL/SQL engine, no \
-                  write/DDL surface."
+                  Streamable HTTP (--listen). Exposes read-only Oracle tools \
+                  (profile discovery, connection info, query, schema_inspect, \
+                  describe, get_ddl, compile_errors, search_source, explain_plan) \
+                  plus the zero-arg oracle_capabilities discovery tool. No \
+                  PL/SQL engine, no write/DDL surface."
 )]
 struct Cli {
     /// Emit a single JSON object on stdout instead of human text.
@@ -434,12 +434,12 @@ mod tests {
     }
 
     #[test]
-    fn build_server_advertises_the_seven_tools_plus_capabilities() {
+    fn build_server_advertises_the_registered_tools_plus_capabilities() {
         let conn = open_connection(OracleConnectOptions::default());
         let server = build_server(conn, false);
-        // The capabilities report (which the server answers) carries 7 tools.
+        // The capabilities report carries the registry's tools.
         let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), LIVE_DB, false);
-        assert_eq!(caps.tools.len(), 7);
+        assert_eq!(caps.tools.len(), registry::TOOL_NAMES.len());
         // Smoke: the server clones (it is Clone) — proves it is fully built.
         let _ = server.clone();
     }
