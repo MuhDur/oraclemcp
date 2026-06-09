@@ -109,6 +109,7 @@ Config discovery order is:
 | `oracle_schema_inspect` | List objects in a schema (optionally by type) |
 | `oracle_describe` | Column metadata for a table or view |
 | `oracle_get_ddl` | `DBMS_METADATA` DDL for an object |
+| `oracle_get_source` | Full source text for a package, procedure, function, trigger, or type |
 | `oracle_compile_errors` | Compile errors for a PL/SQL object |
 | `oracle_search_source` | Search `ALL_SOURCE` for a needle |
 | `oracle_explain_plan` | Execution plan for a read-only statement |

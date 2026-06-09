@@ -16,7 +16,7 @@ use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::ToolDispatch;
 use oraclemcp_db::{
     DbError, OracleBind, OracleConnection, QueryCaps, SerializeOptions, compile_errors,
-    describe_columns, explain_plan, get_ddl, list_objects, read_query, search_source,
+    describe_columns, explain_plan, get_ddl, get_source, list_objects, read_query, search_source,
     serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
@@ -28,6 +28,8 @@ use serde_json::{Value, json};
 
 /// Default cap on `oracle_search_source` result rows when the caller omits it.
 const DEFAULT_SEARCH_MAX_ROWS: usize = 200;
+/// Default cap on `oracle_get_source` source text when the caller omits it.
+const DEFAULT_SOURCE_MAX_CHARS: usize = 1_000_000;
 
 /// The dispatcher: owns the (single) live connection behind a `std::sync::Mutex`
 /// so dispatch stays sync and the connection is never shared across threads
@@ -78,6 +80,15 @@ struct GetDdlArgs {
     object_type: String,
     owner: String,
     name: String,
+}
+
+#[derive(Deserialize)]
+struct GetSourceArgs {
+    owner: String,
+    name: String,
+    object_type: String,
+    #[serde(default)]
+    max_chars: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -242,6 +253,12 @@ impl ToolDispatch for OracleDispatcher {
                 let a: GetDdlArgs = parse_args(name, args)?;
                 get_ddl(conn, &a.object_type, &a.owner, &a.name).map(|ddl| json!({ "ddl": ddl }))
             }
+            "oracle_get_source" => {
+                let a: GetSourceArgs = parse_args(name, args)?;
+                let max_chars = a.max_chars.unwrap_or(DEFAULT_SOURCE_MAX_CHARS);
+                get_source(conn, &a.owner, &a.name, &a.object_type, max_chars)
+                    .map(|source| json!({ "source": source }))
+            }
             "oracle_compile_errors" => {
                 let a: CompileErrorsArgs = parse_args(name, args)?;
                 compile_errors(conn, &a.owner, &a.name)
@@ -361,6 +378,9 @@ mod tests {
             "oracle_describe" => json!({ "owner": "HR", "table": "EMPLOYEES" }),
             "oracle_get_ddl" => {
                 json!({ "object_type": "TABLE", "owner": "HR", "name": "EMPLOYEES" })
+            }
+            "oracle_get_source" => {
+                json!({ "object_type": "PACKAGE", "owner": "HR", "name": "EMP_API" })
             }
             "oracle_compile_errors" => json!({ "owner": "HR", "name": "PKG" }),
             "oracle_search_source" => json!({ "owner": "HR", "needle": "commit" }),

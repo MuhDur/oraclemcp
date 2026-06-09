@@ -15,13 +15,14 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 9] = [
+pub const TOOL_NAMES: [&str; 10] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_query",
     "oracle_schema_inspect",
     "oracle_describe",
     "oracle_get_ddl",
+    "oracle_get_source",
     "oracle_compile_errors",
     "oracle_search_source",
     "oracle_explain_plan",
@@ -125,6 +126,23 @@ pub fn tool_registry() -> ToolRegistry {
                 "name": { "type": "string", "description": "Object name (case-insensitive)." }
             }),
             &["object_type", "owner", "name"],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_get_source",
+            ToolTier::FoundationLiveDb,
+            "Fetch an object's full source text from ALL_SOURCE with a character cap.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Schema owner (case-insensitive)." },
+                "name": { "type": "string", "description": "Object name (case-insensitive)." },
+                "object_type": { "type": "string", "description": "Supported source type: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY." },
+                "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum source characters to return (default 1000000)." }
+            }),
+            &["owner", "name", "object_type"],
         )),
     );
 

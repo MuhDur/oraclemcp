@@ -13,6 +13,7 @@
 use crate::connection::OracleConnection;
 use crate::error::DbError;
 use crate::types::{OracleBind, OracleRow};
+use serde::{Deserialize, Serialize};
 
 /// A simple unquoted Oracle identifier (≤ 30 chars). Rejects injection.
 #[must_use]
@@ -40,10 +41,51 @@ const DDL_OBJECT_TYPES: &[&str] = &[
     "SYNONYM",
 ];
 
+/// The `ALL_SOURCE.TYPE` values we expose for source retrieval.
+const SOURCE_OBJECT_TYPES: &[(&str, &str)] = &[
+    ("PACKAGE", "PACKAGE"),
+    ("PACKAGE_BODY", "PACKAGE BODY"),
+    ("PACKAGE BODY", "PACKAGE BODY"),
+    ("PROCEDURE", "PROCEDURE"),
+    ("FUNCTION", "FUNCTION"),
+    ("TRIGGER", "TRIGGER"),
+    ("TYPE", "TYPE"),
+    ("TYPE_BODY", "TYPE BODY"),
+    ("TYPE BODY", "TYPE BODY"),
+];
+
+/// Full source text plus truncation metadata.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceText {
+    /// Schema owner.
+    pub owner: String,
+    /// Object name.
+    pub name: String,
+    /// Normalized `ALL_SOURCE.TYPE`.
+    pub object_type: String,
+    /// Concatenated source text.
+    pub source: String,
+    /// Number of source rows read.
+    pub line_count: usize,
+    /// Characters in the untruncated source.
+    pub char_count: usize,
+    /// Whether `source` was truncated to the requested cap.
+    pub truncated: bool,
+}
+
 /// Whether `t` is an allowlisted `DBMS_METADATA` object type.
 #[must_use]
 pub fn is_ddl_object_type(t: &str) -> bool {
     DDL_OBJECT_TYPES.contains(&t.to_ascii_uppercase().as_str())
+}
+
+/// Normalize a supported source object type to `ALL_SOURCE.TYPE`.
+#[must_use]
+pub fn normalize_source_object_type(t: &str) -> Option<&'static str> {
+    let ty = t.trim().to_ascii_uppercase();
+    SOURCE_OBJECT_TYPES
+        .iter()
+        .find_map(|(input, normalized)| (*input == ty).then_some(*normalized))
 }
 
 /// `schema_inspect`: objects in a schema, optionally filtered by type. Owner +
@@ -151,6 +193,59 @@ pub fn search_source(
     )
 }
 
+/// Full source text for one object from `ALL_SOURCE`, capped by characters.
+pub fn get_source(
+    conn: &dyn OracleConnection,
+    owner: &str,
+    name: &str,
+    object_type: &str,
+    max_chars: usize,
+) -> Result<SourceText, DbError> {
+    let Some(source_type) = normalize_source_object_type(object_type) else {
+        return Err(DbError::Query(format!(
+            "unsupported source object type: {object_type:?}"
+        )));
+    };
+    let sql = "SELECT line, text FROM all_source \
+               WHERE owner = :1 AND name = :2 AND type = :3 \
+               ORDER BY line";
+    let rows = conn.query_rows(
+        sql,
+        &[
+            OracleBind::from(owner.to_ascii_uppercase()),
+            OracleBind::from(name.to_ascii_uppercase()),
+            OracleBind::from(source_type),
+        ],
+    )?;
+
+    let cap = max_chars.max(1);
+    let mut source = String::new();
+    let mut char_count = 0usize;
+    let mut truncated = false;
+    for row in &rows {
+        let text = row.text("TEXT").unwrap_or_default();
+        let text_chars = text.chars().count();
+        if !truncated && char_count.saturating_add(text_chars) <= cap {
+            source.push_str(text);
+        } else if !truncated {
+            let remaining = cap.saturating_sub(char_count);
+            source.extend(text.chars().take(remaining));
+            truncated = true;
+        }
+        char_count = char_count.saturating_add(text_chars);
+    }
+
+    Ok(SourceText {
+        owner: owner.to_ascii_uppercase(),
+        name: name.to_ascii_uppercase(),
+        object_type: source_type.to_owned(),
+        source,
+        line_count: rows.len(),
+        char_count,
+        truncated,
+    })
+}
+
 /// Safe data sampling: the first `n` rows of a table. Schema/table are validated
 /// identifiers (they cannot be bound); `n` is bound.
 pub fn sample_rows(
@@ -200,6 +295,52 @@ pub fn explain_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{OracleBackend, OracleCell, OracleConnectionInfo};
+
+    struct SourceMock;
+
+    impl OracleConnection for SourceMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        fn query_rows(&self, _sql: &str, _binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+            Ok(vec![
+                OracleRow {
+                    columns: vec![(
+                        "TEXT".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("BEGIN\n".to_owned())),
+                    )],
+                },
+                OracleRow {
+                    columns: vec![(
+                        "TEXT".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("  NULL;\nEND;\n".to_owned())),
+                    )],
+                },
+            ])
+        }
+
+        fn execute(&self, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        fn commit(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        fn rollback(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn identifier_and_type_validation() {
@@ -208,6 +349,24 @@ mod tests {
         assert!(is_ddl_object_type("table"));
         assert!(is_ddl_object_type("PACKAGE_BODY"));
         assert!(!is_ddl_object_type("ANYTHING_ELSE"));
+        assert_eq!(
+            normalize_source_object_type("package_body"),
+            Some("PACKAGE BODY")
+        );
+        assert_eq!(normalize_source_object_type("TYPE BODY"), Some("TYPE BODY"));
+        assert_eq!(normalize_source_object_type("TABLE"), None);
+    }
+
+    #[test]
+    fn get_source_caps_text_and_reports_metadata() {
+        let source = get_source(&SourceMock, "hr", "emp_api", "package_body", 8).unwrap();
+        assert_eq!(source.owner, "HR");
+        assert_eq!(source.name, "EMP_API");
+        assert_eq!(source.object_type, "PACKAGE BODY");
+        assert_eq!(source.line_count, 2);
+        assert_eq!(source.char_count, "BEGIN\n  NULL;\nEND;\n".chars().count());
+        assert_eq!(source.source, "BEGIN\n  ");
+        assert!(source.truncated);
     }
 
     // The query-builder shapes are exercised by the live tests; the validation
