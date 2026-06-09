@@ -17,7 +17,7 @@
 //!
 //! CLI shape (mirrors `plsql-mcp`): a top-level `--robot-json` flag plus
 //! `serve` (stdio default, `--listen <ADDR>` for Streamable HTTP), `info`,
-//! `doctor`, and `capabilities`.
+//! `doctor`, `capabilities`, and `robot-docs guide`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -60,7 +60,7 @@ const CUSTOM_TOOLS_HMAC_KEY_ENV: &str = "ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY";
 )]
 struct Cli {
     /// Emit a single JSON object on stdout instead of human text.
-    #[arg(long, global = true)]
+    #[arg(long, visible_alias = "json", global = true)]
     robot_json: bool,
 
     #[command(subcommand)]
@@ -101,6 +101,18 @@ enum Command {
     Profiles,
     /// Print the capabilities report (tools, level, feature tiers) as JSON.
     Capabilities,
+    /// Print an agent-oriented usage guide from the binary itself.
+    #[command(name = "robot-docs", alias = "robot_docs")]
+    RobotDocs {
+        #[command(subcommand)]
+        command: Option<RobotDocsCommand>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum RobotDocsCommand {
+    /// Print the compact agent guide.
+    Guide,
 }
 
 fn main() -> ExitCode {
@@ -129,6 +141,9 @@ fn main() -> ExitCode {
         Command::Doctor { profile } => run_doctor_cmd(robot_json, profile),
         Command::Profiles => run_profiles(robot_json),
         Command::Capabilities => run_capabilities(robot_json),
+        Command::RobotDocs { command } => match command {
+            None | Some(RobotDocsCommand::Guide) => run_robot_docs_guide(robot_json),
+        },
     }
 }
 
@@ -565,6 +580,142 @@ fn run_capabilities(robot_json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn robot_docs_guide_json() -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "guide_version": 1,
+        "binary": "oraclemcp",
+        "structured_output": {
+            "flag": "--robot-json",
+            "alias": "--json",
+            "contract": "stdout is compact JSON; diagnostics go to stderr"
+        },
+        "first_commands": [
+            {
+                "intent": "discover configured profiles without opening a database connection",
+                "command": "oraclemcp --json profiles"
+            },
+            {
+                "intent": "run offline diagnostics",
+                "command": "oraclemcp --json doctor"
+            },
+            {
+                "intent": "run profile-backed diagnostics",
+                "command": "oraclemcp --json doctor --profile <profile>"
+            },
+            {
+                "intent": "inspect the MCP tool surface",
+                "command": "oraclemcp --json capabilities"
+            },
+            {
+                "intent": "start stdio MCP for a local agent",
+                "command": "oraclemcp serve --profile <profile> --allow-no-auth"
+            }
+        ],
+        "mcp_workflows": [
+            {
+                "intent": "read data safely",
+                "steps": [
+                    "oracle_list_profiles",
+                    "oracle_switch_profile if needed",
+                    "oracle_preview_sql",
+                    "oracle_query"
+                ]
+            },
+            {
+                "intent": "commit DML deliberately",
+                "steps": [
+                    "oracle_preview_sql",
+                    "oracle_set_session_level when the preview asks for step-up",
+                    "oracle_execute with commit=false for rollback preview",
+                    "oracle_execute with commit=true and execute_confirmation.confirm only when committing"
+                ]
+            },
+            {
+                "intent": "apply DDL deliberately",
+                "steps": [
+                    "oracle_preview_sql or oracle_create_or_replace without execute=true",
+                    "oracle_set_session_level with level=DDL when permitted",
+                    "oracle_create_or_replace or oracle_execute with commit=true and the preview confirmation token"
+                ]
+            }
+        ],
+        "safety_model": {
+            "levels": ["READ_ONLY", "READ_WRITE", "DDL", "ADMIN"],
+            "default_level": "READ_ONLY",
+            "ceiling": "profile max_level is immutable for the running profile",
+            "writes": "DML rolls back by default; commit requires a preview-derived confirmation token",
+            "ddl_admin": "DDL and ADMIN statements require commit=true plus a confirmation token because Oracle cannot rollback-preview them"
+        },
+        "config": {
+            "profiles": "~/.config/oraclemcp/profiles.toml or ORACLEMCP_CONFIG",
+            "custom_tools": "~/.config/oraclemcp/tools.d/*.toml or ORACLEMCP_TOOLS_DIR",
+            "secret_refs": "prefer credential_ref over literal passwords"
+        },
+        "exit_codes": [
+            { "code": 0, "meaning": "success" },
+            { "code": 2, "meaning": "invalid arguments, config error, failed diagnostics, or startup safety block" }
+        ]
+    })
+}
+
+fn robot_docs_guide_text() -> &'static str {
+    r#"oraclemcp robot-docs guide
+
+Output contract
+- Use --robot-json or --json for compact machine-readable stdout.
+- Diagnostics and serve startup status are written to stderr.
+- Read-only commands do not open a database unless their command explicitly says so.
+
+First commands
+- oraclemcp --json profiles
+- oraclemcp --json doctor
+- oraclemcp --json doctor --profile <profile>
+- oraclemcp --json capabilities
+- oraclemcp serve --profile <profile> --allow-no-auth
+
+MCP read workflow
+1. oracle_list_profiles
+2. oracle_switch_profile if the active profile is not the target profile
+3. oracle_preview_sql to classify raw SQL before running it
+4. oracle_query for proven read-only SELECT/WITH statements
+
+MCP write workflow
+1. oracle_preview_sql
+2. oracle_set_session_level if the preview requires step-up and the profile ceiling permits it
+3. oracle_execute with commit=false for rollback preview of DML
+4. oracle_execute with commit=true and execute_confirmation.confirm only when committing
+
+MCP DDL workflow
+1. oracle_preview_sql or oracle_create_or_replace without execute=true
+2. oracle_set_session_level with level=DDL when permitted by the profile ceiling
+3. oracle_create_or_replace or oracle_execute with commit=true and the preview confirmation token
+
+Safety model
+- Levels are ordered READ_ONLY < READ_WRITE < DDL < ADMIN.
+- Profiles default to READ_ONLY and cannot be raised above max_level at runtime.
+- DML rolls back by default.
+- DDL and ADMIN require commit=true plus confirmation because Oracle cannot rollback-preview them.
+
+Configuration
+- Profiles: ~/.config/oraclemcp/profiles.toml or ORACLEMCP_CONFIG.
+- Custom tools: ~/.config/oraclemcp/tools.d/*.toml or ORACLEMCP_TOOLS_DIR.
+- Prefer credential_ref over literal passwords.
+"#
+}
+
+fn run_robot_docs_guide(robot_json: bool) -> ExitCode {
+    if robot_json {
+        println!(
+            "{}",
+            serde_json::to_string(&robot_docs_guide_json()).unwrap()
+        );
+    } else {
+        print!("{}", robot_docs_guide_text());
+    }
+    ExitCode::SUCCESS
+}
+
 fn profiles_json(cfg: &OracleMcpConfig) -> serde_json::Value {
     let profiles = cfg
         .list_profiles()
@@ -855,6 +1006,59 @@ mod tests {
         let text = profiles_text(&cfg);
         assert!(text.contains("no profiles configured"));
         assert!(text.contains("ORACLEMCP_CONFIG"));
+    }
+
+    #[test]
+    fn json_alias_is_accepted_before_and_after_subcommand() {
+        let before = Cli::try_parse_from(["oraclemcp", "--json", "profiles"]).expect("parse");
+        assert!(before.robot_json);
+        assert!(matches!(before.command, Some(Command::Profiles)));
+
+        let after = Cli::try_parse_from(["oraclemcp", "profiles", "--json"]).expect("parse");
+        assert!(after.robot_json);
+        assert!(matches!(after.command, Some(Command::Profiles)));
+    }
+
+    #[test]
+    fn robot_docs_guide_is_available_with_or_without_guide_subcommand() {
+        let bare = Cli::try_parse_from(["oraclemcp", "robot-docs"]).expect("parse");
+        assert!(matches!(
+            bare.command,
+            Some(Command::RobotDocs { command: None })
+        ));
+
+        let explicit = Cli::try_parse_from(["oraclemcp", "robot-docs", "guide"]).expect("parse");
+        assert!(matches!(
+            explicit.command,
+            Some(Command::RobotDocs {
+                command: Some(RobotDocsCommand::Guide)
+            })
+        ));
+    }
+
+    #[test]
+    fn robot_docs_guide_outputs_agent_workflows() {
+        let text = robot_docs_guide_text();
+        assert!(text.contains("oraclemcp robot-docs guide"));
+        assert!(text.contains("oracle_preview_sql"));
+        assert!(text.contains("oracle_execute"));
+        assert!(text.contains("READ_ONLY < READ_WRITE < DDL < ADMIN"));
+
+        let out = robot_docs_guide_json();
+        assert_eq!(out["ok"], serde_json::json!(true));
+        assert_eq!(
+            out["structured_output"]["alias"],
+            serde_json::json!("--json")
+        );
+        assert_eq!(
+            out["safety_model"]["levels"],
+            serde_json::json!(["READ_ONLY", "READ_WRITE", "DDL", "ADMIN"])
+        );
+        assert!(
+            serde_json::to_string(&out)
+                .expect("json")
+                .contains("oracle_preview_sql")
+        );
     }
 
     fn custom_def(name: &str) -> CustomToolDef {
