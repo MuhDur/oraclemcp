@@ -13,13 +13,15 @@
 use std::sync::{Arc, Mutex};
 
 use oraclemcp_config::OracleMcpConfig;
-use oraclemcp_core::ToolDispatch;
+use oraclemcp_core::{
+    CustomToolCatalog, CustomToolExecutor, ToolBody, ToolDispatch, execute_custom_tool,
+};
 use oraclemcp_db::{
     DbError, OracleBind, OracleConnection, QueryCaps, SerializeOptions, compile_errors,
     describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
     execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl, get_source,
     get_sources_by_name, list_objects, list_schemas, plscope_identifiers, plscope_statements,
-    read_lob, read_query, sample_rows, search_source, serialize_row,
+    read_lob, read_query, read_query_named, sample_rows, search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
@@ -61,6 +63,10 @@ const MAX_QUERY_BLOB_BYTES: usize = 5 * 1024 * 1024;
 pub type ProfileConnector =
     dyn Fn(&str) -> Result<Box<dyn OracleConnection>, DbError> + Send + Sync + 'static;
 
+/// Profile-scoped custom-tool loader used by `oracle_switch_profile`.
+pub type CustomToolLoader =
+    dyn Fn(&SessionLevelState) -> Result<CustomToolCatalog, ErrorEnvelope> + Send + Sync + 'static;
+
 fn default_read_only_level() -> SessionLevelState {
     SessionLevelState::new(OperatingLevel::ReadOnly, false)
 }
@@ -79,6 +85,7 @@ struct DispatcherState {
     conn: Box<dyn OracleConnection>,
     active_profile: Option<String>,
     level: SessionLevelState,
+    custom_catalog: CustomToolCatalog,
 }
 
 /// The dispatcher: owns the live connection behind a `std::sync::Mutex` so
@@ -87,6 +94,7 @@ struct DispatcherState {
 pub struct OracleDispatcher {
     state: Mutex<DispatcherState>,
     connector: Option<Arc<ProfileConnector>>,
+    custom_loader: Option<Arc<CustomToolLoader>>,
 }
 
 impl OracleDispatcher {
@@ -114,8 +122,10 @@ impl OracleDispatcher {
                 conn,
                 active_profile,
                 level,
+                custom_catalog: CustomToolCatalog::default(),
             }),
             connector: None,
+            custom_loader: None,
         }
     }
 
@@ -126,13 +136,34 @@ impl OracleDispatcher {
         level: SessionLevelState,
         connector: Arc<ProfileConnector>,
     ) -> Self {
+        Self::new_switchable_with_custom_tools(
+            conn,
+            active_profile,
+            level,
+            connector,
+            CustomToolCatalog::default(),
+            None,
+        )
+    }
+
+    /// Build a switchable dispatcher with a profile-scoped custom-tool catalog.
+    pub fn new_switchable_with_custom_tools(
+        conn: Box<dyn OracleConnection>,
+        active_profile: Option<String>,
+        level: SessionLevelState,
+        connector: Arc<ProfileConnector>,
+        custom_catalog: CustomToolCatalog,
+        custom_loader: Option<Arc<CustomToolLoader>>,
+    ) -> Self {
         OracleDispatcher {
             state: Mutex::new(DispatcherState {
                 conn,
                 active_profile,
                 level,
+                custom_catalog,
             }),
             connector: Some(connector),
+            custom_loader,
         }
     }
 }
@@ -511,6 +542,48 @@ fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
     })))
 }
 
+struct ReadOnlyCustomToolExecutor<'a> {
+    conn: &'a dyn OracleConnection,
+}
+
+impl CustomToolExecutor for ReadOnlyCustomToolExecutor<'_> {
+    fn run(
+        &self,
+        body: ToolBody<'_>,
+        level: OperatingLevel,
+        binds: &[(String, OracleBind)],
+    ) -> Result<Value, ErrorEnvelope> {
+        if level > OperatingLevel::ReadOnly {
+            return Err(ErrorEnvelope::new(
+                ErrorClass::OperatingLevelTooLow,
+                format!(
+                    "custom tool requires {} but this server executes only READ_ONLY custom tools",
+                    level.as_str()
+                ),
+            )
+            .with_next_step(
+                "move write or DDL workflows behind a separate guarded execution service",
+            ));
+        }
+
+        let sql = match body {
+            ToolBody::InlineSql(sql) => sql.to_owned(),
+            ToolBody::PackageCall(call) => format!("SELECT {call} AS VALUE FROM dual"),
+        };
+        ensure_read_only(&sql)?;
+        read_query_named(
+            self.conn,
+            &sql,
+            binds,
+            QueryCaps::default(),
+            0,
+            &SerializeOptions::default(),
+        )
+        .map(|resp| serde_json::to_value(resp).unwrap_or(Value::Null))
+        .map_err(DbError::into_envelope)
+    }
+}
+
 fn preview_sql(sql: &str, session: &SessionLevelState) -> Value {
     let decision = Classifier::new(ClassifierConfig::new()).classify(sql);
     let gate = decision.gate(session);
@@ -591,15 +664,22 @@ impl ToolDispatch for OracleDispatcher {
 
             let new_conn = connector(&a.profile).map_err(DbError::into_envelope)?;
             let connection_info = new_conn.describe().ok();
+            let new_level = profile_level(&a.profile);
+            let new_custom_catalog = match &self.custom_loader {
+                Some(loader) => loader(&new_level)?,
+                None => CustomToolCatalog::default(),
+            };
             let mut state = self.state.lock().map_err(|_| {
                 ErrorEnvelope::new(ErrorClass::Internal, "connection mutex poisoned")
             })?;
             state.conn = new_conn;
             state.active_profile = Some(a.profile.clone());
-            state.level = profile_level(&a.profile);
+            state.level = new_level;
+            state.custom_catalog = new_custom_catalog;
             return Ok(json!({
                 "active_profile": a.profile,
                 "connection": connection_info,
+                "custom_tool_count": state.custom_catalog.len(),
             }));
         }
 
@@ -886,6 +966,10 @@ impl ToolDispatch for OracleDispatcher {
                     .map(|rows| json!({ "plan": rows_to_json(&rows) }))
             }
             other => {
+                if let Some(loaded) = state.custom_catalog.get(other) {
+                    let executor = ReadOnlyCustomToolExecutor { conn };
+                    return execute_custom_tool(loaded, &args, &executor);
+                }
                 return Err(invalid_args(format!(
                     "unknown tool: {other:?} (call oracle_capabilities for the tool surface)"
                 )));
@@ -961,6 +1045,18 @@ mod tests {
                     ),
                 ],
             }])
+        }
+        fn query_rows_named(
+            &self,
+            sql: &str,
+            b: &[(String, OracleBind)],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            assert!(
+                sql.contains(":id"),
+                "custom SQL should preserve named bind references: {sql}"
+            );
+            assert_eq!(b, &[("id".to_owned(), OracleBind::I64(7))]);
+            self.query_rows(sql, &[])
         }
         fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
             Ok(0)
@@ -1394,6 +1490,46 @@ mod tests {
             .dispatch("oracle_nonexistent", json!({}))
             .expect_err("unknown tool errors");
         assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+    }
+
+    #[test]
+    fn custom_read_only_tool_dispatches_with_named_binds() {
+        let defs = oraclemcp_core::parse_tools_file(
+            r#"
+            [[tool]]
+            name = "app_customer_lookup"
+            description = "Lookup a customer row by id"
+            sql = "SELECT id, name FROM app_customers WHERE id = :id"
+            output_mode = "rows"
+
+            [[tool.params]]
+            name = "id"
+            type = "integer"
+            required = true
+            description = "Customer id"
+            "#,
+        )
+        .expect("custom tool parses");
+        let loaded = oraclemcp_core::load_tools(
+            &defs,
+            &Classifier::new(ClassifierConfig::new()),
+            OperatingLevel::ReadOnly,
+        )
+        .expect("custom tool loads");
+        let dispatcher = OracleDispatcher::new_switchable_with_custom_tools(
+            Box::new(OneRowMock),
+            Some("dev".to_owned()),
+            default_read_only_level(),
+            Arc::new(|_| Ok(Box::new(OneRowMock))),
+            CustomToolCatalog::new(loaded),
+            None,
+        );
+
+        let out = dispatcher
+            .dispatch("app_customer_lookup", json!({ "id": 7 }))
+            .expect("custom tool dispatches");
+        assert_eq!(out["row_count"], json!(1));
+        assert_eq!(out["rows"][0]["OBJECT_NAME"], json!("EMPLOYEES"));
     }
 
     #[test]

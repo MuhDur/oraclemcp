@@ -22,6 +22,19 @@ pub trait OracleConnection: Send {
     /// Run a query, binding `binds` positionally (`:1`, `:2`, …). Values are
     /// always bound, never interpolated.
     fn query_rows(&self, sql: &str, binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError>;
+    /// Run a query, binding `binds` by name (`:name`). Values are always bound,
+    /// never interpolated. Backends that cannot bind by name should fail
+    /// explicitly instead of trying to rewrite SQL.
+    fn query_rows_named(
+        &self,
+        sql: &str,
+        binds: &[(String, OracleBind)],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let _ = (sql, binds);
+        Err(DbError::Query(
+            "named binds are not supported by this Oracle backend".to_owned(),
+        ))
+    }
     /// Run a DML/DDL statement; returns rows affected (`SQL%ROWCOUNT`).
     fn execute(&self, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError>;
 
@@ -74,7 +87,7 @@ mod driver {
     use crate::types::{
         OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow, OracleSessionIdentity,
     };
-    use oracle::sql_type::ToSql;
+    use oracle::{ResultSet, Row, sql_type::ToSql};
 
     /// Fold a wallet directory into an EZConnect-Plus descriptor so we never
     /// have to mutate `TNS_ADMIN` (which needs `unsafe std::env::set_var` under
@@ -209,6 +222,26 @@ mod driver {
         }
     }
 
+    fn collect_rows(result_set: ResultSet<'static, Row>) -> Result<Vec<OracleRow>, DbError> {
+        let col_info: Vec<(String, String)> = result_set
+            .column_info()
+            .iter()
+            .map(|ci| (ci.name().to_owned(), ci.oracle_type().to_string()))
+            .collect();
+        let mut out = Vec::new();
+        for row in result_set {
+            let row = row.map_err(|e| DbError::Query(e.to_string()))?;
+            let mut cells = Vec::with_capacity(col_info.len());
+            for (i, (name, oratype)) in col_info.iter().enumerate() {
+                let value: Option<String> =
+                    row.get(i).map_err(|e| DbError::Query(e.to_string()))?;
+                cells.push((name.clone(), OracleCell::new(oratype.clone(), value)));
+            }
+            out.push(OracleRow { columns: cells });
+        }
+        Ok(out)
+    }
+
     impl super::OracleConnection for RustOracleConnection {
         fn backend(&self) -> crate::types::OracleBackend {
             crate::types::OracleBackend::RustOracle
@@ -317,23 +350,27 @@ mod driver {
                 .inner
                 .query(sql, &refs)
                 .map_err(|e| DbError::Query(e.to_string()))?;
-            let col_info: Vec<(String, String)> = result_set
-                .column_info()
+            collect_rows(result_set)
+        }
+
+        fn query_rows_named(
+            &self,
+            sql: &str,
+            binds: &[(String, crate::types::OracleBind)],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            let params: Vec<(String, Box<dyn ToSql>)> = binds
                 .iter()
-                .map(|ci| (ci.name().to_owned(), ci.oracle_type().to_string()))
+                .map(|(name, bind)| (name.clone(), to_param(bind)))
                 .collect();
-            let mut out = Vec::new();
-            for row in result_set {
-                let row = row.map_err(|e| DbError::Query(e.to_string()))?;
-                let mut cells = Vec::with_capacity(col_info.len());
-                for (i, (name, oratype)) in col_info.iter().enumerate() {
-                    let value: Option<String> =
-                        row.get(i).map_err(|e| DbError::Query(e.to_string()))?;
-                    cells.push((name.clone(), OracleCell::new(oratype.clone(), value)));
-                }
-                out.push(OracleRow { columns: cells });
-            }
-            Ok(out)
+            let refs: Vec<(&str, &dyn ToSql)> = params
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_ref()))
+                .collect();
+            let result_set = self
+                .inner
+                .query_named(sql, &refs)
+                .map_err(|e| DbError::Query(e.to_string()))?;
+            collect_rows(result_set)
         }
 
         fn execute(&self, sql: &str, binds: &[crate::types::OracleBind]) -> Result<u64, DbError> {

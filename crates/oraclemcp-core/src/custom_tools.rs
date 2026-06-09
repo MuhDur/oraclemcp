@@ -560,7 +560,7 @@ fn coerce_bind(p: &ParamDef, v: &Value) -> Option<OracleBind> {
 /// Runs a custom tool's body with bound params at the granted level (engine/DB
 /// side). Injected so this module stays engine-free and unit-testable; the
 /// implementation reuses the Phase-1 read/exec path + type/NLS serializer.
-pub trait CustomToolExecutor: Send + Sync {
+pub trait CustomToolExecutor {
     /// Execute `body` at `level` with the bound params; return structured JSON.
     fn run(
         &self,

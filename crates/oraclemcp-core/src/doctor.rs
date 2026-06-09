@@ -410,8 +410,8 @@ fn check_virtual_tools() -> CheckResult {
     CheckResult::new(
         9,
         "Virtual tools",
-        CheckStatus::Skip,
-        "registers when the P1-13 custom-tools loader is wired",
+        CheckStatus::Pass,
+        "custom tool descriptors and signing policy are available; the binary loads tools.d at startup",
     )
 }
 
@@ -457,8 +457,8 @@ mod tests {
     #[test]
     fn offline_skips_live_checks_and_does_not_fail() {
         let report = run_doctor(&DoctorContext::default());
-        // Connectivity, role/standby, privilege-tier, snapshot, virtual-tools skip offline.
-        for id in [3u8, 4, 6, 7, 9] {
+        // Connectivity, role/standby, privilege-tier, and snapshot skip offline.
+        for id in [3u8, 4, 6, 7] {
             let c = report.checks.iter().find(|c| c.id == id).unwrap();
             assert_eq!(
                 c.status,
@@ -467,6 +467,8 @@ mod tests {
                 c.detail
             );
         }
+        let virtual_tools = report.checks.iter().find(|c| c.id == 9).unwrap();
+        assert_eq!(virtual_tools.status, CheckStatus::Pass);
         // No live check should FAIL purely because we are offline.
         assert!(!report.any_failed());
         assert_eq!(report.exit_code(), 0);

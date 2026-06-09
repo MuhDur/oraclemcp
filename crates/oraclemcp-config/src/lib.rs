@@ -39,11 +39,13 @@ pub const CONFIG_PATH_ENV: &str = "ORACLEMCP_CONFIG";
 
 const IGNORED_ENV_KEYS: &[&str] = &[
     "config",
+    "custom_tools_hmac_key",
     "log",
     "stdio_token",
     "test_dsn",
     "test_password",
     "test_user",
+    "tools_dir",
 ];
 
 fn default_schema_version() -> u32 {
@@ -446,6 +448,8 @@ mod tests {
             jail.set_env("HOME", home);
             jail.set_env("ORACLEMCP_LOG", "debug");
             jail.set_env("ORACLEMCP_STDIO_TOKEN", "token-for-stdio");
+            jail.set_env("ORACLEMCP_TOOLS_DIR", "/tmp/oraclemcp-tools");
+            jail.set_env("ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY", "test-hmac-key");
             jail.set_env("ORACLEMCP_TEST_DSN", "localhost:1521/FREEPDB1");
 
             let cfg = OracleMcpConfig::load(None).expect("control env vars are ignored");

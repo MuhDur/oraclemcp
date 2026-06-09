@@ -141,6 +141,41 @@ Agents can inspect available profiles with `oracle_list_profiles` and reconnect
 the running MCP server with `oracle_switch_profile`. A failed switch leaves the
 current connection in place.
 
+### Operator-defined read-only tools
+
+Operators can expose environment-specific read helpers without forking the
+server by placing TOML files in `~/.config/oraclemcp/tools.d/*.toml`. Set
+`ORACLEMCP_TOOLS_DIR` to use a different directory. Definitions are loaded and
+advertised when `serve` starts, then revalidated before `oracle_switch_profile`
+replaces the active connection; malformed files fail closed instead of silently
+disappearing.
+
+```toml
+[[tool]]
+name = "app_customer_lookup"
+description = "Lookup customer rows by id"
+sql = "SELECT id, name, status FROM app_customers WHERE id = :id"
+output_mode = "rows"
+
+[[tool.params]]
+name = "id"
+type = "integer"
+required = true
+description = "Customer id"
+```
+
+Custom tool SQL uses named binds (`:id` above). Agent-supplied values are typed
+from `params` and bound by name; they are never interpolated into SQL text. The
+binary only loads definitions the classifier proves are `READ_ONLY`, even if a
+profile permits a higher ceiling. Write, DDL, PL/SQL block, and unproven package
+call definitions are rejected at load time.
+
+On protected profiles, every custom tool must carry a valid HMAC signature. Set
+`ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY` in the server environment to verify signed
+definitions. On unprotected profiles, unsigned tools are allowed for local use;
+if any definition includes a `signature`, the same key is required and invalid
+signatures are rejected.
+
 ## Tools
 
 | Tool | Purpose |

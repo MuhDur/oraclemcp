@@ -81,6 +81,32 @@ pub fn read_query(
     let fetch = caps.max_rows.saturating_add(1).max(1);
     let wrapped = paginated_sql(sql, offset, fetch);
     let rows = conn.query_rows(&wrapped, binds)?;
+    Ok(query_response_from_rows(rows, caps, offset, serialize_opts))
+}
+
+/// Execute one page of a read query with named binds (`:name`). This is used by
+/// operator-defined tools, whose SQL is authored in config and naturally refers
+/// to named parameters.
+pub fn read_query_named(
+    conn: &dyn OracleConnection,
+    sql: &str,
+    binds: &[(String, OracleBind)],
+    caps: QueryCaps,
+    offset: usize,
+    serialize_opts: &SerializeOptions,
+) -> Result<QueryResponse, DbError> {
+    let fetch = caps.max_rows.saturating_add(1).max(1);
+    let wrapped = paginated_sql(sql, offset, fetch);
+    let rows = conn.query_rows_named(&wrapped, binds)?;
+    Ok(query_response_from_rows(rows, caps, offset, serialize_opts))
+}
+
+fn query_response_from_rows(
+    rows: Vec<crate::types::OracleRow>,
+    caps: QueryCaps,
+    offset: usize,
+    serialize_opts: &SerializeOptions,
+) -> QueryResponse {
     let more_by_rows = rows.len() > caps.max_rows;
     let page = &rows[..rows.len().min(caps.max_rows)];
 
@@ -111,14 +137,14 @@ pub fn read_query(
         None
     };
 
-    Ok(QueryResponse {
+    QueryResponse {
         columns,
         row_count: out_rows.len(),
         rows: out_rows,
         truncated,
         next_cursor,
         total_bytes,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -158,6 +184,14 @@ mod tests {
                 })
                 .collect())
         }
+        fn query_rows_named(
+            &self,
+            _sql: &str,
+            b: &[(String, OracleBind)],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            assert_eq!(b, &[("id".to_owned(), OracleBind::I64(42))]);
+            self.query_rows("", &[])
+        }
         fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
             Ok(0)
         }
@@ -179,6 +213,25 @@ mod tests {
             &SerializeOptions::default(),
         )
         .expect("read")
+    }
+
+    #[test]
+    fn read_query_named_uses_named_binds_and_paginates() {
+        let caps = QueryCaps {
+            max_rows: 2,
+            max_result_bytes: 1_000_000,
+        };
+        let response = read_query_named(
+            &NRowMock { n: 3 },
+            "SELECT * FROM t WHERE id = :id",
+            &[("id".to_owned(), OracleBind::I64(42))],
+            caps,
+            5,
+            &SerializeOptions::default(),
+        )
+        .expect("read named");
+        assert_eq!(response.row_count, 2);
+        assert_eq!(response.next_cursor.as_deref(), Some("7"));
     }
 
     #[test]
