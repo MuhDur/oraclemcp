@@ -83,6 +83,8 @@ impl CheckResult {
 pub struct DoctorContext<'a> {
     /// A live connection, if one could be opened (enables the live checks).
     pub conn: Option<&'a dyn OracleConnection>,
+    /// Connection/setup error observed before a live connection was available.
+    pub connection_error: Option<String>,
     /// `TNS_ADMIN` (tnsnames/wallet directory), if set.
     pub tns_admin: Option<String>,
     /// A configured wallet location, if any.
@@ -115,16 +117,28 @@ impl DoctorReport {
     /// Machine-readable report.
     #[must_use]
     pub fn to_json(&self) -> Value {
+        self.to_json_with_exit_code(self.exit_code())
+    }
+
+    /// Machine-readable report with a caller-selected process exit code.
+    #[must_use]
+    pub fn to_json_with_exit_code(&self, exit_code: i32) -> Value {
         json!({
             "checks": self.checks,
             "ok": !self.any_failed(),
-            "exit_code": self.exit_code(),
+            "exit_code": exit_code,
         })
     }
 
     /// Human-readable report (one line per check + indented fixes).
     #[must_use]
     pub fn to_text(&self) -> String {
+        self.to_text_with_exit_code(self.exit_code())
+    }
+
+    /// Human-readable report with a caller-selected process exit code.
+    #[must_use]
+    pub fn to_text_with_exit_code(&self, exit_code: i32) -> String {
         let mut out = String::from("oraclemcp doctor\n");
         for c in &self.checks {
             out.push_str(&format!(
@@ -139,7 +153,7 @@ impl DoctorReport {
             }
         }
         let verdict = if self.any_failed() { "FAILED" } else { "ok" };
-        out.push_str(&format!("verdict: {verdict} (exit {})\n", self.exit_code()));
+        out.push_str(&format!("verdict: {verdict} (exit {exit_code})\n"));
         out
     }
 }
@@ -238,6 +252,15 @@ fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
 }
 
 fn check_connectivity(ctx: &DoctorContext) -> CheckResult {
+    if let Some(error) = &ctx.connection_error {
+        return CheckResult::new(
+            3,
+            "Connectivity",
+            CheckStatus::Fail,
+            format!("connect failed: {error}"),
+        )
+        .with_fix("verify the connect string, credentials, and listener reachability");
+    }
     match ctx.conn {
         None => CheckResult::new(
             3,
@@ -264,6 +287,14 @@ fn check_connectivity(ctx: &DoctorContext) -> CheckResult {
 }
 
 fn check_role_standby(ctx: &DoctorContext) -> CheckResult {
+    if ctx.connection_error.is_some() {
+        return CheckResult::new(
+            4,
+            "Role/standby",
+            CheckStatus::Skip,
+            "skipped because connectivity failed",
+        );
+    }
     match ctx.conn {
         None => CheckResult::new(
             4,
@@ -300,7 +331,7 @@ fn check_role_standby(ctx: &DoctorContext) -> CheckResult {
 
 fn check_nls(ctx: &DoctorContext) -> CheckResult {
     let n = canonical_nls_statements().len();
-    let clock = if ctx.conn.is_some() {
+    let clock = if ctx.conn.is_some() && ctx.connection_error.is_none() {
         ""
     } else {
         " (clock-skew sub-check skipped offline)"
@@ -316,6 +347,24 @@ fn check_nls(ctx: &DoctorContext) -> CheckResult {
 }
 
 fn check_privilege_tier(ctx: &DoctorContext) -> CheckResult {
+    if ctx.connection_error.is_some() {
+        return if ctx.protected_profile_writable {
+            CheckResult::new(
+                6,
+                "Privilege tier",
+                CheckStatus::Warn,
+                "a protected profile has max_level above READ_ONLY; live privilege probe skipped because connectivity failed",
+            )
+            .with_fix("set max_level = READ_ONLY (or remove protected), then rerun doctor after connectivity is fixed")
+        } else {
+            CheckResult::new(
+                6,
+                "Privilege tier",
+                CheckStatus::Skip,
+                "skipped because connectivity failed",
+            )
+        };
+    }
     match ctx.conn {
         None => {
             if ctx.protected_profile_writable {
@@ -528,5 +577,42 @@ mod tests {
         let j = report.to_json();
         assert_eq!(j["checks"].as_array().unwrap().len(), 9);
         assert_eq!(j["exit_code"], json!(0));
+    }
+
+    #[test]
+    fn connection_error_fails_connectivity_and_skips_dependent_live_checks() {
+        let ctx = DoctorContext {
+            connection_error: Some("could not open connection".to_owned()),
+            ..DoctorContext::default()
+        };
+        let report = run_doctor(&ctx);
+        assert_eq!(
+            report.checks.iter().find(|c| c.id == 3).unwrap().status,
+            CheckStatus::Fail
+        );
+        assert_eq!(
+            report.checks.iter().find(|c| c.id == 4).unwrap().status,
+            CheckStatus::Skip
+        );
+        assert_eq!(
+            report.checks.iter().find(|c| c.id == 6).unwrap().status,
+            CheckStatus::Skip
+        );
+    }
+
+    #[test]
+    fn renderers_can_use_process_exit_code_override() {
+        let ctx = DoctorContext {
+            tns_admin: Some("/nonexistent/tns/dir/xyz".to_owned()),
+            ..DoctorContext::default()
+        };
+        let report = run_doctor(&ctx);
+        assert_eq!(report.exit_code(), 1);
+        assert_eq!(report.to_json_with_exit_code(2)["exit_code"], json!(2));
+        assert!(
+            report
+                .to_text_with_exit_code(2)
+                .contains("verdict: FAILED (exit 2)")
+        );
     }
 }

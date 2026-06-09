@@ -89,8 +89,13 @@ enum Command {
     },
     /// Print build information (version, enabled features) and exit.
     Info,
-    /// Run offline diagnostics; exit 2 on a blocker.
-    Doctor,
+    /// Run diagnostics; exit 2 on a blocker.
+    Doctor {
+        /// Connect using this named profile and include live connectivity checks.
+        /// Omit for offline diagnostics only.
+        #[arg(long)]
+        profile: Option<String>,
+    },
     /// Print the capabilities report (tools, level, feature tiers) as JSON.
     Capabilities,
 }
@@ -118,7 +123,7 @@ fn main() -> ExitCode {
             profile,
         } => run_serve(listen, allow_no_auth, stdio_token, profile, robot_json),
         Command::Info => run_info(robot_json),
-        Command::Doctor => run_doctor_cmd(robot_json),
+        Command::Doctor { profile } => run_doctor_cmd(robot_json, profile),
         Command::Capabilities => run_capabilities(robot_json),
     }
 }
@@ -192,6 +197,10 @@ fn connect_profile(profile: &str) -> Result<Box<dyn OracleConnection>, DbError> 
             "connection profile `{profile}` not found"
         )));
     };
+    try_open_connection(opts)
+}
+
+fn try_open_connection(opts: OracleConnectOptions) -> Result<Box<dyn OracleConnection>, DbError> {
     #[cfg(feature = "live-db")]
     {
         RustOracleConnection::connect(opts).map(|conn| Box::new(conn) as Box<dyn OracleConnection>)
@@ -210,30 +219,12 @@ fn connect_profile(profile: &str) -> Result<Box<dyn OracleConnection>, DbError> 
 /// way `serve` starts: capabilities/doctor work offline, and live tool calls
 /// return a structured envelope instead of crashing the process.
 fn open_connection(opts: OracleConnectOptions) -> Box<dyn OracleConnection> {
-    // `RustOracleConnection` only implements `OracleConnection` when the
-    // `oracle-driver` feature (pulled by `live-db`) is on. Without it, connect
-    // always fails (`BackendNotCompiled`), so we go straight to the stub and
-    // never need the (unimplemented) trait bound on the real type.
-    #[cfg(feature = "live-db")]
-    {
-        match RustOracleConnection::connect(opts) {
-            Ok(conn) => Box::new(conn),
-            Err(e) => {
-                tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
-                Box::new(stub::StubConnection::new(e))
-            }
+    match try_open_connection(opts) {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
+            Box::new(stub::StubConnection::new(e))
         }
-    }
-    #[cfg(not(feature = "live-db"))]
-    {
-        // Drive `connect` for its error (BackendNotCompiled) so the stub carries
-        // an accurate message; the `Ok` arm is unreachable in this build.
-        let e = match RustOracleConnection::connect(opts) {
-            Ok(_) => unreachable!("offline build cannot open a live connection"),
-            Err(e) => e,
-        };
-        tracing::warn!(error = %e, "no live connection (driver not compiled); live tools will return a structured error envelope");
-        Box::new(stub::StubConnection::new(e))
     }
 }
 
@@ -570,28 +561,87 @@ fn run_capabilities(robot_json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_doctor_cmd(robot_json: bool) -> ExitCode {
-    // Offline doctor context: no live connection (the live subset reports Skip
-    // with a reason). TNS_ADMIN is surfaced if set so its directory check runs.
+fn doctor_process_exit_code(report: &oraclemcp_core::DoctorReport) -> u8 {
+    // Mirror plsql-mcp: a blocker (any failed check) exits 2.
+    if report.any_failed() { 2 } else { 0 }
+}
+
+struct DoctorProfileContext {
+    conn: Option<Box<dyn OracleConnection>>,
+    connection_error: Option<String>,
+    wallet_location: Option<String>,
+    protected_profile_writable: bool,
+}
+
+fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
+    let Some(profile) = profile else {
+        return DoctorProfileContext {
+            conn: None,
+            connection_error: None,
+            wallet_location: None,
+            protected_profile_writable: false,
+        };
+    };
+
+    match resolve_profile_options(Some(profile)) {
+        Ok(Some((_, opts, level))) => {
+            let wallet_location = opts
+                .wallet_location
+                .as_ref()
+                .map(|path| path.display().to_string());
+            let protected_profile_writable =
+                level.is_protected() && level.max_level() > OperatingLevel::ReadOnly;
+            match try_open_connection(opts) {
+                Ok(conn) => DoctorProfileContext {
+                    conn: Some(conn),
+                    connection_error: None,
+                    wallet_location,
+                    protected_profile_writable,
+                },
+                Err(e) => DoctorProfileContext {
+                    conn: None,
+                    connection_error: Some(e.to_string()),
+                    wallet_location,
+                    protected_profile_writable,
+                },
+            }
+        }
+        Ok(None) => DoctorProfileContext {
+            conn: None,
+            connection_error: Some(format!("connection profile `{profile}` not found")),
+            wallet_location: None,
+            protected_profile_writable: false,
+        },
+        Err(e) => DoctorProfileContext {
+            conn: None,
+            connection_error: Some(e.to_string()),
+            wallet_location: None,
+            protected_profile_writable: false,
+        },
+    }
+}
+
+fn run_doctor_cmd(robot_json: bool, profile: Option<String>) -> ExitCode {
+    // Offline by default: no live connection (the live subset reports Skip with
+    // a reason). With --profile, use the configured profile and let the live
+    // checks report connection/auth/role failures as ordinary doctor checks.
+    let profile_ctx = doctor_profile_context(profile.as_deref());
     let ctx = DoctorContext {
-        conn: None,
+        conn: profile_ctx.conn.as_deref(),
+        connection_error: profile_ctx.connection_error,
         tns_admin: std::env::var("TNS_ADMIN").ok(),
-        wallet_location: None,
-        protected_profile_writable: false,
+        wallet_location: profile_ctx.wallet_location,
+        protected_profile_writable: profile_ctx.protected_profile_writable,
     };
     let report = run_doctor(&ctx);
+    let exit_code = doctor_process_exit_code(&report);
     if robot_json {
-        println!("{}", report.to_json());
+        println!("{}", report.to_json_with_exit_code(i32::from(exit_code)));
     } else {
         // The human report is the data here; print it on stdout.
-        print!("{}", report.to_text());
+        print!("{}", report.to_text_with_exit_code(i32::from(exit_code)));
     }
-    // Mirror plsql-mcp: a blocker (any failed check) exits 2.
-    if report.any_failed() {
-        ExitCode::from(2)
-    } else {
-        ExitCode::SUCCESS
-    }
+    ExitCode::from(exit_code)
 }
 
 /// A no-driver / failed-connect stub connection: every operation returns the
@@ -659,6 +709,28 @@ mod tests {
         let err = stub.ping().expect_err("stub always errors");
         // It maps to a structured envelope (no panic).
         let _ = err.into_envelope();
+    }
+
+    #[test]
+    fn doctor_process_exit_code_matches_cli_contract() {
+        let ok = oraclemcp_core::DoctorReport { checks: Vec::new() };
+        assert_eq!(doctor_process_exit_code(&ok), 0);
+
+        let failed = oraclemcp_core::DoctorReport {
+            checks: vec![oraclemcp_core::CheckResult {
+                id: 1,
+                name: "example".to_owned(),
+                status: oraclemcp_core::CheckStatus::Fail,
+                detail: "failed".to_owned(),
+                fix: None,
+            }],
+        };
+        let process_code = doctor_process_exit_code(&failed);
+        assert_eq!(process_code, 2);
+        assert_eq!(
+            failed.to_json_with_exit_code(i32::from(process_code))["exit_code"],
+            serde_json::json!(2)
+        );
     }
 
     fn custom_def(name: &str) -> CustomToolDef {
