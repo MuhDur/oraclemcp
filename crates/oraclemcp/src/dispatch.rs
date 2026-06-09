@@ -2363,7 +2363,10 @@ fn connection_info_json(
                 "active_profile": active_profile,
                 "connected": false,
                 "connection": Value::Null,
-                "connection_error": err.into_envelope().to_json(),
+                "connection_error": err
+                    .into_envelope()
+                    .with_suggested_tool("oracle_list_profiles")
+                    .to_json(),
                 "next_actions": next_actions,
             })
         }
@@ -3316,6 +3319,10 @@ mod tests {
                 json!("RUNTIME_STATE_REQUIRED")
             );
             assert_eq!(
+                out["connection_error"]["suggested_tool"],
+                json!("oracle_list_profiles")
+            );
+            assert_eq!(
                 out["next_actions"][0]["tool"],
                 json!("oracle_list_profiles")
             );
@@ -3404,6 +3411,10 @@ mod tests {
         assert_eq!(
             out["connection_error"]["error_class"],
             json!("RUNTIME_STATE_REQUIRED")
+        );
+        assert_eq!(
+            out["connection_error"]["suggested_tool"],
+            json!("oracle_list_profiles")
         );
 
         let current = dispatcher
