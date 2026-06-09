@@ -261,8 +261,8 @@ fn live_tier1_intelligence_dictionary_tools() {
     );
 
     // compile_errors runs (valid package -> empty is fine).
-    let _ =
-        oraclemcp_db::compile_errors(&conn, "demo", "PKG_AUTONOMOUS").expect("errors query runs");
+    let _ = oraclemcp_db::compile_errors(&conn, "demo", Some("PKG_AUTONOMOUS"))
+        .expect("errors query runs");
 
     // search_source over ALL_SOURCE.
     let hits = oraclemcp_db::search_source(&conn, "demo", "AUTONOMOUS", 50).expect("search");

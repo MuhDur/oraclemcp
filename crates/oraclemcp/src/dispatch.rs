@@ -160,8 +160,10 @@ struct SwitchProfileArgs {
 
 #[derive(Deserialize)]
 struct CompileErrorsArgs {
-    owner: String,
-    name: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -381,8 +383,21 @@ impl ToolDispatch for OracleDispatcher {
             }
             "oracle_compile_errors" => {
                 let a: CompileErrorsArgs = parse_args(name, args)?;
-                compile_errors(conn, &a.owner, &a.name)
-                    .map(|rows| json!({ "errors": rows_to_json(&rows) }))
+                let owner_result: Result<String, DbError> = match a.owner {
+                    Some(owner) => Ok(owner),
+                    None => conn.describe().and_then(|info| {
+                        info.current_schema.ok_or_else(|| {
+                            DbError::Query(
+                                "owner is required because current_schema could not be detected"
+                                    .to_owned(),
+                            )
+                        })
+                    }),
+                };
+                owner_result.and_then(|owner| {
+                    compile_errors(conn, &owner, a.name.as_deref())
+                        .map(|rows| json!({ "errors": rows_to_json(&rows) }))
+                })
             }
             "oracle_search_source" => {
                 let a: SearchSourceArgs = parse_args(name, args)?;
@@ -560,6 +575,15 @@ mod tests {
             .dispatch("oracle_connection_info", json!({}))
             .expect("current connection still usable");
         assert_eq!(out["active_profile"], json!("dev"));
+    }
+
+    #[test]
+    fn compile_errors_can_default_to_current_schema() {
+        let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+        let out = dispatcher
+            .dispatch("oracle_compile_errors", json!({}))
+            .expect("compile errors defaults owner");
+        assert!(out["errors"].is_array());
     }
 
     #[test]

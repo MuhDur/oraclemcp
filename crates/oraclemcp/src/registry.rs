@@ -202,14 +202,14 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_compile_errors",
             ToolTier::FoundationLiveDb,
-            "Retrieve an object's compile errors (ALL_ERRORS).",
+            "Retrieve compile errors for the current schema, an owner, or one object (ALL_ERRORS).",
         )
         .with_input_schema(object_schema(
             json!({
-                "owner": { "type": "string", "description": "Schema owner (case-insensitive)." },
-                "name": { "type": "string", "description": "Object name (case-insensitive)." }
+                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
+                "name": { "type": "string", "description": "Optional object name (case-insensitive). Omit to list all compile errors for the owner/current schema." }
             }),
-            &["owner", "name"],
+            &[],
         )),
     );
 

@@ -173,21 +173,23 @@ pub fn get_ddl(
     Ok(rows.first().and_then(|r| r.text("DDL").map(str::to_owned)))
 }
 
-/// Compile errors for an object (`ALL_ERRORS`; owner + name bound).
+/// Compile errors for an owner, optionally narrowed to one object (`ALL_ERRORS`;
+/// owner + name bound).
 pub fn compile_errors(
     conn: &dyn OracleConnection,
     owner: &str,
-    name: &str,
+    name: Option<&str>,
 ) -> Result<Vec<OracleRow>, DbError> {
     let sql = "SELECT name, type, line, position, text, attribute \
-               FROM all_errors WHERE owner = :1 AND name = :2 \
-               ORDER BY sequence";
+               FROM all_errors \
+               WHERE owner = :1 AND (:2 IS NULL OR name = :2) \
+               ORDER BY name, type, sequence";
+    let name_bind = name.map_or(OracleBind::Null, |n| {
+        OracleBind::from(n.to_ascii_uppercase())
+    });
     conn.query_rows(
         sql,
-        &[
-            OracleBind::from(owner.to_ascii_uppercase()),
-            OracleBind::from(name.to_ascii_uppercase()),
-        ],
+        &[OracleBind::from(owner.to_ascii_uppercase()), name_bind],
     )
 }
 
