@@ -51,22 +51,29 @@ fn is_simple_ident(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '#')
 }
 
-/// The DDL to recompile `owner.name` with PL/Scope identifier + statement
-/// collection enabled. `object_type` is `PACKAGE`/`PACKAGE BODY`/`PROCEDURE`/
-/// `FUNCTION`/`TRIGGER`/`TYPE`/`TYPE BODY`. DDL-level (step-up-gated). Returns an
-/// error if any name is not a simple identifier (injection defense — object
-/// names are not bindable).
-pub fn recompile_with_plscope_statements(
+fn normalize_compile_object_type(object_type: &str) -> String {
+    object_type.trim().replace('_', " ").to_ascii_uppercase()
+}
+
+/// The DDL statements to compile `owner.name`. `object_type` is
+/// `PACKAGE`/`PACKAGE BODY`/`PROCEDURE`/`FUNCTION`/`TRIGGER`/`TYPE`/`TYPE BODY`/
+/// `VIEW`; underscores are accepted for MCP-friendly spellings such as
+/// `PACKAGE_BODY`. When `plscope` is true, the returned statements first enable
+/// PL/Scope identifier + statement collection for the current session. DDL-level
+/// (step-up-gated). Returns an error if any name is not a simple identifier
+/// (injection defense — object names are not bindable).
+pub fn compile_object_statements(
     object_type: &str,
     owner: &str,
     name: &str,
+    plscope: bool,
 ) -> Result<Vec<String>, DbError> {
     if !is_simple_ident(owner) || !is_simple_ident(name) {
         return Err(DbError::Execute(format!(
             "invalid object identifier(s): {owner:?}.{name:?}"
         )));
     }
-    let ty = object_type.trim().to_ascii_uppercase();
+    let ty = normalize_compile_object_type(object_type);
     let compile = match ty.as_str() {
         "PACKAGE BODY" => format!("ALTER PACKAGE {owner}.{name} COMPILE BODY"),
         "TYPE BODY" => format!("ALTER TYPE {owner}.{name} COMPILE BODY"),
@@ -79,10 +86,24 @@ pub fn recompile_with_plscope_statements(
             )));
         }
     };
-    Ok(vec![
-        "ALTER SESSION SET PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL, STATEMENTS:ALL'".to_owned(),
-        compile,
-    ])
+    let mut statements = Vec::new();
+    if plscope {
+        statements.push(
+            "ALTER SESSION SET PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL, STATEMENTS:ALL'".to_owned(),
+        );
+    }
+    statements.push(compile);
+    Ok(statements)
+}
+
+/// The DDL to recompile `owner.name` with PL/Scope identifier + statement
+/// collection enabled. Retained for callers that only need the PL/Scope path.
+pub fn recompile_with_plscope_statements(
+    object_type: &str,
+    owner: &str,
+    name: &str,
+) -> Result<Vec<String>, DbError> {
+    compile_object_statements(object_type, owner, name, true)
 }
 
 fn row_i64(row: &crate::types::OracleRow, col: &str) -> i64 {
@@ -183,9 +204,19 @@ mod tests {
     }
 
     #[test]
+    fn compile_object_can_emit_plain_compile_only() {
+        let s = compile_object_statements("PACKAGE", "HR", "EMP_API", false).unwrap();
+        assert_eq!(s, vec!["ALTER PACKAGE HR.EMP_API COMPILE"]);
+    }
+
+    #[test]
     fn recompile_handles_package_body_and_validates_idents() {
         assert_eq!(
             recompile_with_plscope_statements("PACKAGE BODY", "HR", "EMP_API").unwrap()[1],
+            "ALTER PACKAGE HR.EMP_API COMPILE BODY"
+        );
+        assert_eq!(
+            compile_object_statements("PACKAGE_BODY", "HR", "EMP_API", false).unwrap()[0],
             "ALTER PACKAGE HR.EMP_API COMPILE BODY"
         );
         // Injection attempt in the (non-bindable) object name is rejected.

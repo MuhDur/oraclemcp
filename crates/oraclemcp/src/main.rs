@@ -53,7 +53,7 @@ const CUSTOM_TOOLS_HMAC_KEY_ENV: &str = "ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY";
                   (profile discovery, connection info, query, schema_inspect, \
                   list_schemas, switch_profile, preview_sql, describe, get_ddl, \
                   get_source, compile_errors, search_source, plscope_inspect, \
-                  sample_rows, read_clob, explain_plan, guarded execute) plus the \
+                  sample_rows, read_clob, explain_plan, compile_object, guarded execute) plus the \
                   zero-arg oracle_capabilities discovery tool. No PL/SQL engine, \
                   no environment-specific workflow engine."
 )]

@@ -18,10 +18,11 @@ use oraclemcp_core::{
 };
 use oraclemcp_db::{
     DbError, OracleBind, OracleConnection, QueryCaps, SerializeOptions, compile_errors,
-    describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
-    execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl, get_source,
-    get_sources_by_name, list_objects, list_schemas, plscope_identifiers, plscope_statements,
-    read_lob, read_query, read_query_named, sample_rows, search_source, serialize_row,
+    compile_object_statements, describe_columns, describe_constraints, describe_index,
+    describe_trigger, describe_view, execute_immediate_audit, explain_plan,
+    find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects, list_schemas,
+    plscope_identifiers, plscope_statements, read_lob, read_query, read_query_named, sample_rows,
+    search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
@@ -243,6 +244,21 @@ struct ExecuteArgs {
     binds: Vec<Value>,
     #[serde(default)]
     commit: bool,
+    #[serde(default, alias = "token", alias = "confirmation_token")]
+    confirm: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CompileObjectArgs {
+    object_type: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default, alias = "object_name")]
+    name: Option<String>,
+    #[serde(default)]
+    plscope: bool,
+    #[serde(default)]
+    execute: bool,
     #[serde(default, alias = "token", alias = "confirmation_token")]
     confirm: Option<String>,
 }
@@ -829,6 +845,244 @@ fn execute_sql(
     }))
 }
 
+fn normalize_compile_type_for_wire(object_type: &str) -> String {
+    object_type.trim().replace('_', " ").to_ascii_uppercase()
+}
+
+fn compile_confirmation_token(
+    statements: &[String],
+    active_profile: Option<&str>,
+    owner: &str,
+    name: &str,
+    object_type: &str,
+    plscope: bool,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"oraclemcp:compile-confirmation:v1\0");
+    hasher.update(active_profile.unwrap_or("").as_bytes());
+    hasher.update(b"\0");
+    hasher.update(owner.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(name.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(object_type.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(if plscope { b"plscope=1" } else { b"plscope=0" });
+    for stmt in statements {
+        hasher.update(b"\0");
+        hasher.update(stmt.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(16);
+    for byte in &digest[..8] {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+fn gate_decision_json(gate: &LevelDecision) -> (&'static str, Value, Value) {
+    match gate {
+        LevelDecision::Allow => ("allow", Value::Null, Value::Null),
+        LevelDecision::RequireStepUp { target } => ("require_step_up", Value::Null, json!(target)),
+        LevelDecision::Blocked { reason } => {
+            let reason = match reason {
+                oraclemcp_guard::BlockReason::Forbidden => json!({ "type": "forbidden" }),
+                oraclemcp_guard::BlockReason::ExceedsCeiling { required, ceiling } => {
+                    json!({
+                        "type": "exceeds_ceiling",
+                        "required": required,
+                        "ceiling": ceiling,
+                    })
+                }
+                _ => json!({ "type": "unknown" }),
+            };
+            ("blocked", reason, Value::Null)
+        }
+        _ => ("unknown", Value::Null, Value::Null),
+    }
+}
+
+fn compile_gate_error(gate: LevelDecision, session: &SessionLevelState) -> ErrorEnvelope {
+    match gate {
+        LevelDecision::RequireStepUp { target } => ErrorEnvelope::new(
+            ErrorClass::OperatingLevelTooLow,
+            format!(
+                "compile requires {} but the active session level is {}",
+                target.as_str(),
+                session.effective_level().as_str()
+            ),
+        )
+        .with_suggested_tool("oracle_compile_object")
+        .with_next_step("call oracle_compile_object without execute=true to inspect the required level and confirmation token")
+        .with_next_step("use a profile whose default_level permits DDL, or keep the profile read-only"),
+        LevelDecision::Blocked { reason } => match reason {
+            oraclemcp_guard::BlockReason::ExceedsCeiling { required, ceiling } => {
+                ErrorEnvelope::new(
+                    ErrorClass::OperatingLevelTooLow,
+                    format!(
+                        "compile requires {} but the active profile ceiling is {}",
+                        required.as_str(),
+                        ceiling.as_str()
+                    ),
+                )
+                .with_suggested_tool("oracle_list_profiles")
+                .with_next_step("choose a profile whose max_level permits DDL")
+            }
+            _ => ErrorEnvelope::new(ErrorClass::PolicyDenied, "compile is blocked by policy"),
+        },
+        _ => ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "compile gate produced an unexpected decision",
+        ),
+    }
+}
+
+fn compile_next_actions(
+    gate: &LevelDecision,
+    owner: &str,
+    name: &str,
+    object_type: &str,
+    plscope: bool,
+    confirm: Option<&str>,
+) -> Value {
+    let mut actions = Vec::new();
+    match gate {
+        LevelDecision::Allow => {
+            if let Some(confirm) = confirm {
+                actions.push(json!({
+                    "intent": "compile",
+                    "tool": "oracle_compile_object",
+                    "args": {
+                        "owner": owner,
+                        "name": name,
+                        "object_type": object_type,
+                        "plscope": plscope,
+                        "execute": true,
+                        "confirm": confirm,
+                    },
+                }));
+            }
+        }
+        LevelDecision::RequireStepUp { target } => actions.push(json!({
+            "intent": "select_profile_or_raise_default_level",
+            "tool": "oracle_list_profiles",
+            "args": {},
+            "required_level": target,
+        })),
+        LevelDecision::Blocked { reason } => {
+            if let oraclemcp_guard::BlockReason::ExceedsCeiling { required, ceiling } = reason {
+                actions.push(json!({
+                    "intent": "choose_different_profile",
+                    "tool": "oracle_list_profiles",
+                    "args": {},
+                    "required_level": required,
+                    "current_ceiling": ceiling,
+                }));
+            }
+        }
+        _ => {}
+    }
+    Value::Array(actions)
+}
+
+fn compile_object(
+    conn: &dyn OracleConnection,
+    active_profile: Option<&str>,
+    session: &SessionLevelState,
+    tool_name: &str,
+    args: CompileObjectArgs,
+) -> Result<Value, ErrorEnvelope> {
+    let object_name = required_non_empty_arg(tool_name, "name", args.name)?;
+    let (owner, object_name) = owner_and_name_arg(conn, args.owner, object_name, "name")?;
+    let object_type = normalize_compile_type_for_wire(&args.object_type);
+    let statements = compile_object_statements(&object_type, &owner, &object_name, args.plscope)
+        .map_err(DbError::into_envelope)?;
+    let gate = session.evaluate(Some(OperatingLevel::Ddl));
+    let (gate_decision, blocked_reason, step_up_target) = gate_decision_json(&gate);
+    let confirm = matches!(gate, LevelDecision::Allow).then(|| {
+        compile_confirmation_token(
+            &statements,
+            active_profile,
+            &owner,
+            &object_name,
+            &object_type,
+            args.plscope,
+        )
+    });
+
+    let preview = || {
+        json!({
+            "compiled": false,
+            "preview": true,
+            "owner": owner,
+            "name": object_name,
+            "object_type": object_type,
+            "plscope": args.plscope,
+            "required_level": OperatingLevel::Ddl,
+            "session_level": session.effective_level(),
+            "profile_ceiling": session.effective_ceiling(),
+            "gate_decision": gate_decision,
+            "blocked_reason": blocked_reason,
+            "step_up_target": step_up_target,
+            "statements": statements,
+            "confirmation": confirm.as_ref().map(|confirm| json!({
+                "tool": "oracle_compile_object",
+                "execute": true,
+                "confirm": confirm,
+            })),
+            "next_actions": compile_next_actions(
+                &gate,
+                &owner,
+                &object_name,
+                &object_type,
+                args.plscope,
+                confirm.as_deref(),
+            ),
+        })
+    };
+
+    if !args.execute {
+        return Ok(preview());
+    }
+    if !matches!(gate, LevelDecision::Allow) {
+        return Err(compile_gate_error(gate, session));
+    }
+    let Some(expected) = confirm else {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "compile confirmation could not be generated",
+        ));
+    };
+    if args.confirm.as_deref() != Some(expected.as_str()) {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::ChallengeRequired,
+            "compile requires the confirmation token from a preview of this exact object/profile/options",
+        )
+        .with_suggested_tool("oracle_compile_object")
+        .with_next_step("call oracle_compile_object without execute=true, then pass confirmation.confirm with execute=true"));
+    }
+
+    let mut rows_affected = Vec::with_capacity(statements.len());
+    for stmt in &statements {
+        rows_affected.push(conn.execute(stmt, &[]).map_err(DbError::into_envelope)?);
+    }
+    let errors =
+        compile_errors(conn, &owner, Some(&object_name)).map_err(DbError::into_envelope)?;
+    Ok(json!({
+        "compiled": true,
+        "preview": false,
+        "owner": owner,
+        "name": object_name,
+        "object_type": object_type,
+        "plscope": args.plscope,
+        "required_level": OperatingLevel::Ddl,
+        "statements_executed": statements,
+        "rows_affected": rows_affected,
+        "errors": rows_to_json(&errors),
+        "error_count": errors.len(),
+    }))
+}
+
 struct ReadOnlyCustomToolExecutor<'a> {
     conn: &'a dyn OracleConnection,
 }
@@ -925,6 +1179,7 @@ fn canonical_tool_name(name: &str) -> &str {
         "list_objects" => "oracle_schema_inspect",
         "list_schemas" => "oracle_list_schemas",
         "get_schema" => "oracle_schema_inspect",
+        "compile_object" => "oracle_compile_object",
         "describe_table" => "oracle_describe",
         "describe_index" => "oracle_describe_index",
         "describe_trigger" => "oracle_describe_trigger",
@@ -992,6 +1247,16 @@ impl ToolDispatch for OracleDispatcher {
             "oracle_execute" => {
                 let a: ExecuteArgs = parse_args(name, args)?;
                 return execute_sql(conn, state.active_profile.as_deref(), &state.level, a);
+            }
+            "oracle_compile_object" => {
+                let a: CompileObjectArgs = parse_args(name, args)?;
+                return compile_object(
+                    conn,
+                    state.active_profile.as_deref(),
+                    &state.level,
+                    name,
+                    a,
+                );
             }
             "oracle_list_profiles" => {
                 ensure_no_args(name, args)?;
@@ -1558,9 +1823,11 @@ mod tests {
             "oracle_execute" => {
                 json!({ "sql": "UPDATE employees SET name = name WHERE employee_id = 100" })
             }
+            "oracle_compile_object" => json!({ "object_type": "PACKAGE", "name": "EMP_API" }),
             "current_database" => json!({}),
             "switch_database" => json!({ "db": "other" }),
             "query" => json!({ "sql": "SELECT 1 FROM dual" }),
+            "compile_object" => json!({ "object_type": "PACKAGE", "object_name": "EMP_API" }),
             "list_objects" => json!({ "owner": "HR" }),
             "list_schemas" => json!({ "name_like": "APP%" }),
             "get_schema" => json!({ "owner": "HR" }),
@@ -1589,7 +1856,7 @@ mod tests {
             let dispatcher = OracleDispatcher::new_switchable(
                 Box::new(OneRowMock),
                 Some("dev".to_owned()),
-                read_write_level(),
+                ddl_level(),
                 Arc::new(|_| Ok(Box::new(OneRowMock))),
             );
             let out = dispatcher
@@ -1611,6 +1878,7 @@ mod tests {
             "current_database",
             "switch_database",
             "query",
+            "compile_object",
             "list_objects",
             "list_schemas",
             "get_schema",
@@ -2270,6 +2538,129 @@ mod tests {
             .expect_err("ddl cannot rollback-preview");
         assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
         assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
+    }
+
+    #[test]
+    fn compile_object_preview_is_default_and_does_not_execute() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            ddl_level(),
+        );
+
+        let preview = dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({ "object_type": "PACKAGE_BODY", "owner": "APP", "name": "EMP_API", "plscope": true }),
+            )
+            .expect("compile preview");
+        assert_eq!(preview["compiled"], json!(false));
+        assert_eq!(preview["preview"], json!(true));
+        assert_eq!(preview["required_level"], json!("DDL"));
+        assert_eq!(preview["gate_decision"], json!("allow"));
+        assert_eq!(
+            preview["statements"][0],
+            json!("ALTER SESSION SET PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL, STATEMENTS:ALL'")
+        );
+        assert_eq!(
+            preview["statements"][1],
+            json!("ALTER PACKAGE APP.EMP_API COMPILE BODY")
+        );
+        assert_eq!(
+            preview["confirmation"]["tool"],
+            json!("oracle_compile_object")
+        );
+        assert_eq!(preview["next_actions"][0]["intent"], json!("compile"));
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
+    }
+
+    #[test]
+    fn compile_object_requires_ddl_level_without_executing() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({
+                    "object_type": "PACKAGE",
+                    "name": "EMP_API",
+                    "execute": true,
+                    "confirm": "bad"
+                }),
+            )
+            .expect_err("read/write is not enough for compile");
+        assert_eq!(err.error_class, ErrorClass::OperatingLevelTooLow);
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
+    }
+
+    #[test]
+    fn compile_object_execute_requires_preview_confirmation() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            ddl_level(),
+        );
+
+        let err = dispatcher
+            .dispatch(
+                "compile_object",
+                json!({
+                    "object_type": "PACKAGE",
+                    "object_name": "EMP_API",
+                    "execute": true
+                }),
+            )
+            .expect_err("confirmation required");
+        assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
+    }
+
+    #[test]
+    fn compile_object_execute_runs_statements_and_returns_compile_errors() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            ddl_level(),
+        );
+        let preview = dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({ "object_type": "PACKAGE", "name": "EMP_API" }),
+            )
+            .expect("preview");
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("confirm");
+
+        let out = dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({
+                    "object_type": "PACKAGE",
+                    "name": "EMP_API",
+                    "execute": true,
+                    "confirm": confirm
+                }),
+            )
+            .expect("compile executes");
+        assert_eq!(out["compiled"], json!(true));
+        assert_eq!(out["object_type"], json!("PACKAGE"));
+        assert_eq!(
+            out["statements_executed"][0],
+            json!("ALTER PACKAGE APP.EMP_API COMPILE")
+        );
+        assert!(out["errors"].is_array());
+        let executed = state.executed.lock().expect("exec mutex");
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].0, "ALTER PACKAGE APP.EMP_API COMPILE");
     }
 
     #[test]

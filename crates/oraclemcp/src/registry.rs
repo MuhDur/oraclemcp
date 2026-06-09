@@ -15,13 +15,14 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 35] = [
+pub const TOOL_NAMES: [&str; 37] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
     "oracle_query",
     "oracle_preview_sql",
     "oracle_execute",
+    "oracle_compile_object",
     "oracle_list_schemas",
     "oracle_schema_inspect",
     "oracle_describe",
@@ -43,6 +44,7 @@ pub const TOOL_NAMES: [&str; 35] = [
     "switch_database",
     "query",
     "preview_sql",
+    "compile_object",
     "list_objects",
     "list_schemas",
     "get_schema",
@@ -164,6 +166,27 @@ pub fn tool_registry() -> ToolRegistry {
                 "confirm": { "type": "string", "description": "Commit confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true." }
             }),
             &["sql"],
+        ))
+        .destructive(),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_compile_object",
+            ToolTier::FoundationLiveDb,
+            "Preview or compile one PL/SQL/view object through the active DDL profile gate; preview is the default and execution requires the returned confirmation token.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
+                "owner": { "type": "string", "description": "Optional schema owner. Defaults to the current schema when available." },
+                "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
+                "object_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." },
+                "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
+                "execute": { "type": "boolean", "description": "Default false returns a preview and confirmation token. Set true only with confirm to run the compile statements." },
+                "confirm": { "type": "string", "description": "Confirmation token returned by the preview for this exact object/profile/options. Required when execute=true." }
+            }),
+            &["object_type"],
         ))
         .destructive(),
     );
@@ -476,6 +499,27 @@ pub fn tool_registry() -> ToolRegistry {
 
     registry.register(
         ToolDescriptor::new(
+            "compile_object",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_compile_object.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
+                "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
+                "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
+                "object_name": { "type": "string", "description": "Alias for name." },
+                "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
+                "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to compile." },
+                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." }
+            }),
+            &["object_type"],
+        ))
+        .destructive(),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
             "list_objects",
             ToolTier::FoundationLiveDb,
             "Compatibility alias for oracle_schema_inspect.",
@@ -703,8 +747,8 @@ mod tests {
             .collect();
         assert_eq!(
             destructive,
-            vec!["oracle_execute"],
-            "only the guarded execute tool is destructive"
+            vec!["oracle_execute", "oracle_compile_object", "compile_object"],
+            "only guarded execution/compile tools are destructive"
         );
         // oracle_capabilities is NOT in the registry (the server adds it to
         // tools/list itself).

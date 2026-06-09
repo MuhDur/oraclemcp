@@ -186,6 +186,7 @@ signatures are rejected.
 | `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |
 | `oracle_preview_sql` | Classify SQL and report whether it is read-only, needs profile-permitted step-up, or exceeds the active profile ceiling, without executing it |
 | `oracle_execute` | Execute one non-read statement through the active profile/session gate; DML rolls back by default, while commits and DDL/Admin require the confirmation token from `oracle_preview_sql` |
+| `oracle_compile_object` | Preview or compile one PL/SQL/view object through the `DDL` profile gate; execution requires the confirmation token returned by preview |
 | `oracle_list_schemas` | List schemas that own objects visible to this session |
 | `oracle_schema_inspect` | List objects in the current schema, one owner, or all accessible schemas |
 | `oracle_describe` | Column and constraint metadata for a table or view |
@@ -205,7 +206,7 @@ signatures are rejected.
 ### Compatibility aliases
 
 For migrations from shorter Oracle MCP tool surfaces, the server also advertises
-read-only aliases that route to the guarded `oracle_*` tools:
+compatibility aliases that route to the guarded `oracle_*` tools:
 
 | Alias | Routes to |
 | --- | --- |
@@ -213,6 +214,7 @@ read-only aliases that route to the guarded `oracle_*` tools:
 | `switch_database` | `oracle_switch_profile` (`db` is accepted as an alias for `profile`) |
 | `query` | `oracle_query` |
 | `preview_sql` | `oracle_preview_sql` |
+| `compile_object` | `oracle_compile_object` |
 | `list_objects` | `oracle_schema_inspect` |
 | `list_schemas` | `oracle_list_schemas` |
 | `get_schema` | `oracle_schema_inspect` |
@@ -226,7 +228,7 @@ read-only aliases that route to the guarded `oracle_*` tools:
 | `get_clob` | `oracle_read_clob` |
 
 Aliases share the same SQL classifier, argument validation, profile handling,
-and read-only behavior as their `oracle_*` targets.
+and operating-level behavior as their `oracle_*` targets.
 
 `oracle_query` and `oracle_explain_plan` accept a raw statement and so pass through the read-only gate. `oracle_preview_sql` runs that classifier without executing the SQL and includes the active profile ceiling so agents can distinguish "allowed on this profile", "requires a higher profile/session level", and "blocked by policy." When a non-read statement is currently executable, `oracle_preview_sql` also returns `execute_confirmation.confirm`; pass that value to `oracle_execute` with `commit=true` only when you intend to commit that exact statement on the active profile. The dictionary tools build their own parameterized SQL and never execute caller-supplied statements.
 
@@ -241,6 +243,8 @@ READ_ONLY  <  READ_WRITE  <  DDL  <  ADMIN
 Profiles default to **`READ_ONLY`** unless the operator explicitly sets a higher `default_level`, and `max_level` is an immutable ceiling for that profile. For every raw statement, the classifier derives the *minimum* level the statement needs; the level gate then admits it only when the active session already permits that level. Everything else is refused fail-closed, and a statement the classifier cannot prove safe is treated as dangerous, never the reverse. The classifier is whitespace-, comment-, quote-, and batch-aware (it fails closed on desynchronized multi-statement input), and is continuously exercised by a differential adversarial corpus and a cargo-fuzz target.
 
 `oracle_execute` is intentionally narrow. It accepts one statement with positional binds, refuses read-only SQL (use `oracle_query`), refuses anything above the active profile/session level, rolls DML back unless `commit=true`, and requires the `oracle_preview_sql` confirmation token before any commit. DDL/Admin statements cannot be rollback-previewed by Oracle, so they require `commit=true` plus confirmation before execution.
+
+`oracle_compile_object` is the structured alternative to handcrafting `ALTER ... COMPILE`. A call without `execute=true` only previews the validated compile statements, required `DDL` level, gate decision, and confirmation token. A second call with `execute=true` and that token runs the compile and returns current `ALL_ERRORS` rows for the object. Set `plscope=true` to enable PL/Scope collection before compiling; this is still profile-gated at `DDL`.
 
 ## Architecture
 
