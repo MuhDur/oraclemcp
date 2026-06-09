@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 16] = [
+pub const TOOL_NAMES: [&str; 28] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -32,6 +32,21 @@ pub const TOOL_NAMES: [&str; 16] = [
     "oracle_compile_errors",
     "oracle_search_source",
     "oracle_explain_plan",
+    // Compatibility aliases for agents migrating from shorter Oracle MCP tool
+    // names. These route to the prefixed tools in dispatch and share the same
+    // guardrails.
+    "current_database",
+    "switch_database",
+    "query",
+    "list_objects",
+    "describe_table",
+    "describe_index",
+    "describe_trigger",
+    "describe_view",
+    "get_ddl",
+    "get_object_source",
+    "get_errors",
+    "get_clob",
 ];
 
 /// A JSON-Schema `object` with the given required string properties (plus any
@@ -305,6 +320,202 @@ pub fn tool_registry() -> ToolRegistry {
                 "read_only_standby": { "type": "boolean", "description": "If true, refuse (EXPLAIN PLAN writes PLAN_TABLE). Defaults false." }
             }),
             &["sql"],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "current_database",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_connection_info.",
+        )
+        .with_input_schema(object_schema(json!({}), &[])),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "switch_database",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_switch_profile; pass a configured profile name as db or profile.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "db": { "type": "string", "description": "Configured profile name. Alias for profile." },
+                "profile": { "type": "string", "description": "Configured profile name from oracle_list_profiles." }
+            }),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "query",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_query.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "sql": { "type": "string", "description": "A single read-only SELECT. Use :1, :2 ... for binds." },
+                "binds": { "type": "array", "description": "Positional bind values for :1, :2 ...", "items": {} },
+                "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page." }
+            }),
+            &["sql"],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "list_objects",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_schema_inspect.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner; omit for current schema, or use * for all accessible schemas." },
+                "object_type": { "type": "string", "description": "Optional object type filter." },
+                "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for object_name." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum objects to return." },
+                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for limit." }
+            }),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "describe_table",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_describe.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner; defaults to current schema." },
+                "table_name": { "type": "string", "description": "Table or view name. May be OWNER.TABLE." },
+                "table": { "type": "string", "description": "Alias for table_name." }
+            }),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "describe_index",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_describe_index.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner; defaults to current schema." },
+                "index_name": { "type": "string", "description": "Index name. May be OWNER.INDEX_NAME." },
+                "name": { "type": "string", "description": "Alias for index_name." }
+            }),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "describe_trigger",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_describe_trigger.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner; defaults to current schema." },
+                "trigger_name": { "type": "string", "description": "Trigger name. May be OWNER.TRIGGER_NAME." },
+                "name": { "type": "string", "description": "Alias for trigger_name." }
+            }),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "describe_view",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_describe_view.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner; defaults to current schema." },
+                "view_name": { "type": "string", "description": "View name. May be OWNER.VIEW_NAME." },
+                "name": { "type": "string", "description": "Alias for view_name." }
+            }),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "get_ddl",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_get_ddl.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "object_type": { "type": "string", "description": "Allowlisted object type." },
+                "owner": { "type": "string", "description": "Optional schema owner; defaults to current schema." },
+                "object_name": { "type": "string", "description": "Object name. May be OWNER.NAME." },
+                "name": { "type": "string", "description": "Alias for object_name." }
+            }),
+            &["object_type"],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "get_object_source",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_get_source.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner; defaults to current schema." },
+                "object_name": { "type": "string", "description": "Object name. May be OWNER.NAME." },
+                "name": { "type": "string", "description": "Alias for object_name." },
+                "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, or TYPE_BODY." },
+                "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum source characters to return." }
+            }),
+            &["object_type"],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "get_errors",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_compile_errors.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner; defaults to current schema." },
+                "object_name": { "type": "string", "description": "Optional object name. May be OWNER.NAME." },
+                "name": { "type": "string", "description": "Alias for object_name." }
+            }),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "get_clob",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_read_clob.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner; defaults to current schema." },
+                "table": { "type": "string", "description": "Table or view name. May be OWNER.TABLE." },
+                "table_name": { "type": "string", "description": "Alias for table." },
+                "clob_col": { "type": "string", "description": "CLOB/NCLOB/text column name." },
+                "clob_column": { "type": "string", "description": "Alias for clob_col." },
+                "pk_col": { "type": "string", "description": "Key column name." },
+                "pk_column": { "type": "string", "description": "Alias for pk_col." },
+                "pk_val": { "type": "string", "description": "Key value bound as :1." },
+                "pk_value": { "type": "string", "description": "Alias for pk_val." },
+                "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum characters to return." }
+            }),
+            &[],
         )),
     );
 

@@ -136,6 +136,29 @@ current connection in place.
 | `oracle_explain_plan` | Execution plan for a read-only statement |
 | `oracle_capabilities` | Zero-arg discovery: tools, operating level, feature tiers |
 
+### Compatibility aliases
+
+For migrations from shorter Oracle MCP tool surfaces, the server also advertises
+read-only aliases that route to the guarded `oracle_*` tools:
+
+| Alias | Routes to |
+| --- | --- |
+| `current_database` | `oracle_connection_info` |
+| `switch_database` | `oracle_switch_profile` (`db` is accepted as an alias for `profile`) |
+| `query` | `oracle_query` |
+| `list_objects` | `oracle_schema_inspect` |
+| `describe_table` | `oracle_describe` |
+| `describe_index` | `oracle_describe_index` |
+| `describe_trigger` | `oracle_describe_trigger` |
+| `describe_view` | `oracle_describe_view` |
+| `get_ddl` | `oracle_get_ddl` |
+| `get_object_source` | `oracle_get_source` |
+| `get_errors` | `oracle_compile_errors` |
+| `get_clob` | `oracle_read_clob` |
+
+Aliases share the same SQL classifier, argument validation, profile handling,
+and read-only behavior as their `oracle_*` targets.
+
 `oracle_query` and `oracle_explain_plan` accept a raw statement and so pass through the read-only gate; the dictionary tools build their own parameterized SQL and never execute caller-supplied statements.
 
 ## Safety model

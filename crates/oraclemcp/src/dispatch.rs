@@ -206,6 +206,7 @@ struct ReadClobArgs {
 
 #[derive(Deserialize)]
 struct SwitchProfileArgs {
+    #[serde(alias = "db")]
     profile: String,
 }
 
@@ -398,9 +399,28 @@ fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
     })))
 }
 
+fn canonical_tool_name(name: &str) -> &str {
+    match name {
+        "current_database" => "oracle_connection_info",
+        "switch_database" => "oracle_switch_profile",
+        "query" => "oracle_query",
+        "list_objects" => "oracle_schema_inspect",
+        "describe_table" => "oracle_describe",
+        "describe_index" => "oracle_describe_index",
+        "describe_trigger" => "oracle_describe_trigger",
+        "describe_view" => "oracle_describe_view",
+        "get_ddl" => "oracle_get_ddl",
+        "get_object_source" => "oracle_get_source",
+        "get_errors" => "oracle_compile_errors",
+        "get_clob" => "oracle_read_clob",
+        other => other,
+    }
+}
+
 impl ToolDispatch for OracleDispatcher {
     fn dispatch(&self, name: &str, args: Value) -> Result<Value, ErrorEnvelope> {
-        if name == "oracle_switch_profile" {
+        let tool = canonical_tool_name(name);
+        if tool == "oracle_switch_profile" {
             let a: SwitchProfileArgs = parse_args(name, args)?;
             let Some(connector) = &self.connector else {
                 return Err(ErrorEnvelope::new(
@@ -431,7 +451,7 @@ impl ToolDispatch for OracleDispatcher {
             .map_err(|_| ErrorEnvelope::new(ErrorClass::Internal, "connection mutex poisoned"))?;
         let conn: &dyn OracleConnection = state.conn.as_ref();
 
-        let result: Result<Value, DbError> = match name {
+        let result: Result<Value, DbError> = match tool {
             "oracle_list_profiles" => {
                 ensure_no_args(name, args)?;
                 OracleMcpConfig::load(None)
@@ -739,6 +759,24 @@ mod tests {
             "oracle_compile_errors" => json!({ "owner": "HR", "name": "PKG" }),
             "oracle_search_source" => json!({ "owner": "HR", "needle": "commit" }),
             "oracle_explain_plan" => json!({ "sql": "SELECT 1 FROM dual" }),
+            "current_database" => json!({}),
+            "switch_database" => json!({ "db": "other" }),
+            "query" => json!({ "sql": "SELECT 1 FROM dual" }),
+            "list_objects" => json!({ "owner": "HR" }),
+            "describe_table" => json!({ "owner": "HR", "table_name": "EMPLOYEES" }),
+            "describe_index" => json!({ "owner": "HR", "index_name": "EMP_NAME_IX" }),
+            "describe_trigger" => json!({ "owner": "HR", "trigger_name": "EMP_BIU" }),
+            "describe_view" => json!({ "owner": "HR", "view_name": "EMP_DETAILS_VIEW" }),
+            "get_ddl" => {
+                json!({ "object_type": "TABLE", "owner": "HR", "object_name": "EMPLOYEES" })
+            }
+            "get_object_source" => {
+                json!({ "object_type": "PACKAGE", "owner": "HR", "object_name": "EMP_API" })
+            }
+            "get_errors" => json!({ "owner": "HR", "object_name": "PKG" }),
+            "get_clob" => {
+                json!({ "owner": "HR", "table": "DOCS", "clob_col": "BODY", "pk_col": "ID", "pk_val": "42" })
+            }
             other => panic!("no test args for {other}"),
         }
     }
@@ -754,6 +792,34 @@ mod tests {
             let out = dispatcher
                 .dispatch(name, args_for(name))
                 .unwrap_or_else(|e| panic!("{name} should route + succeed offline: {e:?}"));
+            assert!(out.is_object(), "{name} returns a JSON object");
+        }
+    }
+
+    #[test]
+    fn compatibility_aliases_route_to_prefixed_tools() {
+        let dispatcher = OracleDispatcher::new_switchable(
+            Box::new(OneRowMock),
+            Some("dev".to_owned()),
+            Arc::new(|_| Ok(Box::new(OneRowMock))),
+        );
+        for name in [
+            "current_database",
+            "switch_database",
+            "query",
+            "list_objects",
+            "describe_table",
+            "describe_index",
+            "describe_trigger",
+            "describe_view",
+            "get_ddl",
+            "get_object_source",
+            "get_errors",
+            "get_clob",
+        ] {
+            let out = dispatcher
+                .dispatch(name, args_for(name))
+                .unwrap_or_else(|e| panic!("{name} alias should route: {e:?}"));
             assert!(out.is_object(), "{name} returns a JSON object");
         }
     }
