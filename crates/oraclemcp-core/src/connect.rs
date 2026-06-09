@@ -8,7 +8,7 @@
 //! (`oraclemcp_db::LeaseManager::acquire`).
 
 use oraclemcp_config::ConnectionProfile;
-use oraclemcp_db::{OracleConnectOptions, canonical_nls_statements};
+use oraclemcp_db::{OracleConnectOptions, OracleSessionIdentity, canonical_nls_statements};
 use oraclemcp_guard::{OperatingLevel, SessionLevelState, read_only_setup_statements};
 
 /// Everything `oracle_connect` needs once a profile is resolved.
@@ -41,6 +41,16 @@ pub fn profile_to_options(
         wallet_location: oci.as_ref().and_then(|o| o.wallet_location.clone()),
         use_iam_token: oci.as_ref().is_some_and(|o| o.use_iam_token),
         iam_token: None,
+        session_identity: profile
+            .session_identity
+            .as_ref()
+            .map(|identity| OracleSessionIdentity {
+                module: identity.module.clone(),
+                action: identity.action.clone(),
+                client_identifier: identity.client_identifier.clone(),
+                client_info: identity.client_info.clone(),
+                driver_name: identity.driver_name.clone(),
+            }),
     }
 }
 
@@ -187,5 +197,34 @@ mod tests {
             ctx.options.wallet_location.as_deref(),
             Some(std::path::Path::new("/wallets/adb"))
         );
+    }
+
+    #[test]
+    fn session_identity_is_carried_to_connect_options() {
+        let p = profile(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+
+            [profiles.session_identity]
+            module = "local-tool"
+            action = "inspect"
+            client_identifier = "agent"
+            client_info = "workspace"
+            driver_name = "driver"
+            "#,
+        );
+        let ctx = build_session_context(&p, None, false);
+        let identity = ctx
+            .options
+            .session_identity
+            .as_ref()
+            .expect("session identity");
+        assert_eq!(identity.module.as_deref(), Some("local-tool"));
+        assert_eq!(identity.action.as_deref(), Some("inspect"));
+        assert_eq!(identity.client_identifier.as_deref(), Some("agent"));
+        assert_eq!(identity.client_info.as_deref(), Some("workspace"));
+        assert_eq!(identity.driver_name.as_deref(), Some("driver"));
     }
 }

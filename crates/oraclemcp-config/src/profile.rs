@@ -55,6 +55,31 @@ pub struct OciConfig {
     pub iam_config_profile: Option<String>,
 }
 
+/// End-to-end Oracle session identity, applied to each physical connection.
+///
+/// Values here are operator-specific and intentionally profile-driven. They are
+/// not exposed through profile metadata because they can identify users,
+/// workstations, tools, or tenant conventions.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SessionIdentityConfig {
+    /// `DBMS_APPLICATION_INFO` module / `SYS_CONTEXT('USERENV','MODULE')`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+    /// `DBMS_APPLICATION_INFO` action / `SYS_CONTEXT('USERENV','ACTION')`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// `DBMS_SESSION` client identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_identifier: Option<String>,
+    /// `DBMS_APPLICATION_INFO` client info.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_info: Option<String>,
+    /// Driver name shown by Oracle connection-info views where supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_name: Option<String>,
+}
+
 /// A single named Oracle connection profile, as written in
 /// `~/.config/oraclemcp/profiles.toml`. Inheritable fields are `Option`;
 /// [`resolve_inheritance`] merges a `base` chain and the accessors apply
@@ -97,6 +122,9 @@ pub struct ConnectionProfile {
     /// Force `READ_ONLY` regardless of profile (Active Data Guard standby).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only_standby: Option<bool>,
+    /// Optional per-connection Oracle session identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_identity: Option<SessionIdentityConfig>,
     /// Pool settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool: Option<PoolConfig>,
@@ -158,6 +186,7 @@ impl ConnectionProfile {
             default_level,
             protected,
             read_only_standby,
+            session_identity,
             pool,
             oci,
         );
@@ -266,6 +295,7 @@ mod tests {
             default_level: None,
             protected: None,
             read_only_standby: None,
+            session_identity: None,
             pool: None,
             oci: None,
             base: None,
@@ -335,6 +365,13 @@ mod tests {
         let mut prof = p("prod");
         prof.credential_ref = Some("keyring:prod".to_owned());
         prof.username = Some("svc_acct".to_owned());
+        prof.session_identity = Some(SessionIdentityConfig {
+            module: Some("local-client".to_owned()),
+            action: None,
+            client_identifier: Some("operator".to_owned()),
+            client_info: None,
+            driver_name: None,
+        });
         let meta = prof.metadata();
         let json = serde_json::to_string(&meta).expect("serialize");
         assert!(
@@ -342,5 +379,31 @@ mod tests {
             "credential_ref leaked into metadata"
         );
         assert!(!json.contains("svc_acct"), "username leaked into metadata");
+        assert!(
+            !json.contains("operator") && !json.contains("local-client"),
+            "session identity leaked into metadata"
+        );
+    }
+
+    #[test]
+    fn child_inherits_session_identity_from_base() {
+        let mut base = p("shared");
+        base.session_identity = Some(SessionIdentityConfig {
+            module: Some("shared-client".to_owned()),
+            action: Some("inspect".to_owned()),
+            client_identifier: Some("agent".to_owned()),
+            client_info: None,
+            driver_name: Some("shared-driver".to_owned()),
+        });
+        let mut child = p("dev");
+        child.base = Some("shared".to_owned());
+        let mut profiles = vec![base, child];
+        resolve_inheritance(&mut profiles).expect("resolve");
+        let identity = profiles[1]
+            .session_identity
+            .as_ref()
+            .expect("inherited identity");
+        assert_eq!(identity.module.as_deref(), Some("shared-client"));
+        assert_eq!(identity.driver_name.as_deref(), Some("shared-driver"));
     }
 }

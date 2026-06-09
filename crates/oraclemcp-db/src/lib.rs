@@ -71,6 +71,7 @@ pub use serialize::{
 pub use standby::{StandbyStatus, detect_standby};
 pub use types::{
     OracleBackend, OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow,
+    OracleSessionIdentity,
 };
 
 #[cfg(feature = "oracle-driver")]

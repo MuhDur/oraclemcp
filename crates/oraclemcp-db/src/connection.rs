@@ -71,7 +71,9 @@ impl RustOracleConnection {
 mod driver {
     use super::RustOracleConnection;
     use crate::error::DbError;
-    use crate::types::{OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow};
+    use crate::types::{
+        OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow, OracleSessionIdentity,
+    };
     use oracle::sql_type::ToSql;
 
     /// Fold a wallet directory into an EZConnect-Plus descriptor so we never
@@ -100,6 +102,56 @@ mod driver {
         }
     }
 
+    fn connector(
+        opts: &OracleConnectOptions,
+        user: impl Into<String>,
+        pass: impl Into<String>,
+        connect_string: impl Into<String>,
+    ) -> oracle::Connector {
+        let mut connector = oracle::Connector::new(user, pass, connect_string);
+        if opts.external_auth || (opts.username.is_none() && opts.password.is_none()) {
+            connector.external_auth(true);
+        }
+        if let Some(driver_name) = opts
+            .session_identity
+            .as_ref()
+            .and_then(|identity| identity.driver_name.as_deref())
+        {
+            connector.driver_name(driver_name);
+        }
+        connector
+    }
+
+    fn apply_session_identity(
+        inner: &oracle::Connection,
+        identity: Option<&OracleSessionIdentity>,
+    ) -> Result<(), DbError> {
+        let Some(identity) = identity.filter(|identity| !identity.is_empty()) else {
+            return Ok(());
+        };
+        if let Some(module) = identity.module.as_deref() {
+            inner
+                .set_module(module)
+                .map_err(|e| DbError::Connect(e.to_string()))?;
+        }
+        if let Some(action) = identity.action.as_deref() {
+            inner
+                .set_action(action)
+                .map_err(|e| DbError::Connect(e.to_string()))?;
+        }
+        if let Some(client_identifier) = identity.client_identifier.as_deref() {
+            inner
+                .set_client_identifier(client_identifier)
+                .map_err(|e| DbError::Connect(e.to_string()))?;
+        }
+        if let Some(client_info) = identity.client_info.as_deref() {
+            inner
+                .set_client_info(client_info)
+                .map_err(|e| DbError::Connect(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     pub(super) fn connect(opts: OracleConnectOptions) -> Result<RustOracleConnection, DbError> {
         if opts.use_iam_token {
             // OCI IAM database-token auth needs ODPI-C access-token plumbing
@@ -111,16 +163,17 @@ mod driver {
         let connect_string = effective_connect_string(&opts);
         let inner = if opts.external_auth || (opts.username.is_none() && opts.password.is_none()) {
             // Wallet / external auth: empty credentials, the wallet supplies them.
-            oracle::Connector::new("", "", &connect_string)
-                .external_auth(true)
+            connector(&opts, "", "", &connect_string)
                 .connect()
                 .map_err(|e| DbError::Connect(e.to_string()))?
         } else {
             let user = opts.username.as_deref().unwrap_or("");
             let pass = opts.password.as_deref().unwrap_or("");
-            oracle::Connection::connect(user, pass, &connect_string)
+            connector(&opts, user, pass, &connect_string)
+                .connect()
                 .map_err(|e| DbError::Connect(e.to_string()))?
         };
+        apply_session_identity(&inner, opts.session_identity.as_ref())?;
         // Pin canonical, NLS-decoupled output (ISO-8601 dates, period decimals)
         // so identical queries return identical values regardless of host NLS
         // (plan §5.2, P0-5b). ALTER SESSION is non-mutating and session-scoped.

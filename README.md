@@ -83,6 +83,14 @@ connect_string = "localhost:1521/FREEPDB1"
 username = "APP_READONLY"
 credential_ref = "env:ORACLE_APP_PASSWORD"
 max_level = "READ_ONLY"
+
+[profiles.session_identity]
+# Optional: all values are profile-local and are not shown by list_profiles.
+module = "oraclemcp"
+action = "inspect"
+client_identifier = "agent"
+client_info = "local-workstation"
+driver_name = "oraclemcp"
 ```
 
 Then launch:

@@ -181,6 +181,38 @@ impl OracleConnectionInfo {
     }
 }
 
+/// End-to-end session identity applied to each physical Oracle connection.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OracleSessionIdentity {
+    /// Oracle module (`SYS_CONTEXT('USERENV','MODULE')`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+    /// Oracle action (`SYS_CONTEXT('USERENV','ACTION')`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Oracle client identifier (`SYS_CONTEXT('USERENV','CLIENT_IDENTIFIER')`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_identifier: Option<String>,
+    /// Oracle client info (`SYS_CONTEXT('USERENV','CLIENT_INFO')`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_info: Option<String>,
+    /// Driver name shown by Oracle connection-info views where supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_name: Option<String>,
+}
+
+impl OracleSessionIdentity {
+    /// Whether no identity fields were configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.module.is_none()
+            && self.action.is_none()
+            && self.client_identifier.is_none()
+            && self.client_info.is_none()
+            && self.driver_name.is_none()
+    }
+}
+
 /// Options for opening a physical Oracle connection. Credentials are referenced
 /// here transiently; the full secrets-backend + zeroize discipline (§6.5) lands
 /// with the auth layer.
@@ -203,6 +235,8 @@ pub struct OracleConnectOptions {
     pub use_iam_token: bool,
     /// A pre-fetched OCI IAM database token, when `use_iam_token` is set.
     pub iam_token: Option<String>,
+    /// Optional profile-driven session identity.
+    pub session_identity: Option<OracleSessionIdentity>,
 }
 
 #[cfg(test)]

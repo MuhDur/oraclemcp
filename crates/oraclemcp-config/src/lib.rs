@@ -20,7 +20,10 @@ use thiserror::Error;
 
 pub use oraclemcp_error as error;
 pub use oraclemcp_guard::OperatingLevel;
-pub use profile::{ConnectionProfile, OciConfig, PoolConfig, ProfileMetadata, resolve_inheritance};
+pub use profile::{
+    ConnectionProfile, OciConfig, PoolConfig, ProfileMetadata, SessionIdentityConfig,
+    resolve_inheritance,
+};
 
 /// The config schema version this build understands. A config declaring a
 /// higher version is rejected (forward-incompatible) rather than silently
