@@ -609,6 +609,80 @@ fn execute_confirmation_json(
     })
 }
 
+fn preview_next_actions(
+    sql: &str,
+    decision: &GuardDecision,
+    gate: &LevelDecision,
+    active_profile: Option<&str>,
+) -> Value {
+    let mut actions: Vec<Value> = Vec::new();
+    match gate {
+        LevelDecision::Allow => match decision.required_level {
+            Some(level) if level <= OperatingLevel::ReadOnly => {
+                actions.push(json!({
+                    "intent": "run_read",
+                    "tool": "oracle_query",
+                    "args": { "sql": sql, "binds": [] },
+                }));
+            }
+            Some(level) if level < OperatingLevel::Ddl => {
+                actions.push(json!({
+                    "intent": "rollback_preview",
+                    "tool": "oracle_execute",
+                    "args": { "sql": sql, "binds": [], "commit": false },
+                }));
+                if let Some(confirm) = execute_confirmation_token(sql, level, active_profile) {
+                    actions.push(json!({
+                        "intent": "commit",
+                        "tool": "oracle_execute",
+                        "args": { "sql": sql, "binds": [], "commit": true, "confirm": confirm },
+                    }));
+                }
+            }
+            Some(level) => {
+                if let Some(confirm) = execute_confirmation_token(sql, level, active_profile) {
+                    actions.push(json!({
+                        "intent": "commit_ddl_or_admin",
+                        "tool": "oracle_execute",
+                        "args": { "sql": sql, "binds": [], "commit": true, "confirm": confirm },
+                    }));
+                }
+            }
+            None => {}
+        },
+        LevelDecision::RequireStepUp { target } => {
+            actions.push(json!({
+                "intent": "select_profile_or_raise_default_level",
+                "tool": "oracle_list_profiles",
+                "args": {},
+                "required_level": target,
+            }));
+        }
+        LevelDecision::Blocked { reason } => match reason {
+            oraclemcp_guard::BlockReason::ExceedsCeiling { required, ceiling } => {
+                actions.push(json!({
+                    "intent": "choose_different_profile",
+                    "tool": "oracle_list_profiles",
+                    "args": {},
+                    "required_level": required,
+                    "current_ceiling": ceiling,
+                }));
+            }
+            oraclemcp_guard::BlockReason::Forbidden => {
+                actions.push(json!({
+                    "intent": "rewrite_sql",
+                    "message": decision.safe_alternative.clone().unwrap_or_else(|| {
+                        "rewrite as a simpler single statement or use a dedicated safe tool".to_owned()
+                    }),
+                }));
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+    Value::Array(actions)
+}
+
 fn execute_gate_error(
     decision: &GuardDecision,
     gate: LevelDecision,
@@ -839,6 +913,7 @@ fn preview_sql(sql: &str, session: &SessionLevelState, active_profile: Option<&s
         "reason": decision.reason,
         "safe_alternative": decision.safe_alternative,
         "execute_confirmation": execute_confirmation_json(sql, &decision, &gate, active_profile),
+        "next_actions": preview_next_actions(sql, &decision, &gate, active_profile),
     })
 }
 
@@ -1989,12 +2064,18 @@ mod tests {
         assert_eq!(select["required_level"], json!("READ_ONLY"));
         assert_eq!(select["session_level"], json!("READ_ONLY"));
         assert_eq!(select["profile_ceiling"], json!("READ_ONLY"));
+        assert_eq!(select["next_actions"][0]["tool"], json!("oracle_query"));
+        assert_eq!(select["next_actions"][0]["intent"], json!("run_read"));
 
         let write = dispatcher
             .dispatch("preview_sql", json!({ "sql": "DELETE FROM t" }))
             .expect("preview write alias");
         assert_eq!(write["allowed_on_read_only"], json!(false));
         assert_ne!(write["gate_decision"], json!("allow"));
+        assert_eq!(
+            write["next_actions"][0]["tool"],
+            json!("oracle_list_profiles")
+        );
     }
 
     #[test]
@@ -2057,6 +2138,17 @@ mod tests {
                 .expect("token")
                 .len(),
             16
+        );
+        assert_eq!(
+            preview["next_actions"][0]["intent"],
+            json!("rollback_preview")
+        );
+        assert_eq!(preview["next_actions"][0]["tool"], json!("oracle_execute"));
+        assert_eq!(preview["next_actions"][0]["args"]["commit"], json!(false));
+        assert_eq!(preview["next_actions"][1]["intent"], json!("commit"));
+        assert_eq!(
+            preview["next_actions"][1]["args"]["confirm"],
+            preview["execute_confirmation"]["confirm"]
         );
     }
 
