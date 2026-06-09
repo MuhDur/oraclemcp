@@ -14,7 +14,8 @@
 
 use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use oraclemcp_db::{
-    OracleBind, OracleConnectOptions, OracleConnection, QueryCaps, RustOracleConnection,
+    OracleBind, OracleConnectOptions, OracleConnection, OracleSessionIdentity, QueryCaps,
+    RustOracleConnection,
 };
 use serde_json::json;
 use std::time::Duration;
@@ -30,6 +31,11 @@ fn test_opts() -> OracleConnectOptions {
             std::env::var("ORACLEMCP_TEST_PASSWORD")
                 .unwrap_or_else(|_| "DemoPlsqlIntel#2026".to_owned()),
         ),
+        session_identity: Some(OracleSessionIdentity {
+            module: Some("oraclemcp-live-test".to_owned()),
+            client_identifier: Some("oraclemcp-test-agent".to_owned()),
+            ..Default::default()
+        }),
         ..Default::default()
     }
 }
@@ -69,6 +75,19 @@ fn live_connect_ping_query_bind_describe() {
     assert!(
         info.server_version.is_some(),
         "server_version should be populated"
+    );
+    assert_eq!(info.module.as_deref(), Some("oraclemcp-live-test"));
+    assert_eq!(
+        info.client_identifier.as_deref(),
+        Some("oraclemcp-test-agent")
+    );
+    assert!(
+        info.session_user.is_some(),
+        "session_user should be populated"
+    );
+    assert!(
+        info.current_user.is_some(),
+        "current_user should be populated"
     );
     eprintln!(
         "[live-xe] connected: version={:?} role={:?} open_mode={:?} schema={:?}",

@@ -730,6 +730,12 @@ mod tests {
                 database_role: Some("PRIMARY".to_owned()),
                 open_mode: Some("READ WRITE".to_owned()),
                 current_schema: Some("APP".to_owned()),
+                session_user: Some("APP".to_owned()),
+                current_user: Some("APP".to_owned()),
+                module: Some("oraclemcp-test".to_owned()),
+                action: None,
+                client_identifier: Some("agent".to_owned()),
+                client_info: None,
             })
         }
         fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
@@ -893,6 +899,8 @@ mod tests {
             .dispatch("oracle_connection_info", json!({}))
             .expect("connection info");
         assert_eq!(out["active_profile"], json!("dev"));
+        assert_eq!(out["connection"]["module"], json!("oraclemcp-test"));
+        assert_eq!(out["connection"]["client_identifier"], json!("agent"));
     }
 
     #[test]

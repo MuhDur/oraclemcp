@@ -86,6 +86,7 @@ max_level = "READ_ONLY"
 
 [profiles.session_identity]
 # Optional: all values are profile-local and are not shown by list_profiles.
+# oracle_connection_info reports the session-visible fields for verification.
 module = "oraclemcp"
 action = "inspect"
 client_identifier = "agent"

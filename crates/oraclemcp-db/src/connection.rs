@@ -230,10 +230,26 @@ mod driver {
                 }
             }
             if let Ok(rows) = self.query_rows(
-                "SELECT SYS_CONTEXT('USERENV','CURRENT_SCHEMA') AS s FROM dual",
+                "SELECT \
+                    SYS_CONTEXT('USERENV','CURRENT_SCHEMA') AS current_schema, \
+                    SYS_CONTEXT('USERENV','SESSION_USER') AS session_user, \
+                    SYS_CONTEXT('USERENV','CURRENT_USER') AS current_user, \
+                    SYS_CONTEXT('USERENV','MODULE') AS module, \
+                    SYS_CONTEXT('USERENV','ACTION') AS session_action, \
+                    SYS_CONTEXT('USERENV','CLIENT_IDENTIFIER') AS client_identifier, \
+                    SYS_CONTEXT('USERENV','CLIENT_INFO') AS client_info \
+                 FROM dual",
                 &[],
             ) {
-                info.current_schema = rows.first().and_then(|r| r.text("S").map(str::to_owned));
+                if let Some(r) = rows.first() {
+                    info.current_schema = r.text("CURRENT_SCHEMA").map(str::to_owned);
+                    info.session_user = r.text("SESSION_USER").map(str::to_owned);
+                    info.current_user = r.text("CURRENT_USER").map(str::to_owned);
+                    info.module = r.text("MODULE").map(str::to_owned);
+                    info.action = r.text("SESSION_ACTION").map(str::to_owned);
+                    info.client_identifier = r.text("CLIENT_IDENTIFIER").map(str::to_owned);
+                    info.client_info = r.text("CLIENT_INFO").map(str::to_owned);
+                }
             }
             Ok(info)
         }

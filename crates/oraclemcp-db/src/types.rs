@@ -162,6 +162,24 @@ pub struct OracleConnectionInfo {
     pub open_mode: Option<String>,
     /// The current schema (`SYS_CONTEXT('USERENV','CURRENT_SCHEMA')`).
     pub current_schema: Option<String>,
+    /// Oracle session user (`SYS_CONTEXT('USERENV','SESSION_USER')`).
+    #[serde(default)]
+    pub session_user: Option<String>,
+    /// Oracle current user (`SYS_CONTEXT('USERENV','CURRENT_USER')`).
+    #[serde(default)]
+    pub current_user: Option<String>,
+    /// Oracle module (`SYS_CONTEXT('USERENV','MODULE')`).
+    #[serde(default)]
+    pub module: Option<String>,
+    /// Oracle action (`SYS_CONTEXT('USERENV','ACTION')`).
+    #[serde(default)]
+    pub action: Option<String>,
+    /// Oracle client identifier (`SYS_CONTEXT('USERENV','CLIENT_IDENTIFIER')`).
+    #[serde(default)]
+    pub client_identifier: Option<String>,
+    /// Oracle client info (`SYS_CONTEXT('USERENV','CLIENT_INFO')`).
+    #[serde(default)]
+    pub client_info: Option<String>,
 }
 
 impl OracleConnectionInfo {
