@@ -374,21 +374,47 @@ pub fn compile_errors(
     )
 }
 
-/// Full-text search across `ALL_SOURCE` (owner + needle bound; row-capped).
+/// Full-text search across `ALL_SOURCE`, optionally owner/type/name-filtered
+/// and row-capped. NULL owner means all visible schemas.
 pub fn search_source(
     conn: &dyn OracleConnection,
-    owner: &str,
+    owner: Option<&str>,
     needle: &str,
+    object_type: Option<&str>,
+    name_like: Option<&str>,
     max_rows: usize,
 ) -> Result<Vec<OracleRow>, DbError> {
-    let sql = "SELECT name, type, line, text FROM all_source \
-               WHERE owner = :1 AND UPPER(text) LIKE UPPER('%' || :2 || '%') \
-               ORDER BY name, type, line \
-               FETCH FIRST :3 ROWS ONLY";
+    let source_type = match object_type {
+        Some(t) => Some(
+            normalize_source_object_type(t)
+                .ok_or_else(|| DbError::Query(format!("unsupported source object type: {t:?}")))?,
+        ),
+        None => None,
+    };
+    let sql = "WITH args AS ( \
+                   SELECT :1 owner_filter, :2 type_filter, :3 name_filter, :4 needle FROM dual \
+               ) \
+               SELECT s.owner, s.name, s.type, s.line, s.text \
+               FROM all_source s CROSS JOIN args \
+               WHERE (args.owner_filter IS NULL OR s.owner = args.owner_filter) \
+                 AND (args.type_filter IS NULL OR s.type = args.type_filter) \
+                 AND (args.name_filter IS NULL OR s.name LIKE args.name_filter) \
+                 AND UPPER(s.text) LIKE UPPER('%' || args.needle || '%') \
+               ORDER BY s.owner, s.name, s.type, s.line \
+               FETCH FIRST :5 ROWS ONLY";
+    let owner_bind = owner.map_or(OracleBind::Null, |o| {
+        OracleBind::from(o.to_ascii_uppercase())
+    });
+    let type_bind = source_type.map_or(OracleBind::Null, OracleBind::from);
+    let name_like_bind = name_like.map_or(OracleBind::Null, |n| {
+        OracleBind::from(n.to_ascii_uppercase())
+    });
     conn.query_rows(
         sql,
         &[
-            OracleBind::from(owner.to_ascii_uppercase()),
+            owner_bind,
+            type_bind,
+            name_like_bind,
             OracleBind::from(needle),
             OracleBind::from(max_rows as i64),
         ],
@@ -850,6 +876,43 @@ mod tests {
             calls[0].1,
             vec![OracleBind::String("APP%".to_owned()), OracleBind::I64(100),]
         );
+    }
+
+    #[test]
+    fn search_source_binds_optional_scope_filters() {
+        let mock = CaptureMock::default();
+        search_source(
+            &mock,
+            None,
+            "commit",
+            Some("package_body"),
+            Some("emp%"),
+            25,
+        )
+        .unwrap();
+
+        let calls = mock.calls.lock().expect("capture lock");
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.contains("SELECT s.owner, s.name"));
+        assert!(calls[0].0.contains("args.owner_filter IS NULL"));
+        assert_eq!(
+            calls[0].1,
+            vec![
+                OracleBind::Null,
+                OracleBind::String("PACKAGE BODY".to_owned()),
+                OracleBind::String("EMP%".to_owned()),
+                OracleBind::String("commit".to_owned()),
+                OracleBind::I64(25),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_source_rejects_unknown_source_type() {
+        let mock = CaptureMock::default();
+        let err = search_source(&mock, Some("hr"), "commit", Some("table"), None, 25)
+            .expect_err("TABLE is not an ALL_SOURCE type");
+        assert!(err.to_string().contains("unsupported source object type"));
     }
 
     #[test]

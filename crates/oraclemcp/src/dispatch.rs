@@ -29,6 +29,8 @@ use serde_json::{Value, json};
 
 /// Default cap on `oracle_search_source` result rows when the caller omits it.
 const DEFAULT_SEARCH_MAX_ROWS: usize = 200;
+/// Hard cap on `oracle_search_source` for a single call.
+const MAX_SEARCH_MAX_ROWS: usize = 5_000;
 /// Default cap on `oracle_get_source` source text when the caller omits it.
 const DEFAULT_SOURCE_MAX_CHARS: usize = 1_000_000;
 /// Default cap on `oracle_schema_inspect` result rows when the caller omits it.
@@ -319,6 +321,10 @@ struct SearchSourceArgs {
     #[serde(default)]
     owner: Option<String>,
     needle: String,
+    #[serde(default)]
+    object_type: Option<String>,
+    #[serde(default)]
+    name_like: Option<String>,
     #[serde(default)]
     max_rows: Option<usize>,
 }
@@ -812,10 +818,34 @@ impl ToolDispatch for OracleDispatcher {
             }
             "oracle_search_source" => {
                 let a: SearchSourceArgs = parse_args(name, args)?;
-                let max_rows = a.max_rows.unwrap_or(DEFAULT_SEARCH_MAX_ROWS);
-                owner_or_current(conn, a.owner).and_then(|owner| {
-                    search_source(conn, &owner, &a.needle, max_rows)
-                        .map(|rows| json!({ "owner": owner, "matches": rows_to_json(&rows) }))
+                let max_rows = a
+                    .max_rows
+                    .unwrap_or(DEFAULT_SEARCH_MAX_ROWS)
+                    .clamp(1, MAX_SEARCH_MAX_ROWS);
+                let requested_owner = non_empty_arg(a.owner);
+                let owner = match requested_owner.as_deref() {
+                    Some("*") => None,
+                    Some(owner) => Some(owner.to_ascii_uppercase()),
+                    None => Some(owner_or_current(conn, None).map_err(DbError::into_envelope)?),
+                };
+                let object_type = non_empty_arg(a.object_type);
+                let name_like = non_empty_arg(a.name_like);
+                search_source(
+                    conn,
+                    owner.as_deref(),
+                    &a.needle,
+                    object_type.as_deref(),
+                    name_like.as_deref(),
+                    max_rows,
+                )
+                .map(|rows| {
+                    json!({
+                        "owner": owner.as_deref().unwrap_or("*"),
+                        "object_type": object_type,
+                        "name_like": name_like,
+                        "max_rows": max_rows,
+                        "matches": rows_to_json(&rows),
+                    })
                 })
             }
             "oracle_explain_plan" => {
@@ -1270,6 +1300,23 @@ mod tests {
             .expect("search source defaults owner");
         assert_eq!(matches["owner"], json!("APP"));
         assert!(matches["matches"].is_array());
+
+        let all_matches = dispatcher
+            .dispatch(
+                "oracle_search_source",
+                json!({
+                    "owner": "*",
+                    "needle": "commit",
+                    "object_type": "package_body",
+                    "name_like": "emp%",
+                    "max_rows": 999999
+                }),
+            )
+            .expect("search source accepts all-owner and scope filters");
+        assert_eq!(all_matches["owner"], json!("*"));
+        assert_eq!(all_matches["object_type"], json!("package_body"));
+        assert_eq!(all_matches["name_like"], json!("emp%"));
+        assert_eq!(all_matches["max_rows"], json!(5000));
     }
 
     #[test]

@@ -342,9 +342,11 @@ pub fn tool_registry() -> ToolRegistry {
         )
         .with_input_schema(object_schema(
             json!({
-                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
+                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema; use * for all visible source." },
                 "needle": { "type": "string", "description": "Case-insensitive substring to find in source text." },
-                "max_rows": { "type": "integer", "minimum": 1, "description": "Maximum matching source lines to return (default 200)." }
+                "object_type": { "type": "string", "description": "Optional source type filter: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY." },
+                "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for source object names, e.g. EMP%." },
+                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum matching source lines to return (default 200, hard cap 5000)." }
             }),
             &["needle"],
         )),
