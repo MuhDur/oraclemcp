@@ -2410,7 +2410,7 @@ impl ToolDispatch for OracleDispatcher {
             };
 
             let new_conn = connector(&a.profile).map_err(DbError::into_envelope)?;
-            let connection_info = new_conn.describe().ok();
+            let mut response = connection_info_json(Some(a.profile.clone()), new_conn.describe());
             let new_level = profile_level(&a.profile);
             let new_custom_catalog = match &self.custom_loader {
                 Some(loader) => loader(&new_level)?,
@@ -2424,11 +2424,13 @@ impl ToolDispatch for OracleDispatcher {
             state.level = new_level;
             state.custom_catalog = new_custom_catalog;
             state.execute_approved_tokens.clear();
-            return Ok(json!({
-                "active_profile": a.profile,
-                "connection": connection_info,
-                "custom_tool_count": state.custom_catalog.len(),
-            }));
+            if let Value::Object(map) = &mut response {
+                map.insert(
+                    "custom_tool_count".to_owned(),
+                    json!(state.custom_catalog.len()),
+                );
+            }
+            return Ok(response);
         }
 
         // A poisoned mutex means a prior dispatch panicked while holding the
@@ -3381,6 +3383,34 @@ mod tests {
             .dispatch("oracle_connection_info", json!({}))
             .expect("current connection still usable");
         assert_eq!(out["active_profile"], json!("dev"));
+    }
+
+    #[test]
+    fn profile_switch_reports_metadata_errors_after_switching() {
+        let dispatcher = OracleDispatcher::new_switchable(
+            Box::new(OneRowMock),
+            Some("dev".to_owned()),
+            default_read_only_level(),
+            Arc::new(|_| Ok(Box::new(DescribeFailingMock))),
+        );
+
+        let out = dispatcher
+            .dispatch("oracle_switch_profile", json!({ "profile": "offline" }))
+            .expect("switch succeeds even if metadata is unavailable");
+        assert_eq!(out["active_profile"], json!("offline"));
+        assert_eq!(out["connected"], json!(false));
+        assert_eq!(out["connection"], Value::Null);
+        assert_eq!(out["custom_tool_count"], json!(0));
+        assert_eq!(
+            out["connection_error"]["error_class"],
+            json!("RUNTIME_STATE_REQUIRED")
+        );
+
+        let current = dispatcher
+            .dispatch("oracle_connection_info", json!({}))
+            .expect("current profile uses the switched connection");
+        assert_eq!(current["active_profile"], json!("offline"));
+        assert_eq!(current["connected"], json!(false));
     }
 
     #[test]
