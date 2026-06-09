@@ -222,6 +222,7 @@ compatibility aliases that route to the guarded `oracle_*` tools:
 | `compile_object` | `oracle_compile_object` |
 | `compile_with_warnings` | `oracle_compile_object` with `warnings=true` |
 | `create_or_replace` | `oracle_create_or_replace` |
+| `deploy_ddl` | Compatibility wrapper for one DDL statement; preview by default, execution reuses the same DDL profile gate and confirmation |
 | `list_objects` | `oracle_schema_inspect` |
 | `list_schemas` | `oracle_list_schemas` |
 | `get_schema` | `oracle_schema_inspect` |

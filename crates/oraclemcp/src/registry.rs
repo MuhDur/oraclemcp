@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 44] = [
+pub const TOOL_NAMES: [&str; 45] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -52,6 +52,7 @@ pub const TOOL_NAMES: [&str; 44] = [
     "compile_object",
     "compile_with_warnings",
     "create_or_replace",
+    "deploy_ddl",
     "list_objects",
     "list_schemas",
     "get_schema",
@@ -671,6 +672,28 @@ pub fn tool_registry() -> ToolRegistry {
 
     registry.register(
         ToolDescriptor::new(
+            "deploy_ddl",
+            ToolTier::FoundationLiveDb,
+            "Compatibility wrapper for one DDL statement. Preview is the default; execution reuses the same DDL profile gate and confirmation as oracle_execute/oracle_create_or_replace.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "name": { "type": "string", "description": "Optional deployment tag returned in the response." },
+                "ddl": { "type": "string", "description": "One DDL statement. CREATE OR REPLACE uses the structured create_or_replace path." },
+                "sql": { "type": "string", "description": "Alias for ddl." },
+                "source_code": { "type": "string", "description": "Alias for ddl." },
+                "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
+                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
+                "wait_seconds": { "type": "integer", "minimum": 0, "maximum": 3600, "description": "Accepted for compatibility and returned in the response; generic core executes synchronously." },
+                "include_errors": { "type": "boolean", "description": "For CREATE OR REPLACE, include current compile errors for the detected object after execute. Default true." }
+            }),
+            &[],
+        ))
+        .destructive(),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
             "list_objects",
             ToolTier::FoundationLiveDb,
             "Compatibility alias for oracle_schema_inspect.",
@@ -907,7 +930,8 @@ mod tests {
                 "execute_approved",
                 "compile_object",
                 "compile_with_warnings",
-                "create_or_replace"
+                "create_or_replace",
+                "deploy_ddl"
             ],
             "only guarded session elevation/execution/deploy/compile tools are destructive"
         );

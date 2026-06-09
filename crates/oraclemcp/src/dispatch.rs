@@ -349,6 +349,22 @@ struct CreateOrReplaceArgs {
 }
 
 #[derive(Deserialize)]
+struct DeployDdlArgs {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, alias = "sql", alias = "source_code")]
+    ddl: Option<String>,
+    #[serde(default)]
+    execute: bool,
+    #[serde(default, alias = "token", alias = "confirmation_token")]
+    confirm: Option<String>,
+    #[serde(default)]
+    include_errors: Option<bool>,
+    #[serde(default)]
+    wait_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
 struct SchemaInspectArgs {
     #[serde(default)]
     owner: Option<String>,
@@ -2021,6 +2037,110 @@ fn create_or_replace(
     Ok(executed)
 }
 
+fn deploy_ddl(
+    conn: &dyn OracleConnection,
+    active_profile: Option<&str>,
+    session: &SessionLevelState,
+    args: DeployDdlArgs,
+) -> Result<Value, ErrorEnvelope> {
+    let ddl = required_non_empty_arg("deploy_ddl", "ddl", args.ddl)?;
+    let deploy_name = non_empty_arg(args.name);
+    let wait_seconds = args.wait_seconds.unwrap_or(0);
+    if ddl
+        .trim_start()
+        .to_ascii_uppercase()
+        .starts_with("CREATE OR REPLACE ")
+    {
+        let mut out = create_or_replace(
+            conn,
+            active_profile,
+            session,
+            "deploy_ddl",
+            CreateOrReplaceArgs {
+                source_code: Some(ddl),
+                execute: args.execute,
+                confirm: args.confirm,
+                include_errors: args.include_errors,
+            },
+        )?;
+        if let Value::Object(map) = &mut out {
+            map.insert("deploy_name".to_owned(), json!(deploy_name));
+            map.insert("wait_seconds".to_owned(), json!(wait_seconds));
+            map.insert("compatibility_tool".to_owned(), json!("deploy_ddl"));
+        }
+        return Ok(out);
+    }
+
+    let decision = Classifier::new(ClassifierConfig::new()).classify(&ddl);
+    let required_level = decision.required_level.ok_or_else(|| {
+        ErrorEnvelope::new(
+            ErrorClass::ForbiddenStatement,
+            format!(
+                "statement is forbidden by the SQL classifier: {}",
+                decision.reason
+            ),
+        )
+    })?;
+    if required_level < OperatingLevel::Ddl {
+        return Err(invalid_args(
+            "deploy_ddl is for DDL statements; use oracle_preview_sql/oracle_execute for DML",
+        )
+        .with_suggested_tool("oracle_preview_sql"));
+    }
+
+    if !args.execute {
+        let mut preview = preview_sql(&ddl, session, active_profile);
+        if let Value::Object(map) = &mut preview {
+            map.insert("preview".to_owned(), json!(true));
+            map.insert("applied".to_owned(), json!(false));
+            map.insert("deploy_name".to_owned(), json!(deploy_name));
+            map.insert("wait_seconds".to_owned(), json!(wait_seconds));
+            map.insert("source_preview".to_owned(), source_preview_json(&ddl, 500));
+            map.insert("compatibility_tool".to_owned(), json!("deploy_ddl"));
+            if let Some(confirm) = map
+                .get("execute_confirmation")
+                .and_then(|v| v.get("confirm"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            {
+                map.insert(
+                    "confirmation".to_owned(),
+                    json!({
+                        "tool": "deploy_ddl",
+                        "execute": true,
+                        "confirm": confirm,
+                        "note": "Pass confirm only when you intend to apply this exact DDL statement on this active profile."
+                    }),
+                );
+            }
+        }
+        return Ok(preview);
+    }
+
+    let mut out = execute_sql(
+        conn,
+        active_profile,
+        session,
+        ExecuteArgs {
+            sql: ddl,
+            binds: Vec::new(),
+            commit: true,
+            confirm: args.confirm,
+            capture_dbms_output: false,
+            dbms_output_max_lines: None,
+            dbms_output_max_chars: None,
+        },
+    )?;
+    if let Value::Object(map) = &mut out {
+        map.insert("applied".to_owned(), json!(true));
+        map.insert("preview".to_owned(), json!(false));
+        map.insert("deploy_name".to_owned(), json!(deploy_name));
+        map.insert("wait_seconds".to_owned(), json!(wait_seconds));
+        map.insert("compatibility_tool".to_owned(), json!("deploy_ddl"));
+    }
+    Ok(out)
+}
+
 struct ReadOnlyCustomToolExecutor<'a> {
     conn: &'a dyn OracleConnection,
 }
@@ -2121,6 +2241,7 @@ fn canonical_tool_name(name: &str) -> &str {
         "compile_object" | "compile_with_warnings" => "oracle_compile_object",
         "create_or_replace" => "oracle_create_or_replace",
         "execute_approved" => "execute_approved",
+        "deploy_ddl" => "deploy_ddl",
         "describe_table" => "oracle_describe",
         "describe_index" => "oracle_describe_index",
         "describe_trigger" => "oracle_describe_trigger",
@@ -2192,6 +2313,12 @@ impl ToolDispatch for OracleDispatcher {
             let active_profile = state.active_profile.clone();
             let conn: &dyn OracleConnection = state.conn.as_ref();
             return execute_sql(conn, active_profile.as_deref(), &state.level, execute_args);
+        }
+        if tool == "deploy_ddl" {
+            let a: DeployDdlArgs = parse_args(name, args)?;
+            let active_profile = state.active_profile.clone();
+            let conn: &dyn OracleConnection = state.conn.as_ref();
+            return deploy_ddl(conn, active_profile.as_deref(), &state.level, a);
         }
         let conn: &dyn OracleConnection = state.conn.as_ref();
 
@@ -2871,6 +2998,9 @@ mod tests {
             }
             "create_or_replace" => {
                 json!({ "source_code": "CREATE OR REPLACE VIEW EMP_V AS SELECT 1 AS ID FROM dual" })
+            }
+            "deploy_ddl" => {
+                json!({ "ddl": "CREATE OR REPLACE VIEW EMP_V AS SELECT 1 AS ID FROM dual" })
             }
             "list_objects" => json!({ "owner": "HR" }),
             "list_schemas" => json!({ "name_like": "APP%" }),
@@ -3554,6 +3684,75 @@ mod tests {
                 json!({ "source_code": "CREATE TABLE t (id NUMBER)" }),
             )
             .expect_err("non create-or-replace is rejected");
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+    }
+
+    #[test]
+    fn deploy_ddl_preview_uses_create_or_replace_path() {
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(OneRowMock),
+            Some("dev".to_owned()),
+            ddl_level(),
+        );
+
+        let out = dispatcher
+            .dispatch(
+                "deploy_ddl",
+                json!({
+                    "name": "emp_v",
+                    "ddl": "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual",
+                    "wait_seconds": 3
+                }),
+            )
+            .expect("deploy preview");
+        assert_eq!(out["preview"], json!(true));
+        assert_eq!(out["applied"], json!(false));
+        assert_eq!(out["deploy_name"], json!("emp_v"));
+        assert_eq!(out["wait_seconds"], json!(3));
+        assert_eq!(out["compatibility_tool"], json!("deploy_ddl"));
+        assert_eq!(out["detected_object"]["name"], json!("EMP_V"));
+        assert_eq!(
+            out["confirmation"]["tool"],
+            json!("oracle_create_or_replace")
+        );
+    }
+
+    #[test]
+    fn deploy_ddl_execute_requires_confirmation_without_executing() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            ddl_level(),
+        );
+
+        let err = dispatcher
+            .dispatch(
+                "deploy_ddl",
+                json!({
+                    "ddl": "CREATE TABLE emp_stage (id NUMBER)",
+                    "execute": true
+                }),
+            )
+            .expect_err("deploy ddl needs confirmation");
+        assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
+    }
+
+    #[test]
+    fn deploy_ddl_rejects_dml_without_executing() {
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(NoExecMock),
+            Some("dev".to_owned()),
+            ddl_level(),
+        );
+
+        let err = dispatcher
+            .dispatch(
+                "deploy_ddl",
+                json!({ "ddl": "UPDATE employees SET name = name WHERE employee_id = 100" }),
+            )
+            .expect_err("dml is not ddl deploy");
         assert_eq!(err.error_class, ErrorClass::InvalidArguments);
     }
 
