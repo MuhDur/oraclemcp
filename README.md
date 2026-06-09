@@ -162,6 +162,7 @@ current connection in place.
 | `oracle_read_clob` | Read one capped CLOB/NCLOB/text value by key |
 | `oracle_compile_errors` | Compile errors for the current schema, an owner, or one PL/SQL object |
 | `oracle_search_source` | Search `ALL_SOURCE` for a needle; optionally use `owner="*"`, `object_type`, and `name_like` to widen or narrow scope |
+| `oracle_plscope_inspect` | Read PL/Scope identifiers/statements for one object and report unused declarations plus dynamic-SQL lines when metadata is populated |
 | `oracle_explain_plan` | Execution plan for a read-only statement |
 | `oracle_capabilities` | Zero-arg discovery: tools, operating level, feature tiers |
 

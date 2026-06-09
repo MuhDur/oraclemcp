@@ -44,8 +44,8 @@ const LIVE_DB: bool = cfg!(feature = "live-db");
                   Streamable HTTP (--listen). Exposes read-only Oracle tools \
                   (profile discovery, connection info, query, schema_inspect, \
                   list_schemas, switch_profile, preview_sql, describe, get_ddl, \
-                  get_source, compile_errors, search_source, sample_rows, \
-                  read_clob, explain_plan) plus the \
+                  get_source, compile_errors, search_source, plscope_inspect, \
+                  sample_rows, read_clob, explain_plan) plus the \
                   zero-arg oracle_capabilities discovery tool. No PL/SQL engine, \
                   no write/DDL surface."
 )]

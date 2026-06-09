@@ -17,8 +17,9 @@ use oraclemcp_core::ToolDispatch;
 use oraclemcp_db::{
     DbError, OracleBind, OracleConnection, QueryCaps, SerializeOptions, compile_errors,
     describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
-    explain_plan, get_ddl, get_source, get_sources_by_name, list_objects, list_schemas, read_lob,
-    read_query, sample_rows, search_source, serialize_row,
+    execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl, get_source,
+    get_sources_by_name, list_objects, list_schemas, plscope_identifiers, plscope_statements,
+    read_lob, read_query, sample_rows, search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
@@ -330,6 +331,15 @@ struct SearchSourceArgs {
 }
 
 #[derive(Deserialize)]
+struct PlscopeInspectArgs {
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    #[serde(alias = "object_name")]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct ExplainPlanArgs {
     sql: String,
     #[serde(default)]
@@ -496,7 +506,7 @@ fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
          dictionary tools (oracle_schema_inspect, oracle_describe, oracle_get_ddl, \
          oracle_get_source, oracle_describe_index, oracle_describe_trigger, \
          oracle_describe_view, oracle_sample_rows, oracle_read_clob, \
-         oracle_compile_errors, oracle_search_source)"
+         oracle_compile_errors, oracle_search_source, oracle_plscope_inspect)"
             .to_owned()
     })))
 }
@@ -848,6 +858,27 @@ impl ToolDispatch for OracleDispatcher {
                     })
                 })
             }
+            "oracle_plscope_inspect" => {
+                let a: PlscopeInspectArgs = parse_args(name, args)?;
+                let object_name = required_non_empty_arg(name, "name", a.name)?;
+                let (owner, object_name) = owner_and_name_arg(conn, a.owner, object_name, "name")?;
+                let identifiers = plscope_identifiers(conn, &owner, &object_name)
+                    .map_err(DbError::into_envelope)?;
+                let statements = plscope_statements(conn, &owner, &object_name)
+                    .map_err(DbError::into_envelope)?;
+                let unused_declarations = find_unused_declarations(&identifiers);
+                let dynamic_sql_lines = execute_immediate_audit(&statements);
+                Ok(json!({
+                    "owner": owner,
+                    "name": object_name,
+                    "identifier_count": identifiers.len(),
+                    "statement_count": statements.len(),
+                    "unused_declarations": unused_declarations,
+                    "dynamic_sql_lines": dynamic_sql_lines,
+                    "identifiers": identifiers,
+                    "statements": statements,
+                }))
+            }
             "oracle_explain_plan" => {
                 let a: ExplainPlanArgs = parse_args(name, args)?;
                 ensure_read_only(&a.sql)?;
@@ -1049,6 +1080,7 @@ mod tests {
             }
             "oracle_compile_errors" => json!({ "owner": "HR", "name": "PKG" }),
             "oracle_search_source" => json!({ "owner": "HR", "needle": "commit" }),
+            "oracle_plscope_inspect" => json!({ "owner": "HR", "name": "PKG" }),
             "oracle_explain_plan" => json!({ "sql": "SELECT 1 FROM dual" }),
             "oracle_preview_sql" => json!({ "sql": "SELECT 1 FROM dual" }),
             "current_database" => json!({}),
@@ -1317,6 +1349,17 @@ mod tests {
         assert_eq!(all_matches["object_type"], json!("package_body"));
         assert_eq!(all_matches["name_like"], json!("emp%"));
         assert_eq!(all_matches["max_rows"], json!(5000));
+
+        let plscope = dispatcher
+            .dispatch(
+                "oracle_plscope_inspect",
+                json!({ "object_name": "APP.PKG" }),
+            )
+            .expect("plscope inspect accepts object_name alias and qualified name");
+        assert_eq!(plscope["owner"], json!("APP"));
+        assert_eq!(plscope["name"], json!("PKG"));
+        assert!(plscope["identifiers"].is_array());
+        assert!(plscope["statements"].is_array());
     }
 
     #[test]
@@ -1361,6 +1404,12 @@ mod tests {
             .dispatch("oracle_describe", json!({ "owner": "HR" }))
             .expect_err("missing required arg errors");
         assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+
+        let err = dispatcher
+            .dispatch("oracle_plscope_inspect", json!({ "owner": "HR" }))
+            .expect_err("missing PL/Scope object name errors");
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+        assert!(err.message.contains("missing required `name`"));
     }
 
     #[test]

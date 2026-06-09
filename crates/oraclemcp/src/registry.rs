@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 33] = [
+pub const TOOL_NAMES: [&str; 34] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -33,6 +33,7 @@ pub const TOOL_NAMES: [&str; 33] = [
     "oracle_read_clob",
     "oracle_compile_errors",
     "oracle_search_source",
+    "oracle_plscope_inspect",
     "oracle_explain_plan",
     // Compatibility aliases for agents migrating from shorter Oracle MCP tool
     // names. These route to the prefixed tools in dispatch and share the same
@@ -350,6 +351,28 @@ pub fn tool_registry() -> ToolRegistry {
             }),
             &["needle"],
         )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_plscope_inspect",
+            ToolTier::FoundationLiveDb,
+            "Inspect PL/Scope identifier and SQL statement metadata for one PL/SQL object when ALL_IDENTIFIERS/ALL_STATEMENTS are populated.",
+        )
+        .with_input_schema(json!({
+            "type": "object",
+            "properties": {
+                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
+                "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
+                "object_name": { "type": "string", "description": "Alias for name for compatibility. Prefer name." }
+            },
+            "anyOf": [
+                { "required": ["name"] },
+                { "required": ["object_name"] }
+            ],
+            "required": [],
+            "additionalProperties": false,
+        })),
     );
 
     registry.register(
