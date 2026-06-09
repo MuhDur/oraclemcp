@@ -12,13 +12,13 @@
 
 > **Safe-by-default Oracle Database MCP server, in pure Rust.**
 
-`oraclemcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives an AI agent safe-by-default access to an Oracle database: schema introspection, DDL, compile errors, source search, ad-hoc read queries, plan analysis, and an explicit profile-gated execution path for non-read SQL. Every raw statement the agent submits is classified *before* it can reach Oracle. Read tools only admit statements proven read-only; `oracle_execute` only runs statements permitted by the active profile/session level, rolls DML back by default, and requires a preview-derived confirmation token before commit. The core is engine-free and `#![forbid(unsafe_code)]`.
+`oraclemcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives an AI agent safe-by-default access to an Oracle database: schema introspection, DDL, compile errors, source search, ad-hoc read queries, plan analysis, and an explicit profile-gated execution path for non-read SQL. Every raw statement the agent submits is classified *before* it can reach Oracle. Read tools only admit statements proven read-only; `oracle_execute` only runs statements permitted by the active profile/session level, rolls DML back by default, and requires a preview-derived confirmation token before commit. Session elevation is explicit, temporary, and capped by profile `max_level`. The core is engine-free and `#![forbid(unsafe_code)]`.
 
 > _An independent open-source project; not affiliated with Oracle. For Oracle's own MCP servers, see [oracle/mcp](https://github.com/oracle/mcp)._
 
 ## Why oraclemcp
 
-- **Fail-closed by construction.** A SELECT that an agent dreams up should never silently turn into a `DELETE`. Each raw statement runs through the hardened classifier. Read tools admit only **proven** read-only `SELECT`/`WITH` and dictionary introspection. Non-read execution is isolated in `oracle_execute`, bounded by profile `max_level`/`default_level`, rollback-by-default for DML, and explicit-confirm-before-commit. *Forbidden* constructs (multi-statement batches, string-concat dynamic SQL, an unproven function call inside a SELECT) are rejected before touching the database, with an `OperatingLevelTooLow` or `ForbiddenStatement` envelope and a suggested safe alternative.
+- **Fail-closed by construction.** A SELECT that an agent dreams up should never silently turn into a `DELETE`. Each raw statement runs through the hardened classifier. Read tools admit only **proven** read-only `SELECT`/`WITH` and dictionary introspection. Non-read execution is isolated in `oracle_execute`, bounded by profile `max_level`/`default_level`, rollback-by-default for DML, and explicit-confirm-before-commit. Temporary elevation through `oracle_set_session_level` can never exceed the profile ceiling. *Forbidden* constructs (multi-statement batches, string-concat dynamic SQL, an unproven function call inside a SELECT) are rejected before touching the database, with an `OperatingLevelTooLow` or `ForbiddenStatement` envelope and a suggested safe alternative.
 - **Agent-first UX.** Every tool ships a real JSON Schema. Errors are structured [`ErrorEnvelope`](crates/oraclemcp-error)s with machine-stable classes, fuzzy suggestions, and next-step hints, not bare strings. A zero-arg `oracle_capabilities` tool lets an agent discover the surface, and an offline build degrades to a `RuntimeStateRequired` contract instead of crashing.
 - **Pure Rust, no `unsafe`.** Every crate is `#![forbid(unsafe_code)]`; the fail-closed classifier carries a differential cargo-fuzz target.
 - **Two transports.** stdio (default) and Streamable HTTP (`--listen`).
@@ -183,6 +183,7 @@ signatures are rejected.
 | `oracle_list_profiles` | List configured connection profiles without exposing usernames or credential references |
 | `oracle_connection_info` | Describe the active connection: backend, version, role, open mode, read-only database status, session context, and current schema |
 | `oracle_switch_profile` | Reconnect the server to another configured profile |
+| `oracle_set_session_level` | Preview/apply a temporary session operating-level elevation within the profile ceiling, or drop back to `READ_ONLY` |
 | `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |
 | `oracle_preview_sql` | Classify SQL and report whether it is read-only, needs profile-permitted step-up, or exceeds the active profile ceiling, without executing it |
 | `oracle_execute` | Execute one non-read statement through the active profile/session gate; DML rolls back by default, while commits and DDL/Admin require the confirmation token from `oracle_preview_sql` |
@@ -212,6 +213,8 @@ compatibility aliases that route to the guarded `oracle_*` tools:
 | --- | --- |
 | `current_database` | `oracle_connection_info` |
 | `switch_database` | `oracle_switch_profile` (`db` is accepted as an alias for `profile`) |
+| `enable_writes` | `oracle_set_session_level` with `level=READ_WRITE`; preview is still the default |
+| `disable_writes` | `oracle_set_session_level` with `action=drop`; immediately returns the session to `READ_ONLY` |
 | `query` | `oracle_query` |
 | `preview_sql` | `oracle_preview_sql` |
 | `compile_object` | `oracle_compile_object` |
@@ -232,6 +235,16 @@ and operating-level behavior as their `oracle_*` targets.
 
 `oracle_query` and `oracle_explain_plan` accept a raw statement and so pass through the read-only gate. `oracle_preview_sql` runs that classifier without executing the SQL and includes the active profile ceiling so agents can distinguish "allowed on this profile", "requires a higher profile/session level", and "blocked by policy." When a non-read statement is currently executable, `oracle_preview_sql` also returns `execute_confirmation.confirm`; pass that value to `oracle_execute` with `commit=true` only when you intend to commit that exact statement on the active profile. The dictionary tools build their own parameterized SQL and never execute caller-supplied statements.
 
+When a statement is allowed by the profile ceiling but above the current session
+level, call `oracle_set_session_level` first without `execute=true`. The preview
+returns the target level, TTL, gate decision, and a confirmation token. A second
+call with `execute=true` and that token applies a temporary elevation window.
+Lowering to a less-capable level is allowed without a token; use
+`oracle_set_session_level` with `action="drop"` (or the `disable_writes` alias)
+to return the session to `READ_ONLY`. Elevation cannot raise `max_level`; if a
+profile ceiling is `READ_ONLY`, write/DDL/admin work remains blocked and the
+next action is selecting a different profile.
+
 ## Safety model
 
 Statements are graded on an operating-level ladder:
@@ -241,6 +254,12 @@ READ_ONLY  <  READ_WRITE  <  DDL  <  ADMIN
 ```
 
 Profiles default to **`READ_ONLY`** unless the operator explicitly sets a higher `default_level`, and `max_level` is an immutable ceiling for that profile. For every raw statement, the classifier derives the *minimum* level the statement needs; the level gate then admits it only when the active session already permits that level. Everything else is refused fail-closed, and a statement the classifier cannot prove safe is treated as dangerous, never the reverse. The classifier is whitespace-, comment-, quote-, and batch-aware (it fails closed on desynchronized multi-statement input), and is continuously exercised by a differential adversarial corpus and a cargo-fuzz target.
+
+`oracle_set_session_level` is the only general session-elevation tool. It never
+touches database data, never raises the profile ceiling, and defaults to
+preview. Elevating to `READ_WRITE`, `DDL`, or `ADMIN` requires the preview token
+and creates a bounded window (default 900 seconds, maximum 3600 seconds).
+Lowering to a less-capable level is immediate and does not require a token.
 
 `oracle_execute` is intentionally narrow. It accepts one statement with positional binds, refuses read-only SQL (use `oracle_query`), refuses anything above the active profile/session level, rolls DML back unless `commit=true`, and requires the `oracle_preview_sql` confirmation token before any commit. DDL/Admin statements cannot be rollback-previewed by Oracle, so they require `commit=true` plus confirmation before execution.
 

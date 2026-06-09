@@ -11,6 +11,7 @@
 //! discovery tool is answered by the server itself and never reaches here.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::{
@@ -26,7 +27,8 @@ use oraclemcp_db::{
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
-    Classifier, ClassifierConfig, GuardDecision, LevelDecision, OperatingLevel, SessionLevelState,
+    Classifier, ClassifierConfig, EscalationError, GuardDecision, LevelDecision, OperatingLevel,
+    SessionLevelState,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -60,6 +62,10 @@ const MAX_QUERY_RESULT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_QUERY_TEXT_CHARS: usize = 1_000_000;
 /// Hard cap on BLOB bytes materialized by a single query cell.
 const MAX_QUERY_BLOB_BYTES: usize = 5 * 1024 * 1024;
+/// Default temporary session elevation window for `oracle_set_session_level`.
+const DEFAULT_SESSION_LEVEL_TTL_SECONDS: u64 = 900;
+/// Hard cap for one temporary session elevation window.
+const MAX_SESSION_LEVEL_TTL_SECONDS: u64 = 3_600;
 
 /// Reconnect callback used by `oracle_switch_profile`.
 pub type ProfileConnector =
@@ -246,6 +252,20 @@ struct ExecuteArgs {
     commit: bool,
     #[serde(default, alias = "token", alias = "confirmation_token")]
     confirm: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SetSessionLevelArgs {
+    #[serde(default, alias = "target_level")]
+    level: Option<String>,
+    #[serde(default)]
+    ttl_seconds: Option<u64>,
+    #[serde(default)]
+    execute: bool,
+    #[serde(default, alias = "token", alias = "confirmation_token")]
+    confirm: Option<String>,
+    #[serde(default)]
+    action: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -601,6 +621,371 @@ fn execute_confirmation_token(
     Some(out)
 }
 
+fn session_level_view(session: &SessionLevelState) -> Value {
+    json!({
+        "current_level": session.effective_level(),
+        "profile_ceiling": session.effective_ceiling(),
+        "max_level": session.max_level(),
+        "protected": session.is_protected(),
+        "has_active_elevation": session.has_active_elevation(),
+    })
+}
+
+fn parse_session_level(tool: &str, raw: &str) -> Result<OperatingLevel, ErrorEnvelope> {
+    OperatingLevel::parse(raw).ok_or_else(|| {
+        invalid_args(format!(
+            "invalid arguments for {tool}: unknown operating level {:?}; use READ_ONLY, READ_WRITE, DDL, or ADMIN",
+            raw.trim()
+        ))
+        .with_next_step("call oracle_set_session_level with level=\"READ_WRITE\", \"DDL\", \"ADMIN\", or \"READ_ONLY\"")
+    })
+}
+
+fn ttl_from_session_level_args(args: &SetSessionLevelArgs) -> Result<u64, ErrorEnvelope> {
+    let ttl = args
+        .ttl_seconds
+        .unwrap_or(DEFAULT_SESSION_LEVEL_TTL_SECONDS);
+    if ttl == 0 || ttl > MAX_SESSION_LEVEL_TTL_SECONDS {
+        return Err(invalid_args(format!(
+            "ttl_seconds must be between 1 and {MAX_SESSION_LEVEL_TTL_SECONDS}"
+        )));
+    }
+    Ok(ttl)
+}
+
+fn normalized_session_level_action(invoked_as: &str, args: &SetSessionLevelArgs) -> String {
+    if invoked_as == "disable_writes" {
+        return "drop".to_owned();
+    }
+    args.action
+        .as_deref()
+        .unwrap_or(if args.execute { "apply" } else { "preview" })
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn session_level_confirmation_token(
+    active_profile: Option<&str>,
+    target: OperatingLevel,
+    ttl_seconds: u64,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"oraclemcp:session-level-confirmation:v1\0");
+    hasher.update(active_profile.unwrap_or("").as_bytes());
+    hasher.update(b"\0");
+    hasher.update(target.as_str().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(ttl_seconds.to_string().as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(16);
+    for byte in &digest[..8] {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+fn session_level_gate_json(session: &SessionLevelState, target: OperatingLevel) -> Value {
+    match session.evaluate(Some(target)) {
+        LevelDecision::Allow => json!({
+            "decision": "allow",
+        }),
+        LevelDecision::RequireStepUp { target } => json!({
+            "decision": "require_step_up",
+            "target": target,
+        }),
+        LevelDecision::Blocked { reason } => match reason {
+            oraclemcp_guard::BlockReason::ExceedsCeiling { required, ceiling } => json!({
+                "decision": "blocked",
+                "reason": {
+                    "type": "exceeds_ceiling",
+                    "required": required,
+                    "ceiling": ceiling,
+                },
+            }),
+            oraclemcp_guard::BlockReason::Forbidden => json!({
+                "decision": "blocked",
+                "reason": { "type": "forbidden" },
+            }),
+            _ => json!({
+                "decision": "blocked",
+                "reason": { "type": "unknown" },
+            }),
+        },
+        _ => json!({
+            "decision": "unknown",
+        }),
+    }
+}
+
+fn session_level_gate_error(session: &SessionLevelState, target: OperatingLevel) -> ErrorEnvelope {
+    match session.evaluate(Some(target)) {
+        LevelDecision::Blocked {
+            reason: oraclemcp_guard::BlockReason::ExceedsCeiling { required, ceiling },
+        } => ErrorEnvelope::new(
+            ErrorClass::OperatingLevelTooLow,
+            format!(
+                "session level {} exceeds the active profile ceiling {}",
+                required.as_str(),
+                ceiling.as_str()
+            ),
+        )
+        .with_suggested_tool("oracle_list_profiles")
+        .with_next_step("choose a profile whose max_level permits the requested operation"),
+        LevelDecision::Blocked { .. } => {
+            ErrorEnvelope::new(ErrorClass::PolicyDenied, "session level change is blocked")
+        }
+        LevelDecision::RequireStepUp { target } => ErrorEnvelope::new(
+            ErrorClass::ChallengeRequired,
+            format!(
+                "session level elevation to {} requires the confirmation token returned by oracle_set_session_level preview",
+                target.as_str()
+            ),
+        )
+        .with_suggested_tool("oracle_set_session_level")
+        .with_next_step("call oracle_set_session_level without execute=true, then pass confirmation.confirm as confirm"),
+        LevelDecision::Allow => ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "session level gate unexpectedly allowed a failed request",
+        ),
+        _ => ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "session level gate produced an unexpected decision",
+        ),
+    }
+}
+
+fn escalation_error_to_envelope(e: EscalationError) -> ErrorEnvelope {
+    match e {
+        EscalationError::ExceedsCeiling { requested, ceiling } => ErrorEnvelope::new(
+            ErrorClass::OperatingLevelTooLow,
+            format!(
+                "cannot elevate to {} because the active profile ceiling is {}",
+                requested.as_str(),
+                ceiling.as_str()
+            ),
+        )
+        .with_suggested_tool("oracle_list_profiles")
+        .with_next_step("choose a profile whose max_level permits the requested operation"),
+        _ => ErrorEnvelope::new(ErrorClass::PolicyDenied, "session level elevation rejected"),
+    }
+}
+
+fn set_session_level(
+    session: &mut SessionLevelState,
+    active_profile: Option<&str>,
+    invoked_as: &str,
+    args: SetSessionLevelArgs,
+) -> Result<Value, ErrorEnvelope> {
+    let action = normalized_session_level_action(invoked_as, &args);
+    if matches!(
+        action.as_str(),
+        "status" | "get" | "show" | "inspect" | "current"
+    ) {
+        return Ok(json!({
+            "changed": false,
+            "preview": false,
+            "action": "status",
+            "session": session_level_view(session),
+        }));
+    }
+    if matches!(
+        action.as_str(),
+        "drop" | "de_escalate" | "de-escalate" | "disable" | "read_only"
+    ) {
+        session.drop_elevation();
+        session
+            .set_current_level(OperatingLevel::ReadOnly)
+            .map_err(escalation_error_to_envelope)?;
+        return Ok(json!({
+            "changed": true,
+            "preview": false,
+            "action": "drop",
+            "target_level": OperatingLevel::ReadOnly,
+            "session": session_level_view(session),
+            "next_actions": [
+                {
+                    "intent": "run_reads_only",
+                    "tool": "oracle_query",
+                    "args": { "sql": "SELECT 1 FROM dual" }
+                }
+            ],
+        }));
+    }
+    if !matches!(action.as_str(), "preview" | "apply" | "execute") {
+        return Err(invalid_args(format!(
+            "invalid arguments for {invoked_as}: action must be preview, apply, drop, or status"
+        )));
+    }
+
+    let ttl_seconds = ttl_from_session_level_args(&args)?;
+    let target = if invoked_as == "enable_writes" {
+        OperatingLevel::ReadWrite
+    } else {
+        let raw = required_non_empty_arg(invoked_as, "level", args.level)?;
+        parse_session_level(invoked_as, &raw)?
+    };
+    if target == OperatingLevel::ReadOnly {
+        session.drop_elevation();
+        session
+            .set_current_level(OperatingLevel::ReadOnly)
+            .map_err(escalation_error_to_envelope)?;
+        return Ok(json!({
+            "changed": true,
+            "preview": false,
+            "action": "drop",
+            "target_level": OperatingLevel::ReadOnly,
+            "session": session_level_view(session),
+        }));
+    }
+
+    let current = session.effective_level();
+    if target < current {
+        if action == "preview" {
+            return Ok(json!({
+                "changed": false,
+                "preview": true,
+                "action": "preview",
+                "target_level": target,
+                "session": session_level_view(session),
+                "gate": {
+                    "decision": "allow_lowering",
+                    "from": current,
+                    "to": target,
+                },
+                "confirmation": Value::Null,
+                "next_actions": [
+                    {
+                        "intent": "apply_session_level_lowering",
+                        "tool": "oracle_set_session_level",
+                        "args": { "level": target, "action": "apply" }
+                    }
+                ],
+            }));
+        }
+        session.drop_elevation();
+        session
+            .set_current_level(target)
+            .map_err(escalation_error_to_envelope)?;
+        return Ok(json!({
+            "changed": true,
+            "preview": false,
+            "action": "apply",
+            "target_level": target,
+            "session": session_level_view(session),
+            "next_actions": [
+                {
+                    "intent": "drop_session_level",
+                    "tool": "oracle_set_session_level",
+                    "args": { "action": "drop" }
+                }
+            ],
+        }));
+    }
+
+    let gate = session.evaluate(Some(target));
+    let confirm = session_level_confirmation_token(active_profile, target, ttl_seconds);
+    let next_actions = match gate {
+        LevelDecision::Allow => json!([
+            {
+                "intent": "continue",
+                "message": "The active session already permits this level."
+            }
+        ]),
+        LevelDecision::RequireStepUp { .. } => json!([
+            {
+                "intent": "apply_session_level",
+                "tool": invoked_as,
+                "args": {
+                    "level": target,
+                    "ttl_seconds": ttl_seconds,
+                    "execute": true,
+                    "confirm": confirm
+                }
+            },
+            {
+                "intent": "drop_session_level",
+                "tool": "oracle_set_session_level",
+                "args": { "action": "drop" }
+            }
+        ]),
+        LevelDecision::Blocked { .. } => json!([
+            {
+                "intent": "choose_different_profile",
+                "tool": "oracle_list_profiles",
+                "args": {},
+                "required_level": target,
+                "current_ceiling": session.effective_ceiling()
+            }
+        ]),
+        _ => Value::Array(Vec::new()),
+    };
+
+    if action == "preview" {
+        return Ok(json!({
+            "changed": false,
+            "preview": true,
+            "action": "preview",
+            "target_level": target,
+            "ttl_seconds": ttl_seconds,
+            "session": session_level_view(session),
+            "gate": session_level_gate_json(session, target),
+            "confirmation": if matches!(gate, LevelDecision::RequireStepUp { .. }) {
+                json!({
+                    "tool": invoked_as,
+                    "confirm": confirm,
+                    "execute": true,
+                    "ttl_seconds": ttl_seconds,
+                    "target_level": target,
+                    "note": "Pass confirm only when you intend to temporarily elevate this active session within the profile ceiling."
+                })
+            } else {
+                Value::Null
+            },
+            "next_actions": next_actions,
+        }));
+    }
+
+    match gate {
+        LevelDecision::Allow => Ok(json!({
+            "changed": false,
+            "preview": false,
+            "action": "apply",
+            "target_level": target,
+            "ttl_seconds": ttl_seconds,
+            "session": session_level_view(session),
+            "message": "The active session already permits this level.",
+        })),
+        LevelDecision::RequireStepUp { .. } => {
+            if args.confirm.as_deref() != Some(confirm.as_str()) {
+                return Err(session_level_gate_error(session, target));
+            }
+            session
+                .escalate_window(target, Duration::from_secs(ttl_seconds))
+                .map_err(escalation_error_to_envelope)?;
+            Ok(json!({
+                "changed": true,
+                "preview": false,
+                "action": "apply",
+                "target_level": target,
+                "ttl_seconds": ttl_seconds,
+                "session": session_level_view(session),
+                "next_actions": [
+                    {
+                        "intent": "drop_session_level",
+                        "tool": "oracle_set_session_level",
+                        "args": { "action": "drop" }
+                    }
+                ],
+            }))
+        }
+        LevelDecision::Blocked { .. } => Err(session_level_gate_error(session, target)),
+        _ => Err(ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "session level gate produced an unexpected decision",
+        )),
+    }
+}
+
 fn execute_confirmation_json(
     sql: &str,
     decision: &GuardDecision,
@@ -668,7 +1053,13 @@ fn preview_next_actions(
         },
         LevelDecision::RequireStepUp { target } => {
             actions.push(json!({
-                "intent": "select_profile_or_raise_default_level",
+                "intent": "preview_session_level_step_up",
+                "tool": "oracle_set_session_level",
+                "args": { "level": target, "ttl_seconds": DEFAULT_SESSION_LEVEL_TTL_SECONDS },
+                "required_level": target,
+            }));
+            actions.push(json!({
+                "intent": "choose_different_profile",
                 "tool": "oracle_list_profiles",
                 "args": {},
                 "required_level": target,
@@ -715,9 +1106,7 @@ fn execute_gate_error(
         )
         .with_suggested_tool("oracle_preview_sql")
         .with_next_step("call oracle_preview_sql to inspect the required level and profile ceiling")
-        .with_next_step(
-            "use a profile whose default_level permits this statement, or keep the profile read-only",
-        ),
+        .with_next_step("call oracle_set_session_level to preview a temporary elevation, or keep the profile read-only"),
         LevelDecision::Blocked { reason } => match reason {
             oraclemcp_guard::BlockReason::Forbidden => ErrorEnvelope::new(
                 ErrorClass::ForbiddenStatement,
@@ -914,7 +1303,7 @@ fn compile_gate_error(gate: LevelDecision, session: &SessionLevelState) -> Error
         )
         .with_suggested_tool("oracle_compile_object")
         .with_next_step("call oracle_compile_object without execute=true to inspect the required level and confirmation token")
-        .with_next_step("use a profile whose default_level permits DDL, or keep the profile read-only"),
+        .with_next_step("call oracle_set_session_level with level=\"DDL\" to preview a temporary elevation, or keep the profile read-only"),
         LevelDecision::Blocked { reason } => match reason {
             oraclemcp_guard::BlockReason::ExceedsCeiling { required, ceiling } => {
                 ErrorEnvelope::new(
@@ -963,12 +1352,20 @@ fn compile_next_actions(
                 }));
             }
         }
-        LevelDecision::RequireStepUp { target } => actions.push(json!({
-            "intent": "select_profile_or_raise_default_level",
-            "tool": "oracle_list_profiles",
-            "args": {},
-            "required_level": target,
-        })),
+        LevelDecision::RequireStepUp { target } => {
+            actions.push(json!({
+                "intent": "preview_session_level_step_up",
+                "tool": "oracle_set_session_level",
+                "args": { "level": target, "ttl_seconds": DEFAULT_SESSION_LEVEL_TTL_SECONDS },
+                "required_level": target,
+            }));
+            actions.push(json!({
+                "intent": "choose_different_profile",
+                "tool": "oracle_list_profiles",
+                "args": {},
+                "required_level": target,
+            }));
+        }
         LevelDecision::Blocked { reason } => {
             if let oraclemcp_guard::BlockReason::ExceedsCeiling { required, ceiling } = reason {
                 actions.push(json!({
@@ -1175,6 +1572,7 @@ fn canonical_tool_name(name: &str) -> &str {
     match name {
         "current_database" => "oracle_connection_info",
         "switch_database" => "oracle_switch_profile",
+        "enable_writes" | "disable_writes" => "oracle_set_session_level",
         "query" => "oracle_query",
         "list_objects" => "oracle_schema_inspect",
         "list_schemas" => "oracle_list_schemas",
@@ -1229,10 +1627,15 @@ impl ToolDispatch for OracleDispatcher {
 
         // A poisoned mutex means a prior dispatch panicked while holding the
         // connection; surface it as an Internal error rather than re-panicking.
-        let state = self
+        let mut state = self
             .state
             .lock()
             .map_err(|_| ErrorEnvelope::new(ErrorClass::Internal, "connection mutex poisoned"))?;
+        if tool == "oracle_set_session_level" {
+            let a: SetSessionLevelArgs = parse_args(name, args)?;
+            let active_profile = state.active_profile.clone();
+            return set_session_level(&mut state.level, active_profile.as_deref(), name, a);
+        }
         let conn: &dyn OracleConnection = state.conn.as_ref();
 
         let result: Result<Value, DbError> = match tool {
@@ -1798,6 +2201,7 @@ mod tests {
             "oracle_list_profiles" => json!({}),
             "oracle_connection_info" => json!({}),
             "oracle_switch_profile" => json!({ "profile": "other" }),
+            "oracle_set_session_level" => json!({ "action": "status" }),
             "oracle_query" => json!({ "sql": "SELECT 1 FROM dual" }),
             "oracle_list_schemas" => json!({ "name_like": "APP%", "limit": 10 }),
             "oracle_schema_inspect" => json!({ "owner": "HR" }),
@@ -1826,6 +2230,8 @@ mod tests {
             "oracle_compile_object" => json!({ "object_type": "PACKAGE", "name": "EMP_API" }),
             "current_database" => json!({}),
             "switch_database" => json!({ "db": "other" }),
+            "enable_writes" => json!({ "ttl_seconds": 60 }),
+            "disable_writes" => json!({}),
             "query" => json!({ "sql": "SELECT 1 FROM dual" }),
             "compile_object" => json!({ "object_type": "PACKAGE", "object_name": "EMP_API" }),
             "list_objects" => json!({ "owner": "HR" }),
@@ -2365,6 +2771,10 @@ mod tests {
         assert_eq!(write["step_up_target"], json!("READ_WRITE"));
         assert_eq!(write["profile_ceiling"], json!("DDL"));
         assert_eq!(write["protected"], json!(false));
+        assert_eq!(
+            write["next_actions"][0]["tool"],
+            json!("oracle_set_session_level")
+        );
 
         let ddl = dispatcher
             .dispatch(
@@ -2374,6 +2784,194 @@ mod tests {
             .expect("preview ddl");
         assert_eq!(ddl["gate_decision"], json!("require_step_up"));
         assert_eq!(ddl["step_up_target"], json!("DDL"));
+    }
+
+    #[test]
+    fn set_session_level_previews_before_elevating() {
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(NoExecMock),
+            Some("dev".to_owned()),
+            SessionLevelState::new(OperatingLevel::ReadWrite, false),
+        );
+
+        let out = dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({ "level": "READ_WRITE", "ttl_seconds": 60 }),
+            )
+            .expect("session level preview");
+        assert_eq!(out["preview"], json!(true));
+        assert_eq!(out["changed"], json!(false));
+        assert_eq!(out["target_level"], json!("READ_WRITE"));
+        assert_eq!(out["session"]["current_level"], json!("READ_ONLY"));
+        assert_eq!(out["session"]["profile_ceiling"], json!("READ_WRITE"));
+        assert_eq!(out["gate"]["decision"], json!("require_step_up"));
+        assert_eq!(
+            out["confirmation"]["tool"],
+            json!("oracle_set_session_level")
+        );
+        assert!(out["confirmation"]["confirm"].as_str().is_some());
+
+        let write = dispatcher
+            .dispatch(
+                "oracle_preview_sql",
+                json!({ "sql": "DELETE FROM t WHERE id = 1" }),
+            )
+            .expect("preview write after level preview only");
+        assert_eq!(write["gate_decision"], json!("require_step_up"));
+    }
+
+    #[test]
+    fn set_session_level_requires_confirmation_to_apply() {
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(NoExecMock),
+            Some("dev".to_owned()),
+            SessionLevelState::new(OperatingLevel::ReadWrite, false),
+        );
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({ "level": "READ_WRITE", "ttl_seconds": 60, "execute": true }),
+            )
+            .expect_err("elevation requires preview token");
+        assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+
+        let preview = dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({ "level": "READ_WRITE", "ttl_seconds": 60 }),
+            )
+            .expect("preview supplies token");
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("confirm token");
+        let applied = dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({ "level": "READ_WRITE", "ttl_seconds": 60, "execute": true, "confirm": confirm }),
+            )
+            .expect("confirmed elevation applies");
+        assert_eq!(applied["changed"], json!(true));
+        assert_eq!(applied["session"]["current_level"], json!("READ_WRITE"));
+        assert_eq!(applied["session"]["has_active_elevation"], json!(true));
+
+        let write = dispatcher
+            .dispatch(
+                "oracle_preview_sql",
+                json!({ "sql": "DELETE FROM t WHERE id = 1" }),
+            )
+            .expect("write is now within current session level");
+        assert_eq!(write["gate_decision"], json!("allow"));
+        assert!(write["execute_confirmation"]["confirm"].as_str().is_some());
+    }
+
+    #[test]
+    fn set_session_level_can_lower_without_confirmation() {
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(NoExecMock),
+            Some("dev".to_owned()),
+            ddl_level(),
+        );
+
+        let preview = dispatcher
+            .dispatch("oracle_set_session_level", json!({ "level": "READ_WRITE" }))
+            .expect("lowering preview");
+        assert_eq!(preview["preview"], json!(true));
+        assert_eq!(preview["gate"]["decision"], json!("allow_lowering"));
+        assert_eq!(preview["confirmation"], Value::Null);
+
+        let lowered = dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({ "level": "READ_WRITE", "action": "apply" }),
+            )
+            .expect("lowering applies without confirmation");
+        assert_eq!(lowered["changed"], json!(true));
+        assert_eq!(lowered["session"]["current_level"], json!("READ_WRITE"));
+
+        let ddl = dispatcher
+            .dispatch(
+                "oracle_preview_sql",
+                json!({ "sql": "CREATE TABLE t (id NUMBER)" }),
+            )
+            .expect("ddl now requires step-up again");
+        assert_eq!(ddl["gate_decision"], json!("require_step_up"));
+    }
+
+    #[test]
+    fn set_session_level_cannot_exceed_profile_ceiling() {
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(NoExecMock),
+            Some("ro".to_owned()),
+            SessionLevelState::new(OperatingLevel::ReadOnly, true),
+        );
+
+        let preview = dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({ "level": "READ_WRITE", "ttl_seconds": 60 }),
+            )
+            .expect("blocked preview is still inspectable");
+        assert_eq!(preview["preview"], json!(true));
+        assert_eq!(preview["gate"]["decision"], json!("blocked"));
+        assert_eq!(preview["confirmation"], Value::Null);
+        assert_eq!(
+            preview["next_actions"][0]["tool"],
+            json!("oracle_list_profiles")
+        );
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({ "level": "READ_WRITE", "ttl_seconds": 60, "execute": true, "confirm": "wrong" }),
+            )
+            .expect_err("ceiling blocks even with execute=true");
+        assert_eq!(err.error_class, ErrorClass::OperatingLevelTooLow);
+    }
+
+    #[test]
+    fn write_compatibility_aliases_share_session_level_gate() {
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(NoExecMock),
+            Some("dev".to_owned()),
+            SessionLevelState::new(OperatingLevel::ReadWrite, false),
+        );
+
+        let preview = dispatcher
+            .dispatch(
+                "enable_writes",
+                json!({ "ttl_seconds": 60, "db": "ignored" }),
+            )
+            .expect("enable_writes previews READ_WRITE elevation");
+        assert_eq!(preview["preview"], json!(true));
+        assert_eq!(preview["target_level"], json!("READ_WRITE"));
+        assert_eq!(preview["confirmation"]["tool"], json!("enable_writes"));
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("confirm token");
+
+        let applied = dispatcher
+            .dispatch(
+                "enable_writes",
+                json!({ "ttl_seconds": 60, "execute": true, "confirm": confirm }),
+            )
+            .expect("enable_writes applies with confirmation");
+        assert_eq!(applied["session"]["current_level"], json!("READ_WRITE"));
+
+        let dropped = dispatcher
+            .dispatch("disable_writes", json!({}))
+            .expect("disable_writes drops immediately");
+        assert_eq!(dropped["changed"], json!(true));
+        assert_eq!(dropped["session"]["current_level"], json!("READ_ONLY"));
+
+        let write = dispatcher
+            .dispatch(
+                "oracle_preview_sql",
+                json!({ "sql": "DELETE FROM t WHERE id = 1" }),
+            )
+            .expect("write requires step-up again");
+        assert_eq!(write["gate_decision"], json!("require_step_up"));
     }
 
     #[test]

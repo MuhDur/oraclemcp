@@ -15,10 +15,11 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 37] = [
+pub const TOOL_NAMES: [&str; 40] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
+    "oracle_set_session_level",
     "oracle_query",
     "oracle_preview_sql",
     "oracle_execute",
@@ -42,6 +43,8 @@ pub const TOOL_NAMES: [&str; 37] = [
     // guardrails.
     "current_database",
     "switch_database",
+    "enable_writes",
+    "disable_writes",
     "query",
     "preview_sql",
     "compile_object",
@@ -105,6 +108,26 @@ pub fn tool_registry() -> ToolRegistry {
             }),
             &["profile"],
         )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_set_session_level",
+            ToolTier::FoundationStatic,
+            "Preview or apply a temporary session operating-level elevation within the active profile ceiling, or drop back to READ_ONLY.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "level": { "type": "string", "description": "Target level: READ_WRITE, DDL, or ADMIN. READ_ONLY drops any active elevation." },
+                "target_level": { "type": "string", "description": "Alias for level." },
+                "ttl_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary elevation window in seconds (default 900, hard cap 3600)." },
+                "execute": { "type": "boolean", "description": "Default false previews the level change and returns a confirmation token. Set true with confirm to apply elevation." },
+                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true raises the level." },
+                "action": { "type": "string", "description": "Optional action: preview, apply, drop, or status. Omit for preview/apply based on execute." }
+            }),
+            &[],
+        ))
+        .destructive(),
     );
 
     registry.register(
@@ -462,6 +485,40 @@ pub fn tool_registry() -> ToolRegistry {
 
     registry.register(
         ToolDescriptor::new(
+            "enable_writes",
+            ToolTier::FoundationStatic,
+            "Compatibility alias for oracle_set_session_level with level=READ_WRITE; preview is still the default.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "ttl_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary READ_WRITE elevation window in seconds (default 900)." },
+                "execute": { "type": "boolean", "description": "Default false previews and returns a confirmation token. Set true with confirm to apply." },
+                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true raises the level." },
+                "db": { "type": "string", "description": "Ignored compatibility argument from older clients; use switch_database/oracle_switch_profile to change profiles." },
+                "profile": { "type": "string", "description": "Ignored compatibility argument from older clients; use switch_database/oracle_switch_profile to change profiles." }
+            }),
+            &[],
+        ))
+        .destructive(),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "disable_writes",
+            ToolTier::FoundationStatic,
+            "Compatibility alias for oracle_set_session_level action=drop; immediately returns the session to READ_ONLY.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "db": { "type": "string", "description": "Ignored compatibility argument from older clients." },
+                "profile": { "type": "string", "description": "Ignored compatibility argument from older clients." }
+            }),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
             "query",
             ToolTier::FoundationLiveDb,
             "Compatibility alias for oracle_query.",
@@ -747,8 +804,14 @@ mod tests {
             .collect();
         assert_eq!(
             destructive,
-            vec!["oracle_execute", "oracle_compile_object", "compile_object"],
-            "only guarded execution/compile tools are destructive"
+            vec![
+                "oracle_set_session_level",
+                "oracle_execute",
+                "oracle_compile_object",
+                "enable_writes",
+                "compile_object"
+            ],
+            "only guarded session elevation/execution/compile tools are destructive"
         );
         // oracle_capabilities is NOT in the registry (the server adds it to
         // tools/list itself).
