@@ -132,7 +132,7 @@ current connection in place.
 | `oracle_connection_info` | Describe the active connection: backend, version, role, open mode, read-only database status, session context, and current schema |
 | `oracle_switch_profile` | Reconnect the server to another configured profile |
 | `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |
-| `oracle_preview_sql` | Classify SQL and report whether it would pass the read-only gate without executing it |
+| `oracle_preview_sql` | Classify SQL and report whether it is read-only, needs profile-permitted step-up, or exceeds the active profile ceiling, without executing it |
 | `oracle_schema_inspect` | List objects in the current schema, one owner, or all accessible schemas |
 | `oracle_describe` | Column and constraint metadata for a table or view |
 | `oracle_describe_index` | Index metadata, indexed columns, and function-based expressions |
@@ -172,7 +172,7 @@ read-only aliases that route to the guarded `oracle_*` tools:
 Aliases share the same SQL classifier, argument validation, profile handling,
 and read-only behavior as their `oracle_*` targets.
 
-`oracle_query` and `oracle_explain_plan` accept a raw statement and so pass through the read-only gate. `oracle_preview_sql` runs that classifier without executing the SQL. The dictionary tools build their own parameterized SQL and never execute caller-supplied statements.
+`oracle_query` and `oracle_explain_plan` accept a raw statement and so pass through the read-only gate. `oracle_preview_sql` runs that classifier without executing the SQL and includes the active profile ceiling so agents can distinguish "requires step-up on this profile" from "blocked by policy." The dictionary tools build their own parameterized SQL and never execute caller-supplied statements.
 
 ## Safety model
 

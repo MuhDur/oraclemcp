@@ -54,9 +54,24 @@ const MAX_QUERY_BLOB_BYTES: usize = 5 * 1024 * 1024;
 pub type ProfileConnector =
     dyn Fn(&str) -> Result<Box<dyn OracleConnection>, DbError> + Send + Sync + 'static;
 
+fn default_read_only_level() -> SessionLevelState {
+    SessionLevelState::new(OperatingLevel::ReadOnly, false)
+}
+
+fn profile_level(profile: &str) -> SessionLevelState {
+    OracleMcpConfig::load(None)
+        .ok()
+        .and_then(|cfg| {
+            cfg.profile(profile)
+                .map(|profile| oraclemcp_core::session_level_state(profile, false))
+        })
+        .unwrap_or_else(default_read_only_level)
+}
+
 struct DispatcherState {
     conn: Box<dyn OracleConnection>,
     active_profile: Option<String>,
+    level: SessionLevelState,
 }
 
 /// The dispatcher: owns the live connection behind a `std::sync::Mutex` so
@@ -78,10 +93,20 @@ impl OracleDispatcher {
         conn: Box<dyn OracleConnection>,
         active_profile: Option<String>,
     ) -> Self {
+        Self::new_with_profile_level(conn, active_profile, default_read_only_level())
+    }
+
+    /// Build a dispatcher with a known active profile and policy level.
+    pub fn new_with_profile_level(
+        conn: Box<dyn OracleConnection>,
+        active_profile: Option<String>,
+        level: SessionLevelState,
+    ) -> Self {
         OracleDispatcher {
             state: Mutex::new(DispatcherState {
                 conn,
                 active_profile,
+                level,
             }),
             connector: None,
         }
@@ -91,12 +116,14 @@ impl OracleDispatcher {
     pub fn new_switchable(
         conn: Box<dyn OracleConnection>,
         active_profile: Option<String>,
+        level: SessionLevelState,
         connector: Arc<ProfileConnector>,
     ) -> Self {
         OracleDispatcher {
             state: Mutex::new(DispatcherState {
                 conn,
                 active_profile,
+                level,
             }),
             connector: Some(connector),
         }
@@ -456,10 +483,9 @@ fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
     })))
 }
 
-fn preview_sql(sql: &str) -> Value {
+fn preview_sql(sql: &str, session: &SessionLevelState) -> Value {
     let decision = Classifier::new(ClassifierConfig::new()).classify(sql);
-    let session = SessionLevelState::new(OperatingLevel::ReadOnly, false);
-    let gate = decision.gate(&session);
+    let gate = decision.gate(session);
     let (gate_decision, blocked_reason, step_up_target) = match gate {
         LevelDecision::Allow => ("allow", Value::Null, Value::Null),
         LevelDecision::RequireStepUp { target } => ("require_step_up", Value::Null, json!(target)),
@@ -485,7 +511,13 @@ fn preview_sql(sql: &str) -> Value {
     json!({
         "danger": decision.danger,
         "required_level": decision.required_level,
-        "allowed_on_read_only": gate_decision == "allow",
+        "allowed_on_read_only": matches!(
+            decision.gate(&SessionLevelState::new(OperatingLevel::ReadOnly, false)),
+            LevelDecision::Allow
+        ),
+        "session_level": session.effective_level(),
+        "profile_ceiling": session.effective_ceiling(),
+        "protected": session.is_protected(),
         "gate_decision": gate_decision,
         "blocked_reason": blocked_reason,
         "step_up_target": step_up_target,
@@ -535,6 +567,7 @@ impl ToolDispatch for OracleDispatcher {
             })?;
             state.conn = new_conn;
             state.active_profile = Some(a.profile.clone());
+            state.level = profile_level(&a.profile);
             return Ok(json!({
                 "active_profile": a.profile,
                 "connection": connection_info,
@@ -552,7 +585,7 @@ impl ToolDispatch for OracleDispatcher {
         let result: Result<Value, DbError> = match tool {
             "oracle_preview_sql" => {
                 let a: PreviewSqlArgs = parse_args(name, args)?;
-                Ok(preview_sql(&a.sql))
+                Ok(preview_sql(&a.sql, &state.level))
             }
             "oracle_list_profiles" => {
                 ensure_no_args(name, args)?;
@@ -972,6 +1005,7 @@ mod tests {
         let dispatcher = OracleDispatcher::new_switchable(
             Box::new(OneRowMock),
             Some("dev".to_owned()),
+            default_read_only_level(),
             Arc::new(|_| Ok(Box::new(OneRowMock))),
         );
         for name in TOOL_NAMES {
@@ -987,6 +1021,7 @@ mod tests {
         let dispatcher = OracleDispatcher::new_switchable(
             Box::new(OneRowMock),
             Some("dev".to_owned()),
+            default_read_only_level(),
             Arc::new(|_| Ok(Box::new(OneRowMock))),
         );
         for name in [
@@ -1030,6 +1065,7 @@ mod tests {
         let dispatcher = OracleDispatcher::new_switchable(
             Box::new(OneRowMock),
             Some("dev".to_owned()),
+            default_read_only_level(),
             Arc::new(|_| Err(DbError::Connect("connect failed".to_owned()))),
         );
 
@@ -1350,12 +1386,44 @@ mod tests {
         assert_eq!(select["allowed_on_read_only"], json!(true));
         assert_eq!(select["gate_decision"], json!("allow"));
         assert_eq!(select["required_level"], json!("READ_ONLY"));
+        assert_eq!(select["session_level"], json!("READ_ONLY"));
+        assert_eq!(select["profile_ceiling"], json!("READ_ONLY"));
 
         let write = dispatcher
             .dispatch("preview_sql", json!({ "sql": "DELETE FROM t" }))
             .expect("preview write alias");
         assert_eq!(write["allowed_on_read_only"], json!(false));
         assert_ne!(write["gate_decision"], json!("allow"));
+    }
+
+    #[test]
+    fn preview_sql_uses_configured_profile_ceiling() {
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(NoExecMock),
+            Some("dev".to_owned()),
+            SessionLevelState::new(OperatingLevel::Ddl, false),
+        );
+
+        let write = dispatcher
+            .dispatch(
+                "oracle_preview_sql",
+                json!({ "sql": "DELETE FROM t WHERE id = 1" }),
+            )
+            .expect("preview write");
+        assert_eq!(write["allowed_on_read_only"], json!(false));
+        assert_eq!(write["gate_decision"], json!("require_step_up"));
+        assert_eq!(write["step_up_target"], json!("READ_WRITE"));
+        assert_eq!(write["profile_ceiling"], json!("DDL"));
+        assert_eq!(write["protected"], json!(false));
+
+        let ddl = dispatcher
+            .dispatch(
+                "oracle_preview_sql",
+                json!({ "sql": "CREATE TABLE t (id NUMBER)" }),
+            )
+            .expect("preview ddl");
+        assert_eq!(ddl["gate_decision"], json!("require_step_up"));
+        assert_eq!(ddl["step_up_target"], json!("DDL"));
     }
 
     #[test]

@@ -30,6 +30,7 @@ use oraclemcp_core::{
     DoctorContext, HttpTransportConfig, OracleMcpServer, StdioAuthPolicy, run_doctor, serve_http,
 };
 use oraclemcp_db::{DbError, OracleConnectOptions, OracleConnection, RustOracleConnection};
+use oraclemcp_guard::{OperatingLevel, SessionLevelState};
 
 /// Whether this build compiled in the Oracle driver (the `live-db` feature).
 const LIVE_DB: bool = cfg!(feature = "live-db");
@@ -128,9 +129,13 @@ fn init_tracing() {
 /// Resolve the selected profile name and connection options from config + an
 /// optional profile name. When no explicit/default/sole profile resolves, the
 /// result is `None` so `serve` can still start for capabilities/doctor.
+fn default_read_only_level() -> SessionLevelState {
+    SessionLevelState::new(OperatingLevel::ReadOnly, false)
+}
+
 fn resolve_profile_options(
     profile: Option<&str>,
-) -> Result<Option<(String, OracleConnectOptions)>, DbError> {
+) -> Result<Option<(String, OracleConnectOptions, SessionLevelState)>, DbError> {
     let cfg = OracleMcpConfig::load(None)
         .map_err(|e| DbError::UnsupportedAuth(format!("config load failed: {e}")))?;
 
@@ -168,14 +173,12 @@ fn resolve_profile_options(
         None => None,
     };
 
-    Ok(Some((
-        chosen.name.clone(),
-        oraclemcp_core::profile_to_options(chosen, password)?,
-    )))
+    let ctx = oraclemcp_core::build_session_context(chosen, password, false)?;
+    Ok(Some((chosen.name.clone(), ctx.options, ctx.level_state)))
 }
 
 fn connect_profile(profile: &str) -> Result<Box<dyn OracleConnection>, DbError> {
-    let Some((_, opts)) = resolve_profile_options(Some(profile))? else {
+    let Some((_, opts, _level)) = resolve_profile_options(Some(profile))? else {
         return Err(DbError::UnsupportedAuth(format!(
             "connection profile `{profile}` not found"
         )));
@@ -229,13 +232,14 @@ fn open_connection(opts: OracleConnectOptions) -> Box<dyn OracleConnection> {
 fn build_server(
     conn: Box<dyn OracleConnection>,
     active_profile: Option<String>,
+    level: SessionLevelState,
     http: bool,
 ) -> OracleMcpServer {
     let version = env!("CARGO_PKG_VERSION");
     let registry = registry::tool_registry();
     let caps = registry::capabilities(version, LIVE_DB, http);
     let dispatcher =
-        OracleDispatcher::new_switchable(conn, active_profile, Arc::new(connect_profile));
+        OracleDispatcher::new_switchable(conn, active_profile, level, Arc::new(connect_profile));
     OracleMcpServer::new(version, registry, caps, Arc::new(dispatcher))
 }
 
@@ -247,14 +251,19 @@ fn run_serve(
     robot_json: bool,
 ) -> ExitCode {
     init_tracing();
-    let (conn, active_profile) = match resolve_profile_options(profile.as_deref()) {
-        Ok(Some((profile_name, opts))) => (open_connection(opts), Some(profile_name)),
-        Ok(None) => (open_connection(OracleConnectOptions::default()), None),
+    let (conn, active_profile, level) = match resolve_profile_options(profile.as_deref()) {
+        Ok(Some((profile_name, opts, level))) => (open_connection(opts), Some(profile_name), level),
+        Ok(None) => (
+            open_connection(OracleConnectOptions::default()),
+            None,
+            default_read_only_level(),
+        ),
         Err(e) => {
             tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
             (
                 Box::new(stub::StubConnection::new(e)) as Box<dyn OracleConnection>,
                 None,
+                default_read_only_level(),
             )
         }
     };
@@ -283,7 +292,7 @@ fn run_serve(
                     return ExitCode::from(2);
                 }
             };
-            let server = build_server(conn, active_profile, false);
+            let server = build_server(conn, active_profile, level, false);
             emit_serve_status(robot_json, "stdio", None);
             match runtime.block_on(server.serve_stdio(&auth)) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -295,7 +304,7 @@ fn run_serve(
         }
         // ── Streamable HTTP transport (--listen) ───────────────────────────
         Some(addr) => {
-            let server = build_server(conn, active_profile, true);
+            let server = build_server(conn, active_profile, level, true);
             let cfg = HttpTransportConfig::default();
             emit_serve_status(robot_json, "http", Some(&addr));
             let bind_addr = addr.clone();
@@ -475,7 +484,7 @@ mod tests {
     #[test]
     fn build_server_advertises_the_registered_tools_plus_capabilities() {
         let conn = open_connection(OracleConnectOptions::default());
-        let server = build_server(conn, None, false);
+        let server = build_server(conn, None, default_read_only_level(), false);
         // The capabilities report carries the registry's tools.
         let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), LIVE_DB, false);
         assert_eq!(caps.tools.len(), registry::TOOL_NAMES.len());
