@@ -43,9 +43,9 @@ pub use drcp::{DrcpConfig, SessionPurity};
 pub use error::DbError;
 pub use intelligence::{
     IndexDescription, LobText, SourceText, TriggerDescription, ViewDescription, compile_errors,
-    describe_columns, describe_index, describe_trigger, describe_view, explain_plan, get_ddl,
-    get_source, is_ddl_object_type, list_objects, normalize_source_object_type, read_lob,
-    sample_rows, search_source,
+    describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
+    explain_plan, get_ddl, get_source, is_ddl_object_type, list_objects,
+    normalize_source_object_type, read_lob, sample_rows, search_source,
 };
 pub use lease::{LeaseId, LeaseInfo, LeaseManager, PreviewImpact, require_lease_id};
 pub use oci::{

@@ -16,8 +16,9 @@ use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::ToolDispatch;
 use oraclemcp_db::{
     DbError, OracleBind, OracleConnection, QueryCaps, SerializeOptions, compile_errors,
-    describe_columns, describe_index, describe_trigger, describe_view, explain_plan, get_ddl,
-    get_source, list_objects, read_lob, read_query, sample_rows, search_source, serialize_row,
+    describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
+    explain_plan, get_ddl, get_source, list_objects, read_lob, read_query, sample_rows,
+    search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
@@ -531,8 +532,16 @@ impl ToolDispatch for OracleDispatcher {
                 let a: DescribeArgs = parse_args(name, args)?;
                 let table = required_non_empty_arg(name, "table", a.table)?;
                 let (owner, table) = owner_and_name_arg(conn, a.owner, table, "table")?;
-                describe_columns(conn, &owner, &table)
-                    .map(|rows| json!({ "owner": owner, "table": table, "columns": rows_to_json(&rows) }))
+                describe_columns(conn, &owner, &table).and_then(|columns| {
+                    describe_constraints(conn, &owner, &table).map(|constraints| {
+                        json!({
+                            "owner": owner,
+                            "table": table,
+                            "columns": rows_to_json(&columns),
+                            "constraints": rows_to_json(&constraints),
+                        })
+                    })
+                })
             }
             "oracle_describe_index" => {
                 let a: DescribeIndexArgs = parse_args(name, args)?;
@@ -926,6 +935,7 @@ mod tests {
         assert_eq!(described["owner"], json!("APP"));
         assert_eq!(described["table"], json!("EMPLOYEES"));
         assert!(described["columns"].is_array());
+        assert!(described["constraints"].is_array());
 
         let ddl = dispatcher
             .dispatch(

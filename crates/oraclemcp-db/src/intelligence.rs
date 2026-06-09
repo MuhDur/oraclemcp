@@ -279,6 +279,31 @@ pub fn describe_columns(
     )
 }
 
+/// Constraint metadata for a table/view (owner + name bound).
+pub fn describe_constraints(
+    conn: &dyn OracleConnection,
+    owner: &str,
+    table: &str,
+) -> Result<Vec<OracleRow>, DbError> {
+    let sql = "SELECT c.constraint_name, c.constraint_type, c.status, \
+                      c.deferrable, c.deferred, c.validated, c.generated, \
+                      c.r_owner, c.r_constraint_name, cc.column_name, cc.position \
+               FROM all_constraints c \
+               LEFT JOIN all_cons_columns cc \
+                 ON cc.owner = c.owner \
+                AND cc.constraint_name = c.constraint_name \
+                AND cc.table_name = c.table_name \
+               WHERE c.owner = :1 AND c.table_name = :2 \
+               ORDER BY c.constraint_name, cc.position";
+    conn.query_rows(
+        sql,
+        &[
+            OracleBind::from(owner.to_ascii_uppercase()),
+            OracleBind::from(table.to_ascii_uppercase()),
+        ],
+    )
+}
+
 /// `get_ddl`: `DBMS_METADATA.GET_DDL` for an object. `object_type` is validated
 /// against the allowlist (it cannot be bound); name + owner are bound.
 pub fn get_ddl(
@@ -724,6 +749,24 @@ mod tests {
             vec![
                 OracleBind::String("HR".to_owned()),
                 OracleBind::String("EMP_V".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn describe_constraints_binds_owner_and_table() {
+        let mock = CaptureMock::default();
+        let constraints = describe_constraints(&mock, "hr", "employees").unwrap();
+        assert!(constraints.is_empty());
+        let calls = mock.calls.lock().expect("capture lock");
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.contains("FROM all_constraints"));
+        assert!(calls[0].0.contains("LEFT JOIN all_cons_columns"));
+        assert_eq!(
+            calls[0].1,
+            vec![
+                OracleBind::String("HR".to_owned()),
+                OracleBind::String("EMPLOYEES".to_owned()),
             ]
         );
     }

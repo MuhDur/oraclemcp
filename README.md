@@ -123,7 +123,7 @@ current connection in place.
 | `oracle_switch_profile` | Reconnect the server to another configured profile |
 | `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |
 | `oracle_schema_inspect` | List objects in the current schema, one owner, or all accessible schemas |
-| `oracle_describe` | Column metadata for a table or view |
+| `oracle_describe` | Column and constraint metadata for a table or view |
 | `oracle_describe_index` | Index metadata, indexed columns, and function-based expressions |
 | `oracle_describe_trigger` | Trigger timing, target table, status, and body |
 | `oracle_describe_view` | View definition metadata and columns |

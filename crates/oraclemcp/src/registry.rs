@@ -140,7 +140,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_describe",
             ToolTier::FoundationLiveDb,
-            "Describe a table/view's columns (ALL_TAB_COLUMNS).",
+            "Describe a table/view's columns and constraint metadata.",
         )
         .with_input_schema(object_schema(
             json!({
@@ -385,7 +385,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "describe_table",
             ToolTier::FoundationLiveDb,
-            "Compatibility alias for oracle_describe.",
+            "Compatibility alias for oracle_describe; returns columns and constraints.",
         )
         .with_input_schema(object_schema(
             json!({
