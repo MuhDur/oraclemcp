@@ -52,13 +52,23 @@ pub fn session_level_state(
     profile: &ConnectionProfile,
     standby_read_only: bool,
 ) -> SessionLevelState {
-    let max = if standby_read_only || profile.read_only_standby() {
+    let forced_read_only = standby_read_only || profile.read_only_standby();
+    let max = if forced_read_only {
         OperatingLevel::ReadOnly
     } else {
         profile.max_level()
     };
-    let protected = profile.protected() || standby_read_only || profile.read_only_standby();
-    SessionLevelState::new(max, protected)
+    let protected = profile.protected() || forced_read_only;
+    let default = if forced_read_only {
+        OperatingLevel::ReadOnly
+    } else {
+        profile.default_level().min(max)
+    };
+    let mut level_state = SessionLevelState::new(max, protected);
+    level_state
+        .set_current_level(default)
+        .expect("default level is clamped to the effective ceiling");
+    level_state
 }
 
 /// Assemble a [`SessionContext`] for a profile.
@@ -263,11 +273,30 @@ mod tests {
             name = "replica"
             connect_string = "replica:1521/svc"
             max_level = "DDL"
+            default_level = "READ_WRITE"
             "#,
         );
         let ctx = build_session_context(&p, None, true).expect("context");
         assert_eq!(ctx.level_state.max_level(), OperatingLevel::ReadOnly);
+        assert_eq!(ctx.level_state.effective_level(), OperatingLevel::ReadOnly);
         assert!(ctx.level_state.is_protected());
+    }
+
+    #[test]
+    fn default_level_sets_initial_session_level_within_ceiling() {
+        let p = profile(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            max_level = "DDL"
+            default_level = "READ_WRITE"
+            "#,
+        );
+        let ctx = build_session_context(&p, None, false).expect("context");
+        assert_eq!(ctx.level_state.max_level(), OperatingLevel::Ddl);
+        assert_eq!(ctx.level_state.effective_level(), OperatingLevel::ReadWrite);
+        assert!(!ctx.level_state.is_protected());
     }
 
     #[test]

@@ -168,6 +168,13 @@ impl OracleMcpConfig {
             if prof.protected() && prof.max_level() != OperatingLevel::ReadOnly {
                 return Err(ConfigError::ProtectedNotReadOnly(prof.name.clone()));
             }
+            if prof.default_level() > prof.max_level() {
+                return Err(ConfigError::DefaultLevelExceedsMax {
+                    profile: prof.name.clone(),
+                    default_level: prof.default_level(),
+                    max_level: prof.max_level(),
+                });
+            }
         }
         Ok(self)
     }
@@ -227,6 +234,18 @@ pub enum ConfigError {
     /// A `protected` profile declared a `max_level` above `READ_ONLY`.
     #[error("protected profile `{0}` must pin max_level = READ_ONLY (§6.6)")]
     ProtectedNotReadOnly(String),
+    /// A profile's default operating level is above its immutable ceiling.
+    #[error(
+        "connection profile `{profile}` has default_level {default_level} above max_level {max_level}"
+    )]
+    DefaultLevelExceedsMax {
+        /// Profile name.
+        profile: String,
+        /// Configured default level.
+        default_level: OperatingLevel,
+        /// Configured ceiling.
+        max_level: OperatingLevel,
+    },
 }
 
 impl From<figment::Error> for ConfigError {
@@ -334,6 +353,21 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ConfigError::ProtectedNotReadOnly(_)));
+    }
+
+    #[test]
+    fn default_level_cannot_exceed_max_level() {
+        let err = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "dev:1521/svc"
+            max_level = "READ_WRITE"
+            default_level = "DDL"
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::DefaultLevelExceedsMax { .. }));
     }
 
     #[test]

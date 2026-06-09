@@ -83,6 +83,7 @@ connect_string = "localhost:1521/FREEPDB1"
 username = "APP_READONLY"
 credential_ref = "env:ORACLE_APP_PASSWORD"
 max_level = "READ_ONLY"
+default_level = "READ_ONLY"
 login_statements = [
   "ALTER SESSION SET NLS_LANGUAGE = english",
   "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'",
@@ -98,7 +99,9 @@ client_info = "local-workstation"
 driver_name = "oraclemcp"
 ```
 
-`login_statements` and `login_script` are for profile-local session policy only.
+`max_level` is the profile ceiling; `default_level` is the starting session
+level and must not exceed that ceiling. `login_statements` and `login_script`
+are for profile-local session policy only.
 They are restricted to allowlisted `ALTER SESSION SET ...` parameters, so local
 tooling conventions stay in config without making the open-source core
 environment-specific.
