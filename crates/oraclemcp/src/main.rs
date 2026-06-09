@@ -426,6 +426,14 @@ fn run_serve(
             None,
             default_read_only_level(),
         ),
+        Err(e) if profile.is_some() => {
+            emit_status_error(
+                robot_json,
+                "ORACLEMCP_CONFIG_INVALID",
+                &format!("failed to resolve connection profile: {e}"),
+            );
+            return ExitCode::from(2);
+        }
         Err(e) => {
             tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
             (

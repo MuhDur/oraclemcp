@@ -153,6 +153,10 @@ If `serve --profile <name>` is provided, it overrides `default_profile`. If neit
 Agents can inspect available profiles with `oracle_list_profiles` and reconnect
 the running MCP server with `oracle_switch_profile`. A failed switch leaves the
 current connection in place.
+`oraclemcp serve --profile <name>` fails fast when the profile or config cannot
+be resolved. Without an explicit profile, startup keeps discovery available even
+when the default live connection cannot be opened; live database calls then
+return structured tool errors instead of crashing the MCP server.
 
 ### Operator-defined read-only tools
 
