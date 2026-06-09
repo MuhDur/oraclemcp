@@ -8,11 +8,12 @@
 //! E-2b).
 //!
 //! A thin consumer of `oraclemcp-core` (the rmcp [`OracleMcpServer`] +
-//! `oracle_capabilities`) and `oraclemcp-db` (the read-only dictionary ops). It
-//! advertises read-only live-DB/config-inspection tools ([`registry`]) and
-//! dispatches them through [`dispatch::OracleDispatcher`]. There is NO engine,
-//! NO `plsql-*` dependency, and NO write/DDL surface — reads only, gated by the
-//! live-DB build feature.
+//! `oracle_capabilities`) and `oraclemcp-db` (the read-only dictionary ops plus
+//! one guarded execute primitive). It advertises safe-by-default
+//! live-DB/config-inspection tools ([`registry`]) and dispatches them through
+//! [`dispatch::OracleDispatcher`]. There is NO engine and NO `plsql-*`
+//! dependency; non-read execution is isolated behind the classifier,
+//! profile/session operating level, rollback default, and commit confirmation.
 //!
 //! CLI shape (mirrors `plsql-mcp`): a top-level `--robot-json` flag plus
 //! `serve` (stdio default, `--listen <ADDR>` for Streamable HTTP), `info`,
@@ -46,15 +47,15 @@ const CUSTOM_TOOLS_HMAC_KEY_ENV: &str = "ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY";
 #[command(
     name = "oraclemcp",
     version,
-    about = "Engine-free, read-only-by-default Oracle Database MCP server",
+    about = "Engine-free, safe-by-default Oracle Database MCP server",
     long_about = "Speaks the Model Context Protocol over stdio (default) or \
-                  Streamable HTTP (--listen). Exposes read-only Oracle tools \
+                  Streamable HTTP (--listen). Exposes safe-by-default Oracle tools \
                   (profile discovery, connection info, query, schema_inspect, \
                   list_schemas, switch_profile, preview_sql, describe, get_ddl, \
                   get_source, compile_errors, search_source, plscope_inspect, \
-                  sample_rows, read_clob, explain_plan) plus the \
+                  sample_rows, read_clob, explain_plan, guarded execute) plus the \
                   zero-arg oracle_capabilities discovery tool. No PL/SQL engine, \
-                  no write/DDL surface."
+                  no environment-specific workflow engine."
 )]
 struct Cli {
     /// Emit a single JSON object on stdout instead of human text.

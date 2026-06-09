@@ -1,7 +1,7 @@
 //! The advertised tool surface for the engine-free `oraclemcp` server.
 //!
 //! Pure data — no database access. [`tool_registry`] builds the
-//! read-only/config-inspection tools the server dispatches (see
+//! safe-by-default config-inspection, read, and guarded execute tools the server dispatches (see
 //! [`crate::dispatch`]); [`capabilities`] assembles the zero-arg
 //! `oracle_capabilities` report from that surface plus the build's feature
 //! tiers. The `oracle_capabilities` discovery tool itself is answered by
@@ -15,12 +15,13 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 34] = [
+pub const TOOL_NAMES: [&str; 35] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
     "oracle_query",
     "oracle_preview_sql",
+    "oracle_execute",
     "oracle_list_schemas",
     "oracle_schema_inspect",
     "oracle_describe",
@@ -66,7 +67,7 @@ fn object_schema(props: Value, required: &[&str]) -> Value {
     })
 }
 
-/// Build the read-only tool registry. Each descriptor carries a hand-written
+/// Build the public tool registry. Each descriptor carries a hand-written
 /// argument JSON-Schema mirroring the matching `dispatch` arg struct so an
 /// agent can construct a call first-try.
 pub fn tool_registry() -> ToolRegistry {
@@ -135,7 +136,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_preview_sql",
             ToolTier::FoundationStatic,
-            "Classify a SQL statement and report whether it would pass the read-only gate without executing it.",
+            "Classify a SQL statement and report whether it would pass the active profile/session gate without executing it.",
         )
         .with_input_schema(object_schema(
             json!({
@@ -143,6 +144,28 @@ pub fn tool_registry() -> ToolRegistry {
             }),
             &["sql"],
         )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_execute",
+            ToolTier::FoundationLiveDb,
+            "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default and commits require the confirmation token from oracle_preview_sql.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "sql": { "type": "string", "description": "A single non-read SQL statement. Use :1, :2 … for binds." },
+                "binds": {
+                    "type": "array",
+                    "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
+                    "items": {}
+                },
+                "commit": { "type": "boolean", "description": "Default false rolls back after DML. Set true only with confirm from oracle_preview_sql. DDL/Admin statements require true because Oracle cannot rollback them." },
+                "confirm": { "type": "string", "description": "Commit confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true." }
+            }),
+            &["sql"],
+        ))
+        .destructive(),
     );
 
     registry.register(
@@ -667,14 +690,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_lists_exactly_the_registered_read_only_tools() {
+    fn registry_lists_exactly_the_registered_tools() {
         let registry = tool_registry();
         assert_eq!(registry.len(), TOOL_NAMES.len(), "exact tool surface");
         let names: Vec<&str> = registry.tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, TOOL_NAMES.to_vec());
-        // None of the read tools is destructive, and oracle_capabilities is NOT
-        // in the registry (the server adds it to tools/list itself).
-        assert!(registry.tools.iter().all(|t| !t.destructive));
+        let destructive: Vec<&str> = registry
+            .tools
+            .iter()
+            .filter(|t| t.destructive)
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(
+            destructive,
+            vec!["oracle_execute"],
+            "only the guarded execute tool is destructive"
+        );
+        // oracle_capabilities is NOT in the registry (the server adds it to
+        // tools/list itself).
         assert!(
             !names.contains(&oraclemcp_core::CAPABILITIES_TOOL),
             "oracle_capabilities is server-answered, never registered"

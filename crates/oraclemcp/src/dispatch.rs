@@ -25,10 +25,11 @@ use oraclemcp_db::{
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
-    Classifier, ClassifierConfig, LevelDecision, OperatingLevel, SessionLevelState,
+    Classifier, ClassifierConfig, GuardDecision, LevelDecision, OperatingLevel, SessionLevelState,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 /// Default cap on `oracle_search_source` result rows when the caller omits it.
 const DEFAULT_SEARCH_MAX_ROWS: usize = 200;
@@ -233,6 +234,17 @@ struct QueryArgs {
 #[derive(Deserialize)]
 struct PreviewSqlArgs {
     sql: String,
+}
+
+#[derive(Deserialize)]
+struct ExecuteArgs {
+    sql: String,
+    #[serde(default)]
+    binds: Vec<Value>,
+    #[serde(default)]
+    commit: bool,
+    #[serde(default, alias = "token", alias = "confirmation_token")]
+    confirm: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -542,6 +554,207 @@ fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
     })))
 }
 
+fn normalized_sql_for_confirmation(sql: &str) -> String {
+    sql.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_end_matches(';')
+        .to_ascii_lowercase()
+}
+
+fn execute_confirmation_token(
+    sql: &str,
+    required_level: OperatingLevel,
+    active_profile: Option<&str>,
+) -> Option<String> {
+    if required_level <= OperatingLevel::ReadOnly {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"oraclemcp:execute-confirmation:v1\0");
+    hasher.update(active_profile.unwrap_or("").as_bytes());
+    hasher.update(b"\0");
+    hasher.update(required_level.as_str().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(normalized_sql_for_confirmation(sql).as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(16);
+    for byte in &digest[..8] {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    Some(out)
+}
+
+fn execute_confirmation_json(
+    sql: &str,
+    decision: &GuardDecision,
+    gate: &LevelDecision,
+    active_profile: Option<&str>,
+) -> Value {
+    let Some(required_level) = decision.required_level else {
+        return Value::Null;
+    };
+    if required_level <= OperatingLevel::ReadOnly || !matches!(gate, LevelDecision::Allow) {
+        return Value::Null;
+    }
+    let Some(confirm) = execute_confirmation_token(sql, required_level, active_profile) else {
+        return Value::Null;
+    };
+    json!({
+        "tool": "oracle_execute",
+        "confirm": confirm,
+        "commit": true,
+        "required_level": required_level,
+        "note": "Pass confirm only when you intend to commit this exact statement on this active profile.",
+    })
+}
+
+fn execute_gate_error(
+    decision: &GuardDecision,
+    gate: LevelDecision,
+    session: &SessionLevelState,
+) -> ErrorEnvelope {
+    match gate {
+        LevelDecision::RequireStepUp { target } => ErrorEnvelope::new(
+            ErrorClass::OperatingLevelTooLow,
+            format!(
+                "statement requires {} but the active session level is {}",
+                target.as_str(),
+                session.effective_level().as_str()
+            ),
+        )
+        .with_suggested_tool("oracle_preview_sql")
+        .with_next_step("call oracle_preview_sql to inspect the required level and profile ceiling")
+        .with_next_step(
+            "use a profile whose default_level permits this statement, or keep the profile read-only",
+        ),
+        LevelDecision::Blocked { reason } => match reason {
+            oraclemcp_guard::BlockReason::Forbidden => ErrorEnvelope::new(
+                ErrorClass::ForbiddenStatement,
+                format!("statement is forbidden by the SQL classifier: {}", decision.reason),
+            )
+            .with_next_step(decision.safe_alternative.clone().unwrap_or_else(|| {
+                "rewrite the statement as a simpler, single SQL statement".to_owned()
+            })),
+            oraclemcp_guard::BlockReason::ExceedsCeiling { required, ceiling } => {
+                ErrorEnvelope::new(
+                    ErrorClass::OperatingLevelTooLow,
+                    format!(
+                        "statement requires {} but the active profile ceiling is {}",
+                        required.as_str(),
+                        ceiling.as_str()
+                    ),
+                )
+                .with_suggested_tool("oracle_list_profiles")
+                .with_next_step("choose a profile whose max_level permits the statement")
+            }
+            _ => ErrorEnvelope::new(ErrorClass::PolicyDenied, "statement is blocked by policy"),
+        },
+        _ => ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "execute gate produced an unexpected decision",
+        ),
+    }
+}
+
+fn verify_commit_confirmation(
+    sql: &str,
+    required_level: OperatingLevel,
+    active_profile: Option<&str>,
+    confirm: Option<&str>,
+) -> Result<(), ErrorEnvelope> {
+    let expected =
+        execute_confirmation_token(sql, required_level, active_profile).ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorClass::InvalidArguments,
+                "read-only statements do not use oracle_execute commit confirmation",
+            )
+        })?;
+    if confirm == Some(expected.as_str()) {
+        return Ok(());
+    }
+    Err(ErrorEnvelope::new(
+        ErrorClass::ChallengeRequired,
+        "commit requires the confirmation token from oracle_preview_sql for this exact statement and active profile",
+    )
+    .with_suggested_tool("oracle_preview_sql")
+    .with_next_step("call oracle_preview_sql with the exact sql, then pass execute_confirmation.confirm as confirm"))
+}
+
+fn execute_sql(
+    conn: &dyn OracleConnection,
+    active_profile: Option<&str>,
+    session: &SessionLevelState,
+    args: ExecuteArgs,
+) -> Result<Value, ErrorEnvelope> {
+    let decision = Classifier::new(ClassifierConfig::new()).classify(&args.sql);
+    let gate = decision.gate(session);
+    if !matches!(gate, LevelDecision::Allow) {
+        return Err(execute_gate_error(&decision, gate, session));
+    }
+
+    let required_level = decision.required_level.ok_or_else(|| {
+        ErrorEnvelope::new(
+            ErrorClass::ForbiddenStatement,
+            format!(
+                "statement is forbidden by the SQL classifier: {}",
+                decision.reason
+            ),
+        )
+    })?;
+    if required_level <= OperatingLevel::ReadOnly {
+        return Err(invalid_args(
+            "oracle_execute is for non-read statements; use oracle_query for SELECT/WITH",
+        )
+        .with_suggested_tool("oracle_query"));
+    }
+    if required_level >= OperatingLevel::Ddl && !args.commit {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::ChallengeRequired,
+            "DDL/Admin statements cannot be rollback-previewed by Oracle; commit=true and confirm are required",
+        )
+        .with_suggested_tool("oracle_preview_sql")
+        .with_next_step("call oracle_preview_sql and pass execute_confirmation.confirm to oracle_execute with commit=true"));
+    }
+    if args.commit {
+        verify_commit_confirmation(
+            &args.sql,
+            required_level,
+            active_profile,
+            args.confirm.as_deref(),
+        )?;
+    }
+
+    let binds = args
+        .binds
+        .iter()
+        .map(json_to_bind)
+        .collect::<Result<Vec<_>, _>>()?;
+    let rows_affected = match conn.execute(&args.sql, &binds) {
+        Ok(rows) => rows,
+        Err(e) => {
+            let _ = conn.rollback();
+            return Err(DbError::into_envelope(e));
+        }
+    };
+    if args.commit {
+        conn.commit().map_err(DbError::into_envelope)?;
+    } else {
+        conn.rollback().map_err(DbError::into_envelope)?;
+    }
+
+    Ok(json!({
+        "executed": true,
+        "committed": args.commit,
+        "rolled_back": !args.commit,
+        "rows_affected": rows_affected,
+        "required_level": required_level,
+        "danger": decision.danger,
+        "objects_affected": decision.objects_affected,
+        "reason": decision.reason,
+    }))
+}
+
 struct ReadOnlyCustomToolExecutor<'a> {
     conn: &'a dyn OracleConnection,
 }
@@ -584,7 +797,7 @@ impl CustomToolExecutor for ReadOnlyCustomToolExecutor<'_> {
     }
 }
 
-fn preview_sql(sql: &str, session: &SessionLevelState) -> Value {
+fn preview_sql(sql: &str, session: &SessionLevelState, active_profile: Option<&str>) -> Value {
     let decision = Classifier::new(ClassifierConfig::new()).classify(sql);
     let gate = decision.gate(session);
     let (gate_decision, blocked_reason, step_up_target) = match gate {
@@ -625,6 +838,7 @@ fn preview_sql(sql: &str, session: &SessionLevelState) -> Value {
         "objects_affected": decision.objects_affected,
         "reason": decision.reason,
         "safe_alternative": decision.safe_alternative,
+        "execute_confirmation": execute_confirmation_json(sql, &decision, &gate, active_profile),
     })
 }
 
@@ -694,7 +908,15 @@ impl ToolDispatch for OracleDispatcher {
         let result: Result<Value, DbError> = match tool {
             "oracle_preview_sql" => {
                 let a: PreviewSqlArgs = parse_args(name, args)?;
-                Ok(preview_sql(&a.sql, &state.level))
+                Ok(preview_sql(
+                    &a.sql,
+                    &state.level,
+                    state.active_profile.as_deref(),
+                ))
+            }
+            "oracle_execute" => {
+                let a: ExecuteArgs = parse_args(name, args)?;
+                return execute_sql(conn, state.active_profile.as_deref(), &state.level, a);
             }
             "oracle_list_profiles" => {
                 ensure_no_args(name, args)?;
@@ -985,6 +1207,23 @@ mod tests {
     use super::*;
     use crate::registry::TOOL_NAMES;
     use oraclemcp_db::{OracleBackend, OracleCell, OracleConnectionInfo, OracleRow};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn read_write_level() -> SessionLevelState {
+        let mut level = SessionLevelState::new(OperatingLevel::ReadWrite, false);
+        level
+            .set_current_level(OperatingLevel::ReadWrite)
+            .expect("read/write is within ceiling");
+        level
+    }
+
+    fn ddl_level() -> SessionLevelState {
+        let mut level = SessionLevelState::new(OperatingLevel::Ddl, false);
+        level
+            .set_current_level(OperatingLevel::Ddl)
+            .expect("ddl is within ceiling");
+        level
+    }
 
     /// A driver-free mock that returns one synthetic row for any query — mirrors
     /// `oraclemcp_db::query`'s `NRowMock` so the dispatch arms exercise offline.
@@ -1151,6 +1390,68 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ExecState {
+        executed: Mutex<Vec<(String, Vec<OracleBind>)>>,
+        commits: AtomicUsize,
+        rollbacks: AtomicUsize,
+    }
+
+    struct ExecRecordingMock {
+        state: Arc<ExecState>,
+        rows_affected: u64,
+    }
+
+    impl ExecRecordingMock {
+        fn new(state: Arc<ExecState>) -> Self {
+            Self {
+                state,
+                rows_affected: 3,
+            }
+        }
+    }
+
+    impl OracleConnection for ExecRecordingMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo {
+                backend: Some(OracleBackend::RustOracle),
+                current_schema: Some("APP".to_owned()),
+                ..Default::default()
+            })
+        }
+
+        fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+            Ok(Vec::new())
+        }
+
+        fn execute(&self, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
+            self.state
+                .executed
+                .lock()
+                .expect("exec mutex")
+                .push((sql.to_owned(), b.to_vec()));
+            Ok(self.rows_affected)
+        }
+
+        fn commit(&self) -> Result<(), DbError> {
+            self.state.commits.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn rollback(&self) -> Result<(), DbError> {
+            self.state.rollbacks.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     /// Minimal valid args for a given tool name (matches the registry schemas).
     fn args_for(name: &str) -> Value {
         match name {
@@ -1179,6 +1480,9 @@ mod tests {
             "oracle_plscope_inspect" => json!({ "owner": "HR", "name": "PKG" }),
             "oracle_explain_plan" => json!({ "sql": "SELECT 1 FROM dual" }),
             "oracle_preview_sql" => json!({ "sql": "SELECT 1 FROM dual" }),
+            "oracle_execute" => {
+                json!({ "sql": "UPDATE employees SET name = name WHERE employee_id = 100" })
+            }
             "current_database" => json!({}),
             "switch_database" => json!({ "db": "other" }),
             "query" => json!({ "sql": "SELECT 1 FROM dual" }),
@@ -1206,13 +1510,13 @@ mod tests {
 
     #[test]
     fn every_registry_tool_routes_and_deserializes_offline() {
-        let dispatcher = OracleDispatcher::new_switchable(
-            Box::new(OneRowMock),
-            Some("dev".to_owned()),
-            default_read_only_level(),
-            Arc::new(|_| Ok(Box::new(OneRowMock))),
-        );
         for name in TOOL_NAMES {
+            let dispatcher = OracleDispatcher::new_switchable(
+                Box::new(OneRowMock),
+                Some("dev".to_owned()),
+                read_write_level(),
+                Arc::new(|_| Ok(Box::new(OneRowMock))),
+            );
             let out = dispatcher
                 .dispatch(name, args_for(name))
                 .unwrap_or_else(|e| panic!("{name} should route + succeed offline: {e:?}"));
@@ -1721,6 +2025,159 @@ mod tests {
             .expect("preview ddl");
         assert_eq!(ddl["gate_decision"], json!("require_step_up"));
         assert_eq!(ddl["step_up_target"], json!("DDL"));
+    }
+
+    #[test]
+    fn preview_sql_includes_execute_confirmation_for_allowed_write() {
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(NoExecMock),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+
+        let preview = dispatcher
+            .dispatch(
+                "oracle_preview_sql",
+                json!({ "sql": "UPDATE employees SET name = name WHERE employee_id = 100" }),
+            )
+            .expect("preview write");
+        assert_eq!(preview["gate_decision"], json!("allow"));
+        assert_eq!(
+            preview["execute_confirmation"]["tool"],
+            json!("oracle_execute")
+        );
+        assert_eq!(preview["execute_confirmation"]["commit"], json!(true));
+        assert_eq!(
+            preview["execute_confirmation"]["required_level"],
+            json!("READ_WRITE")
+        );
+        assert_eq!(
+            preview["execute_confirmation"]["confirm"]
+                .as_str()
+                .expect("token")
+                .len(),
+            16
+        );
+    }
+
+    #[test]
+    fn execute_rolls_back_dml_by_default() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+
+        let out = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({
+                    "sql": "UPDATE employees SET name = name WHERE employee_id = :1",
+                    "binds": [100]
+                }),
+            )
+            .expect("execute rollback");
+        assert_eq!(out["executed"], json!(true));
+        assert_eq!(out["committed"], json!(false));
+        assert_eq!(out["rolled_back"], json!(true));
+        assert_eq!(out["rows_affected"], json!(3));
+        assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+        assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+        let executed = state.executed.lock().expect("exec mutex");
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].1, vec![OracleBind::I64(100)]);
+    }
+
+    #[test]
+    fn execute_commit_requires_preview_confirmation_without_executing() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({
+                    "sql": "UPDATE employees SET name = name WHERE employee_id = 100",
+                    "commit": true
+                }),
+            )
+            .expect_err("commit needs confirmation");
+        assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
+        assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+        assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn execute_commit_with_preview_confirmation_commits() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+        let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+        let preview = dispatcher
+            .dispatch("oracle_preview_sql", json!({ "sql": sql }))
+            .expect("preview");
+        let confirm = preview["execute_confirmation"]["confirm"]
+            .as_str()
+            .expect("confirm");
+
+        let out = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": sql, "commit": true, "confirm": confirm }),
+            )
+            .expect("execute commit");
+        assert_eq!(out["committed"], json!(true));
+        assert_eq!(out["rolled_back"], json!(false));
+        assert_eq!(state.commits.load(Ordering::SeqCst), 1);
+        assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+    }
+
+    #[test]
+    fn execute_rejects_write_below_current_level_without_executing() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            SessionLevelState::new(OperatingLevel::ReadWrite, false),
+        );
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": "UPDATE employees SET name = name WHERE employee_id = 100" }),
+            )
+            .expect_err("write needs elevated/default read-write level");
+        assert_eq!(err.error_class, ErrorClass::OperatingLevelTooLow);
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
+    }
+
+    #[test]
+    fn execute_requires_commit_confirmation_for_ddl_without_executing() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            ddl_level(),
+        );
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": "CREATE TABLE app_smoke_execute (id NUMBER)" }),
+            )
+            .expect_err("ddl cannot rollback-preview");
+        assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
     }
 
     #[test]
