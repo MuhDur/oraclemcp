@@ -62,6 +62,7 @@ Or run it directly:
 oraclemcp serve                      # stdio (default); --allow-no-auth for local dev
 oraclemcp serve --listen 127.0.0.1:7070   # Streamable HTTP (bind loopback only)
 oraclemcp capabilities               # the advertised tool surface + feature tiers (JSON)
+oraclemcp profiles                   # configured profile names and non-secret metadata
 oraclemcp doctor                     # offline diagnostics (classifier self-test, NLS, …)
 oraclemcp doctor --profile dev_ro    # include live connectivity/role/privilege checks
 oraclemcp info                       # build info: version, tools, transports, live-db

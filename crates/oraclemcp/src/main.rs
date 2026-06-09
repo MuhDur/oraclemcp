@@ -96,6 +96,9 @@ enum Command {
         #[arg(long)]
         profile: Option<String>,
     },
+    /// List configured connection profiles without opening a database connection.
+    #[command(alias = "list-profiles")]
+    Profiles,
     /// Print the capabilities report (tools, level, feature tiers) as JSON.
     Capabilities,
 }
@@ -124,6 +127,7 @@ fn main() -> ExitCode {
         } => run_serve(listen, allow_no_auth, stdio_token, profile, robot_json),
         Command::Info => run_info(robot_json),
         Command::Doctor { profile } => run_doctor_cmd(robot_json, profile),
+        Command::Profiles => run_profiles(robot_json),
         Command::Capabilities => run_capabilities(robot_json),
     }
 }
@@ -561,6 +565,85 @@ fn run_capabilities(robot_json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn profiles_json(cfg: &OracleMcpConfig) -> serde_json::Value {
+    let profiles = cfg
+        .list_profiles()
+        .into_iter()
+        .map(|profile| {
+            serde_json::json!({
+                "name": profile.name,
+                "description": profile.description,
+                "is_default": profile.is_default,
+                "call_timeout_seconds": profile.call_timeout_seconds,
+                "max_level": profile.max_level,
+                "default_level": profile.default_level,
+                "protected": profile.protected,
+                "read_only_standby": profile.read_only_standby,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "ok": true,
+        "profile_count": profiles.len(),
+        "has_default_profile": cfg.default_profile.is_some(),
+        "profiles": profiles,
+    })
+}
+
+fn profiles_text(cfg: &OracleMcpConfig) -> String {
+    let profiles = cfg.list_profiles();
+    if profiles.is_empty() {
+        return "oraclemcp profiles\nno profiles configured\ncreate ~/.config/oraclemcp/profiles.toml or set ORACLEMCP_CONFIG\n".to_owned();
+    }
+
+    let mut out = String::from("oraclemcp profiles\n");
+    for profile in profiles {
+        let default = if profile.is_default { " default" } else { "" };
+        let protected = if profile.protected { " protected" } else { "" };
+        out.push_str(&format!(
+            "- {}{}{} max_level={} default_level={}",
+            profile.name, default, protected, profile.max_level, profile.default_level
+        ));
+        if let Some(description) = profile.description {
+            out.push_str(&format!(" — {description}"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn run_profiles(robot_json: bool) -> ExitCode {
+    match OracleMcpConfig::load(None) {
+        Ok(cfg) => {
+            if robot_json {
+                println!("{}", profiles_json(&cfg));
+            } else {
+                print!("{}", profiles_text(&cfg));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            if robot_json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": false,
+                        "exit_code": 2,
+                        "error": {
+                            "class": "ConfigError",
+                            "message": e.to_string(),
+                        }
+                    })
+                );
+            } else {
+                eprintln!("oraclemcp profiles: {e}");
+                eprintln!("fix: correct ~/.config/oraclemcp/profiles.toml or set ORACLEMCP_CONFIG");
+            }
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn doctor_process_exit_code(report: &oraclemcp_core::DoctorReport) -> u8 {
     // Mirror plsql-mcp: a blocker (any failed check) exits 2.
     if report.any_failed() { 2 } else { 0 }
@@ -731,6 +814,47 @@ mod tests {
             failed.to_json_with_exit_code(i32::from(process_code))["exit_code"],
             serde_json::json!(2)
         );
+    }
+
+    #[test]
+    fn profiles_json_reports_non_secret_metadata() {
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            schema_version = 1
+            default_profile = "dev"
+
+            [[profiles]]
+            name = "dev"
+            description = "Development profile"
+            connect_string = "localhost:1521/FREEPDB1"
+            username = "APP_USER"
+            credential_ref = "env:ORACLE_PASSWORD"
+            max_level = "READ_ONLY"
+            default_level = "READ_ONLY"
+            "#,
+        )
+        .expect("valid config");
+
+        let out = profiles_json(&cfg);
+        assert_eq!(out["ok"], serde_json::json!(true));
+        assert_eq!(out["profile_count"], serde_json::json!(1));
+        assert_eq!(out["has_default_profile"], serde_json::json!(true));
+        assert_eq!(out["profiles"][0]["name"], serde_json::json!("dev"));
+        assert_eq!(out["profiles"][0]["is_default"], serde_json::json!(true));
+        let serialized = serde_json::to_string(&out).expect("json");
+        assert!(!serialized.contains("APP_USER"));
+        assert!(!serialized.contains("ORACLE_PASSWORD"));
+        assert!(!serialized.contains("credential_ref"));
+        assert!(!serialized.contains("FREEPDB1"));
+        assert!(!serialized.contains("connect_string"));
+    }
+
+    #[test]
+    fn profiles_text_handles_empty_config() {
+        let cfg = OracleMcpConfig::from_toml_str("").expect("empty config is valid");
+        let text = profiles_text(&cfg);
+        assert!(text.contains("no profiles configured"));
+        assert!(text.contains("ORACLEMCP_CONFIG"));
     }
 
     fn custom_def(name: &str) -> CustomToolDef {
