@@ -15,9 +15,10 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 12] = [
+pub const TOOL_NAMES: [&str; 13] = [
     "oracle_list_profiles",
     "oracle_connection_info",
+    "oracle_switch_profile",
     "oracle_query",
     "oracle_schema_inspect",
     "oracle_describe",
@@ -60,9 +61,23 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_connection_info",
             ToolTier::FoundationLiveDb,
-            "Describe the active Oracle connection: backend, version, role, open mode, and current schema.",
+            "Describe the active profile and Oracle connection: backend, version, role, open mode, and current schema.",
         )
         .with_input_schema(object_schema(json!({}), &[])),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_switch_profile",
+            ToolTier::FoundationLiveDb,
+            "Reconnect this MCP server to another configured profile by name.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "profile": { "type": "string", "description": "Configured profile name from oracle_list_profiles." }
+            }),
+            &["profile"],
+        )),
     );
 
     registry.register(

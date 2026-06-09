@@ -10,7 +10,7 @@
 //! [`ErrorEnvelope`] via `DbError::into_envelope`. The `oracle_capabilities`
 //! discovery tool is answered by the server itself and never reaches here.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::ToolDispatch;
@@ -37,18 +37,55 @@ const MAX_SAMPLE_MAX_ROWS: usize = 1_000;
 /// Default cap on `oracle_read_clob` text when the caller omits it.
 const DEFAULT_LOB_MAX_CHARS: usize = 1_000_000;
 
-/// The dispatcher: owns the (single) live connection behind a `std::sync::Mutex`
-/// so dispatch stays sync and the connection is never shared across threads
+/// Reconnect callback used by `oracle_switch_profile`.
+pub type ProfileConnector =
+    dyn Fn(&str) -> Result<Box<dyn OracleConnection>, DbError> + Send + Sync + 'static;
+
+struct DispatcherState {
+    conn: Box<dyn OracleConnection>,
+    active_profile: Option<String>,
+}
+
+/// The dispatcher: owns the live connection behind a `std::sync::Mutex` so
+/// dispatch stays sync and the connection is never shared across threads
 /// without serialization.
 pub struct OracleDispatcher {
-    conn: Mutex<Box<dyn OracleConnection>>,
+    state: Mutex<DispatcherState>,
+    connector: Option<Arc<ProfileConnector>>,
 }
 
 impl OracleDispatcher {
     /// Build a dispatcher over an open (or stub) connection.
     pub fn new(conn: Box<dyn OracleConnection>) -> Self {
+        Self::new_with_profile(conn, None)
+    }
+
+    /// Build a dispatcher with a known active profile name.
+    pub fn new_with_profile(
+        conn: Box<dyn OracleConnection>,
+        active_profile: Option<String>,
+    ) -> Self {
         OracleDispatcher {
-            conn: Mutex::new(conn),
+            state: Mutex::new(DispatcherState {
+                conn,
+                active_profile,
+            }),
+            connector: None,
+        }
+    }
+
+    /// Build a dispatcher that can reconnect to other configured profiles.
+    pub fn new_switchable(
+        conn: Box<dyn OracleConnection>,
+        active_profile: Option<String>,
+        connector: Arc<ProfileConnector>,
+    ) -> Self {
+        OracleDispatcher {
+            state: Mutex::new(DispatcherState {
+                conn,
+                active_profile,
+            }),
+            connector: Some(connector),
         }
     }
 }
@@ -114,6 +151,11 @@ struct ReadClobArgs {
     pk_value: String,
     #[serde(default)]
     max_chars: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct SwitchProfileArgs {
+    profile: String,
 }
 
 #[derive(Deserialize)]
@@ -191,8 +233,9 @@ fn ensure_no_args(tool: &str, args: Value) -> Result<(), ErrorEnvelope> {
 /// unproven function call in a SELECT, …) are rejected with a structured
 /// envelope. Proven read-only `SELECT`/`WITH` and dictionary introspection pass.
 ///
-/// The other five tools build their own parameterized dictionary SQL and never
-/// execute caller-supplied statements, so they need no gate.
+/// The dictionary/profile tools build their own parameterized SQL or reconnect
+/// from configured profiles and never execute caller-supplied statements, so
+/// they need no raw-SQL gate.
 fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
     let decision = Classifier::new(ClassifierConfig::new()).classify(sql);
     // A session whose ceiling is READ_ONLY: `gate` returns `Allow` only for
@@ -227,13 +270,36 @@ fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
 
 impl ToolDispatch for OracleDispatcher {
     fn dispatch(&self, name: &str, args: Value) -> Result<Value, ErrorEnvelope> {
+        if name == "oracle_switch_profile" {
+            let a: SwitchProfileArgs = parse_args(name, args)?;
+            let Some(connector) = &self.connector else {
+                return Err(ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    "profile switching is unavailable in this server instance",
+                )
+                .with_next_step("restart the server with `oraclemcp serve --profile <name>`"));
+            };
+
+            let new_conn = connector(&a.profile).map_err(DbError::into_envelope)?;
+            let connection_info = new_conn.describe().ok();
+            let mut state = self.state.lock().map_err(|_| {
+                ErrorEnvelope::new(ErrorClass::Internal, "connection mutex poisoned")
+            })?;
+            state.conn = new_conn;
+            state.active_profile = Some(a.profile.clone());
+            return Ok(json!({
+                "active_profile": a.profile,
+                "connection": connection_info,
+            }));
+        }
+
         // A poisoned mutex means a prior dispatch panicked while holding the
         // connection; surface it as an Internal error rather than re-panicking.
-        let conn_guard = self
-            .conn
+        let state = self
+            .state
             .lock()
             .map_err(|_| ErrorEnvelope::new(ErrorClass::Internal, "connection mutex poisoned"))?;
-        let conn: &dyn OracleConnection = conn_guard.as_ref();
+        let conn: &dyn OracleConnection = state.conn.as_ref();
 
         let result: Result<Value, DbError> = match name {
             "oracle_list_profiles" => {
@@ -244,7 +310,12 @@ impl ToolDispatch for OracleDispatcher {
             }
             "oracle_connection_info" => {
                 ensure_no_args(name, args)?;
-                conn.describe().map(|info| json!({ "connection": info }))
+                conn.describe().map(|info| {
+                    json!({
+                        "active_profile": state.active_profile.clone(),
+                        "connection": info,
+                    })
+                })
             }
             "oracle_query" => {
                 let a: QueryArgs = parse_args(name, args)?;
@@ -426,6 +497,7 @@ mod tests {
         match name {
             "oracle_list_profiles" => json!({}),
             "oracle_connection_info" => json!({}),
+            "oracle_switch_profile" => json!({ "profile": "other" }),
             "oracle_query" => json!({ "sql": "SELECT 1 FROM dual" }),
             "oracle_schema_inspect" => json!({ "owner": "HR" }),
             "oracle_describe" => json!({ "owner": "HR", "table": "EMPLOYEES" }),
@@ -448,13 +520,46 @@ mod tests {
 
     #[test]
     fn every_registry_tool_routes_and_deserializes_offline() {
-        let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+        let dispatcher = OracleDispatcher::new_switchable(
+            Box::new(OneRowMock),
+            Some("dev".to_owned()),
+            Arc::new(|_| Ok(Box::new(OneRowMock))),
+        );
         for name in TOOL_NAMES {
             let out = dispatcher
                 .dispatch(name, args_for(name))
                 .unwrap_or_else(|e| panic!("{name} should route + succeed offline: {e:?}"));
             assert!(out.is_object(), "{name} returns a JSON object");
         }
+    }
+
+    #[test]
+    fn connection_info_reports_the_active_profile() {
+        let dispatcher =
+            OracleDispatcher::new_with_profile(Box::new(OneRowMock), Some("dev".to_owned()));
+        let out = dispatcher
+            .dispatch("oracle_connection_info", json!({}))
+            .expect("connection info");
+        assert_eq!(out["active_profile"], json!("dev"));
+    }
+
+    #[test]
+    fn failed_profile_switch_does_not_replace_the_current_connection() {
+        let dispatcher = OracleDispatcher::new_switchable(
+            Box::new(OneRowMock),
+            Some("dev".to_owned()),
+            Arc::new(|_| Err(DbError::Connect("connect failed".to_owned()))),
+        );
+
+        let err = dispatcher
+            .dispatch("oracle_switch_profile", json!({ "profile": "broken" }))
+            .expect_err("switch errors");
+        assert_eq!(err.error_class, ErrorClass::ConnectionFailed);
+
+        let out = dispatcher
+            .dispatch("oracle_connection_info", json!({}))
+            .expect("current connection still usable");
+        assert_eq!(out["active_profile"], json!("dev"));
     }
 
     #[test]

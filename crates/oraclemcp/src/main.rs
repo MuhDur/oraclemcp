@@ -42,10 +42,10 @@ const LIVE_DB: bool = cfg!(feature = "live-db");
     long_about = "Speaks the Model Context Protocol over stdio (default) or \
                   Streamable HTTP (--listen). Exposes read-only Oracle tools \
                   (profile discovery, connection info, query, schema_inspect, \
-                  describe, get_ddl, get_source, compile_errors, search_source, \
-                  sample_rows, read_clob, explain_plan) plus the zero-arg \
-                  oracle_capabilities discovery tool. No PL/SQL engine, no \
-                  write/DDL surface."
+                  switch_profile, describe, get_ddl, get_source, compile_errors, \
+                  search_source, sample_rows, read_clob, explain_plan) plus the \
+                  zero-arg oracle_capabilities discovery tool. No PL/SQL engine, \
+                  no write/DDL surface."
 )]
 struct Cli {
     /// Emit a single JSON object on stdout instead of human text.
@@ -124,12 +124,12 @@ fn init_tracing() {
         .try_init();
 }
 
-/// Resolve the connection options from config + an optional profile name.
-/// Falls back to an empty (unconnectable) option set when no implicit profile
-/// resolves. Explicit profile/config/secret failures are returned so `serve`
-/// can expose them through the same structured-error stub path as live connect
-/// failures.
-fn resolve_connect_options(profile: Option<&str>) -> Result<OracleConnectOptions, DbError> {
+/// Resolve the selected profile name and connection options from config + an
+/// optional profile name. When no explicit/default/sole profile resolves, the
+/// result is `None` so `serve` can still start for capabilities/doctor.
+fn resolve_profile_options(
+    profile: Option<&str>,
+) -> Result<Option<(String, OracleConnectOptions)>, DbError> {
     let cfg = OracleMcpConfig::load(None)
         .map_err(|e| DbError::UnsupportedAuth(format!("config load failed: {e}")))?;
 
@@ -148,7 +148,7 @@ fn resolve_connect_options(profile: Option<&str>) -> Result<OracleConnectOptions
         None if cfg.profiles.len() == 1 => cfg.profiles.first(),
         None => None,
     }) else {
-        return Ok(OracleConnectOptions::default());
+        return Ok(None);
     };
 
     let password = match chosen.credential_ref.as_deref() {
@@ -167,7 +167,29 @@ fn resolve_connect_options(profile: Option<&str>) -> Result<OracleConnectOptions
         None => None,
     };
 
-    Ok(oraclemcp_core::profile_to_options(chosen, password))
+    Ok(Some((
+        chosen.name.clone(),
+        oraclemcp_core::profile_to_options(chosen, password),
+    )))
+}
+
+fn connect_profile(profile: &str) -> Result<Box<dyn OracleConnection>, DbError> {
+    let Some((_, opts)) = resolve_profile_options(Some(profile))? else {
+        return Err(DbError::UnsupportedAuth(format!(
+            "connection profile `{profile}` not found"
+        )));
+    };
+    #[cfg(feature = "live-db")]
+    {
+        RustOracleConnection::connect(opts).map(|conn| Box::new(conn) as Box<dyn OracleConnection>)
+    }
+    #[cfg(not(feature = "live-db"))]
+    {
+        match RustOracleConnection::connect(opts) {
+            Ok(_) => unreachable!("offline build cannot open a live connection"),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 /// Open the live connection, or — when the driver is absent / the connect fails
@@ -203,11 +225,16 @@ fn open_connection(opts: OracleConnectOptions) -> Box<dyn OracleConnection> {
 }
 
 /// Build the server from the registry + capabilities + dispatcher over `conn`.
-fn build_server(conn: Box<dyn OracleConnection>, http: bool) -> OracleMcpServer {
+fn build_server(
+    conn: Box<dyn OracleConnection>,
+    active_profile: Option<String>,
+    http: bool,
+) -> OracleMcpServer {
     let version = env!("CARGO_PKG_VERSION");
     let registry = registry::tool_registry();
     let caps = registry::capabilities(version, LIVE_DB, http);
-    let dispatcher = OracleDispatcher::new(conn);
+    let dispatcher =
+        OracleDispatcher::new_switchable(conn, active_profile, Arc::new(connect_profile));
     OracleMcpServer::new(version, registry, caps, Arc::new(dispatcher))
 }
 
@@ -219,11 +246,15 @@ fn run_serve(
     robot_json: bool,
 ) -> ExitCode {
     init_tracing();
-    let conn = match resolve_connect_options(profile.as_deref()) {
-        Ok(opts) => open_connection(opts),
+    let (conn, active_profile) = match resolve_profile_options(profile.as_deref()) {
+        Ok(Some((profile_name, opts))) => (open_connection(opts), Some(profile_name)),
+        Ok(None) => (open_connection(OracleConnectOptions::default()), None),
         Err(e) => {
             tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
-            Box::new(stub::StubConnection::new(e))
+            (
+                Box::new(stub::StubConnection::new(e)) as Box<dyn OracleConnection>,
+                None,
+            )
         }
     };
 
@@ -251,7 +282,7 @@ fn run_serve(
                     return ExitCode::from(2);
                 }
             };
-            let server = build_server(conn, false);
+            let server = build_server(conn, active_profile, false);
             emit_serve_status(robot_json, "stdio", None);
             match runtime.block_on(server.serve_stdio(&auth)) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -263,7 +294,7 @@ fn run_serve(
         }
         // ── Streamable HTTP transport (--listen) ───────────────────────────
         Some(addr) => {
-            let server = build_server(conn, true);
+            let server = build_server(conn, active_profile, true);
             let cfg = HttpTransportConfig::default();
             emit_serve_status(robot_json, "http", Some(&addr));
             let bind_addr = addr.clone();
@@ -443,7 +474,7 @@ mod tests {
     #[test]
     fn build_server_advertises_the_registered_tools_plus_capabilities() {
         let conn = open_connection(OracleConnectOptions::default());
-        let server = build_server(conn, false);
+        let server = build_server(conn, None, false);
         // The capabilities report carries the registry's tools.
         let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), LIVE_DB, false);
         assert_eq!(caps.tools.len(), registry::TOOL_NAMES.len());

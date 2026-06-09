@@ -102,12 +102,17 @@ Config discovery order is:
 
 If `serve --profile <name>` is provided, it overrides `default_profile`. If neither is set and exactly one profile exists, that sole profile is used.
 
+Agents can inspect available profiles with `oracle_list_profiles` and reconnect
+the running MCP server with `oracle_switch_profile`. A failed switch leaves the
+current connection in place.
+
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
 | `oracle_list_profiles` | List configured connection profiles without exposing usernames or credential references |
 | `oracle_connection_info` | Describe the active connection: backend, version, role, open mode, and current schema |
+| `oracle_switch_profile` | Reconnect the server to another configured profile |
 | `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |
 | `oracle_schema_inspect` | List objects in a schema (optionally by type) |
 | `oracle_describe` | Column metadata for a table or view |
