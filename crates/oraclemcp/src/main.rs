@@ -137,7 +137,13 @@ fn resolve_connect_options(profile: Option<&str>) -> Result<OracleConnectOptions
         Some(name) => Some(cfg.profile(name).ok_or_else(|| {
             DbError::UnsupportedAuth(format!("connection profile `{name}` not found"))
         })?),
-        // No explicit profile: use the sole profile if there is exactly
+        None if cfg.default_profile.is_some() => {
+            let name = cfg.default_profile.as_deref().expect("checked is_some");
+            Some(cfg.profile(name).ok_or_else(|| {
+                DbError::UnsupportedAuth(format!("default_profile `{name}` not found"))
+            })?)
+        }
+        // No explicit/default profile: use the sole profile if there is exactly
         // one, else none (the agent can still drive capabilities/doctor).
         None if cfg.profiles.len() == 1 => cfg.profiles.first(),
         None => None,

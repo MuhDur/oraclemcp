@@ -172,6 +172,7 @@ impl ConnectionProfile {
             name: self.name.clone(),
             description: self.description.clone(),
             connect_string: self.connect_string.clone(),
+            is_default: false,
             max_level: self.max_level(),
             default_level: self.default_level(),
             protected: self.protected(),
@@ -189,6 +190,8 @@ pub struct ProfileMetadata {
     pub description: Option<String>,
     /// The Oracle Net connect identifier (not a secret).
     pub connect_string: Option<String>,
+    /// Whether this is the configured startup default.
+    pub is_default: bool,
     /// The operating-level ceiling.
     pub max_level: OperatingLevel,
     /// The starting operating level.

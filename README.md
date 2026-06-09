@@ -74,6 +74,7 @@ For live database access, create `~/.config/oraclemcp/profiles.toml`:
 
 ```toml
 schema_version = 1
+default_profile = "dev_ro"
 
 [[profiles]]
 name = "dev_ro"
@@ -88,7 +89,7 @@ Then launch:
 
 ```sh
 export ORACLE_APP_PASSWORD='...'
-oraclemcp serve --allow-no-auth --profile dev_ro
+oraclemcp serve --allow-no-auth
 ```
 
 Config discovery order is:
@@ -98,6 +99,8 @@ Config discovery order is:
 3. `~/.config/oraclemcp/config.toml`
 
 `credential_ref` supports `env:VAR` for environment-injected credentials and `literal:value` for local development only. Literal credentials are rejected when `protected = true`.
+
+If `serve --profile <name>` is provided, it overrides `default_profile`. If neither is set and exactly one profile exists, that sole profile is used.
 
 ## Tools
 

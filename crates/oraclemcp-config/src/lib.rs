@@ -54,6 +54,10 @@ pub struct OracleMcpConfig {
     /// Config schema version for upgrade migrations.
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    /// Optional profile name to use when the launcher does not pass
+    /// `serve --profile <name>`. This keeps multi-client MCP config small.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile: Option<String>,
     /// Named connection profiles.
     #[serde(default)]
     pub profiles: Vec<ConnectionProfile>,
@@ -63,6 +67,7 @@ impl Default for OracleMcpConfig {
     fn default() -> Self {
         OracleMcpConfig {
             schema_version: SUPPORTED_SCHEMA_VERSION,
+            default_profile: None,
             profiles: Vec::new(),
         }
     }
@@ -142,6 +147,13 @@ impl OracleMcpConfig {
             });
         }
         resolve_inheritance(&mut self.profiles)?;
+        if let Some(default_profile) = self.default_profile.as_deref()
+            && !self.profiles.iter().any(|p| p.name == default_profile)
+        {
+            return Err(ConfigError::UnknownDefaultProfile(
+                default_profile.to_owned(),
+            ));
+        }
         for prof in &self.profiles {
             match prof.connect_string.as_deref() {
                 Some(s) if !s.trim().is_empty() => {}
@@ -169,7 +181,12 @@ impl OracleMcpConfig {
     pub fn list_profiles(&self) -> Vec<ProfileMetadata> {
         self.profiles
             .iter()
-            .map(ConnectionProfile::metadata)
+            .map(|profile| {
+                let mut metadata = profile.metadata();
+                metadata.is_default =
+                    self.default_profile.as_deref() == Some(profile.name.as_str());
+                metadata
+            })
             .collect()
     }
 }
@@ -193,6 +210,9 @@ pub enum ConfigError {
     /// Two profiles share a name.
     #[error("duplicate connection profile name `{0}`")]
     DuplicateProfile(String),
+    /// The configured default profile does not exist.
+    #[error("default_profile references unknown profile `{0}`")]
+    UnknownDefaultProfile(String),
     /// The config declares a newer schema than this build supports.
     #[error("unsupported config schema_version {found}; this build supports {supported}")]
     UnsupportedSchemaVersion {
@@ -237,6 +257,33 @@ mod tests {
         assert_eq!(dev.max_level(), OperatingLevel::ReadOnly);
         assert_eq!(dev.default_level(), OperatingLevel::ReadOnly);
         assert!(!dev.protected());
+    }
+
+    #[test]
+    fn default_profile_must_reference_a_known_profile() {
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            default_profile = "dev"
+
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            "#,
+        )
+        .expect("loads");
+        assert_eq!(cfg.default_profile.as_deref(), Some("dev"));
+
+        let err = OracleMcpConfig::from_toml_str(
+            r#"
+            default_profile = "missing"
+
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::UnknownDefaultProfile(_)));
     }
 
     #[test]
@@ -358,6 +405,8 @@ mod tests {
     #[allow(clippy::result_large_err)]
     fn launcher_env_vars_do_not_become_unknown_config_keys() {
         figment::Jail::expect_with(|jail| {
+            let home = jail.directory().display().to_string();
+            jail.set_env("HOME", home);
             jail.set_env("ORACLEMCP_LOG", "debug");
             jail.set_env("ORACLEMCP_STDIO_TOKEN", "token-for-stdio");
             jail.set_env("ORACLEMCP_TEST_DSN", "localhost:1521/FREEPDB1");
@@ -373,6 +422,8 @@ mod tests {
     fn list_profiles_excludes_credentials() {
         let cfg = OracleMcpConfig::from_toml_str(
             r#"
+            default_profile = "prod"
+
             [[profiles]]
             name = "prod"
             connect_string = "prod:1521/svc"
@@ -385,5 +436,6 @@ mod tests {
         assert!(!json.contains("keyring:prod"));
         assert!(!json.contains("svc_acct"));
         assert!(json.contains("prod:1521/svc"));
+        assert!(json.contains("\"is_default\":true"));
     }
 }
