@@ -6,7 +6,7 @@
 //! raw newline-delimited JSON-RPC frames. Asserts the full protocol surface
 //! offline (default features, no Oracle driver):
 //!   - `initialize` completes and advertises `oraclemcp`,
-//!   - `tools/list` advertises exactly the 7 read-only tools + `oracle_capabilities`,
+//!   - `tools/list` advertises the read-only registry tools + `oracle_capabilities`,
 //!   - `tools/call oracle_capabilities` returns the capability report,
 //!   - a live tool call against an error-returning mock returns a STRUCTURED
 //!     error envelope (isError + error_class), never a panic.
@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oraclemcp::dispatch::OracleDispatcher;
-use oraclemcp::registry::{capabilities, tool_registry};
+use oraclemcp::registry::{TOOL_NAMES, capabilities, tool_registry};
 use oraclemcp_core::{CAPABILITIES_TOOL, OracleMcpServer};
 use oraclemcp_db::{
     DbError, OracleBackend, OracleBind, OracleConnection, OracleConnectionInfo, OracleRow,
@@ -142,7 +142,7 @@ async fn initialize_completes_and_advertises_the_server() {
 }
 
 #[tokio::test]
-async fn tools_list_advertises_the_seven_tools_plus_capabilities() {
+async fn tools_list_advertises_registry_tools_plus_capabilities() {
     let list_req = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
     let replies = run_session(server_over(Box::new(FailingMock)), vec![list_req]).await;
     let list = replies
@@ -153,17 +153,7 @@ async fn tools_list_advertises_the_seven_tools_plus_capabilities() {
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
 
-    // The 7 read tools + the server-added oracle_capabilities = 8 total.
-    let expected_reads = [
-        "oracle_query",
-        "oracle_schema_inspect",
-        "oracle_describe",
-        "oracle_get_ddl",
-        "oracle_compile_errors",
-        "oracle_search_source",
-        "oracle_explain_plan",
-    ];
-    for name in expected_reads {
+    for name in TOOL_NAMES {
         assert!(
             names.contains(&name),
             "tools/list missing `{name}`: {names:?}"
@@ -175,8 +165,8 @@ async fn tools_list_advertises_the_seven_tools_plus_capabilities() {
     );
     assert_eq!(
         names.len(),
-        expected_reads.len() + 1,
-        "exactly 7 reads + oracle_capabilities, got {names:?}"
+        TOOL_NAMES.len() + 1,
+        "registry tools + oracle_capabilities, got {names:?}"
     );
     // oracle_capabilities appears exactly once (no dup with the registry).
     assert_eq!(
@@ -208,11 +198,11 @@ async fn call_oracle_capabilities_returns_the_report() {
     let structured = &result["structuredContent"];
     assert_eq!(structured["server_name"], json!("oraclemcp"));
     assert_eq!(structured["protocol_version"], json!("2025-11-25"));
-    // The advertised tool surface in the report is the 7 read tools.
+    // The advertised tool surface in the report is the registry surface.
     assert_eq!(
         structured["tools"].as_array().map(Vec::len),
-        Some(7),
-        "capability report lists the 7 read tools"
+        Some(TOOL_NAMES.len()),
+        "capability report lists the registry tools"
     );
 }
 
