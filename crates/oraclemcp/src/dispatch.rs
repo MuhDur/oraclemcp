@@ -81,6 +81,8 @@ const MAX_DBMS_OUTPUT_BUFFER_BYTES: usize = 1_000_000;
 const EXECUTE_APPROVED_TOKEN_TTL_SECONDS: u64 = 300;
 /// Hard cap on remembered compatibility grants in one server process.
 const MAX_EXECUTE_APPROVED_TOKENS: usize = 128;
+/// Hard cap on per-call Oracle round-trip timeout overrides.
+const MAX_CALL_TIMEOUT_SECONDS: u64 = 3_600;
 
 /// Reconnect callback used by `oracle_switch_profile`.
 pub type ProfileConnector =
@@ -242,6 +244,43 @@ fn query_serialize_options_from_args(args: &QueryArgs) -> SerializeOptions {
     }
 }
 
+fn call_timeout_duration(seconds: Option<u64>) -> Result<Option<Duration>, ErrorEnvelope> {
+    let Some(seconds) = seconds else {
+        return Ok(None);
+    };
+    if seconds == 0 {
+        return Err(invalid_args(
+            "timeout_seconds must be at least 1 when provided",
+        ));
+    }
+    Ok(Some(Duration::from_secs(
+        seconds.min(MAX_CALL_TIMEOUT_SECONDS),
+    )))
+}
+
+fn with_call_timeout<T>(
+    conn: &dyn OracleConnection,
+    timeout_seconds: Option<u64>,
+    f: impl FnOnce() -> Result<T, ErrorEnvelope>,
+) -> Result<T, ErrorEnvelope> {
+    let Some(timeout) = call_timeout_duration(timeout_seconds)? else {
+        return f();
+    };
+    let previous = conn.call_timeout().map_err(DbError::into_envelope)?;
+    conn.set_call_timeout(Some(timeout))
+        .map_err(DbError::into_envelope)?;
+    let result = f();
+    let restore = conn
+        .set_call_timeout(previous)
+        .map_err(DbError::into_envelope);
+    match (result, restore) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(err), Ok(())) => Err(err),
+        (Ok(_), Err(err)) => Err(err),
+        (Err(err), Err(_)) => Err(err),
+    }
+}
+
 #[derive(Deserialize)]
 struct QueryArgs {
     sql: String,
@@ -261,6 +300,8 @@ struct QueryArgs {
     max_col_width: Option<usize>,
     #[serde(default)]
     numbers_as_float: Option<bool>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -283,6 +324,8 @@ struct ExecuteArgs {
     dbms_output_max_lines: Option<usize>,
     #[serde(default, alias = "max_dbms_output_chars")]
     dbms_output_max_chars: Option<usize>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -334,6 +377,8 @@ struct CompileObjectArgs {
     execute: bool,
     #[serde(default, alias = "token", alias = "confirmation_token")]
     confirm: Option<String>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -346,6 +391,8 @@ struct CreateOrReplaceArgs {
     confirm: Option<String>,
     #[serde(default)]
     include_errors: Option<bool>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -362,6 +409,8 @@ struct DeployDdlArgs {
     include_errors: Option<bool>,
     #[serde(default)]
     wait_seconds: Option<u64>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1312,7 +1361,7 @@ fn execute_approved_args(
     state: &mut DispatcherState,
     args: ExecuteApprovedArgs,
 ) -> Result<ExecuteArgs, ErrorEnvelope> {
-    let _ = args.timeout_seconds;
+    let timeout_seconds = args.timeout_seconds;
     if args.save_output.is_some() {
         return Err(invalid_args(
             "execute_approved does not write DBMS_OUTPUT to files; set capture_dbms_output=true and read dbms_output.lines from the tool result",
@@ -1334,6 +1383,7 @@ fn execute_approved_args(
             capture_dbms_output: args.capture_dbms_output,
             dbms_output_max_lines: args.dbms_output_max_lines,
             dbms_output_max_chars: args.dbms_output_max_chars,
+            timeout_seconds,
         });
     }
 
@@ -1374,10 +1424,22 @@ fn execute_approved_args(
         capture_dbms_output: args.capture_dbms_output,
         dbms_output_max_lines: args.dbms_output_max_lines,
         dbms_output_max_chars: args.dbms_output_max_chars,
+        timeout_seconds,
     })
 }
 
 fn execute_sql(
+    conn: &dyn OracleConnection,
+    active_profile: Option<&str>,
+    session: &SessionLevelState,
+    args: ExecuteArgs,
+) -> Result<Value, ErrorEnvelope> {
+    with_call_timeout(conn, args.timeout_seconds, || {
+        execute_sql_inner(conn, active_profile, session, args)
+    })
+}
+
+fn execute_sql_inner(
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
@@ -1634,6 +1696,18 @@ fn compile_diagnostic_counts(errors: &[oraclemcp_db::OracleRow]) -> (usize, usiz
 }
 
 fn compile_object(
+    conn: &dyn OracleConnection,
+    active_profile: Option<&str>,
+    session: &SessionLevelState,
+    tool_name: &str,
+    args: CompileObjectArgs,
+) -> Result<Value, ErrorEnvelope> {
+    with_call_timeout(conn, args.timeout_seconds, || {
+        compile_object_inner(conn, active_profile, session, tool_name, args)
+    })
+}
+
+fn compile_object_inner(
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
@@ -1952,6 +2026,18 @@ fn create_or_replace(
     tool_name: &str,
     args: CreateOrReplaceArgs,
 ) -> Result<Value, ErrorEnvelope> {
+    with_call_timeout(conn, args.timeout_seconds, || {
+        create_or_replace_inner(conn, active_profile, session, tool_name, args)
+    })
+}
+
+fn create_or_replace_inner(
+    conn: &dyn OracleConnection,
+    active_profile: Option<&str>,
+    session: &SessionLevelState,
+    tool_name: &str,
+    args: CreateOrReplaceArgs,
+) -> Result<Value, ErrorEnvelope> {
     let source = create_or_replace_source_arg(tool_name, args.source_code)?;
     let decision = Classifier::new(ClassifierConfig::new()).classify(&source);
     let gate = decision.gate(session);
@@ -2008,6 +2094,7 @@ fn create_or_replace(
             capture_dbms_output: false,
             dbms_output_max_lines: None,
             dbms_output_max_chars: None,
+            timeout_seconds: args.timeout_seconds,
         },
     )?;
     let include_errors = args.include_errors.unwrap_or(true);
@@ -2043,6 +2130,17 @@ fn deploy_ddl(
     session: &SessionLevelState,
     args: DeployDdlArgs,
 ) -> Result<Value, ErrorEnvelope> {
+    with_call_timeout(conn, args.timeout_seconds, || {
+        deploy_ddl_inner(conn, active_profile, session, args)
+    })
+}
+
+fn deploy_ddl_inner(
+    conn: &dyn OracleConnection,
+    active_profile: Option<&str>,
+    session: &SessionLevelState,
+    args: DeployDdlArgs,
+) -> Result<Value, ErrorEnvelope> {
     let ddl = required_non_empty_arg("deploy_ddl", "ddl", args.ddl)?;
     let deploy_name = non_empty_arg(args.name);
     let wait_seconds = args.wait_seconds.unwrap_or(0);
@@ -2061,6 +2159,7 @@ fn deploy_ddl(
                 execute: args.execute,
                 confirm: args.confirm,
                 include_errors: args.include_errors,
+                timeout_seconds: args.timeout_seconds,
             },
         )?;
         if let Value::Object(map) = &mut out {
@@ -2129,6 +2228,7 @@ fn deploy_ddl(
             capture_dbms_output: false,
             dbms_output_max_lines: None,
             dbms_output_max_chars: None,
+            timeout_seconds: args.timeout_seconds,
         },
     )?;
     if let Value::Object(map) = &mut out {
@@ -2364,22 +2464,25 @@ impl ToolDispatch for OracleDispatcher {
             }
             "oracle_query" => {
                 let a: QueryArgs = parse_args(name, args)?;
-                ensure_read_only(&a.sql)?;
-                let binds = a
-                    .binds
-                    .iter()
-                    .map(json_to_bind)
-                    .collect::<Result<Vec<_>, _>>()?;
-                let offset = oraclemcp_db::cursor_to_offset(a.cursor.as_deref());
-                read_query(
-                    conn,
-                    &a.sql,
-                    &binds,
-                    query_caps_from_args(&a),
-                    offset,
-                    &query_serialize_options_from_args(&a),
-                )
-                .map(|resp| serde_json::to_value(resp).unwrap_or(Value::Null))
+                return with_call_timeout(conn, a.timeout_seconds, || {
+                    ensure_read_only(&a.sql)?;
+                    let binds = a
+                        .binds
+                        .iter()
+                        .map(json_to_bind)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let offset = oraclemcp_db::cursor_to_offset(a.cursor.as_deref());
+                    read_query(
+                        conn,
+                        &a.sql,
+                        &binds,
+                        query_caps_from_args(&a),
+                        offset,
+                        &query_serialize_options_from_args(&a),
+                    )
+                    .map(|resp| serde_json::to_value(resp).unwrap_or(Value::Null))
+                    .map_err(DbError::into_envelope)
+                });
             }
             "oracle_schema_inspect" => {
                 let a: SchemaInspectArgs = parse_args(name, args)?;
@@ -2826,6 +2929,8 @@ mod tests {
         dbms_output: Mutex<DbmsOutput>,
         dbms_output_enabled: AtomicUsize,
         dbms_output_limits: Mutex<Vec<(usize, usize)>>,
+        current_call_timeout: Mutex<Option<Duration>>,
+        call_timeout_sets: Mutex<Vec<Option<Duration>>>,
         commits: AtomicUsize,
         rollbacks: AtomicUsize,
     }
@@ -2880,6 +2985,28 @@ mod tests {
                 .expect("exec mutex")
                 .push((sql.to_owned(), b.to_vec()));
             Ok(self.rows_affected)
+        }
+
+        fn call_timeout(&self) -> Result<Option<Duration>, DbError> {
+            Ok(*self
+                .state
+                .current_call_timeout
+                .lock()
+                .expect("timeout mutex"))
+        }
+
+        fn set_call_timeout(&self, timeout: Option<Duration>) -> Result<(), DbError> {
+            *self
+                .state
+                .current_call_timeout
+                .lock()
+                .expect("timeout mutex") = timeout;
+            self.state
+                .call_timeout_sets
+                .lock()
+                .expect("timeout sets mutex")
+                .push(timeout);
+            Ok(())
         }
 
         fn enable_dbms_output(&self, _buffer_bytes: Option<u32>) -> Result<(), DbError> {
@@ -4015,6 +4142,54 @@ mod tests {
         let executed = state.executed.lock().expect("exec mutex");
         assert_eq!(executed.len(), 1);
         assert_eq!(executed[0].1, vec![OracleBind::I64(100)]);
+    }
+
+    #[test]
+    fn query_timeout_override_is_restored_after_call() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            default_read_only_level(),
+        );
+
+        let out = dispatcher
+            .dispatch(
+                "oracle_query",
+                json!({
+                    "sql": "SELECT 1 AS id FROM dual",
+                    "timeout_seconds": 17
+                }),
+            )
+            .expect("query with timeout");
+        assert_eq!(out["row_count"], json!(0));
+        let timeouts = state.call_timeout_sets.lock().expect("timeout sets mutex");
+        assert_eq!(timeouts.as_slice(), &[Some(Duration::from_secs(17)), None]);
+    }
+
+    #[test]
+    fn execute_timeout_override_is_restored_after_call() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+
+        let out = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({
+                    "sql": "UPDATE employees SET name = name WHERE employee_id = 100",
+                    "timeout_seconds": 11
+                }),
+            )
+            .expect("execute with timeout");
+        assert_eq!(out["executed"], json!(true));
+        assert_eq!(out["rolled_back"], json!(true));
+        assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+        let timeouts = state.call_timeout_sets.lock().expect("timeout sets mutex");
+        assert_eq!(timeouts.as_slice(), &[Some(Duration::from_secs(11)), None]);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! plus the Oracle type name; the deterministic NUMBER→string / ISO-8601 / NLS
 //! serializer (P0-5) builds the precise JSON mapping on top.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -305,6 +305,8 @@ pub struct OracleConnectOptions {
     pub iam_token: Option<String>,
     /// Optional profile-driven session identity.
     pub session_identity: Option<OracleSessionIdentity>,
+    /// Optional Oracle per-round-trip call timeout.
+    pub call_timeout: Option<Duration>,
     /// Extra guarded session setup statements to run after canonical NLS setup.
     pub session_statements: Vec<String>,
 }

@@ -117,6 +117,9 @@ pub struct ConnectionProfile {
     /// guarded login statements. These are never agent supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_session_statements: Option<Vec<String>>,
+    /// Optional per-round-trip Oracle call timeout, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_timeout_seconds: Option<u64>,
     /// The per-target operating-level ceiling (§6.6). Defaults to `READ_ONLY`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_level: Option<OperatingLevel>,
@@ -190,6 +193,7 @@ impl ConnectionProfile {
             login_script,
             login_statements,
             trusted_session_statements,
+            call_timeout_seconds,
             max_level,
             default_level,
             protected,
@@ -210,6 +214,7 @@ impl ConnectionProfile {
             description: self.description.clone(),
             connect_string: self.connect_string.clone(),
             is_default: false,
+            call_timeout_seconds: self.call_timeout_seconds,
             max_level: self.max_level(),
             default_level: self.default_level(),
             protected: self.protected(),
@@ -229,6 +234,8 @@ pub struct ProfileMetadata {
     pub connect_string: Option<String>,
     /// Whether this is the configured startup default.
     pub is_default: bool,
+    /// Optional per-round-trip Oracle call timeout, in seconds.
+    pub call_timeout_seconds: Option<u64>,
     /// The operating-level ceiling.
     pub max_level: OperatingLevel,
     /// The starting operating level.
@@ -300,6 +307,7 @@ mod tests {
             login_script: None,
             login_statements: None,
             trusted_session_statements: None,
+            call_timeout_seconds: None,
             max_level: None,
             default_level: None,
             protected: None,
@@ -324,6 +332,7 @@ mod tests {
         let mut base = p("shared");
         base.connect_string = Some("host:1521/svc".to_owned());
         base.max_level = Some(OperatingLevel::ReadWrite);
+        base.call_timeout_seconds = Some(30);
         let mut child = p("dev");
         child.base = Some("shared".to_owned());
         let mut profiles = vec![base, child];
@@ -331,6 +340,7 @@ mod tests {
         let dev = &profiles[1];
         assert_eq!(dev.connect_string.as_deref(), Some("host:1521/svc"));
         assert_eq!(dev.max_level(), OperatingLevel::ReadWrite);
+        assert_eq!(dev.call_timeout_seconds, Some(30));
     }
 
     #[test]

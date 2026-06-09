@@ -156,7 +156,8 @@ pub fn tool_registry() -> ToolRegistry {
                 "max_col_width": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Compatibility text cap for ordinary text/raw columns. Truncated values are returned as { value, truncated, char_length }." },
                 "max_lob_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum CLOB characters to inline per cell (default 32768)." },
                 "max_blob_bytes": { "type": "integer", "minimum": 1, "maximum": 5242880, "description": "Maximum BLOB bytes to inline per cell as base64 (default 1048576)." },
-                "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible. Default false preserves Oracle NUMBER losslessly as strings." }
+                "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible. Default false preserves Oracle NUMBER losslessly as strings." },
+                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
             }),
             &["sql"],
         )),
@@ -194,7 +195,8 @@ pub fn tool_registry() -> ToolRegistry {
                 "confirm": { "type": "string", "description": "Commit confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true." },
                 "capture_dbms_output": { "type": "boolean", "description": "Default false. When true, enables DBMS_OUTPUT before execution and returns bounded captured lines after commit/rollback." },
                 "dbms_output_max_lines": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum DBMS_OUTPUT lines to return when capture_dbms_output=true (default 200)." },
-                "dbms_output_max_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum DBMS_OUTPUT characters to return when capture_dbms_output=true (default 200000)." }
+                "dbms_output_max_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum DBMS_OUTPUT characters to return when capture_dbms_output=true (default 200000)." },
+                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
             }),
             &["sql"],
         ))
@@ -216,7 +218,8 @@ pub fn tool_registry() -> ToolRegistry {
                 "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
                 "warnings": { "type": "boolean", "description": "Enable PLSQL_WARNINGS='ENABLE:ALL' before compiling. Default false." },
                 "execute": { "type": "boolean", "description": "Default false returns a preview and confirmation token. Set true only with confirm to run the compile statements." },
-                "confirm": { "type": "string", "description": "Confirmation token returned by the preview for this exact object/profile/options. Required when execute=true." }
+                "confirm": { "type": "string", "description": "Confirmation token returned by the preview for this exact object/profile/options. Required when execute=true." },
+                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
             }),
             &["object_type"],
         ))
@@ -236,7 +239,8 @@ pub fn tool_registry() -> ToolRegistry {
                 "ddl": { "type": "string", "description": "Alias for source_code." },
                 "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
                 "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
-                "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the detected object when possible. Default true." }
+                "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the detected object when possible. Default true." },
+                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
             }),
             &[],
         ))
@@ -563,7 +567,8 @@ pub fn tool_registry() -> ToolRegistry {
                 "max_col_width": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Compatibility text cap for ordinary text/raw columns." },
                 "max_lob_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum CLOB characters to inline per cell." },
                 "max_blob_bytes": { "type": "integer", "minimum": 1, "maximum": 5242880, "description": "Maximum BLOB bytes to inline per cell as base64." },
-                "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible." }
+                "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible." },
+                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
             }),
             &["sql"],
         )),
@@ -596,13 +601,13 @@ pub fn tool_registry() -> ToolRegistry {
                 "confirmation_token": { "type": "string", "description": "Alias for token." },
                 "sql": { "type": "string", "description": "Optional SQL statement. If omitted, the token must still be cached from preview_sql in this server process." },
                 "commit": { "type": "boolean", "description": "Default true for this compatibility tool. Set false to rollback-preview DML." },
-                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Accepted for compatibility; the MCP host controls request timeout." },
+                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." },
                 "save_output": { "type": "string", "description": "Unsupported in the generic core. Use capture_dbms_output=true and read dbms_output.lines instead." },
                 "capture_dbms_output": { "type": "boolean", "description": "Default false. When true, returns bounded DBMS_OUTPUT lines." },
                 "dbms_output_max_lines": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum DBMS_OUTPUT lines to return when capture_dbms_output=true (default 200)." },
                 "dbms_output_max_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum DBMS_OUTPUT characters to return when capture_dbms_output=true (default 200000)." }
             }),
-            &["token"],
+            &[],
         ))
         .destructive(),
     );
@@ -622,7 +627,8 @@ pub fn tool_registry() -> ToolRegistry {
                 "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
                 "warnings": { "type": "boolean", "description": "Enable PLSQL_WARNINGS='ENABLE:ALL' before compiling. Default false." },
                 "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to compile." },
-                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." }
+                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
+                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
             }),
             &["object_type"],
         ))
@@ -643,7 +649,8 @@ pub fn tool_registry() -> ToolRegistry {
                 "object_name": { "type": "string", "description": "Alias for name." },
                 "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
                 "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to compile." },
-                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." }
+                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
+                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
             }),
             &["object_type"],
         ))
@@ -663,7 +670,8 @@ pub fn tool_registry() -> ToolRegistry {
                 "ddl": { "type": "string", "description": "Alias for source_code." },
                 "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
                 "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
-                "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the detected object when possible. Default true." }
+                "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the detected object when possible. Default true." },
+                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
             }),
             &[],
         ))
@@ -685,7 +693,8 @@ pub fn tool_registry() -> ToolRegistry {
                 "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
                 "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
                 "wait_seconds": { "type": "integer", "minimum": 0, "maximum": 3600, "description": "Accepted for compatibility and returned in the response; generic core executes synchronously." },
-                "include_errors": { "type": "boolean", "description": "For CREATE OR REPLACE, include current compile errors for the detected object after execute. Default true." }
+                "include_errors": { "type": "boolean", "description": "For CREATE OR REPLACE, include current compile errors for the detected object after execute. Default true." },
+                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
             }),
             &[],
         ))

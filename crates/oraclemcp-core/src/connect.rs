@@ -7,7 +7,7 @@
 //! already omits secret references). Profile login statements are allowlisted
 //! and carried to both the default connection and leased sessions.
 
-use std::{fs, path::Path};
+use std::{fs, path::Path, time::Duration};
 
 use oraclemcp_config::ConnectionProfile;
 use oraclemcp_db::{
@@ -116,6 +116,7 @@ fn profile_to_options_for_level(
                 client_info: identity.client_info.clone(),
                 driver_name: identity.driver_name.clone(),
             }),
+        call_timeout: profile.call_timeout_seconds.map(Duration::from_secs),
         session_statements: profile_session_statements(profile, level_state)?,
     })
 }
@@ -307,11 +308,13 @@ mod tests {
             connect_string = "localhost:1521/FREEPDB1"
             max_level = "DDL"
             default_level = "READ_WRITE"
+            call_timeout_seconds = 45
             "#,
         );
         let ctx = build_session_context(&p, None, false).expect("context");
         assert_eq!(ctx.level_state.max_level(), OperatingLevel::Ddl);
         assert_eq!(ctx.level_state.effective_level(), OperatingLevel::ReadWrite);
+        assert_eq!(ctx.options.call_timeout, Some(Duration::from_secs(45)));
         assert!(!ctx.level_state.is_protected());
     }
 

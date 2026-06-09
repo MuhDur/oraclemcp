@@ -10,6 +10,7 @@ use crate::types::{
     OracleBackend, OracleBind, OracleConnectOptions, OracleConnectionInfo, OracleRow,
 };
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 /// Bounded `DBMS_OUTPUT` lines captured from a single Oracle session.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +48,17 @@ pub trait OracleConnection: Send {
     }
     /// Run a DML/DDL statement; returns rows affected (`SQL%ROWCOUNT`).
     fn execute(&self, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError>;
+
+    /// Current Oracle per-round-trip call timeout, when supported by the backend.
+    fn call_timeout(&self) -> Result<Option<Duration>, DbError> {
+        Ok(None)
+    }
+
+    /// Set the Oracle per-round-trip call timeout. `None` disables it.
+    fn set_call_timeout(&self, timeout: Option<Duration>) -> Result<(), DbError> {
+        let _ = timeout;
+        Ok(())
+    }
 
     /// Enable `DBMS_OUTPUT` for this session. `buffer_bytes` is passed through
     /// to Oracle; callers should keep it bounded.
@@ -231,6 +243,11 @@ mod driver {
                 .connect()
                 .map_err(|e| DbError::Connect(e.to_string()))?
         };
+        if let Some(timeout) = opts.call_timeout {
+            inner
+                .set_call_timeout(Some(timeout))
+                .map_err(|e| DbError::Connect(e.to_string()))?;
+        }
         apply_session_identity(&inner, opts.session_identity.as_ref())?;
         // Pin canonical, NLS-decoupled output (ISO-8601 dates, period decimals)
         // so identical queries return identical values regardless of host NLS
@@ -419,6 +436,18 @@ mod driver {
                 .execute(sql, &refs)
                 .map_err(|e| DbError::Execute(e.to_string()))?;
             stmt.row_count()
+                .map_err(|e| DbError::Execute(e.to_string()))
+        }
+
+        fn call_timeout(&self) -> Result<Option<std::time::Duration>, DbError> {
+            self.inner
+                .call_timeout()
+                .map_err(|e| DbError::Execute(e.to_string()))
+        }
+
+        fn set_call_timeout(&self, timeout: Option<std::time::Duration>) -> Result<(), DbError> {
+            self.inner
+                .set_call_timeout(timeout)
                 .map_err(|e| DbError::Execute(e.to_string()))
         }
 
