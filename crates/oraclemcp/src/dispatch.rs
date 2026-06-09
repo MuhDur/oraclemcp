@@ -779,6 +779,8 @@ mod tests {
                 server_version: Some("23.0.0".to_owned()),
                 database_role: Some("PRIMARY".to_owned()),
                 open_mode: Some("READ WRITE".to_owned()),
+                read_only: false,
+                read_only_reason: None,
                 current_schema: Some("APP".to_owned()),
                 session_user: Some("APP".to_owned()),
                 current_user: Some("APP".to_owned()),
@@ -951,6 +953,7 @@ mod tests {
         assert_eq!(out["active_profile"], json!("dev"));
         assert_eq!(out["connection"]["module"], json!("oraclemcp-test"));
         assert_eq!(out["connection"]["client_identifier"], json!("agent"));
+        assert_eq!(out["connection"]["read_only"], json!(false));
     }
 
     #[test]

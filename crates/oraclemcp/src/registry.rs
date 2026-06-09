@@ -81,7 +81,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_connection_info",
             ToolTier::FoundationLiveDb,
-            "Describe the active profile and Oracle connection: backend, version, role, open mode, and current schema.",
+            "Describe the active profile and Oracle connection: backend, version, role, open mode, read-only database status, session context, and current schema.",
         )
         .with_input_schema(object_schema(json!({}), &[])),
     );

@@ -256,7 +256,7 @@ mod driver {
                     info.client_info = r.text("CLIENT_INFO").map(str::to_owned);
                 }
             }
-            Ok(info)
+            Ok(info.with_read_only_status())
         }
 
         fn query_rows(

@@ -129,7 +129,7 @@ current connection in place.
 | Tool | Purpose |
 | --- | --- |
 | `oracle_list_profiles` | List configured connection profiles without exposing usernames or credential references |
-| `oracle_connection_info` | Describe the active connection: backend, version, role, open mode, and current schema |
+| `oracle_connection_info` | Describe the active connection: backend, version, role, open mode, read-only database status, session context, and current schema |
 | `oracle_switch_profile` | Reconnect the server to another configured profile |
 | `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |
 | `oracle_preview_sql` | Classify SQL and report whether it would pass the read-only gate without executing it |

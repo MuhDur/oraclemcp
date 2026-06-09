@@ -160,6 +160,14 @@ pub struct OracleConnectionInfo {
     pub database_role: Option<String>,
     /// `V$DATABASE.OPEN_MODE` (e.g. `READ WRITE`, `READ ONLY`).
     pub open_mode: Option<String>,
+    /// Derived from `database_role` / `open_mode`: true when the database role
+    /// or open mode indicates a physically read-only target. This does not
+    /// describe profile ceilings or user grants.
+    #[serde(default)]
+    pub read_only: bool,
+    /// Machine-readable reason for `read_only = true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_reason: Option<String>,
     /// The current schema (`SYS_CONTEXT('USERENV','CURRENT_SCHEMA')`).
     pub current_schema: Option<String>,
     /// Oracle session user (`SYS_CONTEXT('USERENV','SESSION_USER')`).
@@ -187,15 +195,32 @@ impl OracleConnectionInfo {
     /// non-primary role or a read-only open mode.
     #[must_use]
     pub fn is_read_only_standby(&self) -> bool {
-        let role_standby = self
-            .database_role
-            .as_deref()
-            .is_some_and(|r| !r.eq_ignore_ascii_case("PRIMARY"));
-        let mode_ro = self
-            .open_mode
-            .as_deref()
-            .is_some_and(|m| m.to_ascii_uppercase().contains("READ ONLY"));
-        role_standby || mode_ro
+        self.read_only_status().0
+    }
+
+    /// Derived database read-only status and a compact reason when true.
+    #[must_use]
+    pub fn read_only_status(&self) -> (bool, Option<String>) {
+        if let Some(role) = self.database_role.as_deref()
+            && !role.eq_ignore_ascii_case("PRIMARY")
+        {
+            return (true, Some("database_role_not_primary".to_owned()));
+        }
+        if let Some(open_mode) = self.open_mode.as_deref()
+            && open_mode.to_ascii_uppercase().contains("READ ONLY")
+        {
+            return (true, Some("open_mode_read_only".to_owned()));
+        }
+        (false, None)
+    }
+
+    /// Populate the serialized read-only fields from role/open-mode metadata.
+    #[must_use]
+    pub fn with_read_only_status(mut self) -> Self {
+        let (read_only, reason) = self.read_only_status();
+        self.read_only = read_only;
+        self.read_only_reason = reason;
+        self
     }
 }
 
@@ -295,6 +320,9 @@ mod tests {
             ..Default::default()
         };
         assert!(!primary.is_read_only_standby());
+        let primary = primary.with_read_only_status();
+        assert!(!primary.read_only);
+        assert_eq!(primary.read_only_reason, None);
 
         let standby = OracleConnectionInfo {
             database_role: Some("PHYSICAL STANDBY".to_owned()),
@@ -302,6 +330,12 @@ mod tests {
             ..Default::default()
         };
         assert!(standby.is_read_only_standby());
+        let standby = standby.with_read_only_status();
+        assert!(standby.read_only);
+        assert_eq!(
+            standby.read_only_reason.as_deref(),
+            Some("database_role_not_primary")
+        );
 
         let ro_primary = OracleConnectionInfo {
             database_role: Some("PRIMARY".to_owned()),
@@ -309,5 +343,11 @@ mod tests {
             ..Default::default()
         };
         assert!(ro_primary.is_read_only_standby());
+        let ro_primary = ro_primary.with_read_only_status();
+        assert!(ro_primary.read_only);
+        assert_eq!(
+            ro_primary.read_only_reason.as_deref(),
+            Some("open_mode_read_only")
+        );
     }
 }
