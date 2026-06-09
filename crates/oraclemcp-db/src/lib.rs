@@ -37,7 +37,7 @@ mod pool;
 
 pub use auth_adapter::{AuthAdapter, AuthAdapterError};
 pub use awr::{DiagnosticsSource, detect_statspack, select_diagnostics_source, top_sql_query};
-pub use connection::{OracleConnection, RustOracleConnection};
+pub use connection::{DbmsOutput, OracleConnection, RustOracleConnection};
 pub use doctor::{InstantClientPosture, detect_instant_client, oracle_driver_compiled};
 pub use drcp::{DrcpConfig, SessionPurity};
 pub use error::DbError;

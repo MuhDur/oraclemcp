@@ -186,7 +186,7 @@ signatures are rejected.
 | `oracle_set_session_level` | Preview/apply a temporary session operating-level elevation within the profile ceiling, or drop back to `READ_ONLY` |
 | `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |
 | `oracle_preview_sql` | Classify SQL and report whether it is read-only, needs profile-permitted step-up, or exceeds the active profile ceiling, without executing it |
-| `oracle_execute` | Execute one non-read statement through the active profile/session gate; DML rolls back by default, while commits and DDL/Admin require the confirmation token from `oracle_preview_sql` |
+| `oracle_execute` | Execute one non-read statement through the active profile/session gate; DML rolls back by default, while commits and DDL/Admin require the confirmation token from `oracle_preview_sql`; optionally captures bounded `DBMS_OUTPUT` |
 | `oracle_compile_object` | Preview or compile one PL/SQL/view object through the `DDL` profile gate; execution requires the confirmation token returned by preview |
 | `oracle_create_or_replace` | Preview or apply one `CREATE OR REPLACE` statement through the classifier and `DDL` profile gate |
 | `oracle_list_schemas` | List schemas that own objects visible to this session |
@@ -264,7 +264,7 @@ preview. Elevating to `READ_WRITE`, `DDL`, or `ADMIN` requires the preview token
 and creates a bounded window (default 900 seconds, maximum 3600 seconds).
 Lowering to a less-capable level is immediate and does not require a token.
 
-`oracle_execute` is intentionally narrow. It accepts one statement with positional binds, refuses read-only SQL (use `oracle_query`), refuses anything above the active profile/session level, rolls DML back unless `commit=true`, and requires the `oracle_preview_sql` confirmation token before any commit. DDL/Admin statements cannot be rollback-previewed by Oracle, so they require `commit=true` plus confirmation before execution.
+`oracle_execute` is intentionally narrow. It accepts one statement with positional binds, refuses read-only SQL (use `oracle_query`), refuses anything above the active profile/session level, rolls DML back unless `commit=true`, and requires the `oracle_preview_sql` confirmation token before any commit. DDL/Admin statements cannot be rollback-previewed by Oracle, so they require `commit=true` plus confirmation before execution. Set `capture_dbms_output=true` to enable `DBMS_OUTPUT` before the statement and return bounded output after the commit or rollback; `dbms_output_max_lines` and `dbms_output_max_chars` cap the response.
 
 `oracle_compile_object` is the structured alternative to handcrafting `ALTER ... COMPILE`. A call without `execute=true` only previews the validated compile statements, required `DDL` level, gate decision, and confirmation token. A second call with `execute=true` and that token runs the compile and returns current `ALL_ERRORS` rows for the object. Set `plscope=true` to enable PL/Scope collection before compiling, or `warnings=true` to enable `PLSQL_WARNINGS='ENABLE:ALL'` before compiling. Both options remain profile-gated at `DDL`; `compile_with_warnings` is a compatibility alias for the warnings path.
 

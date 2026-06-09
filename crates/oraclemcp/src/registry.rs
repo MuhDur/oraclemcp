@@ -189,7 +189,10 @@ pub fn tool_registry() -> ToolRegistry {
                     "items": {}
                 },
                 "commit": { "type": "boolean", "description": "Default false rolls back after DML. Set true only with confirm from oracle_preview_sql. DDL/Admin statements require true because Oracle cannot rollback them." },
-                "confirm": { "type": "string", "description": "Commit confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true." }
+                "confirm": { "type": "string", "description": "Commit confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true." },
+                "capture_dbms_output": { "type": "boolean", "description": "Default false. When true, enables DBMS_OUTPUT before execution and returns bounded captured lines after commit/rollback." },
+                "dbms_output_max_lines": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum DBMS_OUTPUT lines to return when capture_dbms_output=true (default 200)." },
+                "dbms_output_max_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum DBMS_OUTPUT characters to return when capture_dbms_output=true (default 200000)." }
             }),
             &["sql"],
         ))

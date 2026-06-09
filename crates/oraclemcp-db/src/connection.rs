@@ -9,6 +9,16 @@ use crate::error::DbError;
 use crate::types::{
     OracleBackend, OracleBind, OracleConnectOptions, OracleConnectionInfo, OracleRow,
 };
+use serde::{Deserialize, Serialize};
+
+/// Bounded `DBMS_OUTPUT` lines captured from a single Oracle session.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DbmsOutput {
+    pub lines: Vec<String>,
+    pub line_count: usize,
+    pub char_count: usize,
+    pub truncated: bool,
+}
 
 /// A synchronous Oracle connection. Implementors run on a `spawn_blocking`
 /// worker; never on the async executor (§4.3).
@@ -37,6 +47,31 @@ pub trait OracleConnection: Send {
     }
     /// Run a DML/DDL statement; returns rows affected (`SQL%ROWCOUNT`).
     fn execute(&self, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError>;
+
+    /// Enable `DBMS_OUTPUT` for this session. `buffer_bytes` is passed through
+    /// to Oracle; callers should keep it bounded.
+    fn enable_dbms_output(&self, buffer_bytes: Option<u32>) -> Result<(), DbError> {
+        match buffer_bytes {
+            Some(bytes) => self
+                .execute(
+                    "BEGIN DBMS_OUTPUT.ENABLE(:1); END;",
+                    &[OracleBind::I64(i64::from(bytes))],
+                )
+                .map(|_| ()),
+            None => self
+                .execute("BEGIN DBMS_OUTPUT.ENABLE(NULL); END;", &[])
+                .map(|_| ()),
+        }
+    }
+
+    /// Drain `DBMS_OUTPUT` from this session, bounded by line and character
+    /// limits. Backends without output-bind support must fail explicitly.
+    fn read_dbms_output(&self, max_lines: usize, max_chars: usize) -> Result<DbmsOutput, DbError> {
+        let _ = (max_lines, max_chars);
+        Err(DbError::Execute(
+            "DBMS_OUTPUT capture is not supported by this Oracle backend".to_owned(),
+        ))
+    }
 
     /// Commit the current transaction on this session.
     fn commit(&self) -> Result<(), DbError>;
@@ -87,7 +122,10 @@ mod driver {
     use crate::types::{
         OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow, OracleSessionIdentity,
     };
-    use oracle::{ResultSet, Row, sql_type::ToSql};
+    use oracle::{
+        ResultSet, Row,
+        sql_type::{OracleType, ToSql},
+    };
 
     /// Fold a wallet directory into an EZConnect-Plus descriptor so we never
     /// have to mutate `TNS_ADMIN` (which needs `unsafe std::env::set_var` under
@@ -382,6 +420,55 @@ mod driver {
                 .map_err(|e| DbError::Execute(e.to_string()))?;
             stmt.row_count()
                 .map_err(|e| DbError::Execute(e.to_string()))
+        }
+
+        fn read_dbms_output(
+            &self,
+            max_lines: usize,
+            max_chars: usize,
+        ) -> Result<super::DbmsOutput, DbError> {
+            let line_type = OracleType::Varchar2(32_767);
+            let status_type = OracleType::Number(10, 0);
+            let mut stmt = self
+                .inner
+                .statement("BEGIN DBMS_OUTPUT.GET_LINE(:line, :status); END;")
+                .build()
+                .map_err(|e| DbError::Execute(e.to_string()))?;
+
+            let mut out = super::DbmsOutput::default();
+            for _ in 0..max_lines {
+                stmt.execute(&[&line_type, &status_type])
+                    .map_err(|e| DbError::Execute(e.to_string()))?;
+                let status: i32 = stmt
+                    .bind_value("status")
+                    .map_err(|e| DbError::Execute(e.to_string()))?;
+                if status != 0 {
+                    return Ok(out);
+                }
+
+                let line: Option<String> = stmt
+                    .bind_value("line")
+                    .map_err(|e| DbError::Execute(e.to_string()))?;
+                let line = line.unwrap_or_default();
+                let remaining = max_chars.saturating_sub(out.char_count);
+                if remaining == 0 {
+                    out.truncated = true;
+                    return Ok(out);
+                }
+                let line_chars = line.chars().count();
+                if line_chars > remaining {
+                    out.lines.push(line.chars().take(remaining).collect());
+                    out.char_count += remaining;
+                    out.line_count = out.lines.len();
+                    out.truncated = true;
+                    return Ok(out);
+                }
+                out.char_count += line_chars;
+                out.lines.push(line);
+                out.line_count = out.lines.len();
+            }
+            out.truncated = true;
+            Ok(out)
         }
 
         fn commit(&self) -> Result<(), DbError> {

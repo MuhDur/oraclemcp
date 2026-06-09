@@ -18,7 +18,7 @@ use oraclemcp_core::{
     CustomToolCatalog, CustomToolExecutor, ToolBody, ToolDispatch, execute_custom_tool,
 };
 use oraclemcp_db::{
-    DbError, OracleBind, OracleConnection, QueryCaps, SerializeOptions, compile_errors,
+    DbError, DbmsOutput, OracleBind, OracleConnection, QueryCaps, SerializeOptions, compile_errors,
     compile_object_statements, describe_columns, describe_constraints, describe_index,
     describe_trigger, describe_view, execute_immediate_audit, explain_plan,
     find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects, list_schemas,
@@ -66,6 +66,16 @@ const MAX_QUERY_BLOB_BYTES: usize = 5 * 1024 * 1024;
 const DEFAULT_SESSION_LEVEL_TTL_SECONDS: u64 = 900;
 /// Hard cap for one temporary session elevation window.
 const MAX_SESSION_LEVEL_TTL_SECONDS: u64 = 3_600;
+/// Default cap on DBMS_OUTPUT lines captured by `oracle_execute`.
+const DEFAULT_DBMS_OUTPUT_MAX_LINES: usize = 200;
+/// Hard cap on DBMS_OUTPUT lines captured by `oracle_execute`.
+const MAX_DBMS_OUTPUT_MAX_LINES: usize = 5_000;
+/// Default cap on DBMS_OUTPUT characters captured by `oracle_execute`.
+const DEFAULT_DBMS_OUTPUT_MAX_CHARS: usize = 200_000;
+/// Hard cap on DBMS_OUTPUT characters captured by `oracle_execute`.
+const MAX_DBMS_OUTPUT_MAX_CHARS: usize = 1_000_000;
+/// Hard cap on the Oracle-side DBMS_OUTPUT buffer requested for a capture.
+const MAX_DBMS_OUTPUT_BUFFER_BYTES: usize = 1_000_000;
 
 /// Reconnect callback used by `oracle_switch_profile`.
 pub type ProfileConnector =
@@ -252,6 +262,12 @@ struct ExecuteArgs {
     commit: bool,
     #[serde(default, alias = "token", alias = "confirmation_token")]
     confirm: Option<String>,
+    #[serde(default, alias = "dbms_output")]
+    capture_dbms_output: bool,
+    #[serde(default, alias = "max_dbms_output_lines")]
+    dbms_output_max_lines: Option<usize>,
+    #[serde(default, alias = "max_dbms_output_chars")]
+    dbms_output_max_chars: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -1174,6 +1190,34 @@ fn verify_commit_confirmation(
     .with_next_step("call oracle_preview_sql with the exact sql, then pass execute_confirmation.confirm as confirm"))
 }
 
+fn dbms_output_limits(args: &ExecuteArgs) -> (usize, usize, u32) {
+    let max_lines = args
+        .dbms_output_max_lines
+        .unwrap_or(DEFAULT_DBMS_OUTPUT_MAX_LINES)
+        .clamp(1, MAX_DBMS_OUTPUT_MAX_LINES);
+    let max_chars = args
+        .dbms_output_max_chars
+        .unwrap_or(DEFAULT_DBMS_OUTPUT_MAX_CHARS)
+        .clamp(1, MAX_DBMS_OUTPUT_MAX_CHARS);
+    let buffer_bytes = max_chars
+        .saturating_mul(4)
+        .max(2_000)
+        .min(MAX_DBMS_OUTPUT_BUFFER_BYTES) as u32;
+    (max_lines, max_chars, buffer_bytes)
+}
+
+fn dbms_output_json(out: &DbmsOutput, max_lines: usize, max_chars: usize) -> Value {
+    json!({
+        "enabled": true,
+        "lines": out.lines.clone(),
+        "line_count": out.line_count,
+        "char_count": out.char_count,
+        "max_lines": max_lines,
+        "max_chars": max_chars,
+        "truncated": out.truncated,
+    })
+}
+
 fn execute_sql(
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
@@ -1223,6 +1267,14 @@ fn execute_sql(
         .iter()
         .map(json_to_bind)
         .collect::<Result<Vec<_>, _>>()?;
+    let dbms_output_limits = if args.capture_dbms_output {
+        let (max_lines, max_chars, buffer_bytes) = dbms_output_limits(&args);
+        conn.enable_dbms_output(Some(buffer_bytes))
+            .map_err(DbError::into_envelope)?;
+        Some((max_lines, max_chars))
+    } else {
+        None
+    };
     let rows_affected = match conn.execute(&args.sql, &binds) {
         Ok(rows) => rows,
         Err(e) => {
@@ -1235,8 +1287,16 @@ fn execute_sql(
     } else {
         conn.rollback().map_err(DbError::into_envelope)?;
     }
+    let dbms_output = match dbms_output_limits {
+        Some((max_lines, max_chars)) => Some(
+            conn.read_dbms_output(max_lines, max_chars)
+                .map_err(DbError::into_envelope)
+                .map(|out| dbms_output_json(&out, max_lines, max_chars))?,
+        ),
+        None => None,
+    };
 
-    Ok(json!({
+    let mut response = json!({
         "executed": true,
         "committed": args.commit,
         "rolled_back": !args.commit,
@@ -1245,7 +1305,11 @@ fn execute_sql(
         "danger": decision.danger,
         "objects_affected": decision.objects_affected,
         "reason": decision.reason,
-    }))
+    });
+    if let Some(dbms_output) = dbms_output {
+        response["dbms_output"] = dbms_output;
+    }
+    Ok(response)
 }
 
 fn normalize_compile_type_for_wire(object_type: &str) -> String {
@@ -1782,6 +1846,9 @@ fn create_or_replace(
             binds: Vec::new(),
             commit: true,
             confirm: args.confirm,
+            capture_dbms_output: false,
+            dbms_output_max_lines: None,
+            dbms_output_max_chars: None,
         },
     )?;
     let include_errors = args.include_errors.unwrap_or(true);
@@ -2479,6 +2546,9 @@ mod tests {
     struct ExecState {
         executed: Mutex<Vec<(String, Vec<OracleBind>)>>,
         diagnostics: Mutex<Vec<OracleRow>>,
+        dbms_output: Mutex<DbmsOutput>,
+        dbms_output_enabled: AtomicUsize,
+        dbms_output_limits: Mutex<Vec<(usize, usize)>>,
         commits: AtomicUsize,
         rollbacks: AtomicUsize,
     }
@@ -2533,6 +2603,26 @@ mod tests {
                 .expect("exec mutex")
                 .push((sql.to_owned(), b.to_vec()));
             Ok(self.rows_affected)
+        }
+
+        fn enable_dbms_output(&self, _buffer_bytes: Option<u32>) -> Result<(), DbError> {
+            self.state
+                .dbms_output_enabled
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn read_dbms_output(
+            &self,
+            max_lines: usize,
+            max_chars: usize,
+        ) -> Result<DbmsOutput, DbError> {
+            self.state
+                .dbms_output_limits
+                .lock()
+                .expect("output limits mutex")
+                .push((max_lines, max_chars));
+            Ok(self.state.dbms_output.lock().expect("output mutex").clone())
         }
 
         fn commit(&self) -> Result<(), DbError> {
@@ -3569,6 +3659,92 @@ mod tests {
         let executed = state.executed.lock().expect("exec mutex");
         assert_eq!(executed.len(), 1);
         assert_eq!(executed[0].1, vec![OracleBind::I64(100)]);
+    }
+
+    #[test]
+    fn execute_can_capture_bounded_dbms_output() {
+        let state = Arc::new(ExecState::default());
+        *state.dbms_output.lock().expect("output mutex") = DbmsOutput {
+            lines: vec!["first".to_owned(), "second".to_owned()],
+            line_count: 2,
+            char_count: 11,
+            truncated: false,
+        };
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+
+        let out = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({
+                    "sql": "BEGIN DBMS_OUTPUT.PUT_LINE('first'); DBMS_OUTPUT.PUT_LINE('second'); END;",
+                    "capture_dbms_output": true,
+                    "dbms_output_max_lines": 10,
+                    "dbms_output_max_chars": 100
+                }),
+            )
+            .expect("execute with dbms output");
+
+        assert_eq!(out["executed"], json!(true));
+        assert_eq!(out["rolled_back"], json!(true));
+        assert_eq!(out["dbms_output"]["enabled"], json!(true));
+        assert_eq!(out["dbms_output"]["lines"], json!(["first", "second"]));
+        assert_eq!(out["dbms_output"]["line_count"], json!(2));
+        assert_eq!(out["dbms_output"]["char_count"], json!(11));
+        assert_eq!(out["dbms_output"]["truncated"], json!(false));
+        assert_eq!(out["dbms_output"]["max_lines"], json!(10));
+        assert_eq!(out["dbms_output"]["max_chars"], json!(100));
+        assert_eq!(state.dbms_output_enabled.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state
+                .dbms_output_limits
+                .lock()
+                .expect("output limits mutex")
+                .as_slice(),
+            &[(10, 100)]
+        );
+    }
+
+    #[test]
+    fn execute_dbms_output_limits_are_clamped() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+
+        let out = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({
+                    "sql": "BEGIN DBMS_OUTPUT.PUT_LINE('x'); END;",
+                    "capture_dbms_output": true,
+                    "dbms_output_max_lines": 999999,
+                    "dbms_output_max_chars": 999999999
+                }),
+            )
+            .expect("execute with clamped dbms output");
+
+        assert_eq!(
+            out["dbms_output"]["max_lines"],
+            json!(MAX_DBMS_OUTPUT_MAX_LINES)
+        );
+        assert_eq!(
+            out["dbms_output"]["max_chars"],
+            json!(MAX_DBMS_OUTPUT_MAX_CHARS)
+        );
+        assert_eq!(
+            state
+                .dbms_output_limits
+                .lock()
+                .expect("output limits mutex")
+                .as_slice(),
+            &[(MAX_DBMS_OUTPUT_MAX_LINES, MAX_DBMS_OUTPUT_MAX_CHARS)]
+        );
     }
 
     #[test]
