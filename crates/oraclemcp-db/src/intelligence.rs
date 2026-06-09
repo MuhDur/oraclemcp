@@ -426,6 +426,60 @@ pub fn get_source(
     })
 }
 
+/// List visible `ALL_SOURCE.TYPE` variants for one object name.
+pub fn list_source_types(
+    conn: &dyn OracleConnection,
+    owner: &str,
+    name: &str,
+) -> Result<Vec<String>, DbError> {
+    let sql = "SELECT type \
+               FROM ( \
+                   SELECT DISTINCT type, \
+                          CASE type \
+                              WHEN 'PACKAGE' THEN 1 \
+                              WHEN 'PACKAGE BODY' THEN 2 \
+                              WHEN 'TYPE' THEN 3 \
+                              WHEN 'TYPE BODY' THEN 4 \
+                              WHEN 'PROCEDURE' THEN 5 \
+                              WHEN 'FUNCTION' THEN 6 \
+                              WHEN 'TRIGGER' THEN 7 \
+                              ELSE 99 \
+                          END sort_key \
+                   FROM all_source \
+                   WHERE owner = :1 AND name = :2 \
+               ) \
+               ORDER BY sort_key, type";
+    let rows = conn.query_rows(
+        sql,
+        &[
+            OracleBind::from(owner.to_ascii_uppercase()),
+            OracleBind::from(name.to_ascii_uppercase()),
+        ],
+    )?;
+    let mut types = Vec::new();
+    for row in rows {
+        if let Some(source_type) = row.text("TYPE").and_then(normalize_source_object_type)
+            && !types.iter().any(|t| t == source_type)
+        {
+            types.push(source_type.to_owned());
+        }
+    }
+    Ok(types)
+}
+
+/// Full source text for every visible source type for one object name.
+pub fn get_sources_by_name(
+    conn: &dyn OracleConnection,
+    owner: &str,
+    name: &str,
+    max_chars: usize,
+) -> Result<Vec<SourceText>, DbError> {
+    list_source_types(conn, owner, name)?
+        .into_iter()
+        .map(|source_type| get_source(conn, owner, name, &source_type, max_chars))
+        .collect()
+}
+
 /// Safe data sampling: the first `n` rows of a table. Schema/table are validated
 /// identifiers (they cannot be bound); `n` is bound.
 pub fn sample_rows(
@@ -626,6 +680,67 @@ mod tests {
         }
     }
 
+    struct MultiSourceMock;
+
+    impl OracleConnection for MultiSourceMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        fn query_rows(&self, sql: &str, binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+            if sql.contains("SELECT type") {
+                assert_eq!(
+                    binds,
+                    &[
+                        OracleBind::String("HR".to_owned()),
+                        OracleBind::String("EMP_API".to_owned()),
+                    ]
+                );
+                return Ok(vec![
+                    OracleRow {
+                        columns: vec![(
+                            "TYPE".to_owned(),
+                            OracleCell::new("VARCHAR2", Some("PACKAGE".to_owned())),
+                        )],
+                    },
+                    OracleRow {
+                        columns: vec![(
+                            "TYPE".to_owned(),
+                            OracleCell::new("VARCHAR2", Some("PACKAGE BODY".to_owned())),
+                        )],
+                    },
+                ]);
+            }
+
+            Ok(vec![OracleRow {
+                columns: vec![(
+                    "TEXT".to_owned(),
+                    OracleCell::new("VARCHAR2", Some("BEGIN NULL; END;\n".to_owned())),
+                )],
+            }])
+        }
+
+        fn execute(&self, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        fn commit(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        fn rollback(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
     struct LobMock;
 
     impl OracleConnection for LobMock {
@@ -781,6 +896,17 @@ mod tests {
         assert_eq!(source.char_count, "BEGIN\n  NULL;\nEND;\n".chars().count());
         assert_eq!(source.source, "BEGIN\n  ");
         assert!(source.truncated);
+    }
+
+    #[test]
+    fn get_sources_by_name_lists_source_types_and_fetches_each() {
+        let sources = get_sources_by_name(&MultiSourceMock, "hr", "emp_api", 64).unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].object_type, "PACKAGE");
+        assert_eq!(sources[1].object_type, "PACKAGE BODY");
+        assert_eq!(sources[0].owner, "HR");
+        assert_eq!(sources[0].name, "EMP_API");
+        assert_eq!(sources[0].source, "BEGIN NULL; END;\n");
     }
 
     #[test]

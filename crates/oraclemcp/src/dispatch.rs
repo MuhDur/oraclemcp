@@ -17,8 +17,8 @@ use oraclemcp_core::ToolDispatch;
 use oraclemcp_db::{
     DbError, OracleBind, OracleConnection, QueryCaps, SerializeOptions, compile_errors,
     describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
-    explain_plan, get_ddl, get_source, list_objects, read_lob, read_query, sample_rows,
-    search_source, serialize_row,
+    explain_plan, get_ddl, get_source, get_sources_by_name, list_objects, read_lob, read_query,
+    sample_rows, search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
@@ -229,7 +229,8 @@ struct GetSourceArgs {
     owner: Option<String>,
     #[serde(alias = "object_name")]
     name: String,
-    object_type: String,
+    #[serde(default)]
+    object_type: Option<String>,
     #[serde(default)]
     max_chars: Option<usize>,
 }
@@ -689,8 +690,22 @@ impl ToolDispatch for OracleDispatcher {
                 let a: GetSourceArgs = parse_args(name, args)?;
                 let max_chars = a.max_chars.unwrap_or(DEFAULT_SOURCE_MAX_CHARS);
                 let (owner, object_name) = owner_and_name_arg(conn, a.owner, a.name, "name")?;
-                get_source(conn, &owner, &object_name, &a.object_type, max_chars)
-                    .map(|source| json!({ "source": source }))
+                match a.object_type.as_deref().filter(|s| !s.trim().is_empty()) {
+                    Some(object_type) => {
+                        get_source(conn, &owner, &object_name, object_type, max_chars)
+                            .map(|source| json!({ "source": source }))
+                    }
+                    None => {
+                        get_sources_by_name(conn, &owner, &object_name, max_chars).map(|sources| {
+                            json!({
+                                "owner": owner,
+                                "name": object_name,
+                                "source_count": sources.len(),
+                                "sources": sources,
+                            })
+                        })
+                    }
+                }
             }
             "oracle_sample_rows" => {
                 let a: SampleRowsArgs = parse_args(name, args)?;
@@ -807,6 +822,57 @@ mod tests {
                         OracleCell::new("CLOB", Some("large text".to_owned())),
                     ),
                 ],
+            }])
+        }
+        fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+            Ok(0)
+        }
+        fn commit(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        fn rollback(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    struct SourceLookupMock;
+    impl OracleConnection for SourceLookupMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo {
+                backend: Some(OracleBackend::RustOracle),
+                current_schema: Some("APP".to_owned()),
+                ..Default::default()
+            })
+        }
+        fn query_rows(&self, sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+            if sql.contains("SELECT type") {
+                return Ok(vec![
+                    OracleRow {
+                        columns: vec![(
+                            "TYPE".to_owned(),
+                            OracleCell::new("VARCHAR2", Some("PACKAGE".to_owned())),
+                        )],
+                    },
+                    OracleRow {
+                        columns: vec![(
+                            "TYPE".to_owned(),
+                            OracleCell::new("VARCHAR2", Some("PACKAGE BODY".to_owned())),
+                        )],
+                    },
+                ]);
+            }
+
+            Ok(vec![OracleRow {
+                columns: vec![(
+                    "TEXT".to_owned(),
+                    OracleCell::new("VARCHAR2", Some("BEGIN NULL; END;\n".to_owned())),
+                )],
             }])
         }
         fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
@@ -1103,6 +1169,19 @@ mod tests {
             .expect("search source defaults owner");
         assert_eq!(matches["owner"], json!("APP"));
         assert!(matches["matches"].is_array());
+    }
+
+    #[test]
+    fn get_source_without_object_type_returns_all_visible_sources() {
+        let dispatcher = OracleDispatcher::new(Box::new(SourceLookupMock));
+        let out = dispatcher
+            .dispatch("oracle_get_source", json!({ "name": "EMP_API" }))
+            .expect("source lookup can infer visible source types");
+        assert_eq!(out["owner"], json!("APP"));
+        assert_eq!(out["name"], json!("EMP_API"));
+        assert_eq!(out["source_count"], json!(2));
+        assert_eq!(out["sources"][0]["object_type"], json!("PACKAGE"));
+        assert_eq!(out["sources"][1]["object_type"], json!("PACKAGE BODY"));
     }
 
     #[test]

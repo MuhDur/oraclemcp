@@ -246,17 +246,17 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_get_source",
             ToolTier::FoundationLiveDb,
-            "Fetch an object's full source text from ALL_SOURCE with a character cap.",
+            "Fetch an object's full source text from ALL_SOURCE with a character cap. Omit object_type to return every visible source variant for the object name.",
         )
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
                 "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
                 "object_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." },
-                "object_type": { "type": "string", "description": "Supported source type: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY." },
+                "object_type": { "type": "string", "description": "Optional supported source type: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY. When omitted, all visible source types for this name are returned." },
                 "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum source characters to return (default 1000000)." }
             }),
-            &["object_type"],
+            &[],
         )),
     );
 
@@ -529,17 +529,17 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "get_object_source",
             ToolTier::FoundationLiveDb,
-            "Compatibility alias for oracle_get_source.",
+            "Compatibility alias for oracle_get_source. Omit object_type to return every visible source variant for the object name.",
         )
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner; defaults to current schema." },
                 "object_name": { "type": "string", "description": "Object name. May be OWNER.NAME." },
                 "name": { "type": "string", "description": "Alias for object_name." },
-                "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, or TYPE_BODY." },
+                "object_type": { "type": "string", "description": "Optional source type: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, or TYPE_BODY. When omitted, all visible source types for this name are returned." },
                 "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum source characters to return." }
             }),
-            &["object_type"],
+            &[],
         )),
     );
 

@@ -139,7 +139,7 @@ current connection in place.
 | `oracle_describe_trigger` | Trigger timing, target table, status, and body |
 | `oracle_describe_view` | View definition metadata and columns |
 | `oracle_get_ddl` | `DBMS_METADATA` DDL for an object |
-| `oracle_get_source` | Full source text for a package, procedure, function, trigger, or type |
+| `oracle_get_source` | Full source text for a package, procedure, function, trigger, or type; omit `object_type` to return every visible source variant for the object name |
 | `oracle_sample_rows` | Safely sample the first rows of a table or view |
 | `oracle_read_clob` | Read one capped CLOB/NCLOB/text value by key |
 | `oracle_compile_errors` | Compile errors for the current schema, an owner, or one PL/SQL object |
