@@ -174,6 +174,28 @@ pub fn list_objects(
     )
 }
 
+/// List schemas that own objects visible to this session, optionally filtered
+/// by a SQL `LIKE` pattern.
+pub fn list_schemas(
+    conn: &dyn OracleConnection,
+    name_like: Option<&str>,
+    max_rows: usize,
+) -> Result<Vec<OracleRow>, DbError> {
+    let sql = "WITH args AS ( \
+                   SELECT :1 name_filter FROM dual \
+               ) \
+               SELECT o.owner AS schema_name, COUNT(*) AS object_count \
+               FROM all_objects o CROSS JOIN args \
+               WHERE args.name_filter IS NULL OR o.owner LIKE args.name_filter \
+               GROUP BY o.owner \
+               ORDER BY o.owner \
+               FETCH FIRST :2 ROWS ONLY";
+    let name_like_bind = name_like.map_or(OracleBind::Null, |n| {
+        OracleBind::from(n.to_ascii_uppercase())
+    });
+    conn.query_rows(sql, &[name_like_bind, OracleBind::from(max_rows as i64)])
+}
+
 /// Describe one index's metadata, indexed columns, and function-based
 /// expressions. Owner + index name are bound.
 pub fn describe_index(
@@ -812,6 +834,21 @@ mod tests {
                 OracleBind::String("EMP%".to_owned()),
                 OracleBind::I64(25),
             ]
+        );
+    }
+
+    #[test]
+    fn list_schemas_binds_filter_and_limit() {
+        let mock = CaptureMock::default();
+        list_schemas(&mock, Some("app%"), 100).unwrap();
+
+        let calls = mock.calls.lock().expect("capture lock");
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.contains("SELECT o.owner AS schema_name"));
+        assert!(calls[0].0.contains("COUNT(*) AS object_count"));
+        assert_eq!(
+            calls[0].1,
+            vec![OracleBind::String("APP%".to_owned()), OracleBind::I64(100),]
         );
     }
 

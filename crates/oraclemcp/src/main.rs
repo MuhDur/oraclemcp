@@ -43,9 +43,9 @@ const LIVE_DB: bool = cfg!(feature = "live-db");
     long_about = "Speaks the Model Context Protocol over stdio (default) or \
                   Streamable HTTP (--listen). Exposes read-only Oracle tools \
                   (profile discovery, connection info, query, schema_inspect, \
-                  switch_profile, preview_sql, describe, get_ddl, get_source, \
-                  compile_errors, search_source, sample_rows, read_clob, \
-                  explain_plan) plus the \
+                  list_schemas, switch_profile, preview_sql, describe, get_ddl, \
+                  get_source, compile_errors, search_source, sample_rows, \
+                  read_clob, explain_plan) plus the \
                   zero-arg oracle_capabilities discovery tool. No PL/SQL engine, \
                   no write/DDL surface."
 )]
@@ -337,7 +337,7 @@ fn emit_serve_status(robot_json: bool, transport: &str, addr: Option<&str>) {
                 "transport": transport,
                 "listen": addr,
                 "live_db": LIVE_DB,
-                "tools": registry::TOOL_NAMES,
+                "tools": &registry::TOOL_NAMES[..],
             })
         );
     } else {
@@ -373,7 +373,7 @@ fn run_info(robot_json: bool) -> ExitCode {
         "engine": false,
         "live_db": LIVE_DB,
         "transports": ["stdio", "http"],
-        "tools": registry::TOOL_NAMES,
+        "tools": &registry::TOOL_NAMES[..],
         "mcp_protocol_version": oraclemcp_core::PROTOCOL_VERSION,
     });
     if robot_json {

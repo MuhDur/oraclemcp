@@ -136,6 +136,7 @@ current connection in place.
 | `oracle_switch_profile` | Reconnect the server to another configured profile |
 | `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |
 | `oracle_preview_sql` | Classify SQL and report whether it is read-only, needs profile-permitted step-up, or exceeds the active profile ceiling, without executing it |
+| `oracle_list_schemas` | List schemas that own objects visible to this session |
 | `oracle_schema_inspect` | List objects in the current schema, one owner, or all accessible schemas |
 | `oracle_describe` | Column and constraint metadata for a table or view |
 | `oracle_describe_index` | Index metadata, indexed columns, and function-based expressions |
@@ -162,6 +163,7 @@ read-only aliases that route to the guarded `oracle_*` tools:
 | `query` | `oracle_query` |
 | `preview_sql` | `oracle_preview_sql` |
 | `list_objects` | `oracle_schema_inspect` |
+| `list_schemas` | `oracle_list_schemas` |
 | `get_schema` | `oracle_schema_inspect` |
 | `describe_table` | `oracle_describe` |
 | `describe_index` | `oracle_describe_index` |

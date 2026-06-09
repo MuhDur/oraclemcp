@@ -17,8 +17,8 @@ use oraclemcp_core::ToolDispatch;
 use oraclemcp_db::{
     DbError, OracleBind, OracleConnection, QueryCaps, SerializeOptions, compile_errors,
     describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
-    explain_plan, get_ddl, get_source, get_sources_by_name, list_objects, read_lob, read_query,
-    sample_rows, search_source, serialize_row,
+    explain_plan, get_ddl, get_source, get_sources_by_name, list_objects, list_schemas, read_lob,
+    read_query, sample_rows, search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
@@ -35,6 +35,10 @@ const DEFAULT_SOURCE_MAX_CHARS: usize = 1_000_000;
 const DEFAULT_SCHEMA_INSPECT_MAX_ROWS: usize = 500;
 /// Hard cap on `oracle_schema_inspect` for a single call.
 const MAX_SCHEMA_INSPECT_MAX_ROWS: usize = 5_000;
+/// Default cap on `oracle_list_schemas` result rows when the caller omits it.
+const DEFAULT_SCHEMA_LIST_MAX_ROWS: usize = 200;
+/// Hard cap on `oracle_list_schemas` for a single call.
+const MAX_SCHEMA_LIST_MAX_ROWS: usize = 5_000;
 /// Default cap on `oracle_sample_rows` when the caller omits it.
 const DEFAULT_SAMPLE_MAX_ROWS: usize = 50;
 /// Hard cap on `oracle_sample_rows` for a single call.
@@ -203,6 +207,14 @@ struct SchemaInspectArgs {
     owner: Option<String>,
     #[serde(default)]
     object_type: Option<String>,
+    #[serde(default)]
+    name_like: Option<String>,
+    #[serde(default, alias = "limit")]
+    max_rows: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct ListSchemasArgs {
     #[serde(default)]
     name_like: Option<String>,
     #[serde(default, alias = "limit")]
@@ -533,6 +545,7 @@ fn canonical_tool_name(name: &str) -> &str {
         "switch_database" => "oracle_switch_profile",
         "query" => "oracle_query",
         "list_objects" => "oracle_schema_inspect",
+        "list_schemas" => "oracle_list_schemas",
         "get_schema" => "oracle_schema_inspect",
         "describe_table" => "oracle_describe",
         "describe_index" => "oracle_describe_index",
@@ -659,6 +672,22 @@ impl ToolDispatch for OracleDispatcher {
                             "max_rows": max_rows,
                             "truncated": rows.len() == max_rows,
                         })
+                    })
+                })
+            }
+            "oracle_list_schemas" => {
+                let a: ListSchemasArgs = parse_args(name, args)?;
+                let name_like = non_empty_arg(a.name_like);
+                let max_rows = a
+                    .max_rows
+                    .unwrap_or(DEFAULT_SCHEMA_LIST_MAX_ROWS)
+                    .clamp(1, MAX_SCHEMA_LIST_MAX_ROWS);
+                list_schemas(conn, name_like.as_deref(), max_rows).map(|rows| {
+                    json!({
+                        "schemas": rows_to_json(&rows),
+                        "name_like": name_like,
+                        "max_rows": max_rows,
+                        "truncated": rows.len() == max_rows,
                     })
                 })
             }
@@ -847,6 +876,14 @@ mod tests {
                         OracleCell::new("VARCHAR2", Some("EMPLOYEES".to_owned())),
                     ),
                     (
+                        "SCHEMA_NAME".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("APP".to_owned())),
+                    ),
+                    (
+                        "OBJECT_COUNT".to_owned(),
+                        OracleCell::new("NUMBER", Some("42".to_owned())),
+                    ),
+                    (
                         "DDL".to_owned(),
                         OracleCell::new("CLOB", Some("CREATE TABLE ...".to_owned())),
                     ),
@@ -957,6 +994,7 @@ mod tests {
             "oracle_connection_info" => json!({}),
             "oracle_switch_profile" => json!({ "profile": "other" }),
             "oracle_query" => json!({ "sql": "SELECT 1 FROM dual" }),
+            "oracle_list_schemas" => json!({ "name_like": "APP%", "limit": 10 }),
             "oracle_schema_inspect" => json!({ "owner": "HR" }),
             "oracle_describe" => json!({ "owner": "HR", "table": "EMPLOYEES" }),
             "oracle_describe_index" => json!({ "owner": "HR", "name": "EMP_NAME_IX" }),
@@ -980,6 +1018,7 @@ mod tests {
             "switch_database" => json!({ "db": "other" }),
             "query" => json!({ "sql": "SELECT 1 FROM dual" }),
             "list_objects" => json!({ "owner": "HR" }),
+            "list_schemas" => json!({ "name_like": "APP%" }),
             "get_schema" => json!({ "owner": "HR" }),
             "describe_table" => json!({ "owner": "HR", "table_name": "EMPLOYEES" }),
             "describe_index" => json!({ "owner": "HR", "index_name": "EMP_NAME_IX" }),
@@ -1029,6 +1068,7 @@ mod tests {
             "switch_database",
             "query",
             "list_objects",
+            "list_schemas",
             "get_schema",
             "describe_table",
             "describe_index",
@@ -1098,6 +1138,19 @@ mod tests {
         assert_eq!(out["owner"], json!("APP"));
         assert_eq!(out["max_rows"], json!(DEFAULT_SCHEMA_INSPECT_MAX_ROWS));
         assert!(out["objects"].is_array());
+    }
+
+    #[test]
+    fn list_schemas_accepts_filter_and_limit_alias() {
+        let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+        let out = dispatcher
+            .dispatch("list_schemas", json!({ "name_like": "app%", "limit": 10 }))
+            .expect("schema listing accepts filter and limit alias");
+        assert_eq!(out["name_like"], json!("app%"));
+        assert_eq!(out["max_rows"], json!(10));
+        assert!(out["schemas"].is_array());
+        assert_eq!(out["schemas"][0]["SCHEMA_NAME"], json!("APP"));
+        assert_eq!(out["schemas"][0]["OBJECT_COUNT"], json!("42"));
     }
 
     #[test]

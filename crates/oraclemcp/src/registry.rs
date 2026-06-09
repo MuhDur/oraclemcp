@@ -15,12 +15,13 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 31] = [
+pub const TOOL_NAMES: [&str; 33] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
     "oracle_query",
     "oracle_preview_sql",
+    "oracle_list_schemas",
     "oracle_schema_inspect",
     "oracle_describe",
     "oracle_describe_index",
@@ -41,6 +42,7 @@ pub const TOOL_NAMES: [&str; 31] = [
     "query",
     "preview_sql",
     "list_objects",
+    "list_schemas",
     "get_schema",
     "describe_table",
     "describe_index",
@@ -139,6 +141,22 @@ pub fn tool_registry() -> ToolRegistry {
                 "sql": { "type": "string", "description": "SQL statement to classify. It is never executed." }
             }),
             &["sql"],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_list_schemas",
+            ToolTier::FoundationLiveDb,
+            "List schemas that own objects visible to this session, optionally filtered by name.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for schema names (case-insensitive), e.g. APP%." },
+                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum schemas to return (default 200, hard cap 5000)." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." }
+            }),
+            &[],
         )),
     );
 
@@ -421,6 +439,22 @@ pub fn tool_registry() -> ToolRegistry {
                 "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for object_name." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum objects to return." },
                 "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for limit." }
+            }),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "list_schemas",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_list_schemas.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for schema names." },
+                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum schemas to return." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows." }
             }),
             &[],
         )),
