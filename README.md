@@ -116,6 +116,9 @@ current connection in place.
 | `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |
 | `oracle_schema_inspect` | List objects in the current schema, one owner, or all accessible schemas |
 | `oracle_describe` | Column metadata for a table or view |
+| `oracle_describe_index` | Index metadata, indexed columns, and function-based expressions |
+| `oracle_describe_trigger` | Trigger timing, target table, status, and body |
+| `oracle_describe_view` | View definition metadata and columns |
 | `oracle_get_ddl` | `DBMS_METADATA` DDL for an object |
 | `oracle_get_source` | Full source text for a package, procedure, function, trigger, or type |
 | `oracle_sample_rows` | Safely sample the first rows of a table or view |

@@ -15,13 +15,16 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 13] = [
+pub const TOOL_NAMES: [&str; 16] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
     "oracle_query",
     "oracle_schema_inspect",
     "oracle_describe",
+    "oracle_describe_index",
+    "oracle_describe_trigger",
+    "oracle_describe_view",
     "oracle_get_ddl",
     "oracle_get_source",
     "oracle_sample_rows",
@@ -130,6 +133,54 @@ pub fn tool_registry() -> ToolRegistry {
                 "table": { "type": "string", "description": "Table or view name (case-insensitive)." }
             }),
             &["owner", "table"],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_describe_index",
+            ToolTier::FoundationLiveDb,
+            "Describe one index's metadata, indexed columns, and function-based expressions.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
+                "name": { "type": "string", "description": "Index name (case-insensitive). Required unless index_name is supplied." },
+                "index_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." }
+            }),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_describe_trigger",
+            ToolTier::FoundationLiveDb,
+            "Describe one trigger's timing, event, target table, status, and body.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
+                "name": { "type": "string", "description": "Trigger name (case-insensitive). Required unless trigger_name is supplied." },
+                "trigger_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." }
+            }),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_describe_view",
+            ToolTier::FoundationLiveDb,
+            "Describe one view's definition metadata and columns.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
+                "name": { "type": "string", "description": "View name (case-insensitive). Required unless view_name is supplied." },
+                "view_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." }
+            }),
+            &[],
         )),
     );
 

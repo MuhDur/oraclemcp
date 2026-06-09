@@ -16,8 +16,8 @@ use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::ToolDispatch;
 use oraclemcp_db::{
     DbError, OracleBind, OracleConnection, QueryCaps, SerializeOptions, compile_errors,
-    describe_columns, explain_plan, get_ddl, get_source, list_objects, read_lob, read_query,
-    sample_rows, search_source, serialize_row,
+    describe_columns, describe_index, describe_trigger, describe_view, explain_plan, get_ddl,
+    get_source, list_objects, read_lob, read_query, sample_rows, search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
@@ -100,6 +100,11 @@ fn rows_to_json(rows: &[oraclemcp_db::OracleRow]) -> Value {
     Value::Array(rows.iter().map(|r| serialize_row(r, &opts)).collect())
 }
 
+fn optional_row_to_json(row: Option<&oraclemcp_db::OracleRow>) -> Value {
+    let opts = SerializeOptions::default();
+    row.map(|r| serialize_row(r, &opts)).unwrap_or(Value::Null)
+}
+
 #[derive(Deserialize)]
 struct QueryArgs {
     sql: String,
@@ -125,6 +130,30 @@ struct SchemaInspectArgs {
 struct DescribeArgs {
     owner: String,
     table: String,
+}
+
+#[derive(Deserialize)]
+struct DescribeIndexArgs {
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(alias = "index_name")]
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct DescribeTriggerArgs {
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(alias = "trigger_name")]
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct DescribeViewArgs {
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(alias = "view_name")]
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -242,6 +271,19 @@ fn non_empty_arg(value: Option<String>) -> Option<String> {
     })
 }
 
+fn owner_or_current(conn: &dyn OracleConnection, owner: Option<String>) -> Result<String, DbError> {
+    match non_empty_arg(owner) {
+        Some(owner) => Ok(owner),
+        None => conn.describe().and_then(|info| {
+            info.current_schema.ok_or_else(|| {
+                DbError::Query(
+                    "owner is required because current_schema could not be detected".to_owned(),
+                )
+            })
+        }),
+    }
+}
+
 /// The fail-closed read-only gate for the two tools that accept a raw SQL
 /// statement (`oracle_query`, `oracle_explain_plan`). This binary is read-only
 /// by construction: every such statement is run through the `oraclemcp-guard`
@@ -280,8 +322,9 @@ fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
     .with_next_step(decision.safe_alternative.unwrap_or_else(|| {
         "this server accepts only read-only statements — SELECT/WITH plus the \
          dictionary tools (oracle_schema_inspect, oracle_describe, oracle_get_ddl, \
-         oracle_get_source, oracle_sample_rows, oracle_read_clob, oracle_compile_errors, \
-         oracle_search_source)"
+         oracle_get_source, oracle_describe_index, oracle_describe_trigger, \
+         oracle_describe_view, oracle_sample_rows, oracle_read_clob, \
+         oracle_compile_errors, oracle_search_source)"
             .to_owned()
     })))
 }
@@ -399,6 +442,45 @@ impl ToolDispatch for OracleDispatcher {
                 let a: DescribeArgs = parse_args(name, args)?;
                 describe_columns(conn, &a.owner, &a.table)
                     .map(|rows| json!({ "columns": rows_to_json(&rows) }))
+            }
+            "oracle_describe_index" => {
+                let a: DescribeIndexArgs = parse_args(name, args)?;
+                owner_or_current(conn, a.owner).and_then(|owner| {
+                    describe_index(conn, &owner, &a.name).map(|desc| {
+                        json!({
+                            "owner": owner,
+                            "name": a.name,
+                            "index": optional_row_to_json(desc.metadata.as_ref()),
+                            "columns": rows_to_json(&desc.columns),
+                            "expressions": rows_to_json(&desc.expressions),
+                        })
+                    })
+                })
+            }
+            "oracle_describe_trigger" => {
+                let a: DescribeTriggerArgs = parse_args(name, args)?;
+                owner_or_current(conn, a.owner).and_then(|owner| {
+                    describe_trigger(conn, &owner, &a.name).map(|desc| {
+                        json!({
+                            "owner": owner,
+                            "name": a.name,
+                            "trigger": optional_row_to_json(desc.metadata.as_ref()),
+                        })
+                    })
+                })
+            }
+            "oracle_describe_view" => {
+                let a: DescribeViewArgs = parse_args(name, args)?;
+                owner_or_current(conn, a.owner).and_then(|owner| {
+                    describe_view(conn, &owner, &a.name).map(|desc| {
+                        json!({
+                            "owner": owner,
+                            "name": a.name,
+                            "view": optional_row_to_json(desc.metadata.as_ref()),
+                            "columns": rows_to_json(&desc.columns),
+                        })
+                    })
+                })
             }
             "oracle_get_ddl" => {
                 let a: GetDdlArgs = parse_args(name, args)?;
@@ -568,6 +650,9 @@ mod tests {
             "oracle_query" => json!({ "sql": "SELECT 1 FROM dual" }),
             "oracle_schema_inspect" => json!({ "owner": "HR" }),
             "oracle_describe" => json!({ "owner": "HR", "table": "EMPLOYEES" }),
+            "oracle_describe_index" => json!({ "owner": "HR", "name": "EMP_NAME_IX" }),
+            "oracle_describe_trigger" => json!({ "owner": "HR", "name": "EMP_BIU" }),
+            "oracle_describe_view" => json!({ "owner": "HR", "name": "EMP_DETAILS_VIEW" }),
             "oracle_get_ddl" => {
                 json!({ "object_type": "TABLE", "owner": "HR", "name": "EMPLOYEES" })
             }
@@ -662,6 +747,34 @@ mod tests {
         assert_eq!(out["object_type"], json!("package"));
         assert_eq!(out["name_like"], json!("emp%"));
         assert_eq!(out["max_rows"], json!(5));
+    }
+
+    #[test]
+    fn describe_object_helpers_default_owner_and_accept_legacy_aliases() {
+        let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+        let index = dispatcher
+            .dispatch("oracle_describe_index", json!({ "index_name": "EMP_IX" }))
+            .expect("index description defaults owner");
+        assert_eq!(index["owner"], json!("APP"));
+        assert!(index["index"].is_object());
+        assert!(index["columns"].is_array());
+        assert!(index["expressions"].is_array());
+
+        let trigger = dispatcher
+            .dispatch(
+                "oracle_describe_trigger",
+                json!({ "trigger_name": "EMP_BIU" }),
+            )
+            .expect("trigger description defaults owner");
+        assert_eq!(trigger["owner"], json!("APP"));
+        assert!(trigger["trigger"].is_object());
+
+        let view = dispatcher
+            .dispatch("oracle_describe_view", json!({ "view_name": "EMP_V" }))
+            .expect("view description defaults owner");
+        assert_eq!(view["owner"], json!("APP"));
+        assert!(view["view"].is_object());
+        assert!(view["columns"].is_array());
     }
 
     #[test]

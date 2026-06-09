@@ -92,6 +92,33 @@ pub struct LobText {
     pub truncated: bool,
 }
 
+/// Metadata and column/expression details for one index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexDescription {
+    /// The `ALL_INDEXES` metadata row, or `None` when the index is not visible.
+    pub metadata: Option<OracleRow>,
+    /// `ALL_IND_COLUMNS` rows in column position order.
+    pub columns: Vec<OracleRow>,
+    /// `ALL_IND_EXPRESSIONS` rows for function-based index expressions.
+    pub expressions: Vec<OracleRow>,
+}
+
+/// Metadata and body for one trigger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TriggerDescription {
+    /// The `ALL_TRIGGERS` metadata row, or `None` when the trigger is not visible.
+    pub metadata: Option<OracleRow>,
+}
+
+/// Metadata/definition and column details for one view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewDescription {
+    /// The `ALL_VIEWS` metadata row, or `None` when the view is not visible.
+    pub metadata: Option<OracleRow>,
+    /// View columns from `ALL_TAB_COLUMNS`.
+    pub columns: Vec<OracleRow>,
+}
+
 /// Whether `t` is an allowlisted `DBMS_METADATA` object type.
 #[must_use]
 pub fn is_ddl_object_type(t: &str) -> bool {
@@ -145,6 +172,93 @@ pub fn list_objects(
             OracleBind::from(max_rows as i64),
         ],
     )
+}
+
+/// Describe one index's metadata, indexed columns, and function-based
+/// expressions. Owner + index name are bound.
+pub fn describe_index(
+    conn: &dyn OracleConnection,
+    owner: &str,
+    index_name: &str,
+) -> Result<IndexDescription, DbError> {
+    let owner = owner.to_ascii_uppercase();
+    let index_name = index_name.to_ascii_uppercase();
+    let binds = [
+        OracleBind::from(owner.clone()),
+        OracleBind::from(index_name.clone()),
+    ];
+
+    let metadata = conn.query_optional_row(
+        "SELECT owner, index_name, index_type, table_owner, table_name, \
+                uniqueness, status, partitioned, temporary, generated, degree \
+         FROM all_indexes \
+         WHERE owner = :1 AND index_name = :2",
+        &binds,
+    )?;
+    let columns = conn.query_rows(
+        "SELECT column_position, column_name, descend, column_length, char_length \
+         FROM all_ind_columns \
+         WHERE index_owner = :1 AND index_name = :2 \
+         ORDER BY column_position",
+        &binds,
+    )?;
+    let expressions = conn.query_rows(
+        "SELECT column_position, column_expression \
+         FROM all_ind_expressions \
+         WHERE index_owner = :1 AND index_name = :2 \
+         ORDER BY column_position",
+        &binds,
+    )?;
+
+    Ok(IndexDescription {
+        metadata,
+        columns,
+        expressions,
+    })
+}
+
+/// Describe one trigger's timing/event/status and body. Owner + trigger name
+/// are bound.
+pub fn describe_trigger(
+    conn: &dyn OracleConnection,
+    owner: &str,
+    trigger_name: &str,
+) -> Result<TriggerDescription, DbError> {
+    let metadata = conn.query_optional_row(
+        "SELECT owner, trigger_name, trigger_type, triggering_event, \
+                table_owner, table_name, status, when_clause, description, trigger_body \
+         FROM all_triggers \
+         WHERE owner = :1 AND trigger_name = :2",
+        &[
+            OracleBind::from(owner.to_ascii_uppercase()),
+            OracleBind::from(trigger_name.to_ascii_uppercase()),
+        ],
+    )?;
+    Ok(TriggerDescription { metadata })
+}
+
+/// Describe one view's definition metadata and columns. Owner + view name are
+/// bound.
+pub fn describe_view(
+    conn: &dyn OracleConnection,
+    owner: &str,
+    view_name: &str,
+) -> Result<ViewDescription, DbError> {
+    let owner = owner.to_ascii_uppercase();
+    let view_name = view_name.to_ascii_uppercase();
+    let binds = [
+        OracleBind::from(owner.clone()),
+        OracleBind::from(view_name.clone()),
+    ];
+
+    let metadata = conn.query_optional_row(
+        "SELECT owner, view_name, text_length, text \
+         FROM all_views \
+         WHERE owner = :1 AND view_name = :2",
+        &binds,
+    )?;
+    let columns = describe_columns(conn, &owner, &view_name)?;
+    Ok(ViewDescription { metadata, columns })
 }
 
 /// Columns of a table/view (owner + name bound).
@@ -557,6 +671,59 @@ mod tests {
                 OracleBind::String("PACKAGE".to_owned()),
                 OracleBind::String("EMP%".to_owned()),
                 OracleBind::I64(25),
+            ]
+        );
+    }
+
+    #[test]
+    fn describe_index_trigger_and_view_bind_names() {
+        let index_mock = CaptureMock::default();
+        let index = describe_index(&index_mock, "hr", "emp_ix").unwrap();
+        assert!(index.metadata.is_none());
+        assert!(index.columns.is_empty());
+        assert!(index.expressions.is_empty());
+        let calls = index_mock.calls.lock().expect("capture lock");
+        assert_eq!(calls.len(), 3);
+        assert!(calls[0].0.contains("FROM all_indexes"));
+        assert!(calls[1].0.contains("FROM all_ind_columns"));
+        assert!(calls[2].0.contains("FROM all_ind_expressions"));
+        assert_eq!(
+            calls[0].1,
+            vec![
+                OracleBind::String("HR".to_owned()),
+                OracleBind::String("EMP_IX".to_owned()),
+            ]
+        );
+        drop(calls);
+
+        let trigger_mock = CaptureMock::default();
+        let trigger = describe_trigger(&trigger_mock, "hr", "emp_biu").unwrap();
+        assert!(trigger.metadata.is_none());
+        let calls = trigger_mock.calls.lock().expect("capture lock");
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.contains("FROM all_triggers"));
+        assert_eq!(
+            calls[0].1,
+            vec![
+                OracleBind::String("HR".to_owned()),
+                OracleBind::String("EMP_BIU".to_owned()),
+            ]
+        );
+        drop(calls);
+
+        let view_mock = CaptureMock::default();
+        let view = describe_view(&view_mock, "hr", "emp_v").unwrap();
+        assert!(view.metadata.is_none());
+        assert!(view.columns.is_empty());
+        let calls = view_mock.calls.lock().expect("capture lock");
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].0.contains("FROM all_views"));
+        assert!(calls[1].0.contains("FROM all_tab_columns"));
+        assert_eq!(
+            calls[0].1,
+            vec![
+                OracleBind::String("HR".to_owned()),
+                OracleBind::String("EMP_V".to_owned()),
             ]
         );
     }
