@@ -43,8 +43,9 @@ const LIVE_DB: bool = cfg!(feature = "live-db");
                   Streamable HTTP (--listen). Exposes read-only Oracle tools \
                   (profile discovery, connection info, query, schema_inspect, \
                   describe, get_ddl, get_source, compile_errors, search_source, \
-                  explain_plan) plus the zero-arg oracle_capabilities discovery tool. No \
-                  PL/SQL engine, no write/DDL surface."
+                  sample_rows, read_clob, explain_plan) plus the zero-arg \
+                  oracle_capabilities discovery tool. No PL/SQL engine, no \
+                  write/DDL surface."
 )]
 struct Cli {
     /// Emit a single JSON object on stdout instead of human text.

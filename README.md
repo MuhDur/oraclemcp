@@ -110,6 +110,8 @@ Config discovery order is:
 | `oracle_describe` | Column metadata for a table or view |
 | `oracle_get_ddl` | `DBMS_METADATA` DDL for an object |
 | `oracle_get_source` | Full source text for a package, procedure, function, trigger, or type |
+| `oracle_sample_rows` | Safely sample the first rows of a table or view |
+| `oracle_read_clob` | Read one capped CLOB/NCLOB/text value by key |
 | `oracle_compile_errors` | Compile errors for a PL/SQL object |
 | `oracle_search_source` | Search `ALL_SOURCE` for a needle |
 | `oracle_explain_plan` | Execution plan for a read-only statement |

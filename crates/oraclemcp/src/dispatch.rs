@@ -16,8 +16,8 @@ use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::ToolDispatch;
 use oraclemcp_db::{
     DbError, OracleBind, OracleConnection, QueryCaps, SerializeOptions, compile_errors,
-    describe_columns, explain_plan, get_ddl, get_source, list_objects, read_query, search_source,
-    serialize_row,
+    describe_columns, explain_plan, get_ddl, get_source, list_objects, read_lob, read_query,
+    sample_rows, search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
@@ -30,6 +30,12 @@ use serde_json::{Value, json};
 const DEFAULT_SEARCH_MAX_ROWS: usize = 200;
 /// Default cap on `oracle_get_source` source text when the caller omits it.
 const DEFAULT_SOURCE_MAX_CHARS: usize = 1_000_000;
+/// Default cap on `oracle_sample_rows` when the caller omits it.
+const DEFAULT_SAMPLE_MAX_ROWS: usize = 50;
+/// Hard cap on `oracle_sample_rows` for a single call.
+const MAX_SAMPLE_MAX_ROWS: usize = 1_000;
+/// Default cap on `oracle_read_clob` text when the caller omits it.
+const DEFAULT_LOB_MAX_CHARS: usize = 1_000_000;
 
 /// The dispatcher: owns the (single) live connection behind a `std::sync::Mutex`
 /// so dispatch stays sync and the connection is never shared across threads
@@ -87,6 +93,25 @@ struct GetSourceArgs {
     owner: String,
     name: String,
     object_type: String,
+    #[serde(default)]
+    max_chars: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct SampleRowsArgs {
+    owner: String,
+    table: String,
+    #[serde(default)]
+    max_rows: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct ReadClobArgs {
+    owner: String,
+    table: String,
+    clob_column: String,
+    pk_column: String,
+    pk_value: String,
     #[serde(default)]
     max_chars: Option<usize>,
 }
@@ -194,7 +219,8 @@ fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
     .with_next_step(decision.safe_alternative.unwrap_or_else(|| {
         "this server accepts only read-only statements — SELECT/WITH plus the \
          dictionary tools (oracle_schema_inspect, oracle_describe, oracle_get_ddl, \
-         oracle_compile_errors, oracle_search_source)"
+         oracle_get_source, oracle_sample_rows, oracle_read_clob, oracle_compile_errors, \
+         oracle_search_source)"
             .to_owned()
     })))
 }
@@ -258,6 +284,29 @@ impl ToolDispatch for OracleDispatcher {
                 let max_chars = a.max_chars.unwrap_or(DEFAULT_SOURCE_MAX_CHARS);
                 get_source(conn, &a.owner, &a.name, &a.object_type, max_chars)
                     .map(|source| json!({ "source": source }))
+            }
+            "oracle_sample_rows" => {
+                let a: SampleRowsArgs = parse_args(name, args)?;
+                let max_rows = a
+                    .max_rows
+                    .unwrap_or(DEFAULT_SAMPLE_MAX_ROWS)
+                    .clamp(1, MAX_SAMPLE_MAX_ROWS);
+                sample_rows(conn, &a.owner, &a.table, max_rows)
+                    .map(|rows| json!({ "rows": rows_to_json(&rows), "row_count": rows.len() }))
+            }
+            "oracle_read_clob" => {
+                let a: ReadClobArgs = parse_args(name, args)?;
+                let max_chars = a.max_chars.unwrap_or(DEFAULT_LOB_MAX_CHARS);
+                read_lob(
+                    conn,
+                    &a.owner,
+                    &a.table,
+                    &a.clob_column,
+                    &a.pk_column,
+                    &a.pk_value,
+                    max_chars,
+                )
+                .map(|clob| json!({ "clob": clob }))
             }
             "oracle_compile_errors" => {
                 let a: CompileErrorsArgs = parse_args(name, args)?;
@@ -323,6 +372,10 @@ mod tests {
                         "DDL".to_owned(),
                         OracleCell::new("CLOB", Some("CREATE TABLE ...".to_owned())),
                     ),
+                    (
+                        "LOB_VALUE".to_owned(),
+                        OracleCell::new("CLOB", Some("large text".to_owned())),
+                    ),
                 ],
             }])
         }
@@ -381,6 +434,10 @@ mod tests {
             }
             "oracle_get_source" => {
                 json!({ "object_type": "PACKAGE", "owner": "HR", "name": "EMP_API" })
+            }
+            "oracle_sample_rows" => json!({ "owner": "HR", "table": "EMPLOYEES" }),
+            "oracle_read_clob" => {
+                json!({ "owner": "HR", "table": "DOCS", "clob_column": "BODY", "pk_column": "ID", "pk_value": "42" })
             }
             "oracle_compile_errors" => json!({ "owner": "HR", "name": "PKG" }),
             "oracle_search_source" => json!({ "owner": "HR", "needle": "commit" }),

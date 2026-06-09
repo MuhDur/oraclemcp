@@ -73,6 +73,25 @@ pub struct SourceText {
     pub truncated: bool,
 }
 
+/// A single CLOB/NCLOB/text value read by key, with truncation metadata.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LobText {
+    /// Schema owner.
+    pub owner: String,
+    /// Table or view name.
+    pub table: String,
+    /// CLOB/NCLOB/text column name.
+    pub column: String,
+    /// Key column used to locate the row.
+    pub pk_column: String,
+    /// The text value, or `None` when the matched column is SQL NULL.
+    pub value: Option<String>,
+    /// Characters in the untruncated value. Zero for SQL NULL.
+    pub char_count: usize,
+    /// Whether `value` was truncated to the requested cap.
+    pub truncated: bool,
+}
+
 /// Whether `t` is an allowlisted `DBMS_METADATA` object type.
 #[must_use]
 pub fn is_ddl_object_type(t: &str) -> bool {
@@ -267,6 +286,71 @@ pub fn sample_rows(
     conn.query_rows(&sql, &[OracleBind::from(n as i64)])
 }
 
+/// Read one CLOB/NCLOB/text value by an equality key, capped by characters.
+///
+/// The identifiers cannot be bound in Oracle SQL, so each identifier is
+/// restricted to a simple unquoted Oracle identifier before interpolation. The
+/// key value is always bound.
+pub fn read_lob(
+    conn: &dyn OracleConnection,
+    owner: &str,
+    table: &str,
+    clob_column: &str,
+    pk_column: &str,
+    pk_value: &str,
+    max_chars: usize,
+) -> Result<Option<LobText>, DbError> {
+    for (label, value) in [
+        ("owner", owner),
+        ("table", table),
+        ("clob_column", clob_column),
+        ("pk_column", pk_column),
+    ] {
+        if !is_simple_identifier(value) {
+            return Err(DbError::Query(format!(
+                "invalid {label} identifier: {value:?}"
+            )));
+        }
+    }
+
+    let owner = owner.to_ascii_uppercase();
+    let table = table.to_ascii_uppercase();
+    let clob_column = clob_column.to_ascii_uppercase();
+    let pk_column = pk_column.to_ascii_uppercase();
+    let sql = format!(
+        "SELECT {clob_column} AS LOB_VALUE \
+         FROM {owner}.{table} \
+         WHERE {pk_column} = :1 \
+         FETCH FIRST 1 ROW ONLY"
+    );
+    let rows = conn.query_rows(&sql, &[OracleBind::from(pk_value)])?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+
+    let cap = max_chars.max(1);
+    let full_value = row.text("LOB_VALUE");
+    let char_count = full_value.map(|s| s.chars().count()).unwrap_or(0);
+    let truncated = char_count > cap;
+    let value = full_value.map(|s| {
+        if truncated {
+            s.chars().take(cap).collect()
+        } else {
+            s.to_owned()
+        }
+    });
+
+    Ok(Some(LobText {
+        owner,
+        table,
+        column: clob_column,
+        pk_column,
+        value,
+        char_count,
+        truncated,
+    }))
+}
+
 /// `explain_plan`: on a primary, `EXPLAIN PLAN FOR <sql>` then
 /// `DBMS_XPLAN.DISPLAY`; on a read-only standby, `EXPLAIN PLAN` would write
 /// `PLAN_TABLE` (§5.8), so it is refused there (route to `DISPLAY_CURSOR`).
@@ -342,6 +426,43 @@ mod tests {
         }
     }
 
+    struct LobMock;
+
+    impl OracleConnection for LobMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        fn query_rows(&self, _sql: &str, _binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+            Ok(vec![OracleRow {
+                columns: vec![(
+                    "LOB_VALUE".to_owned(),
+                    OracleCell::new("CLOB", Some("abcdefgh".to_owned())),
+                )],
+            }])
+        }
+
+        fn execute(&self, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        fn commit(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        fn rollback(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn identifier_and_type_validation() {
         assert!(is_simple_identifier("HR"));
@@ -367,6 +488,24 @@ mod tests {
         assert_eq!(source.char_count, "BEGIN\n  NULL;\nEND;\n".chars().count());
         assert_eq!(source.source, "BEGIN\n  ");
         assert!(source.truncated);
+    }
+
+    #[test]
+    fn read_lob_caps_text_and_validates_identifiers() {
+        let lob = read_lob(&LobMock, "hr", "docs", "body", "id", "42", 4)
+            .unwrap()
+            .expect("matched row");
+        assert_eq!(lob.owner, "HR");
+        assert_eq!(lob.table, "DOCS");
+        assert_eq!(lob.column, "BODY");
+        assert_eq!(lob.pk_column, "ID");
+        assert_eq!(lob.value.as_deref(), Some("abcd"));
+        assert_eq!(lob.char_count, 8);
+        assert!(lob.truncated);
+
+        let err = read_lob(&LobMock, "hr", "docs;drop", "body", "id", "42", 4)
+            .expect_err("bad identifier refused");
+        assert!(matches!(err, DbError::Query(_)));
     }
 
     // The query-builder shapes are exercised by the live tests; the validation

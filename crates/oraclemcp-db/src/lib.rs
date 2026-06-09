@@ -42,8 +42,9 @@ pub use doctor::{InstantClientPosture, detect_instant_client, oracle_driver_comp
 pub use drcp::{DrcpConfig, SessionPurity};
 pub use error::DbError;
 pub use intelligence::{
-    SourceText, compile_errors, describe_columns, explain_plan, get_ddl, get_source,
-    is_ddl_object_type, list_objects, normalize_source_object_type, sample_rows, search_source,
+    LobText, SourceText, compile_errors, describe_columns, explain_plan, get_ddl, get_source,
+    is_ddl_object_type, list_objects, normalize_source_object_type, read_lob, sample_rows,
+    search_source,
 };
 pub use lease::{LeaseId, LeaseInfo, LeaseManager, PreviewImpact, require_lease_id};
 pub use oci::{

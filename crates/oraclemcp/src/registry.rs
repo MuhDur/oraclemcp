@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 10] = [
+pub const TOOL_NAMES: [&str; 12] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_query",
@@ -23,6 +23,8 @@ pub const TOOL_NAMES: [&str; 10] = [
     "oracle_describe",
     "oracle_get_ddl",
     "oracle_get_source",
+    "oracle_sample_rows",
+    "oracle_read_clob",
     "oracle_compile_errors",
     "oracle_search_source",
     "oracle_explain_plan",
@@ -143,6 +145,41 @@ pub fn tool_registry() -> ToolRegistry {
                 "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum source characters to return (default 1000000)." }
             }),
             &["owner", "name", "object_type"],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_sample_rows",
+            ToolTier::FoundationLiveDb,
+            "Read the first rows of a table or view with a hard row cap.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Schema owner (case-insensitive)." },
+                "table": { "type": "string", "description": "Table or view name (case-insensitive)." },
+                "max_rows": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Maximum rows to return (default 50, hard cap 1000)." }
+            }),
+            &["owner", "table"],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_read_clob",
+            ToolTier::FoundationLiveDb,
+            "Read one CLOB/NCLOB/text value by key with a character cap.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Schema owner (case-insensitive)." },
+                "table": { "type": "string", "description": "Table or view name (case-insensitive)." },
+                "clob_column": { "type": "string", "description": "CLOB/NCLOB/text column name (case-insensitive)." },
+                "pk_column": { "type": "string", "description": "Key column name (case-insensitive)." },
+                "pk_value": { "type": "string", "description": "Key value bound as :1." },
+                "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum characters to return (default 1000000)." }
+            }),
+            &["owner", "table", "clob_column", "pk_column", "pk_value"],
         )),
     );
 
