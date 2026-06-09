@@ -117,7 +117,7 @@ oraclemcp            → core, db, …        this binary
 `oraclemcp` is the lean half of a two-binary family:
 
 - **`oraclemcp`** (this repo) — the engine-free Oracle **database** MCP server: safe, read-only DB access for an agent. Reach for it when you want schema introspection and guarded queries.
-- **`plsql-mcp`** (in [plsql-intelligence](https://github.com/MuhDur/plsql-intelligence)) — the full **superset**: everything here *plus* offline PL/SQL code intelligence (parse/analyze, dependency graph, lineage, SAST, impact analysis). Reach for it when you want deep PL/SQL understanding, not just database access.
+- **`plsql-mcp`** (in [plsql-intelligence](https://github.com/MuhDur/plsql-intelligence)) — the full **superset**: everything here *plus* offline PL/SQL code intelligence (parse/analyze, dependency graph, lineage, SAST, impact analysis) and guarded writes. Reach for it when you want deep PL/SQL understanding, not just database access. Available as `docker run -i ghcr.io/muhdur/plsql-mcp` and in the MCP registry as `io.github.MuhDur/plsql-mcp`.
 
 ## Offline behavior
 
