@@ -159,6 +159,7 @@ read-only aliases that route to the guarded `oracle_*` tools:
 | `query` | `oracle_query` |
 | `preview_sql` | `oracle_preview_sql` |
 | `list_objects` | `oracle_schema_inspect` |
+| `get_schema` | `oracle_schema_inspect` |
 | `describe_table` | `oracle_describe` |
 | `describe_index` | `oracle_describe_index` |
 | `describe_trigger` | `oracle_describe_trigger` |

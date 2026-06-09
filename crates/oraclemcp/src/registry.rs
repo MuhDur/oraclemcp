@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 30] = [
+pub const TOOL_NAMES: [&str; 31] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -41,6 +41,7 @@ pub const TOOL_NAMES: [&str; 30] = [
     "query",
     "preview_sql",
     "list_objects",
+    "get_schema",
     "describe_table",
     "describe_index",
     "describe_trigger",
@@ -412,6 +413,24 @@ pub fn tool_registry() -> ToolRegistry {
             "list_objects",
             ToolTier::FoundationLiveDb,
             "Compatibility alias for oracle_schema_inspect.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner; omit for current schema, or use * for all accessible schemas." },
+                "object_type": { "type": "string", "description": "Optional object type filter." },
+                "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for object_name." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum objects to return." },
+                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for limit." }
+            }),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "get_schema",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_schema_inspect; omit arguments to inspect the current schema.",
         )
         .with_input_schema(object_schema(
             json!({
