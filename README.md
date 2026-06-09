@@ -218,6 +218,7 @@ compatibility aliases that route to the guarded `oracle_*` tools:
 | `disable_writes` | `oracle_set_session_level` with `action=drop`; immediately returns the session to `READ_ONLY` |
 | `query` | `oracle_query` |
 | `preview_sql` | `oracle_preview_sql` |
+| `execute_approved` | Compatibility wrapper around `oracle_execute`; token-only calls work for five minutes after `preview_sql` in the same server process |
 | `compile_object` | `oracle_compile_object` |
 | `compile_with_warnings` | `oracle_compile_object` with `warnings=true` |
 | `create_or_replace` | `oracle_create_or_replace` |

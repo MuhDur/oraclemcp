@@ -10,8 +10,9 @@
 //! [`ErrorEnvelope`] via `DbError::into_envelope`. The `oracle_capabilities`
 //! discovery tool is answered by the server itself and never reaches here.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::{
@@ -76,6 +77,10 @@ const DEFAULT_DBMS_OUTPUT_MAX_CHARS: usize = 200_000;
 const MAX_DBMS_OUTPUT_MAX_CHARS: usize = 1_000_000;
 /// Hard cap on the Oracle-side DBMS_OUTPUT buffer requested for a capture.
 const MAX_DBMS_OUTPUT_BUFFER_BYTES: usize = 1_000_000;
+/// Compatibility TTL for `preview_sql` -> `execute_approved` cached grants.
+const EXECUTE_APPROVED_TOKEN_TTL_SECONDS: u64 = 300;
+/// Hard cap on remembered compatibility grants in one server process.
+const MAX_EXECUTE_APPROVED_TOKENS: usize = 128;
 
 /// Reconnect callback used by `oracle_switch_profile`.
 pub type ProfileConnector =
@@ -104,6 +109,14 @@ struct DispatcherState {
     active_profile: Option<String>,
     level: SessionLevelState,
     custom_catalog: CustomToolCatalog,
+    execute_approved_tokens: HashMap<String, ExecuteApprovedGrant>,
+}
+
+struct ExecuteApprovedGrant {
+    sql: String,
+    required_level: OperatingLevel,
+    active_profile: Option<String>,
+    expires_at: Instant,
 }
 
 /// The dispatcher: owns the live connection behind a `std::sync::Mutex` so
@@ -141,6 +154,7 @@ impl OracleDispatcher {
                 active_profile,
                 level,
                 custom_catalog: CustomToolCatalog::default(),
+                execute_approved_tokens: HashMap::new(),
             }),
             connector: None,
             custom_loader: None,
@@ -179,6 +193,7 @@ impl OracleDispatcher {
                 active_profile,
                 level,
                 custom_catalog,
+                execute_approved_tokens: HashMap::new(),
             }),
             connector: Some(connector),
             custom_loader,
@@ -262,6 +277,26 @@ struct ExecuteArgs {
     commit: bool,
     #[serde(default, alias = "token", alias = "confirmation_token")]
     confirm: Option<String>,
+    #[serde(default, alias = "dbms_output")]
+    capture_dbms_output: bool,
+    #[serde(default, alias = "max_dbms_output_lines")]
+    dbms_output_max_lines: Option<usize>,
+    #[serde(default, alias = "max_dbms_output_chars")]
+    dbms_output_max_chars: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct ExecuteApprovedArgs {
+    #[serde(default, alias = "confirm", alias = "confirmation_token")]
+    token: Option<String>,
+    #[serde(default)]
+    sql: Option<String>,
+    #[serde(default)]
+    commit: Option<bool>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    save_output: Option<String>,
     #[serde(default, alias = "dbms_output")]
     capture_dbms_output: bool,
     #[serde(default, alias = "max_dbms_output_lines")]
@@ -1218,6 +1253,114 @@ fn dbms_output_json(out: &DbmsOutput, max_lines: usize, max_chars: usize) -> Val
     })
 }
 
+fn prune_execute_approved_tokens(state: &mut DispatcherState) {
+    let now = Instant::now();
+    state
+        .execute_approved_tokens
+        .retain(|_, grant| grant.expires_at > now);
+    while state.execute_approved_tokens.len() >= MAX_EXECUTE_APPROVED_TOKENS {
+        let Some(key) = state.execute_approved_tokens.keys().next().cloned() else {
+            break;
+        };
+        state.execute_approved_tokens.remove(&key);
+    }
+}
+
+fn remember_execute_approved_token(state: &mut DispatcherState, sql: &str, preview: &Value) {
+    let Some(confirm) = preview
+        .pointer("/execute_confirmation/confirm")
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    let Some(required_level) = preview
+        .pointer("/execute_confirmation/required_level")
+        .and_then(Value::as_str)
+        .and_then(OperatingLevel::parse)
+    else {
+        return;
+    };
+    prune_execute_approved_tokens(state);
+    state.execute_approved_tokens.insert(
+        confirm.to_owned(),
+        ExecuteApprovedGrant {
+            sql: sql.to_owned(),
+            required_level,
+            active_profile: state.active_profile.clone(),
+            expires_at: Instant::now() + Duration::from_secs(EXECUTE_APPROVED_TOKEN_TTL_SECONDS),
+        },
+    );
+}
+
+fn execute_approved_args(
+    state: &mut DispatcherState,
+    args: ExecuteApprovedArgs,
+) -> Result<ExecuteArgs, ErrorEnvelope> {
+    let _ = args.timeout_seconds;
+    if args.save_output.is_some() {
+        return Err(invalid_args(
+            "execute_approved does not write DBMS_OUTPUT to files; set capture_dbms_output=true and read dbms_output.lines from the tool result",
+        )
+        .with_suggested_tool("oracle_execute"));
+    }
+
+    let token = args.token.filter(|s| !s.trim().is_empty()).ok_or_else(|| {
+        invalid_args("execute_approved requires token from preview_sql")
+            .with_suggested_tool("preview_sql")
+            .with_next_step("call preview_sql with the SQL statement, then pass execute_confirmation.confirm as token")
+    })?;
+    if let Some(sql) = args.sql.filter(|s| !s.trim().is_empty()) {
+        return Ok(ExecuteArgs {
+            sql,
+            binds: Vec::new(),
+            commit: args.commit.unwrap_or(true),
+            confirm: Some(token),
+            capture_dbms_output: args.capture_dbms_output,
+            dbms_output_max_lines: args.dbms_output_max_lines,
+            dbms_output_max_chars: args.dbms_output_max_chars,
+        });
+    }
+
+    prune_execute_approved_tokens(state);
+    let Some(grant) = state.execute_approved_tokens.remove(&token) else {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::ChallengeRequired,
+            "execute_approved token is unknown or expired in this server process",
+        )
+        .with_suggested_tool("preview_sql")
+        .with_next_step("call preview_sql again, then call execute_approved with the returned token within five minutes")
+        .with_next_step("or call oracle_execute with sql, commit=true, and confirm"));
+    };
+
+    if grant.active_profile != state.active_profile {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::ChallengeRequired,
+            "execute_approved token belongs to a different active profile",
+        )
+        .with_suggested_tool("preview_sql")
+        .with_next_step(
+            "switch back to the previewed profile or preview the SQL again on the active profile",
+        ));
+    }
+    if state.level.evaluate(Some(grant.required_level)) != LevelDecision::Allow {
+        return Err(execute_gate_error(
+            &Classifier::new(ClassifierConfig::new()).classify(&grant.sql),
+            state.level.evaluate(Some(grant.required_level)),
+            &state.level,
+        ));
+    }
+
+    Ok(ExecuteArgs {
+        sql: grant.sql,
+        binds: Vec::new(),
+        commit: args.commit.unwrap_or(true),
+        confirm: Some(token),
+        capture_dbms_output: args.capture_dbms_output,
+        dbms_output_max_lines: args.dbms_output_max_lines,
+        dbms_output_max_chars: args.dbms_output_max_chars,
+    })
+}
+
 fn execute_sql(
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
@@ -1977,6 +2120,7 @@ fn canonical_tool_name(name: &str) -> &str {
         "get_schema" => "oracle_schema_inspect",
         "compile_object" | "compile_with_warnings" => "oracle_compile_object",
         "create_or_replace" => "oracle_create_or_replace",
+        "execute_approved" => "execute_approved",
         "describe_table" => "oracle_describe",
         "describe_index" => "oracle_describe_index",
         "describe_trigger" => "oracle_describe_trigger",
@@ -2017,6 +2161,7 @@ impl ToolDispatch for OracleDispatcher {
             state.active_profile = Some(a.profile.clone());
             state.level = new_level;
             state.custom_catalog = new_custom_catalog;
+            state.execute_approved_tokens.clear();
             return Ok(json!({
                 "active_profile": a.profile,
                 "connection": connection_info,
@@ -2035,17 +2180,22 @@ impl ToolDispatch for OracleDispatcher {
             let active_profile = state.active_profile.clone();
             return set_session_level(&mut state.level, active_profile.as_deref(), name, a);
         }
+        if tool == "oracle_preview_sql" {
+            let a: PreviewSqlArgs = parse_args(name, args)?;
+            let preview = preview_sql(&a.sql, &state.level, state.active_profile.as_deref());
+            remember_execute_approved_token(&mut state, &a.sql, &preview);
+            return Ok(preview);
+        }
+        if tool == "execute_approved" {
+            let a: ExecuteApprovedArgs = parse_args(name, args)?;
+            let execute_args = execute_approved_args(&mut state, a)?;
+            let active_profile = state.active_profile.clone();
+            let conn: &dyn OracleConnection = state.conn.as_ref();
+            return execute_sql(conn, active_profile.as_deref(), &state.level, execute_args);
+        }
         let conn: &dyn OracleConnection = state.conn.as_ref();
 
         let result: Result<Value, DbError> = match tool {
-            "oracle_preview_sql" => {
-                let a: PreviewSqlArgs = parse_args(name, args)?;
-                Ok(preview_sql(
-                    &a.sql,
-                    &state.level,
-                    state.active_profile.as_deref(),
-                ))
-            }
             "oracle_execute" => {
                 let a: ExecuteArgs = parse_args(name, args)?;
                 return execute_sql(conn, state.active_profile.as_deref(), &state.level, a);
@@ -2708,6 +2858,13 @@ mod tests {
             "enable_writes" => json!({ "ttl_seconds": 60 }),
             "disable_writes" => json!({}),
             "query" => json!({ "sql": "SELECT 1 FROM dual" }),
+            "execute_approved" => {
+                let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+                let confirm =
+                    execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("dev"))
+                        .expect("confirm");
+                json!({ "sql": sql, "token": confirm })
+            }
             "compile_object" => json!({ "object_type": "PACKAGE", "object_name": "EMP_API" }),
             "compile_with_warnings" => {
                 json!({ "object_type": "PACKAGE", "object_name": "EMP_API" })
@@ -3798,6 +3955,84 @@ mod tests {
         assert_eq!(state.commits.load(Ordering::SeqCst), 1);
         assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
         assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+    }
+
+    #[test]
+    fn execute_approved_replays_preview_token_once() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+        let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+        let preview = dispatcher
+            .dispatch("preview_sql", json!({ "sql": sql }))
+            .expect("preview stores token");
+        let token = preview["execute_confirmation"]["confirm"]
+            .as_str()
+            .expect("token");
+
+        let out = dispatcher
+            .dispatch("execute_approved", json!({ "token": token }))
+            .expect("execute approved");
+        assert_eq!(out["committed"], json!(true));
+        assert_eq!(out["rolled_back"], json!(false));
+        assert_eq!(state.commits.load(Ordering::SeqCst), 1);
+        assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+
+        let err = dispatcher
+            .dispatch("execute_approved", json!({ "token": token }))
+            .expect_err("token is one shot");
+        assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+    }
+
+    #[test]
+    fn execute_approved_accepts_stateless_sql_and_token() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+        let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+        let token = execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("dev"))
+            .expect("confirm");
+
+        let out = dispatcher
+            .dispatch(
+                "execute_approved",
+                json!({ "sql": sql, "token": token, "commit": false }),
+            )
+            .expect("execute approved with sql");
+        assert_eq!(out["committed"], json!(false));
+        assert_eq!(out["rolled_back"], json!(true));
+        assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+        assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn execute_approved_rejects_file_output_without_executing() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+        let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+        let token = execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("dev"))
+            .expect("confirm");
+
+        let err = dispatcher
+            .dispatch(
+                "execute_approved",
+                json!({ "sql": sql, "token": token, "save_output": "out.json" }),
+            )
+            .expect_err("file output is not generic core behavior");
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
     }
 
     #[test]

@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 43] = [
+pub const TOOL_NAMES: [&str; 44] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -48,6 +48,7 @@ pub const TOOL_NAMES: [&str; 43] = [
     "disable_writes",
     "query",
     "preview_sql",
+    "execute_approved",
     "compile_object",
     "compile_with_warnings",
     "create_or_replace",
@@ -583,6 +584,30 @@ pub fn tool_registry() -> ToolRegistry {
 
     registry.register(
         ToolDescriptor::new(
+            "execute_approved",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for executing a statement previously previewed with preview_sql; token-only calls work for five minutes in the same server process.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "token": { "type": "string", "description": "Confirmation token from preview_sql.execute_confirmation.confirm." },
+                "confirm": { "type": "string", "description": "Alias for token." },
+                "confirmation_token": { "type": "string", "description": "Alias for token." },
+                "sql": { "type": "string", "description": "Optional SQL statement. If omitted, the token must still be cached from preview_sql in this server process." },
+                "commit": { "type": "boolean", "description": "Default true for this compatibility tool. Set false to rollback-preview DML." },
+                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Accepted for compatibility; the MCP host controls request timeout." },
+                "save_output": { "type": "string", "description": "Unsupported in the generic core. Use capture_dbms_output=true and read dbms_output.lines instead." },
+                "capture_dbms_output": { "type": "boolean", "description": "Default false. When true, returns bounded DBMS_OUTPUT lines." },
+                "dbms_output_max_lines": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum DBMS_OUTPUT lines to return when capture_dbms_output=true (default 200)." },
+                "dbms_output_max_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum DBMS_OUTPUT characters to return when capture_dbms_output=true (default 200000)." }
+            }),
+            &["token"],
+        ))
+        .destructive(),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
             "compile_object",
             ToolTier::FoundationLiveDb,
             "Compatibility alias for oracle_compile_object.",
@@ -879,6 +904,7 @@ mod tests {
                 "oracle_compile_object",
                 "oracle_create_or_replace",
                 "enable_writes",
+                "execute_approved",
                 "compile_object",
                 "compile_with_warnings",
                 "create_or_replace"
