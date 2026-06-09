@@ -3382,8 +3382,8 @@ mod tests {
         );
 
         let err = dispatcher
-            .dispatch("oracle_switch_profile", json!({ "profile": "broken" }))
-            .expect_err("switch errors");
+            .dispatch("oracle_switch_profile", json!({ "db": "broken" }))
+            .expect_err("canonical switch profile accepts db alias before switch errors");
         assert_eq!(err.error_class, ErrorClass::ConnectionFailed);
 
         let out = dispatcher

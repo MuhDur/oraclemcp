@@ -109,9 +109,10 @@ pub fn tool_registry() -> ToolRegistry {
         )
         .with_input_schema(object_schema(
             json!({
-                "profile": { "type": "string", "description": "Configured profile name from oracle_list_profiles." }
+                "profile": { "type": "string", "description": "Configured profile name from oracle_list_profiles." },
+                "db": { "type": "string", "description": "Alias for profile for compatibility with older clients. Prefer profile." }
             }),
-            &["profile"],
+            &[],
         )),
     );
 
@@ -992,6 +993,34 @@ mod tests {
                 "{name} must advertise the accepted limit alias"
             );
         }
+    }
+
+    #[test]
+    fn switch_profile_advertises_db_alias_without_false_required_key() {
+        let registry = tool_registry();
+        let tool = registry
+            .tools
+            .iter()
+            .find(|tool| tool.name == "oracle_switch_profile")
+            .expect("oracle_switch_profile must be registered");
+        let schema = tool
+            .input_schema
+            .as_ref()
+            .expect("oracle_switch_profile must advertise an input schema");
+        let properties = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("oracle_switch_profile must advertise object properties");
+        assert!(properties.contains_key("profile"));
+        assert!(properties.contains_key("db"));
+        let required = schema
+            .get("required")
+            .and_then(Value::as_array)
+            .expect("oracle_switch_profile schema must declare required args");
+        assert!(
+            required.is_empty(),
+            "profile and db are alternative spellings, so neither key is individually required"
+        );
     }
 
     #[test]
