@@ -96,7 +96,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_connection_info",
             ToolTier::FoundationLiveDb,
-            "Describe the active profile and Oracle connection: backend, version, role, open mode, read-only database status, session context, and current schema.",
+            "Describe the active profile and Oracle connection. When live connection metadata is unavailable, returns connected=false with a structured connection_error and next_actions.",
         )
         .with_input_schema(object_schema(json!({}), &[])),
     );
@@ -496,7 +496,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "current_database",
             ToolTier::FoundationLiveDb,
-            "Compatibility alias for oracle_connection_info.",
+            "Compatibility alias for oracle_connection_info; returns connected=false with recovery hints when live connection metadata is unavailable.",
         )
         .with_input_schema(object_schema(json!({}), &[])),
     );

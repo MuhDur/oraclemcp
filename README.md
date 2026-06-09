@@ -198,7 +198,7 @@ signatures are rejected.
 | Tool | Purpose |
 | --- | --- |
 | `oracle_list_profiles` | List configured connection profiles without exposing connect strings, usernames, or credential references |
-| `oracle_connection_info` | Describe the active connection: backend, version, role, open mode, read-only database status, session context, and current schema |
+| `oracle_connection_info` | Describe the active profile and connection; if live metadata is unavailable, returns `connected=false` with a structured `connection_error` and `next_actions` |
 | `oracle_switch_profile` | Reconnect the server to another configured profile |
 | `oracle_set_session_level` | Preview/apply a temporary session operating-level elevation within the profile ceiling, or drop back to `READ_ONLY` |
 | `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |

@@ -19,12 +19,12 @@ use oraclemcp_core::{
     CustomToolCatalog, CustomToolExecutor, ToolBody, ToolDispatch, execute_custom_tool,
 };
 use oraclemcp_db::{
-    DbError, DbmsOutput, OracleBind, OracleConnection, QueryCaps, SerializeOptions, compile_errors,
-    compile_object_statements, describe_columns, describe_constraints, describe_index,
-    describe_trigger, describe_view, execute_immediate_audit, explain_plan,
-    find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects, list_schemas,
-    plscope_identifiers, plscope_statements, read_lob, read_query, read_query_named, sample_rows,
-    search_source, serialize_row,
+    DbError, DbmsOutput, OracleBind, OracleConnection, OracleConnectionInfo, QueryCaps,
+    SerializeOptions, compile_errors, compile_object_statements, describe_columns,
+    describe_constraints, describe_index, describe_trigger, describe_view, execute_immediate_audit,
+    explain_plan, find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects,
+    list_schemas, plscope_identifiers, plscope_statements, read_lob, read_query, read_query_named,
+    sample_rows, search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
@@ -2333,6 +2333,43 @@ fn preview_sql(sql: &str, session: &SessionLevelState, active_profile: Option<&s
     })
 }
 
+fn connection_info_json(
+    active_profile: Option<String>,
+    info: Result<OracleConnectionInfo, DbError>,
+) -> Value {
+    match info {
+        Ok(info) => json!({
+            "active_profile": active_profile,
+            "connected": true,
+            "connection": info,
+        }),
+        Err(err) => {
+            let mut next_actions = vec![json!({
+                "intent": "inspect_profiles",
+                "tool": "oracle_list_profiles",
+                "args": {},
+            })];
+            let doctor_args = match active_profile.as_deref() {
+                Some(profile) => json!(["--json", "doctor", "--profile", profile]),
+                None => json!(["--json", "doctor"]),
+            };
+            next_actions.push(json!({
+                "intent": "run_cli_doctor",
+                "command": "oraclemcp",
+                "args": doctor_args,
+            }));
+
+            json!({
+                "active_profile": active_profile,
+                "connected": false,
+                "connection": Value::Null,
+                "connection_error": err.into_envelope().to_json(),
+                "next_actions": next_actions,
+            })
+        }
+    }
+}
+
 fn canonical_tool_name(name: &str) -> &str {
     match name {
         "current_database" => "oracle_connection_info",
@@ -2459,12 +2496,10 @@ impl ToolDispatch for OracleDispatcher {
             }
             "oracle_connection_info" => {
                 ensure_no_args(name, args)?;
-                conn.describe().map(|info| {
-                    json!({
-                        "active_profile": state.active_profile.clone(),
-                        "connection": info,
-                    })
-                })
+                Ok(connection_info_json(
+                    state.active_profile.clone(),
+                    conn.describe(),
+                ))
             }
             "oracle_query" => {
                 let a: QueryArgs = parse_args(name, args)?;
@@ -2742,7 +2777,7 @@ impl ToolDispatch for OracleDispatcher {
 mod tests {
     use super::*;
     use crate::registry::TOOL_NAMES;
-    use oraclemcp_db::{OracleBackend, OracleCell, OracleConnectionInfo, OracleRow};
+    use oraclemcp_db::{OracleBackend, OracleCell, OracleRow};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn read_write_level() -> SessionLevelState {
@@ -2923,6 +2958,43 @@ mod tests {
         }
         fn rollback(&self) -> Result<(), DbError> {
             Ok(())
+        }
+    }
+
+    struct DescribeFailingMock;
+    impl OracleConnection for DescribeFailingMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        fn ping(&self) -> Result<(), DbError> {
+            Err(DbError::BackendNotCompiled {
+                backend: OracleBackend::RustOracle,
+            })
+        }
+        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+            Err(DbError::BackendNotCompiled {
+                backend: OracleBackend::RustOracle,
+            })
+        }
+        fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+            Err(DbError::BackendNotCompiled {
+                backend: OracleBackend::RustOracle,
+            })
+        }
+        fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+            Err(DbError::BackendNotCompiled {
+                backend: OracleBackend::RustOracle,
+            })
+        }
+        fn commit(&self) -> Result<(), DbError> {
+            Err(DbError::BackendNotCompiled {
+                backend: OracleBackend::RustOracle,
+            })
+        }
+        fn rollback(&self) -> Result<(), DbError> {
+            Err(DbError::BackendNotCompiled {
+                backend: OracleBackend::RustOracle,
+            })
         }
     }
 
@@ -3212,6 +3284,7 @@ mod tests {
             .dispatch("oracle_connection_info", json!({}))
             .expect("connection info");
         assert_eq!(out["active_profile"], json!("dev"));
+        assert_eq!(out["connected"], json!(true));
         assert_eq!(out["connection"]["module"], json!("oraclemcp-test"));
         assert_eq!(out["connection"]["client_identifier"], json!("agent"));
         assert_eq!(out["connection"]["program"], json!("oraclemcp"));
@@ -3220,6 +3293,36 @@ mod tests {
             json!("oraclemcp-driver")
         );
         assert_eq!(out["connection"]["read_only"], json!(false));
+    }
+
+    #[test]
+    fn connection_info_degrades_when_describe_fails() {
+        let dispatcher = OracleDispatcher::new_with_profile(
+            Box::new(DescribeFailingMock),
+            Some("dev".to_owned()),
+        );
+
+        for tool in ["oracle_connection_info", "current_database"] {
+            let out = dispatcher
+                .dispatch(tool, json!({}))
+                .unwrap_or_else(|e| panic!("{tool} should degrade without tool error: {e:?}"));
+            assert_eq!(out["active_profile"], json!("dev"));
+            assert_eq!(out["connected"], json!(false));
+            assert_eq!(out["connection"], Value::Null);
+            assert_eq!(
+                out["connection_error"]["error_class"],
+                json!("RUNTIME_STATE_REQUIRED")
+            );
+            assert_eq!(
+                out["next_actions"][0]["tool"],
+                json!("oracle_list_profiles")
+            );
+            assert_eq!(out["next_actions"][1]["command"], json!("oraclemcp"));
+            assert_eq!(
+                out["next_actions"][1]["args"],
+                json!(["--json", "doctor", "--profile", "dev"])
+            );
+        }
     }
 
     #[test]
