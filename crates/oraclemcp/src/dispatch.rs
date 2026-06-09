@@ -277,6 +277,8 @@ struct CompileObjectArgs {
     name: Option<String>,
     #[serde(default)]
     plscope: bool,
+    #[serde(default, alias = "enable_warnings")]
+    warnings: bool,
     #[serde(default)]
     execute: bool,
     #[serde(default, alias = "token", alias = "confirmation_token")]
@@ -1344,6 +1346,7 @@ fn compile_next_actions(
     name: &str,
     object_type: &str,
     plscope: bool,
+    warnings: bool,
     confirm: Option<&str>,
 ) -> Value {
     let mut actions = Vec::new();
@@ -1358,6 +1361,7 @@ fn compile_next_actions(
                         "name": name,
                         "object_type": object_type,
                         "plscope": plscope,
+                        "warnings": warnings,
                         "execute": true,
                         "confirm": confirm,
                     },
@@ -1394,6 +1398,18 @@ fn compile_next_actions(
     Value::Array(actions)
 }
 
+fn compile_diagnostic_counts(errors: &[oraclemcp_db::OracleRow]) -> (usize, usize) {
+    let error_count = errors
+        .iter()
+        .filter(|row| {
+            row.text("ATTRIBUTE")
+                .is_some_and(|attr| attr.eq_ignore_ascii_case("ERROR"))
+        })
+        .count();
+    let warning_count = errors.len().saturating_sub(error_count);
+    (error_count, warning_count)
+}
+
 fn compile_object(
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
@@ -1404,8 +1420,16 @@ fn compile_object(
     let object_name = required_non_empty_arg(tool_name, "name", args.name)?;
     let (owner, object_name) = owner_and_name_arg(conn, args.owner, object_name, "name")?;
     let object_type = normalize_compile_type_for_wire(&args.object_type);
-    let statements = compile_object_statements(&object_type, &owner, &object_name, args.plscope)
-        .map_err(DbError::into_envelope)?;
+    let warnings = args.warnings || tool_name == "compile_with_warnings";
+    let mut statements =
+        compile_object_statements(&object_type, &owner, &object_name, args.plscope)
+            .map_err(DbError::into_envelope)?;
+    if warnings {
+        statements.insert(
+            0,
+            "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'".to_owned(),
+        );
+    }
     let gate = session.evaluate(Some(OperatingLevel::Ddl));
     let (gate_decision, blocked_reason, step_up_target) = gate_decision_json(&gate);
     let confirm = matches!(gate, LevelDecision::Allow).then(|| {
@@ -1427,6 +1451,7 @@ fn compile_object(
             "name": object_name,
             "object_type": object_type,
             "plscope": args.plscope,
+            "warnings": warnings,
             "required_level": OperatingLevel::Ddl,
             "session_level": session.effective_level(),
             "profile_ceiling": session.effective_ceiling(),
@@ -1435,7 +1460,7 @@ fn compile_object(
             "step_up_target": step_up_target,
             "statements": statements,
             "confirmation": confirm.as_ref().map(|confirm| json!({
-                "tool": "oracle_compile_object",
+                "tool": tool_name,
                 "execute": true,
                 "confirm": confirm,
             })),
@@ -1445,6 +1470,7 @@ fn compile_object(
                 &object_name,
                 &object_type,
                 args.plscope,
+                warnings,
                 confirm.as_deref(),
             ),
         })
@@ -1477,6 +1503,7 @@ fn compile_object(
     }
     let errors =
         compile_errors(conn, &owner, Some(&object_name)).map_err(DbError::into_envelope)?;
+    let (error_count, warning_count) = compile_diagnostic_counts(&errors);
     Ok(json!({
         "compiled": true,
         "preview": false,
@@ -1484,11 +1511,14 @@ fn compile_object(
         "name": object_name,
         "object_type": object_type,
         "plscope": args.plscope,
+        "warnings": warnings,
         "required_level": OperatingLevel::Ddl,
         "statements_executed": statements,
         "rows_affected": rows_affected,
         "errors": rows_to_json(&errors),
-        "error_count": errors.len(),
+        "diagnostic_count": errors.len(),
+        "error_count": error_count,
+        "warning_count": warning_count,
     }))
 }
 
@@ -1878,7 +1908,7 @@ fn canonical_tool_name(name: &str) -> &str {
         "list_objects" => "oracle_schema_inspect",
         "list_schemas" => "oracle_list_schemas",
         "get_schema" => "oracle_schema_inspect",
-        "compile_object" => "oracle_compile_object",
+        "compile_object" | "compile_with_warnings" => "oracle_compile_object",
         "create_or_replace" => "oracle_create_or_replace",
         "describe_table" => "oracle_describe",
         "describe_index" => "oracle_describe_index",
@@ -2448,6 +2478,7 @@ mod tests {
     #[derive(Default)]
     struct ExecState {
         executed: Mutex<Vec<(String, Vec<OracleBind>)>>,
+        diagnostics: Mutex<Vec<OracleRow>>,
         commits: AtomicUsize,
         rollbacks: AtomicUsize,
     }
@@ -2483,7 +2514,15 @@ mod tests {
             })
         }
 
-        fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        fn query_rows(&self, sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+            if sql.to_ascii_lowercase().contains("from all_errors") {
+                return Ok(self
+                    .state
+                    .diagnostics
+                    .lock()
+                    .expect("diagnostics mutex")
+                    .clone());
+            }
             Ok(Vec::new())
         }
 
@@ -2504,6 +2543,37 @@ mod tests {
         fn rollback(&self) -> Result<(), DbError> {
             self.state.rollbacks.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+    }
+
+    fn diagnostic_row(attribute: &str, text: &str) -> OracleRow {
+        OracleRow {
+            columns: vec![
+                (
+                    "NAME".to_owned(),
+                    OracleCell::new("VARCHAR2", Some("EMP_API".to_owned())),
+                ),
+                (
+                    "TYPE".to_owned(),
+                    OracleCell::new("VARCHAR2", Some("PACKAGE".to_owned())),
+                ),
+                (
+                    "LINE".to_owned(),
+                    OracleCell::new("NUMBER", Some("7".to_owned())),
+                ),
+                (
+                    "POSITION".to_owned(),
+                    OracleCell::new("NUMBER", Some("3".to_owned())),
+                ),
+                (
+                    "TEXT".to_owned(),
+                    OracleCell::new("VARCHAR2", Some(text.to_owned())),
+                ),
+                (
+                    "ATTRIBUTE".to_owned(),
+                    OracleCell::new("VARCHAR2", Some(attribute.to_owned())),
+                ),
+            ],
         }
     }
 
@@ -2549,6 +2619,9 @@ mod tests {
             "disable_writes" => json!({}),
             "query" => json!({ "sql": "SELECT 1 FROM dual" }),
             "compile_object" => json!({ "object_type": "PACKAGE", "object_name": "EMP_API" }),
+            "compile_with_warnings" => {
+                json!({ "object_type": "PACKAGE", "object_name": "EMP_API" })
+            }
             "create_or_replace" => {
                 json!({ "source_code": "CREATE OR REPLACE VIEW EMP_V AS SELECT 1 AS ID FROM dual" })
             }
@@ -3710,6 +3783,72 @@ mod tests {
         let executed = state.executed.lock().expect("exec mutex");
         assert_eq!(executed.len(), 1);
         assert_eq!(executed[0].0, "ALTER PACKAGE APP.EMP_API COMPILE");
+    }
+
+    #[test]
+    fn compile_with_warnings_enables_warnings_and_counts_diagnostics() {
+        let state = Arc::new(ExecState::default());
+        state
+            .diagnostics
+            .lock()
+            .expect("diagnostics mutex")
+            .extend([
+                diagnostic_row("ERROR", "PLS-00103: encountered symbol"),
+                diagnostic_row("WARNING", "PLW-06009: procedure may be removed"),
+            ]);
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            ddl_level(),
+        );
+
+        let preview = dispatcher
+            .dispatch(
+                "compile_with_warnings",
+                json!({ "object_type": "PACKAGE", "object_name": "EMP_API" }),
+            )
+            .expect("compile-with-warnings preview");
+        assert_eq!(preview["warnings"], json!(true));
+        assert_eq!(
+            preview["statements"][0],
+            json!("ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'")
+        );
+        assert_eq!(
+            preview["statements"][1],
+            json!("ALTER PACKAGE APP.EMP_API COMPILE")
+        );
+        assert_eq!(
+            preview["confirmation"]["tool"],
+            json!("compile_with_warnings")
+        );
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("confirm");
+
+        let out = dispatcher
+            .dispatch(
+                "compile_with_warnings",
+                json!({
+                    "object_type": "PACKAGE",
+                    "object_name": "EMP_API",
+                    "execute": true,
+                    "confirm": confirm
+                }),
+            )
+            .expect("compile with warnings executes");
+        assert_eq!(out["compiled"], json!(true));
+        assert_eq!(out["warnings"], json!(true));
+        assert_eq!(out["diagnostic_count"], json!(2));
+        assert_eq!(out["error_count"], json!(1));
+        assert_eq!(out["warning_count"], json!(1));
+
+        let executed = state.executed.lock().expect("exec mutex");
+        assert_eq!(executed.len(), 2);
+        assert_eq!(
+            executed[0].0,
+            "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'"
+        );
+        assert_eq!(executed[1].0, "ALTER PACKAGE APP.EMP_API COMPILE");
     }
 
     #[test]

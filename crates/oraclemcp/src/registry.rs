@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 42] = [
+pub const TOOL_NAMES: [&str; 43] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -49,6 +49,7 @@ pub const TOOL_NAMES: [&str; 42] = [
     "query",
     "preview_sql",
     "compile_object",
+    "compile_with_warnings",
     "create_or_replace",
     "list_objects",
     "list_schemas",
@@ -208,6 +209,7 @@ pub fn tool_registry() -> ToolRegistry {
                 "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
                 "object_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." },
                 "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
+                "warnings": { "type": "boolean", "description": "Enable PLSQL_WARNINGS='ENABLE:ALL' before compiling. Default false." },
                 "execute": { "type": "boolean", "description": "Default false returns a preview and confirmation token. Set true only with confirm to run the compile statements." },
                 "confirm": { "type": "string", "description": "Confirmation token returned by the preview for this exact object/profile/options. Required when execute=true." }
             }),
@@ -589,6 +591,28 @@ pub fn tool_registry() -> ToolRegistry {
                 "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
                 "object_name": { "type": "string", "description": "Alias for name." },
                 "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
+                "warnings": { "type": "boolean", "description": "Enable PLSQL_WARNINGS='ENABLE:ALL' before compiling. Default false." },
+                "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to compile." },
+                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." }
+            }),
+            &["object_type"],
+        ))
+        .destructive(),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "compile_with_warnings",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_compile_object with warnings=true.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
+                "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
+                "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
+                "object_name": { "type": "string", "description": "Alias for name." },
+                "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
                 "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to compile." },
                 "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." }
             }),
@@ -853,6 +877,7 @@ mod tests {
                 "oracle_create_or_replace",
                 "enable_writes",
                 "compile_object",
+                "compile_with_warnings",
                 "create_or_replace"
             ],
             "only guarded session elevation/execution/deploy/compile tools are destructive"

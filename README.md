@@ -219,6 +219,7 @@ compatibility aliases that route to the guarded `oracle_*` tools:
 | `query` | `oracle_query` |
 | `preview_sql` | `oracle_preview_sql` |
 | `compile_object` | `oracle_compile_object` |
+| `compile_with_warnings` | `oracle_compile_object` with `warnings=true` |
 | `create_or_replace` | `oracle_create_or_replace` |
 | `list_objects` | `oracle_schema_inspect` |
 | `list_schemas` | `oracle_list_schemas` |
@@ -265,7 +266,7 @@ Lowering to a less-capable level is immediate and does not require a token.
 
 `oracle_execute` is intentionally narrow. It accepts one statement with positional binds, refuses read-only SQL (use `oracle_query`), refuses anything above the active profile/session level, rolls DML back unless `commit=true`, and requires the `oracle_preview_sql` confirmation token before any commit. DDL/Admin statements cannot be rollback-previewed by Oracle, so they require `commit=true` plus confirmation before execution.
 
-`oracle_compile_object` is the structured alternative to handcrafting `ALTER ... COMPILE`. A call without `execute=true` only previews the validated compile statements, required `DDL` level, gate decision, and confirmation token. A second call with `execute=true` and that token runs the compile and returns current `ALL_ERRORS` rows for the object. Set `plscope=true` to enable PL/Scope collection before compiling; this is still profile-gated at `DDL`.
+`oracle_compile_object` is the structured alternative to handcrafting `ALTER ... COMPILE`. A call without `execute=true` only previews the validated compile statements, required `DDL` level, gate decision, and confirmation token. A second call with `execute=true` and that token runs the compile and returns current `ALL_ERRORS` rows for the object. Set `plscope=true` to enable PL/Scope collection before compiling, or `warnings=true` to enable `PLSQL_WARNINGS='ENABLE:ALL'` before compiling. Both options remain profile-gated at `DDL`; `compile_with_warnings` is a compatibility alias for the warnings path.
 
 `oracle_create_or_replace` is the structured deployment macro for one full
 `CREATE OR REPLACE` statement. It validates that the source has the expected
