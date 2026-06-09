@@ -63,6 +63,9 @@ pub struct OciConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SessionIdentityConfig {
+    /// Optional Oracle edition for Edition-Based Redefinition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edition: Option<String>,
     /// `DBMS_APPLICATION_INFO` module / `SYS_CONTEXT('USERENV','MODULE')`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
@@ -110,6 +113,10 @@ pub struct ConnectionProfile {
     /// Inline login statements (allowlist-validated; §6.5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_statements: Option<Vec<String>>,
+    /// Trusted local session setup statements, run exactly as configured after
+    /// guarded login statements. These are never agent supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_session_statements: Option<Vec<String>>,
     /// The per-target operating-level ceiling (§6.6). Defaults to `READ_ONLY`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_level: Option<OperatingLevel>,
@@ -182,6 +189,7 @@ impl ConnectionProfile {
             credential_ref,
             login_script,
             login_statements,
+            trusted_session_statements,
             max_level,
             default_level,
             protected,
@@ -291,6 +299,7 @@ mod tests {
             credential_ref: None,
             login_script: None,
             login_statements: None,
+            trusted_session_statements: None,
             max_level: None,
             default_level: None,
             protected: None,
@@ -366,6 +375,7 @@ mod tests {
         prof.credential_ref = Some("keyring:prod".to_owned());
         prof.username = Some("svc_acct".to_owned());
         prof.session_identity = Some(SessionIdentityConfig {
+            edition: None,
             module: Some("local-client".to_owned()),
             action: None,
             client_identifier: Some("operator".to_owned()),
@@ -389,6 +399,7 @@ mod tests {
     fn child_inherits_session_identity_from_base() {
         let mut base = p("shared");
         base.session_identity = Some(SessionIdentityConfig {
+            edition: Some("shared-edition".to_owned()),
             module: Some("shared-client".to_owned()),
             action: Some("inspect".to_owned()),
             client_identifier: Some("agent".to_owned()),
@@ -404,6 +415,7 @@ mod tests {
             .as_ref()
             .expect("inherited identity");
         assert_eq!(identity.module.as_deref(), Some("shared-client"));
+        assert_eq!(identity.edition.as_deref(), Some("shared-edition"));
         assert_eq!(identity.driver_name.as_deref(), Some("shared-driver"));
     }
 }

@@ -112,6 +112,13 @@ mod driver {
         if opts.external_auth || (opts.username.is_none() && opts.password.is_none()) {
             connector.external_auth(true);
         }
+        if let Some(edition) = opts
+            .session_identity
+            .as_ref()
+            .and_then(|identity| identity.edition.as_deref())
+        {
+            connector.edition(edition);
+        }
         if let Some(driver_name) = opts
             .session_identity
             .as_ref()
@@ -237,23 +244,63 @@ mod driver {
             if let Ok(rows) = self.query_rows(
                 "SELECT \
                     SYS_CONTEXT('USERENV','CURRENT_SCHEMA') AS current_schema, \
+                    SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME') AS current_edition, \
                     SYS_CONTEXT('USERENV','SESSION_USER') AS session_user, \
                     SYS_CONTEXT('USERENV','CURRENT_USER') AS current_user, \
                     SYS_CONTEXT('USERENV','MODULE') AS module, \
                     SYS_CONTEXT('USERENV','ACTION') AS session_action, \
                     SYS_CONTEXT('USERENV','CLIENT_IDENTIFIER') AS client_identifier, \
-                    SYS_CONTEXT('USERENV','CLIENT_INFO') AS client_info \
+                    SYS_CONTEXT('USERENV','CLIENT_INFO') AS client_info, \
+                    SYS_CONTEXT('USERENV','OS_USER') AS os_user, \
+                    SYS_CONTEXT('USERENV','HOST') AS host, \
+                    SYS_CONTEXT('USERENV','TERMINAL') AS terminal \
                  FROM dual",
                 &[],
             ) {
                 if let Some(r) = rows.first() {
                     info.current_schema = r.text("CURRENT_SCHEMA").map(str::to_owned);
+                    info.current_edition = r.text("CURRENT_EDITION").map(str::to_owned);
                     info.session_user = r.text("SESSION_USER").map(str::to_owned);
                     info.current_user = r.text("CURRENT_USER").map(str::to_owned);
                     info.module = r.text("MODULE").map(str::to_owned);
                     info.action = r.text("SESSION_ACTION").map(str::to_owned);
                     info.client_identifier = r.text("CLIENT_IDENTIFIER").map(str::to_owned);
                     info.client_info = r.text("CLIENT_INFO").map(str::to_owned);
+                    info.os_user = r.text("OS_USER").map(str::to_owned);
+                    info.host = r.text("HOST").map(str::to_owned);
+                    info.terminal = r.text("TERMINAL").map(str::to_owned);
+                }
+            }
+            if let Ok(rows) = self.query_rows(
+                "SELECT osuser, machine, terminal, program \
+                 FROM v$session \
+                 WHERE sid = TO_NUMBER(SYS_CONTEXT('USERENV','SID')) \
+                 FETCH FIRST 1 ROWS ONLY",
+                &[],
+            ) {
+                if let Some(r) = rows.first() {
+                    info.os_user = r
+                        .text("OSUSER")
+                        .map(str::to_owned)
+                        .or_else(|| info.os_user.take());
+                    info.machine = r.text("MACHINE").map(str::to_owned);
+                    info.terminal = r
+                        .text("TERMINAL")
+                        .map(str::to_owned)
+                        .or_else(|| info.terminal.take());
+                    info.program = r.text("PROGRAM").map(str::to_owned);
+                }
+            }
+            if let Ok(rows) = self.query_rows(
+                "SELECT client_driver \
+                 FROM v$session_connect_info \
+                 WHERE sid = TO_NUMBER(SYS_CONTEXT('USERENV','SID')) \
+                   AND client_driver IS NOT NULL \
+                 FETCH FIRST 1 ROWS ONLY",
+                &[],
+            ) {
+                if let Some(r) = rows.first() {
+                    info.client_driver = r.text("CLIENT_DRIVER").map(str::to_owned);
                 }
             }
             Ok(info.with_read_only_status())

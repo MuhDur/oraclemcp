@@ -860,12 +860,19 @@ mod tests {
                 read_only: false,
                 read_only_reason: None,
                 current_schema: Some("APP".to_owned()),
+                current_edition: Some("ORA$BASE".to_owned()),
                 session_user: Some("APP".to_owned()),
                 current_user: Some("APP".to_owned()),
                 module: Some("oraclemcp-test".to_owned()),
                 action: None,
                 client_identifier: Some("agent".to_owned()),
                 client_info: None,
+                os_user: Some("operator".to_owned()),
+                host: Some("workstation".to_owned()),
+                machine: Some("workstation".to_owned()),
+                terminal: None,
+                program: Some("oraclemcp".to_owned()),
+                client_driver: Some("oraclemcp-driver".to_owned()),
             })
         }
         fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
@@ -1097,6 +1104,11 @@ mod tests {
         assert_eq!(out["active_profile"], json!("dev"));
         assert_eq!(out["connection"]["module"], json!("oraclemcp-test"));
         assert_eq!(out["connection"]["client_identifier"], json!("agent"));
+        assert_eq!(out["connection"]["program"], json!("oraclemcp"));
+        assert_eq!(
+            out["connection"]["client_driver"],
+            json!("oraclemcp-driver")
+        );
         assert_eq!(out["connection"]["read_only"], json!(false));
     }
 

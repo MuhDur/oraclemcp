@@ -170,6 +170,9 @@ pub struct OracleConnectionInfo {
     pub read_only_reason: Option<String>,
     /// The current schema (`SYS_CONTEXT('USERENV','CURRENT_SCHEMA')`).
     pub current_schema: Option<String>,
+    /// The current edition (`SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME')`).
+    #[serde(default)]
+    pub current_edition: Option<String>,
     /// Oracle session user (`SYS_CONTEXT('USERENV','SESSION_USER')`).
     #[serde(default)]
     pub session_user: Option<String>,
@@ -188,6 +191,24 @@ pub struct OracleConnectionInfo {
     /// Oracle client info (`SYS_CONTEXT('USERENV','CLIENT_INFO')`).
     #[serde(default)]
     pub client_info: Option<String>,
+    /// Client OS user as reported by Oracle session context or V$SESSION.
+    #[serde(default)]
+    pub os_user: Option<String>,
+    /// Client host as reported by Oracle session context.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Client machine as reported by V$SESSION, when visible.
+    #[serde(default)]
+    pub machine: Option<String>,
+    /// Client terminal as reported by Oracle session context or V$SESSION.
+    #[serde(default)]
+    pub terminal: Option<String>,
+    /// Client program as reported by V$SESSION, when visible.
+    #[serde(default)]
+    pub program: Option<String>,
+    /// Client driver as reported by V$SESSION_CONNECT_INFO, when visible.
+    #[serde(default)]
+    pub client_driver: Option<String>,
 }
 
 impl OracleConnectionInfo {
@@ -227,6 +248,9 @@ impl OracleConnectionInfo {
 /// End-to-end session identity applied to each physical Oracle connection.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OracleSessionIdentity {
+    /// Optional Oracle edition for Edition-Based Redefinition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edition: Option<String>,
     /// Oracle module (`SYS_CONTEXT('USERENV','MODULE')`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
@@ -248,7 +272,8 @@ impl OracleSessionIdentity {
     /// Whether no identity fields were configured.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.module.is_none()
+        self.edition.is_none()
+            && self.module.is_none()
             && self.action.is_none()
             && self.client_identifier.is_none()
             && self.client_info.is_none()

@@ -88,10 +88,16 @@ login_statements = [
   "ALTER SESSION SET NLS_LANGUAGE = english",
   "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'",
 ]
+# Optional trusted local setup, authored by the profile owner and never by the
+# agent. Use for session-local initialization that is not an ALTER SESSION.
+trusted_session_statements = [
+  "BEGIN DBMS_OUTPUT.ENABLE(500000); END;",
+]
 
 [profiles.session_identity]
 # Optional: all values are profile-local and are not shown by list_profiles.
 # oracle_connection_info reports the session-visible fields for verification.
+edition = "ORA$BASE"
 module = "oraclemcp"
 action = "inspect"
 client_identifier = "agent"
@@ -101,10 +107,18 @@ driver_name = "oraclemcp"
 
 `max_level` is the profile ceiling; `default_level` is the starting session
 level and must not exceed that ceiling. `login_statements` and `login_script`
-are for profile-local session policy only.
-They are restricted to allowlisted `ALTER SESSION SET ...` parameters, so local
-tooling conventions stay in config without making the open-source core
-environment-specific.
+are for profile-local session policy only and are restricted to allowlisted
+`ALTER SESSION SET ...` parameters.
+`trusted_session_statements` are an explicit profile-owner escape hatch for
+local session initialization such as `DBMS_APPLICATION_INFO`, application
+contexts, or `DBMS_OUTPUT`; they are never accepted from agent tool calls, and
+they keep environment-specific conventions in private config rather than in the
+open-source core.
+The `oracle_connection_info` tool also reports diagnostic fields such as
+`os_user`, `program`, and `client_driver` when the database exposes them. In the
+current Rust backend, profile config can set the session identity fields shown
+above and the driver name, but `os_user` and `program` remain backend-reported
+values unless the underlying driver exposes setters for them.
 
 Then launch:
 

@@ -109,6 +109,7 @@ fn profile_to_options_for_level(
             .session_identity
             .as_ref()
             .map(|identity| OracleSessionIdentity {
+                edition: identity.edition.clone(),
                 module: identity.module.clone(),
                 action: identity.action.clone(),
                 client_identifier: identity.client_identifier.clone(),
@@ -142,6 +143,11 @@ fn profile_session_statements(
             out.push(validate_login_statement(&profile.name, &stmt)?);
         }
     }
+    if let Some(extra) = &profile.trusted_session_statements {
+        for stmt in extra {
+            out.push(validate_trusted_session_statement(&profile.name, stmt)?);
+        }
+    }
     Ok(out)
 }
 
@@ -159,6 +165,16 @@ fn validate_login_statement(profile: &str, statement: &str) -> Result<String, Db
             "profile `{profile}` login statement is not an allowlisted ALTER SESSION SET statement: {trimmed:?}"
         )))
     }
+}
+
+fn validate_trusted_session_statement(profile: &str, statement: &str) -> Result<String, DbError> {
+    let trimmed = statement.trim();
+    if trimmed.is_empty() {
+        return Err(DbError::UnsupportedAuth(format!(
+            "profile `{profile}` contains an empty trusted_session_statements entry"
+        )));
+    }
+    Ok(trimmed.to_owned())
 }
 
 fn read_login_script(profile: &str, path: &Path) -> Result<Vec<String>, DbError> {
@@ -330,6 +346,7 @@ mod tests {
             connect_string = "localhost:1521/FREEPDB1"
 
             [profiles.session_identity]
+            edition = "v1"
             module = "local-tool"
             action = "inspect"
             client_identifier = "agent"
@@ -343,11 +360,57 @@ mod tests {
             .session_identity
             .as_ref()
             .expect("session identity");
+        assert_eq!(identity.edition.as_deref(), Some("v1"));
         assert_eq!(identity.module.as_deref(), Some("local-tool"));
         assert_eq!(identity.action.as_deref(), Some("inspect"));
         assert_eq!(identity.client_identifier.as_deref(), Some("agent"));
         assert_eq!(identity.client_info.as_deref(), Some("workspace"));
         assert_eq!(identity.driver_name.as_deref(), Some("driver"));
+    }
+
+    #[test]
+    fn trusted_session_statements_are_carried_after_guarded_login_statements() {
+        let p = profile(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            login_statements = [
+              "ALTER SESSION SET NLS_LANGUAGE=english",
+            ]
+            trusted_session_statements = [
+              "BEGIN DBMS_OUTPUT.ENABLE(500000); END;",
+            ]
+            "#,
+        );
+        let ctx = build_session_context(&p, None, false).expect("context");
+        assert!(
+            ctx.options
+                .session_statements
+                .iter()
+                .any(|s| s == "ALTER SESSION SET NLS_LANGUAGE=english")
+        );
+        assert_eq!(
+            ctx.options.session_statements.last().map(String::as_str),
+            Some("BEGIN DBMS_OUTPUT.ENABLE(500000); END;")
+        );
+    }
+
+    #[test]
+    fn empty_trusted_session_statement_is_rejected() {
+        let p = profile(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            trusted_session_statements = ["  "]
+            "#,
+        );
+        let err = build_session_context(&p, None, false).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("empty trusted_session_statements entry")
+        );
     }
 
     #[test]
