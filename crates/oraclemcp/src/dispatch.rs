@@ -209,6 +209,10 @@ fn rows_to_json(rows: &[oraclemcp_db::OracleRow]) -> Value {
     Value::Array(rows.iter().map(|r| serialize_row(r, &opts)).collect())
 }
 
+fn profiles_response(cfg: &OracleMcpConfig) -> Value {
+    json!({ "profiles": cfg.list_profiles() })
+}
+
 fn optional_row_to_json(row: Option<&oraclemcp_db::OracleRow>) -> Value {
     let opts = SerializeOptions::default();
     row.map(|r| serialize_row(r, &opts)).unwrap_or(Value::Null)
@@ -2450,7 +2454,7 @@ impl ToolDispatch for OracleDispatcher {
             "oracle_list_profiles" => {
                 ensure_no_args(name, args)?;
                 OracleMcpConfig::load(None)
-                    .map(|cfg| json!({ "profiles": cfg.list_profiles() }))
+                    .map(|cfg| profiles_response(&cfg))
                     .map_err(|e| DbError::UnsupportedAuth(format!("config load failed: {e}")))
             }
             "oracle_connection_info" => {
@@ -3216,6 +3220,44 @@ mod tests {
             json!("oraclemcp-driver")
         );
         assert_eq!(out["connection"]["read_only"], json!(false));
+    }
+
+    #[test]
+    fn profile_response_omits_connection_and_secret_material() {
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            default_profile = "prod"
+
+            [[profiles]]
+            name = "prod"
+            description = "Production profile"
+            connect_string = "prod:1521/svc"
+            username = "svc_acct"
+            credential_ref = "env:ORACLE_PASSWORD"
+            max_level = "READ_ONLY"
+            default_level = "READ_ONLY"
+            "#,
+        )
+        .expect("valid config");
+
+        let out = profiles_response(&cfg);
+        assert_eq!(out["profiles"][0]["name"], json!("prod"));
+        assert_eq!(out["profiles"][0]["is_default"], json!(true));
+
+        let serialized = serde_json::to_string(&out).expect("json");
+        for hidden in [
+            "prod:1521/svc",
+            "svc_acct",
+            "ORACLE_PASSWORD",
+            "connect_string",
+            "credential_ref",
+            "username",
+        ] {
+            assert!(
+                !serialized.contains(hidden),
+                "{hidden} leaked into profile response"
+            );
+        }
     }
 
     #[test]

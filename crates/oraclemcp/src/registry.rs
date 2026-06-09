@@ -87,7 +87,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_list_profiles",
             ToolTier::FoundationStatic,
-            "List configured connection profiles without exposing usernames or credential references.",
+            "List configured connection profiles without exposing connect strings, usernames, or credential references.",
         )
         .with_input_schema(object_schema(json!({}), &[])),
     );

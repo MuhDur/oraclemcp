@@ -189,7 +189,7 @@ signatures are rejected.
 
 | Tool | Purpose |
 | --- | --- |
-| `oracle_list_profiles` | List configured connection profiles without exposing usernames or credential references |
+| `oracle_list_profiles` | List configured connection profiles without exposing connect strings, usernames, or credential references |
 | `oracle_connection_info` | Describe the active connection: backend, version, role, open mode, read-only database status, session context, and current schema |
 | `oracle_switch_profile` | Reconnect the server to another configured profile |
 | `oracle_set_session_level` | Preview/apply a temporary session operating-level elevation within the profile ceiling, or drop back to `READ_ONLY` |

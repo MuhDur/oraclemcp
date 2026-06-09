@@ -204,15 +204,15 @@ impl ConnectionProfile {
         );
     }
 
-    /// Non-secret metadata for `list_profiles` self-discovery. Deliberately
-    /// omits `credential_ref` and `username` so no secret reference is ever
-    /// materialized into agent-visible output (plan §8.4).
+    /// Non-sensitive metadata for `list_profiles` self-discovery. Deliberately
+    /// omits connection strings, `credential_ref`, and `username` so local
+    /// topology and secret references are never materialized into
+    /// agent-visible output (plan §8.4).
     #[must_use]
     pub fn metadata(&self) -> ProfileMetadata {
         ProfileMetadata {
             name: self.name.clone(),
             description: self.description.clone(),
-            connect_string: self.connect_string.clone(),
             is_default: false,
             call_timeout_seconds: self.call_timeout_seconds,
             max_level: self.max_level(),
@@ -230,8 +230,6 @@ pub struct ProfileMetadata {
     pub name: String,
     /// Description, if any.
     pub description: Option<String>,
-    /// The Oracle Net connect identifier (not a secret).
-    pub connect_string: Option<String>,
     /// Whether this is the configured startup default.
     pub is_default: bool,
     /// Optional per-round-trip Oracle call timeout, in seconds.
@@ -382,6 +380,7 @@ mod tests {
     #[test]
     fn metadata_omits_secret_reference() {
         let mut prof = p("prod");
+        prof.connect_string = Some("prod:1521/svc".to_owned());
         prof.credential_ref = Some("keyring:prod".to_owned());
         prof.username = Some("svc_acct".to_owned());
         prof.session_identity = Some(SessionIdentityConfig {
@@ -402,6 +401,10 @@ mod tests {
         assert!(
             !json.contains("operator") && !json.contains("local-client"),
             "session identity leaked into metadata"
+        );
+        assert!(
+            !json.contains("prod:1521/svc") && !json.contains("connect_string"),
+            "connect string leaked into metadata"
         );
     }
 

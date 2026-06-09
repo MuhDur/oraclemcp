@@ -460,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn list_profiles_excludes_credentials() {
+    fn list_profiles_excludes_connection_and_credentials() {
         let cfg = OracleMcpConfig::from_toml_str(
             r#"
             default_profile = "prod"
@@ -476,7 +476,8 @@ mod tests {
         let json = serde_json::to_string(&cfg.list_profiles()).expect("serialize");
         assert!(!json.contains("keyring:prod"));
         assert!(!json.contains("svc_acct"));
-        assert!(json.contains("prod:1521/svc"));
+        assert!(!json.contains("prod:1521/svc"));
+        assert!(!json.contains("connect_string"));
         assert!(json.contains("\"is_default\":true"));
     }
 }
