@@ -601,23 +601,28 @@ fn robot_docs_guide_json() -> serde_json::Value {
         "first_commands": [
             {
                 "intent": "discover configured profiles without opening a database connection",
-                "command": "oraclemcp --json profiles"
+                "command": "oraclemcp --json profiles",
+                "argv": ["oraclemcp", "--json", "profiles"]
             },
             {
                 "intent": "run offline diagnostics",
-                "command": "oraclemcp --json doctor"
+                "command": "oraclemcp --json doctor",
+                "argv": ["oraclemcp", "--json", "doctor"]
             },
             {
                 "intent": "run profile-backed diagnostics",
-                "command": "oraclemcp --json doctor --profile <profile>"
+                "command": "oraclemcp --json doctor --profile <profile>",
+                "argv": ["oraclemcp", "--json", "doctor", "--profile", "<profile>"]
             },
             {
                 "intent": "inspect the MCP tool surface",
-                "command": "oraclemcp --json capabilities"
+                "command": "oraclemcp --json capabilities",
+                "argv": ["oraclemcp", "--json", "capabilities"]
             },
             {
                 "intent": "start stdio MCP for a local agent",
-                "command": "oraclemcp serve --profile <profile> --allow-no-auth"
+                "command": "oraclemcp serve --profile <profile> --allow-no-auth",
+                "argv": ["oraclemcp", "serve", "--profile", "<profile>", "--allow-no-auth"]
             }
         ],
         "mcp_workflows": [
@@ -1057,6 +1062,14 @@ mod tests {
         assert_eq!(
             out["structured_output"]["alias"],
             serde_json::json!("--json")
+        );
+        assert_eq!(
+            out["first_commands"][0]["argv"],
+            serde_json::json!(["oraclemcp", "--json", "profiles"])
+        );
+        assert_eq!(
+            out["first_commands"][2]["argv"],
+            serde_json::json!(["oraclemcp", "--json", "doctor", "--profile", "<profile>"])
         );
         assert_eq!(
             out["safety_model"]["levels"],
