@@ -116,6 +116,11 @@ struct QueryArgs {
 }
 
 #[derive(Deserialize)]
+struct PreviewSqlArgs {
+    sql: String,
+}
+
+#[derive(Deserialize)]
 struct SchemaInspectArgs {
     #[serde(default)]
     owner: Option<String>,
@@ -400,6 +405,45 @@ fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
     })))
 }
 
+fn preview_sql(sql: &str) -> Value {
+    let decision = Classifier::new(ClassifierConfig::new()).classify(sql);
+    let session = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+    let gate = decision.gate(&session);
+    let (gate_decision, blocked_reason, step_up_target) = match gate {
+        LevelDecision::Allow => ("allow", Value::Null, Value::Null),
+        LevelDecision::RequireStepUp { target } => ("require_step_up", Value::Null, json!(target)),
+        LevelDecision::Blocked { reason } => {
+            let reason = match reason {
+                oraclemcp_guard::BlockReason::Forbidden => {
+                    json!({ "type": "forbidden" })
+                }
+                oraclemcp_guard::BlockReason::ExceedsCeiling { required, ceiling } => {
+                    json!({
+                        "type": "exceeds_ceiling",
+                        "required": required,
+                        "ceiling": ceiling,
+                    })
+                }
+                _ => json!({ "type": "unknown" }),
+            };
+            ("blocked", reason, Value::Null)
+        }
+        _ => ("unknown", Value::Null, Value::Null),
+    };
+
+    json!({
+        "danger": decision.danger,
+        "required_level": decision.required_level,
+        "allowed_on_read_only": gate_decision == "allow",
+        "gate_decision": gate_decision,
+        "blocked_reason": blocked_reason,
+        "step_up_target": step_up_target,
+        "objects_affected": decision.objects_affected,
+        "reason": decision.reason,
+        "safe_alternative": decision.safe_alternative,
+    })
+}
+
 fn canonical_tool_name(name: &str) -> &str {
     match name {
         "current_database" => "oracle_connection_info",
@@ -414,6 +458,7 @@ fn canonical_tool_name(name: &str) -> &str {
         "get_object_source" => "oracle_get_source",
         "get_errors" => "oracle_compile_errors",
         "get_clob" => "oracle_read_clob",
+        "preview_sql" => "oracle_preview_sql",
         other => other,
     }
 }
@@ -453,6 +498,10 @@ impl ToolDispatch for OracleDispatcher {
         let conn: &dyn OracleConnection = state.conn.as_ref();
 
         let result: Result<Value, DbError> = match tool {
+            "oracle_preview_sql" => {
+                let a: PreviewSqlArgs = parse_args(name, args)?;
+                Ok(preview_sql(&a.sql))
+            }
             "oracle_list_profiles" => {
                 ensure_no_args(name, args)?;
                 OracleMcpConfig::load(None)
@@ -768,6 +817,7 @@ mod tests {
             "oracle_compile_errors" => json!({ "owner": "HR", "name": "PKG" }),
             "oracle_search_source" => json!({ "owner": "HR", "needle": "commit" }),
             "oracle_explain_plan" => json!({ "sql": "SELECT 1 FROM dual" }),
+            "oracle_preview_sql" => json!({ "sql": "SELECT 1 FROM dual" }),
             "current_database" => json!({}),
             "switch_database" => json!({ "db": "other" }),
             "query" => json!({ "sql": "SELECT 1 FROM dual" }),
@@ -786,6 +836,7 @@ mod tests {
             "get_clob" => {
                 json!({ "owner": "HR", "table": "DOCS", "clob_col": "BODY", "pk_col": "ID", "pk_val": "42" })
             }
+            "preview_sql" => json!({ "sql": "SELECT 1 FROM dual" }),
             other => panic!("no test args for {other}"),
         }
     }
@@ -825,6 +876,7 @@ mod tests {
             "get_object_source",
             "get_errors",
             "get_clob",
+            "preview_sql",
         ] {
             let out = dispatcher
                 .dispatch(name, args_for(name))
@@ -1121,6 +1173,23 @@ mod tests {
             )
             .expect("a read-only SELECT must pass the gate");
         assert!(out.is_object());
+    }
+
+    #[test]
+    fn preview_sql_reports_read_only_gate_decision_without_running_sql() {
+        let dispatcher = OracleDispatcher::new(Box::new(NoExecMock));
+        let select = dispatcher
+            .dispatch("oracle_preview_sql", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("preview select");
+        assert_eq!(select["allowed_on_read_only"], json!(true));
+        assert_eq!(select["gate_decision"], json!("allow"));
+        assert_eq!(select["required_level"], json!("READ_ONLY"));
+
+        let write = dispatcher
+            .dispatch("preview_sql", json!({ "sql": "DELETE FROM t" }))
+            .expect("preview write alias");
+        assert_eq!(write["allowed_on_read_only"], json!(false));
+        assert_ne!(write["gate_decision"], json!("allow"));
     }
 
     #[test]

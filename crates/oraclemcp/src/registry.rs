@@ -15,11 +15,12 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 28] = [
+pub const TOOL_NAMES: [&str; 30] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
     "oracle_query",
+    "oracle_preview_sql",
     "oracle_schema_inspect",
     "oracle_describe",
     "oracle_describe_index",
@@ -38,6 +39,7 @@ pub const TOOL_NAMES: [&str; 28] = [
     "current_database",
     "switch_database",
     "query",
+    "preview_sql",
     "list_objects",
     "describe_table",
     "describe_index",
@@ -113,6 +115,20 @@ pub fn tool_registry() -> ToolRegistry {
                     "items": {}
                 },
                 "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page." }
+            }),
+            &["sql"],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_preview_sql",
+            ToolTier::FoundationStatic,
+            "Classify a SQL statement and report whether it would pass the read-only gate without executing it.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "sql": { "type": "string", "description": "SQL statement to classify. It is never executed." }
             }),
             &["sql"],
         )),
@@ -358,6 +374,20 @@ pub fn tool_registry() -> ToolRegistry {
                 "sql": { "type": "string", "description": "A single read-only SELECT. Use :1, :2 ... for binds." },
                 "binds": { "type": "array", "description": "Positional bind values for :1, :2 ...", "items": {} },
                 "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page." }
+            }),
+            &["sql"],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "preview_sql",
+            ToolTier::FoundationStatic,
+            "Compatibility alias for oracle_preview_sql.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "sql": { "type": "string", "description": "SQL statement to classify. It is never executed." }
             }),
             &["sql"],
         )),

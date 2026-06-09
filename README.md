@@ -122,6 +122,7 @@ current connection in place.
 | `oracle_connection_info` | Describe the active connection: backend, version, role, open mode, and current schema |
 | `oracle_switch_profile` | Reconnect the server to another configured profile |
 | `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |
+| `oracle_preview_sql` | Classify SQL and report whether it would pass the read-only gate without executing it |
 | `oracle_schema_inspect` | List objects in the current schema, one owner, or all accessible schemas |
 | `oracle_describe` | Column and constraint metadata for a table or view |
 | `oracle_describe_index` | Index metadata, indexed columns, and function-based expressions |
@@ -146,6 +147,7 @@ read-only aliases that route to the guarded `oracle_*` tools:
 | `current_database` | `oracle_connection_info` |
 | `switch_database` | `oracle_switch_profile` (`db` is accepted as an alias for `profile`) |
 | `query` | `oracle_query` |
+| `preview_sql` | `oracle_preview_sql` |
 | `list_objects` | `oracle_schema_inspect` |
 | `describe_table` | `oracle_describe` |
 | `describe_index` | `oracle_describe_index` |
@@ -159,7 +161,7 @@ read-only aliases that route to the guarded `oracle_*` tools:
 Aliases share the same SQL classifier, argument validation, profile handling,
 and read-only behavior as their `oracle_*` targets.
 
-`oracle_query` and `oracle_explain_plan` accept a raw statement and so pass through the read-only gate; the dictionary tools build their own parameterized SQL and never execute caller-supplied statements.
+`oracle_query` and `oracle_explain_plan` accept a raw statement and so pass through the read-only gate. `oracle_preview_sql` runs that classifier without executing the SQL. The dictionary tools build their own parameterized SQL and never execute caller-supplied statements.
 
 ## Safety model
 
