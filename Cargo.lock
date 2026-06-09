@@ -946,6 +946,7 @@ name = "oraclemcp"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "oraclemcp-auth",
  "oraclemcp-config",
  "oraclemcp-core",
  "oraclemcp-db",

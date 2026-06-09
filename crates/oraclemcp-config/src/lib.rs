@@ -11,7 +11,7 @@
 
 mod profile;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
@@ -29,6 +29,19 @@ pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
 /// Default environment-variable prefix for config overrides.
 pub const ENV_PREFIX: &str = "ORACLEMCP_";
+/// Environment variable that points at a specific TOML config file.
+///
+/// This is a launcher/control variable, not part of the config schema.
+pub const CONFIG_PATH_ENV: &str = "ORACLEMCP_CONFIG";
+
+const IGNORED_ENV_KEYS: &[&str] = &[
+    "config",
+    "log",
+    "stdio_token",
+    "test_dsn",
+    "test_password",
+    "test_user",
+];
 
 fn default_schema_version() -> u32 {
     SUPPORTED_SCHEMA_VERSION
@@ -56,16 +69,48 @@ impl Default for OracleMcpConfig {
 }
 
 impl OracleMcpConfig {
+    /// Return the default config file if one is configured or present.
+    ///
+    /// Precedence:
+    /// 1. `$ORACLEMCP_CONFIG`
+    /// 2. `~/.config/oraclemcp/profiles.toml`
+    /// 3. `~/.config/oraclemcp/config.toml`
+    #[must_use]
+    pub fn default_config_path() -> Option<PathBuf> {
+        if let Some(path) = std::env::var_os(CONFIG_PATH_ENV).map(PathBuf::from) {
+            return Some(path);
+        }
+        let home = std::env::var_os("HOME").map(PathBuf::from)?;
+        [
+            home.join(".config").join("oraclemcp").join("profiles.toml"),
+            home.join(".config").join("oraclemcp").join("config.toml"),
+        ]
+        .into_iter()
+        .find(|path| path.is_file())
+    }
+
     /// Build the layered [`Figment`] (defaults < `config.toml` < env), without
     /// extracting. Callers (the binary) may `.merge()` CLI overrides last —
     /// CLI has the highest precedence — before calling [`Self::from_figment`].
     #[must_use]
     pub fn figment(config_path: Option<&Path>) -> Figment {
         let mut fig = Figment::from(Serialized::defaults(OracleMcpConfig::default()));
-        if let Some(path) = config_path {
+        let discovered_path;
+        let path = match config_path {
+            Some(path) => Some(path),
+            None => {
+                discovered_path = Self::default_config_path();
+                discovered_path.as_deref()
+            }
+        };
+        if let Some(path) = path {
             fig = fig.merge(Toml::file(path));
         }
-        fig.merge(Env::prefixed(ENV_PREFIX).split("__"))
+        fig.merge(
+            Env::prefixed(ENV_PREFIX)
+                .split("__")
+                .ignore(IGNORED_ENV_KEYS),
+        )
     }
 
     /// Extract and validate from a composed [`Figment`].
@@ -282,6 +327,44 @@ mod tests {
                 .merge(Env::prefixed(ENV_PREFIX).split("__"));
             let cfg = OracleMcpConfig::from_figment(&figment).expect("loads");
             assert_eq!(cfg.schema_version, 1);
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn load_discovers_profiles_toml_under_config_home() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_dir(".config/oraclemcp")?;
+            jail.create_file(
+                ".config/oraclemcp/profiles.toml",
+                r#"
+                [[profiles]]
+                name = "dev"
+                connect_string = "localhost:1521/FREEPDB1"
+                "#,
+            )?;
+            let home = jail.directory().display().to_string();
+            jail.set_env("HOME", home);
+
+            let cfg = OracleMcpConfig::load(None).expect("loads discovered profile");
+
+            assert!(cfg.profile("dev").is_some());
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn launcher_env_vars_do_not_become_unknown_config_keys() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("ORACLEMCP_LOG", "debug");
+            jail.set_env("ORACLEMCP_STDIO_TOKEN", "token-for-stdio");
+            jail.set_env("ORACLEMCP_TEST_DSN", "localhost:1521/FREEPDB1");
+
+            let cfg = OracleMcpConfig::load(None).expect("control env vars are ignored");
+
+            assert!(cfg.profiles.is_empty());
             Ok(())
         });
     }

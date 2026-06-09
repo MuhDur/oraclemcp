@@ -10,7 +10,7 @@ use thiserror::Error;
 use crate::types::OracleBackend;
 
 /// An error from the Oracle connectivity layer.
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 #[non_exhaustive]
 pub enum DbError {
     /// The requested backend was not compiled in (the `oracle-driver` feature

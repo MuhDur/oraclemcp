@@ -68,6 +68,37 @@ oraclemcp info                       # build info: version, tools, transports, l
 
 Connection profiles are resolved from layered configuration (`oraclemcp-config`); select one with `serve --profile <name>`.
 
+### Connection profiles
+
+For live database access, create `~/.config/oraclemcp/profiles.toml`:
+
+```toml
+schema_version = 1
+
+[[profiles]]
+name = "dev_ro"
+description = "Read-only development database"
+connect_string = "localhost:1521/FREEPDB1"
+username = "APP_READONLY"
+credential_ref = "env:ORACLE_APP_PASSWORD"
+max_level = "READ_ONLY"
+```
+
+Then launch:
+
+```sh
+export ORACLE_APP_PASSWORD='...'
+oraclemcp serve --allow-no-auth --profile dev_ro
+```
+
+Config discovery order is:
+
+1. `$ORACLEMCP_CONFIG`
+2. `~/.config/oraclemcp/profiles.toml`
+3. `~/.config/oraclemcp/config.toml`
+
+`credential_ref` supports `env:VAR` for environment-injected credentials and `literal:value` for local development only. Literal credentials are rejected when `protected = true`.
+
 ## Tools
 
 | Tool | Purpose |

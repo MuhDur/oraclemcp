@@ -24,11 +24,12 @@ use std::sync::Arc;
 use clap::{CommandFactory, Parser, Subcommand};
 use oraclemcp::dispatch::OracleDispatcher;
 use oraclemcp::registry;
+use oraclemcp_auth::resolve_secret;
 use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::{
     DoctorContext, HttpTransportConfig, OracleMcpServer, StdioAuthPolicy, run_doctor, serve_http,
 };
-use oraclemcp_db::{OracleConnectOptions, OracleConnection, RustOracleConnection};
+use oraclemcp_db::{DbError, OracleConnectOptions, OracleConnection, RustOracleConnection};
 
 /// Whether this build compiled in the Oracle driver (the `live-db` feature).
 const LIVE_DB: bool = cfg!(feature = "live-db");
@@ -123,28 +124,43 @@ fn init_tracing() {
 }
 
 /// Resolve the connection options from config + an optional profile name.
-/// Falls back to an empty (unconnectable) option set when no config / profile
-/// resolves; the connection then reports its failure as a structured envelope
-/// at first tool call rather than blocking serve startup.
-fn resolve_connect_options(profile: Option<&str>) -> OracleConnectOptions {
-    match OracleMcpConfig::load(None) {
-        Ok(cfg) => {
-            let chosen = match profile {
-                Some(name) => cfg.profile(name),
-                // No explicit profile: use the sole profile if there is exactly
-                // one, else none (the agent can still drive capabilities/doctor).
-                None if cfg.profiles.len() == 1 => cfg.profiles.first(),
-                None => None,
-            };
-            chosen
-                .map(|p| oraclemcp_core::profile_to_options(p, None))
-                .unwrap_or_default()
+/// Falls back to an empty (unconnectable) option set when no implicit profile
+/// resolves. Explicit profile/config/secret failures are returned so `serve`
+/// can expose them through the same structured-error stub path as live connect
+/// failures.
+fn resolve_connect_options(profile: Option<&str>) -> Result<OracleConnectOptions, DbError> {
+    let cfg = OracleMcpConfig::load(None)
+        .map_err(|e| DbError::UnsupportedAuth(format!("config load failed: {e}")))?;
+
+    let Some(chosen) = (match profile {
+        Some(name) => Some(cfg.profile(name).ok_or_else(|| {
+            DbError::UnsupportedAuth(format!("connection profile `{name}` not found"))
+        })?),
+        // No explicit profile: use the sole profile if there is exactly
+        // one, else none (the agent can still drive capabilities/doctor).
+        None if cfg.profiles.len() == 1 => cfg.profiles.first(),
+        None => None,
+    }) else {
+        return Ok(OracleConnectOptions::default());
+    };
+
+    let password = match chosen.credential_ref.as_deref() {
+        Some(reference) => {
+            let secret = resolve_secret(reference, chosen.protected(), |name| {
+                std::env::var(name).ok()
+            })
+            .map_err(|e| {
+                DbError::UnsupportedAuth(format!(
+                    "failed to resolve credential_ref for profile `{}`: {e}",
+                    chosen.name
+                ))
+            })?;
+            Some(secret.expose().to_owned())
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "config load failed; starting without a profile");
-            OracleConnectOptions::default()
-        }
-    }
+        None => None,
+    };
+
+    Ok(oraclemcp_core::profile_to_options(chosen, password))
 }
 
 /// Open the live connection, or — when the driver is absent / the connect fails
@@ -196,8 +212,13 @@ fn run_serve(
     robot_json: bool,
 ) -> ExitCode {
     init_tracing();
-    let opts = resolve_connect_options(profile.as_deref());
-    let conn = open_connection(opts);
+    let conn = match resolve_connect_options(profile.as_deref()) {
+        Ok(opts) => open_connection(opts),
+        Err(e) => {
+            tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
+            Box::new(stub::StubConnection::new(e))
+        }
+    };
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -361,17 +382,15 @@ mod stub {
     };
 
     pub(super) struct StubConnection {
-        message: String,
+        error: DbError,
     }
 
     impl StubConnection {
         pub(super) fn new(error: DbError) -> Self {
-            StubConnection {
-                message: error.to_string(),
-            }
+            StubConnection { error }
         }
         fn err(&self) -> DbError {
-            DbError::Connect(self.message.clone())
+            self.error.clone()
         }
     }
 
