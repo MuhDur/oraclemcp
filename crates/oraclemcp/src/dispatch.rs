@@ -284,6 +284,18 @@ struct CompileObjectArgs {
 }
 
 #[derive(Deserialize)]
+struct CreateOrReplaceArgs {
+    #[serde(default, alias = "sql", alias = "ddl")]
+    source_code: Option<String>,
+    #[serde(default)]
+    execute: bool,
+    #[serde(default, alias = "token", alias = "confirmation_token")]
+    confirm: Option<String>,
+    #[serde(default)]
+    include_errors: Option<bool>,
+}
+
+#[derive(Deserialize)]
 struct SchemaInspectArgs {
     #[serde(default)]
     owner: Option<String>,
@@ -1480,6 +1492,295 @@ fn compile_object(
     }))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceObjectHint {
+    owner: String,
+    name: String,
+    object_type: String,
+}
+
+fn is_simple_source_name(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    let second = parts.next();
+    if parts.next().is_some() {
+        return false;
+    }
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '#'))
+    };
+    valid_part(first) && second.is_none_or(valid_part)
+}
+
+fn clean_source_name_token(raw: &str) -> Option<String> {
+    let token = raw
+        .split('(')
+        .next()
+        .unwrap_or(raw)
+        .trim()
+        .trim_end_matches(';')
+        .trim_matches('"');
+    if is_simple_source_name(token) {
+        Some(token.to_owned())
+    } else {
+        None
+    }
+}
+
+fn detect_create_or_replace_object(
+    conn: &dyn OracleConnection,
+    source: &str,
+) -> Option<SourceObjectHint> {
+    let words: Vec<&str> = source.split_whitespace().collect();
+    if words.len() < 4
+        || !words[0].eq_ignore_ascii_case("CREATE")
+        || !words[1].eq_ignore_ascii_case("OR")
+        || !words[2].eq_ignore_ascii_case("REPLACE")
+    {
+        return None;
+    }
+
+    let mut idx = 3;
+    while matches!(
+        words.get(idx).map(|w| w.to_ascii_uppercase()).as_deref(),
+        Some("EDITIONABLE" | "NONEDITIONABLE" | "FORCE" | "NOFORCE")
+    ) {
+        idx += 1;
+    }
+
+    let first = words.get(idx)?.to_ascii_uppercase();
+    let (object_type, name_idx) = match first.as_str() {
+        "PACKAGE"
+            if words
+                .get(idx + 1)
+                .is_some_and(|w| w.eq_ignore_ascii_case("BODY")) =>
+        {
+            ("PACKAGE BODY".to_owned(), idx + 2)
+        }
+        "TYPE"
+            if words
+                .get(idx + 1)
+                .is_some_and(|w| w.eq_ignore_ascii_case("BODY")) =>
+        {
+            ("TYPE BODY".to_owned(), idx + 2)
+        }
+        "PACKAGE" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "TYPE" | "VIEW" => (first, idx + 1),
+        _ => return None,
+    };
+    let name = clean_source_name_token(words.get(name_idx)?)?;
+    let (owner, name) = owner_and_name_arg(conn, None, name, "name").ok()?;
+    Some(SourceObjectHint {
+        owner,
+        name,
+        object_type,
+    })
+}
+
+fn source_preview_json(source: &str, max_chars: usize) -> Value {
+    let mut preview = String::new();
+    let mut truncated = false;
+    for (idx, ch) in source.chars().enumerate() {
+        if idx >= max_chars {
+            truncated = true;
+            break;
+        }
+        preview.push(ch);
+    }
+    json!({
+        "text": preview,
+        "truncated": truncated,
+        "max_chars": max_chars,
+    })
+}
+
+fn detected_object_json(hint: Option<&SourceObjectHint>) -> Value {
+    hint.map(|hint| {
+        json!({
+            "owner": hint.owner,
+            "name": hint.name,
+            "object_type": hint.object_type,
+        })
+    })
+    .unwrap_or(Value::Null)
+}
+
+fn create_or_replace_next_actions(
+    gate: &LevelDecision,
+    source: &str,
+    required_level: Option<OperatingLevel>,
+    confirm: Option<&str>,
+) -> Value {
+    let mut actions = Vec::new();
+    match gate {
+        LevelDecision::Allow => {
+            if let Some(confirm) = confirm {
+                actions.push(json!({
+                    "intent": "apply_create_or_replace",
+                    "tool": "oracle_create_or_replace",
+                    "args": {
+                        "source_code": source,
+                        "execute": true,
+                        "confirm": confirm,
+                    },
+                }));
+            }
+        }
+        LevelDecision::RequireStepUp { target } => {
+            actions.push(json!({
+                "intent": "preview_session_level_step_up",
+                "tool": "oracle_set_session_level",
+                "args": { "level": target, "ttl_seconds": DEFAULT_SESSION_LEVEL_TTL_SECONDS },
+                "required_level": target,
+            }));
+            actions.push(json!({
+                "intent": "choose_different_profile",
+                "tool": "oracle_list_profiles",
+                "args": {},
+                "required_level": target,
+            }));
+        }
+        LevelDecision::Blocked { reason } => match reason {
+            oraclemcp_guard::BlockReason::ExceedsCeiling { required, ceiling } => {
+                actions.push(json!({
+                    "intent": "choose_different_profile",
+                    "tool": "oracle_list_profiles",
+                    "args": {},
+                    "required_level": required,
+                    "current_ceiling": ceiling,
+                }));
+            }
+            oraclemcp_guard::BlockReason::Forbidden => {
+                actions.push(json!({
+                    "intent": "rewrite_source",
+                    "message": "submit one plain CREATE OR REPLACE statement without dynamic SQL or extra statements",
+                }));
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+    if matches!(gate, LevelDecision::Allow)
+        && required_level.is_some_and(|l| l < OperatingLevel::Ddl)
+    {
+        actions.push(json!({
+            "intent": "use_general_execute",
+            "tool": "oracle_preview_sql",
+            "args": { "sql": source },
+        }));
+    }
+    Value::Array(actions)
+}
+
+fn create_or_replace_source_arg(
+    tool_name: &str,
+    value: Option<String>,
+) -> Result<String, ErrorEnvelope> {
+    let source = required_non_empty_arg(tool_name, "source_code", value)?;
+    let normalized = source.trim_start();
+    let upper = normalized.to_ascii_uppercase();
+    if !upper.starts_with("CREATE OR REPLACE ") {
+        return Err(invalid_args(format!(
+            "invalid arguments for {tool_name}: source_code must start with CREATE OR REPLACE"
+        ))
+        .with_next_step("pass one full CREATE OR REPLACE statement, or use oracle_preview_sql/oracle_execute for other SQL"));
+    }
+    Ok(source)
+}
+
+fn create_or_replace(
+    conn: &dyn OracleConnection,
+    active_profile: Option<&str>,
+    session: &SessionLevelState,
+    tool_name: &str,
+    args: CreateOrReplaceArgs,
+) -> Result<Value, ErrorEnvelope> {
+    let source = create_or_replace_source_arg(tool_name, args.source_code)?;
+    let decision = Classifier::new(ClassifierConfig::new()).classify(&source);
+    let gate = decision.gate(session);
+    let (gate_decision, blocked_reason, step_up_target) = gate_decision_json(&gate);
+    let detected = detect_create_or_replace_object(conn, &source);
+    let confirm = match (decision.required_level, &gate) {
+        (Some(level), LevelDecision::Allow) if level >= OperatingLevel::Ddl => {
+            execute_confirmation_token(&source, level, active_profile)
+        }
+        _ => None,
+    };
+
+    if !args.execute {
+        return Ok(json!({
+            "applied": false,
+            "preview": true,
+            "source_preview": source_preview_json(&source, 500),
+            "detected_object": detected_object_json(detected.as_ref()),
+            "danger": decision.danger,
+            "required_level": decision.required_level,
+            "session_level": session.effective_level(),
+            "profile_ceiling": session.effective_ceiling(),
+            "gate_decision": gate_decision,
+            "blocked_reason": blocked_reason,
+            "step_up_target": step_up_target,
+            "reason": decision.reason,
+            "confirmation": confirm.as_ref().map(|confirm| json!({
+                "tool": "oracle_create_or_replace",
+                "execute": true,
+                "confirm": confirm,
+                "note": "Pass confirm only when you intend to apply this exact CREATE OR REPLACE statement on this active profile.",
+            })),
+            "next_actions": create_or_replace_next_actions(
+                &gate,
+                &source,
+                decision.required_level,
+                confirm.as_deref(),
+            ),
+        }));
+    }
+
+    if !matches!(gate, LevelDecision::Allow) {
+        return Err(execute_gate_error(&decision, gate, session));
+    }
+    let mut executed = execute_sql(
+        conn,
+        active_profile,
+        session,
+        ExecuteArgs {
+            sql: source.clone(),
+            binds: Vec::new(),
+            commit: true,
+            confirm: args.confirm,
+        },
+    )?;
+    let include_errors = args.include_errors.unwrap_or(true);
+    if let Value::Object(map) = &mut executed {
+        map.insert("applied".to_owned(), json!(true));
+        map.insert("preview".to_owned(), json!(false));
+        map.insert(
+            "detected_object".to_owned(),
+            detected_object_json(detected.as_ref()),
+        );
+        if include_errors {
+            if let Some(hint) = detected.as_ref() {
+                let errors = compile_errors(conn, &hint.owner, Some(&hint.name))
+                    .map_err(DbError::into_envelope)?;
+                map.insert("errors".to_owned(), rows_to_json(&errors));
+                map.insert("error_count".to_owned(), json!(errors.len()));
+            } else {
+                map.insert("errors".to_owned(), Value::Null);
+                map.insert("error_count".to_owned(), Value::Null);
+                map.insert(
+                    "error_lookup_note".to_owned(),
+                    json!("object name could not be inferred from the source"),
+                );
+            }
+        }
+    }
+    Ok(executed)
+}
+
 struct ReadOnlyCustomToolExecutor<'a> {
     conn: &'a dyn OracleConnection,
 }
@@ -1578,6 +1879,7 @@ fn canonical_tool_name(name: &str) -> &str {
         "list_schemas" => "oracle_list_schemas",
         "get_schema" => "oracle_schema_inspect",
         "compile_object" => "oracle_compile_object",
+        "create_or_replace" => "oracle_create_or_replace",
         "describe_table" => "oracle_describe",
         "describe_index" => "oracle_describe_index",
         "describe_trigger" => "oracle_describe_trigger",
@@ -1654,6 +1956,16 @@ impl ToolDispatch for OracleDispatcher {
             "oracle_compile_object" => {
                 let a: CompileObjectArgs = parse_args(name, args)?;
                 return compile_object(
+                    conn,
+                    state.active_profile.as_deref(),
+                    &state.level,
+                    name,
+                    a,
+                );
+            }
+            "oracle_create_or_replace" => {
+                let a: CreateOrReplaceArgs = parse_args(name, args)?;
+                return create_or_replace(
                     conn,
                     state.active_profile.as_deref(),
                     &state.level,
@@ -2228,12 +2540,18 @@ mod tests {
                 json!({ "sql": "UPDATE employees SET name = name WHERE employee_id = 100" })
             }
             "oracle_compile_object" => json!({ "object_type": "PACKAGE", "name": "EMP_API" }),
+            "oracle_create_or_replace" => {
+                json!({ "source_code": "CREATE OR REPLACE VIEW EMP_V AS SELECT 1 AS ID FROM dual" })
+            }
             "current_database" => json!({}),
             "switch_database" => json!({ "db": "other" }),
             "enable_writes" => json!({ "ttl_seconds": 60 }),
             "disable_writes" => json!({}),
             "query" => json!({ "sql": "SELECT 1 FROM dual" }),
             "compile_object" => json!({ "object_type": "PACKAGE", "object_name": "EMP_API" }),
+            "create_or_replace" => {
+                json!({ "source_code": "CREATE OR REPLACE VIEW EMP_V AS SELECT 1 AS ID FROM dual" })
+            }
             "list_objects" => json!({ "owner": "HR" }),
             "list_schemas" => json!({ "name_like": "APP%" }),
             "get_schema" => json!({ "owner": "HR" }),
@@ -2784,6 +3102,139 @@ mod tests {
             .expect("preview ddl");
         assert_eq!(ddl["gate_decision"], json!("require_step_up"));
         assert_eq!(ddl["step_up_target"], json!("DDL"));
+    }
+
+    #[test]
+    fn create_or_replace_preview_is_default_and_does_not_execute() {
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(OneRowMock),
+            Some("dev".to_owned()),
+            ddl_level(),
+        );
+
+        let out = dispatcher
+            .dispatch(
+                "oracle_create_or_replace",
+                json!({ "source_code": "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual" }),
+            )
+            .expect("create-or-replace preview");
+        assert_eq!(out["preview"], json!(true));
+        assert_eq!(out["applied"], json!(false));
+        assert_eq!(out["required_level"], json!("DDL"));
+        assert_eq!(out["gate_decision"], json!("allow"));
+        assert_eq!(out["detected_object"]["owner"], json!("APP"));
+        assert_eq!(out["detected_object"]["name"], json!("EMP_V"));
+        assert_eq!(out["detected_object"]["object_type"], json!("VIEW"));
+        assert_eq!(
+            out["confirmation"]["tool"],
+            json!("oracle_create_or_replace")
+        );
+        assert_eq!(
+            out["next_actions"][0]["tool"],
+            json!("oracle_create_or_replace")
+        );
+    }
+
+    #[test]
+    fn create_or_replace_requires_ddl_level_without_executing() {
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(NoExecMock),
+            Some("dev".to_owned()),
+            SessionLevelState::new(OperatingLevel::Ddl, false),
+        );
+
+        let preview = dispatcher
+            .dispatch(
+                "oracle_create_or_replace",
+                json!({ "source_code": "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual" }),
+            )
+            .expect("preview is inspectable below current level");
+        assert_eq!(preview["gate_decision"], json!("require_step_up"));
+        assert_eq!(preview["step_up_target"], json!("DDL"));
+        assert_eq!(
+            preview["next_actions"][0]["tool"],
+            json!("oracle_set_session_level")
+        );
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_create_or_replace",
+                json!({
+                    "source_code": "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual",
+                    "execute": true,
+                    "confirm": "wrong"
+                }),
+            )
+            .expect_err("execute is blocked before touching DB");
+        assert_eq!(err.error_class, ErrorClass::OperatingLevelTooLow);
+    }
+
+    #[test]
+    fn create_or_replace_execute_requires_confirmation() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            ddl_level(),
+        );
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_create_or_replace",
+                json!({
+                    "source_code": "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual",
+                    "execute": true
+                }),
+            )
+            .expect_err("apply requires preview token");
+        assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
+    }
+
+    #[test]
+    fn create_or_replace_execute_applies_and_reports_compile_errors() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            ddl_level(),
+        );
+        let source = "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual";
+        let preview = dispatcher
+            .dispatch("create_or_replace", json!({ "source_code": source }))
+            .expect("alias previews");
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("confirm token");
+
+        let out = dispatcher
+            .dispatch(
+                "create_or_replace",
+                json!({ "source_code": source, "execute": true, "confirm": confirm }),
+            )
+            .expect("confirmed apply");
+        assert_eq!(out["applied"], json!(true));
+        assert_eq!(out["committed"], json!(true));
+        assert_eq!(out["detected_object"]["owner"], json!("APP"));
+        assert_eq!(out["detected_object"]["name"], json!("EMP_V"));
+        assert_eq!(out["errors"], json!([]));
+        assert_eq!(out["error_count"], json!(0));
+        assert_eq!(state.commits.load(Ordering::SeqCst), 1);
+        let executed = state.executed.lock().expect("exec mutex");
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].0, source);
+    }
+
+    #[test]
+    fn create_or_replace_rejects_other_sql_shapes() {
+        let dispatcher = OracleDispatcher::new(Box::new(NoExecMock));
+        let err = dispatcher
+            .dispatch(
+                "oracle_create_or_replace",
+                json!({ "source_code": "CREATE TABLE t (id NUMBER)" }),
+            )
+            .expect_err("non create-or-replace is rejected");
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
     }
 
     #[test]

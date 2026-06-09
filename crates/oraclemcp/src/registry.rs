@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 40] = [
+pub const TOOL_NAMES: [&str; 42] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -24,6 +24,7 @@ pub const TOOL_NAMES: [&str; 40] = [
     "oracle_preview_sql",
     "oracle_execute",
     "oracle_compile_object",
+    "oracle_create_or_replace",
     "oracle_list_schemas",
     "oracle_schema_inspect",
     "oracle_describe",
@@ -48,6 +49,7 @@ pub const TOOL_NAMES: [&str; 40] = [
     "query",
     "preview_sql",
     "compile_object",
+    "create_or_replace",
     "list_objects",
     "list_schemas",
     "get_schema",
@@ -210,6 +212,26 @@ pub fn tool_registry() -> ToolRegistry {
                 "confirm": { "type": "string", "description": "Confirmation token returned by the preview for this exact object/profile/options. Required when execute=true." }
             }),
             &["object_type"],
+        ))
+        .destructive(),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_create_or_replace",
+            ToolTier::FoundationLiveDb,
+            "Preview or apply one CREATE OR REPLACE statement through the classifier and active DDL profile gate.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "source_code": { "type": "string", "description": "Full CREATE OR REPLACE statement. Required unless sql or ddl is supplied." },
+                "sql": { "type": "string", "description": "Alias for source_code." },
+                "ddl": { "type": "string", "description": "Alias for source_code." },
+                "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
+                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
+                "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the detected object when possible. Default true." }
+            }),
+            &[],
         ))
         .destructive(),
     );
@@ -577,6 +599,26 @@ pub fn tool_registry() -> ToolRegistry {
 
     registry.register(
         ToolDescriptor::new(
+            "create_or_replace",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_create_or_replace.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "source_code": { "type": "string", "description": "Full CREATE OR REPLACE statement. Required unless sql or ddl is supplied." },
+                "sql": { "type": "string", "description": "Alias for source_code." },
+                "ddl": { "type": "string", "description": "Alias for source_code." },
+                "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
+                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
+                "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the detected object when possible. Default true." }
+            }),
+            &[],
+        ))
+        .destructive(),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
             "list_objects",
             ToolTier::FoundationLiveDb,
             "Compatibility alias for oracle_schema_inspect.",
@@ -808,10 +850,12 @@ mod tests {
                 "oracle_set_session_level",
                 "oracle_execute",
                 "oracle_compile_object",
+                "oracle_create_or_replace",
                 "enable_writes",
-                "compile_object"
+                "compile_object",
+                "create_or_replace"
             ],
-            "only guarded session elevation/execution/compile tools are destructive"
+            "only guarded session elevation/execution/deploy/compile tools are destructive"
         );
         // oracle_capabilities is NOT in the registry (the server adds it to
         // tools/list itself).
