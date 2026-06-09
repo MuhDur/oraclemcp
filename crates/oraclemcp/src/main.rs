@@ -170,7 +170,7 @@ fn resolve_profile_options(
 
     Ok(Some((
         chosen.name.clone(),
-        oraclemcp_core::profile_to_options(chosen, password),
+        oraclemcp_core::profile_to_options(chosen, password)?,
     )))
 }
 

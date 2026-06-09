@@ -83,6 +83,10 @@ connect_string = "localhost:1521/FREEPDB1"
 username = "APP_READONLY"
 credential_ref = "env:ORACLE_APP_PASSWORD"
 max_level = "READ_ONLY"
+login_statements = [
+  "ALTER SESSION SET NLS_LANGUAGE = english",
+  "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'",
+]
 
 [profiles.session_identity]
 # Optional: all values are profile-local and are not shown by list_profiles.
@@ -93,6 +97,11 @@ client_identifier = "agent"
 client_info = "local-workstation"
 driver_name = "oraclemcp"
 ```
+
+`login_statements` and `login_script` are for profile-local session policy only.
+They are restricted to allowlisted `ALTER SESSION SET ...` parameters, so local
+tooling conventions stay in config without making the open-source core
+environment-specific.
 
 Then launch:
 

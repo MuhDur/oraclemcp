@@ -255,6 +255,8 @@ pub struct OracleConnectOptions {
     pub iam_token: Option<String>,
     /// Optional profile-driven session identity.
     pub session_identity: Option<OracleSessionIdentity>,
+    /// Extra guarded session setup statements to run after canonical NLS setup.
+    pub session_statements: Vec<String>,
 }
 
 #[cfg(test)]

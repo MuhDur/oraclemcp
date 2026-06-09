@@ -182,6 +182,11 @@ mod driver {
                 .execute(stmt, &[])
                 .map_err(|e| DbError::Connect(e.to_string()))?;
         }
+        for stmt in &opts.session_statements {
+            inner
+                .execute(stmt, &[])
+                .map_err(|e| DbError::Connect(format!("session setup failed: {e}")))?;
+        }
         Ok(RustOracleConnection { opts, inner })
     }
 

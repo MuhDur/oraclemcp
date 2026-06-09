@@ -71,6 +71,7 @@ const ALTER_SESSION_ALLOWLIST: &[&str] = &[
     "OPTIMIZER_MODE",
     "STATISTICS_LEVEL",
     "OPTIMIZER_DYNAMIC_SAMPLING",
+    "PLSQL_WARNINGS",
 ];
 
 /// Whether an `ALTER SESSION SET <param> = …` statement targets *only*
@@ -214,6 +215,9 @@ mod tests {
         ));
         assert!(is_allowed_alter_session(
             "ALTER SESSION SET OPTIMIZER_MODE = ALL_ROWS"
+        ));
+        assert!(is_allowed_alter_session(
+            "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'"
         ));
     }
 
