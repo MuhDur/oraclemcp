@@ -114,7 +114,14 @@ pub fn tool_registry() -> ToolRegistry {
                     "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
                     "items": {}
                 },
-                "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page." }
+                "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page." },
+                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum rows in this page (default 200, hard cap 5000)." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },
+                "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 26214400, "description": "Maximum serialized JSON bytes in this page (default 10485760, hard cap 26214400)." },
+                "max_col_width": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Compatibility text cap for ordinary text/raw columns. Truncated values are returned as { value, truncated, char_length }." },
+                "max_lob_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum CLOB characters to inline per cell (default 32768)." },
+                "max_blob_bytes": { "type": "integer", "minimum": 1, "maximum": 5242880, "description": "Maximum BLOB bytes to inline per cell as base64 (default 1048576)." },
+                "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible. Default false preserves Oracle NUMBER losslessly as strings." }
             }),
             &["sql"],
         )),
@@ -373,7 +380,14 @@ pub fn tool_registry() -> ToolRegistry {
             json!({
                 "sql": { "type": "string", "description": "A single read-only SELECT. Use :1, :2 ... for binds." },
                 "binds": { "type": "array", "description": "Positional bind values for :1, :2 ...", "items": {} },
-                "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page." }
+                "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page." },
+                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum rows in this page (default 200, hard cap 5000)." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },
+                "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 26214400, "description": "Maximum serialized JSON bytes in this page." },
+                "max_col_width": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Compatibility text cap for ordinary text/raw columns." },
+                "max_lob_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum CLOB characters to inline per cell." },
+                "max_blob_bytes": { "type": "integer", "minimum": 1, "maximum": 5242880, "description": "Maximum BLOB bytes to inline per cell as base64." },
+                "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible." }
             }),
             &["sql"],
         )),

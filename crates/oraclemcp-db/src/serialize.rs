@@ -37,6 +37,9 @@ pub struct SerializeOptions {
     /// Emit NUMBER as a JSON float (lossy for >15 sig digits) instead of the
     /// default lossless string.
     pub numbers_as_float: bool,
+    /// Max characters of ordinary text/raw columns to inline. `None` means no
+    /// per-column text cap beyond the page byte cap.
+    pub max_text_chars: Option<usize>,
     /// Max characters of a CLOB/text value to inline before truncating.
     pub max_lob_chars: usize,
     /// Max bytes of a BLOB to base64-inline before truncating.
@@ -47,9 +50,23 @@ impl Default for SerializeOptions {
     fn default() -> Self {
         SerializeOptions {
             numbers_as_float: false,
+            max_text_chars: None,
             max_lob_chars: 32_768,
             max_blob_bytes: 1_048_576,
         }
+    }
+}
+
+fn capped_text_value(text: &str, cap: Option<usize>) -> Value {
+    let Some(cap) = cap else {
+        return Value::String(text.to_owned());
+    };
+    let char_length = text.chars().count();
+    if char_length > cap {
+        let value: String = text.chars().take(cap).collect();
+        json!({ "value": value, "truncated": true, "char_length": char_length })
+    } else {
+        Value::String(text.to_owned())
     }
 }
 
@@ -210,7 +227,7 @@ pub fn serialize_cell(cell: &OracleCell, opts: &SerializeOptions) -> Value {
             // canonicalize to ISO-8601 here (the only reliable place).
             Value::String(canonicalize_datetime(text))
         }
-        TypeRepr::Text | TypeRepr::Raw => Value::String(text.to_owned()),
+        TypeRepr::Text | TypeRepr::Raw => capped_text_value(text, opts.max_text_chars),
         TypeRepr::Clob => {
             let truncated = text.chars().count() > opts.max_lob_chars;
             if truncated {
@@ -343,6 +360,24 @@ mod tests {
         assert_eq!(
             serialize_cell(&c, &SerializeOptions::default()),
             Value::Null
+        );
+    }
+
+    #[test]
+    fn text_cap_marks_truncated_text_without_changing_default() {
+        let c = cell("VARCHAR2", "abcdef");
+        assert_eq!(
+            serialize_cell(&c, &SerializeOptions::default()),
+            json!("abcdef")
+        );
+
+        let opts = SerializeOptions {
+            max_text_chars: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(
+            serialize_cell(&c, &opts),
+            json!({ "value": "abc", "truncated": true, "char_length": 6 })
         );
     }
 

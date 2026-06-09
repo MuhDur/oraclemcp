@@ -41,6 +41,14 @@ const DEFAULT_SAMPLE_MAX_ROWS: usize = 50;
 const MAX_SAMPLE_MAX_ROWS: usize = 1_000;
 /// Default cap on `oracle_read_clob` text when the caller omits it.
 const DEFAULT_LOB_MAX_CHARS: usize = 1_000_000;
+/// Hard cap on `oracle_query` rows per page when a caller supplies max_rows/limit.
+const MAX_QUERY_MAX_ROWS: usize = 5_000;
+/// Hard cap on serialized bytes per `oracle_query` page.
+const MAX_QUERY_RESULT_BYTES: usize = 25 * 1024 * 1024;
+/// Hard cap on text/CLOB characters materialized by a single query cell.
+const MAX_QUERY_TEXT_CHARS: usize = 1_000_000;
+/// Hard cap on BLOB bytes materialized by a single query cell.
+const MAX_QUERY_BLOB_BYTES: usize = 5 * 1024 * 1024;
 
 /// Reconnect callback used by `oracle_switch_profile`.
 pub type ProfileConnector =
@@ -106,6 +114,36 @@ fn optional_row_to_json(row: Option<&oraclemcp_db::OracleRow>) -> Value {
     row.map(|r| serialize_row(r, &opts)).unwrap_or(Value::Null)
 }
 
+fn query_caps_from_args(args: &QueryArgs) -> QueryCaps {
+    let defaults = QueryCaps::default();
+    QueryCaps {
+        max_rows: args
+            .max_rows
+            .unwrap_or(defaults.max_rows)
+            .clamp(1, MAX_QUERY_MAX_ROWS),
+        max_result_bytes: args
+            .max_result_bytes
+            .unwrap_or(defaults.max_result_bytes)
+            .clamp(1, MAX_QUERY_RESULT_BYTES),
+    }
+}
+
+fn query_serialize_options_from_args(args: &QueryArgs) -> SerializeOptions {
+    let defaults = SerializeOptions::default();
+    SerializeOptions {
+        numbers_as_float: args.numbers_as_float.unwrap_or(defaults.numbers_as_float),
+        max_text_chars: args.max_col_width.map(|n| n.clamp(1, MAX_QUERY_TEXT_CHARS)),
+        max_lob_chars: args
+            .max_lob_chars
+            .unwrap_or(defaults.max_lob_chars)
+            .clamp(1, MAX_QUERY_TEXT_CHARS),
+        max_blob_bytes: args
+            .max_blob_bytes
+            .unwrap_or(defaults.max_blob_bytes)
+            .clamp(1, MAX_QUERY_BLOB_BYTES),
+    }
+}
+
 #[derive(Deserialize)]
 struct QueryArgs {
     sql: String,
@@ -113,6 +151,18 @@ struct QueryArgs {
     binds: Vec<Value>,
     #[serde(default)]
     cursor: Option<String>,
+    #[serde(default, alias = "limit")]
+    max_rows: Option<usize>,
+    #[serde(default)]
+    max_result_bytes: Option<usize>,
+    #[serde(default)]
+    max_lob_chars: Option<usize>,
+    #[serde(default)]
+    max_blob_bytes: Option<usize>,
+    #[serde(default)]
+    max_col_width: Option<usize>,
+    #[serde(default)]
+    numbers_as_float: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -530,9 +580,9 @@ impl ToolDispatch for OracleDispatcher {
                     conn,
                     &a.sql,
                     &binds,
-                    QueryCaps::default(),
+                    query_caps_from_args(&a),
                     offset,
-                    &SerializeOptions::default(),
+                    &query_serialize_options_from_args(&a),
                 )
                 .map(|resp| serde_json::to_value(resp).unwrap_or(Value::Null))
             }
@@ -1100,6 +1150,29 @@ mod tests {
             )
             .expect("binds accepted");
         assert!(out["columns"].is_array() || out.is_object());
+    }
+
+    #[test]
+    fn query_accepts_page_and_width_compatibility_args() {
+        let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+        let out = dispatcher
+            .dispatch(
+                "query",
+                json!({
+                    "sql": "SELECT object_name, lob_value FROM user_objects",
+                    "limit": 25,
+                    "max_col_width": 3,
+                    "max_lob_chars": 4,
+                    "max_result_bytes": 4096,
+                    "numbers_as_float": false
+                }),
+            )
+            .expect("query args accepted");
+        assert_eq!(out["row_count"], json!(1));
+        assert_eq!(out["rows"][0]["OBJECT_NAME"]["value"], json!("EMP"));
+        assert_eq!(out["rows"][0]["OBJECT_NAME"]["truncated"], json!(true));
+        assert_eq!(out["rows"][0]["LOB_VALUE"]["value"], json!("larg"));
+        assert_eq!(out["rows"][0]["LOB_VALUE"]["truncated"], json!(true));
     }
 
     #[test]
