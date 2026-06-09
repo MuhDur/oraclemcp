@@ -129,10 +129,12 @@ pub fn tool_registry() -> ToolRegistry {
         )
         .with_input_schema(object_schema(
             json!({
-                "owner": { "type": "string", "description": "Schema owner (case-insensitive)." },
-                "table": { "type": "string", "description": "Table or view name (case-insensitive)." }
+                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
+                "table": { "type": "string", "description": "Table or view name. May be OWNER.TABLE. Required unless table_name or name is supplied." },
+                "table_name": { "type": "string", "description": "Alias for table for compatibility with older clients. Prefer table." },
+                "name": { "type": "string", "description": "Alias for table. Prefer table." }
             }),
-            &["owner", "table"],
+            &[],
         )),
     );
 
@@ -193,10 +195,11 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             json!({
                 "object_type": { "type": "string", "description": "Allowlisted type, e.g. TABLE, VIEW, PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, SEQUENCE, INDEX, SYNONYM." },
-                "owner": { "type": "string", "description": "Schema owner (case-insensitive)." },
-                "name": { "type": "string", "description": "Object name (case-insensitive)." }
+                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
+                "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
+                "object_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." }
             }),
-            &["object_type", "owner", "name"],
+            &["object_type"],
         )),
     );
 
@@ -208,12 +211,13 @@ pub fn tool_registry() -> ToolRegistry {
         )
         .with_input_schema(object_schema(
             json!({
-                "owner": { "type": "string", "description": "Schema owner (case-insensitive)." },
-                "name": { "type": "string", "description": "Object name (case-insensitive)." },
+                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
+                "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
+                "object_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." },
                 "object_type": { "type": "string", "description": "Supported source type: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY." },
                 "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum source characters to return (default 1000000)." }
             }),
-            &["owner", "name", "object_type"],
+            &["object_type"],
         )),
     );
 
@@ -225,11 +229,12 @@ pub fn tool_registry() -> ToolRegistry {
         )
         .with_input_schema(object_schema(
             json!({
-                "owner": { "type": "string", "description": "Schema owner (case-insensitive)." },
-                "table": { "type": "string", "description": "Table or view name (case-insensitive)." },
+                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
+                "table": { "type": "string", "description": "Table or view name. May be OWNER.TABLE. Required unless table_name is supplied." },
+                "table_name": { "type": "string", "description": "Alias for table for compatibility with older clients. Prefer table." },
                 "max_rows": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Maximum rows to return (default 50, hard cap 1000)." }
             }),
-            &["owner", "table"],
+            &[],
         )),
     );
 
@@ -241,14 +246,18 @@ pub fn tool_registry() -> ToolRegistry {
         )
         .with_input_schema(object_schema(
             json!({
-                "owner": { "type": "string", "description": "Schema owner (case-insensitive)." },
-                "table": { "type": "string", "description": "Table or view name (case-insensitive)." },
-                "clob_column": { "type": "string", "description": "CLOB/NCLOB/text column name (case-insensitive)." },
-                "pk_column": { "type": "string", "description": "Key column name (case-insensitive)." },
-                "pk_value": { "type": "string", "description": "Key value bound as :1." },
+                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
+                "table": { "type": "string", "description": "Table or view name. May be OWNER.TABLE. Required unless table_name is supplied." },
+                "table_name": { "type": "string", "description": "Alias for table for compatibility with older clients. Prefer table." },
+                "clob_column": { "type": "string", "description": "CLOB/NCLOB/text column name (case-insensitive). Required unless clob_col is supplied." },
+                "clob_col": { "type": "string", "description": "Alias for clob_column. Prefer clob_column." },
+                "pk_column": { "type": "string", "description": "Key column name (case-insensitive). Required unless pk_col is supplied." },
+                "pk_col": { "type": "string", "description": "Alias for pk_column. Prefer pk_column." },
+                "pk_value": { "type": "string", "description": "Key value bound as :1. Required unless pk_val is supplied." },
+                "pk_val": { "type": "string", "description": "Alias for pk_value. Prefer pk_value." },
                 "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum characters to return (default 1000000)." }
             }),
-            &["owner", "table", "clob_column", "pk_column", "pk_value"],
+            &[],
         )),
     );
 
@@ -261,7 +270,8 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
-                "name": { "type": "string", "description": "Optional object name (case-insensitive). Omit to list all compile errors for the owner/current schema." }
+                "name": { "type": "string", "description": "Optional object name. May be OWNER.NAME. Omit to list all compile errors for the owner/current schema." },
+                "object_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." }
             }),
             &[],
         )),
@@ -275,11 +285,11 @@ pub fn tool_registry() -> ToolRegistry {
         )
         .with_input_schema(object_schema(
             json!({
-                "owner": { "type": "string", "description": "Schema owner (case-insensitive)." },
+                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
                 "needle": { "type": "string", "description": "Case-insensitive substring to find in source text." },
                 "max_rows": { "type": "integer", "minimum": 1, "description": "Maximum matching source lines to return (default 200)." }
             }),
-            &["owner", "needle"],
+            &["needle"],
         )),
     );
 

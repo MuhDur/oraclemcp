@@ -128,8 +128,10 @@ struct SchemaInspectArgs {
 
 #[derive(Deserialize)]
 struct DescribeArgs {
-    owner: String,
-    table: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default, alias = "table_name", alias = "name")]
+    table: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -159,13 +161,17 @@ struct DescribeViewArgs {
 #[derive(Deserialize)]
 struct GetDdlArgs {
     object_type: String,
-    owner: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(alias = "object_name")]
     name: String,
 }
 
 #[derive(Deserialize)]
 struct GetSourceArgs {
-    owner: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(alias = "object_name")]
     name: String,
     object_type: String,
     #[serde(default)]
@@ -174,7 +180,9 @@ struct GetSourceArgs {
 
 #[derive(Deserialize)]
 struct SampleRowsArgs {
-    owner: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(alias = "table_name")]
     table: String,
     #[serde(default)]
     max_rows: Option<usize>,
@@ -182,10 +190,15 @@ struct SampleRowsArgs {
 
 #[derive(Deserialize)]
 struct ReadClobArgs {
-    owner: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(alias = "table_name")]
     table: String,
+    #[serde(alias = "clob_col")]
     clob_column: String,
+    #[serde(alias = "pk_col")]
     pk_column: String,
+    #[serde(alias = "pk_val")]
     pk_value: String,
     #[serde(default)]
     max_chars: Option<usize>,
@@ -200,13 +213,14 @@ struct SwitchProfileArgs {
 struct CompileErrorsArgs {
     #[serde(default)]
     owner: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "object_name")]
     name: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct SearchSourceArgs {
-    owner: String,
+    #[serde(default)]
+    owner: Option<String>,
     needle: String,
     #[serde(default)]
     max_rows: Option<usize>,
@@ -273,15 +287,70 @@ fn non_empty_arg(value: Option<String>) -> Option<String> {
 
 fn owner_or_current(conn: &dyn OracleConnection, owner: Option<String>) -> Result<String, DbError> {
     match non_empty_arg(owner) {
-        Some(owner) => Ok(owner),
+        Some(owner) => Ok(owner.to_ascii_uppercase()),
         None => conn.describe().and_then(|info| {
-            info.current_schema.ok_or_else(|| {
-                DbError::Query(
-                    "owner is required because current_schema could not be detected".to_owned(),
-                )
-            })
+            info.current_schema
+                .map(|owner| owner.to_ascii_uppercase())
+                .ok_or_else(|| {
+                    DbError::Query(
+                        "owner is required because current_schema could not be detected".to_owned(),
+                    )
+                })
         }),
     }
+}
+
+fn required_non_empty_arg(
+    tool: &str,
+    field: &str,
+    value: Option<String>,
+) -> Result<String, ErrorEnvelope> {
+    non_empty_arg(value).ok_or_else(|| {
+        invalid_args(format!(
+            "invalid arguments for {tool}: missing required `{field}`"
+        ))
+    })
+}
+
+fn split_qualified_name(
+    value: &str,
+    label: &str,
+) -> Result<(Option<String>, String), ErrorEnvelope> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(invalid_args(format!("{label} must not be empty")));
+    }
+    let parts: Vec<&str> = value.split('.').collect();
+    match parts.as_slice() {
+        [name] if !name.trim().is_empty() => Ok((None, name.trim().to_owned())),
+        [owner, name] if !owner.trim().is_empty() && !name.trim().is_empty() => {
+            Ok((Some(owner.trim().to_owned()), name.trim().to_owned()))
+        }
+        _ => Err(invalid_args(format!(
+            "{label} must be an unquoted name or OWNER.NAME"
+        ))),
+    }
+}
+
+fn owner_and_name_arg(
+    conn: &dyn OracleConnection,
+    owner: Option<String>,
+    name: String,
+    label: &str,
+) -> Result<(String, String), ErrorEnvelope> {
+    let explicit_owner = non_empty_arg(owner);
+    let (qualified_owner, object_name) = split_qualified_name(&name, label)?;
+    let owner = match (explicit_owner, qualified_owner) {
+        (Some(explicit), Some(qualified)) if !explicit.eq_ignore_ascii_case(&qualified) => {
+            return Err(invalid_args(format!(
+                "conflicting owner arguments: owner={explicit:?}, {label}={name:?}"
+            )));
+        }
+        (Some(explicit), _) => explicit,
+        (None, Some(qualified)) => qualified,
+        (None, None) => owner_or_current(conn, None).map_err(DbError::into_envelope)?,
+    };
+    Ok((owner.to_ascii_uppercase(), object_name.to_ascii_uppercase()))
 }
 
 /// The fail-closed read-only gate for the two tools that accept a raw SQL
@@ -440,56 +509,58 @@ impl ToolDispatch for OracleDispatcher {
             }
             "oracle_describe" => {
                 let a: DescribeArgs = parse_args(name, args)?;
-                describe_columns(conn, &a.owner, &a.table)
-                    .map(|rows| json!({ "columns": rows_to_json(&rows) }))
+                let table = required_non_empty_arg(name, "table", a.table)?;
+                let (owner, table) = owner_and_name_arg(conn, a.owner, table, "table")?;
+                describe_columns(conn, &owner, &table)
+                    .map(|rows| json!({ "owner": owner, "table": table, "columns": rows_to_json(&rows) }))
             }
             "oracle_describe_index" => {
                 let a: DescribeIndexArgs = parse_args(name, args)?;
-                owner_or_current(conn, a.owner).and_then(|owner| {
-                    describe_index(conn, &owner, &a.name).map(|desc| {
-                        json!({
-                            "owner": owner,
-                            "name": a.name,
-                            "index": optional_row_to_json(desc.metadata.as_ref()),
-                            "columns": rows_to_json(&desc.columns),
-                            "expressions": rows_to_json(&desc.expressions),
-                        })
+                let (owner, object_name) = owner_and_name_arg(conn, a.owner, a.name, "index")?;
+                describe_index(conn, &owner, &object_name).map(|desc| {
+                    json!({
+                        "owner": owner,
+                        "name": object_name,
+                        "index": optional_row_to_json(desc.metadata.as_ref()),
+                        "columns": rows_to_json(&desc.columns),
+                        "expressions": rows_to_json(&desc.expressions),
                     })
                 })
             }
             "oracle_describe_trigger" => {
                 let a: DescribeTriggerArgs = parse_args(name, args)?;
-                owner_or_current(conn, a.owner).and_then(|owner| {
-                    describe_trigger(conn, &owner, &a.name).map(|desc| {
-                        json!({
-                            "owner": owner,
-                            "name": a.name,
-                            "trigger": optional_row_to_json(desc.metadata.as_ref()),
-                        })
+                let (owner, object_name) = owner_and_name_arg(conn, a.owner, a.name, "trigger")?;
+                describe_trigger(conn, &owner, &object_name).map(|desc| {
+                    json!({
+                        "owner": owner,
+                        "name": object_name,
+                        "trigger": optional_row_to_json(desc.metadata.as_ref()),
                     })
                 })
             }
             "oracle_describe_view" => {
                 let a: DescribeViewArgs = parse_args(name, args)?;
-                owner_or_current(conn, a.owner).and_then(|owner| {
-                    describe_view(conn, &owner, &a.name).map(|desc| {
-                        json!({
-                            "owner": owner,
-                            "name": a.name,
-                            "view": optional_row_to_json(desc.metadata.as_ref()),
-                            "columns": rows_to_json(&desc.columns),
-                        })
+                let (owner, object_name) = owner_and_name_arg(conn, a.owner, a.name, "view")?;
+                describe_view(conn, &owner, &object_name).map(|desc| {
+                    json!({
+                        "owner": owner,
+                        "name": object_name,
+                        "view": optional_row_to_json(desc.metadata.as_ref()),
+                        "columns": rows_to_json(&desc.columns),
                     })
                 })
             }
             "oracle_get_ddl" => {
                 let a: GetDdlArgs = parse_args(name, args)?;
-                get_ddl(conn, &a.object_type, &a.owner, &a.name).map(|ddl| json!({ "ddl": ddl }))
+                let (owner, object_name) = owner_and_name_arg(conn, a.owner, a.name, "name")?;
+                get_ddl(conn, &a.object_type, &owner, &object_name)
+                    .map(|ddl| json!({ "owner": owner, "name": object_name, "ddl": ddl }))
             }
             "oracle_get_source" => {
                 let a: GetSourceArgs = parse_args(name, args)?;
                 let max_chars = a.max_chars.unwrap_or(DEFAULT_SOURCE_MAX_CHARS);
-                get_source(conn, &a.owner, &a.name, &a.object_type, max_chars)
+                let (owner, object_name) = owner_and_name_arg(conn, a.owner, a.name, "name")?;
+                get_source(conn, &owner, &object_name, &a.object_type, max_chars)
                     .map(|source| json!({ "source": source }))
             }
             "oracle_sample_rows" => {
@@ -498,16 +569,18 @@ impl ToolDispatch for OracleDispatcher {
                     .max_rows
                     .unwrap_or(DEFAULT_SAMPLE_MAX_ROWS)
                     .clamp(1, MAX_SAMPLE_MAX_ROWS);
-                sample_rows(conn, &a.owner, &a.table, max_rows)
-                    .map(|rows| json!({ "rows": rows_to_json(&rows), "row_count": rows.len() }))
+                let (owner, table) = owner_and_name_arg(conn, a.owner, a.table, "table")?;
+                sample_rows(conn, &owner, &table, max_rows)
+                    .map(|rows| json!({ "owner": owner, "table": table, "rows": rows_to_json(&rows), "row_count": rows.len() }))
             }
             "oracle_read_clob" => {
                 let a: ReadClobArgs = parse_args(name, args)?;
                 let max_chars = a.max_chars.unwrap_or(DEFAULT_LOB_MAX_CHARS);
+                let (owner, table) = owner_and_name_arg(conn, a.owner, a.table, "table")?;
                 read_lob(
                     conn,
-                    &a.owner,
-                    &a.table,
+                    &owner,
+                    &table,
                     &a.clob_column,
                     &a.pk_column,
                     &a.pk_value,
@@ -517,27 +590,27 @@ impl ToolDispatch for OracleDispatcher {
             }
             "oracle_compile_errors" => {
                 let a: CompileErrorsArgs = parse_args(name, args)?;
-                let owner_result: Result<String, DbError> = match a.owner {
-                    Some(owner) => Ok(owner),
-                    None => conn.describe().and_then(|info| {
-                        info.current_schema.ok_or_else(|| {
-                            DbError::Query(
-                                "owner is required because current_schema could not be detected"
-                                    .to_owned(),
-                            )
-                        })
+                let object_name = non_empty_arg(a.name);
+                match object_name {
+                    Some(object_name) => {
+                        let (owner, object_name) =
+                            owner_and_name_arg(conn, a.owner, object_name, "name")?;
+                        compile_errors(conn, &owner, Some(&object_name))
+                            .map(|rows| json!({ "owner": owner, "name": object_name, "errors": rows_to_json(&rows) }))
+                    }
+                    None => owner_or_current(conn, a.owner).and_then(|owner| {
+                        compile_errors(conn, &owner, None)
+                            .map(|rows| json!({ "owner": owner, "errors": rows_to_json(&rows) }))
                     }),
-                };
-                owner_result.and_then(|owner| {
-                    compile_errors(conn, &owner, a.name.as_deref())
-                        .map(|rows| json!({ "errors": rows_to_json(&rows) }))
-                })
+                }
             }
             "oracle_search_source" => {
                 let a: SearchSourceArgs = parse_args(name, args)?;
                 let max_rows = a.max_rows.unwrap_or(DEFAULT_SEARCH_MAX_ROWS);
-                search_source(conn, &a.owner, &a.needle, max_rows)
-                    .map(|rows| json!({ "matches": rows_to_json(&rows) }))
+                owner_or_current(conn, a.owner).and_then(|owner| {
+                    search_source(conn, &owner, &a.needle, max_rows)
+                        .map(|rows| json!({ "owner": owner, "matches": rows_to_json(&rows) }))
+                })
             }
             "oracle_explain_plan" => {
                 let a: ExplainPlanArgs = parse_args(name, args)?;
@@ -775,6 +848,81 @@ mod tests {
         assert_eq!(view["owner"], json!("APP"));
         assert!(view["view"].is_object());
         assert!(view["columns"].is_array());
+    }
+
+    #[test]
+    fn dictionary_tools_accept_default_owner_qualified_names_and_aliases() {
+        let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+
+        let described = dispatcher
+            .dispatch("oracle_describe", json!({ "table_name": "APP.EMPLOYEES" }))
+            .expect("describe accepts table_name alias and qualified table");
+        assert_eq!(described["owner"], json!("APP"));
+        assert_eq!(described["table"], json!("EMPLOYEES"));
+        assert!(described["columns"].is_array());
+
+        let ddl = dispatcher
+            .dispatch(
+                "oracle_get_ddl",
+                json!({ "object_type": "TABLE", "object_name": "APP.EMPLOYEES" }),
+            )
+            .expect("ddl accepts object_name alias and qualified name");
+        assert_eq!(ddl["owner"], json!("APP"));
+        assert_eq!(ddl["name"], json!("EMPLOYEES"));
+        assert_eq!(ddl["ddl"], json!("CREATE TABLE ..."));
+
+        let source = dispatcher
+            .dispatch(
+                "oracle_get_source",
+                json!({ "object_type": "PACKAGE", "object_name": "APP.EMP_API" }),
+            )
+            .expect("source accepts object_name alias and qualified name");
+        assert_eq!(source["source"]["owner"], json!("APP"));
+        assert_eq!(source["source"]["name"], json!("EMP_API"));
+
+        let sample = dispatcher
+            .dispatch(
+                "oracle_sample_rows",
+                json!({ "table_name": "APP.EMPLOYEES", "max_rows": 2 }),
+            )
+            .expect("sample accepts table_name alias and qualified table");
+        assert_eq!(sample["owner"], json!("APP"));
+        assert_eq!(sample["table"], json!("EMPLOYEES"));
+        assert_eq!(sample["row_count"], json!(1));
+
+        let clob = dispatcher
+            .dispatch(
+                "oracle_read_clob",
+                json!({ "table": "APP.DOCS", "clob_col": "BODY", "pk_col": "ID", "pk_val": "42" }),
+            )
+            .expect("read_clob accepts old argument aliases");
+        assert_eq!(clob["clob"]["owner"], json!("APP"));
+        assert_eq!(clob["clob"]["table"], json!("DOCS"));
+
+        let errors = dispatcher
+            .dispatch("oracle_compile_errors", json!({ "object_name": "APP.PKG" }))
+            .expect("compile errors accepts object_name alias and qualified name");
+        assert_eq!(errors["owner"], json!("APP"));
+        assert_eq!(errors["name"], json!("PKG"));
+        assert!(errors["errors"].is_array());
+
+        let matches = dispatcher
+            .dispatch("oracle_search_source", json!({ "needle": "commit" }))
+            .expect("search source defaults owner");
+        assert_eq!(matches["owner"], json!("APP"));
+        assert!(matches["matches"].is_array());
+    }
+
+    #[test]
+    fn conflicting_owner_and_qualified_name_is_invalid_arguments() {
+        let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+        let err = dispatcher
+            .dispatch(
+                "oracle_get_ddl",
+                json!({ "object_type": "TABLE", "owner": "HR", "name": "APP.EMPLOYEES" }),
+            )
+            .expect_err("conflicting owners rejected");
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
     }
 
     #[test]
