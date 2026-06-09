@@ -1,7 +1,7 @@
 [package]
 name = "oraclemcp-core"
 version = "0.1.0"
-description = "MCP protocol surface, Tool/ToolRegistry contract and capabilities for the oraclemcp server. Unofficial; not affiliated with Oracle Corporation."
+description = "MCP protocol surface, Tool/ToolRegistry contract and capabilities for the oraclemcp server."
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
