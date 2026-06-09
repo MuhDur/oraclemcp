@@ -3973,7 +3973,7 @@ mod tests {
         let out = dispatcher
             .dispatch(
                 "create_or_replace",
-                json!({ "source_code": source, "execute": true, "confirm": confirm }),
+                json!({ "source_code": source, "execute": true, "token": confirm }),
             )
             .expect("confirmed apply");
         assert_eq!(out["applied"], json!(true));
@@ -4132,7 +4132,7 @@ mod tests {
         let applied = dispatcher
             .dispatch(
                 "oracle_set_session_level",
-                json!({ "level": "READ_WRITE", "ttl_seconds": 60, "execute": true, "confirm": confirm }),
+                json!({ "level": "READ_WRITE", "ttl_seconds": 60, "execute": true, "token": confirm }),
             )
             .expect("confirmed elevation applies");
         assert_eq!(applied["changed"], json!(true));
@@ -4398,9 +4398,9 @@ mod tests {
                 "oracle_execute",
                 json!({
                     "sql": "BEGIN DBMS_OUTPUT.PUT_LINE('first'); DBMS_OUTPUT.PUT_LINE('second'); END;",
-                    "capture_dbms_output": true,
-                    "dbms_output_max_lines": 10,
-                    "dbms_output_max_chars": 100
+                    "dbms_output": true,
+                    "max_dbms_output_lines": 10,
+                    "max_dbms_output_chars": 100
                 }),
             )
             .expect("execute with dbms output");
@@ -4507,7 +4507,7 @@ mod tests {
         let out = dispatcher
             .dispatch(
                 "oracle_execute",
-                json!({ "sql": sql, "commit": true, "confirm": confirm }),
+                json!({ "sql": sql, "commit": true, "confirmation_token": confirm }),
             )
             .expect("execute commit");
         assert_eq!(out["committed"], json!(true));
@@ -4645,19 +4645,30 @@ mod tests {
         let preview = dispatcher
             .dispatch(
                 "oracle_compile_object",
-                json!({ "object_type": "PACKAGE_BODY", "owner": "APP", "name": "EMP_API", "plscope": true }),
+                json!({
+                    "object_type": "PACKAGE_BODY",
+                    "owner": "APP",
+                    "name": "EMP_API",
+                    "plscope": true,
+                    "enable_warnings": true
+                }),
             )
             .expect("compile preview");
         assert_eq!(preview["compiled"], json!(false));
         assert_eq!(preview["preview"], json!(true));
+        assert_eq!(preview["warnings"], json!(true));
         assert_eq!(preview["required_level"], json!("DDL"));
         assert_eq!(preview["gate_decision"], json!("allow"));
         assert_eq!(
             preview["statements"][0],
-            json!("ALTER SESSION SET PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL, STATEMENTS:ALL'")
+            json!("ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'")
         );
         assert_eq!(
             preview["statements"][1],
+            json!("ALTER SESSION SET PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL, STATEMENTS:ALL'")
+        );
+        assert_eq!(
+            preview["statements"][2],
             json!("ALTER PACKAGE APP.EMP_API COMPILE BODY")
         );
         assert_eq!(
@@ -4740,7 +4751,7 @@ mod tests {
                     "object_type": "PACKAGE",
                     "name": "EMP_API",
                     "execute": true,
-                    "confirm": confirm
+                    "confirmation_token": confirm
                 }),
             )
             .expect("compile executes");
@@ -4803,7 +4814,7 @@ mod tests {
                     "object_type": "PACKAGE",
                     "object_name": "EMP_API",
                     "execute": true,
-                    "confirm": confirm
+                    "token": confirm
                 }),
             )
             .expect("compile with warnings executes");
