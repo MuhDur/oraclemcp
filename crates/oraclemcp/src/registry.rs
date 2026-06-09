@@ -392,7 +392,8 @@ pub fn tool_registry() -> ToolRegistry {
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
                 "table": { "type": "string", "description": "Table or view name. May be OWNER.TABLE. Required unless table_name is supplied." },
                 "table_name": { "type": "string", "description": "Alias for table for compatibility with older clients. Prefer table." },
-                "max_rows": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Maximum rows to return (default 50, hard cap 1000)." }
+                "max_rows": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Maximum rows to return (default 50, hard cap 1000)." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." }
             }),
             &[],
         )),
@@ -449,7 +450,8 @@ pub fn tool_registry() -> ToolRegistry {
                 "needle": { "type": "string", "description": "Case-insensitive substring to find in source text." },
                 "object_type": { "type": "string", "description": "Optional source type filter: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY." },
                 "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for source object names, e.g. EMP%." },
-                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum matching source lines to return (default 200, hard cap 5000)." }
+                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum matching source lines to return (default 200, hard cap 5000)." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." }
             }),
             &["needle"],
         )),
@@ -963,6 +965,31 @@ mod tests {
                 schema.get("required").is_some(),
                 "{} schema declares required args",
                 tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn row_capped_read_tools_advertise_limit_aliases() {
+        let registry = tool_registry();
+        for name in ["oracle_sample_rows", "oracle_search_source"] {
+            let tool = registry
+                .tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} must be registered"));
+            let schema = tool
+                .input_schema
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} must advertise an input schema"));
+            let properties = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{name} must advertise object properties"));
+            assert!(properties.contains_key("max_rows"), "{name}");
+            assert!(
+                properties.contains_key("limit"),
+                "{name} must advertise the accepted limit alias"
             );
         }
     }

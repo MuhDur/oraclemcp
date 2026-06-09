@@ -496,7 +496,7 @@ struct SampleRowsArgs {
     owner: Option<String>,
     #[serde(alias = "table_name")]
     table: String,
-    #[serde(default)]
+    #[serde(default, alias = "limit")]
     max_rows: Option<usize>,
 }
 
@@ -539,7 +539,7 @@ struct SearchSourceArgs {
     object_type: Option<String>,
     #[serde(default)]
     name_like: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "limit")]
     max_rows: Option<usize>,
 }
 
@@ -3534,9 +3534,9 @@ mod tests {
         let sample = dispatcher
             .dispatch(
                 "oracle_sample_rows",
-                json!({ "table_name": "APP.EMPLOYEES", "max_rows": 2 }),
+                json!({ "table_name": "APP.EMPLOYEES", "limit": 2 }),
             )
-            .expect("sample accepts table_name alias and qualified table");
+            .expect("sample accepts table_name/limit aliases and qualified table");
         assert_eq!(sample["owner"], json!("APP"));
         assert_eq!(sample["table"], json!("EMPLOYEES"));
         assert_eq!(sample["row_count"], json!(1));
@@ -3571,10 +3571,10 @@ mod tests {
                     "needle": "commit",
                     "object_type": "package_body",
                     "name_like": "emp%",
-                    "max_rows": 999999
+                    "limit": 999999
                 }),
             )
-            .expect("search source accepts all-owner and scope filters");
+            .expect("search source accepts all-owner, scope filters, and limit alias");
         assert_eq!(all_matches["owner"], json!("*"));
         assert_eq!(all_matches["object_type"], json!("package_body"));
         assert_eq!(all_matches["name_like"], json!("emp%"));
