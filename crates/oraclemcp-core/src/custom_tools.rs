@@ -282,6 +282,7 @@ impl CustomToolDef {
             ToolTier::FoundationLiveDb,
             self.description.clone(),
         )
+        .with_input_schema(self.input_schema())
     }
 }
 
@@ -647,7 +648,22 @@ impl CustomToolCatalog {
                  Discover the catalog via oracle_capabilities or the oracle://tools resource.",
                 self.tools.len()
             ),
-        ));
+        )
+        .with_input_schema(json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the operator-defined tool from the oracle://tools catalog."
+                },
+                "params": {
+                    "type": "object",
+                    "description": "Parameters for the named tool, validated against that tool's catalog input_schema."
+                }
+            },
+            "required": ["name"],
+            "additionalProperties": false,
+        })));
     }
 
     /// Meta-dispatch: run the named tool with `params`. `args` is the
@@ -752,7 +768,15 @@ mod tests {
         let defs = parse_tools_file(FORM_A).unwrap();
         let mut reg = ToolRegistry::new();
         register_custom_tools(&mut reg, &defs);
-        assert!(reg.tools.iter().any(|t| t.name == "customer_360"));
+        let tool = reg
+            .tools
+            .iter()
+            .find(|t| t.name == "customer_360")
+            .expect("registered");
+        assert_eq!(
+            tool.input_schema.as_ref().expect("input schema")["properties"]["id"]["type"],
+            json!("integer")
+        );
         // Idempotent.
         register_custom_tools(&mut reg, &defs);
         assert_eq!(
@@ -1239,6 +1263,13 @@ mod tests {
         cat.register_meta_dispatch(&mut reg);
         assert_eq!(reg.tools.len(), 1);
         assert_eq!(reg.tools[0].name, RUN_NAMED_TOOL);
+        assert_eq!(
+            reg.tools[0]
+                .input_schema
+                .as_ref()
+                .expect("meta dispatch schema")["properties"]["name"]["type"],
+            json!("string")
+        );
     }
 
     #[test]
