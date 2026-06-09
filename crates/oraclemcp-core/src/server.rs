@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 
 use crate::capabilities::CapabilitiesReport;
 use crate::init_token::StdioAuthPolicy;
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolDescriptor, ToolRegistry};
 
 /// The `_meta` field carrying the stdio init token on the `initialize` request.
 /// The client places its shared token here so the server can gate the handshake
@@ -81,9 +81,7 @@ impl OracleMcpServer {
         self
     }
 
-    /// Map the registry descriptors to rmcp [`Tool`]s. Inputs are flat objects;
-    /// each tool advertises a permissive `object` input schema (precise
-    /// per-tool schemas land with each tool's bead).
+    /// Map the registry descriptors to rmcp [`Tool`]s.
     fn rmcp_tools(&self) -> Vec<Tool> {
         let mut tools = Vec::with_capacity(self.registry.tools.len() + 1);
         // oracle_capabilities is always present even if not in the registry.
@@ -99,7 +97,7 @@ impl OracleMcpServer {
             tools.push(Tool::new(
                 d.name.clone(),
                 d.summary.clone(),
-                empty_object_schema(),
+                descriptor_input_schema(d),
             ));
         }
         tools
@@ -247,6 +245,13 @@ fn empty_object_schema() -> Map<String, Value> {
     m
 }
 
+fn descriptor_input_schema(descriptor: &ToolDescriptor) -> Map<String, Value> {
+    match descriptor.input_schema.as_ref() {
+        Some(Value::Object(schema)) => schema.clone(),
+        _ => empty_object_schema(),
+    }
+}
+
 /// A success result carrying dual output: human/LLM text + structured JSON.
 fn tool_result_ok(value: Value) -> CallToolResult {
     let mut result = CallToolResult::success(vec![Content::text(value.to_string())]);
@@ -282,11 +287,17 @@ mod tests {
 
     fn server() -> OracleMcpServer {
         let mut registry = ToolRegistry::new();
-        registry.register(ToolDescriptor::new(
-            "oracle_query",
-            ToolTier::FoundationLiveDb,
-            "run a query",
-        ));
+        registry.register(
+            ToolDescriptor::new("oracle_query", ToolTier::FoundationLiveDb, "run a query")
+                .with_input_schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "sql": { "type": "string" }
+                    },
+                    "required": ["sql"],
+                    "additionalProperties": false
+                })),
+        );
         let caps = CapabilitiesReport::new(
             "0.1.0",
             registry.tools.clone(),
@@ -311,6 +322,21 @@ mod tests {
             tools.iter().filter(|t| t.name == CAPABILITIES_TOOL).count(),
             1
         );
+    }
+
+    #[test]
+    fn rmcp_tools_preserve_descriptor_input_schemas() {
+        let s = server();
+        let tools = s.rmcp_tools();
+        let query = tools
+            .iter()
+            .find(|t| t.name == "oracle_query")
+            .expect("registered tool");
+        assert_eq!(
+            query.input_schema["properties"]["sql"]["type"],
+            serde_json::json!("string")
+        );
+        assert_eq!(query.input_schema["required"], serde_json::json!(["sql"]));
     }
 
     #[test]
