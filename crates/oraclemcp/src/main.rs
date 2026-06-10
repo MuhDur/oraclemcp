@@ -32,7 +32,7 @@ use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::{
     CapabilitiesReport, CustomToolCatalog, CustomToolDef, DoctorContext, FeatureTiers,
     HttpTransportConfig, OracleMcpServer, StdioAuthPolicy, load_tools, load_tools_for_profile,
-    parse_tools_file, run_doctor, serve_http,
+    parse_tools_file, run_doctor, serve_http, sign,
 };
 use oraclemcp_db::{DbError, OracleConnectOptions, OracleConnection, RustOracleConnection};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
@@ -107,6 +107,33 @@ enum Command {
         #[command(subcommand)]
         command: Option<RobotDocsCommand>,
     },
+    /// Print generic onboarding templates for profiles, wrappers, and MCP clients.
+    Setup {
+        /// Example profile name to use in generated snippets.
+        #[arg(long, default_value = "db_ro")]
+        profile: String,
+        /// Environment variable name used by credential_ref in the profile template.
+        #[arg(long, default_value = "ORACLE_APP_PASSWORD")]
+        credential_env: String,
+        /// Wrapper path shown in client snippets.
+        #[arg(long, default_value = "~/.local/bin/oraclemcp-local")]
+        wrapper_path: String,
+        /// Config path shown in generated guidance.
+        #[arg(long, default_value = "~/.config/oraclemcp/profiles.toml")]
+        config_path: String,
+        /// Custom tools directory shown in generated guidance.
+        #[arg(long, default_value = "~/.config/oraclemcp/tools.d")]
+        tools_dir: String,
+    },
+    /// Print HMAC signatures for operator-defined custom tool definitions.
+    #[command(name = "sign-tool", alias = "sign_tools")]
+    SignTool {
+        /// TOML file containing one or more [[tool]] definitions.
+        path: PathBuf,
+        /// Sign only this tool name from the file.
+        #[arg(long)]
+        tool: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -144,6 +171,21 @@ fn main() -> ExitCode {
         Command::RobotDocs { command } => match command {
             None | Some(RobotDocsCommand::Guide) => run_robot_docs_guide(robot_json),
         },
+        Command::Setup {
+            profile,
+            credential_env,
+            wrapper_path,
+            config_path,
+            tools_dir,
+        } => run_setup(
+            robot_json,
+            &profile,
+            &credential_env,
+            &wrapper_path,
+            &config_path,
+            &tools_dir,
+        ),
+        Command::SignTool { path, tool } => run_sign_tool(robot_json, &path, tool.as_deref()),
     }
 }
 
@@ -331,7 +373,27 @@ fn validate_custom_tool_names(defs: &[CustomToolDef]) -> Result<(), ErrorEnvelop
     Ok(())
 }
 
-fn load_custom_catalog_for_level(
+fn custom_tools_require_signatures(
+    active_profile: Option<&str>,
+    level: &SessionLevelState,
+) -> bool {
+    if level.is_protected() {
+        return true;
+    }
+    let Some(profile_name) = active_profile else {
+        return false;
+    };
+    OracleMcpConfig::load(None)
+        .ok()
+        .and_then(|cfg| {
+            cfg.profile(profile_name)
+                .map(|profile| profile.require_signed_tools())
+        })
+        .unwrap_or(false)
+}
+
+fn load_custom_catalog_for_profile(
+    active_profile: Option<&str>,
     level: &SessionLevelState,
 ) -> Result<CustomToolCatalog, ErrorEnvelope> {
     let Some(dir) = custom_tools_dir() else {
@@ -346,10 +408,11 @@ fn load_custom_catalog_for_level(
     let classifier = Classifier::new(ClassifierConfig::new());
     let key = std::env::var(CUSTOM_TOOLS_HMAC_KEY_ENV).ok();
     let signed_defs_present = defs.iter().any(|def| def.signature.is_some());
-    let loaded = if level.is_protected() {
+    let require_signed_tools = custom_tools_require_signatures(active_profile, level);
+    let loaded = if require_signed_tools {
         let key = key.ok_or_else(|| {
             custom_tool_error(format!(
-                "{CUSTOM_TOOLS_HMAC_KEY_ENV} is required when loading custom tools for a protected profile"
+                "{CUSTOM_TOOLS_HMAC_KEY_ENV} is required when this profile requires signed custom tools"
             ))
         })?;
         load_tools_for_profile(
@@ -406,7 +469,7 @@ fn build_server(
         level,
         Arc::new(connect_profile),
         custom_catalog,
-        Some(Arc::new(load_custom_catalog_for_level)),
+        Some(Arc::new(load_custom_catalog_for_profile)),
     );
     OracleMcpServer::new(version, registry, caps, Arc::new(dispatcher))
 }
@@ -444,7 +507,7 @@ fn run_serve(
         }
     };
 
-    let custom_catalog = match load_custom_catalog_for_level(&level) {
+    let custom_catalog = match load_custom_catalog_for_profile(active_profile.as_deref(), &level) {
         Ok(catalog) => catalog,
         Err(e) => {
             emit_status_error(robot_json, "ORACLEMCP_CUSTOM_TOOLS_INVALID", &e.message);
@@ -575,6 +638,268 @@ fn run_info(robot_json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn setup_profiles_template(profile: &str, credential_env: &str) -> String {
+    format!(
+        r#"schema_version = 1
+default_profile = "{profile}"
+
+[[profiles]]
+name = "{profile}"
+description = "Read-only database profile"
+connect_string = "dbhost.example.com:1521/service_name"
+username = "APP_READONLY"
+credential_ref = "env:{credential_env}"
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
+protected = true
+require_signed_tools = true
+call_timeout_seconds = 30
+login_statements = [
+  "ALTER SESSION SET NLS_LANGUAGE = english",
+]
+
+[profiles.session_identity]
+module = "oraclemcp"
+action = "inspect"
+client_identifier = "agent"
+client_info = "local-agent"
+driver_name = "oraclemcp"
+
+[[profiles]]
+name = "db_ddl"
+description = "DDL-capable sandbox; never point this at production"
+base = "{profile}"
+protected = false
+max_level = "DDL"
+default_level = "READ_ONLY"
+require_signed_tools = true
+"#
+    )
+}
+
+fn setup_wrapper_template() -> &'static str {
+    r#"#!/usr/bin/env sh
+set -eu
+
+ORACLE_IC_HOME="${ORACLE_IC_HOME:-/opt/oracle/instantclient}"
+ORACLE_NET_HOME="${ORACLE_NET_HOME:-$HOME/.config/oraclemcp/network}"
+
+if [ -d "$ORACLE_IC_HOME" ]; then
+  if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    export LD_LIBRARY_PATH="$ORACLE_IC_HOME:$LD_LIBRARY_PATH"
+  else
+    export LD_LIBRARY_PATH="$ORACLE_IC_HOME"
+  fi
+fi
+
+if [ -d "$ORACLE_NET_HOME" ]; then
+  export TNS_ADMIN="${TNS_ADMIN:-$ORACLE_NET_HOME}"
+fi
+
+exec oraclemcp "$@"
+"#
+}
+
+fn setup_custom_tool_template() -> &'static str {
+    r#"[[tool]]
+name = "app_customer_lookup"
+description = "Lookup customer rows by id"
+sql = "SELECT id, name, status FROM app_customers WHERE id = :id"
+output_mode = "rows"
+# signature = "add with: oraclemcp sign-tool ~/.config/oraclemcp/tools.d/customer.toml --tool app_customer_lookup"
+
+[[tool.params]]
+name = "id"
+type = "integer"
+required = true
+description = "Customer id"
+"#
+}
+
+fn setup_payload(
+    profile: &str,
+    credential_env: &str,
+    wrapper_path: &str,
+    config_path: &str,
+    tools_dir: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "kind": "oraclemcp_setup",
+        "principle": "one generic binary; all environment-specific database names, credentials, session identity, and custom tools live in local config",
+        "install": {
+            "cargo_live_db": "cargo install oraclemcp --features live-db",
+            "docker_stdio": "docker run -i --rm ghcr.io/muhdur/oraclemcp:0.1.0"
+        },
+        "paths": {
+            "profiles": config_path,
+            "custom_tools": tools_dir,
+            "wrapper": wrapper_path
+        },
+        "profiles_toml": setup_profiles_template(profile, credential_env),
+        "wrapper_script": setup_wrapper_template(),
+        "custom_tool_toml": setup_custom_tool_template(),
+        "claude_mcp_json": {
+            "mcpServers": {
+                "oracle": {
+                    "command": wrapper_path,
+                    "args": ["serve", "--profile", profile, "--allow-no-auth"]
+                }
+            }
+        },
+        "codex_config_toml": format!(
+            "[mcp_servers.oracle]\ncommand = \"{wrapper_path}\"\nargs = [\"serve\", \"--profile\", \"{profile}\", \"--allow-no-auth\"]\n"
+        ),
+        "secure_stdio": {
+            "env": { "ORACLEMCP_STDIO_TOKEN": "<shared-init-token>" },
+            "args": ["serve", "--profile", profile],
+            "note": "Use secure stdio when the MCP client can provide the init token; otherwise keep stdio local and use --allow-no-auth intentionally."
+        },
+        "validation_commands": [
+            ["oraclemcp", "--json", "info"],
+            ["oraclemcp", "--json", "setup", "--profile", profile],
+            ["oraclemcp", "--json", "profiles"],
+            ["oraclemcp", "--json", "doctor"],
+            ["oraclemcp", "--json", "doctor", "--profile", profile],
+            ["oraclemcp", "--json", "capabilities"]
+        ],
+        "next_actions": [
+            format!("write the profiles template to {config_path} after replacing placeholders"),
+            format!("write the wrapper template to {wrapper_path} and make it executable if Oracle client environment setup is needed"),
+            "configure every MCP client to call the same wrapper and args",
+            "restart each MCP client after changing the binary, wrapper, or profile",
+            "run the validation commands before allowing agents to use live database tools"
+        ]
+    })
+}
+
+fn run_setup(
+    robot_json: bool,
+    profile: &str,
+    credential_env: &str,
+    wrapper_path: &str,
+    config_path: &str,
+    tools_dir: &str,
+) -> ExitCode {
+    let payload = setup_payload(
+        profile,
+        credential_env,
+        wrapper_path,
+        config_path,
+        tools_dir,
+    );
+    if robot_json {
+        println!("{}", serde_json::to_string(&payload).unwrap());
+    } else {
+        println!("oraclemcp setup\n");
+        println!("Install:\n  cargo install oraclemcp --features live-db\n");
+        println!("Profiles path:\n  {config_path}\n");
+        println!(
+            "profiles.toml template:\n{}\n",
+            payload["profiles_toml"].as_str().unwrap_or("")
+        );
+        println!("Wrapper path:\n  {wrapper_path}\n");
+        println!(
+            "wrapper script template:\n{}\n",
+            payload["wrapper_script"].as_str().unwrap_or("")
+        );
+        println!("Custom tools path:\n  {tools_dir}\n");
+        println!(
+            "custom tool template:\n{}\n",
+            payload["custom_tool_toml"].as_str().unwrap_or("")
+        );
+        println!(
+            "Claude MCP JSON:\n{}\n",
+            serde_json::to_string_pretty(&payload["claude_mcp_json"]).unwrap()
+        );
+        println!(
+            "Codex config TOML:\n{}",
+            payload["codex_config_toml"].as_str().unwrap_or("")
+        );
+        println!("Validation commands:");
+        for command in payload["validation_commands"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let rendered = command
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|part| part.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!("  {rendered}");
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn custom_tool_signatures(
+    path: &Path,
+    only_tool: Option<&str>,
+) -> Result<serde_json::Value, ErrorEnvelope> {
+    let key = std::env::var(CUSTOM_TOOLS_HMAC_KEY_ENV).map_err(|_| {
+        custom_tool_error(format!(
+            "{CUSTOM_TOOLS_HMAC_KEY_ENV} is required to sign custom tool definitions"
+        ))
+    })?;
+    let src = std::fs::read_to_string(path).map_err(|e| {
+        custom_tool_error(format!(
+            "failed to read custom tool file {}: {e}",
+            path.display()
+        ))
+    })?;
+    let defs = parse_tools_file(&src).map_err(|e| {
+        custom_tool_error(format!(
+            "failed to parse custom tool file {}: {e}",
+            path.display()
+        ))
+    })?;
+    let mut signatures = Vec::new();
+    for def in defs {
+        if only_tool.is_some_and(|name| name != def.name.as_str()) {
+            continue;
+        }
+        signatures.push(serde_json::json!({
+            "name": def.name,
+            "signature": sign(&def, key.as_bytes()),
+        }));
+    }
+    if signatures.is_empty() {
+        return Err(custom_tool_error(
+            "no matching custom tool definitions found",
+        ));
+    }
+    Ok(serde_json::json!({
+        "ok": true,
+        "path": path.display().to_string(),
+        "signatures": signatures,
+        "next_actions": [
+            "copy each signature into its matching [[tool]] block as signature = \"...\"",
+            "set ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY in the MCP server environment",
+            "run oraclemcp --json doctor --profile <profile> before restarting clients"
+        ]
+    }))
+}
+
+fn run_sign_tool(robot_json: bool, path: &Path, only_tool: Option<&str>) -> ExitCode {
+    match custom_tool_signatures(path, only_tool) {
+        Ok(payload) => {
+            if robot_json {
+                println!("{}", serde_json::to_string(&payload).unwrap());
+            } else {
+                println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            emit_status_error(robot_json, "ORACLEMCP_SIGN_TOOL_FAILED", &e.message);
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn run_capabilities(robot_json: bool) -> ExitCode {
     // HTTP is advertised as available (the binary can serve it); live_db tracks
     // the compiled driver feature.
@@ -626,6 +951,11 @@ fn robot_docs_guide_json() -> serde_json::Value {
             },
             "smoke_tests": [
                 {
+                    "intent": "generate generic local setup templates without reading private config",
+                    "command": "oraclemcp --json setup --profile <profile>",
+                    "argv": ["oraclemcp", "--json", "setup", "--profile", "<profile>"]
+                },
+                {
                     "intent": "verify the installed binary and local config without MCP",
                     "command": "oraclemcp --json doctor --profile <profile>",
                     "argv": ["oraclemcp", "--json", "doctor", "--profile", "<profile>"]
@@ -644,6 +974,11 @@ fn robot_docs_guide_json() -> serde_json::Value {
             "restart_rule": "after replacing the binary or wrapper, restart or reconnect each MCP client so it imports the fresh tool schema"
         },
         "first_commands": [
+            {
+                "intent": "print generic onboarding templates for profiles, wrappers, and MCP clients",
+                "command": "oraclemcp --json setup --profile <profile>",
+                "argv": ["oraclemcp", "--json", "setup", "--profile", "<profile>"]
+            },
             {
                 "intent": "discover configured profiles without opening a database connection",
                 "command": "oraclemcp --json profiles",
@@ -718,6 +1053,7 @@ fn robot_docs_guide_json() -> serde_json::Value {
         "config": {
             "profiles": "~/.config/oraclemcp/profiles.toml or ORACLEMCP_CONFIG",
             "custom_tools": "~/.config/oraclemcp/tools.d/*.toml or ORACLEMCP_TOOLS_DIR",
+            "custom_tool_signing": "protected profiles and profiles with require_signed_tools=true require ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY plus per-tool signatures from oraclemcp sign-tool",
             "secret_refs": "prefer credential_ref over literal passwords",
             "environment_specifics": "database aliases, session identity, client module/program labels, and custom workflow tools belong in profiles or tools.d config, not in the general core"
         },
@@ -725,6 +1061,10 @@ fn robot_docs_guide_json() -> serde_json::Value {
             {
                 "intent": "binary and build posture",
                 "argv": ["oraclemcp", "--json", "info"]
+            },
+            {
+                "intent": "generic onboarding templates",
+                "argv": ["oraclemcp", "--json", "setup", "--profile", "<profile>"]
             },
             {
                 "intent": "profile inventory without connecting",
@@ -752,7 +1092,7 @@ fn robot_docs_guide_json() -> serde_json::Value {
             "Treat confirmation tokens as process-local preview tokens; regenerate them after restarting the server.",
             "Never assume DDL can be rollback-previewed.",
             "Treat profile max_level as the hard ceiling for the running server.",
-            "Keep company-specific tools, names, identities, and connection details in config."
+            "Keep environment-specific tools, names, identities, and connection details in config."
         ],
         "exit_codes": [
             { "code": 0, "meaning": "success" },
@@ -772,17 +1112,20 @@ Output contract
 
 Client setup
 - Install or build one oraclemcp binary, then configure every MCP client to call the same command, args, config file, and environment.
+- Generate generic setup templates with: oraclemcp --json setup --profile <profile>
 - Local stdio command: oraclemcp serve --profile <profile> --allow-no-auth
 - Secure stdio command: ORACLEMCP_STDIO_TOKEN=<token> oraclemcp serve --profile <profile>
 - If Oracle client libraries or network files need environment setup, point every MCP client at the same small wrapper script.
 - After replacing the binary or wrapper, restart or reconnect each MCP client so it imports the fresh tool schema.
 
 Client smoke tests
-1. oraclemcp --json doctor --profile <profile>
-2. MCP tools/list discovers oracle_capabilities plus the advertised Oracle tools without schema import errors
-3. MCP tools/call oracle_capabilities with empty arguments succeeds
+1. oraclemcp --json setup --profile <profile>
+2. oraclemcp --json doctor --profile <profile>
+3. MCP tools/list discovers oracle_capabilities plus the advertised Oracle tools without schema import errors
+4. MCP tools/call oracle_capabilities with empty arguments succeeds
 
 First commands
+- oraclemcp --json setup --profile <profile>
 - oraclemcp --json profiles
 - oraclemcp --json doctor
 - oraclemcp --json doctor --profile <profile>
@@ -823,15 +1166,17 @@ Safety model
 Configuration
 - Profiles: ~/.config/oraclemcp/profiles.toml or ORACLEMCP_CONFIG.
 - Custom tools: ~/.config/oraclemcp/tools.d/*.toml or ORACLEMCP_TOOLS_DIR.
+- Custom tool signing: protected profiles and profiles with require_signed_tools=true require ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY and signatures from oraclemcp sign-tool.
 - Prefer credential_ref over literal passwords.
 - Database aliases, session identity, client module/program labels, and custom workflow tools belong in profiles or tools.d config, not in the general core.
 
 Diagnostic flow
 1. oraclemcp --json info
-2. oraclemcp --json profiles
-3. oraclemcp --json doctor
-4. oraclemcp --json doctor --profile <profile>
-5. oraclemcp --json capabilities
+2. oraclemcp --json setup --profile <profile>
+3. oraclemcp --json profiles
+4. oraclemcp --json doctor
+5. oraclemcp --json doctor --profile <profile>
+6. oraclemcp --json capabilities
 
 Agent rules
 - Prefer oracle_query for SELECT/WITH statements.
@@ -841,7 +1186,7 @@ Agent rules
 - deploy_ddl accepts name and wait_seconds for compatibility; the generic core executes synchronously and returns those fields.
 - Never assume DDL can be rollback-previewed.
 - Treat profile max_level as the hard ceiling for the running server.
-- Keep company-specific tools, names, identities, and connection details in config.
+- Keep environment-specific tools, names, identities, and connection details in config.
 "#
 }
 
@@ -870,6 +1215,7 @@ fn profiles_json(cfg: &OracleMcpConfig) -> serde_json::Value {
                 "max_level": profile.max_level,
                 "default_level": profile.default_level,
                 "protected": profile.protected,
+                "require_signed_tools": profile.require_signed_tools,
                 "read_only_standby": profile.read_only_standby,
             })
         })
@@ -892,9 +1238,19 @@ fn profiles_text(cfg: &OracleMcpConfig) -> String {
     for profile in profiles {
         let default = if profile.is_default { " default" } else { "" };
         let protected = if profile.protected { " protected" } else { "" };
+        let signed_tools = if profile.require_signed_tools {
+            " signed-tools"
+        } else {
+            ""
+        };
         out.push_str(&format!(
-            "- {}{}{} max_level={} default_level={}",
-            profile.name, default, protected, profile.max_level, profile.default_level
+            "- {}{}{}{} max_level={} default_level={}",
+            profile.name,
+            default,
+            protected,
+            signed_tools,
+            profile.max_level,
+            profile.default_level
         ));
         if let Some(description) = profile.description {
             out.push_str(&format!(" — {description}"));
@@ -1123,6 +1479,7 @@ mod tests {
             credential_ref = "env:ORACLE_PASSWORD"
             max_level = "READ_ONLY"
             default_level = "READ_ONLY"
+            require_signed_tools = true
             "#,
         )
         .expect("valid config");
@@ -1133,6 +1490,10 @@ mod tests {
         assert_eq!(out["has_default_profile"], serde_json::json!(true));
         assert_eq!(out["profiles"][0]["name"], serde_json::json!("dev"));
         assert_eq!(out["profiles"][0]["is_default"], serde_json::json!(true));
+        assert_eq!(
+            out["profiles"][0]["require_signed_tools"],
+            serde_json::json!(true)
+        );
         let serialized = serde_json::to_string(&out).expect("json");
         assert!(!serialized.contains("APP_USER"));
         assert!(!serialized.contains("ORACLE_PASSWORD"));
@@ -1150,6 +1511,44 @@ mod tests {
     }
 
     #[test]
+    fn setup_payload_is_generic_and_client_ready() {
+        let out = setup_payload(
+            "tenant_ro",
+            "APP_PASSWORD",
+            "/opt/oraclemcp-wrapper",
+            "/etc/oraclemcp/profiles.toml",
+            "/etc/oraclemcp/tools.d",
+        );
+        assert_eq!(out["ok"], serde_json::json!(true));
+        assert_eq!(out["kind"], serde_json::json!("oraclemcp_setup"));
+        assert!(
+            out["profiles_toml"]
+                .as_str()
+                .expect("profiles_toml")
+                .contains("credential_ref = \"env:APP_PASSWORD\"")
+        );
+        assert_eq!(
+            out["claude_mcp_json"]["mcpServers"]["oracle"]["command"],
+            serde_json::json!("/opt/oraclemcp-wrapper")
+        );
+        assert!(
+            out["codex_config_toml"]
+                .as_str()
+                .expect("codex config")
+                .contains("tenant_ro")
+        );
+        assert!(
+            out["custom_tool_toml"]
+                .as_str()
+                .expect("custom tool template")
+                .contains("oraclemcp sign-tool")
+        );
+        let serialized = serde_json::to_string(&out).expect("json");
+        assert!(serialized.contains("dbhost.example.com"));
+        assert!(!serialized.contains("literal:"));
+    }
+
+    #[test]
     fn json_alias_is_accepted_before_and_after_subcommand() {
         let before = Cli::try_parse_from(["oraclemcp", "--json", "profiles"]).expect("parse");
         assert!(before.robot_json);
@@ -1158,6 +1557,45 @@ mod tests {
         let after = Cli::try_parse_from(["oraclemcp", "profiles", "--json"]).expect("parse");
         assert!(after.robot_json);
         assert!(matches!(after.command, Some(Command::Profiles)));
+    }
+
+    #[test]
+    fn setup_and_sign_tool_commands_parse() {
+        let setup = Cli::try_parse_from([
+            "oraclemcp",
+            "--json",
+            "setup",
+            "--profile",
+            "tenant_ro",
+            "--credential-env",
+            "APP_PASSWORD",
+        ])
+        .expect("parse setup");
+        assert!(setup.robot_json);
+        assert!(matches!(
+            setup.command,
+            Some(Command::Setup {
+                ref profile,
+                ref credential_env,
+                ..
+            }) if profile == "tenant_ro" && credential_env == "APP_PASSWORD"
+        ));
+
+        let sign = Cli::try_parse_from([
+            "oraclemcp",
+            "sign-tool",
+            "tools.toml",
+            "--tool",
+            "app_lookup",
+        ])
+        .expect("parse sign-tool");
+        assert!(matches!(
+            sign.command,
+            Some(Command::SignTool {
+                ref path,
+                ref tool,
+            }) if path == Path::new("tools.toml") && tool.as_deref() == Some("app_lookup")
+        ));
     }
 
     #[test]
@@ -1192,6 +1630,12 @@ mod tests {
             serde_json::json!("--json")
         );
         assert!(text.contains("Client smoke tests"));
+        assert!(text.contains("oraclemcp --json setup --profile <profile>"));
+        assert!(
+            serde_json::to_string(&out)
+                .expect("json")
+                .contains("custom_tool_signing")
+        );
         assert!(text.contains("MCP tools/list"));
         assert_eq!(
             out["tool_schema_contract"]["strict_client_safe"],
@@ -1211,18 +1655,26 @@ mod tests {
         );
         assert_eq!(
             out["client_setup"]["smoke_tests"][1]["mcp_method"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            out["client_setup"]["smoke_tests"][2]["mcp_method"],
             serde_json::json!("tools/list")
         );
         assert_eq!(
-            out["diagnostic_flow"][4]["argv"],
+            out["diagnostic_flow"][5]["argv"],
             serde_json::json!(["oraclemcp", "--json", "capabilities"])
         );
         assert_eq!(
             out["first_commands"][0]["argv"],
+            serde_json::json!(["oraclemcp", "--json", "setup", "--profile", "<profile>"])
+        );
+        assert_eq!(
+            out["first_commands"][1]["argv"],
             serde_json::json!(["oraclemcp", "--json", "profiles"])
         );
         assert_eq!(
-            out["first_commands"][2]["argv"],
+            out["first_commands"][3]["argv"],
             serde_json::json!(["oraclemcp", "--json", "doctor", "--profile", "<profile>"])
         );
         assert_eq!(

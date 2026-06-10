@@ -93,8 +93,10 @@ pub type ProfileConnector =
     dyn Fn(&str) -> Result<Box<dyn OracleConnection>, DbError> + Send + Sync + 'static;
 
 /// Profile-scoped custom-tool loader used by `oracle_switch_profile`.
-pub type CustomToolLoader =
-    dyn Fn(&SessionLevelState) -> Result<CustomToolCatalog, ErrorEnvelope> + Send + Sync + 'static;
+pub type CustomToolLoader = dyn Fn(Option<&str>, &SessionLevelState) -> Result<CustomToolCatalog, ErrorEnvelope>
+    + Send
+    + Sync
+    + 'static;
 
 fn default_read_only_level() -> SessionLevelState {
     SessionLevelState::new(OperatingLevel::ReadOnly, false)
@@ -3063,7 +3065,7 @@ impl ToolDispatch for OracleDispatcher {
             let mut response = connection_info_json(Some(profile.clone()), new_conn.describe());
             let new_level = profile_level(&profile);
             let new_custom_catalog = match &self.custom_loader {
-                Some(loader) => loader(&new_level)?,
+                Some(loader) => loader(Some(&profile), &new_level)?,
                 None => CustomToolCatalog::default(),
             };
             let mut state = self.state.lock().map_err(|_| {

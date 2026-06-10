@@ -892,7 +892,8 @@ pub fn tool_registry() -> ToolRegistry {
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner; defaults to current schema." },
                 "table_name": { "type": "string", "description": "Table or view name. May be OWNER.TABLE." },
-                "table": { "type": "string", "description": "Alias for table_name." }
+                "table": { "type": "string", "description": "Alias for table_name." },
+                "name": { "type": "string", "description": "Alias for table_name." }
             }),
             &[],
         )),
@@ -1253,6 +1254,245 @@ mod tests {
                 properties.contains_key("enable_warnings"),
                 "{name} must advertise accepted enable_warnings spelling"
             );
+        }
+    }
+
+    #[test]
+    fn accepted_argument_spellings_stay_advertised() {
+        let registry = tool_registry();
+        let cases: &[(&str, &[&str])] = &[
+            ("oracle_switch_profile", &["profile", "db"]),
+            (
+                "oracle_set_session_level",
+                &[
+                    "level",
+                    "target_level",
+                    "ttl_seconds",
+                    "execute",
+                    "confirm",
+                    "token",
+                    "confirmation_token",
+                    "action",
+                ],
+            ),
+            (
+                "oracle_query",
+                &[
+                    "sql",
+                    "binds",
+                    "cursor",
+                    "max_rows",
+                    "limit",
+                    "max_result_bytes",
+                    "max_lob_chars",
+                    "max_blob_bytes",
+                    "max_col_width",
+                    "numbers_as_float",
+                    "timeout_seconds",
+                ],
+            ),
+            (
+                "oracle_execute",
+                &[
+                    "sql",
+                    "binds",
+                    "commit",
+                    "confirm",
+                    "token",
+                    "confirmation_token",
+                    "capture_dbms_output",
+                    "dbms_output",
+                    "dbms_output_max_lines",
+                    "max_dbms_output_lines",
+                    "dbms_output_max_chars",
+                    "max_dbms_output_chars",
+                    "timeout_seconds",
+                ],
+            ),
+            (
+                "execute_approved",
+                &[
+                    "token",
+                    "confirm",
+                    "confirmation_token",
+                    "sql",
+                    "commit",
+                    "timeout_seconds",
+                    "save_output",
+                    "capture_dbms_output",
+                    "dbms_output",
+                    "dbms_output_max_lines",
+                    "max_dbms_output_lines",
+                    "dbms_output_max_chars",
+                    "max_dbms_output_chars",
+                ],
+            ),
+            (
+                "oracle_compile_object",
+                &[
+                    "object_type",
+                    "owner",
+                    "name",
+                    "object_name",
+                    "plscope",
+                    "warnings",
+                    "enable_warnings",
+                    "execute",
+                    "confirm",
+                    "token",
+                    "confirmation_token",
+                    "timeout_seconds",
+                ],
+            ),
+            (
+                "oracle_create_or_replace",
+                &[
+                    "source_code",
+                    "sql",
+                    "ddl",
+                    "execute",
+                    "confirm",
+                    "token",
+                    "confirmation_token",
+                    "include_errors",
+                    "timeout_seconds",
+                ],
+            ),
+            (
+                "oracle_patch_source",
+                &[
+                    "owner",
+                    "name",
+                    "object_name",
+                    "object_type",
+                    "old_text",
+                    "search_text",
+                    "new_text",
+                    "replacement",
+                    "max_chars",
+                    "execute",
+                    "confirm",
+                    "token",
+                    "confirmation_token",
+                    "include_errors",
+                    "timeout_seconds",
+                ],
+            ),
+            ("read_patch_preview", &["name", "object_name", "max_chars"]),
+            (
+                "deploy_ddl",
+                &[
+                    "name",
+                    "ddl",
+                    "sql",
+                    "source_code",
+                    "execute",
+                    "confirm",
+                    "token",
+                    "confirmation_token",
+                    "wait_seconds",
+                    "include_errors",
+                    "timeout_seconds",
+                ],
+            ),
+            (
+                "oracle_schema_inspect",
+                &["owner", "object_type", "name_like", "max_rows", "limit"],
+            ),
+            ("oracle_list_schemas", &["name_like", "max_rows", "limit"]),
+            ("oracle_describe", &["owner", "table", "table_name", "name"]),
+            ("describe_table", &["owner", "table", "table_name", "name"]),
+            ("oracle_describe_index", &["owner", "name", "index_name"]),
+            ("describe_index", &["owner", "name", "index_name"]),
+            (
+                "oracle_describe_trigger",
+                &["owner", "name", "trigger_name"],
+            ),
+            ("describe_trigger", &["owner", "name", "trigger_name"]),
+            ("oracle_describe_view", &["owner", "name", "view_name"]),
+            ("describe_view", &["owner", "name", "view_name"]),
+            (
+                "oracle_get_ddl",
+                &["object_type", "owner", "name", "object_name"],
+            ),
+            ("get_ddl", &["object_type", "owner", "name", "object_name"]),
+            (
+                "oracle_get_source",
+                &["owner", "name", "object_name", "object_type", "max_chars"],
+            ),
+            (
+                "get_object_source",
+                &["owner", "name", "object_name", "object_type", "max_chars"],
+            ),
+            (
+                "oracle_sample_rows",
+                &["owner", "table", "table_name", "max_rows", "limit"],
+            ),
+            (
+                "oracle_read_clob",
+                &[
+                    "owner",
+                    "table",
+                    "table_name",
+                    "clob_column",
+                    "clob_col",
+                    "pk_column",
+                    "pk_col",
+                    "pk_value",
+                    "pk_val",
+                    "max_chars",
+                ],
+            ),
+            (
+                "get_clob",
+                &[
+                    "owner",
+                    "table",
+                    "table_name",
+                    "clob_column",
+                    "clob_col",
+                    "pk_column",
+                    "pk_col",
+                    "pk_value",
+                    "pk_val",
+                    "max_chars",
+                ],
+            ),
+            ("oracle_compile_errors", &["owner", "name", "object_name"]),
+            ("get_errors", &["owner", "name", "object_name"]),
+            (
+                "oracle_search_source",
+                &[
+                    "owner",
+                    "needle",
+                    "object_type",
+                    "name_like",
+                    "max_rows",
+                    "limit",
+                ],
+            ),
+            ("oracle_plscope_inspect", &["owner", "name", "object_name"]),
+            ("oracle_explain_plan", &["sql", "read_only_standby"]),
+        ];
+
+        for (tool_name, spellings) in cases {
+            let tool = registry
+                .tools
+                .iter()
+                .find(|tool| tool.name == *tool_name)
+                .unwrap_or_else(|| panic!("{tool_name} must be registered"));
+            let properties = tool
+                .input_schema
+                .as_ref()
+                .and_then(|schema| schema.get("properties"))
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{tool_name} must advertise object properties"));
+            for spelling in *spellings {
+                assert!(
+                    properties.contains_key(*spelling),
+                    "{tool_name} must advertise accepted argument spelling {spelling}"
+                );
+            }
         }
     }
 

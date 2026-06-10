@@ -129,6 +129,10 @@ pub struct ConnectionProfile {
     /// Production profile: the ceiling is pinned and immutable (§6.6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protected: Option<bool>,
+    /// Require HMAC signatures for every operator-defined custom tool loaded
+    /// with this profile. Protected profiles imply this even when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_signed_tools: Option<bool>,
     /// Force `READ_ONLY` regardless of profile (Active Data Guard standby).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only_standby: Option<bool>,
@@ -165,6 +169,12 @@ impl ConnectionProfile {
         self.protected.unwrap_or(false)
     }
 
+    /// Whether custom tool definitions must be signed for this profile.
+    #[must_use]
+    pub fn require_signed_tools(&self) -> bool {
+        self.protected() || self.require_signed_tools.unwrap_or(false)
+    }
+
     /// Whether this profile is flagged a read-only standby.
     #[must_use]
     pub fn read_only_standby(&self) -> bool {
@@ -197,6 +207,7 @@ impl ConnectionProfile {
             max_level,
             default_level,
             protected,
+            require_signed_tools,
             read_only_standby,
             session_identity,
             pool,
@@ -218,6 +229,7 @@ impl ConnectionProfile {
             max_level: self.max_level(),
             default_level: self.default_level(),
             protected: self.protected(),
+            require_signed_tools: self.require_signed_tools(),
             read_only_standby: self.read_only_standby(),
         }
     }
@@ -240,6 +252,8 @@ pub struct ProfileMetadata {
     pub default_level: OperatingLevel,
     /// Whether the profile is production-protected.
     pub protected: bool,
+    /// Whether custom tools for this profile require HMAC signatures.
+    pub require_signed_tools: bool,
     /// Whether the profile is a read-only standby.
     pub read_only_standby: bool,
 }
@@ -309,6 +323,7 @@ mod tests {
             max_level: None,
             default_level: None,
             protected: None,
+            require_signed_tools: None,
             read_only_standby: None,
             session_identity: None,
             pool: None,
@@ -323,6 +338,7 @@ mod tests {
         assert_eq!(prof.max_level(), OperatingLevel::ReadOnly);
         assert_eq!(prof.default_level(), OperatingLevel::ReadOnly);
         assert!(!prof.protected());
+        assert!(!prof.require_signed_tools());
     }
 
     #[test]
@@ -383,6 +399,7 @@ mod tests {
         prof.connect_string = Some("prod:1521/svc".to_owned());
         prof.credential_ref = Some("keyring:prod".to_owned());
         prof.username = Some("svc_acct".to_owned());
+        prof.require_signed_tools = Some(true);
         prof.session_identity = Some(SessionIdentityConfig {
             edition: None,
             module: Some("local-client".to_owned()),
@@ -405,6 +422,10 @@ mod tests {
         assert!(
             !json.contains("prod:1521/svc") && !json.contains("connect_string"),
             "connect string leaked into metadata"
+        );
+        assert!(
+            json.contains("require_signed_tools"),
+            "signing policy is safe profile metadata"
         );
     }
 
@@ -430,5 +451,23 @@ mod tests {
         assert_eq!(identity.module.as_deref(), Some("shared-client"));
         assert_eq!(identity.edition.as_deref(), Some("shared-edition"));
         assert_eq!(identity.driver_name.as_deref(), Some("shared-driver"));
+    }
+
+    #[test]
+    fn child_inherits_custom_tool_signing_policy_from_base() {
+        let mut base = p("shared");
+        base.require_signed_tools = Some(true);
+        let mut child = p("dev");
+        child.base = Some("shared".to_owned());
+        let mut profiles = vec![base, child];
+        resolve_inheritance(&mut profiles).expect("resolve");
+        assert!(profiles[1].require_signed_tools());
+    }
+
+    #[test]
+    fn protected_profile_implies_signed_custom_tools() {
+        let mut prod = p("prod");
+        prod.protected = Some(true);
+        assert!(prod.require_signed_tools());
     }
 }

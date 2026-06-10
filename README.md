@@ -35,6 +35,13 @@ The default build is **offline** (no native dependencies), ideal for CI and for 
 cargo install oraclemcp --features live-db
 ```
 
+Generate generic local setup templates for profiles, wrappers, and MCP client
+snippets:
+
+```sh
+oraclemcp --json setup --profile db_ro
+```
+
 **Docker:** a ready-to-run image with Oracle Instant Client bundled (so live-db works out of the box), published to GHCR and listed in the [official MCP registry](https://registry.modelcontextprotocol.io) as `io.github.MuhDur/oraclemcp`:
 
 ```sh
@@ -56,11 +63,20 @@ Wire it into an MCP client (e.g. Claude Desktop) over stdio:
 }
 ```
 
+For Codex-style TOML config, the same command is:
+
+```toml
+[mcp_servers.oracle]
+command = "oraclemcp"
+args = ["serve", "--allow-no-auth"]
+```
+
 Or run it directly:
 
 ```sh
 oraclemcp serve                      # stdio (default); --allow-no-auth for local dev
 oraclemcp serve --listen 127.0.0.1:7070   # Streamable HTTP (bind loopback only)
+oraclemcp --json setup --profile db_ro    # generic onboarding templates
 oraclemcp capabilities               # the advertised tool surface + feature tiers (JSON)
 oraclemcp --json profiles            # configured profile names and non-secret metadata
 oraclemcp doctor                     # offline diagnostics (classifier self-test, NLS, …)
@@ -90,6 +106,7 @@ username = "APP_READONLY"
 credential_ref = "env:ORACLE_APP_PASSWORD"
 max_level = "READ_ONLY"
 default_level = "READ_ONLY"
+require_signed_tools = true
 # Optional Oracle per-round-trip timeout. Tool calls can override it with
 # timeout_seconds where advertised.
 call_timeout_seconds = 30
@@ -132,6 +149,8 @@ The `oracle_connection_info` tool also reports diagnostic fields such as
 current Rust backend, profile config can set the session identity fields shown
 above and the driver name, but `os_user` and `program` remain backend-reported
 values unless the underlying driver exposes setters for them.
+`require_signed_tools = true` requires HMAC signatures for operator-defined
+custom tools on that profile; `protected = true` implies the same policy.
 
 Then launch:
 
@@ -192,6 +211,16 @@ On protected profiles, every custom tool must carry a valid HMAC signature. Set
 definitions. On unprotected profiles, unsigned tools are allowed for local use;
 if any definition includes a `signature`, the same key is required and invalid
 signatures are rejected.
+
+Sign local tool definitions from the same binary:
+
+```sh
+export ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY='...'
+oraclemcp sign-tool ~/.config/oraclemcp/tools.d/customer.toml --tool app_customer_lookup
+```
+
+The command prints the signature values to place into matching `[[tool]]`
+blocks; it does not print the HMAC key.
 
 ## Tools
 
