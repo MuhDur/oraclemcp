@@ -476,20 +476,14 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationLiveDb,
             "Inspect PL/Scope identifier and SQL statement metadata for one PL/SQL object when ALL_IDENTIFIERS/ALL_STATEMENTS are populated.",
         )
-        .with_input_schema(json!({
-            "type": "object",
-            "properties": {
+        .with_input_schema(object_schema(
+            json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
                 "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
                 "object_name": { "type": "string", "description": "Alias for name for compatibility. Prefer name." }
-            },
-            "anyOf": [
-                { "required": ["name"] },
-                { "required": ["object_name"] }
-            ],
-            "required": [],
-            "additionalProperties": false,
-        })),
+            }),
+            &[],
+        )),
     );
 
     registry.register(
@@ -983,11 +977,20 @@ mod tests {
 
     #[test]
     fn every_tool_advertises_an_input_schema() {
+        let top_level_keywords_rejected_by_function_adapters =
+            ["oneOf", "anyOf", "allOf", "enum", "not"];
         for tool in tool_registry().tools {
             let schema = tool
                 .input_schema
                 .unwrap_or_else(|| panic!("{} must advertise an input schema", tool.name));
             assert_eq!(schema["type"], json!("object"), "{}", tool.name);
+            for keyword in top_level_keywords_rejected_by_function_adapters {
+                assert!(
+                    schema.get(keyword).is_none(),
+                    "{} schema must not advertise top-level {keyword}; keep MCP tool parameters function-adapter compatible",
+                    tool.name
+                );
+            }
             assert!(
                 schema.get("required").is_some(),
                 "{} schema declares required args",

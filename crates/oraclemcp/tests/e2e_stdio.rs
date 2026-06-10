@@ -174,6 +174,26 @@ async fn tools_list_advertises_registry_tools_plus_capabilities() {
         1,
         "oracle_capabilities advertised once"
     );
+
+    for tool in tools {
+        let schema = tool
+            .get("inputSchema")
+            .or_else(|| tool.get("input_schema"))
+            .unwrap_or_else(|| panic!("{} must advertise inputSchema", tool["name"]));
+        assert_eq!(
+            schema["type"],
+            json!("object"),
+            "{} schema must be a top-level object",
+            tool["name"]
+        );
+        for keyword in ["oneOf", "anyOf", "allOf", "enum", "not"] {
+            assert!(
+                schema.get(keyword).is_none(),
+                "{} schema must not advertise top-level {keyword}",
+                tool["name"]
+            );
+        }
+    }
 }
 
 #[tokio::test]
