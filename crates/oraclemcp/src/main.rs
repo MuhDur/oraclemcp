@@ -54,7 +54,7 @@ const CUSTOM_TOOLS_HMAC_KEY_ENV: &str = "ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY";
                   list_schemas, switch_profile, set_session_level, preview_sql, describe, get_ddl, \
                   get_source, compile_errors, search_source, plscope_inspect, \
                   sample_rows, read_clob, explain_plan, compile_object, compile_with_warnings, \
-                  create_or_replace, guarded execute) plus the \
+                  create_or_replace, patch_source, guarded execute) plus the \
                   zero-arg oracle_capabilities discovery tool. No PL/SQL engine, \
                   no environment-specific workflow engine."
 )]
@@ -696,6 +696,15 @@ fn robot_docs_guide_json() -> serde_json::Value {
                     "oracle_set_session_level with level=DDL when permitted",
                     "oracle_create_or_replace or oracle_execute with commit=true and the preview confirmation token"
                 ]
+            },
+            {
+                "intent": "patch stored source deliberately",
+                "steps": [
+                    "oracle_get_source or oracle_get_ddl to inspect the current object",
+                    "oracle_patch_source with exact old_text/new_text and execute omitted",
+                    "oracle_set_session_level with level=DDL when permitted",
+                    "oracle_patch_source with execute=true and the preview confirmation token"
+                ]
             }
         ],
         "safety_model": {
@@ -736,6 +745,7 @@ fn robot_docs_guide_json() -> serde_json::Value {
         "agent_rules": [
             "Prefer oracle_query for SELECT/WITH statements.",
             "Use oracle_preview_sql before oracle_execute or DDL helpers.",
+            "Use oracle_patch_source for exact stored-source edits instead of hand-building full replacement DDL when possible.",
             "Never assume DDL can be rollback-previewed.",
             "Treat profile max_level as the hard ceiling for the running server.",
             "Keep company-specific tools, names, identities, and connection details in config."
@@ -792,6 +802,12 @@ MCP DDL workflow
 2. oracle_set_session_level with level=DDL when permitted by the profile ceiling
 3. oracle_create_or_replace or oracle_execute with commit=true and the preview confirmation token
 
+MCP source patch workflow
+1. oracle_get_source or oracle_get_ddl to inspect the current object
+2. oracle_patch_source with exact old_text/new_text and execute omitted
+3. oracle_set_session_level with level=DDL when permitted by the profile ceiling
+4. oracle_patch_source with execute=true and the preview confirmation token
+
 Safety model
 - Levels are ordered READ_ONLY < READ_WRITE < DDL < ADMIN.
 - Profiles default to READ_ONLY and cannot be raised above max_level at runtime.
@@ -814,6 +830,7 @@ Diagnostic flow
 Agent rules
 - Prefer oracle_query for SELECT/WITH statements.
 - Use oracle_preview_sql before oracle_execute or DDL helpers.
+- Use oracle_patch_source for exact stored-source edits instead of hand-building full replacement DDL when possible.
 - Never assume DDL can be rollback-previewed.
 - Treat profile max_level as the hard ceiling for the running server.
 - Keep company-specific tools, names, identities, and connection details in config.

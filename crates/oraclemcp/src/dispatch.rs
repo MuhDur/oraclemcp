@@ -41,6 +41,8 @@ const DEFAULT_SEARCH_MAX_ROWS: usize = 200;
 const MAX_SEARCH_MAX_ROWS: usize = 5_000;
 /// Default cap on `oracle_get_source` source text when the caller omits it.
 const DEFAULT_SOURCE_MAX_CHARS: usize = 1_000_000;
+/// Cap on before/after snippets in `oracle_patch_source` previews.
+const DEFAULT_PATCH_PREVIEW_CHARS: usize = 1_000;
 /// Default cap on `oracle_schema_inspect` result rows when the caller omits it.
 const DEFAULT_SCHEMA_INSPECT_MAX_ROWS: usize = 500;
 /// Hard cap on `oracle_schema_inspect` for a single call.
@@ -395,6 +397,30 @@ struct CreateOrReplaceArgs {
     confirm: Option<String>,
     #[serde(default)]
     include_errors: Option<bool>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct PatchSourceArgs {
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default, alias = "object_name")]
+    name: Option<String>,
+    #[serde(default)]
+    object_type: Option<String>,
+    #[serde(default, alias = "search_text")]
+    old_text: Option<String>,
+    #[serde(default, alias = "replacement")]
+    new_text: Option<String>,
+    #[serde(default)]
+    execute: bool,
+    #[serde(default, alias = "token", alias = "confirmation_token")]
+    confirm: Option<String>,
+    #[serde(default)]
+    include_errors: Option<bool>,
+    #[serde(default)]
+    max_chars: Option<usize>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
 }
@@ -2034,6 +2060,428 @@ fn create_or_replace_source_arg(
     Ok(source)
 }
 
+#[derive(Clone, Debug)]
+struct PatchSourceDocument {
+    text: String,
+    source_kind: &'static str,
+    line_count: Option<usize>,
+    char_count: usize,
+}
+
+fn normalize_patch_object_type(
+    tool_name: &str,
+    value: Option<String>,
+) -> Result<String, ErrorEnvelope> {
+    let value = non_empty_arg(value).or_else(|| match tool_name {
+        "patch_package" => Some("PACKAGE BODY".to_owned()),
+        "patch_view" => Some("VIEW".to_owned()),
+        _ => None,
+    });
+    let Some(value) = value else {
+        return Err(invalid_args(format!(
+            "invalid arguments for {tool_name}: missing required `object_type`"
+        ))
+        .with_next_step(
+            "use PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW",
+        ));
+    };
+    let normalized = value.trim().to_ascii_uppercase().replace('_', " ");
+    match normalized.as_str() {
+        "PACKAGE" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "TYPE" | "VIEW" => Ok(normalized),
+        "PACKAGE BODY" | "TYPE BODY" => Ok(normalized),
+        _ => Err(invalid_args(format!(
+            "invalid arguments for {tool_name}: unsupported object_type {value:?}"
+        ))
+        .with_next_step(
+            "use PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW",
+        )),
+    }
+}
+
+fn required_patch_old_text(
+    tool_name: &str,
+    value: Option<String>,
+) -> Result<String, ErrorEnvelope> {
+    match value {
+        Some(value) if !value.is_empty() => Ok(value),
+        _ => Err(invalid_args(format!(
+            "invalid arguments for {tool_name}: missing required non-empty `old_text`"
+        ))),
+    }
+}
+
+fn required_patch_new_text(
+    tool_name: &str,
+    value: Option<String>,
+) -> Result<String, ErrorEnvelope> {
+    value.ok_or_else(|| {
+        invalid_args(format!(
+            "invalid arguments for {tool_name}: missing required `new_text`"
+        ))
+    })
+}
+
+fn fetch_patch_source_document(
+    conn: &dyn OracleConnection,
+    owner: &str,
+    name: &str,
+    object_type: &str,
+    max_chars: usize,
+) -> Result<PatchSourceDocument, ErrorEnvelope> {
+    if object_type == "VIEW" {
+        let ddl = get_ddl(conn, "VIEW", owner, name)
+            .map_err(DbError::into_envelope)?
+            .ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorClass::ObjectNotFound,
+                    format!("VIEW {owner}.{name} is not visible to this session"),
+                )
+                .with_suggested_tool("oracle_get_ddl")
+            })?;
+        return Ok(PatchSourceDocument {
+            char_count: ddl.chars().count(),
+            text: ddl,
+            source_kind: "dbms_metadata",
+            line_count: None,
+        });
+    }
+
+    let source =
+        get_source(conn, owner, name, object_type, max_chars).map_err(DbError::into_envelope)?;
+    if source.line_count == 0 {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::ObjectNotFound,
+            format!("{object_type} {owner}.{name} source is not visible to this session"),
+        )
+        .with_suggested_tool("oracle_get_source"));
+    }
+    if source.truncated {
+        return Err(invalid_args(format!(
+            "source for {owner}.{name} was truncated at {max_chars} characters; refusing to patch partial source"
+        ))
+        .with_suggested_tool("oracle_get_source")
+        .with_next_step("raise max_chars and preview the patch again"));
+    }
+    Ok(PatchSourceDocument {
+        text: source.source,
+        source_kind: "all_source",
+        line_count: Some(source.line_count),
+        char_count: source.char_count,
+    })
+}
+
+fn find_unique_patch_match(
+    source: &str,
+    old_text: &str,
+    tool_name: &str,
+) -> Result<usize, ErrorEnvelope> {
+    let mut matches = source.match_indices(old_text);
+    let Some((first_idx, _)) = matches.next() else {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::ObjectNotFound,
+            "old_text was not found exactly in the current source",
+        )
+        .with_suggested_tool("oracle_get_source")
+        .with_next_step("fetch the current source and pass an exact old_text slice"));
+    };
+    if matches.next().is_some() {
+        return Err(invalid_args(format!(
+            "invalid arguments for {tool_name}: old_text matches more than once; include more surrounding context"
+        ))
+        .with_suggested_tool("oracle_get_source"));
+    }
+    Ok(first_idx)
+}
+
+fn create_or_replace_ddl_from_source(source: &str) -> String {
+    if source
+        .trim_start()
+        .to_ascii_uppercase()
+        .starts_with("CREATE OR REPLACE ")
+    {
+        source.to_owned()
+    } else {
+        format!("CREATE OR REPLACE {source}")
+    }
+}
+
+fn line_number_at(source: &str, byte_idx: usize) -> usize {
+    source[..byte_idx].bytes().filter(|b| *b == b'\n').count() + 1
+}
+
+fn logical_line_count(value: &str) -> usize {
+    if value.is_empty() {
+        0
+    } else {
+        value.lines().count().max(1)
+    }
+}
+
+fn patch_diff_json(source: &str, match_idx: usize, old_text: &str, new_text: &str) -> Value {
+    json!({
+        "format": "exact-replacement",
+        "start_line": line_number_at(source, match_idx),
+        "old_line_count": logical_line_count(old_text),
+        "new_line_count": logical_line_count(new_text),
+        "old_preview": source_preview_json(old_text, DEFAULT_PATCH_PREVIEW_CHARS),
+        "new_preview": source_preview_json(new_text, DEFAULT_PATCH_PREVIEW_CHARS),
+    })
+}
+
+fn patch_next_actions(
+    tool_name: &str,
+    gate: &LevelDecision,
+    identity: (&str, &str, &str),
+    patch: (&str, &str),
+    max_chars: usize,
+    confirm: Option<&str>,
+) -> Value {
+    let (owner, name, object_type) = identity;
+    let (old_text, new_text) = patch;
+    let mut actions = Vec::new();
+    match gate {
+        LevelDecision::Allow => {
+            if let Some(confirm) = confirm {
+                actions.push(json!({
+                    "intent": "apply_source_patch",
+                    "tool": tool_name,
+                    "args": {
+                        "owner": owner,
+                        "name": name,
+                        "object_type": object_type,
+                        "old_text": old_text,
+                        "new_text": new_text,
+                        "max_chars": max_chars,
+                        "execute": true,
+                        "confirm": confirm,
+                    },
+                }));
+            }
+        }
+        LevelDecision::RequireStepUp { target } => {
+            actions.push(json!({
+                "intent": "preview_session_level_step_up",
+                "tool": "oracle_set_session_level",
+                "args": { "level": target, "ttl_seconds": DEFAULT_SESSION_LEVEL_TTL_SECONDS },
+                "required_level": target,
+            }));
+            actions.push(json!({
+                "intent": "choose_different_profile",
+                "tool": "oracle_list_profiles",
+                "args": {},
+                "required_level": target,
+            }));
+        }
+        LevelDecision::Blocked { reason } => match reason {
+            oraclemcp_guard::BlockReason::ExceedsCeiling { required, ceiling } => {
+                actions.push(json!({
+                    "intent": "choose_different_profile",
+                    "tool": "oracle_list_profiles",
+                    "args": {},
+                    "required_level": required,
+                    "current_ceiling": ceiling,
+                }));
+            }
+            oraclemcp_guard::BlockReason::Forbidden => {
+                actions.push(json!({
+                    "intent": "adjust_patch",
+                    "message": "patch result must be one plain CREATE OR REPLACE statement without dynamic SQL or extra statements",
+                }));
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+    Value::Array(actions)
+}
+
+fn is_patch_body_object_type(object_type: &str) -> bool {
+    matches!(object_type, "PACKAGE BODY" | "TYPE BODY")
+}
+
+fn contains_patch_side_effect_marker(source: &str) -> bool {
+    let normalized = source
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase();
+    [
+        "EXECUTE IMMEDIATE",
+        "DBMS_SQL",
+        "UTL_FILE",
+        "UTL_HTTP",
+        "UTL_TCP",
+        "UTL_SMTP",
+        "DBMS_SCHEDULER",
+        "DBMS_JOB",
+        "PRAGMA AUTONOMOUS_TRANSACTION",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn patch_source(
+    conn: &dyn OracleConnection,
+    active_profile: Option<&str>,
+    session: &SessionLevelState,
+    tool_name: &str,
+    args: PatchSourceArgs,
+) -> Result<Value, ErrorEnvelope> {
+    with_call_timeout(conn, args.timeout_seconds, || {
+        patch_source_inner(conn, active_profile, session, tool_name, args)
+    })
+}
+
+fn patch_source_inner(
+    conn: &dyn OracleConnection,
+    active_profile: Option<&str>,
+    session: &SessionLevelState,
+    tool_name: &str,
+    args: PatchSourceArgs,
+) -> Result<Value, ErrorEnvelope> {
+    let object_name = required_non_empty_arg(tool_name, "name", args.name)?;
+    let object_type = normalize_patch_object_type(tool_name, args.object_type)?;
+    let old_text = required_patch_old_text(tool_name, args.old_text)?;
+    let new_text = required_patch_new_text(tool_name, args.new_text)?;
+    let max_chars = args.max_chars.unwrap_or(DEFAULT_SOURCE_MAX_CHARS).max(1);
+    let (owner, object_name) = owner_and_name_arg(conn, args.owner, object_name, "name")?;
+    let document =
+        fetch_patch_source_document(conn, &owner, &object_name, &object_type, max_chars)?;
+    let match_idx = find_unique_patch_match(&document.text, &old_text, tool_name)?;
+    let mut patched_source = document.text.clone();
+    patched_source.replace_range(match_idx..match_idx + old_text.len(), &new_text);
+    let patched_ddl = if object_type == "VIEW" {
+        patched_source.clone()
+    } else {
+        create_or_replace_ddl_from_source(&patched_source)
+    };
+    let patched_ddl = create_or_replace_source_arg(tool_name, Some(patched_ddl))?;
+    let decision = Classifier::new(ClassifierConfig::new()).classify(&patched_ddl);
+    let classifier_gate = decision.gate(session);
+    let classifier_forbidden = matches!(
+        &classifier_gate,
+        LevelDecision::Blocked {
+            reason: oraclemcp_guard::BlockReason::Forbidden
+        }
+    );
+    let body_balance_override = classifier_forbidden
+        && is_patch_body_object_type(&object_type)
+        && !contains_patch_side_effect_marker(&patched_ddl);
+    let patch_required_level = if decision.required_level.is_some() || body_balance_override {
+        Some(OperatingLevel::Ddl)
+    } else {
+        None
+    };
+    let patch_guard_note = body_balance_override.then_some(
+        "generic classifier could not balance a stored package/type body; patch path enforced DDL gate and side-effect marker scan",
+    );
+    let gate = if classifier_forbidden && !body_balance_override {
+        classifier_gate
+    } else {
+        session.evaluate(patch_required_level)
+    };
+    let (gate_decision, blocked_reason, step_up_target) = gate_decision_json(&gate);
+    let confirm = match (patch_required_level, &gate) {
+        (Some(level), LevelDecision::Allow) => {
+            execute_confirmation_token(&patched_ddl, level, active_profile)
+        }
+        _ => None,
+    };
+
+    if !args.execute {
+        return Ok(json!({
+            "applied": false,
+            "preview": true,
+            "owner": owner,
+            "name": object_name,
+            "object_type": object_type,
+            "source_kind": document.source_kind,
+            "line_count": document.line_count,
+            "char_count": document.char_count,
+            "match_count": 1,
+            "diff": patch_diff_json(&document.text, match_idx, &old_text, &new_text),
+            "patched_source_preview": source_preview_json(&patched_source, DEFAULT_PATCH_PREVIEW_CHARS),
+            "patched_ddl_preview": source_preview_json(&patched_ddl, DEFAULT_PATCH_PREVIEW_CHARS),
+            "danger": decision.danger,
+            "required_level": patch_required_level,
+            "session_level": session.effective_level(),
+            "profile_ceiling": session.effective_ceiling(),
+            "gate_decision": gate_decision,
+            "blocked_reason": blocked_reason,
+            "step_up_target": step_up_target,
+            "reason": decision.reason,
+            "patch_guard_note": patch_guard_note,
+            "confirmation": confirm.as_ref().map(|confirm| json!({
+                "tool": tool_name,
+                "execute": true,
+                "confirm": confirm,
+                "note": "Pass confirm only when you intend to apply this exact source patch on this active profile.",
+            })),
+            "next_actions": patch_next_actions(
+                tool_name,
+                &gate,
+                (&owner, &object_name, &object_type),
+                (&old_text, &new_text),
+                max_chars,
+                confirm.as_deref(),
+            ),
+        }));
+    }
+
+    if !matches!(gate, LevelDecision::Allow) {
+        return Err(execute_gate_error(&decision, gate, session));
+    }
+    let Some(expected) = confirm else {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "patch confirmation could not be generated",
+        ));
+    };
+    if args.confirm.as_deref() != Some(expected.as_str()) {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::ChallengeRequired,
+            "source patch requires the confirmation token from a preview of this exact object/profile/patch",
+        )
+        .with_suggested_tool(tool_name)
+        .with_next_step("call the patch tool without execute=true, then pass confirmation.confirm with execute=true"));
+    }
+
+    let rows_affected = match conn.execute(&patched_ddl, &[]) {
+        Ok(rows) => rows,
+        Err(e) => {
+            let _ = conn.rollback();
+            return Err(DbError::into_envelope(e));
+        }
+    };
+    conn.commit().map_err(DbError::into_envelope)?;
+    let include_errors = args.include_errors.unwrap_or(true);
+    let errors = if include_errors {
+        Some(compile_errors(conn, &owner, Some(&object_name)).map_err(DbError::into_envelope)?)
+    } else {
+        None
+    };
+    Ok(json!({
+        "applied": true,
+        "preview": false,
+        "executed": true,
+        "committed": true,
+        "rows_affected": rows_affected,
+        "patch_tool": tool_name,
+        "owner": owner,
+        "name": object_name,
+        "object_type": object_type,
+        "source_kind": document.source_kind,
+        "required_level": OperatingLevel::Ddl,
+        "danger": decision.danger,
+        "objects_affected": decision.objects_affected,
+        "reason": decision.reason,
+        "patch_guard_note": patch_guard_note,
+        "diff": patch_diff_json(&document.text, match_idx, &old_text, &new_text),
+        "errors": errors.as_ref().map(|rows| rows_to_json(rows)),
+        "error_count": errors.as_ref().map(Vec::len),
+    }))
+}
+
 fn create_or_replace(
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
@@ -2395,6 +2843,7 @@ fn canonical_tool_name(name: &str) -> &str {
         "get_schema" => "oracle_schema_inspect",
         "compile_object" | "compile_with_warnings" => "oracle_compile_object",
         "create_or_replace" => "oracle_create_or_replace",
+        "patch_package" | "patch_view" => "oracle_patch_source",
         "execute_approved" => "execute_approved",
         "deploy_ddl" => "deploy_ddl",
         "describe_table" => "oracle_describe",
@@ -2504,6 +2953,10 @@ impl ToolDispatch for OracleDispatcher {
                     name,
                     a,
                 );
+            }
+            "oracle_patch_source" => {
+                let a: PatchSourceArgs = parse_args(name, args)?;
+                return patch_source(conn, state.active_profile.as_deref(), &state.level, name, a);
             }
             "oracle_list_profiles" => {
                 ensure_no_args(name, args)?;
@@ -2870,6 +3323,16 @@ mod tests {
                         "LOB_VALUE".to_owned(),
                         OracleCell::new("CLOB", Some("large text".to_owned())),
                     ),
+                    (
+                        "TEXT".to_owned(),
+                        OracleCell::new(
+                            "VARCHAR2",
+                            Some(
+                                "PACKAGE BODY EMP_API AS\nPROCEDURE P IS BEGIN NULL; END;\nEND EMP_API;\n"
+                                    .to_owned(),
+                            ),
+                        ),
+                    ),
                 ],
             }])
         }
@@ -2932,7 +3395,13 @@ mod tests {
             Ok(vec![OracleRow {
                 columns: vec![(
                     "TEXT".to_owned(),
-                    OracleCell::new("VARCHAR2", Some("BEGIN NULL; END;\n".to_owned())),
+                    OracleCell::new(
+                        "VARCHAR2",
+                        Some(
+                            "PACKAGE BODY EMP_API AS\nPROCEDURE P IS BEGIN NULL; END;\nEND EMP_API;\n"
+                                .to_owned(),
+                        ),
+                    ),
                 )],
             }])
         }
@@ -3060,13 +3529,28 @@ mod tests {
         }
 
         fn query_rows(&self, sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
-            if sql.to_ascii_lowercase().contains("from all_errors") {
+            let sql_lc = sql.to_ascii_lowercase();
+            if sql_lc.contains("from all_errors") {
                 return Ok(self
                     .state
                     .diagnostics
                     .lock()
                     .expect("diagnostics mutex")
                     .clone());
+            }
+            if sql_lc.contains("from all_source") {
+                return Ok(vec![OracleRow {
+                    columns: vec![(
+                        "TEXT".to_owned(),
+                        OracleCell::new(
+                            "VARCHAR2",
+                            Some(
+                                "PACKAGE BODY EMP_API AS\nPROCEDURE P IS BEGIN NULL; END;\nEND EMP_API;\n"
+                                    .to_owned(),
+                            ),
+                        ),
+                    )],
+                }]);
             }
             Ok(Vec::new())
         }
@@ -3200,6 +3684,9 @@ mod tests {
             "oracle_create_or_replace" => {
                 json!({ "source_code": "CREATE OR REPLACE VIEW EMP_V AS SELECT 1 AS ID FROM dual" })
             }
+            "oracle_patch_source" => {
+                json!({ "object_type": "PACKAGE_BODY", "owner": "HR", "name": "EMP_API", "old_text": "NULL", "new_text": "1" })
+            }
             "current_database" => json!({}),
             "switch_database" => json!({ "db": "other" }),
             "enable_writes" => json!({ "ttl_seconds": 60 }),
@@ -3218,6 +3705,12 @@ mod tests {
             }
             "create_or_replace" => {
                 json!({ "source_code": "CREATE OR REPLACE VIEW EMP_V AS SELECT 1 AS ID FROM dual" })
+            }
+            "patch_package" => {
+                json!({ "owner": "HR", "object_name": "EMP_API", "search_text": "NULL", "replacement": "1" })
+            }
+            "patch_view" => {
+                json!({ "owner": "HR", "object_name": "EMP_V", "old_text": "CREATE TABLE ...", "new_text": "CREATE OR REPLACE VIEW EMP_V AS SELECT 1 AS ID FROM dual" })
             }
             "deploy_ddl" => {
                 json!({ "ddl": "CREATE OR REPLACE VIEW EMP_V AS SELECT 1 AS ID FROM dual" })
@@ -3273,6 +3766,8 @@ mod tests {
             "switch_database",
             "query",
             "compile_object",
+            "patch_package",
+            "patch_view",
             "list_objects",
             "list_schemas",
             "get_schema",
@@ -3640,6 +4135,132 @@ mod tests {
         assert_eq!(out["source_count"], json!(2));
         assert_eq!(out["sources"][0]["object_type"], json!("PACKAGE"));
         assert_eq!(out["sources"][1]["object_type"], json!("PACKAGE BODY"));
+    }
+
+    #[test]
+    fn patch_source_preview_requires_unique_match_and_returns_confirmation() {
+        let dispatcher = OracleDispatcher::new_switchable(
+            Box::new(SourceLookupMock),
+            Some("dev".to_owned()),
+            ddl_level(),
+            Arc::new(|_| Ok(Box::new(SourceLookupMock))),
+        );
+        let out = dispatcher
+            .dispatch(
+                "oracle_patch_source",
+                json!({
+                    "owner": "APP",
+                    "name": "EMP_API",
+                    "object_type": "PACKAGE_BODY",
+                    "old_text": "NULL",
+                    "new_text": "1",
+                }),
+            )
+            .expect("patch preview succeeds");
+        assert_eq!(out["applied"], json!(false));
+        assert_eq!(out["preview"], json!(true));
+        assert_eq!(out["source_kind"], json!("all_source"));
+        assert_eq!(out["object_type"], json!("PACKAGE BODY"));
+        assert_eq!(out["match_count"], json!(1));
+        assert_eq!(out["diff"]["start_line"], json!(2));
+        assert!(
+            out["patched_ddl_preview"]["text"]
+                .as_str()
+                .expect("preview text")
+                .contains("CREATE OR REPLACE PACKAGE BODY EMP_API")
+        );
+        assert_eq!(out["confirmation"]["tool"], json!("oracle_patch_source"));
+        assert_eq!(out["next_actions"][0]["tool"], json!("oracle_patch_source"));
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_patch_source",
+                json!({
+                    "owner": "APP",
+                    "name": "EMP_API",
+                    "object_type": "PACKAGE_BODY",
+                    "old_text": "EMP_API",
+                    "new_text": "EMP_API2",
+                }),
+            )
+            .expect_err("duplicate exact match is rejected");
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+        assert!(err.message.contains("matches more than once"));
+
+        let blocked = dispatcher
+            .dispatch(
+                "oracle_patch_source",
+                json!({
+                    "owner": "APP",
+                    "name": "EMP_API",
+                    "object_type": "PACKAGE_BODY",
+                    "old_text": "NULL",
+                    "new_text": "EXECUTE IMMEDIATE 'DROP TABLE T'",
+                }),
+            )
+            .expect("unsafe patch previews but does not mint confirmation");
+        assert_eq!(blocked["gate_decision"], json!("blocked"));
+        assert_eq!(blocked["confirmation"], Value::Null);
+    }
+
+    #[test]
+    fn patch_source_execute_refetches_and_uses_create_or_replace_gate() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_switchable(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            ddl_level(),
+            Arc::new(|_| Ok(Box::new(OneRowMock))),
+        );
+        let preview_args = json!({
+            "owner": "APP",
+            "name": "EMP_API",
+            "object_type": "PACKAGE_BODY",
+            "old_text": "NULL",
+            "new_text": "1",
+        });
+        let preview = dispatcher
+            .dispatch("oracle_patch_source", preview_args.clone())
+            .expect("patch preview succeeds");
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("confirm token")
+            .to_owned();
+        let mut execute_args = preview_args;
+        execute_args["execute"] = json!(true);
+        execute_args["confirm"] = json!(confirm);
+
+        let out = dispatcher
+            .dispatch("oracle_patch_source", execute_args)
+            .expect("patch execute succeeds");
+        assert_eq!(out["applied"], json!(true));
+        assert_eq!(out["patch_tool"], json!("oracle_patch_source"));
+        let executed = state.executed.lock().expect("executed SQL");
+        assert_eq!(executed.len(), 1);
+        assert!(
+            executed[0]
+                .0
+                .contains("CREATE OR REPLACE PACKAGE BODY EMP_API")
+        );
+        assert!(executed[0].0.contains("BEGIN 1; END;"));
+        assert_eq!(state.commits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn patch_view_alias_defaults_to_view_ddl() {
+        let dispatcher = OracleDispatcher::new_switchable(
+            Box::new(OneRowMock),
+            Some("dev".to_owned()),
+            ddl_level(),
+            Arc::new(|_| Ok(Box::new(OneRowMock))),
+        );
+        let out = dispatcher
+            .dispatch("patch_view", args_for("patch_view"))
+            .expect("patch_view defaults object_type");
+        assert_eq!(out["preview"], json!(true));
+        assert_eq!(out["object_type"], json!("VIEW"));
+        assert_eq!(out["source_kind"], json!("dbms_metadata"));
+        assert_eq!(out["confirmation"]["tool"], json!("patch_view"));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 45] = [
+pub const TOOL_NAMES: [&str; 48] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -25,6 +25,7 @@ pub const TOOL_NAMES: [&str; 45] = [
     "oracle_execute",
     "oracle_compile_object",
     "oracle_create_or_replace",
+    "oracle_patch_source",
     "oracle_list_schemas",
     "oracle_schema_inspect",
     "oracle_describe",
@@ -52,6 +53,8 @@ pub const TOOL_NAMES: [&str; 45] = [
     "compile_object",
     "compile_with_warnings",
     "create_or_replace",
+    "patch_package",
+    "patch_view",
     "deploy_ddl",
     "list_objects",
     "list_schemas",
@@ -256,6 +259,35 @@ pub fn tool_registry() -> ToolRegistry {
                 "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
             }),
             &[],
+        ))
+        .destructive(),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_patch_source",
+            ToolTier::FoundationLiveDb,
+            "Preview or apply an exact old_text to new_text replacement against one stored source object; preview refetches the current source and execute uses the existing DDL confirmation gate.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner. Defaults to the current schema when available." },
+                "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
+                "object_name": { "type": "string", "description": "Alias for name." },
+                "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
+                "old_text": { "type": "string", "description": "Exact non-empty text to replace. It must match the current source exactly once." },
+                "search_text": { "type": "string", "description": "Alias for old_text." },
+                "new_text": { "type": "string", "description": "Replacement text. May be empty to delete the matched text." },
+                "replacement": { "type": "string", "description": "Alias for new_text." },
+                "max_chars": { "type": "integer", "minimum": 1, "maximum": 10000000, "description": "Maximum source characters to fetch before patching (default 1000000)." },
+                "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
+                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
+                "token": { "type": "string", "description": "Alias for confirm." },
+                "confirmation_token": { "type": "string", "description": "Alias for confirm." },
+                "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the patched object when possible. Default true." },
+                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
+            }),
+            &["object_type"],
         ))
         .destructive(),
     );
@@ -701,6 +733,63 @@ pub fn tool_registry() -> ToolRegistry {
 
     registry.register(
         ToolDescriptor::new(
+            "patch_package",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_patch_source; defaults object_type to PACKAGE_BODY when omitted.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
+                "name": { "type": "string", "description": "Package name. May be OWNER.NAME. Required unless object_name is supplied." },
+                "object_name": { "type": "string", "description": "Alias for name." },
+                "object_type": { "type": "string", "description": "Optional override, usually PACKAGE or PACKAGE_BODY. Defaults to PACKAGE_BODY." },
+                "old_text": { "type": "string", "description": "Exact non-empty text to replace. It must match the current source exactly once." },
+                "search_text": { "type": "string", "description": "Alias for old_text." },
+                "new_text": { "type": "string", "description": "Replacement text. May be empty to delete the matched text." },
+                "replacement": { "type": "string", "description": "Alias for new_text." },
+                "max_chars": { "type": "integer", "minimum": 1, "maximum": 10000000, "description": "Maximum source characters to fetch before patching (default 1000000)." },
+                "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
+                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
+                "token": { "type": "string", "description": "Alias for confirm." },
+                "confirmation_token": { "type": "string", "description": "Alias for confirm." },
+                "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the patched object when possible. Default true." },
+                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
+            }),
+            &[],
+        ))
+        .destructive(),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "patch_view",
+            ToolTier::FoundationLiveDb,
+            "Compatibility alias for oracle_patch_source; defaults object_type to VIEW when omitted.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
+                "name": { "type": "string", "description": "View name. May be OWNER.NAME. Required unless object_name is supplied." },
+                "object_name": { "type": "string", "description": "Alias for name." },
+                "old_text": { "type": "string", "description": "Exact non-empty text to replace. It must match the current view DDL exactly once." },
+                "search_text": { "type": "string", "description": "Alias for old_text." },
+                "new_text": { "type": "string", "description": "Replacement text. May be empty to delete the matched text." },
+                "replacement": { "type": "string", "description": "Alias for new_text." },
+                "max_chars": { "type": "integer", "minimum": 1, "maximum": 10000000, "description": "Accepted for symmetry with source patching." },
+                "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
+                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
+                "token": { "type": "string", "description": "Alias for confirm." },
+                "confirmation_token": { "type": "string", "description": "Alias for confirm." },
+                "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the patched view when possible. Default true." },
+                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
+            }),
+            &[],
+        ))
+        .destructive(),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
             "deploy_ddl",
             ToolTier::FoundationLiveDb,
             "Compatibility wrapper for one DDL statement. Preview is the default; execution reuses the same DDL profile gate and confirmation as oracle_execute/oracle_create_or_replace.",
@@ -958,11 +1047,14 @@ mod tests {
                 "oracle_execute",
                 "oracle_compile_object",
                 "oracle_create_or_replace",
+                "oracle_patch_source",
                 "enable_writes",
                 "execute_approved",
                 "compile_object",
                 "compile_with_warnings",
                 "create_or_replace",
+                "patch_package",
+                "patch_view",
                 "deploy_ddl"
             ],
             "only guarded session elevation/execution/deploy/compile tools are destructive"
