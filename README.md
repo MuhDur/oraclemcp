@@ -240,6 +240,7 @@ compatibility aliases that route to the guarded `oracle_*` tools:
 | `compile_with_warnings` | `oracle_compile_object` with `warnings=true` |
 | `create_or_replace` | `oracle_create_or_replace` |
 | `deploy_ddl` | Compatibility wrapper for one DDL statement; preview by default, execution reuses the same DDL profile gate and confirmation |
+| `read_patch_preview` | Compatibility helper that lists or reads the last in-process source-patch preview created by `oracle_patch_source`, `patch_package`, or `patch_view` |
 | `list_objects` | `oracle_schema_inspect` |
 | `list_schemas` | `oracle_list_schemas` |
 | `get_schema` | `oracle_schema_inspect` |
@@ -256,6 +257,9 @@ Aliases share the same SQL classifier, argument validation, profile handling,
 and operating-level behavior as their `oracle_*` targets.
 
 `oracle_query` and `oracle_explain_plan` accept a raw statement and so pass through the read-only gate. `oracle_preview_sql` runs that classifier without executing the SQL and includes the active profile ceiling so agents can distinguish "allowed on this profile", "requires a higher profile/session level", and "blocked by policy." When a non-read statement is currently executable, `oracle_preview_sql` also returns `execute_confirmation.confirm`; pass that value to `oracle_execute` with `commit=true` only when you intend to commit that exact statement on the active profile. The dictionary tools build their own parameterized SQL and never execute caller-supplied statements.
+
+Confirmation tokens are process-local preview tokens. Regenerate them after
+restarting the server or switching profiles.
 
 When a statement is allowed by the profile ceiling but above the current session
 level, call `oracle_set_session_level` first without `execute=true`. The preview
@@ -294,6 +298,16 @@ confirmation token and `DDL` session/profile gate as `oracle_execute`. When it
 can infer the target object from a simple package/procedure/function/trigger/
 type/view name, the apply result includes current compile errors for that
 object.
+
+`deploy_ddl` is a compatibility wrapper over that same path. It accepts `name`
+and `wait_seconds` for older callers, returns them in the response, and executes
+synchronously in the generic core.
+
+`oracle_patch_source`, `patch_package`, and `patch_view` preview exact
+`old_text` to `new_text` replacements against current stored source. The
+`read_patch_preview` compatibility helper can list or return the last remembered
+in-process patch preview for the active profile, but the applying call must
+still pass the confirmation token from the preview.
 
 ## Architecture
 

@@ -702,6 +702,7 @@ fn robot_docs_guide_json() -> serde_json::Value {
                 "steps": [
                     "oracle_get_source or oracle_get_ddl to inspect the current object",
                     "oracle_patch_source with exact old_text/new_text and execute omitted",
+                    "read_patch_preview when a compatibility client needs to re-read the last in-process patch preview",
                     "oracle_set_session_level with level=DDL when permitted",
                     "oracle_patch_source with execute=true and the preview confirmation token"
                 ]
@@ -746,6 +747,9 @@ fn robot_docs_guide_json() -> serde_json::Value {
             "Prefer oracle_query for SELECT/WITH statements.",
             "Use oracle_preview_sql before oracle_execute or DDL helpers.",
             "Use oracle_patch_source for exact stored-source edits instead of hand-building full replacement DDL when possible.",
+            "Use read_patch_preview only for in-process compatibility reads of the last source-patch preview.",
+            "deploy_ddl accepts name and wait_seconds for compatibility; the generic core executes synchronously and returns those fields.",
+            "Treat confirmation tokens as process-local preview tokens; regenerate them after restarting the server.",
             "Never assume DDL can be rollback-previewed.",
             "Treat profile max_level as the hard ceiling for the running server.",
             "Keep company-specific tools, names, identities, and connection details in config."
@@ -805,14 +809,16 @@ MCP DDL workflow
 MCP source patch workflow
 1. oracle_get_source or oracle_get_ddl to inspect the current object
 2. oracle_patch_source with exact old_text/new_text and execute omitted
-3. oracle_set_session_level with level=DDL when permitted by the profile ceiling
-4. oracle_patch_source with execute=true and the preview confirmation token
+3. read_patch_preview when a compatibility client needs to re-read the last in-process patch preview
+4. oracle_set_session_level with level=DDL when permitted by the profile ceiling
+5. oracle_patch_source with execute=true and the preview confirmation token
 
 Safety model
 - Levels are ordered READ_ONLY < READ_WRITE < DDL < ADMIN.
 - Profiles default to READ_ONLY and cannot be raised above max_level at runtime.
 - DML rolls back by default.
 - DDL and ADMIN require commit=true plus confirmation because Oracle cannot rollback-preview them.
+- Confirmation tokens are process-local preview tokens; regenerate them after restarting the server.
 
 Configuration
 - Profiles: ~/.config/oraclemcp/profiles.toml or ORACLEMCP_CONFIG.
@@ -831,6 +837,8 @@ Agent rules
 - Prefer oracle_query for SELECT/WITH statements.
 - Use oracle_preview_sql before oracle_execute or DDL helpers.
 - Use oracle_patch_source for exact stored-source edits instead of hand-building full replacement DDL when possible.
+- Use read_patch_preview only for in-process compatibility reads of the last source-patch preview.
+- deploy_ddl accepts name and wait_seconds for compatibility; the generic core executes synchronously and returns those fields.
 - Never assume DDL can be rollback-previewed.
 - Treat profile max_level as the hard ceiling for the running server.
 - Keep company-specific tools, names, identities, and connection details in config.

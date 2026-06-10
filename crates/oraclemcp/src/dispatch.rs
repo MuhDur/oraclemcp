@@ -11,7 +11,7 @@
 //! discovery tool is answered by the server itself and never reaches here.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use oraclemcp_config::OracleMcpConfig;
@@ -83,6 +83,8 @@ const MAX_DBMS_OUTPUT_BUFFER_BYTES: usize = 1_000_000;
 const EXECUTE_APPROVED_TOKEN_TTL_SECONDS: u64 = 300;
 /// Hard cap on remembered compatibility grants in one server process.
 const MAX_EXECUTE_APPROVED_TOKENS: usize = 128;
+/// Hard cap on remembered source patch previews in one server process.
+const MAX_PATCH_PREVIEWS: usize = 128;
 /// Hard cap on per-call Oracle round-trip timeout overrides.
 const MAX_CALL_TIMEOUT_SECONDS: u64 = 3_600;
 
@@ -114,6 +116,7 @@ struct DispatcherState {
     level: SessionLevelState,
     custom_catalog: CustomToolCatalog,
     execute_approved_tokens: HashMap<String, ExecuteApprovedGrant>,
+    patch_previews: HashMap<String, PatchPreviewEntry>,
 }
 
 struct ExecuteApprovedGrant {
@@ -121,6 +124,17 @@ struct ExecuteApprovedGrant {
     required_level: OperatingLevel,
     active_profile: Option<String>,
     expires_at: Instant,
+}
+
+#[derive(Clone, Debug)]
+struct PatchPreviewEntry {
+    active_profile: Option<String>,
+    owner: String,
+    name: String,
+    object_type: String,
+    patched_ddl: String,
+    tool_name: String,
+    created_at: Instant,
 }
 
 /// The dispatcher: owns the live connection behind a `std::sync::Mutex` so
@@ -159,6 +173,7 @@ impl OracleDispatcher {
                 level,
                 custom_catalog: CustomToolCatalog::default(),
                 execute_approved_tokens: HashMap::new(),
+                patch_previews: HashMap::new(),
             }),
             connector: None,
             custom_loader: None,
@@ -198,6 +213,7 @@ impl OracleDispatcher {
                 level,
                 custom_catalog,
                 execute_approved_tokens: HashMap::new(),
+                patch_previews: HashMap::new(),
             }),
             connector: Some(connector),
             custom_loader,
@@ -423,6 +439,14 @@ struct PatchSourceArgs {
     max_chars: Option<usize>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ReadPatchPreviewArgs {
+    #[serde(default, alias = "object_name")]
+    name: Option<String>,
+    #[serde(default)]
+    max_chars: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -771,6 +795,53 @@ fn normalized_sql_for_confirmation(sql: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn confirmation_key() -> &'static [u8; 32] {
+    static KEY: OnceLock<[u8; 32]> = OnceLock::new();
+    KEY.get_or_init(|| {
+        let mut key = [0u8; 32];
+        getrandom::getrandom(&mut key).expect("OS random source required for confirmation tokens");
+        key
+    })
+}
+
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    let mut k = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        k[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; BLOCK];
+    let mut opad = [0x5cu8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(msg);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner);
+    outer.finalize().into()
+}
+
+fn confirmation_mac(parts: &[&[u8]]) -> String {
+    let mut message = Vec::new();
+    for part in parts {
+        message.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        message.extend_from_slice(part);
+    }
+    let digest = hmac_sha256(confirmation_key(), &message);
+    let mut out = String::with_capacity(16);
+    for byte in &digest[..8] {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
 fn execute_confirmation_token(
     sql: &str,
     required_level: OperatingLevel,
@@ -779,19 +850,13 @@ fn execute_confirmation_token(
     if required_level <= OperatingLevel::ReadOnly {
         return None;
     }
-    let mut hasher = Sha256::new();
-    hasher.update(b"oraclemcp:execute-confirmation:v1\0");
-    hasher.update(active_profile.unwrap_or("").as_bytes());
-    hasher.update(b"\0");
-    hasher.update(required_level.as_str().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(normalized_sql_for_confirmation(sql).as_bytes());
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(16);
-    for byte in &digest[..8] {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    Some(out)
+    let normalized = normalized_sql_for_confirmation(sql);
+    Some(confirmation_mac(&[
+        b"oraclemcp:execute-confirmation:v2",
+        active_profile.unwrap_or("").as_bytes(),
+        required_level.as_str().as_bytes(),
+        normalized.as_bytes(),
+    ]))
 }
 
 fn session_level_view(session: &SessionLevelState) -> Value {
@@ -842,19 +907,13 @@ fn session_level_confirmation_token(
     target: OperatingLevel,
     ttl_seconds: u64,
 ) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"oraclemcp:session-level-confirmation:v1\0");
-    hasher.update(active_profile.unwrap_or("").as_bytes());
-    hasher.update(b"\0");
-    hasher.update(target.as_str().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(ttl_seconds.to_string().as_bytes());
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(16);
-    for byte in &digest[..8] {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
+    let ttl = ttl_seconds.to_string();
+    confirmation_mac(&[
+        b"oraclemcp:session-level-confirmation:v2",
+        active_profile.unwrap_or("").as_bytes(),
+        target.as_str().as_bytes(),
+        ttl.as_bytes(),
+    ])
 }
 
 fn session_level_gate_json(session: &SessionLevelState, target: OperatingLevel) -> Value {
@@ -1587,27 +1646,19 @@ fn compile_confirmation_token(
     object_type: &str,
     plscope: bool,
 ) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"oraclemcp:compile-confirmation:v1\0");
-    hasher.update(active_profile.unwrap_or("").as_bytes());
-    hasher.update(b"\0");
-    hasher.update(owner.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(name.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(object_type.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(if plscope { b"plscope=1" } else { b"plscope=0" });
+    let plscope_part: &[u8] = if plscope { b"plscope=1" } else { b"plscope=0" };
+    let mut parts = vec![
+        b"oraclemcp:compile-confirmation:v2".as_slice(),
+        active_profile.unwrap_or("").as_bytes(),
+        owner.as_bytes(),
+        name.as_bytes(),
+        object_type.as_bytes(),
+        plscope_part,
+    ];
     for stmt in statements {
-        hasher.update(b"\0");
-        hasher.update(stmt.as_bytes());
+        parts.push(stmt.as_bytes());
     }
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(16);
-    for byte in &digest[..8] {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
+    confirmation_mac(&parts)
 }
 
 fn gate_decision_json(gate: &LevelDecision) -> (&'static str, Value, Value) {
@@ -2320,13 +2371,133 @@ fn contains_patch_side_effect_marker(source: &str) -> bool {
     .any(|marker| normalized.contains(marker))
 }
 
+fn patch_preview_key(active_profile: Option<&str>, owner: &str, name: &str) -> String {
+    format!(
+        "{}\0{}\0{}",
+        active_profile.unwrap_or(""),
+        owner.to_ascii_uppercase(),
+        name.to_ascii_uppercase()
+    )
+}
+
+fn remember_patch_preview(state: &mut DispatcherState, entry: PatchPreviewEntry) {
+    if state.patch_previews.len() >= MAX_PATCH_PREVIEWS
+        && let Some(oldest_key) = state
+            .patch_previews
+            .iter()
+            .min_by_key(|(_, entry)| entry.created_at)
+            .map(|(key, _)| key.clone())
+    {
+        state.patch_previews.remove(&oldest_key);
+    }
+    let key = patch_preview_key(entry.active_profile.as_deref(), &entry.owner, &entry.name);
+    state.patch_previews.insert(key, entry);
+}
+
+fn read_patch_preview(
+    state: &DispatcherState,
+    tool_name: &str,
+    args: ReadPatchPreviewArgs,
+) -> Result<Value, ErrorEnvelope> {
+    let max_chars = args.max_chars.unwrap_or(100_000).clamp(1, 10_000_000);
+    let active_profile = state.active_profile.as_deref();
+    if let Some(name) = non_empty_arg(args.name) {
+        let (_owner, name) = split_qualified_name(&name, "name")?;
+        let wanted_name = name.to_ascii_uppercase();
+        let mut matches = state
+            .patch_previews
+            .values()
+            .filter(|entry| {
+                entry.active_profile.as_deref() == active_profile && entry.name == wanted_name
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        matches.sort_by_key(|entry| entry.created_at);
+        let Some(entry) = matches.pop() else {
+            return Err(ErrorEnvelope::new(
+                ErrorClass::ObjectNotFound,
+                "no source patch preview is remembered for that object in the active profile",
+            )
+            .with_suggested_tool("oracle_patch_source")
+            .with_next_step(
+                "rerun oracle_patch_source, patch_package, or patch_view without execute=true",
+            ));
+        };
+        return Ok(json!({
+            "preview_available": true,
+            "compatibility_tool": tool_name,
+            "source": "in_memory_patch_preview",
+            "active_profile": active_profile,
+            "owner": entry.owner,
+            "name": entry.name,
+            "object_type": entry.object_type,
+            "patch_tool": entry.tool_name,
+            "ddl_char_count": entry.patched_ddl.chars().count(),
+            "ddl_preview": source_preview_json(&entry.patched_ddl, max_chars),
+            "next_actions": [
+                {
+                    "intent": "apply_source_patch",
+                    "tool": entry.tool_name,
+                    "message": "rerun the same patch tool with execute=true and the confirmation token from its preview"
+                }
+            ],
+        }));
+    }
+
+    let mut entries = state
+        .patch_previews
+        .values()
+        .filter(|entry| entry.active_profile.as_deref() == active_profile)
+        .map(|entry| {
+            json!({
+                "owner": entry.owner,
+                "name": entry.name,
+                "object_type": entry.object_type,
+                "patch_tool": entry.tool_name,
+                "ddl_char_count": entry.patched_ddl.chars().count(),
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| {
+        a["name"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(b["name"].as_str().unwrap_or_default())
+    });
+    Ok(json!({
+        "preview_available": !entries.is_empty(),
+        "compatibility_tool": tool_name,
+        "source": "in_memory_patch_preview",
+        "active_profile": active_profile,
+        "preview_count": entries.len(),
+        "previews": entries,
+        "next_actions": if entries.is_empty() {
+            json!([
+                {
+                    "intent": "create_source_patch_preview",
+                    "tool": "oracle_patch_source",
+                    "message": "run oracle_patch_source, patch_package, or patch_view without execute=true"
+                }
+            ])
+        } else {
+            json!([
+                {
+                    "intent": "read_one_preview",
+                    "tool": "read_patch_preview",
+                    "args": { "name": "<object_name>" }
+                }
+            ])
+        },
+    }))
+}
+
 fn patch_source(
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
     tool_name: &str,
     args: PatchSourceArgs,
-) -> Result<Value, ErrorEnvelope> {
+) -> Result<(Value, Option<PatchPreviewEntry>), ErrorEnvelope> {
     with_call_timeout(conn, args.timeout_seconds, || {
         patch_source_inner(conn, active_profile, session, tool_name, args)
     })
@@ -2338,7 +2509,7 @@ fn patch_source_inner(
     session: &SessionLevelState,
     tool_name: &str,
     args: PatchSourceArgs,
-) -> Result<Value, ErrorEnvelope> {
+) -> Result<(Value, Option<PatchPreviewEntry>), ErrorEnvelope> {
     let object_name = required_non_empty_arg(tool_name, "name", args.name)?;
     let object_type = normalize_patch_object_type(tool_name, args.object_type)?;
     let old_text = required_patch_old_text(tool_name, args.old_text)?;
@@ -2389,43 +2560,55 @@ fn patch_source_inner(
     };
 
     if !args.execute {
-        return Ok(json!({
-            "applied": false,
-            "preview": true,
-            "owner": owner,
-            "name": object_name,
-            "object_type": object_type,
-            "source_kind": document.source_kind,
-            "line_count": document.line_count,
-            "char_count": document.char_count,
-            "match_count": 1,
-            "diff": patch_diff_json(&document.text, match_idx, &old_text, &new_text),
-            "patched_source_preview": source_preview_json(&patched_source, DEFAULT_PATCH_PREVIEW_CHARS),
-            "patched_ddl_preview": source_preview_json(&patched_ddl, DEFAULT_PATCH_PREVIEW_CHARS),
-            "danger": decision.danger,
-            "required_level": patch_required_level,
-            "session_level": session.effective_level(),
-            "profile_ceiling": session.effective_ceiling(),
-            "gate_decision": gate_decision,
-            "blocked_reason": blocked_reason,
-            "step_up_target": step_up_target,
-            "reason": decision.reason,
-            "patch_guard_note": patch_guard_note,
-            "confirmation": confirm.as_ref().map(|confirm| json!({
-                "tool": tool_name,
-                "execute": true,
-                "confirm": confirm,
-                "note": "Pass confirm only when you intend to apply this exact source patch on this active profile.",
-            })),
-            "next_actions": patch_next_actions(
-                tool_name,
-                &gate,
-                (&owner, &object_name, &object_type),
-                (&old_text, &new_text),
-                max_chars,
-                confirm.as_deref(),
-            ),
-        }));
+        let preview_entry = confirm.as_ref().map(|_| PatchPreviewEntry {
+            active_profile: active_profile.map(str::to_owned),
+            owner: owner.clone(),
+            name: object_name.clone(),
+            object_type: object_type.clone(),
+            patched_ddl: patched_ddl.clone(),
+            tool_name: tool_name.to_owned(),
+            created_at: Instant::now(),
+        });
+        return Ok((
+            json!({
+                "applied": false,
+                "preview": true,
+                "owner": owner,
+                "name": object_name,
+                "object_type": object_type,
+                "source_kind": document.source_kind,
+                "line_count": document.line_count,
+                "char_count": document.char_count,
+                "match_count": 1,
+                "diff": patch_diff_json(&document.text, match_idx, &old_text, &new_text),
+                "patched_source_preview": source_preview_json(&patched_source, DEFAULT_PATCH_PREVIEW_CHARS),
+                "patched_ddl_preview": source_preview_json(&patched_ddl, DEFAULT_PATCH_PREVIEW_CHARS),
+                "danger": decision.danger,
+                "required_level": patch_required_level,
+                "session_level": session.effective_level(),
+                "profile_ceiling": session.effective_ceiling(),
+                "gate_decision": gate_decision,
+                "blocked_reason": blocked_reason,
+                "step_up_target": step_up_target,
+                "reason": decision.reason,
+                "patch_guard_note": patch_guard_note,
+                "confirmation": confirm.as_ref().map(|confirm| json!({
+                    "tool": tool_name,
+                    "execute": true,
+                    "confirm": confirm,
+                    "note": "Pass confirm only when you intend to apply this exact source patch on this active profile.",
+                })),
+                "next_actions": patch_next_actions(
+                    tool_name,
+                    &gate,
+                    (&owner, &object_name, &object_type),
+                    (&old_text, &new_text),
+                    max_chars,
+                    confirm.as_deref(),
+                ),
+            }),
+            preview_entry,
+        ));
     }
 
     if !matches!(gate, LevelDecision::Allow) {
@@ -2460,26 +2643,29 @@ fn patch_source_inner(
     } else {
         None
     };
-    Ok(json!({
-        "applied": true,
-        "preview": false,
-        "executed": true,
-        "committed": true,
-        "rows_affected": rows_affected,
-        "patch_tool": tool_name,
-        "owner": owner,
-        "name": object_name,
-        "object_type": object_type,
-        "source_kind": document.source_kind,
-        "required_level": OperatingLevel::Ddl,
-        "danger": decision.danger,
-        "objects_affected": decision.objects_affected,
-        "reason": decision.reason,
-        "patch_guard_note": patch_guard_note,
-        "diff": patch_diff_json(&document.text, match_idx, &old_text, &new_text),
-        "errors": errors.as_ref().map(|rows| rows_to_json(rows)),
-        "error_count": errors.as_ref().map(Vec::len),
-    }))
+    Ok((
+        json!({
+            "applied": true,
+            "preview": false,
+            "executed": true,
+            "committed": true,
+            "rows_affected": rows_affected,
+            "patch_tool": tool_name,
+            "owner": owner,
+            "name": object_name,
+            "object_type": object_type,
+            "source_kind": document.source_kind,
+            "required_level": OperatingLevel::Ddl,
+            "danger": decision.danger,
+            "objects_affected": decision.objects_affected,
+            "reason": decision.reason,
+            "patch_guard_note": patch_guard_note,
+            "diff": patch_diff_json(&document.text, match_idx, &old_text, &new_text),
+            "errors": errors.as_ref().map(|rows| rows_to_json(rows)),
+            "error_count": errors.as_ref().map(Vec::len),
+        }),
+        None,
+    ))
 }
 
 fn create_or_replace(
@@ -2888,6 +3074,7 @@ impl ToolDispatch for OracleDispatcher {
             state.level = new_level;
             state.custom_catalog = new_custom_catalog;
             state.execute_approved_tokens.clear();
+            state.patch_previews.clear();
             if let Value::Object(map) = &mut response {
                 map.insert(
                     "custom_tool_count".to_owned(),
@@ -2927,6 +3114,10 @@ impl ToolDispatch for OracleDispatcher {
             let conn: &dyn OracleConnection = state.conn.as_ref();
             return deploy_ddl(conn, active_profile.as_deref(), &state.level, a);
         }
+        if tool == "read_patch_preview" {
+            let a: ReadPatchPreviewArgs = parse_args(name, args)?;
+            return read_patch_preview(&state, name, a);
+        }
         let conn: &dyn OracleConnection = state.conn.as_ref();
 
         let result: Result<Value, DbError> = match tool {
@@ -2956,7 +3147,12 @@ impl ToolDispatch for OracleDispatcher {
             }
             "oracle_patch_source" => {
                 let a: PatchSourceArgs = parse_args(name, args)?;
-                return patch_source(conn, state.active_profile.as_deref(), &state.level, name, a);
+                let (value, preview_entry) =
+                    patch_source(conn, state.active_profile.as_deref(), &state.level, name, a)?;
+                if let Some(preview_entry) = preview_entry {
+                    remember_patch_preview(&mut state, preview_entry);
+                }
+                return Ok(value);
             }
             "oracle_list_profiles" => {
                 ensure_no_args(name, args)?;
@@ -3712,6 +3908,7 @@ mod tests {
             "patch_view" => {
                 json!({ "owner": "HR", "object_name": "EMP_V", "old_text": "CREATE TABLE ...", "new_text": "CREATE OR REPLACE VIEW EMP_V AS SELECT 1 AS ID FROM dual" })
             }
+            "read_patch_preview" => json!({}),
             "deploy_ddl" => {
                 json!({ "ddl": "CREATE OR REPLACE VIEW EMP_V AS SELECT 1 AS ID FROM dual" })
             }
@@ -3768,6 +3965,7 @@ mod tests {
             "compile_object",
             "patch_package",
             "patch_view",
+            "read_patch_preview",
             "list_objects",
             "list_schemas",
             "get_schema",
@@ -4261,6 +4459,57 @@ mod tests {
         assert_eq!(out["object_type"], json!("VIEW"));
         assert_eq!(out["source_kind"], json!("dbms_metadata"));
         assert_eq!(out["confirmation"]["tool"], json!("patch_view"));
+    }
+
+    #[test]
+    fn read_patch_preview_lists_and_reads_last_preview() {
+        let dispatcher = OracleDispatcher::new_switchable(
+            Box::new(SourceLookupMock),
+            Some("dev".to_owned()),
+            ddl_level(),
+            Arc::new(|_| Ok(Box::new(SourceLookupMock))),
+        );
+
+        let empty = dispatcher
+            .dispatch("read_patch_preview", json!({}))
+            .expect("empty preview cache is readable");
+        assert_eq!(empty["preview_available"], json!(false));
+        assert_eq!(empty["preview_count"], json!(0));
+
+        dispatcher
+            .dispatch(
+                "patch_package",
+                json!({
+                    "owner": "APP",
+                    "object_name": "EMP_API",
+                    "search_text": "NULL",
+                    "replacement": "1",
+                }),
+            )
+            .expect("patch preview is remembered");
+
+        let listed = dispatcher
+            .dispatch("read_patch_preview", json!({}))
+            .expect("preview list is readable");
+        assert_eq!(listed["preview_available"], json!(true));
+        assert_eq!(listed["preview_count"], json!(1));
+        assert_eq!(listed["previews"][0]["name"], json!("EMP_API"));
+
+        let read = dispatcher
+            .dispatch(
+                "read_patch_preview",
+                json!({ "name": "EMP_API", "max_chars": 50 }),
+            )
+            .expect("remembered preview is readable");
+        assert_eq!(read["preview_available"], json!(true));
+        assert_eq!(read["patch_tool"], json!("patch_package"));
+        assert_eq!(read["ddl_preview"]["truncated"], json!(true));
+        assert!(
+            read["ddl_preview"]["text"]
+                .as_str()
+                .expect("preview text")
+                .starts_with("CREATE OR REPLACE PACKAGE BODY EMP_API")
+        );
     }
 
     #[test]
@@ -4957,6 +5206,42 @@ mod tests {
             preview["next_actions"][1]["args"]["confirm"],
             preview["execute_confirmation"]["confirm"]
         );
+    }
+
+    #[test]
+    fn confirmation_tokens_are_stable_hex_and_domain_separated() {
+        let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+        let execute = execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("dev"))
+            .expect("write token");
+        let execute_normalized = execute_confirmation_token(
+            "  UPDATE   employees SET name = name WHERE employee_id = 100; ",
+            OperatingLevel::ReadWrite,
+            Some("dev"),
+        )
+        .expect("write token");
+        assert_eq!(execute, execute_normalized);
+
+        let other_profile =
+            execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("prod"))
+                .expect("write token");
+        let session = session_level_confirmation_token(Some("dev"), OperatingLevel::ReadWrite, 60);
+        let compile = compile_confirmation_token(
+            &["ALTER PACKAGE APP.EMP_API COMPILE".to_owned()],
+            Some("dev"),
+            "APP",
+            "EMP_API",
+            "PACKAGE",
+            false,
+        );
+
+        for token in [&execute, &other_profile, &session, &compile] {
+            assert_eq!(token.len(), 16);
+            assert!(token.chars().all(|ch| ch.is_ascii_hexdigit()));
+        }
+        assert_ne!(execute, other_profile);
+        assert_ne!(execute, session);
+        assert_ne!(execute, compile);
+        assert_ne!(session, compile);
     }
 
     #[test]

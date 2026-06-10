@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 48] = [
+pub const TOOL_NAMES: [&str; 49] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -55,6 +55,7 @@ pub const TOOL_NAMES: [&str; 48] = [
     "create_or_replace",
     "patch_package",
     "patch_view",
+    "read_patch_preview",
     "deploy_ddl",
     "list_objects",
     "list_schemas",
@@ -786,6 +787,22 @@ pub fn tool_registry() -> ToolRegistry {
             &[],
         ))
         .destructive(),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "read_patch_preview",
+            ToolTier::FoundationStatic,
+            "Compatibility helper for reading the last in-memory source patch preview returned by oracle_patch_source, patch_package, or patch_view.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "name": { "type": "string", "description": "Optional object name to inspect. If omitted, lists remembered patch previews for the active profile." },
+                "object_name": { "type": "string", "description": "Alias for name." },
+                "max_chars": { "type": "integer", "minimum": 1, "maximum": 10000000, "description": "Maximum DDL preview characters to return for one object (default 100000)." }
+            }),
+            &[],
+        )),
     );
 
     registry.register(
