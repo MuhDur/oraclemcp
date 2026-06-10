@@ -34,7 +34,10 @@ fn bench_classify(c: &mut Criterion) {
     let opts = SerializeOptions::default();
     let row = OracleRow {
         columns: vec![
-            ("ID".to_owned(), OracleCell::new("NUMBER", Some("42".to_owned()))),
+            (
+                "ID".to_owned(),
+                OracleCell::new("NUMBER", Some("42".to_owned())),
+            ),
             (
                 "WHEN".to_owned(),
                 OracleCell::new("DATE", Some("2026-06-01 12:00:00".to_owned())),

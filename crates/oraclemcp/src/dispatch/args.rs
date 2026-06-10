@@ -310,4 +310,3 @@ pub(super) struct ExplainPlanArgs {
     #[serde(default)]
     pub(super) read_only_standby: bool,
 }
-

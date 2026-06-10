@@ -160,25 +160,28 @@ proptest! {
 /// variant must classify at a danger ≥ that reference.
 const DANGEROUS_TEMPLATES: &[&[&str]] = &[
     &["BEGIN", "EXECUTE", "IMMEDIATE", "'DROP TABLE t'", "; END;"],
-    &["BEGIN", "EXECUTE", "IMMEDIATE", "'GRANT DBA TO scott'", "; END;"],
-    &["DECLARE", "x NUMBER; BEGIN", "DBMS_SQL", ".PARSE(c, s, 1); END;"],
-    &["BEGIN", "UTL_FILE", ".FOPEN('D', 'f', 'w'); END;"],
-    &["BEGIN", "UTL_HTTP", ".REQUEST('http://x'); END;"],
     &[
         "BEGIN",
-        "DBMS_SCHEDULER",
-        ".CREATE_JOB('j'); END;",
+        "EXECUTE",
+        "IMMEDIATE",
+        "'GRANT DBA TO scott'",
+        "; END;",
     ],
+    &[
+        "DECLARE",
+        "x NUMBER; BEGIN",
+        "DBMS_SQL",
+        ".PARSE(c, s, 1); END;",
+    ],
+    &["BEGIN", "UTL_FILE", ".FOPEN('D', 'f', 'w'); END;"],
+    &["BEGIN", "UTL_HTTP", ".REQUEST('http://x'); END;"],
+    &["BEGIN", "DBMS_SCHEDULER", ".CREATE_JOB('j'); END;"],
     &[
         "DECLARE PRAGMA",
         "AUTONOMOUS_TRANSACTION",
         "; BEGIN NULL; END;",
     ],
-    &[
-        "CREATE OR REPLACE",
-        "PROCEDURE",
-        "p AS BEGIN NULL; END;",
-    ],
+    &["CREATE OR REPLACE", "PROCEDURE", "p AS BEGIN NULL; END;"],
     &["BEGIN NULL; END;", "GRANT DBA TO scott"],
 ];
 

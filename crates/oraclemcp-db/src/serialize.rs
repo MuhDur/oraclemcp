@@ -568,10 +568,7 @@ mod tests {
             OracleRow {
                 columns: vec![
                     ("ID".to_owned(), cell("NUMBER", "1234567890123456789")),
-                    (
-                        "WHEN".to_owned(),
-                        cell("DATE", "2026-12-31 23:59:59"),
-                    ),
+                    ("WHEN".to_owned(), cell("DATE", "2026-12-31 23:59:59")),
                     ("BODY".to_owned(), cell("CLOB", "")),
                 ],
             },
@@ -597,17 +594,17 @@ mod tests {
             columns: vec![("V".to_owned(), cell("NuMbEr", "42"))],
         };
         let cache = PageColumnCache::from_row(&first);
-        assert_eq!(
-            cache.serialize_row(&row, &opts),
-            serialize_row(&row, &opts)
-        );
+        assert_eq!(cache.serialize_row(&row, &opts), serialize_row(&row, &opts));
     }
 
     #[test]
     fn classify_type_public_signature_unchanged() {
         assert_eq!(classify_type("number"), TypeRepr::Numeric);
         assert_eq!(classify_type("  VARCHAR2(50) "), TypeRepr::Text);
-        assert_eq!(classify_type("TIMESTAMP(6) WITH TIME ZONE"), TypeRepr::Timestamp);
+        assert_eq!(
+            classify_type("TIMESTAMP(6) WITH TIME ZONE"),
+            TypeRepr::Timestamp
+        );
         assert_eq!(classify_type("DATE"), TypeRepr::Date);
         assert_eq!(classify_type("SDO_GEOMETRY"), TypeRepr::Unsupported);
     }

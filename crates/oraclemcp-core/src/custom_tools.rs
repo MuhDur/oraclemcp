@@ -894,7 +894,10 @@ mod tests {
             type = "int"
             requierd = true
         "#;
-        assert!(matches!(parse_tools_file(typo_param), Err(LoadError::Parse(_))));
+        assert!(matches!(
+            parse_tools_file(typo_param),
+            Err(LoadError::Parse(_))
+        ));
     }
 
     // ── classify-at-load (2.12.2) ─────────────────────────────────────────────

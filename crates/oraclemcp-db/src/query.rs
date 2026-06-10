@@ -361,8 +361,14 @@ mod tests {
                 let offset = 7;
                 let got = query_response_from_rows(rows.clone(), caps, offset, &opts);
                 let (rc, trunc, cursor, total) = reference_page(&rows, caps, offset, &opts);
-                assert_eq!(got.row_count, rc, "row_count @ {max_rows}/{max_result_bytes}");
-                assert_eq!(got.truncated, trunc, "truncated @ {max_rows}/{max_result_bytes}");
+                assert_eq!(
+                    got.row_count, rc,
+                    "row_count @ {max_rows}/{max_result_bytes}"
+                );
+                assert_eq!(
+                    got.truncated, trunc,
+                    "truncated @ {max_rows}/{max_result_bytes}"
+                );
                 assert_eq!(
                     got.next_cursor, cursor,
                     "cursor @ {max_rows}/{max_result_bytes}"

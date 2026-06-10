@@ -28,8 +28,7 @@ fn test_opts() -> OracleConnectOptions {
             std::env::var("ORACLEMCP_TEST_USER").unwrap_or_else(|_| "system".to_owned()),
         ),
         password: Some(
-            std::env::var("ORACLEMCP_TEST_PASSWORD")
-                .unwrap_or_else(|_| "test_password".to_owned()),
+            std::env::var("ORACLEMCP_TEST_PASSWORD").unwrap_or_else(|_| "test_password".to_owned()),
         ),
         session_identity: Some(OracleSessionIdentity {
             module: Some("oraclemcp-live-test".to_owned()),

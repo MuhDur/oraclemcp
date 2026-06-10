@@ -1084,9 +1084,9 @@ fn gate_error(
                         labels.subject, decision.reason
                     ),
                 )
-                .with_next_step(decision.safe_alternative.clone().unwrap_or_else(|| {
-                    "rewrite the statement as a simpler, single SQL statement".to_owned()
-                }))
+                .with_next_step(decision.safe_alternative.clone().unwrap_or_else(
+                    || "rewrite the statement as a simpler, single SQL statement".to_owned(),
+                ))
             }
             oraclemcp_guard::BlockReason::ExceedsCeiling { required, ceiling } => {
                 ErrorEnvelope::new(
@@ -1118,10 +1118,8 @@ fn execute_gate_error(
         &GateErrorLabels {
             subject: "statement",
             step_up_tool: "oracle_preview_sql",
-            step_up_inspect_step:
-                "call oracle_preview_sql to inspect the required level and profile ceiling",
-            step_up_elevation_step:
-                "call oracle_set_session_level to preview a temporary elevation, or keep the profile read-only",
+            step_up_inspect_step: "call oracle_preview_sql to inspect the required level and profile ceiling",
+            step_up_elevation_step: "call oracle_set_session_level to preview a temporary elevation, or keep the profile read-only",
             ceiling_step: "choose a profile whose max_level permits the statement",
             policy_denied_message: "statement is blocked by policy",
             internal_message: "execute gate produced an unexpected decision",
@@ -1435,12 +1433,17 @@ fn verify_token_confirmation(
     next_step: &'static str,
 ) -> Result<(), ErrorEnvelope> {
     let Some(expected) = confirm else {
-        return Err(ErrorEnvelope::new(ErrorClass::Internal, missing_token_message));
+        return Err(ErrorEnvelope::new(
+            ErrorClass::Internal,
+            missing_token_message,
+        ));
     };
     if supplied != Some(expected.as_str()) {
-        return Err(ErrorEnvelope::new(ErrorClass::ChallengeRequired, challenge_message)
-            .with_suggested_tool(suggested_tool)
-            .with_next_step(next_step));
+        return Err(
+            ErrorEnvelope::new(ErrorClass::ChallengeRequired, challenge_message)
+                .with_suggested_tool(suggested_tool)
+                .with_next_step(next_step),
+        );
     }
     Ok(())
 }
@@ -1474,10 +1477,8 @@ fn compile_gate_error(gate: LevelDecision, session: &SessionLevelState) -> Error
         &GateErrorLabels {
             subject: "compile",
             step_up_tool: "oracle_compile_object",
-            step_up_inspect_step:
-                "call oracle_compile_object without execute=true to inspect the required level and confirmation token",
-            step_up_elevation_step:
-                "call oracle_set_session_level with level=\"DDL\" to preview a temporary elevation, or keep the profile read-only",
+            step_up_inspect_step: "call oracle_compile_object without execute=true to inspect the required level and confirmation token",
+            step_up_elevation_step: "call oracle_set_session_level with level=\"DDL\" to preview a temporary elevation, or keep the profile read-only",
             ceiling_step: "choose a profile whose max_level permits DDL",
             policy_denied_message: "compile is blocked by policy",
             internal_message: "compile gate produced an unexpected decision",
