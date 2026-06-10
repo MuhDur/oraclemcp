@@ -127,5 +127,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
-      - run: cargo +nightly fuzz build
+        # Pin the gnu target: cargo-fuzz otherwise defaults to musl here, whose
+        # static libc is incompatible with the ASan sanitizer.
+      - run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
         working-directory: crates/oraclemcp-guard
