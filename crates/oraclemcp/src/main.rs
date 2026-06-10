@@ -598,6 +598,51 @@ fn robot_docs_guide_json() -> serde_json::Value {
             "alias": "--json",
             "contract": "stdout is compact JSON; diagnostics go to stderr"
         },
+        "tool_schema_contract": {
+            "top_level": "every advertised MCP tool input schema is a JSON object",
+            "strict_client_safe": "tool parameter schemas avoid top-level oneOf, anyOf, allOf, enum, and not"
+        },
+        "client_setup": {
+            "principle": "install or build one oraclemcp binary, then configure each MCP client to call the same command, args, config file, and environment",
+            "stdio": {
+                "command": "oraclemcp",
+                "args": ["serve", "--profile", "<profile>", "--allow-no-auth"],
+                "argv": ["oraclemcp", "serve", "--profile", "<profile>", "--allow-no-auth"],
+                "notes": [
+                    "Use --allow-no-auth only for local stdio clients you already trust.",
+                    "If Oracle client libraries or network files need environment setup, point every MCP client at the same small wrapper script."
+                ]
+            },
+            "secure_stdio": {
+                "command": "oraclemcp",
+                "args": ["serve", "--profile", "<profile>"],
+                "env": {
+                    "ORACLEMCP_STDIO_TOKEN": "<shared-init-token>"
+                },
+                "notes": [
+                    "Use this when the MCP client can send the init token in initialize _meta.",
+                    "If the client cannot send an init token, keep the server local and use --allow-no-auth intentionally."
+                ]
+            },
+            "smoke_tests": [
+                {
+                    "intent": "verify the installed binary and local config without MCP",
+                    "command": "oraclemcp --json doctor --profile <profile>",
+                    "argv": ["oraclemcp", "--json", "doctor", "--profile", "<profile>"]
+                },
+                {
+                    "intent": "verify the MCP client can import the tool list",
+                    "mcp_method": "tools/list",
+                    "expected": "the client discovers oracle_capabilities plus the advertised Oracle tools without schema import errors"
+                },
+                {
+                    "intent": "verify a zero-arg MCP call works",
+                    "mcp_tool": "oracle_capabilities",
+                    "arguments": {}
+                }
+            ],
+            "restart_rule": "after replacing the binary or wrapper, restart or reconnect each MCP client so it imports the fresh tool schema"
+        },
         "first_commands": [
             {
                 "intent": "discover configured profiles without opening a database connection",
@@ -663,8 +708,38 @@ fn robot_docs_guide_json() -> serde_json::Value {
         "config": {
             "profiles": "~/.config/oraclemcp/profiles.toml or ORACLEMCP_CONFIG",
             "custom_tools": "~/.config/oraclemcp/tools.d/*.toml or ORACLEMCP_TOOLS_DIR",
-            "secret_refs": "prefer credential_ref over literal passwords"
+            "secret_refs": "prefer credential_ref over literal passwords",
+            "environment_specifics": "database aliases, session identity, client module/program labels, and custom workflow tools belong in profiles or tools.d config, not in the general core"
         },
+        "diagnostic_flow": [
+            {
+                "intent": "binary and build posture",
+                "argv": ["oraclemcp", "--json", "info"]
+            },
+            {
+                "intent": "profile inventory without connecting",
+                "argv": ["oraclemcp", "--json", "profiles"]
+            },
+            {
+                "intent": "offline checks",
+                "argv": ["oraclemcp", "--json", "doctor"]
+            },
+            {
+                "intent": "profile-backed checks",
+                "argv": ["oraclemcp", "--json", "doctor", "--profile", "<profile>"]
+            },
+            {
+                "intent": "MCP tool surface and schema inspection",
+                "argv": ["oraclemcp", "--json", "capabilities"]
+            }
+        ],
+        "agent_rules": [
+            "Prefer oracle_query for SELECT/WITH statements.",
+            "Use oracle_preview_sql before oracle_execute or DDL helpers.",
+            "Never assume DDL can be rollback-previewed.",
+            "Treat profile max_level as the hard ceiling for the running server.",
+            "Keep company-specific tools, names, identities, and connection details in config."
+        ],
         "exit_codes": [
             { "code": 0, "meaning": "success" },
             { "code": 2, "meaning": "invalid arguments, config error, failed diagnostics, or startup safety block" }
@@ -679,6 +754,19 @@ Output contract
 - Use --robot-json or --json for compact machine-readable stdout.
 - Diagnostics and serve startup status are written to stderr.
 - Read-only commands do not open a database unless their command explicitly says so.
+- MCP tool parameter schemas are top-level JSON objects and avoid top-level oneOf, anyOf, allOf, enum, and not for strict client adapters.
+
+Client setup
+- Install or build one oraclemcp binary, then configure every MCP client to call the same command, args, config file, and environment.
+- Local stdio command: oraclemcp serve --profile <profile> --allow-no-auth
+- Secure stdio command: ORACLEMCP_STDIO_TOKEN=<token> oraclemcp serve --profile <profile>
+- If Oracle client libraries or network files need environment setup, point every MCP client at the same small wrapper script.
+- After replacing the binary or wrapper, restart or reconnect each MCP client so it imports the fresh tool schema.
+
+Client smoke tests
+1. oraclemcp --json doctor --profile <profile>
+2. MCP tools/list discovers oracle_capabilities plus the advertised Oracle tools without schema import errors
+3. MCP tools/call oracle_capabilities with empty arguments succeeds
 
 First commands
 - oraclemcp --json profiles
@@ -714,6 +802,21 @@ Configuration
 - Profiles: ~/.config/oraclemcp/profiles.toml or ORACLEMCP_CONFIG.
 - Custom tools: ~/.config/oraclemcp/tools.d/*.toml or ORACLEMCP_TOOLS_DIR.
 - Prefer credential_ref over literal passwords.
+- Database aliases, session identity, client module/program labels, and custom workflow tools belong in profiles or tools.d config, not in the general core.
+
+Diagnostic flow
+1. oraclemcp --json info
+2. oraclemcp --json profiles
+3. oraclemcp --json doctor
+4. oraclemcp --json doctor --profile <profile>
+5. oraclemcp --json capabilities
+
+Agent rules
+- Prefer oracle_query for SELECT/WITH statements.
+- Use oracle_preview_sql before oracle_execute or DDL helpers.
+- Never assume DDL can be rollback-previewed.
+- Treat profile max_level as the hard ceiling for the running server.
+- Keep company-specific tools, names, identities, and connection details in config.
 "#
 }
 
@@ -1062,6 +1165,32 @@ mod tests {
         assert_eq!(
             out["structured_output"]["alias"],
             serde_json::json!("--json")
+        );
+        assert!(text.contains("Client smoke tests"));
+        assert!(text.contains("MCP tools/list"));
+        assert_eq!(
+            out["tool_schema_contract"]["strict_client_safe"],
+            serde_json::json!(
+                "tool parameter schemas avoid top-level oneOf, anyOf, allOf, enum, and not"
+            )
+        );
+        assert_eq!(
+            out["client_setup"]["stdio"]["argv"],
+            serde_json::json!([
+                "oraclemcp",
+                "serve",
+                "--profile",
+                "<profile>",
+                "--allow-no-auth"
+            ])
+        );
+        assert_eq!(
+            out["client_setup"]["smoke_tests"][1]["mcp_method"],
+            serde_json::json!("tools/list")
+        );
+        assert_eq!(
+            out["diagnostic_flow"][4]["argv"],
+            serde_json::json!(["oraclemcp", "--json", "capabilities"])
         );
         assert_eq!(
             out["first_commands"][0]["argv"],
