@@ -518,8 +518,8 @@ struct ReadClobArgs {
 
 #[derive(Deserialize)]
 struct SwitchProfileArgs {
-    #[serde(alias = "db")]
-    profile: String,
+    #[serde(default, alias = "db")]
+    profile: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -635,6 +635,19 @@ fn required_non_empty_arg(
         invalid_args(format!(
             "invalid arguments for {tool}: missing required `{field}`"
         ))
+    })
+}
+
+fn required_switch_profile_arg(tool: &str, value: Option<String>) -> Result<String, ErrorEnvelope> {
+    non_empty_arg(value).ok_or_else(|| {
+        invalid_args(format!(
+            "invalid arguments for {tool}: provide `profile` or compatibility alias `db`"
+        ))
+        .with_suggested_tool("oracle_list_profiles")
+        .with_next_step("call oracle_list_profiles to inspect configured profile names")
+        .with_next_step(
+            "call oracle_switch_profile with {\"profile\":\"<name>\"} or {\"db\":\"<name>\"}",
+        )
     })
 }
 
@@ -1305,8 +1318,7 @@ fn dbms_output_limits(args: &ExecuteArgs) -> (usize, usize, u32) {
         .clamp(1, MAX_DBMS_OUTPUT_MAX_CHARS);
     let buffer_bytes = max_chars
         .saturating_mul(4)
-        .max(2_000)
-        .min(MAX_DBMS_OUTPUT_BUFFER_BYTES) as u32;
+        .clamp(2_000, MAX_DBMS_OUTPUT_BUFFER_BYTES) as u32;
     (max_lines, max_chars, buffer_bytes)
 }
 
@@ -1671,17 +1683,16 @@ fn compile_next_actions(
                 "required_level": target,
             }));
         }
-        LevelDecision::Blocked { reason } => {
-            if let oraclemcp_guard::BlockReason::ExceedsCeiling { required, ceiling } = reason {
-                actions.push(json!({
-                    "intent": "choose_different_profile",
-                    "tool": "oracle_list_profiles",
-                    "args": {},
-                    "required_level": required,
-                    "current_ceiling": ceiling,
-                }));
-            }
-        }
+        LevelDecision::Blocked {
+            reason: oraclemcp_guard::BlockReason::ExceedsCeiling { required, ceiling },
+        } => actions.push(json!({
+            "intent": "choose_different_profile",
+            "tool": "oracle_list_profiles",
+            "args": {},
+            "required_level": required,
+            "current_ceiling": ceiling,
+        })),
+        LevelDecision::Blocked { .. } => {}
         _ => {}
     }
     Value::Array(actions)
@@ -2404,6 +2415,7 @@ impl ToolDispatch for OracleDispatcher {
         let tool = canonical_tool_name(name);
         if tool == "oracle_switch_profile" {
             let a: SwitchProfileArgs = parse_args(name, args)?;
+            let profile = required_switch_profile_arg(name, a.profile)?;
             let Some(connector) = &self.connector else {
                 return Err(ErrorEnvelope::new(
                     ErrorClass::RuntimeStateRequired,
@@ -2412,9 +2424,9 @@ impl ToolDispatch for OracleDispatcher {
                 .with_next_step("restart the server with `oraclemcp serve --profile <name>`"));
             };
 
-            let new_conn = connector(&a.profile).map_err(DbError::into_envelope)?;
-            let mut response = connection_info_json(Some(a.profile.clone()), new_conn.describe());
-            let new_level = profile_level(&a.profile);
+            let new_conn = connector(&profile).map_err(DbError::into_envelope)?;
+            let mut response = connection_info_json(Some(profile.clone()), new_conn.describe());
+            let new_level = profile_level(&profile);
             let new_custom_catalog = match &self.custom_loader {
                 Some(loader) => loader(&new_level)?,
                 None => CustomToolCatalog::default(),
@@ -2423,7 +2435,7 @@ impl ToolDispatch for OracleDispatcher {
                 ErrorEnvelope::new(ErrorClass::Internal, "connection mutex poisoned")
             })?;
             state.conn = new_conn;
-            state.active_profile = Some(a.profile.clone());
+            state.active_profile = Some(profile.clone());
             state.level = new_level;
             state.custom_catalog = new_custom_catalog;
             state.execute_approved_tokens.clear();
@@ -3390,6 +3402,31 @@ mod tests {
             .dispatch("oracle_connection_info", json!({}))
             .expect("current connection still usable");
         assert_eq!(out["active_profile"], json!("dev"));
+    }
+
+    #[test]
+    fn missing_profile_switch_target_is_actionable_invalid_arguments() {
+        let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+        let err = dispatcher
+            .dispatch("oracle_switch_profile", json!({}))
+            .expect_err("missing profile target is rejected before reconnect");
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+        assert!(err.message.contains("profile"));
+        assert!(err.message.contains("db"));
+        assert_eq!(err.suggested_tool.as_deref(), Some("oracle_list_profiles"));
+        assert!(
+            err.next_steps
+                .iter()
+                .any(|step| step.contains("oracle_list_profiles"))
+        );
+
+        let err = dispatcher
+            .dispatch("switch_database", json!({ "db": " " }))
+            .expect_err("blank db alias is rejected before reconnect");
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+        assert!(err.message.contains("profile"));
+        assert!(err.message.contains("db"));
+        assert_eq!(err.suggested_tool.as_deref(), Some("oracle_list_profiles"));
     }
 
     #[test]
