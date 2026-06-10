@@ -51,6 +51,7 @@ impl ParamType {
 
 /// A typed, named parameter — bound as a bind variable (`:name`), never interpolated.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ParamDef {
     /// Bind name (without the leading `:`).
     pub name: String,
@@ -78,6 +79,7 @@ pub enum OutputMode {
 
 /// A parsed operator tool definition.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CustomToolDef {
     /// The stable tool name (MUST be operator-namespaced; see [`Self::validate`]).
     pub name: String,
@@ -162,6 +164,7 @@ pub enum LoadError {
 
 /// The on-disk file shape: `[[tool]]` array-of-tables.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ToolFile {
     #[serde(default, rename = "tool")]
     tool: Vec<CustomToolDef>,
@@ -866,6 +869,32 @@ mod tests {
             parse_tools_file("this is not = = toml"),
             Err(LoadError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn unknown_tool_key_is_rejected_not_silently_ignored() {
+        // A misspelled safety-bearing key (here `requ1red`) must fail loudly
+        // rather than parse to its default and silently weaken the tool.
+        let typo = r#"
+            [[tool]]
+            name = "myco.lookup"
+            description = "x"
+            sql = "SELECT 1 FROM dual"
+            requ1red = true
+        "#;
+        assert!(matches!(parse_tools_file(typo), Err(LoadError::Parse(_))));
+
+        let typo_param = r#"
+            [[tool]]
+            name = "myco.lookup"
+            description = "x"
+            sql = "SELECT 1 FROM dual WHERE id = :id"
+            [[tool.params]]
+            name = "id"
+            type = "int"
+            requierd = true
+        "#;
+        assert!(matches!(parse_tools_file(typo_param), Err(LoadError::Parse(_))));
     }
 
     // ── classify-at-load (2.12.2) ─────────────────────────────────────────────

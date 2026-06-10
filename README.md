@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/assets/hero.svg" alt="oraclemcp — safe-by-default Oracle Database MCP server in pure Rust" width="100%">
+  <img src=".github/assets/hero.svg" alt="oraclemcp: safe-by-default Oracle Database MCP server in pure Rust" width="100%">
 </p>
 
 <p align="center">
@@ -25,14 +25,22 @@
 
 ## Quick start
 
-```sh
-cargo install oraclemcp
-```
-
-The default build is **offline** (no native dependencies), ideal for CI and for trying the tool surface. For live database access, build with the `live-db` feature, which pulls the ODPI-C Oracle driver (needs [Oracle Instant Client](https://www.oracle.com/database/technologies/instant-client.html)):
+For live database access, build with the `live-db` feature, which pulls the ODPI-C Oracle driver:
 
 ```sh
 cargo install oraclemcp --features live-db
+```
+
+**Runtime requirements** for `live-db`:
+
+- A C toolchain at **build** time (the ODPI-C driver compiles native code).
+- [Oracle Instant Client](https://www.oracle.com/database/technologies/instant-client.html) at **run** time, on the library path (`LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS, `PATH` on Windows).
+- Optionally `TNS_ADMIN` pointing at a directory with `tnsnames.ora` if you connect by net-service name.
+
+The default build is **offline** (no native dependencies) and cannot reach a database; it is useful for CI and for inspecting the tool surface, but a binary built this way returns `RuntimeStateRequired` for any live call:
+
+```sh
+cargo install oraclemcp   # tool surface only (no DB)
 ```
 
 Generate generic local setup templates for profiles, wrappers, and MCP client
@@ -42,10 +50,15 @@ snippets:
 oraclemcp --json setup --profile db_ro
 ```
 
-**Docker:** a ready-to-run image with Oracle Instant Client bundled (so live-db works out of the box), published to GHCR and listed in the [official MCP registry](https://registry.modelcontextprotocol.io) as `io.github.MuhDur/oraclemcp`:
+**Docker:** a ready-to-run image with Oracle Instant Client bundled (so live-db works out of the box), published to GHCR and listed in the [MCP registry](https://registry.modelcontextprotocol.io) on release as `io.github.MuhDur/oraclemcp`. Mount a profiles config and pass the credential the profile's `credential_ref` expects:
 
 ```sh
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.1.0   # MCP over stdio
+docker run -i --rm \
+  -v "$HOME/.config/oraclemcp:/root/.config/oraclemcp:ro" \
+  -e ORACLE_APP_PASSWORD \
+  ghcr.io/muhdur/oraclemcp:0.2.0          # MCP over stdio, against the configured profile
+
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.2.0   # tool surface only (no DB)
 ```
 
 > The Docker image bundles Oracle Instant Client (Oracle Free Use Terms) and is therefore a mixed-license artifact; the crates themselves are Apache-2.0 OR MIT.
@@ -87,6 +100,11 @@ oraclemcp robot-docs guide           # compact in-binary guide for agents
 
 `--json` is a visible alias for `--robot-json` and keeps stdout as a single
 machine-readable JSON object.
+
+The Streamable HTTP transport (`--listen`) is unauthenticated plaintext. It now
+fails closed: it refuses to start without `--allow-no-auth`, and refuses any
+non-loopback bind unless `ORACLEMCP_HTTP_ALLOW_REMOTE=1` is set. Treat remote
+binds as opt-in and front them with your own TLS/auth.
 
 Connection profiles are resolved from layered configuration (`oraclemcp-config`); select one with `serve --profile <name>`.
 
@@ -151,6 +169,17 @@ above and the driver name, but `os_user` and `program` remain backend-reported
 values unless the underlying driver exposes setters for them.
 `require_signed_tools = true` requires HMAC signatures for operator-defined
 custom tools on that profile; `protected = true` implies the same policy.
+
+A few further profile keys are optional:
+
+- `base = "other_profile"`: inherit from another profile and override only the
+  keys you set. Inheritance is resolved before validation, so a child still
+  honors the effective `max_level` ceiling.
+- `[profiles.pool]`: connection-pool sizing for the physical connection
+  (`min`, `max`, `increment`).
+- `[profiles.oci]`: OCI-specific connection settings for the underlying driver.
+- `read_only_standby = true`: mark the target as a read-only standby so the
+  profile cannot be elevated above `READ_ONLY` regardless of `max_level`.
 
 Then launch:
 
@@ -235,6 +264,7 @@ blocks; it does not print the HMAC key.
 | `oracle_execute` | Execute one non-read statement through the active profile/session gate; DML rolls back by default, while commits and DDL/Admin require the confirmation token from `oracle_preview_sql`; optionally captures bounded `DBMS_OUTPUT` |
 | `oracle_compile_object` | Preview or compile one PL/SQL/view object through the `DDL` profile gate; execution requires the confirmation token returned by preview |
 | `oracle_create_or_replace` | Preview or apply one `CREATE OR REPLACE` statement through the classifier and `DDL` profile gate |
+| `oracle_patch_source` | Preview or apply an exact `old_text`→`new_text` patch to one stored PL/SQL source object (package/body/type/view) through the classifier and `DDL` profile gate; TOCTOU-safe, re-fetching the current source and re-confirming at execute time |
 | `oracle_list_schemas` | List schemas that own objects visible to this session |
 | `oracle_schema_inspect` | List objects in the current schema, one owner, or all accessible schemas |
 | `oracle_describe` | Column and constraint metadata for a table or view |
@@ -269,6 +299,8 @@ compatibility aliases that route to the guarded `oracle_*` tools:
 | `compile_with_warnings` | `oracle_compile_object` with `warnings=true` |
 | `create_or_replace` | `oracle_create_or_replace` |
 | `deploy_ddl` | Compatibility wrapper for one DDL statement; preview by default, execution reuses the same DDL profile gate and confirmation |
+| `patch_package` | `oracle_patch_source` for a package spec or body |
+| `patch_view` | `oracle_patch_source` for a view |
 | `read_patch_preview` | Compatibility helper that lists or reads the last in-process source-patch preview created by `oracle_patch_source`, `patch_package`, or `patch_view` |
 | `list_objects` | `oracle_schema_inspect` |
 | `list_schemas` | `oracle_list_schemas` |

@@ -122,9 +122,9 @@ mod tests {
 
     #[test]
     fn parses_scheme_and_locator() {
-        let r = SecretRef::parse("env:ORACLE_PW").unwrap();
+        let r = SecretRef::parse("env:DB_PASSWORD").unwrap();
         assert_eq!(r.scheme, "env");
-        assert_eq!(r.locator, "ORACLE_PW");
+        assert_eq!(r.locator, "DB_PASSWORD");
         assert!(SecretRef::parse("noscheme").is_err());
         assert!(SecretRef::parse("env:").is_err());
     }
@@ -132,8 +132,8 @@ mod tests {
     #[test]
     fn env_scheme_resolves_from_injected_lookup() {
         let mut m = HashMap::new();
-        m.insert("ORACLE_PW", "tiger");
-        let s = resolve_secret("env:ORACLE_PW", true, env(&m)).expect("resolve");
+        m.insert("DB_PASSWORD", "tiger");
+        let s = resolve_secret("env:DB_PASSWORD", true, env(&m)).expect("resolve");
         assert_eq!(s.expose(), "tiger");
         // Missing var -> NotFound.
         assert!(matches!(

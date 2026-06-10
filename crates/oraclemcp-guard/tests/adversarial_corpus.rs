@@ -132,6 +132,43 @@ const CORPUS: &[(&str, DangerLevel)] = &[
     ),
     // --- Desync: an unterminated block must be Forbidden, never best-effort ---
     ("DECLARE x NUMBER; BEGIN x := 1;", DangerLevel::Forbidden),
+    // --- Audit gap: Oracle 12c WITH FUNCTION (inline PL/SQL in a SELECT) ---
+    // A 12c `WITH FUNCTION` defines a full PL/SQL function body inside what
+    // syntactically opens like a CTE. It does NOT start with BEGIN/DECLARE, so
+    // Stage A returns PureSql; the inline `BEGIN … END;` then either trips the
+    // dynamic-SQL marker scan (EXECUTE IMMEDIATE) or the buried-`;`-inside-block
+    // desync. Either way the statement MUST NOT be cleared as a benign read just
+    // because it lexes as a SELECT shell. (Observed: Forbidden — fail-closed.)
+    (
+        "WITH FUNCTION f RETURN NUMBER IS BEGIN EXECUTE IMMEDIATE 'DROP TABLE x'; RETURN 1; END; SELECT f FROM dual",
+        DangerLevel::Guarded,
+    ),
+    // The same shape with no dangerous marker — a plain DML in the inline body —
+    // still must not read as Safe (the buried `;` inside the function block is a
+    // desync the pure-SQL caller fails closed on). (Observed: Forbidden.)
+    (
+        "WITH FUNCTION f RETURN NUMBER IS BEGIN DELETE FROM orders; RETURN 1; END; SELECT f FROM dual",
+        DangerLevel::Guarded,
+    ),
+    // Even a side-effect-free inline body (RETURN only) must not be cleared to
+    // Safe — the classifier cannot prove the inline routine pure here, and the
+    // buried `;` desync fails it closed regardless. (Observed: Forbidden.)
+    (
+        "WITH FUNCTION f RETURN NUMBER IS BEGIN RETURN 1; END; SELECT f FROM dual",
+        DangerLevel::Guarded,
+    ),
+    // --- Audit gap: INSERT … WITH (a CTE feeding a write) ---
+    // `INSERT INTO t WITH c AS (…) SELECT * FROM c` is a write that leads with a
+    // CTE on its source side. It must classify as a write (Guarded), never a
+    // read — the leading `INSERT` keyword governs, not the embedded `WITH`/SELECT.
+    (
+        "INSERT INTO t WITH c AS (SELECT 1 FROM dual) SELECT * FROM c",
+        DangerLevel::Guarded,
+    ),
+    (
+        "INSERT INTO t\nWITH c AS (SELECT 1 FROM dual)\nSELECT * FROM c",
+        DangerLevel::Guarded,
+    ),
 ];
 
 #[test]
@@ -195,6 +232,67 @@ fn classifier_never_panics_on_arbitrary_input() {
                 "garbage cleared to Safe: {input:?} -> {decision:?}"
             );
         }
+    }
+}
+
+#[test]
+fn multibyte_literal_contents_are_data_not_statements() {
+    // Audit gap: a multibyte / unicode string literal carrying an embedded `;`
+    // plus dangerous keywords (DROP/END/EXECUTE IMMEDIATE) is DATA inside one
+    // SELECT, never a phantom statement boundary. The classifier must read the
+    // literal as a single token regardless of non-ASCII bytes around the `;`,
+    // and the whole thing stays exactly one Safe SELECT. (No false split, no
+    // false danger — a false positive here would block legitimate reads.)
+    let classifier = Classifier::default();
+    for sql in [
+        "SELECT 'café; DROP TABLE Ω; END; EXECUTE IMMEDIATE x' AS p FROM dual",
+        "SELECT N'你好; DROP TABLE 世界; END;' AS p FROM dual",
+        "SELECT q'{café; DROP TABLE Ω; END;}' AS p FROM dual",
+        "SELECT 'Ω;Ω;Ω' AS p FROM dual",
+    ] {
+        let d = classifier.classify(sql);
+        assert_eq!(
+            d.danger,
+            DangerLevel::Safe,
+            "multibyte-literal contents must be treated as data (Safe SELECT): {sql:?} -> {d:?}"
+        );
+    }
+}
+
+#[test]
+fn qquote_keyword_is_data_but_real_execute_immediate_is_forbidden() {
+    // Audit gap: a `q'[…]'` literal whose CONTENTS spell a dangerous marker
+    // (`EXECUTE IMMEDIATE`) is data, not a statement — it must NOT trip the
+    // PL/SQL dynamic-SQL marker scan. The literal is a single token, so the
+    // SELECT stays Safe.
+    let classifier = Classifier::default();
+    for benign in [
+        "SELECT q'[EXECUTE IMMEDIATE]' AS p FROM dual",
+        "SELECT q'<EXECUTE IMMEDIATE 'DROP TABLE t'>' AS p FROM dual",
+        "SELECT q'{ EXECUTE IMMEDIATE 'x' }' AS p FROM dual",
+    ] {
+        let d = classifier.classify(benign);
+        assert_eq!(
+            d.danger,
+            DangerLevel::Safe,
+            "q-quoted EXECUTE IMMEDIATE is data, must stay Safe: {benign:?} -> {d:?}"
+        );
+    }
+    // But a REAL EXECUTE IMMEDIATE outside any literal must be Forbidden — the
+    // marker scan over the canonicalized token stream catches it. This is the
+    // other half of the symmetry: data is inert, code is caught.
+    for dangerous in [
+        "BEGIN EXECUTE IMMEDIATE 'DROP TABLE x'; END;",
+        // q-quoted decoy first, then a genuine dynamic-SQL call in the same block:
+        // the real marker must still force Forbidden, the decoy must not mask it.
+        "BEGIN x := q'[EXECUTE IMMEDIATE]'; EXECUTE IMMEDIATE 'DROP TABLE x'; END;",
+    ] {
+        let d = classifier.classify(dangerous);
+        assert_eq!(
+            d.danger,
+            DangerLevel::Forbidden,
+            "a real EXECUTE IMMEDIATE outside a literal must be Forbidden: {dangerous:?} -> {d:?}"
+        );
     }
 }
 

@@ -24,4 +24,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "alter_session_parse"
+path = "fuzz_targets/alter_session_parse.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

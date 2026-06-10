@@ -14,9 +14,37 @@
 //!    never silently truncates through `f64`. `numbers_as_float` opts into
 //!    lossy float for callers who accept it.
 
+use std::io::{self, Write};
+
 use serde_json::{Value, json};
 
 use crate::types::{OracleCell, OracleRow};
+
+/// A sink that tallies bytes without buffering, so the page byte cap can measure
+/// a serialized row in one streaming pass instead of allocating a throwaway
+/// `String`. The count equals `Value::to_string().len()` (both use the compact
+/// formatter).
+struct ByteCounter(usize);
+
+impl Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The compact-JSON byte length of `value`, computed without allocating the
+/// serialized string. Equal to `value.to_string().len()`.
+#[must_use]
+pub(crate) fn json_byte_len(value: &Value) -> usize {
+    let mut counter = ByteCounter(0);
+    // serde_json's `Value` serializer is infallible into an infallible writer.
+    let _ = serde_json::to_writer(&mut counter, value);
+    counter.0
+}
 
 /// `ALTER SESSION` statements that pin canonical, NLS-decoupled output. Applied
 /// once per physical session (at connect / lease acquire).
@@ -94,11 +122,10 @@ pub enum TypeRepr {
     Unsupported,
 }
 
-/// Classify an Oracle type name (as rendered by the driver, e.g. `"NUMBER"`,
-/// `"VARCHAR2(50)"`, `"TIMESTAMP(6) WITH TIME ZONE"`).
-#[must_use]
-pub fn classify_type(oracle_type: &str) -> TypeRepr {
-    let t = oracle_type.trim().to_ascii_uppercase();
+/// Classify a pre-uppercased, pre-trimmed Oracle type name. Callers that already
+/// hold the canonical-cased name (the per-column cache) use this to skip the
+/// re-uppercase; [`classify_type`] is the trimming/uppercasing front door.
+fn classify_uppercased(t: &str) -> TypeRepr {
     if t.starts_with("NUMBER")
         || t.starts_with("FLOAT")
         || t.starts_with("BINARY_FLOAT")
@@ -127,6 +154,32 @@ pub fn classify_type(oracle_type: &str) -> TypeRepr {
         TypeRepr::Text
     } else {
         TypeRepr::Unsupported
+    }
+}
+
+/// Classify an Oracle type name (as rendered by the driver, e.g. `"NUMBER"`,
+/// `"VARCHAR2(50)"`, `"TIMESTAMP(6) WITH TIME ZONE"`).
+#[must_use]
+pub fn classify_type(oracle_type: &str) -> TypeRepr {
+    classify_uppercased(&oracle_type.trim().to_ascii_uppercase())
+}
+
+/// The constant-per-column classification: the [`TypeRepr`] plus the NUMBER
+/// distinction the numeric branch needs, computed once so a page of rows never
+/// re-uppercases a column's type per cell.
+#[derive(Clone, Copy, Debug)]
+struct ColumnRepr {
+    repr: TypeRepr,
+    is_number_type: bool,
+}
+
+impl ColumnRepr {
+    fn classify(oracle_type: &str) -> Self {
+        let t = oracle_type.trim().to_ascii_uppercase();
+        ColumnRepr {
+            repr: classify_uppercased(&t),
+            is_number_type: t.starts_with("NUMBER"),
+        }
     }
 }
 
@@ -180,6 +233,12 @@ pub fn canonicalize_datetime(text: &str) -> String {
 /// Serialize one cell to its canonical JSON value per the type table.
 #[must_use]
 pub fn serialize_cell(cell: &OracleCell, opts: &SerializeOptions) -> Value {
+    serialize_cell_classified(cell, ColumnRepr::classify(&cell.oracle_type), opts)
+}
+
+/// Serialize a cell whose column classification is already known, so a page of
+/// rows classifies each column once instead of once per cell.
+fn serialize_cell_classified(cell: &OracleCell, col: ColumnRepr, opts: &SerializeOptions) -> Value {
     // Binary columns carrying raw bytes always base64 (with a cap).
     if let Some(bytes) = &cell.bytes {
         let truncated = bytes.len() > opts.max_blob_bytes;
@@ -198,20 +257,15 @@ pub fn serialize_cell(cell: &OracleCell, opts: &SerializeOptions) -> Value {
     let Some(text) = cell.text() else {
         return Value::Null;
     };
-    match classify_type(&cell.oracle_type) {
+    match col.repr {
         TypeRepr::Numeric => {
-            let is_number_type = cell
-                .oracle_type
-                .trim()
-                .to_ascii_uppercase()
-                .starts_with("NUMBER");
             if opts.numbers_as_float {
                 match text.parse::<f64>() {
                     Ok(f) => serde_json::Number::from_f64(f)
                         .map_or_else(|| Value::String(text.to_owned()), Value::Number),
                     Err(_) => Value::String(text.to_owned()),
                 }
-            } else if is_number_type || significant_digits(text) > 15 {
+            } else if col.is_number_type || significant_digits(text) > 15 {
                 // Lossless: NUMBER (and any >15-sig-digit numeric) stays a string.
                 Value::String(text.to_owned())
             } else {
@@ -229,10 +283,10 @@ pub fn serialize_cell(cell: &OracleCell, opts: &SerializeOptions) -> Value {
         }
         TypeRepr::Text | TypeRepr::Raw => capped_text_value(text, opts.max_text_chars),
         TypeRepr::Clob => {
-            let truncated = text.chars().count() > opts.max_lob_chars;
-            if truncated {
+            let char_length = text.chars().count();
+            if char_length > opts.max_lob_chars {
                 let s: String = text.chars().take(opts.max_lob_chars).collect();
-                json!({ "value": s, "truncated": true, "char_length": text.chars().count() })
+                json!({ "value": s, "truncated": true, "char_length": char_length })
             } else {
                 Value::String(text.to_owned())
             }
@@ -253,9 +307,45 @@ pub fn serialize_cell(cell: &OracleCell, opts: &SerializeOptions) -> Value {
 pub fn serialize_row(row: &OracleRow, opts: &SerializeOptions) -> Value {
     let mut map = serde_json::Map::with_capacity(row.columns.len());
     for (name, cell) in &row.columns {
-        map.insert(name.clone(), serialize_cell(cell, opts));
+        let col = ColumnRepr::classify(&cell.oracle_type);
+        map.insert(name.clone(), serialize_cell_classified(cell, col, opts));
     }
     Value::Object(map)
+}
+
+/// A reusable per-column classification cache for serializing a whole page: the
+/// column classifications are computed once from the first row and reused across
+/// every row, avoiding a per-cell re-uppercase of constant column types.
+pub(crate) struct PageColumnCache {
+    columns: Vec<ColumnRepr>,
+}
+
+impl PageColumnCache {
+    pub(crate) fn from_row(row: &OracleRow) -> Self {
+        PageColumnCache {
+            columns: row
+                .columns
+                .iter()
+                .map(|(_, cell)| ColumnRepr::classify(&cell.oracle_type))
+                .collect(),
+        }
+    }
+
+    /// Serialize a row reusing the cached column classifications. A result-set
+    /// page has a fixed column descriptor, so the cache is keyed by position; an
+    /// index past the cache (a ragged row) classifies fresh rather than panicking.
+    pub(crate) fn serialize_row(&self, row: &OracleRow, opts: &SerializeOptions) -> Value {
+        let mut map = serde_json::Map::with_capacity(row.columns.len());
+        for (idx, (name, cell)) in row.columns.iter().enumerate() {
+            let col = self
+                .columns
+                .get(idx)
+                .copied()
+                .unwrap_or_else(|| ColumnRepr::classify(&cell.oracle_type));
+            map.insert(name.clone(), serialize_cell_classified(cell, col, opts));
+        }
+        Value::Object(map)
+    }
 }
 
 #[cfg(test)]
@@ -440,5 +530,85 @@ mod tests {
         assert!(stmts.iter().any(|s| s.contains("NLS_TIMESTAMP_FORMAT")));
         assert!(stmts.iter().any(|s| s.contains("NLS_TIMESTAMP_TZ_FORMAT")));
         assert!(stmts.iter().any(|s| s.contains("NLS_NUMERIC_CHARACTERS")));
+    }
+
+    fn sample_values() -> Vec<Value> {
+        vec![
+            json!({"ID": "0", "NAME": "n0"}),
+            json!({"z": 1, "a": "héllo €", "nested": {"b": [1, 2, 3], "c": null}}),
+            json!({"value": "ab\"c\\d\ne", "truncated": true, "char_length": 12345}),
+            json!("a \"quoted\" \\ string with \t tab"),
+            json!(null),
+            json!([1.5, "x", false, null]),
+            json!({}),
+        ]
+    }
+
+    #[test]
+    fn json_byte_len_matches_to_string_len() {
+        // T1: the single-pass byte count must equal the old `to_string().len()`.
+        for v in sample_values() {
+            assert_eq!(json_byte_len(&v), v.to_string().len(), "value: {v}");
+        }
+    }
+
+    #[test]
+    fn page_cache_serializes_byte_identically_to_per_cell() {
+        // T2: classifying each column once and reusing it across rows must give
+        // byte-identical JSON to classifying per cell.
+        let opts = SerializeOptions::default();
+        let rows = vec![
+            OracleRow {
+                columns: vec![
+                    ("ID".to_owned(), cell("NUMBER", "1")),
+                    ("WHEN".to_owned(), cell("DATE", "2026-06-01 12:00:00")),
+                    ("BODY".to_owned(), cell("CLOB", "abcdef")),
+                ],
+            },
+            OracleRow {
+                columns: vec![
+                    ("ID".to_owned(), cell("NUMBER", "1234567890123456789")),
+                    (
+                        "WHEN".to_owned(),
+                        cell("DATE", "2026-12-31 23:59:59"),
+                    ),
+                    ("BODY".to_owned(), cell("CLOB", "")),
+                ],
+            },
+        ];
+        let cache = PageColumnCache::from_row(&rows[0]);
+        for row in &rows {
+            let per_cell = serialize_row(row, &opts);
+            let cached = cache.serialize_row(row, &opts);
+            assert_eq!(cached, per_cell);
+            assert_eq!(cached.to_string(), per_cell.to_string());
+        }
+    }
+
+    #[test]
+    fn page_cache_handles_mixed_case_and_padded_type_names() {
+        // The cache must classify identically regardless of casing/whitespace in
+        // the driver-rendered type name.
+        let opts = SerializeOptions::default();
+        let first = OracleRow {
+            columns: vec![("V".to_owned(), cell("  number  ", "9999999999999999999"))],
+        };
+        let row = OracleRow {
+            columns: vec![("V".to_owned(), cell("NuMbEr", "42"))],
+        };
+        let cache = PageColumnCache::from_row(&first);
+        assert_eq!(
+            cache.serialize_row(&row, &opts),
+            serialize_row(&row, &opts)
+        );
+    }
+
+    #[test]
+    fn classify_type_public_signature_unchanged() {
+        assert_eq!(classify_type("number"), TypeRepr::Numeric);
+        assert_eq!(classify_type("  VARCHAR2(50) "), TypeRepr::Text);
+        assert_eq!(classify_type("TIMESTAMP(6) WITH TIME ZONE"), TypeRepr::Timestamp);
+        assert_eq!(classify_type("DATE"), TypeRepr::Date);
+        assert_eq!(classify_type("SDO_GEOMETRY"), TypeRepr::Unsupported);
     }
 }

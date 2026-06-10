@@ -4,6 +4,79 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-06-10
+
+This release turns the read-only preview into a full safe-by-default Oracle MCP
+server: connection profiles, a complete read surface, a profile-gated write
+path, operator-defined custom tools, and compatibility aliases for older Oracle
+MCP clients.
+
+### Added
+
+- **Connection profile system** — layered `profiles.toml` with `default_profile`,
+  profile inheritance via `base`, `env:`/`literal:` credential references, an
+  immutable `max_level` ceiling with a `default_level` starting point, optional
+  `pool`/`oci` settings, and `read_only_standby`. Agents can list profiles
+  (`oracle_list_profiles`) and reconnect a running server with
+  `oracle_switch_profile`; a failed switch leaves the current connection in
+  place.
+- **Session identity and local session policy** — per-profile
+  `session_identity` (module, action, client identifier, driver name, …),
+  allowlisted `login_statements`/`login_script` (`ALTER SESSION SET ...` only),
+  and `trusted_session_statements` as a profile-owner escape hatch for local
+  initialization (`DBMS_APPLICATION_INFO`, application contexts, `DBMS_OUTPUT`).
+  None of these are ever accepted from agent tool calls.
+- **Full read tool surface** — `oracle_get_source`, `oracle_sample_rows`,
+  `oracle_read_clob`, `oracle_describe_index`, `oracle_describe_trigger`,
+  `oracle_describe_view`, constraint metadata in `oracle_describe`,
+  `oracle_list_schemas`, `oracle_plscope_inspect`, and owner/type/`name_like`
+  filters on `oracle_schema_inspect` and `oracle_search_source`.
+- **Profile-gated write path** — `oracle_preview_sql` (classify without
+  executing, reporting whether SQL is read-only, needs a profile-permitted
+  step-up, or exceeds the ceiling); `oracle_execute` (one non-read statement,
+  rollback-by-default for DML, confirmation token required before any commit);
+  `oracle_create_or_replace`; `oracle_patch_source` plus the `patch_package`/
+  `patch_view` aliases (exact `old_text`→`new_text` patches, re-fetched and
+  re-confirmed at execute); `oracle_compile_object` (with `plscope`/`warnings`);
+  `deploy_ddl`; and `oracle_set_session_level` for explicit, bounded session
+  elevation within the profile ceiling.
+- **Operator-defined read-only custom tools** — environment-specific read
+  helpers from `tools.d/*.toml` with named binds, loaded only when the
+  classifier proves them `READ_ONLY`, with optional HMAC signing
+  (`sign-tool`, `ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY`) required on protected
+  profiles.
+- **Compatibility aliases** for older/shorter Oracle MCP clients
+  (`current_database`, `switch_database`, `enable_writes`, `disable_writes`,
+  `query`, `preview_sql`, `execute_approved`, `compile_object`,
+  `compile_with_warnings`, `create_or_replace`, `deploy_ddl`, `patch_package`,
+  `patch_view`, `read_patch_preview`, `list_objects`, `list_schemas`,
+  `get_schema`, `describe_*`, `get_ddl`, `get_object_source`, `get_errors`,
+  `get_clob`), all routing through the same classifier, validation, and gates.
+- **CLI** — `doctor` (offline self-test plus optional live connectivity/role/
+  privilege checks), `profiles` (configured profile names and non-secret
+  metadata), and `robot-docs` (compact in-binary guide for agents).
+
+### Changed
+
+- Omitted MCP tool arguments (`null`) are now treated as an empty object, so
+  zero-arg and all-optional tools no longer reject `null` argument payloads.
+
+### Fixed
+
+- `OracleConnectOptions`’ `Debug` output now redacts credentials instead of
+  printing them.
+
+### Security
+
+- Confirmation tokens are now keyed HMAC tokens rather than guessable
+  identifiers, hardening the preview-to-commit handshake.
+- The patch body-override marker scan is tokenizer-based and resistant to
+  comment-wedge evasion, so a crafted comment can no longer smuggle a body
+  override past the check.
+- The Streamable HTTP transport (`--listen`) is now fail-closed: it refuses to
+  start without `--allow-no-auth`, and refuses non-loopback binds unless
+  `ORACLEMCP_HTTP_ALLOW_REMOTE=1` is set.
+
 ## [0.1.0] — 2026-06-08
 
 Initial public release of `oraclemcp` — an unofficial, engine-free,
@@ -44,4 +117,5 @@ pure Rust. (Not affiliated with Oracle Corporation.)
   closed on desynchronized multi-statement input. It carries a differential
   adversarial corpus (run in CI) and a `cargo-fuzz` target.
 
+[0.2.0]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.2.0
 [0.1.0]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.1.0

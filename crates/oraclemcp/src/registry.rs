@@ -81,6 +81,54 @@ fn object_schema(props: Value, required: &[&str]) -> Value {
     })
 }
 
+/// Merge property fragments into a base `properties` object. Keys serialize
+/// sorted (serde_json is built without preserve_order here), so merge order is
+/// wire-irrelevant; this only de-duplicates the recurring fragment literals.
+fn props_with(base: Value, fragments: &[Value]) -> Value {
+    let mut base = base;
+    if let Value::Object(map) = &mut base {
+        for fragment in fragments {
+            if let Value::Object(extra) = fragment {
+                for (k, v) in extra {
+                    map.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    base
+}
+
+/// The standard per-call `timeout_seconds` override property, repeated across
+/// every live-DB tool schema.
+fn timeout_seconds_prop() -> Value {
+    json!({
+        "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
+    })
+}
+
+/// The `confirm` token property plus its two fixed aliases. Only the `confirm`
+/// description varies per tool; `token`/`confirmation_token` are always aliases.
+fn confirm_trio(confirm_description: &str) -> Value {
+    json!({
+        "confirm": { "type": "string", "description": confirm_description },
+        "token": { "type": "string", "description": "Alias for confirm." },
+        "confirmation_token": { "type": "string", "description": "Alias for confirm." }
+    })
+}
+
+/// The DBMS_OUTPUT capture cluster shared by oracle_execute and execute_approved.
+/// Only the `capture_dbms_output` description differs between the two tools.
+fn dbms_output_props(capture_description: &str) -> Value {
+    json!({
+        "capture_dbms_output": { "type": "boolean", "description": capture_description },
+        "dbms_output": { "type": "boolean", "description": "Alias for capture_dbms_output." },
+        "dbms_output_max_lines": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum DBMS_OUTPUT lines to return when capture_dbms_output=true (default 200)." },
+        "max_dbms_output_lines": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for dbms_output_max_lines." },
+        "dbms_output_max_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum DBMS_OUTPUT characters to return when capture_dbms_output=true (default 200000)." },
+        "max_dbms_output_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Alias for dbms_output_max_chars." }
+    })
+}
+
 /// Build the public tool registry. Each descriptor carries a hand-written
 /// argument JSON-Schema mirroring the matching `dispatch` arg struct so an
 /// agent can construct a call first-try.
@@ -127,16 +175,16 @@ pub fn tool_registry() -> ToolRegistry {
             "Preview or apply a temporary session operating-level elevation within the active profile ceiling, or drop back to READ_ONLY.",
         )
         .with_input_schema(object_schema(
-            json!({
-                "level": { "type": "string", "description": "Target level: READ_WRITE, DDL, or ADMIN. READ_ONLY drops any active elevation." },
-                "target_level": { "type": "string", "description": "Alias for level." },
-                "ttl_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary elevation window in seconds (default 900, hard cap 3600)." },
-                "execute": { "type": "boolean", "description": "Default false previews the level change and returns a confirmation token. Set true with confirm to apply elevation." },
-                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true raises the level." },
-                "token": { "type": "string", "description": "Alias for confirm." },
-                "confirmation_token": { "type": "string", "description": "Alias for confirm." },
-                "action": { "type": "string", "description": "Optional action: preview, apply, drop, or status. Omit for preview/apply based on execute." }
-            }),
+            props_with(
+                json!({
+                    "level": { "type": "string", "description": "Target level: READ_WRITE, DDL, or ADMIN. READ_ONLY drops any active elevation." },
+                    "target_level": { "type": "string", "description": "Alias for level." },
+                    "ttl_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary elevation window in seconds (default 900, hard cap 3600)." },
+                    "execute": { "type": "boolean", "description": "Default false previews the level change and returns a confirmation token. Set true with confirm to apply elevation." },
+                    "action": { "type": "string", "description": "Optional action: preview, apply, drop, or status. Omit for preview/apply based on execute." }
+                }),
+                &[confirm_trio("Confirmation token returned by preview. Required when execute=true raises the level.")],
+            ),
             &[],
         ))
         .destructive(),
@@ -149,23 +197,25 @@ pub fn tool_registry() -> ToolRegistry {
             "Run a read-only SELECT with positional binds; paginated and row/byte capped.",
         )
         .with_input_schema(object_schema(
-            json!({
-                "sql": { "type": "string", "description": "A single read-only SELECT. Use :1, :2 … for binds." },
-                "binds": {
-                    "type": "array",
-                    "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
-                    "items": {}
-                },
-                "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page." },
-                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum rows in this page (default 200, hard cap 5000)." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },
-                "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 26214400, "description": "Maximum serialized JSON bytes in this page (default 10485760, hard cap 26214400)." },
-                "max_col_width": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Compatibility text cap for ordinary text/raw columns. Truncated values are returned as { value, truncated, char_length }." },
-                "max_lob_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum CLOB characters to inline per cell (default 32768)." },
-                "max_blob_bytes": { "type": "integer", "minimum": 1, "maximum": 5242880, "description": "Maximum BLOB bytes to inline per cell as base64 (default 1048576)." },
-                "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible. Default false preserves Oracle NUMBER losslessly as strings." },
-                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
-            }),
+            props_with(
+                json!({
+                    "sql": { "type": "string", "description": "A single read-only SELECT. Use :1, :2 … for binds." },
+                    "binds": {
+                        "type": "array",
+                        "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
+                        "items": {}
+                    },
+                    "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page." },
+                    "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum rows in this page (default 200, hard cap 5000)." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },
+                    "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 26214400, "description": "Maximum serialized JSON bytes in this page (default 10485760, hard cap 26214400)." },
+                    "max_col_width": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Compatibility text cap for ordinary text/raw columns. Truncated values are returned as { value, truncated, char_length }." },
+                    "max_lob_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum CLOB characters to inline per cell (default 32768)." },
+                    "max_blob_bytes": { "type": "integer", "minimum": 1, "maximum": 5242880, "description": "Maximum BLOB bytes to inline per cell as base64 (default 1048576)." },
+                    "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible. Default false preserves Oracle NUMBER losslessly as strings." }
+                }),
+                &[timeout_seconds_prop()],
+            ),
             &["sql"],
         )),
     );
@@ -191,25 +241,22 @@ pub fn tool_registry() -> ToolRegistry {
             "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default and commits require the confirmation token from oracle_preview_sql.",
         )
         .with_input_schema(object_schema(
-            json!({
-                "sql": { "type": "string", "description": "A single non-read SQL statement. Use :1, :2 … for binds." },
-                "binds": {
-                    "type": "array",
-                    "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
-                    "items": {}
-                },
-                "commit": { "type": "boolean", "description": "Default false rolls back after DML. Set true only with confirm from oracle_preview_sql. DDL/Admin statements require true because Oracle cannot rollback them." },
-                "confirm": { "type": "string", "description": "Commit confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true." },
-                "token": { "type": "string", "description": "Alias for confirm." },
-                "confirmation_token": { "type": "string", "description": "Alias for confirm." },
-                "capture_dbms_output": { "type": "boolean", "description": "Default false. When true, enables DBMS_OUTPUT before execution and returns bounded captured lines after commit/rollback." },
-                "dbms_output": { "type": "boolean", "description": "Alias for capture_dbms_output." },
-                "dbms_output_max_lines": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum DBMS_OUTPUT lines to return when capture_dbms_output=true (default 200)." },
-                "max_dbms_output_lines": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for dbms_output_max_lines." },
-                "dbms_output_max_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum DBMS_OUTPUT characters to return when capture_dbms_output=true (default 200000)." },
-                "max_dbms_output_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Alias for dbms_output_max_chars." },
-                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
-            }),
+            props_with(
+                json!({
+                    "sql": { "type": "string", "description": "A single non-read SQL statement. Use :1, :2 … for binds." },
+                    "binds": {
+                        "type": "array",
+                        "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
+                        "items": {}
+                    },
+                    "commit": { "type": "boolean", "description": "Default false rolls back after DML. Set true only with confirm from oracle_preview_sql. DDL/Admin statements require true because Oracle cannot rollback them." }
+                }),
+                &[
+                    confirm_trio("Commit confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true."),
+                    dbms_output_props("Default false. When true, enables DBMS_OUTPUT before execution and returns bounded captured lines after commit/rollback."),
+                    timeout_seconds_prop(),
+                ],
+            ),
             &["sql"],
         ))
         .destructive(),
@@ -222,20 +269,22 @@ pub fn tool_registry() -> ToolRegistry {
             "Preview or compile one PL/SQL/view object through the active DDL profile gate; preview is the default and execution requires the returned confirmation token.",
         )
         .with_input_schema(object_schema(
-            json!({
-                "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
-                "owner": { "type": "string", "description": "Optional schema owner. Defaults to the current schema when available." },
-                "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
-                "object_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." },
-                "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
-                "warnings": { "type": "boolean", "description": "Enable PLSQL_WARNINGS='ENABLE:ALL' before compiling. Default false." },
-                "enable_warnings": { "type": "boolean", "description": "Alias for warnings." },
-                "execute": { "type": "boolean", "description": "Default false returns a preview and confirmation token. Set true only with confirm to run the compile statements." },
-                "confirm": { "type": "string", "description": "Confirmation token returned by the preview for this exact object/profile/options. Required when execute=true." },
-                "token": { "type": "string", "description": "Alias for confirm." },
-                "confirmation_token": { "type": "string", "description": "Alias for confirm." },
-                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
-            }),
+            props_with(
+                json!({
+                    "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
+                    "owner": { "type": "string", "description": "Optional schema owner. Defaults to the current schema when available." },
+                    "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
+                    "object_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." },
+                    "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
+                    "warnings": { "type": "boolean", "description": "Enable PLSQL_WARNINGS='ENABLE:ALL' before compiling. Default false." },
+                    "enable_warnings": { "type": "boolean", "description": "Alias for warnings." },
+                    "execute": { "type": "boolean", "description": "Default false returns a preview and confirmation token. Set true only with confirm to run the compile statements." }
+                }),
+                &[
+                    confirm_trio("Confirmation token returned by the preview for this exact object/profile/options. Required when execute=true."),
+                    timeout_seconds_prop(),
+                ],
+            ),
             &["object_type"],
         ))
         .destructive(),
@@ -248,17 +297,19 @@ pub fn tool_registry() -> ToolRegistry {
             "Preview or apply one CREATE OR REPLACE statement through the classifier and active DDL profile gate.",
         )
         .with_input_schema(object_schema(
-            json!({
-                "source_code": { "type": "string", "description": "Full CREATE OR REPLACE statement. Required unless sql or ddl is supplied." },
-                "sql": { "type": "string", "description": "Alias for source_code." },
-                "ddl": { "type": "string", "description": "Alias for source_code." },
-                "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
-                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
-                "token": { "type": "string", "description": "Alias for confirm." },
-                "confirmation_token": { "type": "string", "description": "Alias for confirm." },
-                "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the detected object when possible. Default true." },
-                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
-            }),
+            props_with(
+                json!({
+                    "source_code": { "type": "string", "description": "Full CREATE OR REPLACE statement. Required unless sql or ddl is supplied." },
+                    "sql": { "type": "string", "description": "Alias for source_code." },
+                    "ddl": { "type": "string", "description": "Alias for source_code." },
+                    "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
+                    "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the detected object when possible. Default true." }
+                }),
+                &[
+                    confirm_trio("Confirmation token returned by preview. Required when execute=true."),
+                    timeout_seconds_prop(),
+                ],
+            ),
             &[],
         ))
         .destructive(),
@@ -271,23 +322,25 @@ pub fn tool_registry() -> ToolRegistry {
             "Preview or apply an exact old_text to new_text replacement against one stored source object; preview refetches the current source and execute uses the existing DDL confirmation gate.",
         )
         .with_input_schema(object_schema(
-            json!({
-                "owner": { "type": "string", "description": "Optional schema owner. Defaults to the current schema when available." },
-                "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
-                "object_name": { "type": "string", "description": "Alias for name." },
-                "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
-                "old_text": { "type": "string", "description": "Exact non-empty text to replace. It must match the current source exactly once." },
-                "search_text": { "type": "string", "description": "Alias for old_text." },
-                "new_text": { "type": "string", "description": "Replacement text. May be empty to delete the matched text." },
-                "replacement": { "type": "string", "description": "Alias for new_text." },
-                "max_chars": { "type": "integer", "minimum": 1, "maximum": 10000000, "description": "Maximum source characters to fetch before patching (default 1000000)." },
-                "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
-                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
-                "token": { "type": "string", "description": "Alias for confirm." },
-                "confirmation_token": { "type": "string", "description": "Alias for confirm." },
-                "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the patched object when possible. Default true." },
-                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
-            }),
+            props_with(
+                json!({
+                    "owner": { "type": "string", "description": "Optional schema owner. Defaults to the current schema when available." },
+                    "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
+                    "object_name": { "type": "string", "description": "Alias for name." },
+                    "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
+                    "old_text": { "type": "string", "description": "Exact non-empty text to replace. It must match the current source exactly once." },
+                    "search_text": { "type": "string", "description": "Alias for old_text." },
+                    "new_text": { "type": "string", "description": "Replacement text. May be empty to delete the matched text." },
+                    "replacement": { "type": "string", "description": "Alias for new_text." },
+                    "max_chars": { "type": "integer", "minimum": 1, "maximum": 10000000, "description": "Maximum source characters to fetch before patching (default 1000000)." },
+                    "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
+                    "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the patched object when possible. Default true." }
+                }),
+                &[
+                    confirm_trio("Confirmation token returned by preview. Required when execute=true."),
+                    timeout_seconds_prop(),
+                ],
+            ),
             &["object_type"],
         ))
         .destructive(),
@@ -565,15 +618,15 @@ pub fn tool_registry() -> ToolRegistry {
             "Compatibility alias for oracle_set_session_level with level=READ_WRITE; preview is still the default.",
         )
         .with_input_schema(object_schema(
-            json!({
-                "ttl_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary READ_WRITE elevation window in seconds (default 900)." },
-                "execute": { "type": "boolean", "description": "Default false previews and returns a confirmation token. Set true with confirm to apply." },
-                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true raises the level." },
-                "token": { "type": "string", "description": "Alias for confirm." },
-                "confirmation_token": { "type": "string", "description": "Alias for confirm." },
-                "db": { "type": "string", "description": "Ignored compatibility argument from older clients; use switch_database/oracle_switch_profile to change profiles." },
-                "profile": { "type": "string", "description": "Ignored compatibility argument from older clients; use switch_database/oracle_switch_profile to change profiles." }
-            }),
+            props_with(
+                json!({
+                    "ttl_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary READ_WRITE elevation window in seconds (default 900)." },
+                    "execute": { "type": "boolean", "description": "Default false previews and returns a confirmation token. Set true with confirm to apply." },
+                    "db": { "type": "string", "description": "Ignored compatibility argument from older clients; use switch_database/oracle_switch_profile to change profiles." },
+                    "profile": { "type": "string", "description": "Ignored compatibility argument from older clients; use switch_database/oracle_switch_profile to change profiles." }
+                }),
+                &[confirm_trio("Confirmation token returned by preview. Required when execute=true raises the level.")],
+            ),
             &[],
         ))
         .destructive(),
@@ -601,19 +654,21 @@ pub fn tool_registry() -> ToolRegistry {
             "Compatibility alias for oracle_query.",
         )
         .with_input_schema(object_schema(
-            json!({
-                "sql": { "type": "string", "description": "A single read-only SELECT. Use :1, :2 ... for binds." },
-                "binds": { "type": "array", "description": "Positional bind values for :1, :2 ...", "items": {} },
-                "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page." },
-                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum rows in this page (default 200, hard cap 5000)." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },
-                "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 26214400, "description": "Maximum serialized JSON bytes in this page." },
-                "max_col_width": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Compatibility text cap for ordinary text/raw columns." },
-                "max_lob_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum CLOB characters to inline per cell." },
-                "max_blob_bytes": { "type": "integer", "minimum": 1, "maximum": 5242880, "description": "Maximum BLOB bytes to inline per cell as base64." },
-                "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible." },
-                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
-            }),
+            props_with(
+                json!({
+                    "sql": { "type": "string", "description": "A single read-only SELECT. Use :1, :2 ... for binds." },
+                    "binds": { "type": "array", "description": "Positional bind values for :1, :2 ...", "items": {} },
+                    "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page." },
+                    "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum rows in this page (default 200, hard cap 5000)." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },
+                    "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 26214400, "description": "Maximum serialized JSON bytes in this page." },
+                    "max_col_width": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Compatibility text cap for ordinary text/raw columns." },
+                    "max_lob_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum CLOB characters to inline per cell." },
+                    "max_blob_bytes": { "type": "integer", "minimum": 1, "maximum": 5242880, "description": "Maximum BLOB bytes to inline per cell as base64." },
+                    "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible." }
+                }),
+                &[timeout_seconds_prop()],
+            ),
             &["sql"],
         )),
     );
@@ -639,21 +694,20 @@ pub fn tool_registry() -> ToolRegistry {
             "Compatibility alias for executing a statement previously previewed with preview_sql; token-only calls work for five minutes in the same server process.",
         )
         .with_input_schema(object_schema(
-            json!({
-                "token": { "type": "string", "description": "Confirmation token from preview_sql.execute_confirmation.confirm." },
-                "confirm": { "type": "string", "description": "Alias for token." },
-                "confirmation_token": { "type": "string", "description": "Alias for token." },
-                "sql": { "type": "string", "description": "Optional SQL statement. If omitted, the token must still be cached from preview_sql in this server process." },
-                "commit": { "type": "boolean", "description": "Default true for this compatibility tool. Set false to rollback-preview DML." },
-                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." },
-                "save_output": { "type": "string", "description": "Unsupported in the generic core. Use capture_dbms_output=true and read dbms_output.lines instead." },
-                "capture_dbms_output": { "type": "boolean", "description": "Default false. When true, returns bounded DBMS_OUTPUT lines." },
-                "dbms_output": { "type": "boolean", "description": "Alias for capture_dbms_output." },
-                "dbms_output_max_lines": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum DBMS_OUTPUT lines to return when capture_dbms_output=true (default 200)." },
-                "max_dbms_output_lines": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for dbms_output_max_lines." },
-                "dbms_output_max_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum DBMS_OUTPUT characters to return when capture_dbms_output=true (default 200000)." },
-                "max_dbms_output_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Alias for dbms_output_max_chars." }
-            }),
+            props_with(
+                json!({
+                    "token": { "type": "string", "description": "Confirmation token from preview_sql.execute_confirmation.confirm." },
+                    "confirm": { "type": "string", "description": "Alias for token." },
+                    "confirmation_token": { "type": "string", "description": "Alias for token." },
+                    "sql": { "type": "string", "description": "Optional SQL statement. If omitted, the token must still be cached from preview_sql in this server process." },
+                    "commit": { "type": "boolean", "description": "Default true for this compatibility tool. Set false to rollback-preview DML." },
+                    "save_output": { "type": "string", "description": "Unsupported in the generic core. Use capture_dbms_output=true and read dbms_output.lines instead." }
+                }),
+                &[
+                    timeout_seconds_prop(),
+                    dbms_output_props("Default false. When true, returns bounded DBMS_OUTPUT lines."),
+                ],
+            ),
             &[],
         ))
         .destructive(),
@@ -666,20 +720,22 @@ pub fn tool_registry() -> ToolRegistry {
             "Compatibility alias for oracle_compile_object.",
         )
         .with_input_schema(object_schema(
-            json!({
-                "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
-                "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
-                "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
-                "object_name": { "type": "string", "description": "Alias for name." },
-                "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
-                "warnings": { "type": "boolean", "description": "Enable PLSQL_WARNINGS='ENABLE:ALL' before compiling. Default false." },
-                "enable_warnings": { "type": "boolean", "description": "Alias for warnings." },
-                "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to compile." },
-                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
-                "token": { "type": "string", "description": "Alias for confirm." },
-                "confirmation_token": { "type": "string", "description": "Alias for confirm." },
-                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
-            }),
+            props_with(
+                json!({
+                    "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
+                    "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
+                    "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
+                    "object_name": { "type": "string", "description": "Alias for name." },
+                    "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
+                    "warnings": { "type": "boolean", "description": "Enable PLSQL_WARNINGS='ENABLE:ALL' before compiling. Default false." },
+                    "enable_warnings": { "type": "boolean", "description": "Alias for warnings." },
+                    "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to compile." }
+                }),
+                &[
+                    confirm_trio("Confirmation token returned by preview. Required when execute=true."),
+                    timeout_seconds_prop(),
+                ],
+            ),
             &["object_type"],
         ))
         .destructive(),
@@ -692,18 +748,20 @@ pub fn tool_registry() -> ToolRegistry {
             "Compatibility alias for oracle_compile_object with warnings=true.",
         )
         .with_input_schema(object_schema(
-            json!({
-                "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
-                "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
-                "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
-                "object_name": { "type": "string", "description": "Alias for name." },
-                "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
-                "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to compile." },
-                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
-                "token": { "type": "string", "description": "Alias for confirm." },
-                "confirmation_token": { "type": "string", "description": "Alias for confirm." },
-                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
-            }),
+            props_with(
+                json!({
+                    "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
+                    "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
+                    "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
+                    "object_name": { "type": "string", "description": "Alias for name." },
+                    "plscope": { "type": "boolean", "description": "Enable PL/Scope identifier and statement collection before compiling. Default false." },
+                    "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to compile." }
+                }),
+                &[
+                    confirm_trio("Confirmation token returned by preview. Required when execute=true."),
+                    timeout_seconds_prop(),
+                ],
+            ),
             &["object_type"],
         ))
         .destructive(),
@@ -716,17 +774,19 @@ pub fn tool_registry() -> ToolRegistry {
             "Compatibility alias for oracle_create_or_replace.",
         )
         .with_input_schema(object_schema(
-            json!({
-                "source_code": { "type": "string", "description": "Full CREATE OR REPLACE statement. Required unless sql or ddl is supplied." },
-                "sql": { "type": "string", "description": "Alias for source_code." },
-                "ddl": { "type": "string", "description": "Alias for source_code." },
-                "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
-                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
-                "token": { "type": "string", "description": "Alias for confirm." },
-                "confirmation_token": { "type": "string", "description": "Alias for confirm." },
-                "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the detected object when possible. Default true." },
-                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
-            }),
+            props_with(
+                json!({
+                    "source_code": { "type": "string", "description": "Full CREATE OR REPLACE statement. Required unless sql or ddl is supplied." },
+                    "sql": { "type": "string", "description": "Alias for source_code." },
+                    "ddl": { "type": "string", "description": "Alias for source_code." },
+                    "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
+                    "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the detected object when possible. Default true." }
+                }),
+                &[
+                    confirm_trio("Confirmation token returned by preview. Required when execute=true."),
+                    timeout_seconds_prop(),
+                ],
+            ),
             &[],
         ))
         .destructive(),
@@ -739,23 +799,25 @@ pub fn tool_registry() -> ToolRegistry {
             "Compatibility alias for oracle_patch_source; defaults object_type to PACKAGE_BODY when omitted.",
         )
         .with_input_schema(object_schema(
-            json!({
-                "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
-                "name": { "type": "string", "description": "Package name. May be OWNER.NAME. Required unless object_name is supplied." },
-                "object_name": { "type": "string", "description": "Alias for name." },
-                "object_type": { "type": "string", "description": "Optional override, usually PACKAGE or PACKAGE_BODY. Defaults to PACKAGE_BODY." },
-                "old_text": { "type": "string", "description": "Exact non-empty text to replace. It must match the current source exactly once." },
-                "search_text": { "type": "string", "description": "Alias for old_text." },
-                "new_text": { "type": "string", "description": "Replacement text. May be empty to delete the matched text." },
-                "replacement": { "type": "string", "description": "Alias for new_text." },
-                "max_chars": { "type": "integer", "minimum": 1, "maximum": 10000000, "description": "Maximum source characters to fetch before patching (default 1000000)." },
-                "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
-                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
-                "token": { "type": "string", "description": "Alias for confirm." },
-                "confirmation_token": { "type": "string", "description": "Alias for confirm." },
-                "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the patched object when possible. Default true." },
-                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
-            }),
+            props_with(
+                json!({
+                    "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
+                    "name": { "type": "string", "description": "Package name. May be OWNER.NAME. Required unless object_name is supplied." },
+                    "object_name": { "type": "string", "description": "Alias for name." },
+                    "object_type": { "type": "string", "description": "Optional override, usually PACKAGE or PACKAGE_BODY. Defaults to PACKAGE_BODY." },
+                    "old_text": { "type": "string", "description": "Exact non-empty text to replace. It must match the current source exactly once." },
+                    "search_text": { "type": "string", "description": "Alias for old_text." },
+                    "new_text": { "type": "string", "description": "Replacement text. May be empty to delete the matched text." },
+                    "replacement": { "type": "string", "description": "Alias for new_text." },
+                    "max_chars": { "type": "integer", "minimum": 1, "maximum": 10000000, "description": "Maximum source characters to fetch before patching (default 1000000)." },
+                    "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
+                    "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the patched object when possible. Default true." }
+                }),
+                &[
+                    confirm_trio("Confirmation token returned by preview. Required when execute=true."),
+                    timeout_seconds_prop(),
+                ],
+            ),
             &[],
         ))
         .destructive(),
@@ -768,22 +830,24 @@ pub fn tool_registry() -> ToolRegistry {
             "Compatibility alias for oracle_patch_source; defaults object_type to VIEW when omitted.",
         )
         .with_input_schema(object_schema(
-            json!({
-                "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
-                "name": { "type": "string", "description": "View name. May be OWNER.NAME. Required unless object_name is supplied." },
-                "object_name": { "type": "string", "description": "Alias for name." },
-                "old_text": { "type": "string", "description": "Exact non-empty text to replace. It must match the current view DDL exactly once." },
-                "search_text": { "type": "string", "description": "Alias for old_text." },
-                "new_text": { "type": "string", "description": "Replacement text. May be empty to delete the matched text." },
-                "replacement": { "type": "string", "description": "Alias for new_text." },
-                "max_chars": { "type": "integer", "minimum": 1, "maximum": 10000000, "description": "Accepted for symmetry with source patching." },
-                "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
-                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
-                "token": { "type": "string", "description": "Alias for confirm." },
-                "confirmation_token": { "type": "string", "description": "Alias for confirm." },
-                "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the patched view when possible. Default true." },
-                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
-            }),
+            props_with(
+                json!({
+                    "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
+                    "name": { "type": "string", "description": "View name. May be OWNER.NAME. Required unless object_name is supplied." },
+                    "object_name": { "type": "string", "description": "Alias for name." },
+                    "old_text": { "type": "string", "description": "Exact non-empty text to replace. It must match the current view DDL exactly once." },
+                    "search_text": { "type": "string", "description": "Alias for old_text." },
+                    "new_text": { "type": "string", "description": "Replacement text. May be empty to delete the matched text." },
+                    "replacement": { "type": "string", "description": "Alias for new_text." },
+                    "max_chars": { "type": "integer", "minimum": 1, "maximum": 10000000, "description": "Accepted for symmetry with source patching." },
+                    "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
+                    "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the patched view when possible. Default true." }
+                }),
+                &[
+                    confirm_trio("Confirmation token returned by preview. Required when execute=true."),
+                    timeout_seconds_prop(),
+                ],
+            ),
             &[],
         ))
         .destructive(),
@@ -812,19 +876,21 @@ pub fn tool_registry() -> ToolRegistry {
             "Compatibility wrapper for one DDL statement. Preview is the default; execution reuses the same DDL profile gate and confirmation as oracle_execute/oracle_create_or_replace.",
         )
         .with_input_schema(object_schema(
-            json!({
-                "name": { "type": "string", "description": "Optional deployment tag returned in the response." },
-                "ddl": { "type": "string", "description": "One DDL statement. CREATE OR REPLACE uses the structured create_or_replace path." },
-                "sql": { "type": "string", "description": "Alias for ddl." },
-                "source_code": { "type": "string", "description": "Alias for ddl." },
-                "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
-                "confirm": { "type": "string", "description": "Confirmation token returned by preview. Required when execute=true." },
-                "token": { "type": "string", "description": "Alias for confirm." },
-                "confirmation_token": { "type": "string", "description": "Alias for confirm." },
-                "wait_seconds": { "type": "integer", "minimum": 0, "maximum": 3600, "description": "Accepted for compatibility and returned in the response; generic core executes synchronously." },
-                "include_errors": { "type": "boolean", "description": "For CREATE OR REPLACE, include current compile errors for the detected object after execute. Default true." },
-                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
-            }),
+            props_with(
+                json!({
+                    "name": { "type": "string", "description": "Optional deployment tag returned in the response." },
+                    "ddl": { "type": "string", "description": "One DDL statement. CREATE OR REPLACE uses the structured create_or_replace path." },
+                    "sql": { "type": "string", "description": "Alias for ddl." },
+                    "source_code": { "type": "string", "description": "Alias for ddl." },
+                    "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
+                    "wait_seconds": { "type": "integer", "minimum": 0, "maximum": 3600, "description": "Accepted for compatibility and returned in the response; generic core executes synchronously." },
+                    "include_errors": { "type": "boolean", "description": "For CREATE OR REPLACE, include current compile errors for the detected object after execute. Default true." }
+                }),
+                &[
+                    confirm_trio("Confirmation token returned by preview. Required when execute=true."),
+                    timeout_seconds_prop(),
+                ],
+            ),
             &[],
         ))
         .destructive(),

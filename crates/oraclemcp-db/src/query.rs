@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::connection::OracleConnection;
 use crate::error::DbError;
-use crate::serialize::{SerializeOptions, serialize_row};
+use crate::serialize::{PageColumnCache, SerializeOptions, json_byte_len};
 use crate::types::OracleBind;
 
 /// Caps on a single page of results (plan §8.2 / §10).
@@ -114,13 +114,17 @@ fn query_response_from_rows(
         .first()
         .map(|r| r.columns.iter().map(|(n, _)| n.clone()).collect())
         .unwrap_or_default();
+    let column_cache = page.first().map(PageColumnCache::from_row);
 
     let mut out_rows: Vec<Value> = Vec::with_capacity(page.len());
     let mut total_bytes = 0usize;
     let mut byte_truncated = false;
     for row in page {
-        let value = serialize_row(row, serialize_opts);
-        let size = value.to_string().len();
+        let value = match &column_cache {
+            Some(cache) => cache.serialize_row(row, serialize_opts),
+            None => crate::serialize::serialize_row(row, serialize_opts),
+        };
+        let size = json_byte_len(&value);
         // Always include at least one row; otherwise stop before exceeding the cap.
         if !out_rows.is_empty() && total_bytes + size > caps.max_result_bytes {
             byte_truncated = true;
@@ -290,5 +294,84 @@ mod tests {
         assert_eq!(cursor_to_offset(Some("40")), 40);
         assert_eq!(cursor_to_offset(None), 0);
         assert_eq!(cursor_to_offset(Some("garbage")), 0);
+    }
+
+    /// Reference page builder using the pre-T1 measurement (`serialize_row` then
+    /// `Value::to_string().len()`), so the optimized single-pass path can be
+    /// proven byte-identical for the cap decision and the totals.
+    fn reference_page(
+        rows: &[OracleRow],
+        caps: QueryCaps,
+        offset: usize,
+        opts: &SerializeOptions,
+    ) -> (usize, bool, Option<String>, usize) {
+        let more_by_rows = rows.len() > caps.max_rows;
+        let page = &rows[..rows.len().min(caps.max_rows)];
+        let mut out = 0usize;
+        let mut total = 0usize;
+        let mut byte_truncated = false;
+        for row in page {
+            let value = crate::serialize::serialize_row(row, opts);
+            let size = value.to_string().len();
+            if out != 0 && total + size > caps.max_result_bytes {
+                byte_truncated = true;
+                break;
+            }
+            total += size;
+            out += 1;
+        }
+        let truncated = more_by_rows || byte_truncated;
+        let cursor = truncated.then(|| (offset + out).to_string());
+        (out, truncated, cursor, total)
+    }
+
+    fn varied_rows(n: usize) -> Vec<OracleRow> {
+        (0..n)
+            .map(|i| OracleRow {
+                columns: vec![
+                    (
+                        "ID".to_owned(),
+                        OracleCell::new("NUMBER", Some(format!("{}", i * 1_000_003))),
+                    ),
+                    (
+                        "WHEN".to_owned(),
+                        OracleCell::new("DATE", Some("2026-06-01 12:00:00".to_owned())),
+                    ),
+                    (
+                        "NAME".to_owned(),
+                        OracleCell::new("VARCHAR2", Some(format!("row-{i}-héllo"))),
+                    ),
+                ],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn single_pass_byte_cap_matches_reference_across_caps() {
+        // T1: which row truncates, the truncated flag, the cursor, and the byte
+        // total must all be byte-identical to the pre-change two-pass logic.
+        let opts = SerializeOptions::default();
+        let rows = varied_rows(40);
+        for &max_rows in &[5usize, 20, 100] {
+            for &max_result_bytes in &[1usize, 10, 50, 120, 500, 10_000, 10 * 1024 * 1024] {
+                let caps = QueryCaps {
+                    max_rows,
+                    max_result_bytes,
+                };
+                let offset = 7;
+                let got = query_response_from_rows(rows.clone(), caps, offset, &opts);
+                let (rc, trunc, cursor, total) = reference_page(&rows, caps, offset, &opts);
+                assert_eq!(got.row_count, rc, "row_count @ {max_rows}/{max_result_bytes}");
+                assert_eq!(got.truncated, trunc, "truncated @ {max_rows}/{max_result_bytes}");
+                assert_eq!(
+                    got.next_cursor, cursor,
+                    "cursor @ {max_rows}/{max_result_bytes}"
+                );
+                assert_eq!(
+                    got.total_bytes, total,
+                    "total_bytes @ {max_rows}/{max_result_bytes}"
+                );
+            }
+        }
     }
 }

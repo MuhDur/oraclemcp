@@ -220,17 +220,29 @@ impl OracleConnectionInfo {
     }
 
     /// Derived database read-only status and a compact reason when true.
+    ///
+    /// `open_mode` is Oracle's authoritative writability signal: a database open
+    /// `READ WRITE` accepts writes even on a non-primary role (e.g. a snapshot
+    /// standby), so it is never read-only. Only when the database is not open
+    /// read-write do we treat a non-primary role or a `READ ONLY` open mode as
+    /// read-only.
     #[must_use]
     pub fn read_only_status(&self) -> (bool, Option<String>) {
-        if let Some(role) = self.database_role.as_deref()
-            && !role.eq_ignore_ascii_case("PRIMARY")
-        {
-            return (true, Some("database_role_not_primary".to_owned()));
-        }
-        if let Some(open_mode) = self.open_mode.as_deref()
-            && open_mode.to_ascii_uppercase().contains("READ ONLY")
-        {
-            return (true, Some("open_mode_read_only".to_owned()));
+        let open_read_write = self
+            .open_mode
+            .as_deref()
+            .is_some_and(|m| m.to_ascii_uppercase().contains("READ WRITE"));
+        if !open_read_write {
+            if let Some(role) = self.database_role.as_deref()
+                && !role.eq_ignore_ascii_case("PRIMARY")
+            {
+                return (true, Some("database_role_not_primary".to_owned()));
+            }
+            if let Some(open_mode) = self.open_mode.as_deref()
+                && open_mode.to_ascii_uppercase().contains("READ ONLY")
+            {
+                return (true, Some("open_mode_read_only".to_owned()));
+            }
         }
         (false, None)
     }
@@ -284,7 +296,10 @@ impl OracleSessionIdentity {
 /// Options for opening a physical Oracle connection. Credentials are referenced
 /// here transiently; the full secrets-backend + zeroize discipline (§6.5) lands
 /// with the auth layer.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// `Debug` is hand-written: `password` and `iam_token` must never reach a log or
+/// panic message in plaintext, so they render as a redaction marker.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct OracleConnectOptions {
     /// Oracle Net connect identifier (EZConnect / EZConnect-Plus / TNS alias).
     pub connect_string: String,
@@ -309,6 +324,25 @@ pub struct OracleConnectOptions {
     pub call_timeout: Option<Duration>,
     /// Extra guarded session setup statements to run after canonical NLS setup.
     pub session_statements: Vec<String>,
+}
+
+impl std::fmt::Debug for OracleConnectOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Presence is preserved (`Some`/`None`) but the secret value is never rendered.
+        let redact = |secret: &Option<String>| secret.as_ref().map(|_| "<redacted>");
+        f.debug_struct("OracleConnectOptions")
+            .field("connect_string", &self.connect_string)
+            .field("username", &self.username)
+            .field("password", &redact(&self.password))
+            .field("external_auth", &self.external_auth)
+            .field("wallet_location", &self.wallet_location)
+            .field("use_iam_token", &self.use_iam_token)
+            .field("iam_token", &redact(&self.iam_token))
+            .field("session_identity", &self.session_identity)
+            .field("call_timeout", &self.call_timeout)
+            .field("session_statements", &self.session_statements)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -376,5 +410,56 @@ mod tests {
             ro_primary.read_only_reason.as_deref(),
             Some("open_mode_read_only")
         );
+
+        // A snapshot standby is open READ WRITE and physically writable, so it
+        // must not be reported read-only despite the non-primary role.
+        let snapshot = OracleConnectionInfo {
+            database_role: Some("SNAPSHOT STANDBY".to_owned()),
+            open_mode: Some("READ WRITE".to_owned()),
+            ..Default::default()
+        };
+        assert!(!snapshot.is_read_only_standby());
+        let snapshot = snapshot.with_read_only_status();
+        assert!(!snapshot.read_only);
+        assert_eq!(snapshot.read_only_reason, None);
+    }
+
+    #[test]
+    fn debug_redacts_password_and_iam_token() {
+        let opts = OracleConnectOptions {
+            connect_string: "host:1521/svc".to_owned(),
+            username: Some("scott".to_owned()),
+            password: Some("hunter2-SUPER-SECRET".to_owned()),
+            use_iam_token: true,
+            iam_token: Some("eyJ-IAM-TOKEN-VALUE".to_owned()),
+            ..Default::default()
+        };
+        let rendered = format!("{opts:?}");
+        assert!(
+            !rendered.contains("hunter2-SUPER-SECRET"),
+            "password leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("eyJ-IAM-TOKEN-VALUE"),
+            "iam_token leaked: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"));
+        // Non-secret fields remain visible, and secret presence is preserved.
+        assert!(rendered.contains("host:1521/svc"));
+        assert!(rendered.contains("scott"));
+        assert!(rendered.contains("password: Some"));
+        assert!(rendered.contains("iam_token: Some"));
+    }
+
+    #[test]
+    fn debug_renders_absent_secrets_as_none() {
+        let opts = OracleConnectOptions {
+            connect_string: "host/svc".to_owned(),
+            ..Default::default()
+        };
+        let rendered = format!("{opts:?}");
+        assert!(rendered.contains("password: None"));
+        assert!(rendered.contains("iam_token: None"));
+        assert!(!rendered.contains("<redacted>"));
     }
 }

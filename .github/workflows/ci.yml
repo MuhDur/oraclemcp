@@ -87,9 +87,40 @@ jobs:
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check
 
-  # The fail-closed classifier ships a cargo-fuzz target at
-  # `crates/oraclemcp-guard/fuzz` (run locally with
-  # `cargo +nightly fuzz run classify_fuzz`). It is intentionally not built in
-  # CI: the classifier's correctness is already exercised here by the
-  # differential adversarial corpus in the `cargo test` job, and a nightly
-  # sanitizer/`build-std` job adds fragility for little extra signal.
+  # The flagship artifact is the live-db binary; the default offline build
+  # cannot connect to Oracle. rust-oracle bundles ODPI-C and links the Instant
+  # Client at runtime, so this compiles in CI without the client present (a C
+  # toolchain is enough). Build-only — live connectivity is covered by the
+  # env-gated `live-xe` tests, not run here.
+  live-db:
+    name: build --features live-db
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p oraclemcp --features live-db
+
+  # No deployment-specific identifiers or secrets may reach the public repo.
+  # Generic heuristics run here; operators add a site denylist locally via
+  # $ORACLEMCP_SENSITIVE_DENYLIST_FILE + a pre-push hook (see the script).
+  sensitive-data:
+    name: sensitive-data lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/sensitive_data_lint.sh
+
+  # Compile the cargo-fuzz targets so they cannot silently rot (the classifier
+  # and ALTER SESSION allowlist each ship one). Build-only; campaigns run
+  # locally with `cargo +nightly fuzz run <target>`.
+  fuzz-build:
+    name: fuzz targets compile (nightly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-fuzz
+      - run: cargo +nightly fuzz build
+        working-directory: crates/oraclemcp-guard/fuzz
