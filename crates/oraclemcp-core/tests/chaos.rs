@@ -5,6 +5,8 @@
 
 use std::time::Duration;
 
+use asupersync::Cx;
+use asupersync::cx::NoCaps;
 use oraclemcp_core::error::{ErrorClass, OracleMcpError};
 use oraclemcp_core::{
     AdmissionController, CancelOutcome, CircuitBreaker, CircuitState, is_transient_error,
@@ -15,9 +17,10 @@ fn pool_exhaustion_returns_structured_busy_not_raw_ora() {
     // global cap 1, per-agent cap 1: the first call admits, the second is
     // refused with a structured BUSY + retry-after — the agent never sees a raw
     // ORA-12519 "no appropriate service handler".
+    let cx = Cx::<NoCaps>::detached_cancel_context();
     let ac = AdmissionController::new(1, 1);
-    let _permit = ac.try_admit("agent-a").expect("first admitted");
-    let err = ac.try_admit("agent-a").expect_err("pool exhausted");
+    let _permit = ac.try_admit(&cx, "agent-a").expect("first admitted");
+    let err = ac.try_admit(&cx, "agent-a").expect_err("pool exhausted");
     assert!(
         matches!(err, OracleMcpError::Busy { .. }),
         "exhaustion is BUSY, not a raw error"
@@ -32,7 +35,7 @@ fn pool_exhaustion_returns_structured_busy_not_raw_ora() {
     // Releasing the permit frees capacity again.
     drop(_permit);
     assert!(
-        ac.try_admit("agent-a").is_ok(),
+        ac.try_admit(&cx, "agent-a").is_ok(),
         "capacity restored after release"
     );
 }

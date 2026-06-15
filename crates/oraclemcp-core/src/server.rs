@@ -125,6 +125,10 @@ impl OracleMcpServer {
     /// resolved (the caller refuses to start when no token + no `--allow-no-auth`
     /// — §7.1); this records the posture, **arms the gate on the live request
     /// path** (the `initialize` override enforces it), and runs the rmcp loop.
+    ///
+    /// COMPAT-REMOVE(oraclemcp-w8-native-stdio-mcp-sk2): this is the temporary
+    /// rmcp/Tokio stdio transport boundary. Native stdio must call
+    /// [`run_tool_with_cx`](Self::run_tool_with_cx) directly instead.
     pub async fn serve_stdio(self, auth: &StdioAuthPolicy) -> std::io::Result<()> {
         match auth {
             StdioAuthPolicy::Required { .. } => {
@@ -246,6 +250,9 @@ impl OracleMcpServer {
 
         let server = self.clone();
         let runtime = Arc::clone(&self.dispatch_runtime);
+        // COMPAT-REMOVE(oraclemcp-w8-native-stdio-mcp-sk2, oraclemcp-w9-native-http-mcp-or0):
+        // rmcp invokes this method from Tokio-owned transport tasks today.
+        // Native transports call `run_tool_with_cx` and delete this bridge.
         match tokio::task::spawn_blocking(move || {
             runtime.block_on(async move {
                 let Some(cx) = Cx::current() else {

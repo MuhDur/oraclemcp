@@ -11,6 +11,10 @@
 //!
 //! The engine stays synchronous behind `spawn_blocking` inside the server's tool
 //! dispatch — this transport is purely the HTTP front.
+//!
+//! COMPAT-REMOVE(oraclemcp-w9-native-http-mcp-or0): this module is the current
+//! rmcp/axum/hyper HTTP boundary. W9 replaces it with native HTTP while
+//! preserving the security checks and Streamable HTTP behavior.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -95,7 +99,7 @@ impl std::fmt::Debug for OAuthEnforcement {
 /// **not** assume scope-based least-privilege is in effect on the HTTP
 /// transport: a narrowly-scoped token (e.g. `oracle:read`) can still reach
 /// write/DDL tools whenever the profile/session default ceiling permits.
-/// Tracking: bead `oracle-ajm2.5`.
+/// Tracking: bead `oraclemcp-w10-http-scope-enforcement-b5a`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScopeGrant(pub Vec<String>);
 
@@ -141,7 +145,7 @@ async fn oauth_guard(
             // `oraclemcp_auth::apply_oauth_scopes` (monotone-down) into a
             // per-session `SessionLevelState` is deferred to the
             // HTTP-transport-wiring phase. See `ScopeGrant` docs / bead
-            // `oracle-ajm2.5`.
+            // `oraclemcp-w10-http-scope-enforcement-b5a`.
             let mut request = request;
             request.extensions_mut().insert(ScopeGrant(scopes));
             next.run(request).await

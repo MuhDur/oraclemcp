@@ -9,6 +9,8 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use asupersync::time::{timeout as asupersync_timeout, wall_now};
+
 /// Transient, retryable Oracle/network error codes (§10). Anything else
 /// (ORA-00942 object-not-found, ORA-01403 no-data, syntax, privilege) is NOT
 /// retried.
@@ -191,12 +193,44 @@ pub async fn run_with_timeout<F, T>(timeout: Duration, fut: F) -> Result<T, ()>
 where
     F: std::future::Future<Output = T>,
 {
-    tokio::time::timeout(timeout, fut).await.map_err(|_| ())
+    asupersync_timeout(wall_now(), timeout, fut)
+        .await
+        .map_err(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asupersync::runtime::RuntimeBuilder;
+    use std::future::Future;
+    use std::panic::AssertUnwindSafe;
+    use std::sync::mpsc;
+
+    fn run_asupersync_test<F>(future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let runtime = RuntimeBuilder::current_thread()
+                    .build()
+                    .expect("asupersync current-thread test runtime builds");
+                runtime.block_on(future);
+            }));
+            let _ = tx.send(result.map_err(|_| "asupersync test future panicked"));
+        });
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => handle.join().expect("asupersync test thread joins"),
+            Ok(Err(message)) => panic!("{message}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("asupersync test future did not complete within 5s")
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("asupersync test thread disconnected")
+            }
+        }
+    }
 
     #[test]
     fn transient_classification() {
@@ -318,15 +352,13 @@ mod tests {
         assert!(cb.allow_request());
     }
 
-    #[tokio::test]
-    async fn timeout_helper_trips_on_slow_future() {
-        let fast = run_with_timeout(Duration::from_secs(5), async { 7 }).await;
-        assert_eq!(fast, Ok(7));
-        let slow = run_with_timeout(Duration::from_millis(10), async {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            7
-        })
-        .await;
-        assert_eq!(slow, Err(()));
+    #[test]
+    fn timeout_helper_completes_fast_future_and_trips_elapsed_deadline() {
+        run_asupersync_test(async move {
+            let fast = run_with_timeout(Duration::from_secs(5), async { 7 }).await;
+            assert_eq!(fast, Ok(7));
+            let slow = run_with_timeout(Duration::ZERO, std::future::pending::<u8>()).await;
+            assert_eq!(slow, Err(()));
+        });
     }
 }
