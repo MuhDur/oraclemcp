@@ -52,7 +52,7 @@ real query text.
 | Read/query | `oracle_query`, `oracle_preview_sql`, `oracle_sample_rows`, `oracle_read_clob`. Raw SQL is classified before DB access; reads admit only proven read-only SQL. | `crates/oraclemcp/src/dispatch/mod.rs`, `crates/oraclemcp-guard/tests/*` |
 | Guarded execution | `oracle_execute`, `oracle_compile_object`, `oracle_create_or_replace`, `oracle_patch_source`. DML is rollback-by-default; DDL/Admin require commit and confirmation. | `README.md`, `crates/oraclemcp/src/dispatch/mod.rs`, `crates/oraclemcp/src/dispatch/tests.rs` |
 | Dictionary/source | `oracle_list_schemas`, `oracle_schema_inspect`, `oracle_describe`, `oracle_describe_index`, `oracle_describe_trigger`, `oracle_describe_view`, `oracle_get_ddl`, `oracle_get_source`, `oracle_compile_errors`, `oracle_search_source`, `oracle_plscope_inspect`. Uses `ALL_*`/dictionary views with privilege degradation. | `README.md`, `crates/oraclemcp-db/src/intelligence.rs`, `crates/oraclemcp-db/src/privileges.rs` |
-| Diagnostics | `oracle_explain_plan`, `oracle_capabilities`. Explain-plan behavior is not purely read-only on primary because it writes `PLAN_TABLE`; see W3.5. | `crates/oraclemcp-db/src/intelligence.rs`, `crates/oraclemcp-db/src/standby.rs`, `oraclemcp-thin-only-oracle-driver-kod.1` |
+| Diagnostics | `oracle_explain_plan`, `oracle_capabilities`. Explain-plan is an explicit diagnostic write on primary because it writes `PLAN_TABLE`; it is refused by default and requires `READ_WRITE` plus `allow_plan_table_write=true`. | `crates/oraclemcp/src/dispatch/mod.rs`, `crates/oraclemcp-db/src/intelligence.rs`, `crates/oraclemcp-db/src/standby.rs`, `oraclemcp-thin-only-oracle-driver-kod.1` |
 | Compatibility aliases | Legacy names such as `query`, `execute_approved`, `describe_table`, `get_ddl`, `get_object_source`, and others are still registered for client compatibility. | `README.md`, `crates/oraclemcp/src/registry.rs` |
 | Operator-defined tools | TOML custom tools are allowed; protected profiles or `require_signed_tools=true` require HMAC signatures. Custom tool execution is read-only only. There is no native/dynamic plugin execution surface. | `crates/oraclemcp/src/main.rs`, `crates/oraclemcp/src/dispatch/mod.rs`, `README.md` |
 
@@ -137,9 +137,9 @@ real query text.
 | Behavior | Current fact | Migration decision |
 | --- | --- | --- |
 | User raw `EXPLAIN PLAN` | Guard adversarial corpus treats raw `EXPLAIN PLAN` as guarded, never safe. | Preserve fail-closed guard behavior. |
-| `oracle_explain_plan` tool | Dispatch first validates the inner SQL as read-only, then `crates/oraclemcp-db/src/intelligence.rs` executes `EXPLAIN PLAN FOR ...` and queries `DBMS_XPLAN.DISPLAY`. | This writes `PLAN_TABLE` on primary databases and conflicts with a simplistic read-only story. |
-| Standby | `read_only_standby` refuses explain-plan path because `EXPLAIN PLAN` needs `PLAN_TABLE`. | Preserve or replace with a non-writing route where possible. |
-| Tracking | New bead `oraclemcp-thin-only-oracle-driver-kod.1` blocks W4. | Resolve before thin adapter starts. |
+| `oracle_explain_plan` tool | Dispatch validates the inner SQL as read-only, requires `allow_plan_table_write=true`, and requires the active session gate to allow `READ_WRITE` before `crates/oraclemcp-db/src/intelligence.rs` executes `EXPLAIN PLAN FOR ...`. | Treat as an explicit diagnostic write, not as part of the read-only tool cluster. |
+| Standby | `read_only_standby` refuses explain-plan path because `EXPLAIN PLAN` needs `PLAN_TABLE`; standby profiles also cap the session at `READ_ONLY`. | Preserve; use `DBMS_XPLAN.DISPLAY_CURSOR` against an existing cursor for no-write plan inspection. |
+| Tracking | New bead `oraclemcp-thin-only-oracle-driver-kod.1` blocks W4. | Resolved when tests prove default refusal, standby refusal, READ_WRITE gating, and raw `EXPLAIN PLAN` classifier behavior. |
 
 ## Asupersync HTTP/Web Primitives
 

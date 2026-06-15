@@ -305,7 +305,7 @@ pub fn render_prompt(name: &str, args: &Value) -> Result<Vec<PromptMessage>, Err
     let body = match name {
         "investigate_slow_query" => format!(
             "Investigate this slow query. Steps:\n\
-             1. Call oracle_query with EXPLAIN PLAN for the statement.\n\
+             1. Call oracle_preview_sql for the statement. Use EXPLAIN PLAN via oracle_explain_plan only when a READ_WRITE diagnostic PLAN_TABLE write is acceptable.\n\
              2. Look for FULL TABLE SCAN / NESTED LOOPS over large row sources.\n\
              3. Check predicate selectivity and missing indexes via oracle_schema_inspect.\n\
              4. Propose an index or rewrite; never run DDL without confirmation.\n\n\

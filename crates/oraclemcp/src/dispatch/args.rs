@@ -309,4 +309,6 @@ pub(super) struct ExplainPlanArgs {
     pub(super) sql: String,
     #[serde(default)]
     pub(super) read_only_standby: bool,
+    #[serde(default)]
+    pub(super) allow_plan_table_write: bool,
 }

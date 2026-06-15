@@ -287,7 +287,7 @@ blocks; it does not print the HMAC key.
 | `oracle_compile_errors` | Compile errors for the current schema, an owner, or one PL/SQL object |
 | `oracle_search_source` | Search `ALL_SOURCE` for a needle; optionally use `owner="*"`, `object_type`, and `name_like` to widen or narrow scope |
 | `oracle_plscope_inspect` | Read PL/Scope identifiers/statements for one object and report unused declarations plus dynamic-SQL lines when metadata is populated |
-| `oracle_explain_plan` | Execution plan for a read-only statement |
+| `oracle_explain_plan` | Diagnostic `EXPLAIN PLAN` for a vetted read-only statement; writes `PLAN_TABLE` and requires `READ_WRITE` plus `allow_plan_table_write=true` |
 | `oracle_capabilities` | Zero-arg discovery: tools, operating level, feature tiers |
 
 ### Compatibility aliases
@@ -326,7 +326,7 @@ compatibility aliases that route to the guarded `oracle_*` tools:
 Aliases share the same SQL classifier, argument validation, profile handling,
 and operating-level behavior as their `oracle_*` targets.
 
-`oracle_query` and `oracle_explain_plan` accept a raw statement and so pass through the read-only gate. `oracle_preview_sql` runs that classifier without executing the SQL and includes the active profile ceiling so agents can distinguish "allowed on this profile", "requires a higher profile/session level", and "blocked by policy." When a non-read statement is currently executable, `oracle_preview_sql` also returns `execute_confirmation.confirm`; pass that value to `oracle_execute` with `commit=true` only when you intend to commit that exact statement on the active profile. The dictionary tools build their own parameterized SQL and never execute caller-supplied statements.
+`oracle_query` and the inner SQL of `oracle_explain_plan` pass through the read-only gate. `oracle_explain_plan` is not a pure read on Oracle primary databases: `EXPLAIN PLAN` writes `PLAN_TABLE`, so the tool refuses by default, refuses on read-only standby, and only runs when the active session is already `READ_WRITE` and the caller passes `allow_plan_table_write=true`. `oracle_preview_sql` runs the classifier without executing the SQL and includes the active profile ceiling so agents can distinguish "allowed on this profile", "requires a higher profile/session level", and "blocked by policy." When a non-read statement is currently executable, `oracle_preview_sql` also returns `execute_confirmation.confirm`; pass that value to `oracle_execute` with `commit=true` only when you intend to commit that exact statement on the active profile. The dictionary tools build their own parameterized SQL and never execute caller-supplied statements.
 
 Confirmation tokens are process-local preview tokens. Regenerate them after
 restarting the server or switching profiles.

@@ -614,10 +614,11 @@ pub fn read_lob(
     }))
 }
 
-/// `explain_plan`: on a primary, `EXPLAIN PLAN FOR <sql>` then
-/// `DBMS_XPLAN.DISPLAY`; on a read-only standby, `EXPLAIN PLAN` would write
-/// `PLAN_TABLE` (§5.8), so it is refused there (route to `DISPLAY_CURSOR`).
-/// `sql` must already have passed the classifier (a vetted SELECT).
+/// `explain_plan`: on a primary, `EXPLAIN PLAN FOR <sql>` writes `PLAN_TABLE`
+/// and then reads `DBMS_XPLAN.DISPLAY`; on a read-only standby it is refused
+/// (route to `DISPLAY_CURSOR`). `sql` must already have passed the classifier
+/// as a vetted SELECT, and callers must separately gate the diagnostic
+/// `PLAN_TABLE` write.
 pub fn explain_plan(
     conn: &dyn OracleConnection,
     sql: &str,

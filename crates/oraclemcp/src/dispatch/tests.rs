@@ -428,7 +428,9 @@ fn args_for(name: &str) -> Value {
         "oracle_compile_errors" => json!({ "owner": "HR", "name": "PKG" }),
         "oracle_search_source" => json!({ "owner": "HR", "needle": "commit" }),
         "oracle_plscope_inspect" => json!({ "owner": "HR", "name": "PKG" }),
-        "oracle_explain_plan" => json!({ "sql": "SELECT 1 FROM dual" }),
+        "oracle_explain_plan" => {
+            json!({ "sql": "SELECT 1 FROM dual", "allow_plan_table_write": true })
+        }
         "oracle_preview_sql" => json!({ "sql": "SELECT 1 FROM dual" }),
         "oracle_execute" => {
             json!({ "sql": "UPDATE employees SET name = name WHERE employee_id = 100" })
@@ -2391,6 +2393,93 @@ fn explain_plan_refuses_a_non_read_only_statement() {
         err.error_class,
         ErrorClass::OperatingLevelTooLow | ErrorClass::ForbiddenStatement
     ));
+}
+
+#[test]
+fn explain_plan_refuses_plan_table_write_by_default_before_db() {
+    let dispatcher = OracleDispatcher::new(Box::new(NoExecMock));
+    let err = dispatcher
+        .dispatch(
+            "oracle_explain_plan",
+            json!({ "sql": "SELECT 1 FROM dual" }),
+        )
+        .expect_err("PLAN_TABLE write needs explicit opt-in");
+    assert_eq!(err.error_class, ErrorClass::PolicyDenied);
+    assert!(err.message.contains("PLAN_TABLE"));
+    assert!(
+        err.next_steps
+            .iter()
+            .any(|step| step.contains("allow_plan_table_write=true"))
+    );
+}
+
+#[test]
+fn explain_plan_refuses_read_only_standby_before_db() {
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(NoExecMock),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+    let err = dispatcher
+        .dispatch(
+            "oracle_explain_plan",
+            json!({
+                "sql": "SELECT 1 FROM dual",
+                "read_only_standby": true,
+                "allow_plan_table_write": true
+            }),
+        )
+        .expect_err("read-only standby must refuse PLAN_TABLE writes");
+    assert_eq!(err.error_class, ErrorClass::PolicyDenied);
+    assert!(err.message.contains("read-only standby"));
+}
+
+#[test]
+fn explain_plan_requires_read_write_session_when_allowed() {
+    let dispatcher = OracleDispatcher::new(Box::new(NoExecMock));
+    let err = dispatcher
+        .dispatch(
+            "oracle_explain_plan",
+            json!({
+                "sql": "SELECT 1 FROM dual",
+                "allow_plan_table_write": true
+            }),
+        )
+        .expect_err("explicit PLAN_TABLE write still needs READ_WRITE");
+    assert_eq!(err.error_class, ErrorClass::OperatingLevelTooLow);
+    assert!(err.message.contains("READ_WRITE"));
+}
+
+#[test]
+fn explain_plan_executes_only_with_read_write_and_explicit_allow() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+
+    let out = dispatcher
+        .dispatch(
+            "oracle_explain_plan",
+            json!({
+                "sql": "SELECT 1 FROM dual",
+                "allow_plan_table_write": true
+            }),
+        )
+        .expect("READ_WRITE + explicit diagnostic write runs explain plan");
+    assert_eq!(out["diagnostic_write"]["statement"], json!("EXPLAIN PLAN"));
+    assert_eq!(out["diagnostic_write"]["writes"], json!("PLAN_TABLE"));
+    assert_eq!(
+        out["diagnostic_write"]["required_level"],
+        json!("READ_WRITE")
+    );
+    assert_eq!(out["diagnostic_write"]["explicitly_allowed"], json!(true));
+
+    let executed = state.executed.lock().expect("exec mutex");
+    assert_eq!(executed.len(), 1);
+    assert_eq!(executed[0].0, "EXPLAIN PLAN FOR SELECT 1 FROM dual");
+    assert_eq!(executed[0].1, Vec::<OracleBind>::new());
 }
 
 #[test]

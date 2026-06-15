@@ -449,14 +449,14 @@ fn owner_and_name_arg(
     Ok((owner.to_ascii_uppercase(), object_name.to_ascii_uppercase()))
 }
 
-/// The fail-closed read-only gate for the two tools that accept a raw SQL
-/// statement (`oracle_query`, `oracle_explain_plan`). This binary is read-only
-/// by construction: every such statement is run through the `oraclemcp-guard`
-/// classifier and refused — *before* it can reach Oracle — unless the guard
-/// proves it needs no more than `READ_ONLY`. Writes, DDL/DCL, and any
-/// `Forbidden` construct (multi-statement batch, string-concat dynamic SQL, an
-/// unproven function call in a SELECT, …) are rejected with a structured
-/// envelope. Proven read-only `SELECT`/`WITH` and dictionary introspection pass.
+/// The fail-closed read-only gate for tools that accept a raw caller SQL
+/// statement (`oracle_query`, plus the inner SQL of `oracle_explain_plan`).
+/// Every such statement is run through the `oraclemcp-guard` classifier and
+/// refused — *before* it can reach Oracle — unless the guard proves it needs no
+/// more than `READ_ONLY`. Writes, DDL/DCL, and any `Forbidden` construct
+/// (multi-statement batch, string-concat dynamic SQL, an unproven function call
+/// in a SELECT, …) are rejected with a structured envelope. Proven read-only
+/// `SELECT`/`WITH` and dictionary introspection pass.
 ///
 /// The dictionary/profile tools build their own parameterized SQL or reconnect
 /// from configured profiles and never execute caller-supplied statements, so
@@ -492,6 +492,53 @@ fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
          oracle_compile_errors, oracle_search_source, oracle_plscope_inspect)"
             .to_owned()
     })))
+}
+
+fn explain_plan_gate_error(gate: LevelDecision, session: &SessionLevelState) -> ErrorEnvelope {
+    gate_error(
+        gate,
+        session,
+        &GateErrorLabels {
+            subject: "oracle_explain_plan PLAN_TABLE diagnostic write",
+            step_up_tool: "oracle_set_session_level",
+            step_up_inspect_step: "call oracle_set_session_level without execute=true to preview a READ_WRITE elevation",
+            step_up_elevation_step: "retry oracle_explain_plan with allow_plan_table_write=true only after the session is at READ_WRITE",
+            ceiling_step: "choose a profile whose max_level permits READ_WRITE, or use DBMS_XPLAN.DISPLAY_CURSOR against an existing cursor",
+            policy_denied_message: "oracle_explain_plan PLAN_TABLE diagnostic write is blocked by policy",
+            internal_message: "oracle_explain_plan gate produced an unexpected decision",
+        },
+        None,
+    )
+}
+
+fn ensure_explain_plan_write_allowed(
+    args: &ExplainPlanArgs,
+    session: &SessionLevelState,
+) -> Result<(), ErrorEnvelope> {
+    if args.read_only_standby {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::PolicyDenied,
+            "oracle_explain_plan writes PLAN_TABLE and is disabled on a read-only standby",
+        )
+        .with_next_step("use DBMS_XPLAN.DISPLAY_CURSOR against an existing cursor instead"));
+    }
+
+    if !args.allow_plan_table_write {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::PolicyDenied,
+            "oracle_explain_plan writes PLAN_TABLE; pass allow_plan_table_write=true only when a diagnostic write is acceptable",
+        )
+        .with_suggested_tool("oracle_set_session_level")
+        .with_next_step("call oracle_preview_sql first if you only need to verify the inner SQL is read-only")
+        .with_next_step("for primary databases where PLAN_TABLE writes are acceptable, elevate to READ_WRITE and retry with allow_plan_table_write=true"));
+    }
+
+    let gate = session.evaluate(Some(OperatingLevel::ReadWrite));
+    if matches!(gate, LevelDecision::Allow) {
+        Ok(())
+    } else {
+        Err(explain_plan_gate_error(gate, session))
+    }
 }
 
 fn normalized_sql_for_confirmation(sql: &str) -> String {
@@ -3140,8 +3187,18 @@ impl OracleDispatcher {
             "oracle_explain_plan" => {
                 let a: ExplainPlanArgs = parse_args(name, args)?;
                 ensure_read_only(&a.sql)?;
-                explain_plan(conn, &a.sql, a.read_only_standby)
-                    .map(|rows| json!({ "plan": rows_to_json(&rows) }))
+                ensure_explain_plan_write_allowed(&a, &state.level)?;
+                explain_plan(conn, &a.sql, a.read_only_standby).map(|rows| {
+                    json!({
+                        "plan": rows_to_json(&rows),
+                        "diagnostic_write": {
+                            "statement": "EXPLAIN PLAN",
+                            "writes": "PLAN_TABLE",
+                            "required_level": OperatingLevel::ReadWrite,
+                            "explicitly_allowed": a.allow_plan_table_write,
+                        },
+                    })
+                })
             }
             other => {
                 if let Some(loaded) = state.custom_catalog.get(other) {

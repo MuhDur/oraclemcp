@@ -576,15 +576,17 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_explain_plan",
             ToolTier::FoundationLiveDb,
-            "EXPLAIN PLAN for a vetted SELECT, then DBMS_XPLAN.DISPLAY (disabled on a read-only standby).",
+            "Explicit diagnostic-write EXPLAIN PLAN for a vetted SELECT; writes PLAN_TABLE, requires READ_WRITE plus allow_plan_table_write, and is disabled on read-only standby.",
         )
         .with_input_schema(object_schema(
             json!({
                 "sql": { "type": "string", "description": "A read-only SELECT to explain." },
-                "read_only_standby": { "type": "boolean", "description": "If true, refuse (EXPLAIN PLAN writes PLAN_TABLE). Defaults false." }
+                "read_only_standby": { "type": "boolean", "description": "If true, refuse even when allow_plan_table_write is true because EXPLAIN PLAN writes PLAN_TABLE. Defaults false." },
+                "allow_plan_table_write": { "type": "boolean", "description": "Default false. Must be true, with the active session at READ_WRITE, before EXPLAIN PLAN may write PLAN_TABLE on a primary database." }
             }),
             &["sql"],
-        )),
+        ))
+        .destructive(),
     );
 
     registry.register(
@@ -1132,6 +1134,7 @@ mod tests {
                 "oracle_compile_object",
                 "oracle_create_or_replace",
                 "oracle_patch_source",
+                "oracle_explain_plan",
                 "enable_writes",
                 "execute_approved",
                 "compile_object",
@@ -1141,7 +1144,7 @@ mod tests {
                 "patch_view",
                 "deploy_ddl"
             ],
-            "only guarded session elevation/execution/deploy/compile tools are destructive"
+            "only guarded session elevation/execution/diagnostic-write/deploy/compile tools are destructive"
         );
         // oracle_capabilities is NOT in the registry (the server adds it to
         // tools/list itself).
@@ -1538,7 +1541,10 @@ mod tests {
                 ],
             ),
             ("oracle_plscope_inspect", &["owner", "name", "object_name"]),
-            ("oracle_explain_plan", &["sql", "read_only_standby"]),
+            (
+                "oracle_explain_plan",
+                &["sql", "read_only_standby", "allow_plan_table_write"],
+            ),
         ];
 
         for (tool_name, spellings) in cases {
