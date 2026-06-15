@@ -144,16 +144,17 @@ pub fn list_objects(
     name_like: Option<&str>,
     max_rows: usize,
 ) -> Result<Vec<OracleRow>, DbError> {
-    let sql = "WITH args AS ( \
-                   SELECT :1 owner_filter, :2 type_filter, :3 name_filter FROM dual \
-               ) \
-               SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
-               FROM all_objects o CROSS JOIN args \
-               WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
-                 AND (args.type_filter IS NULL OR o.object_type = args.type_filter) \
-                 AND (args.name_filter IS NULL OR o.object_name LIKE args.name_filter) \
-               ORDER BY o.owner, o.object_type, o.object_name \
-               FETCH FIRST :4 ROWS ONLY";
+    let sql = "SELECT * FROM ( \
+                   WITH args AS ( \
+                       SELECT :1 owner_filter, :2 type_filter, :3 name_filter FROM dual \
+                   ) \
+                   SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
+                   FROM all_objects o CROSS JOIN args \
+                   WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
+                     AND (args.type_filter IS NULL OR o.object_type = args.type_filter) \
+                     AND (args.name_filter IS NULL OR o.object_name LIKE args.name_filter) \
+                   ORDER BY o.owner, o.object_type, o.object_name \
+               ) WHERE ROWNUM <= :4";
     let owner_bind = owner.map_or(OracleBind::Null, |o| {
         OracleBind::from(o.to_ascii_uppercase())
     });
@@ -181,15 +182,16 @@ pub fn list_schemas(
     name_like: Option<&str>,
     max_rows: usize,
 ) -> Result<Vec<OracleRow>, DbError> {
-    let sql = "WITH args AS ( \
-                   SELECT :1 name_filter FROM dual \
-               ) \
-               SELECT o.owner AS schema_name, COUNT(*) AS object_count \
-               FROM all_objects o CROSS JOIN args \
-               WHERE args.name_filter IS NULL OR o.owner LIKE args.name_filter \
-               GROUP BY o.owner \
-               ORDER BY o.owner \
-               FETCH FIRST :2 ROWS ONLY";
+    let sql = "SELECT * FROM ( \
+                   WITH args AS ( \
+                       SELECT :1 name_filter FROM dual \
+                   ) \
+                   SELECT o.owner AS schema_name, COUNT(*) AS object_count \
+                   FROM all_objects o CROSS JOIN args \
+                   WHERE args.name_filter IS NULL OR o.owner LIKE args.name_filter \
+                   GROUP BY o.owner \
+                   ORDER BY o.owner \
+               ) WHERE ROWNUM <= :2";
     let name_like_bind = name_like.map_or(OracleBind::Null, |n| {
         OracleBind::from(n.to_ascii_uppercase())
     });
@@ -339,9 +341,10 @@ pub fn get_ddl(
             "unsupported DDL object type: {object_type:?}"
         )));
     }
-    // Storage/tablespace stripped for diff-friendliness.
+    // DBMS_METADATA returns a CLOB. Request a VARCHAR2 slice until the thin
+    // driver exposes the LOB APIs needed for streaming full metadata text.
     let sql = format!(
-        "SELECT DBMS_METADATA.GET_DDL('{}', :1, :2) AS ddl FROM dual",
+        "SELECT DBMS_LOB.SUBSTR(DBMS_METADATA.GET_DDL('{}', :1, :2), 4000, 1) AS ddl FROM dual",
         object_type.to_ascii_uppercase()
     );
     let rows = conn.query_rows(
@@ -391,17 +394,18 @@ pub fn search_source(
         ),
         None => None,
     };
-    let sql = "WITH args AS ( \
-                   SELECT :1 owner_filter, :2 type_filter, :3 name_filter, :4 needle FROM dual \
-               ) \
-               SELECT s.owner, s.name, s.type, s.line, s.text \
-               FROM all_source s CROSS JOIN args \
-               WHERE (args.owner_filter IS NULL OR s.owner = args.owner_filter) \
-                 AND (args.type_filter IS NULL OR s.type = args.type_filter) \
-                 AND (args.name_filter IS NULL OR s.name LIKE args.name_filter) \
-                 AND UPPER(s.text) LIKE UPPER('%' || args.needle || '%') \
-               ORDER BY s.owner, s.name, s.type, s.line \
-               FETCH FIRST :5 ROWS ONLY";
+    let sql = "SELECT * FROM ( \
+                   WITH args AS ( \
+                       SELECT :1 owner_filter, :2 type_filter, :3 name_filter, :4 needle FROM dual \
+                   ) \
+                   SELECT s.owner, s.name, s.type, s.line, s.text \
+                   FROM all_source s CROSS JOIN args \
+                   WHERE (args.owner_filter IS NULL OR s.owner = args.owner_filter) \
+                     AND (args.type_filter IS NULL OR s.type = args.type_filter) \
+                     AND (args.name_filter IS NULL OR s.name LIKE args.name_filter) \
+                     AND UPPER(s.text) LIKE UPPER('%' || args.needle || '%') \
+                   ORDER BY s.owner, s.name, s.type, s.line \
+               ) WHERE ROWNUM <= :5";
     let owner_bind = owner.map_or(OracleBind::Null, |o| {
         OracleBind::from(o.to_ascii_uppercase())
     });
@@ -542,7 +546,7 @@ pub fn sample_rows(
         )));
     }
     let sql = format!(
-        "SELECT * FROM {}.{} FETCH FIRST :1 ROWS ONLY",
+        "SELECT * FROM (SELECT * FROM {}.{}) WHERE ROWNUM <= :1",
         owner.to_ascii_uppercase(),
         table.to_ascii_uppercase()
     );
@@ -853,6 +857,8 @@ mod tests {
             calls[0].0.contains("SELECT o.owner, o.object_name"),
             "query should include OWNER for cross-schema results"
         );
+        assert!(calls[0].0.contains("ROWNUM <= :4"));
+        assert!(!calls[0].0.contains("FETCH FIRST :4"));
         assert_eq!(
             calls[0].1,
             vec![
@@ -873,6 +879,8 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert!(calls[0].0.contains("SELECT o.owner AS schema_name"));
         assert!(calls[0].0.contains("COUNT(*) AS object_count"));
+        assert!(calls[0].0.contains("ROWNUM <= :2"));
+        assert!(!calls[0].0.contains("FETCH FIRST :2"));
         assert_eq!(
             calls[0].1,
             vec![OracleBind::String("APP%".to_owned()), OracleBind::I64(100),]
@@ -896,6 +904,8 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert!(calls[0].0.contains("SELECT s.owner, s.name"));
         assert!(calls[0].0.contains("args.owner_filter IS NULL"));
+        assert!(calls[0].0.contains("ROWNUM <= :5"));
+        assert!(!calls[0].0.contains("FETCH FIRST :5"));
         assert_eq!(
             calls[0].1,
             vec![
@@ -914,6 +924,23 @@ mod tests {
         let err = search_source(&mock, Some("hr"), "commit", Some("table"), None, 25)
             .expect_err("TABLE is not an ALL_SOURCE type");
         assert!(err.to_string().contains("unsupported source object type"));
+    }
+
+    #[test]
+    fn get_ddl_uses_text_slice_not_raw_metadata_lob() {
+        let mock = CaptureMock::default();
+        get_ddl(&mock, "package", "hr", "pkg_demo").unwrap();
+
+        let calls = mock.calls.lock().expect("capture lock");
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.contains("DBMS_LOB.SUBSTR(DBMS_METADATA.GET_DDL"));
+        assert_eq!(
+            calls[0].1,
+            vec![
+                OracleBind::String("PKG_DEMO".to_owned()),
+                OracleBind::String("HR".to_owned()),
+            ]
+        );
     }
 
     #[test]
