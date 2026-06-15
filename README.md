@@ -376,6 +376,12 @@ Lowering to a less-capable level is immediate and does not require a token.
 
 `oracle_execute` is intentionally narrow. It accepts one statement with positional binds, refuses read-only SQL (use `oracle_query`), refuses anything above the active profile/session level, rolls DML back unless `commit=true`, and requires the `oracle_preview_sql` confirmation token before any commit. DDL/Admin statements cannot be rollback-previewed by Oracle, so they require `commit=true` plus confirmation before execution. Set `capture_dbms_output=true` to enable `DBMS_OUTPUT` before the statement and return bounded output after the commit or rollback; `dbms_output_max_lines` and `dbms_output_max_chars` cap the response.
 
+Cancellation and timeouts are fail-closed at the DB boundary. A cancelled or
+failed pooled call is treated as an uncertain Oracle session and is discarded
+instead of returned to idle reuse. Lease-backed preview DML rolls back to its
+savepoint even when cancellation is observed after the DML; if that cleanup
+fails, the lease is force-rolled-back and dropped.
+
 `oracle_compile_object` is the structured alternative to handcrafting `ALTER ... COMPILE`. A call without `execute=true` only previews the validated compile statements, required `DDL` level, gate decision, and confirmation token. A second call with `execute=true` and that token runs the compile and returns current `ALL_ERRORS` rows for the object. Set `plscope=true` to enable PL/Scope collection before compiling, or `warnings=true` to enable `PLSQL_WARNINGS='ENABLE:ALL'` before compiling. Both options remain profile-gated at `DDL`; `compile_with_warnings` is a compatibility alias for the warnings path.
 
 `oracle_create_or_replace` is the structured deployment macro for one full

@@ -17,11 +17,32 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use asupersync::Cx;
 use oraclemcp_guard::MonotonicDeadline;
 use serde::{Deserialize, Serialize};
 
 use crate::connection::OracleConnection;
 use crate::error::DbError;
+
+fn lease_checkpoint(cx: Option<&Cx>, phase: &'static str) -> Result<(), DbError> {
+    let Some(cx) = cx else {
+        return Ok(());
+    };
+    cx.checkpoint_with(phase)
+        .map_err(|err| DbError::Cancelled(format!("{phase}: {err}")))
+}
+
+fn lease_execute(
+    cx: Option<&Cx>,
+    conn: &dyn OracleConnection,
+    sql: &str,
+    binds: &[crate::types::OracleBind],
+) -> Result<u64, DbError> {
+    match cx {
+        Some(cx) => conn.execute_cx(cx, sql, binds),
+        None => conn.execute(sql, binds),
+    }
+}
 
 /// Oracle limits: MODULE ≤ 48 chars, ACTION ≤ 32 chars (`DBMS_APPLICATION_INFO`).
 const MODULE_NAME: &str = "oraclemcp";
@@ -268,22 +289,78 @@ impl LeaseManager {
         sql: &str,
         binds: &[crate::types::OracleBind],
     ) -> Result<PreviewImpact, DbError> {
+        self.preview_dml_inner(None, id, sql, binds)
+    }
+
+    /// Cancellation-aware variant of [`Self::preview_dml`].
+    ///
+    /// Cancellation may be observed before the savepoint or before/after the
+    /// preview DML. Once a savepoint exists, rollback-to-savepoint is always
+    /// attempted without a cancellation checkpoint. If rollback-to-savepoint
+    /// fails, the lease is force-rolled-back and removed so an uncertain session
+    /// cannot be reused.
+    pub fn preview_dml_cx(
+        &self,
+        cx: &Cx,
+        id: &LeaseId,
+        sql: &str,
+        binds: &[crate::types::OracleBind],
+    ) -> Result<PreviewImpact, DbError> {
+        self.preview_dml_inner(Some(cx), id, sql, binds)
+    }
+
+    fn preview_dml_inner(
+        &self,
+        cx: Option<&Cx>,
+        id: &LeaseId,
+        sql: &str,
+        binds: &[crate::types::OracleBind],
+    ) -> Result<PreviewImpact, DbError> {
         const SP: &str = "oraclemcp_preview";
-        self.with_lease(&id.0, |lease| {
-            lease.conn.execute(&format!("SAVEPOINT {SP}"), &[])?;
+        let arc = self
+            .get(&id.0)
+            .ok_or_else(|| DbError::LeaseNotFound(id.0.clone()))?;
+        let mut discard_lease = false;
+        let result = {
+            let mut lease = arc.lock().expect("lease mutex poisoned");
+            if lease.deadline.is_expired() {
+                lease.force_rollback();
+                drop(lease);
+                self.remove(&id.0);
+                return Err(DbError::LeaseNotFound(format!("{} (expired)", id.0)));
+            }
+            let savepoint_sql = format!("SAVEPOINT {SP}");
+            let rollback_sql = format!("ROLLBACK TO SAVEPOINT {SP}");
+            lease_checkpoint(cx, "oracle_lease.preview.savepoint.before")?;
+            lease.conn.execute(&savepoint_sql, &[])?;
             lease.in_transaction = true;
-            let result = lease.conn.execute(sql, binds);
-            // Always roll back to the savepoint, regardless of the outcome.
-            let rollback = lease
-                .conn
-                .execute(&format!("ROLLBACK TO SAVEPOINT {SP}"), &[]);
-            let rows_affected = result?;
-            rollback?;
-            Ok(PreviewImpact {
-                rows_affected,
-                rolled_back: true,
-            })
-        })
+            let preview_result = match lease_checkpoint(cx, "oracle_lease.preview.execute.before") {
+                Ok(()) => lease_execute(cx, lease.conn.as_ref(), sql, binds),
+                Err(err) => Err(err),
+            };
+            let rollback_result = lease.conn.execute(&rollback_sql, &[]);
+            match (preview_result, rollback_result) {
+                (Ok(rows_affected), Ok(_)) => {
+                    lease_checkpoint(cx, "oracle_lease.preview.rollback.after")?;
+                    Ok(PreviewImpact {
+                        rows_affected,
+                        rolled_back: true,
+                    })
+                }
+                (Err(err), Ok(_)) => Err(err),
+                (Ok(_), Err(cleanup_err)) | (Err(_), Err(cleanup_err)) => {
+                    lease.force_rollback();
+                    discard_lease = true;
+                    Err(DbError::Execute(format!(
+                        "preview rollback failed; lease discarded: {cleanup_err}"
+                    )))
+                }
+            }
+        };
+        if discard_lease {
+            self.remove(&id.0);
+        }
+        result
     }
 
     /// Enable `DBMS_OUTPUT` on the leased session (full line capture is the
@@ -382,6 +459,7 @@ fn is_simple_identifier(s: &str) -> bool {
 mod tests {
     use super::*;
     use crate::types::{OracleBind, OracleConnectionInfo, OracleRow};
+    use asupersync::runtime::RuntimeBuilder;
 
     #[derive(Default)]
     struct MockLog {
@@ -391,6 +469,14 @@ mod tests {
     }
 
     struct MockConn {
+        log: Arc<Mutex<MockLog>>,
+    }
+
+    struct CancelAfterPreviewExecuteConn {
+        log: Arc<Mutex<MockLog>>,
+    }
+
+    struct RollbackToSavepointFailsConn {
         log: Arc<Mutex<MockLog>>,
     }
 
@@ -422,9 +508,86 @@ mod tests {
         }
     }
 
+    impl OracleConnection for CancelAfterPreviewExecuteConn {
+        fn backend(&self) -> crate::types::OracleBackend {
+            crate::types::OracleBackend::RustOracle
+        }
+        fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+        fn query_rows(&self, sql: &str, _binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+            self.log.lock().unwrap().executed.push(sql.to_owned());
+            Ok(vec![])
+        }
+        fn execute(&self, sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+            self.log.lock().unwrap().executed.push(sql.to_owned());
+            Ok(7)
+        }
+        fn execute_cx(&self, cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
+            let _ = self.execute(sql, binds)?;
+            cx.set_cancel_requested(true);
+            Err(DbError::Cancelled(
+                "test cancellation after preview execute".to_owned(),
+            ))
+        }
+        fn commit(&self) -> Result<(), DbError> {
+            self.log.lock().unwrap().commits += 1;
+            Ok(())
+        }
+        fn rollback(&self) -> Result<(), DbError> {
+            self.log.lock().unwrap().rollbacks += 1;
+            Ok(())
+        }
+    }
+
+    impl OracleConnection for RollbackToSavepointFailsConn {
+        fn backend(&self) -> crate::types::OracleBackend {
+            crate::types::OracleBackend::RustOracle
+        }
+        fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+        fn query_rows(&self, sql: &str, _binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+            self.log.lock().unwrap().executed.push(sql.to_owned());
+            Ok(vec![])
+        }
+        fn execute(&self, sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+            self.log.lock().unwrap().executed.push(sql.to_owned());
+            if sql.starts_with("ROLLBACK TO SAVEPOINT") {
+                Err(DbError::Execute("rollback to savepoint failed".to_owned()))
+            } else {
+                Ok(3)
+            }
+        }
+        fn commit(&self) -> Result<(), DbError> {
+            self.log.lock().unwrap().commits += 1;
+            Ok(())
+        }
+        fn rollback(&self) -> Result<(), DbError> {
+            self.log.lock().unwrap().rollbacks += 1;
+            Ok(())
+        }
+    }
+
     fn mock() -> (Box<dyn OracleConnection>, Arc<Mutex<MockLog>>) {
         let log = Arc::new(Mutex::new(MockLog::default()));
         (Box::new(MockConn { log: log.clone() }), log)
+    }
+
+    fn run_with_current_cx(f: impl FnOnce(&Cx)) {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("asupersync test runtime builds");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            f(&cx);
+        });
     }
 
     #[test]
@@ -550,5 +713,93 @@ mod tests {
         assert!(renewed.expires_in_ms > 0);
         // Roughly the full TTL again.
         assert!(renewed.expires_in_ms >= before.saturating_sub(1000));
+    }
+
+    #[test]
+    fn preview_dml_cx_rolls_back_to_savepoint_after_cancellation() {
+        let mgr = LeaseManager::new();
+        let log = Arc::new(Mutex::new(MockLog::default()));
+        let id = mgr
+            .acquire(
+                "dev",
+                "a",
+                Duration::from_secs(900),
+                &[],
+                Box::new(CancelAfterPreviewExecuteConn { log: log.clone() }),
+            )
+            .expect("acquire");
+        run_with_current_cx(|cx| {
+            let err = mgr
+                .preview_dml_cx(
+                    cx,
+                    &id,
+                    "UPDATE employees SET name = name WHERE employee_id = :1",
+                    &[OracleBind::I64(100)],
+                )
+                .expect_err("preview cancellation is surfaced");
+            assert!(matches!(err, DbError::Cancelled(_)), "{err:?}");
+        });
+
+        let executed = &log.lock().unwrap().executed;
+        assert!(
+            executed
+                .iter()
+                .any(|sql| sql == "UPDATE employees SET name = name WHERE employee_id = :1"),
+            "preview DML reached the mocked database"
+        );
+        assert!(
+            executed
+                .iter()
+                .any(|sql| sql == "ROLLBACK TO SAVEPOINT oraclemcp_preview"),
+            "rollback-to-savepoint runs even after cancellation"
+        );
+        assert_eq!(
+            mgr.active_count(),
+            1,
+            "successful cleanup keeps the lease usable"
+        );
+    }
+
+    #[test]
+    fn preview_dml_discards_lease_when_savepoint_cleanup_fails() {
+        let mgr = LeaseManager::new();
+        let log = Arc::new(Mutex::new(MockLog::default()));
+        let id = mgr
+            .acquire(
+                "dev",
+                "a",
+                Duration::from_secs(900),
+                &[],
+                Box::new(RollbackToSavepointFailsConn { log: log.clone() }),
+            )
+            .expect("acquire");
+        run_with_current_cx(|cx| {
+            let err = mgr
+                .preview_dml_cx(
+                    cx,
+                    &id,
+                    "DELETE FROM employees WHERE employee_id = :1",
+                    &[OracleBind::I64(100)],
+                )
+                .expect_err("cleanup failure is surfaced");
+            assert!(
+                matches!(err, DbError::Execute(ref msg) if msg.contains("lease discarded")),
+                "{err:?}"
+            );
+        });
+        assert_eq!(
+            log.lock().unwrap().rollbacks,
+            1,
+            "cleanup failure falls back to a full rollback before dropping the lease"
+        );
+        assert_eq!(
+            mgr.active_count(),
+            0,
+            "uncertain preview cleanup removes the lease from reuse"
+        );
+        assert!(
+            mgr.info(&id).is_err(),
+            "discarded lease is no longer usable"
+        );
     }
 }

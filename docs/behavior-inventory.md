@@ -146,13 +146,13 @@ Semver, ownership, and security-fix flow:
 
 | oraclemcp need | Legacy/current behavior | `oracledb` / thin migration note |
 | --- | --- | --- |
-| Connect | Thin `oracledb` connect via `RustOracleConnection`; applies username/password, wallet location, identity, NLS, and session statements. | W4 uses `BlockingConnection` as the synchronous bridge. W6b threads `&Cx` through DB-facing dispatch and adds cancellation checkpoints; W7b must complete child-budget/cancel cleanup. |
+| Connect | Thin `oracledb` connect via `RustOracleConnection`; applies username/password, wallet location, identity, NLS, and session statements. | W4 uses `BlockingConnection` as the synchronous bridge. W6b threads `&Cx` through DB-facing dispatch and adds cancellation checkpoints; W7b documents and tests the cleanup/discard policy. |
 | Query rows | Positional and named binds; pagination wraps SQL with `OFFSET ... FETCH`; first page fetches max rows plus one. | `execute_query_with_binds*`, named/positional bind APIs, and fetch APIs exist. W4 must map `QueryValue` to current JSON serialization exactly. |
-| Execute | Thick adapter reports rows affected, commit/rollback, and savepoint rollback preview. | Thin adapter must preserve row counts, savepoints, commit/rollback, and uncertain-session cleanup. |
-| Call timeout/cancel | Thick adapter has call timeout setters and DB pool offloading. | Thin driver exposes timeout/cancel APIs; W7b must wire cancellation to connection cleanup and discard dirty sessions when certainty is lost. |
+| Execute | Thin adapter reports rows affected, commit/rollback, and savepoint rollback preview. | Cancellation-aware execute paths roll back dirty dispatcher work; preview DML always attempts rollback-to-savepoint and discards the lease if cleanup certainty is lost. |
+| Call timeout/cancel | Thin adapter has call timeout setters plus `&Cx` checkpoints at dispatch, DB, pool, and serialization boundaries. | `DbError::Cancelled` maps to `TIMEOUT`; pooled `*_cx` calls discard the checked-out connection on any cancellation/failure because Oracle may already have crossed a round-trip boundary. |
 | LOBs/JSON/NUMBER | Current serialization caps LOBs and keeps NUMBER lossless by default. | Thin values include lossless `QueryValue`; W4 must preserve current JSON schema and truncation markers. |
 | DBMS_OUTPUT | `ENABLE` still executes through PL/SQL. `GET_LINE` capture is an explicit unsupported feature because `oracledb 0.1.1` does not expose the old ODPI-C OUT-bind surface used here. | File granular `rust-oracledb` work if DBMS_OUTPUT capture is required before W11. |
-| Pooling | W4 replaced `r2d2`/Tokio blocking pool with a small bounded thin session pool. | W6b made checkout/use/release cancellation-aware with `&Cx`; W7b should add deeper driver cancellation cleanup for uncertain live calls. |
+| Pooling | W4 replaced `r2d2`/Tokio blocking pool with a small bounded thin session pool. | Checkout loops observe `&Cx`; a cancelled or failed pooled call is treated as uncertain and the physical connection is not returned to idle reuse. |
 | Session identity | Thin connection maps driver name/program/machine/osuser/terminal through `ClientIdentity`, then applies module/action/client_identifier/client_info with PL/SQL. Edition selection is explicitly unsupported on `oracledb 0.1.1`. | If edition support is required, file granular `rust-oracledb` work or add a safe session-level implementation. |
 
 W4 upstream follow-up beads filed in `/home/durakovic/projects/rust-oracledb`:

@@ -235,7 +235,7 @@ impl OraclePool {
             .map_err(|err| DbError::Cancelled(format!("oracle_pool.checkout.before: {err}")))?;
         let conn = self.checkout_cx(cx)?;
         let result = f(&conn);
-        let broken = result.is_err() || self.manager.has_broken(&conn);
+        let broken = should_discard_after_cx_call(&result, self.manager.has_broken(&conn));
         self.checkin(conn, broken)?;
         result
     }
@@ -344,6 +344,10 @@ impl OraclePool {
     }
 }
 
+fn should_discard_after_cx_call<T>(result: &Result<T, DbError>, manager_broken: bool) -> bool {
+    result.is_err() || manager_broken
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,5 +358,18 @@ mod tests {
         assert_eq!(s.max_size, 20);
         assert_eq!(s.min_idle, 2);
         assert_eq!(s.acquire_timeout_secs, 5);
+    }
+
+    #[test]
+    fn cancelled_cx_call_discards_checked_out_connection() {
+        let cancelled: Result<(), DbError> =
+            Err(DbError::Cancelled("test cancellation".to_owned()));
+        assert!(
+            should_discard_after_cx_call(&cancelled, false),
+            "a cancelled DB call may have crossed an Oracle boundary and must not return clean"
+        );
+        let ok: Result<(), DbError> = Ok(());
+        assert!(!should_discard_after_cx_call(&ok, false));
+        assert!(should_discard_after_cx_call(&ok, true));
     }
 }

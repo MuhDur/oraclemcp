@@ -114,4 +114,13 @@ mod tests {
         assert_eq!(env.error_class, ErrorClass::Busy);
         assert_eq!(env.retry_after_ms, Some(250));
     }
+
+    #[test]
+    fn cancelled_error_is_timeout_envelope() {
+        let env =
+            DbError::Cancelled("oracle_query.serialize.rows: cancelled".to_owned()).into_envelope();
+        assert_eq!(env.error_class, ErrorClass::Timeout);
+        assert!(env.message.contains("oracle_query.serialize.rows"));
+        assert!(env.retry_after_ms.is_none());
+    }
 }
