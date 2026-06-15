@@ -248,6 +248,12 @@ impl RustOracleConnection {
     pub fn options(&self) -> &OracleConnectOptions {
         &self.opts
     }
+
+    fn query_first_row(&self, sql: &str) -> Option<OracleRow> {
+        self.query_rows(sql, &[])
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+    }
 }
 
 fn duration_to_millis(duration: Duration) -> u32 {
@@ -662,25 +668,18 @@ mod driver {
                 backend: Some(crate::types::OracleBackend::RustOracle),
                 ..Default::default()
             };
-            if let Ok(rows) = self.query_rows(
+            if let Some(r) = self.query_first_row(
                 "SELECT version_full FROM product_component_version WHERE rownum = 1",
-                &[],
             ) {
-                info.server_version = rows
-                    .first()
-                    .and_then(|r| r.text("VERSION_FULL").map(str::to_owned));
+                info.server_version = r.text("VERSION_FULL").map(str::to_owned);
             }
-            if let Some(r) = self
-                .query_rows("SELECT database_role, open_mode FROM v$database", &[])
-                .ok()
-                .and_then(|rows| rows.into_iter().next())
+            if let Some(r) = self.query_first_row("SELECT database_role, open_mode FROM v$database")
             {
                 info.database_role = r.text("DATABASE_ROLE").map(str::to_owned);
                 info.open_mode = r.text("OPEN_MODE").map(str::to_owned);
             }
-            if let Some(r) = self
-                .query_rows(
-                    "SELECT \
+            if let Some(r) = self.query_first_row(
+                "SELECT \
                     SYS_CONTEXT('USERENV','CURRENT_SCHEMA') AS current_schema, \
                     SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME') AS current_edition, \
                     SYS_CONTEXT('USERENV','SESSION_USER') AS session_user, \
@@ -693,11 +692,7 @@ mod driver {
                     SYS_CONTEXT('USERENV','HOST') AS host, \
                     SYS_CONTEXT('USERENV','TERMINAL') AS terminal \
                  FROM dual",
-                    &[],
-                )
-                .ok()
-                .and_then(|rows| rows.into_iter().next())
-            {
+            ) {
                 info.current_schema = r.text("CURRENT_SCHEMA").map(str::to_owned);
                 info.current_edition = r.text("CURRENT_EDITION").map(str::to_owned);
                 info.session_user = r.text("SESSION_USER").map(str::to_owned);
@@ -710,17 +705,12 @@ mod driver {
                 info.host = r.text("HOST").map(str::to_owned);
                 info.terminal = r.text("TERMINAL").map(str::to_owned);
             }
-            if let Some(r) = self
-                .query_rows(
-                    "SELECT osuser, machine, terminal, program \
+            if let Some(r) = self.query_first_row(
+                "SELECT osuser, machine, terminal, program \
                  FROM v$session \
                  WHERE sid = TO_NUMBER(SYS_CONTEXT('USERENV','SID')) \
                  FETCH FIRST 1 ROWS ONLY",
-                    &[],
-                )
-                .ok()
-                .and_then(|rows| rows.into_iter().next())
-            {
+            ) {
                 info.os_user = r
                     .text("OSUSER")
                     .map(str::to_owned)
@@ -732,18 +722,13 @@ mod driver {
                     .or_else(|| info.terminal.take());
                 info.program = r.text("PROGRAM").map(str::to_owned);
             }
-            if let Some(r) = self
-                .query_rows(
-                    "SELECT client_driver \
+            if let Some(r) = self.query_first_row(
+                "SELECT client_driver \
                  FROM v$session_connect_info \
                  WHERE sid = TO_NUMBER(SYS_CONTEXT('USERENV','SID')) \
                    AND client_driver IS NOT NULL \
                  FETCH FIRST 1 ROWS ONLY",
-                    &[],
-                )
-                .ok()
-                .and_then(|rows| rows.into_iter().next())
-            {
+            ) {
                 info.client_driver = r.text("CLIENT_DRIVER").map(str::to_owned);
             }
             Ok(info.with_read_only_status())
