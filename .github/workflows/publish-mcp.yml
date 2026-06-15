@@ -38,3 +38,23 @@ jobs:
         run: ./mcp-publisher login github-oidc
       - name: Publish server.json
         run: ./mcp-publisher publish
+      - name: Verify MCP registry listing
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(jq -r '.version' server.json)"
+          image="$(jq -r '.packages[] | select(.registryType == "oci") | .identifier' server.json)"
+          for _ in $(seq 1 30); do
+            if curl -fsS 'https://registry.modelcontextprotocol.io/v0/servers?search=oraclemcp&limit=20' |
+              jq -e --arg version "$version" --arg image "$image" '
+                .servers[]
+                | select(.server.name == "io.github.MuhDur/oraclemcp")
+                | select(.server.version == $version)
+                | select(any(.server.packages[]?; .registryType == "oci" and .identifier == $image))
+              ' >/dev/null; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "MCP registry did not list io.github.MuhDur/oraclemcp $version with $image" >&2
+          exit 1

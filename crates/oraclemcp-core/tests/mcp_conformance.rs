@@ -148,7 +148,7 @@ fn conformance_server() -> OracleMcpServer {
         })),
     );
     let report = CapabilitiesReport::new(
-        "0.2.1",
+        "0.3.0",
         registry.tools.clone(),
         OperatingLevel::ReadOnly,
         FeatureTiers {
@@ -157,7 +157,7 @@ fn conformance_server() -> OracleMcpServer {
             http_transport: false,
         },
     );
-    OracleMcpServer::new("0.2.1", registry, report, Arc::new(EchoDispatch))
+    OracleMcpServer::new("0.3.0", registry, report, Arc::new(EchoDispatch))
 }
 
 fn frame(value: &Value) -> Vec<u8> {
@@ -248,7 +248,7 @@ fn initialize_returns_mcp_2025_11_25_server_info_and_tools_capability() {
     let result = &replies[0]["result"];
     assert_eq!(result["protocolVersion"], json!("2025-11-25"));
     assert_eq!(result["serverInfo"]["name"], json!("oraclemcp"));
-    assert_eq!(result["serverInfo"]["version"], json!("0.2.1"));
+    assert_eq!(result["serverInfo"]["version"], json!("0.3.0"));
     assert!(result["capabilities"]["tools"].is_object());
 }
 

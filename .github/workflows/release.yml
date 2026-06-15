@@ -253,6 +253,23 @@ jobs:
           provenance: false
       - name: Verify pushed image
         run: docker buildx imagetools inspect "ghcr.io/muhdur/oraclemcp:${GITHUB_REF_NAME#v}"
+      - name: Smoke pushed image
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          image="ghcr.io/muhdur/oraclemcp:${version}"
+          docker pull "$image"
+          docker run --rm --entrypoint /bin/bash -e EXPECTED_VERSION="$version" "$image" -lc '
+            set -euo pipefail
+            if command -v gcc >/dev/null 2>&1; then
+              echo "runtime image unexpectedly contains gcc" >&2
+              exit 1
+            fi
+            oraclemcp info >/tmp/oraclemcp-info.json
+            grep -q "\"version\": \"$EXPECTED_VERSION\"" /tmp/oraclemcp-info.json
+            oraclemcp capabilities | head -c 1200 >/dev/null
+          '
 
   publish-mcp-registry:
     name: publish MCP registry entry
@@ -275,3 +292,23 @@ jobs:
         run: ./mcp-publisher login github-oidc
       - name: Publish server.json
         run: ./mcp-publisher publish
+      - name: Verify MCP registry listing
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          image="ghcr.io/muhdur/oraclemcp:${version}"
+          for _ in $(seq 1 30); do
+            if curl -fsS 'https://registry.modelcontextprotocol.io/v0/servers?search=oraclemcp&limit=20' |
+              jq -e --arg version "$version" --arg image "$image" '
+                .servers[]
+                | select(.server.name == "io.github.MuhDur/oraclemcp")
+                | select(.server.version == $version)
+                | select(any(.server.packages[]?; .registryType == "oci" and .identifier == $image))
+              ' >/dev/null; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "MCP registry did not list io.github.MuhDur/oraclemcp $version with $image" >&2
+          exit 1

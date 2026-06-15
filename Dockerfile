@@ -24,7 +24,7 @@ COPY --from=builder /src/target/release/oraclemcp /usr/local/bin/oraclemcp
 # server name (io.modelcontextprotocol.server.name == the `name` field).
 LABEL io.modelcontextprotocol.server.name="io.github.MuhDur/oraclemcp"
 LABEL org.opencontainers.image.title="oraclemcp"
-LABEL org.opencontainers.image.description="Unofficial, engine-free Oracle Database MCP server (read-only, fail-closed SQL guard). Not affiliated with Oracle Corporation."
+LABEL org.opencontainers.image.description="Unofficial, engine-free, safe-by-default Oracle Database MCP server with a fail-closed SQL guard. Not affiliated with Oracle Corporation."
 LABEL org.opencontainers.image.source="https://github.com/MuhDur/oraclemcp"
 LABEL org.opencontainers.image.licenses="Apache-2.0 OR MIT"
 

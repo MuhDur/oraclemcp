@@ -25,7 +25,7 @@ Smoke checks:
 
 - `/tmp/cargo-target/release/oraclemcp info` exits successfully and reports
   `engine=false`, `live_db=true`, `transports=["stdio","http"]`, version
-  `0.2.1`.
+  `0.3.0`.
 - `docker run --rm --entrypoint /bin/sh oraclemcp:w13-7dd4a60 -c '... oraclemcp info'`
   exits successfully and reports `runtime_gcc=absent`.
 - `/tmp/cargo-target/release/oraclemcp capabilities | head -c 1200 >/dev/null`
@@ -39,7 +39,7 @@ Out of scope:
 
 - Live Oracle connection/query latency. No live database credentials or
   connect strings were used.
-- Historical thick-mode binary/image timing. Existing stale `0.2.0` packages in
+- Historical thick-mode binary/image timing. Existing stale `0.2.x` packages in
   the local target directory were not treated as a fair rebuilt baseline.
 - Kernel or CPU tuning. The run records current host state only.
 

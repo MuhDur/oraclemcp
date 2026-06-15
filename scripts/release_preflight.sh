@@ -77,6 +77,10 @@ server_version="$(jq -r '.version' server.json)"
 [ "$server_version" = "$version" ] ||
   fail "server.json version '$server_version' does not match workspace version '$version'"
 
+if ! grep -F "## [$version]" CHANGELOG.md >/dev/null; then
+  fail "CHANGELOG.md does not contain an entry for $version"
+fi
+
 server_name="$(jq -r '.name' server.json)"
 [ "$server_name" = "io.github.MuhDur/oraclemcp" ] ||
   fail "server.json name changed unexpectedly: $server_name"

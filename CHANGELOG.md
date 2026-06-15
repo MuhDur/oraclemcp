@@ -4,7 +4,50 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] — 2026-06-10
+## [0.3.0] — Unreleased
+
+This is the thin-native line: Oracle Instant Client/ODPI-C thick mode, Tokio,
+rmcp, Axum, and Hyper have been removed from the production server. The server
+now builds around the pure-Rust `oracledb` driver, native MCP transports, and
+Asupersync runtime boundaries. Because this removes thick-mode/stable-MSRV
+assumptions, the next release is minor rather than patch.
+
+### Added
+
+- Thin-native performance and footprint evidence in
+  `docs/performance-footprint.md`, including release binary size, Docker image
+  size, startup/RSS measurements, synthetic read serialization, classifier
+  throughput, package sizes, Docker smoke, and Unix pipe behavior.
+- Deterministic Asupersync tests for cancellation cleanup, request quiescence,
+  preview-token one-shot races, guard-before-I/O behavior, OAuth token
+  redaction, and live-XE skip/pass coverage.
+- Native stdio and Streamable HTTP transports with golden behavior and MCP
+  conformance tests, removing the rmcp/Axum/Hyper runtime surface.
+- Release automation for synchronized crates.io, GitHub release, GHCR, and MCP
+  registry publication from a single version tag.
+
+### Changed
+
+- Live Oracle access now uses the pure-Rust thin `oracledb` driver by default.
+  The runtime no longer requires Oracle Instant Client, ODPI-C, r2d2, or a C
+  Oracle connectivity library.
+- The workspace is pinned to `nightly-2026-05-11`; stable/MSRV claims were
+  removed because the thin-native Asupersync/oracledb stack is nightly-bound.
+- Docker images are thin-driver images and do not redistribute Oracle Instant
+  Client.
+- CLI stdout emission is fallible, so large JSON commands such as
+  `oraclemcp capabilities | head -c 1200` exit cleanly instead of printing a
+  Rust broken-pipe panic.
+
+### Security
+
+- CI now hard-fails if forbidden production dependencies return: Tokio,
+  asupersync-tokio-compat, rmcp, Axum, Hyper, `oracle`, ODPI-C, r2d2, reqwest,
+  async-std, smol, or related removed crate families.
+- HTTP OAuth scope validation is enforced at dispatch so bearer-token scopes can
+  only lower effective authority and never raise profile/session ceilings.
+
+## [0.2.1] — 2026-06-15
 
 This release turns the read-only preview into a full safe-by-default Oracle MCP
 server: connection profiles, a complete read surface, a profile-gated write
@@ -117,5 +160,6 @@ pure Rust. (Not affiliated with Oracle Corporation.)
   closed on desynchronized multi-statement input. It carries a differential
   adversarial corpus (run in CI) and a `cargo-fuzz` target.
 
-[0.2.0]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.2.0
+[0.3.0]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.3.0
+[0.2.1]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.2.1
 [0.1.0]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.1.0

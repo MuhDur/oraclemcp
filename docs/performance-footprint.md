@@ -64,19 +64,21 @@ Classifier baseline:
 ## Package Sizes
 
 Current `.crate` packages produced by `cargo package --workspace --locked
---no-verify`.
+--no-verify`. Package filenames and compressed sizes were refreshed after the
+W14 version bump; the timing and binary measurements above remain the W13
+baseline.
 
 | Package | Size |
 |---|---:|
-| `oraclemcp-error-0.2.1.crate` | 9,034 bytes |
-| `oraclemcp-audit-0.2.1.crate` | 13,792 bytes |
-| `oraclemcp-guard-0.2.1.crate` | 65,975 bytes |
-| `oraclemcp-auth-0.2.1.crate` | 19,771 bytes |
-| `oraclemcp-config-0.2.1.crate` | 16,359 bytes |
-| `oraclemcp-db-0.2.1.crate` | 86,918 bytes |
-| `oraclemcp-telemetry-0.2.1.crate` | 8,091 bytes |
-| `oraclemcp-core-0.2.1.crate` | 104,955 bytes |
-| `oraclemcp-0.2.1.crate` | 93,871 bytes |
+| `oraclemcp-error-0.3.0.crate` | 9,042 bytes |
+| `oraclemcp-audit-0.3.0.crate` | 13,805 bytes |
+| `oraclemcp-guard-0.3.0.crate` | 65,990 bytes |
+| `oraclemcp-auth-0.3.0.crate` | 19,785 bytes |
+| `oraclemcp-config-0.3.0.crate` | 16,370 bytes |
+| `oraclemcp-db-0.3.0.crate` | 86,935 bytes |
+| `oraclemcp-telemetry-0.3.0.crate` | 8,098 bytes |
+| `oraclemcp-core-0.3.0.crate` | 104,982 bytes |
+| `oraclemcp-0.3.0.crate` | 93,880 bytes |
 
 ## Scope Limits
 

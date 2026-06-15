@@ -123,9 +123,9 @@ impl OracleConnection for FailingMock {
 
 fn server_over(conn: Box<dyn OracleConnection>) -> OracleMcpServer {
     OracleMcpServer::new(
-        "0.2.1",
+        "0.3.0",
         tool_registry(),
-        capabilities("0.2.1", true, false),
+        capabilities("0.3.0", true, false),
         Arc::new(OracleDispatcher::new(conn)),
     )
 }

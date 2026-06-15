@@ -54,7 +54,7 @@ fn harness_server() -> OracleMcpServer {
         })),
     );
     let report = CapabilitiesReport::new(
-        "0.2.1",
+        "0.3.0",
         registry.tools.clone(),
         OperatingLevel::ReadOnly,
         FeatureTiers {
@@ -63,7 +63,7 @@ fn harness_server() -> OracleMcpServer {
             http_transport: true,
         },
     );
-    OracleMcpServer::new("0.2.1", registry, report, Arc::new(EchoDispatch))
+    OracleMcpServer::new("0.3.0", registry, report, Arc::new(EchoDispatch))
 }
 
 fn initialize_body(id: i64, client: &str) -> Value {

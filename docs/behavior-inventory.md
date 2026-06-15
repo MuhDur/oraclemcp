@@ -1,10 +1,10 @@
 # oraclemcp Behavior Inventory
 
-Generated for bead `oraclemcp-w0-behavior-inventory-4t4` on 2026-06-15. This
-file is the source-of-truth baseline before the thin-only, Asupersync-native
-migration starts. It intentionally records current behavior and known gaps; it
-does not record credentials, live Oracle hostnames, customer schema names, or
-real query text.
+Initially generated for bead `oraclemcp-w0-behavior-inventory-4t4` on
+2026-06-15, then maintained as the thin-only, Asupersync-native migration
+progressed. It intentionally records current behavior and known gaps; it does
+not record credentials, live Oracle hostnames, customer schema names, or real
+query text.
 
 ## Evidence Snapshot
 
@@ -12,11 +12,11 @@ real query text.
 | --- | --- | --- |
 | Workspace | Cargo workspace with 9 crates plus `oraclemcp` binary, `resolver = "2"`, edition 2024, pinned nightly `nightly-2026-05-11`, and no stable MSRV on the thin-native line. | `Cargo.toml`, `rust-toolchain.toml` |
 | Safety posture | Every crate forbids unsafe code; raw SQL safety is centered on `oraclemcp-guard`. | `Cargo.toml`, crate roots, `AGENTS.md` |
-| Current release line | All package versions and `server.json` are aligned at 0.2.1. | `Cargo.toml`, crate `Cargo.toml` files, `server.json` |
+| Current release line | All package versions and `server.json` are aligned at 0.3.0. | `Cargo.toml`, crate `Cargo.toml` files, `server.json` |
 | Current DB mode | Default build includes live Oracle support through the pure-Rust `oracledb` thin driver. | `README.md`, `crates/oraclemcp-db/Cargo.toml` |
 | Current runtime/transport | Native stdio and native Streamable HTTP live in `oraclemcp-core`; dispatch receives explicit Asupersync `Cx` contexts; Tokio, `rmcp`, Axum, Hyper, ODPI-C, and `r2d2` are absent from the current manifests and lockfile. | `crates/oraclemcp-core/src/server.rs`, `crates/oraclemcp-core/src/http.rs`, `Cargo.lock`, `Cargo.toml` |
-| Current bead state | Repo-local `.beads/` contains the migration graph; W0 is the only actionable bead. | `br list --json`, `bv --robot-triage` |
-| Local release artifacts | No local `target/release` artifact was present during inventory, so binary-size and startup baselines are not measured yet. | `find target/release ...` |
+| Current bead state | Repo-local `.beads/` contains the migration graph and W-series release hardening work. | `br list --json`, `bv --robot-triage` |
+| Local release artifacts | W13 records release binary size, startup/RSS, package sizes, Docker image size, Docker smoke, and Unix pipe behavior in `docs/performance-footprint.md`. | `docs/performance-footprint.md`, `tests/artifacts/perf/20260615T182242Z-7dd4a60/` |
 
 ## CLI Surface
 
@@ -190,7 +190,7 @@ W4 upstream follow-up beads filed in `/home/durakovic/projects/rust-oracledb`:
 | User raw `EXPLAIN PLAN` | Guard adversarial corpus treats raw `EXPLAIN PLAN` as guarded, never safe. | Preserve fail-closed guard behavior. |
 | `oracle_explain_plan` tool | Dispatch validates the inner SQL as read-only, requires `allow_plan_table_write=true`, and requires the active session gate to allow `READ_WRITE` before `crates/oraclemcp-db/src/intelligence.rs` executes `EXPLAIN PLAN FOR ...`. | Treat as an explicit diagnostic write, not as part of the read-only tool cluster. |
 | Standby | `read_only_standby` refuses explain-plan path because `EXPLAIN PLAN` needs `PLAN_TABLE`; standby profiles also cap the session at `READ_ONLY`. | Preserve; use `DBMS_XPLAN.DISPLAY_CURSOR` against an existing cursor for no-write plan inspection. |
-| Tracking | New bead `oraclemcp-thin-only-oracle-driver-kod.1` blocks W4. | Resolved when tests prove default refusal, standby refusal, READ_WRITE gating, and raw `EXPLAIN PLAN` classifier behavior. |
+| Tracking | The W4 explain-plan contract is implemented and covered by dispatch/guard tests. | Preserve default refusal, standby refusal, READ_WRITE gating, and raw `EXPLAIN PLAN` classifier coverage. |
 
 ## Asupersync HTTP/Web Primitives
 
@@ -212,8 +212,8 @@ W4 upstream follow-up beads filed in `/home/durakovic/projects/rust-oracledb`:
 | DB behavior | Unit/live tests cover type fidelity, live Oracle smoke, leases, chaos rollback, privilege degradation, dictionary tools, and thin pool behavior. Live tests skip without Oracle env. | W4/W11 |
 | Dependency graph | Current manifests and lockfile contain none of Tokio, `rmcp`, Axum, Hyper, `oracle`, `odpic-sys`, or `r2d2`. | W12 hard gate |
 | Release gates | CI runs fmt, clippy, tests, doc, pinned-nightly build, boundary lint, advisory forbidden-dependency reporting, release preflight, cargo deny, thin build, sensitive lint, and fuzz build best-effort. Release workflow publishes crates, GitHub release assets, GHCR, and MCP registry from tags. | W2, W14 |
-| Docker | W4 image builds the default thin binary and no longer uses the Oracle Instant Client runtime base. | W14 should still audit image size, labels, registry metadata, and installer docs. |
-| Performance | No local oraclemcp binary/startup/query benchmarks were produced in W0. Existing rust-oracledb docs contain thin-driver performance evidence, but those numbers are not oraclemcp release claims. | W13 |
+| Docker | W14 Docker artifacts build the default thin binary, carry the MCP registry image label, and runtime-smoke without Oracle Instant Client or gcc. | W14 release artifact gate |
+| Performance | W13 added local oraclemcp binary size, Docker size, startup/RSS, package-size, classifier, synthetic serialization, Docker smoke, and Unix pipe evidence in `docs/performance-footprint.md`. | W13 |
 
 ## Current Gaps Already Reflected In Beads
 

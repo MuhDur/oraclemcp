@@ -1,9 +1,9 @@
 name: Docker image
 
-# Manual rebuild path for the Instant-Client container image. Normal tag
-# releases publish this image from release.yml after tests, GitHub release, and
-# crates.io publishing have succeeded. This workflow is for rebuilding an image
-# for the current Cargo/server.json version without cutting a new release.
+# Manual rebuild path for the thin-driver container image. Normal tag releases
+# publish this image from release.yml after tests, GitHub release, and crates.io
+# publishing have succeeded. This workflow rebuilds an image for the current
+# Cargo/server.json version without cutting a new release.
 on:
   workflow_dispatch:
     inputs:
@@ -71,3 +71,22 @@ jobs:
             ghcr.io/muhdur/oraclemcp:${{ steps.ver.outputs.v }}
             ghcr.io/muhdur/oraclemcp:latest
           provenance: false
+
+      - name: Smoke pushed image
+        shell: bash
+        env:
+          IMAGE: ghcr.io/muhdur/oraclemcp:${{ steps.ver.outputs.v }}
+          VERSION: ${{ steps.ver.outputs.v }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE"
+          docker run --rm --entrypoint /bin/bash -e EXPECTED_VERSION="$VERSION" "$IMAGE" -lc '
+            set -euo pipefail
+            if command -v gcc >/dev/null 2>&1; then
+              echo "runtime image unexpectedly contains gcc" >&2
+              exit 1
+            fi
+            oraclemcp info >/tmp/oraclemcp-info.json
+            grep -q "\"version\": \"$EXPECTED_VERSION\"" /tmp/oraclemcp-info.json
+            oraclemcp capabilities | head -c 1200 >/dev/null
+          '

@@ -26,9 +26,9 @@
 ## Quick start
 
 This branch is pinned to **`nightly-2026-05-11`**. The thin-native line has no
-stable MSRV because the planned Asupersync/oracledb stack uses nightly-only
-language features. The repository's `rust-toolchain.toml` selects the pin for
-local builds; direct `cargo install` users should use the same toolchain.
+stable MSRV because the Asupersync/oracledb stack uses nightly-only language
+features. The repository's `rust-toolchain.toml` selects the pin for local
+builds; direct `cargo install` users should use the same toolchain.
 
 ```sh
 rustup toolchain install nightly-2026-05-11 --component rustfmt --component clippy
@@ -67,9 +67,9 @@ oraclemcp --json setup --profile db_ro
 docker run -i --rm \
   -v "$HOME/.config/oraclemcp:/root/.config/oraclemcp:ro" \
   -e ORACLE_APP_PASSWORD \
-  ghcr.io/muhdur/oraclemcp:0.2.1          # MCP over stdio, against the configured profile
+  ghcr.io/muhdur/oraclemcp:0.3.0          # MCP over stdio, against the configured profile
 
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.2.1   # tool surface only (no DB)
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.3.0   # tool surface only (no DB)
 ```
 
 > The Docker image and crates are Apache-2.0 OR MIT and do not redistribute Oracle Instant Client.

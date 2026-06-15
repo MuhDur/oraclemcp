@@ -2,8 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.MuhDur/oraclemcp",
   "title": "oraclemcp",
-  "description": "Engine-free, read-only Oracle Database MCP server with a fail-closed SQL guard (unofficial).",
-  "version": "0.2.1",
+  "description": "Engine-free, safe-by-default Oracle Database MCP server with a fail-closed SQL guard (unofficial).",
+  "version": "0.3.0",
   "repository": {
     "url": "https://github.com/MuhDur/oraclemcp",
     "source": "github"
@@ -11,7 +11,7 @@
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/muhdur/oraclemcp:0.2.1",
+      "identifier": "ghcr.io/muhdur/oraclemcp:0.3.0",
       "transport": {
         "type": "stdio"
       }
