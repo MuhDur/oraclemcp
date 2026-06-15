@@ -13,7 +13,7 @@ on:
   workflow_dispatch: {}
 
 env:
-  ORACLEMCP_RUST_TOOLCHAIN: nightly-2026-05-11
+  RUST_TOOLCHAIN: nightly-2026-05-11
 
 jobs:
   publish:
@@ -28,7 +28,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.ORACLEMCP_RUST_TOOLCHAIN }}
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Validate release metadata
         run: bash scripts/release_preflight.sh
       - name: Install mcp-publisher

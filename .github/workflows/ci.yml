@@ -8,7 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  ORACLEMCP_RUST_TOOLCHAIN: nightly-2026-05-11
+  RUST_TOOLCHAIN: nightly-2026-05-11
 
 permissions:
   contents: read
@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.ORACLEMCP_RUST_TOOLCHAIN }}
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
       - run: cargo fmt --all -- --check
 
@@ -40,7 +40,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.ORACLEMCP_RUST_TOOLCHAIN }}
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -54,7 +54,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.ORACLEMCP_RUST_TOOLCHAIN }}
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --doc
@@ -71,7 +71,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.ORACLEMCP_RUST_TOOLCHAIN }}
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
 
@@ -84,7 +84,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.ORACLEMCP_RUST_TOOLCHAIN }}
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       # Ensure the docs build; intra-doc-link lints are not gated (some target
       # feature-gated items that are absent in the default-feature doc build).
@@ -102,7 +102,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.ORACLEMCP_RUST_TOOLCHAIN }}
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - run: bash scripts/oraclemcp_boundary_lint.sh
 
   release-metadata:
@@ -114,7 +114,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.ORACLEMCP_RUST_TOOLCHAIN }}
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - run: bash scripts/release_preflight.sh
 
   supply-chain:
@@ -126,7 +126,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.ORACLEMCP_RUST_TOOLCHAIN }}
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check
 
@@ -144,7 +144,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.ORACLEMCP_RUST_TOOLCHAIN }}
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p oraclemcp --features live-db
 
@@ -175,12 +175,12 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.ORACLEMCP_RUST_TOOLCHAIN }}
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
         # Pin the gnu target: cargo-fuzz otherwise defaults to musl here, whose
         # static libc is incompatible with the ASan sanitizer.
-      - run: cargo +${{ env.ORACLEMCP_RUST_TOOLCHAIN }} fuzz build --target x86_64-unknown-linux-gnu
+      - run: cargo +${{ env.RUST_TOOLCHAIN }} fuzz build --target x86_64-unknown-linux-gnu
         working-directory: crates/oraclemcp-guard
