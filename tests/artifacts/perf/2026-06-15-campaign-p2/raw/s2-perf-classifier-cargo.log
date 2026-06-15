@@ -1,0 +1,12 @@
+   Compiling oraclemcp-error v0.3.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-error)
+   Compiling oraclemcp-audit v0.3.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-audit)
+   Compiling oraclemcp-guard v0.3.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-guard)
+    Finished `release` profile [optimized] target(s) in 3.82s
+     Running tests/perf_classifier.rs (/tmp/cargo-target/release/deps/perf_classifier-75af97c81aaf5427)
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":13968,"per_sec":71592,"corpus":12 }
+CLASSIFIER BASELINE: 13968 ns/statement  (~71592 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.53s

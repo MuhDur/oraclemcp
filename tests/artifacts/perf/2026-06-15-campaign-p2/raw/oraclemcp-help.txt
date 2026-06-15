@@ -1,0 +1,26 @@
+Speaks the Model Context Protocol over stdio (default) or Streamable HTTP (--listen). Exposes safe-by-default Oracle tools (profile discovery, connection info, query, schema_inspect, list_schemas, switch_profile, set_session_level, preview_sql, describe, get_ddl, get_source, compile_errors, search_source, plscope_inspect, sample_rows, read_clob, explain_plan, compile_object, compile_with_warnings, create_or_replace, patch_source, guarded execute) plus the zero-arg oracle_capabilities discovery tool. No PL/SQL engine, no environment-specific workflow engine.
+
+Usage: oraclemcp [OPTIONS] [COMMAND]
+
+Commands:
+  serve         Start the MCP server (stdio by default; --listen <ADDR> for HTTP)
+  info          Print build information (version, enabled features) and exit
+  doctor        Run diagnostics; exit 2 on a blocker
+  profiles      List configured connection profiles without opening a database connection
+  capabilities  Print the capabilities report (tools, level, feature tiers) as JSON
+  robot-docs    Print an agent-oriented usage guide from the binary itself
+  setup         Print generic onboarding templates for profiles, wrappers, and MCP clients
+  sign-tool     Print HMAC signatures for operator-defined custom tool definitions
+  help          Print this message or the help of the given subcommand(s)
+
+Options:
+      --robot-json
+          Emit a single JSON object on stdout instead of human text
+
+          [aliases: --json]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version

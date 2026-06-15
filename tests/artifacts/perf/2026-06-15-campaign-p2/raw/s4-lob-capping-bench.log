@@ -1,0 +1,29 @@
+   Compiling oraclemcp-db v0.3.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-db)
+    Finished `bench` profile [optimized] target(s) in 1.19s
+     Running benches/lob_capping.rs (/tmp/cargo-target/release/deps/lob_capping-13db778656e06bd8)
+Benchmarking lob_capping/clob_under_cap
+Benchmarking lob_capping/clob_under_cap: Warming up for 3.0000 s
+Benchmarking lob_capping/clob_under_cap: Collecting 30 samples in estimated 5.0024 s (364k iterations)
+Benchmarking lob_capping/clob_under_cap: Analyzing
+lob_capping/clob_under_cap
+                        time:   [13.592 µs 13.670 µs 13.784 µs]
+Found 3 outliers among 30 measurements (10.00%)
+  1 (3.33%) high mild
+  2 (6.67%) high severe
+Benchmarking lob_capping/clob_over_cap_truncates
+Benchmarking lob_capping/clob_over_cap_truncates: Warming up for 3.0000 s
+Benchmarking lob_capping/clob_over_cap_truncates: Collecting 30 samples in estimated 5.0007 s (468k iterations)
+Benchmarking lob_capping/clob_over_cap_truncates: Analyzing
+lob_capping/clob_over_cap_truncates
+                        time:   [10.604 µs 10.680 µs 10.792 µs]
+Found 4 outliers among 30 measurements (13.33%)
+  1 (3.33%) high mild
+  3 (10.00%) high severe
+Benchmarking lob_capping/blob_base64_over_cap
+Benchmarking lob_capping/blob_base64_over_cap: Warming up for 3.0000 s
+Benchmarking lob_capping/blob_base64_over_cap: Collecting 30 samples in estimated 5.0117 s (42k iterations)
+Benchmarking lob_capping/blob_base64_over_cap: Analyzing
+lob_capping/blob_base64_over_cap
+                        time:   [116.45 µs 116.82 µs 117.51 µs]
+Found 3 outliers among 30 measurements (10.00%)
+  3 (10.00%) high severe

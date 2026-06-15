@@ -1,0 +1,9 @@
+   Compiling oraclemcp-db v0.3.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-db)
+    Finished `release` profile [optimized] target(s) in 2.62s
+     Running tests/live_oracle.rs (/tmp/cargo-target/release/deps/live_oracle-f54300f37b7e579f)
+
+running 1 test
+[live-xe] connected: version=Some("23.26.1.0.0") role=Some("PRIMARY") open_mode=Some("READ WRITE") schema=Some("SYSTEM")
+test live_connect_ping_query_bind_describe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.05s

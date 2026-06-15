@@ -1,0 +1,195 @@
+{
+  "criterion": {
+    "s3_page_serialization": {
+      "page_serialization/read_query_1000_rows": {
+        "estimate": 1.7955,
+        "estimate_unit": "ms",
+        "high": 1.8236,
+        "high_unit": "ms",
+        "low": 1.7744,
+        "low_unit": "ms"
+      },
+      "page_serialization/read_query_10_rows": {
+        "estimate": 13.426,
+        "estimate_unit": "\u00b5s",
+        "high": 13.465,
+        "high_unit": "\u00b5s",
+        "low": 13.4,
+        "low_unit": "\u00b5s"
+      },
+      "page_serialization/read_query_200_rows": {
+        "estimate": 357.76,
+        "estimate_unit": "\u00b5s",
+        "high": 359.03,
+        "high_unit": "\u00b5s",
+        "low": 356.87,
+        "low_unit": "\u00b5s"
+      }
+    },
+    "s4_classify_type": {
+      "classify_type/classify_per_call": {
+        "estimate": 285.05,
+        "estimate_unit": "ns",
+        "high": 287.45,
+        "high_unit": "ns",
+        "low": 283.66,
+        "low_unit": "ns"
+      },
+      "classify_type/serialize_row_classifies_columns": {
+        "estimate": 454.91,
+        "estimate_unit": "ns",
+        "high": 460.09,
+        "high_unit": "ns",
+        "low": 451.44,
+        "low_unit": "ns"
+      }
+    },
+    "s4_lob_capping": {
+      "lob_capping/blob_base64_over_cap": {
+        "estimate": 116.82,
+        "estimate_unit": "\u00b5s",
+        "high": 117.51,
+        "high_unit": "\u00b5s",
+        "low": 116.45,
+        "low_unit": "\u00b5s"
+      },
+      "lob_capping/clob_over_cap_truncates": {
+        "estimate": 10.68,
+        "estimate_unit": "\u00b5s",
+        "high": 10.792,
+        "high_unit": "\u00b5s",
+        "low": 10.604,
+        "low_unit": "\u00b5s"
+      },
+      "lob_capping/clob_under_cap": {
+        "estimate": 13.67,
+        "estimate_unit": "\u00b5s",
+        "high": 13.784,
+        "high_unit": "\u00b5s",
+        "low": 13.592,
+        "low_unit": "\u00b5s"
+      }
+    }
+  },
+  "invalid_measurements": [
+    {
+      "path": "raw/s5-live-connect-smoke.csv",
+      "reason": "selected stale debug test binary; raw log shows 0 tests run; excluded from baseline"
+    }
+  ],
+  "s0_cli_startup": {
+    "capabilities": {
+      "max_rss_kb": {
+        "max": 5248.0,
+        "min": 5148.0,
+        "n": 50,
+        "p50": 5188.0,
+        "p95": 5230.2,
+        "p99": 5244.08
+      },
+      "wall_ms": {
+        "max": 10.0,
+        "min": 8.0,
+        "n": 50,
+        "p50": 9.0,
+        "p95": 10.0,
+        "p99": 10.0
+      }
+    },
+    "info": {
+      "max_rss_kb": {
+        "max": 3192.0,
+        "min": 1024.0,
+        "n": 50,
+        "p50": 3124.0,
+        "p95": 3162.2,
+        "p99": 3188.08
+      },
+      "wall_ms": {
+        "max": 10.0,
+        "min": 7.0,
+        "n": 50,
+        "p50": 8.0,
+        "p95": 9.0,
+        "p99": 9.509999999999998
+      }
+    }
+  },
+  "s1_stdio": {
+    "smoke_output_bytes": 44095,
+    "stdio_initialize_tools_list": {
+      "max_rss_kb": {
+        "max": 9368.0,
+        "min": 8228.0,
+        "n": 50,
+        "p50": 9276.0,
+        "p95": 9342.599999999999,
+        "p99": 9360.16
+      },
+      "wall_ms": {
+        "max": 14.0,
+        "min": 12.0,
+        "n": 50,
+        "p50": 13.0,
+        "p95": 14.0,
+        "p99": 14.0
+      }
+    }
+  },
+  "s2_classifier": {
+    "classifier_throughput": {
+      "max_rss_kb": {
+        "max": 5176.0,
+        "min": 4120.0,
+        "n": 30,
+        "p50": 4172.0,
+        "p95": 5176.0,
+        "p99": 5176.0
+      },
+      "ns_per": {
+        "max": 14717.0,
+        "min": 13611.0,
+        "n": 30,
+        "p50": 13982.0,
+        "p95": 14358.85,
+        "p99": 14616.66
+      },
+      "per_sec": {
+        "max": 73469.0,
+        "min": 67948.0,
+        "n": 30,
+        "p50": 71520.5,
+        "p95": 73157.95,
+        "p99": 73466.1
+      },
+      "wall_ms": {
+        "max": 3734.0,
+        "min": 3458.0,
+        "n": 30,
+        "p50": 3551.5,
+        "p95": 3645.95,
+        "p99": 3709.64
+      }
+    }
+  },
+  "s5_live_release": {
+    "live_connect_ping_query_bind_describe_release": {
+      "max_rss_kb": {
+        "max": 5268.0,
+        "min": 5148.0,
+        "n": 30,
+        "p50": 5180.0,
+        "p95": 5252.0,
+        "p99": 5263.36
+      },
+      "wall_ms": {
+        "max": 57.0,
+        "min": 47.0,
+        "n": 30,
+        "p50": 50.0,
+        "p95": 54.55,
+        "p99": 56.42
+      }
+    }
+  }
+}

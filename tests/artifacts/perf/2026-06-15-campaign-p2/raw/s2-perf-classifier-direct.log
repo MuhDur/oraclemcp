@@ -1,0 +1,239 @@
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":14143,"per_sec":70706,"corpus":12 }
+CLASSIFIER BASELINE: 14143 ns/statement  (~70706 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.58s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":13738,"per_sec":72790,"corpus":12 }
+CLASSIFIER BASELINE: 13738 ns/statement  (~72790 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.48s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":14082,"per_sec":71012,"corpus":12 }
+CLASSIFIER BASELINE: 14082 ns/statement  (~71012 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.57s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":13836,"per_sec":72275,"corpus":12 }
+CLASSIFIER BASELINE: 13836 ns/statement  (~72275 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.51s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":14004,"per_sec":71408,"corpus":12 }
+CLASSIFIER BASELINE: 14004 ns/statement  (~71408 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.54s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":13770,"per_sec":72621,"corpus":12 }
+CLASSIFIER BASELINE: 13770 ns/statement  (~72621 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.49s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":13611,"per_sec":73469,"corpus":12 }
+CLASSIFIER BASELINE: 13611 ns/statement  (~73469 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.46s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":14099,"per_sec":70927,"corpus":12 }
+CLASSIFIER BASELINE: 14099 ns/statement  (~70927 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.57s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":14344,"per_sec":69715,"corpus":12 }
+CLASSIFIER BASELINE: 14344 ns/statement  (~69715 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.63s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":13790,"per_sec":72516,"corpus":12 }
+CLASSIFIER BASELINE: 13790 ns/statement  (~72516 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.50s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":13813,"per_sec":72395,"corpus":12 }
+CLASSIFIER BASELINE: 13813 ns/statement  (~72395 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.51s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":14093,"per_sec":70957,"corpus":12 }
+CLASSIFIER BASELINE: 14093 ns/statement  (~70957 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.57s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":14185,"per_sec":70497,"corpus":12 }
+CLASSIFIER BASELINE: 14185 ns/statement  (~70497 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.59s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":14220,"per_sec":70323,"corpus":12 }
+CLASSIFIER BASELINE: 14220 ns/statement  (~70323 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.60s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":13912,"per_sec":71880,"corpus":12 }
+CLASSIFIER BASELINE: 13912 ns/statement  (~71880 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.53s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":13938,"per_sec":71746,"corpus":12 }
+CLASSIFIER BASELINE: 13938 ns/statement  (~71746 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.53s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":13891,"per_sec":71989,"corpus":12 }
+CLASSIFIER BASELINE: 13891 ns/statement  (~71989 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.52s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":13838,"per_sec":72264,"corpus":12 }
+CLASSIFIER BASELINE: 13838 ns/statement  (~72264 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.50s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":14717,"per_sec":67948,"corpus":12 }
+CLASSIFIER BASELINE: 14717 ns/statement  (~67948 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.72s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":14203,"per_sec":70407,"corpus":12 }
+CLASSIFIER BASELINE: 14203 ns/statement  (~70407 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.60s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":14253,"per_sec":70160,"corpus":12 }
+CLASSIFIER BASELINE: 14253 ns/statement  (~70160 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.61s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":13810,"per_sec":72411,"corpus":12 }
+CLASSIFIER BASELINE: 13810 ns/statement  (~72411 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.50s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":13613,"per_sec":73459,"corpus":12 }
+CLASSIFIER BASELINE: 13613 ns/statement  (~73459 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.45s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":13948,"per_sec":71694,"corpus":12 }
+CLASSIFIER BASELINE: 13948 ns/statement  (~71694 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.53s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":14371,"per_sec":69584,"corpus":12 }
+CLASSIFIER BASELINE: 14371 ns/statement  (~69584 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.64s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":13960,"per_sec":71633,"corpus":12 }
+CLASSIFIER BASELINE: 13960 ns/statement  (~71633 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.54s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":13784,"per_sec":72547,"corpus":12 }
+CLASSIFIER BASELINE: 13784 ns/statement  (~72547 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.49s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":14169,"per_sec":70576,"corpus":12 }
+CLASSIFIER BASELINE: 14169 ns/statement  (~70576 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.59s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":14209,"per_sec":70377,"corpus":12 }
+CLASSIFIER BASELINE: 14209 ns/statement  (~70377 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.60s
+
+
+running 1 test
+perf.profile.span_summary {"span":"classifier.classify","classifications":240000,"ns_per":14178,"per_sec":70531,"corpus":12 }
+CLASSIFIER BASELINE: 14178 ns/statement  (~70531 classifications/sec)  over 240000 runs
+test classifier_throughput_baseline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.59s

@@ -1,0 +1,9 @@
+live_connect_ping_query_bind_describe: test
+live_lease_lifecycle_on_a_pinned_session: test
+live_pool_thin_roundtrip: test
+live_query_pagination_caps_and_cursor: test
+live_savepoint_preview_is_ground_truth_and_rolls_back: test
+live_tier1_intelligence_dictionary_tools: test
+live_type_fidelity_number_string_and_iso_date: test
+
+7 tests, 0 benchmarks

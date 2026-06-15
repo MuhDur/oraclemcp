@@ -1,0 +1,10 @@
+   Compiling oraclemcp-error v0.3.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-error)
+   Compiling oraclemcp-audit v0.3.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-audit)
+   Compiling oraclemcp-telemetry v0.3.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-telemetry)
+   Compiling oraclemcp-guard v0.3.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-guard)
+   Compiling oraclemcp-db v0.3.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-db)
+   Compiling oraclemcp-config v0.3.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-config)
+   Compiling oraclemcp-auth v0.3.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-auth)
+   Compiling oraclemcp-core v0.3.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp-core)
+   Compiling oraclemcp v0.3.0 (/home/durakovic/projects/oraclemcp/crates/oraclemcp)
+    Finished `release` profile [optimized] target(s) in 10.48s
