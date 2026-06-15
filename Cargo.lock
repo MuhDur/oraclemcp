@@ -1633,7 +1633,6 @@ dependencies = [
  "oraclemcp-db",
  "oraclemcp-error",
  "oraclemcp-guard",
- "rmcp",
  "serde",
  "serde_json",
  "sha2 0.11.0",

@@ -1,13 +1,13 @@
-//! The rmcp-backed MCP server (plan §2.5, §7.1, §8.1; bead P0-6).
+//! The MCP server core (plan §2.5, §7.1, §8.1; bead P0-6).
 //!
-//! Replaces `plsql-mcp`'s hand-rolled JSON-RPC with the official `rmcp` SDK.
-//! [`OracleMcpServer`] implements rmcp's [`ServerHandler`] over the dynamic
-//! [`ToolRegistry`] + an injected [`ToolDispatch`], so engine and operator
-//! tools register from the consumer side (the one-way boundary, §0). Tool
-//! dispatch is Cx-aware so the runtime/transport migration can move away from
-//! ambient Tokio handles without changing the fail-closed tool surface.
+//! [`OracleMcpServer`] exposes a native stdio JSON-RPC transport and, until the
+//! HTTP transport is migrated, an rmcp [`ServerHandler`] compatibility path over
+//! the dynamic [`ToolRegistry`] + injected [`ToolDispatch`]. Tool dispatch is
+//! Cx-aware so transports do not need ambient Tokio handles to preserve the
+//! fail-closed tool surface.
 
 use std::future::Future;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -15,13 +15,13 @@ use asupersync::Cx;
 use asupersync::runtime::{Runtime, RuntimeBuilder};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, Implementation, InitializeRequestParams,
+    CallToolRequestParams, CallToolResult, Implementation, InitializeRequestParams,
     InitializeResult, ListToolsResult, Meta, PaginatedRequestParams, ProtocolVersion,
     ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
-use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt};
-use serde_json::{Map, Value};
+use rmcp::{ErrorData as McpError, ServerHandler};
+use serde_json::{Map, Value, json};
 
 use crate::capabilities::CapabilitiesReport;
 use crate::init_token::StdioAuthPolicy;
@@ -36,6 +36,13 @@ pub const INIT_TOKEN_META_KEY: &str = "oraclemcp/initToken";
 /// The zero-arg discovery tool name (§8.1).
 pub const CAPABILITIES_TOOL: &str = "oracle_capabilities";
 
+const STDIO_MAX_FRAME_BYTES: usize = 1024 * 1024;
+const JSONRPC_PARSE_ERROR: i64 = -32700;
+const JSONRPC_INVALID_REQUEST: i64 = -32600;
+const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
+const JSONRPC_INVALID_PARAMS: i64 = -32602;
+const SERVER_INSTRUCTIONS: &str = "Call oracle_capabilities first to discover tools, the current/max operating level, and connection status. Reads are frictionless; writes/DDL require a gated escalation.";
+
 /// Boxed tool-dispatch future. This keeps [`ToolDispatch`] object-safe while
 /// making runtime context explicit at the server boundary.
 pub type DispatchFuture<'a> =
@@ -49,7 +56,8 @@ pub trait ToolDispatch: Send + Sync + 'static {
     fn dispatch<'a>(&'a self, cx: &'a Cx, name: &'a str, args: Value) -> DispatchFuture<'a>;
 }
 
-/// The rmcp server handler.
+/// The MCP server surface shared by native stdio and the rmcp HTTP compatibility
+/// path.
 #[derive(Clone)]
 pub struct OracleMcpServer {
     version: String,
@@ -60,10 +68,9 @@ pub struct OracleMcpServer {
     /// transport beads replace this caller path. Native server code should call
     /// `run_tool_with_cx` with an explicit context.
     dispatch_runtime: Arc<Runtime>,
-    /// The resolved stdio init-token policy enforced on `initialize`. `None`
-    /// for the HTTP path (already guarded by `oauth_guard`, §7.1); `Some` only
-    /// when `serve_stdio` wires the stdio transport. Fail-closed: a `Required`
-    /// policy refuses the handshake unless the client presents the token.
+    /// The resolved stdio init-token policy used by the rmcp compatibility
+    /// `initialize` override. Native stdio receives its policy explicitly at
+    /// the transport boundary.
     auth: Option<Arc<StdioAuthPolicy>>,
 }
 
@@ -89,10 +96,9 @@ impl OracleMcpServer {
         }
     }
 
-    /// Attach the stdio init-token policy enforced on `initialize`. Used by
-    /// [`serve_stdio`](Self::serve_stdio); exposed for tests that drive the
-    /// handshake directly. The HTTP path leaves this `None` (it is guarded by
-    /// `oauth_guard` instead, §7.1).
+    /// Attach the stdio init-token policy enforced by the rmcp compatibility
+    /// `initialize` override. Native stdio passes the policy directly to
+    /// [`serve_stdio`](Self::serve_stdio).
     #[must_use]
     pub fn with_stdio_auth(mut self, auth: StdioAuthPolicy) -> Self {
         self.auth = Some(Arc::new(auth));
@@ -121,15 +127,32 @@ impl OracleMcpServer {
         tools
     }
 
+    /// Map the registry descriptors to native MCP JSON tool descriptors.
+    fn native_tools_json(&self) -> Vec<Value> {
+        let mut tools = Vec::with_capacity(self.registry.tools.len() + 1);
+        tools.push(json!({
+            "name": CAPABILITIES_TOOL,
+            "description": "Zero-arg entry point: tools, operating level + gates, connection/standby status, feature tiers, version.",
+            "inputSchema": empty_object_schema(),
+        }));
+        for d in &self.registry.tools {
+            if d.name == CAPABILITIES_TOOL {
+                continue;
+            }
+            tools.push(json!({
+                "name": d.name,
+                "description": d.summary,
+                "inputSchema": descriptor_input_schema(d),
+            }));
+        }
+        tools
+    }
+
     /// Serve over stdio until the client disconnects. `auth` must already be
     /// resolved (the caller refuses to start when no token + no `--allow-no-auth`
-    /// — §7.1); this records the posture, **arms the gate on the live request
-    /// path** (the `initialize` override enforces it), and runs the rmcp loop.
-    ///
-    /// COMPAT-REMOVE(oraclemcp-w8-native-stdio-mcp-sk2): this is the temporary
-    /// rmcp/Tokio stdio transport boundary. Native stdio must call
-    /// [`run_tool_with_cx`](Self::run_tool_with_cx) directly instead.
-    pub async fn serve_stdio(self, auth: &StdioAuthPolicy) -> std::io::Result<()> {
+    /// — §7.1). This native line-delimited JSON-RPC loop keeps stdout pure MCP
+    /// data and routes tool calls through explicit Asupersync contexts.
+    pub fn serve_stdio(self, auth: &StdioAuthPolicy) -> std::io::Result<()> {
         match auth {
             StdioAuthPolicy::Required { .. } => {
                 tracing::info!("stdio transport: init-token required");
@@ -138,26 +161,57 @@ impl OracleMcpServer {
                 tracing::warn!("stdio transport: auth disabled (--allow-no-auth)");
             }
         }
-        // Wire the policy onto the handler so `initialize` actually validates it
-        // (without this the gate is a no-op: rmcp's default initialize accepts
-        // unconditionally). See `check_init_token` / the `initialize` override.
-        let server = self.with_stdio_auth(auth.clone());
-        let service = server
-            .serve((tokio::io::stdin(), tokio::io::stdout()))
-            .await
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        service
-            .waiting()
-            .await
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        self.serve_stdio_with_io(stdin.lock(), stdout.lock(), auth)
+    }
+
+    /// Serve a native stdio JSON-RPC session over arbitrary blocking IO. This
+    /// is public for protocol/golden tests and intentionally does not depend on
+    /// Tokio or rmcp transport types.
+    pub fn serve_stdio_with_io<R, W>(
+        &self,
+        reader: R,
+        mut writer: W,
+        auth: &StdioAuthPolicy,
+    ) -> std::io::Result<()>
+    where
+        R: Read,
+        W: Write,
+    {
+        let mut reader = BufReader::new(reader);
+        let mut frame = Vec::new();
+        loop {
+            frame.clear();
+            let read = reader.read_until(b'\n', &mut frame)?;
+            if read == 0 {
+                break;
+            }
+            if frame.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let response = if frame.len() > STDIO_MAX_FRAME_BYTES {
+                Some(jsonrpc_error(
+                    Value::Null,
+                    JSONRPC_INVALID_REQUEST,
+                    "JSON-RPC frame exceeds stdio limit",
+                ))
+            } else {
+                self.handle_stdio_frame(&frame, auth)
+            };
+            if let Some(response) = response {
+                write_jsonrpc_response(&mut writer, &response)?;
+            }
+        }
         Ok(())
     }
 
-    /// Validate the stdio init token presented in the `initialize` request's
-    /// `_meta`, fail-closed. When no stdio policy is attached (the HTTP path),
-    /// this is a no-op (`Ok`). When a `Required` policy is attached, a missing
-    /// or mismatched token yields an `invalid_request` [`McpError`] so the
-    /// handshake is refused before any tool is reachable (§7.1).
+    /// Validate the stdio init token presented to the rmcp compatibility
+    /// `initialize` request's `_meta`, fail-closed. When no stdio policy is
+    /// attached (the HTTP path), this is a no-op (`Ok`). When a `Required`
+    /// policy is attached, a missing or mismatched token yields an
+    /// `invalid_request` [`McpError`] so the handshake is refused before any
+    /// tool is reachable (§7.1).
     ///
     /// Factored out of the `initialize` override so the gate is unit-testable
     /// without a live `RequestContext`.
@@ -174,9 +228,25 @@ impl OracleMcpServer {
         })
     }
 
-    fn capabilities_result(&self) -> CallToolResult {
+    fn native_initialize_result_json(&self) -> Value {
+        json!({
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+                "tools": {},
+            },
+            "serverInfo": {
+                "name": "oraclemcp",
+                "version": self.version,
+                "title": "Oracle MCP server",
+                "description": "Safe-by-default Oracle Database MCP server with PL/SQL intelligence.",
+            },
+            "instructions": SERVER_INSTRUCTIONS,
+        })
+    }
+
+    fn capabilities_result_json(&self) -> Value {
         let value = serde_json::to_value(&*self.capabilities).unwrap_or(Value::Null);
-        tool_result_ok(value)
+        tool_result_ok_json(value)
     }
 
     fn advertises_tool(&self, name: &str) -> bool {
@@ -229,15 +299,21 @@ impl OracleMcpServer {
         envelope
     }
 
-    /// Run a tool by name + JSON args in an explicit Asupersync context.
-    pub async fn run_tool_with_cx(&self, cx: &Cx, name: String, args: Value) -> CallToolResult {
+    /// Run a tool by name + JSON args in an explicit Asupersync context,
+    /// returning the native MCP `tools/call` result object.
+    pub async fn run_tool_json_with_cx(&self, cx: &Cx, name: String, args: Value) -> Value {
         if name == CAPABILITIES_TOOL {
-            return self.capabilities_result();
+            return self.capabilities_result_json();
         }
         match self.dispatcher.dispatch(cx, &name, args).await {
-            Ok(value) => tool_result_ok(value),
-            Err(envelope) => tool_result_err(&self.sanitize_error_envelope(envelope)),
+            Ok(value) => tool_result_ok_json(value),
+            Err(envelope) => tool_result_err_json(&self.sanitize_error_envelope(envelope)),
         }
+    }
+
+    /// Run a tool by name + JSON args in an explicit Asupersync context.
+    pub async fn run_tool_with_cx(&self, cx: &Cx, name: String, args: Value) -> CallToolResult {
+        call_tool_result_from_json(self.run_tool_json_with_cx(cx, name, args).await)
     }
 
     /// Run a tool by name + JSON args, returning a [`CallToolResult`]. This is
@@ -260,7 +336,7 @@ impl OracleMcpServer {
                         ErrorClass::RuntimeStateRequired,
                         "Asupersync context was not installed for tool dispatch",
                     );
-                    return tool_result_err(&envelope);
+                    return call_tool_result_from_json(tool_result_err_json(&envelope));
                 };
                 server.run_tool_with_cx(&cx, name, args).await
             })
@@ -268,11 +344,113 @@ impl OracleMcpServer {
         .await
         {
             Ok(result) => result,
-            Err(e) => tool_result_err(&ErrorEnvelope::new(
+            Err(e) => call_tool_result_from_json(tool_result_err_json(&ErrorEnvelope::new(
                 ErrorClass::Internal,
                 format!("dispatch task failed: {e}"),
+            ))),
+        }
+    }
+
+    fn handle_stdio_frame(&self, frame: &[u8], auth: &StdioAuthPolicy) -> Option<Value> {
+        let request = match serde_json::from_slice::<Value>(frame) {
+            Ok(value) => value,
+            Err(_) => {
+                return Some(jsonrpc_error(
+                    Value::Null,
+                    JSONRPC_PARSE_ERROR,
+                    "Parse error",
+                ));
+            }
+        };
+        self.handle_stdio_request(request, auth)
+    }
+
+    fn handle_stdio_request(&self, request: Value, auth: &StdioAuthPolicy) -> Option<Value> {
+        let Value::Object(object) = request else {
+            return Some(jsonrpc_error(
+                Value::Null,
+                JSONRPC_INVALID_REQUEST,
+                "Invalid Request",
+            ));
+        };
+        let id = object.get("id").cloned();
+        let Some(method) = object.get("method").and_then(Value::as_str) else {
+            return id.map(|id| jsonrpc_error(id, JSONRPC_INVALID_REQUEST, "Invalid Request"));
+        };
+        if object.get("jsonrpc") != Some(&Value::String("2.0".to_owned())) {
+            return id.map(|id| jsonrpc_error(id, JSONRPC_INVALID_REQUEST, "Invalid Request"));
+        }
+        let id = id?;
+        match method {
+            "initialize" => Some(self.handle_stdio_initialize(id, object.get("params"), auth)),
+            "notifications/initialized" => None,
+            "tools/list" => Some(jsonrpc_result(
+                id,
+                json!({ "tools": self.native_tools_json() }),
+            )),
+            "tools/call" => Some(self.handle_stdio_tool_call(id, object.get("params"))),
+            _ => Some(jsonrpc_error(
+                id,
+                JSONRPC_METHOD_NOT_FOUND,
+                "Method not found",
             )),
         }
+    }
+
+    fn handle_stdio_initialize(
+        &self,
+        id: Value,
+        params: Option<&Value>,
+        auth: &StdioAuthPolicy,
+    ) -> Value {
+        let presented = params
+            .and_then(|params| params.get("_meta"))
+            .and_then(|meta| meta.get(INIT_TOKEN_META_KEY))
+            .and_then(Value::as_str);
+        if let Err(e) = auth.validate(presented) {
+            tracing::warn!(error = %e, "stdio init-token rejected on initialize");
+            return jsonrpc_error(id, JSONRPC_INVALID_REQUEST, e.to_string());
+        }
+        jsonrpc_result(id, self.native_initialize_result_json())
+    }
+
+    fn handle_stdio_tool_call(&self, id: Value, params: Option<&Value>) -> Value {
+        let Some(Value::Object(params)) = params else {
+            return jsonrpc_error(
+                id,
+                JSONRPC_INVALID_PARAMS,
+                "tools/call params must be an object",
+            );
+        };
+        let Some(name) = params.get("name").and_then(Value::as_str) else {
+            return jsonrpc_error(
+                id,
+                JSONRPC_INVALID_PARAMS,
+                "tools/call name must be a string",
+            );
+        };
+        let args = match params.get("arguments") {
+            Some(Value::Object(arguments)) => Value::Object(arguments.clone()),
+            Some(Value::Null) | None => Value::Null,
+            Some(_) => {
+                return jsonrpc_error(
+                    id,
+                    JSONRPC_INVALID_PARAMS,
+                    "tools/call arguments must be an object",
+                );
+            }
+        };
+        let result = self.dispatch_runtime.block_on(async {
+            let Some(cx) = Cx::current() else {
+                let envelope = ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    "Asupersync context was not installed for tool dispatch",
+                );
+                return tool_result_err_json(&envelope);
+            };
+            self.run_tool_json_with_cx(&cx, name.to_owned(), args).await
+        });
+        jsonrpc_result(id, result)
     }
 }
 
@@ -290,10 +468,7 @@ impl ServerHandler for OracleMcpServer {
             .with_description(
                 "Safe-by-default Oracle Database MCP server with PL/SQL intelligence.",
             );
-        info.instructions = Some(
-            "Call oracle_capabilities first to discover tools, the current/max operating level, and connection status. Reads are frictionless; writes/DDL require a gated escalation."
-                .to_owned(),
-        );
+        info.instructions = Some(SERVER_INSTRUCTIONS.to_owned());
         info
     }
 
@@ -351,19 +526,58 @@ fn descriptor_input_schema(descriptor: &ToolDescriptor) -> Map<String, Value> {
     }
 }
 
+fn jsonrpc_result(id: Value, result: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result,
+    })
+}
+
+fn jsonrpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": code,
+            "message": message.into(),
+        },
+    })
+}
+
+fn write_jsonrpc_response<W: Write>(writer: &mut W, response: &Value) -> std::io::Result<()> {
+    serde_json::to_writer(&mut *writer, response)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    writer.write_all(b"\n")?;
+    writer.flush()
+}
+
 /// A success result carrying dual output: human/LLM text + structured JSON.
-fn tool_result_ok(value: Value) -> CallToolResult {
-    let mut result = CallToolResult::success(vec![Content::text(value.to_string())]);
-    result.structured_content = Some(value);
-    result
+fn tool_result_ok_json(value: Value) -> Value {
+    tool_result_json(value, false)
 }
 
 /// An error result: the agent-facing envelope as both text and structured JSON.
-fn tool_result_err(envelope: &ErrorEnvelope) -> CallToolResult {
+fn tool_result_err_json(envelope: &ErrorEnvelope) -> Value {
     let value = envelope.to_json();
-    let mut result = CallToolResult::error(vec![Content::text(value.to_string())]);
-    result.structured_content = Some(value);
-    result
+    tool_result_json(value, true)
+}
+
+fn tool_result_json(value: Value, is_error: bool) -> Value {
+    json!({
+        "content": [
+            {
+                "type": "text",
+                "text": value.to_string(),
+            }
+        ],
+        "structuredContent": value,
+        "isError": is_error,
+    })
+}
+
+fn call_tool_result_from_json(value: Value) -> CallToolResult {
+    serde_json::from_value(value).expect("native tool result shape matches rmcp CallToolResult")
 }
 
 #[cfg(test)]
@@ -373,6 +587,7 @@ mod tests {
     use crate::tools::{ToolDescriptor, ToolTier};
     use oraclemcp_error::ErrorClass;
     use oraclemcp_guard::OperatingLevel;
+    use std::io::Cursor;
 
     struct EchoDispatcher;
     impl ToolDispatch for EchoDispatcher {
@@ -446,6 +661,25 @@ mod tests {
         OracleMcpServer::new("0.1.0", registry, caps, Arc::new(EchoDispatcher))
     }
 
+    fn stdio_frame(value: &Value) -> Vec<u8> {
+        let mut bytes = serde_json::to_vec(value).expect("frame serializes");
+        bytes.push(b'\n');
+        bytes
+    }
+
+    fn run_stdio_raw(server: &OracleMcpServer, input: Vec<u8>) -> Vec<Value> {
+        let mut output = Vec::new();
+        server
+            .serve_stdio_with_io(Cursor::new(input), &mut output, &StdioAuthPolicy::Disabled)
+            .expect("stdio session completes");
+        String::from_utf8(output)
+            .expect("stdio replies are UTF-8")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<Value>(line).expect("reply is JSON"))
+            .collect()
+    }
+
     #[test]
     fn lists_capabilities_tool_first_and_dedups() {
         let s = server();
@@ -483,16 +717,77 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_result_is_the_report() {
+    fn capabilities_result_json_is_the_report() {
         let s = server();
-        let result = s.capabilities_result();
-        assert_eq!(result.is_error, Some(false));
-        let structured = result.structured_content.expect("structured");
+        let result = s.capabilities_result_json();
+        assert_eq!(result["isError"], serde_json::json!(false));
+        let structured = &result["structuredContent"];
         assert_eq!(structured["server_name"], serde_json::json!("oraclemcp"));
         assert_eq!(
             structured["protocol_version"],
             serde_json::json!("2025-11-25")
         );
+    }
+
+    #[test]
+    fn native_stdio_rejects_malformed_unknown_invalid_and_oversized_frames() {
+        let s = server();
+
+        let malformed = run_stdio_raw(&s, b"{not json\n".to_vec());
+        assert_eq!(malformed[0]["id"], Value::Null);
+        assert_eq!(
+            malformed[0]["error"]["code"],
+            serde_json::json!(JSONRPC_PARSE_ERROR)
+        );
+
+        let unknown = run_stdio_raw(
+            &s,
+            stdio_frame(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "u1",
+                "method": "oracle/unknown"
+            })),
+        );
+        assert_eq!(unknown[0]["id"], serde_json::json!("u1"));
+        assert_eq!(
+            unknown[0]["error"]["code"],
+            serde_json::json!(JSONRPC_METHOD_NOT_FOUND)
+        );
+
+        let invalid_params = run_stdio_raw(
+            &s,
+            stdio_frame(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": { "name": 42 }
+            })),
+        );
+        assert_eq!(invalid_params[0]["id"], serde_json::json!(9));
+        assert_eq!(
+            invalid_params[0]["error"]["code"],
+            serde_json::json!(JSONRPC_INVALID_PARAMS)
+        );
+
+        let oversized = run_stdio_raw(&s, vec![b'x'; STDIO_MAX_FRAME_BYTES + 1]);
+        assert_eq!(oversized[0]["id"], Value::Null);
+        assert_eq!(
+            oversized[0]["error"]["code"],
+            serde_json::json!(JSONRPC_INVALID_REQUEST)
+        );
+    }
+
+    #[test]
+    fn native_stdio_notifications_do_not_receive_responses() {
+        let s = server();
+        let replies = run_stdio_raw(
+            &s,
+            stdio_frame(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            })),
+        );
+        assert!(replies.is_empty(), "notifications produce no response");
     }
 
     #[tokio::test]

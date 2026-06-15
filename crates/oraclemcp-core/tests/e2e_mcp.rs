@@ -1,9 +1,9 @@
 //! Scripted MCP client end-to-end suite (bead T-E2E / oracle-qmwz.6.7).
 //!
 //! Drives the server's protocol surface over the **Streamable HTTP** transport
-//! (a real `initialize` handshake) and over the **stdio dispatch path** (the
-//! same `run_tool` the stdio transport invokes), asserts concurrent-client
-//! isolation, and emits structured JSON-line logs as verifiable evidence.
+//! (a real `initialize` handshake) and over the native **stdio** transport,
+//! asserts concurrent-client isolation, and emits structured JSON-line logs as
+//! verifiable evidence.
 //!
 //! The full live-DB flow (`oracle_connect` → `schema_inspect` → read query →
 //! write-with-step-up → `oracle_query_execute`) and the multi-agent lease-bleed
@@ -11,6 +11,7 @@
 //! 6.1) — those tool bodies need a real database; this harness covers the
 //! transport + protocol surface that gates them.
 
+use std::io::Cursor;
 use std::sync::Arc;
 
 use asupersync::Cx;
@@ -21,9 +22,7 @@ use oraclemcp_core::init_token::StdioAuthPolicy;
 use oraclemcp_core::server::{DispatchFuture, INIT_TOKEN_META_KEY, ToolDispatch};
 use oraclemcp_core::tools::{ToolDescriptor, ToolRegistry, ToolTier};
 use oraclemcp_guard::OperatingLevel;
-use rmcp::ServiceExt as _;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tower::ServiceExt;
 
 /// A trivial engine-free dispatcher for the harness (the live tools are
@@ -112,29 +111,41 @@ async fn http_initialize_handshake_is_scripted_end_to_end() {
     log_step("http_initialize_ok", json!({ "status": 200 }));
 }
 
-#[tokio::test]
-async fn stdio_dispatch_path_serves_capabilities_and_tools() {
-    // The stdio transport drives the same run_tool path; assert the protocol
-    // surface (capabilities + the registered tool) is served identically.
-    let server = harness_server();
-
+#[test]
+fn stdio_dispatch_path_serves_capabilities_and_tools() {
     log_step(
         "stdio_capabilities",
         json!({ "transport": "stdio", "tool": "oracle_capabilities" }),
     );
-    let result = server
-        .run_tool("oracle_capabilities".to_owned(), json!({}))
-        .await;
-    assert!(
-        !result.is_error.unwrap_or(false),
-        "capabilities call is not an error"
+    let replies = run_stdio_session(
+        harness_server(),
+        StdioAuthPolicy::Disabled,
+        None,
+        vec![
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": { "name": "oracle_capabilities", "arguments": {} }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": { "name": "oracle_schema_inspect", "arguments": { "owner": "HR" } }
+            }),
+        ],
     );
-
-    // A regular tool dispatches through the injected dispatcher.
-    let result = server
-        .run_tool("oracle_schema_inspect".to_owned(), json!({ "owner": "HR" }))
-        .await;
-    assert!(!result.is_error.unwrap_or(false), "tool dispatch succeeds");
+    let capabilities = replies
+        .iter()
+        .find(|reply| reply["id"] == json!(2))
+        .expect("capabilities reply");
+    assert_eq!(capabilities["result"]["isError"], json!(false));
+    let inspected = replies
+        .iter()
+        .find(|reply| reply["id"] == json!(3))
+        .expect("schema inspect reply");
+    assert_eq!(inspected["result"]["isError"], json!(false));
     log_step(
         "stdio_dispatch_ok",
         json!({ "tools": ["oracle_capabilities", "oracle_schema_inspect"] }),
@@ -176,13 +187,12 @@ async fn concurrent_http_clients_are_isolated() {
 // ---------------------------------------------------------------------------
 // Regression for oracle-qm3q.10: the stdio init-token gate must be enforced on
 // the live `initialize` request path (it was previously only logged — a silent
-// no-op, so a Required token accepted any/no token). These tests drive a REAL
-// rmcp `initialize` handshake over a duplex transport (the same transport
-// family `serve_stdio` uses) and assert the gate fails closed.
+// no-op, so a Required token accepted any/no token). These tests drive the
+// native stdio `initialize` path and assert the gate fails closed.
 // ---------------------------------------------------------------------------
 
 /// Build a raw JSON-RPC `initialize` frame, optionally carrying a `_meta` token.
-fn init_frame(token: Option<&str>) -> Vec<u8> {
+fn stdio_init_request(token: Option<&str>) -> Value {
     let mut params = json!({
         "protocolVersion": "2025-11-25",
         "capabilities": {},
@@ -191,60 +201,58 @@ fn init_frame(token: Option<&str>) -> Vec<u8> {
     if let Some(t) = token {
         params["_meta"] = json!({ INIT_TOKEN_META_KEY: t });
     }
-    let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params });
-    let mut bytes = serde_json::to_vec(&req).unwrap();
+    json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params })
+}
+
+fn stdio_frame(value: &Value) -> Vec<u8> {
+    let mut bytes = serde_json::to_vec(value).unwrap();
     bytes.push(b'\n');
     bytes
+}
+
+fn run_stdio_session(
+    server: OracleMcpServer,
+    auth: StdioAuthPolicy,
+    token: Option<&str>,
+    requests: Vec<Value>,
+) -> Vec<Value> {
+    let mut input = stdio_frame(&stdio_init_request(token));
+    input.extend(stdio_frame(&json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })));
+    for request in &requests {
+        input.extend(stdio_frame(request));
+    }
+
+    let mut output = Vec::new();
+    server
+        .serve_stdio_with_io(Cursor::new(input), &mut output, &auth)
+        .expect("stdio session completes");
+    String::from_utf8(output)
+        .expect("stdio replies are UTF-8")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("reply is JSON"))
+        .collect()
 }
 
 /// Drive a real `initialize` handshake against a server carrying the given
 /// stdio auth policy and presenting the given token; return the parsed JSON-RPC
 /// reply (a `result` on success, an `error` on a refused handshake).
-async fn drive_initialize(auth: Option<StdioAuthPolicy>, token: Option<&str>) -> Value {
-    let mut server = harness_server();
-    if let Some(policy) = auth {
-        server = server.with_stdio_auth(policy);
-    }
-
-    let (server_io, client_io) = tokio::io::duplex(8 * 1024);
-    // Run the rmcp serve loop on the server half (the same `serve` call
-    // `serve_stdio` makes, exercising the `initialize` override end to end).
-    let serve = tokio::spawn(async move {
-        match server.serve(server_io).await {
-            Ok(running) => {
-                // Handshake accepted; tear down cleanly so the task ends.
-                let _ = running.cancel().await;
-                true
-            }
-            // Handshake refused (e.g. fail-closed token rejection).
-            Err(_) => false,
-        }
-    });
-
-    let (read_half, mut write_half) = tokio::io::split(client_io);
-    write_half.write_all(&init_frame(token)).await.unwrap();
-
-    // Read exactly one newline-delimited JSON-RPC reply.
-    let mut reader = BufReader::new(read_half);
-    let mut line = String::new();
-    let reply = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        reader.read_line(&mut line).await.unwrap();
-        serde_json::from_str::<Value>(&line).unwrap()
-    })
-    .await
-    .expect("server replies to initialize within 5s");
-
-    // Let the serve task settle (success path cancels itself).
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), serve).await;
-    reply
+fn drive_initialize(auth: StdioAuthPolicy, token: Option<&str>) -> Value {
+    run_stdio_session(harness_server(), auth, token, vec![])
+        .into_iter()
+        .next()
+        .expect("initialize reply")
 }
 
-#[tokio::test]
-async fn stdio_initialize_required_rejects_missing_token() {
+#[test]
+fn stdio_initialize_required_rejects_missing_token() {
     let policy = StdioAuthPolicy::Required {
         expected: "s3cr3t".to_owned(),
     };
-    let reply = drive_initialize(Some(policy), None).await;
+    let reply = drive_initialize(policy, None);
     log_step("stdio_init_missing_token", reply.clone());
     assert!(
         reply.get("error").is_some(),
@@ -256,12 +264,12 @@ async fn stdio_initialize_required_rejects_missing_token() {
     );
 }
 
-#[tokio::test]
-async fn stdio_initialize_required_rejects_wrong_token() {
+#[test]
+fn stdio_initialize_required_rejects_wrong_token() {
     let policy = StdioAuthPolicy::Required {
         expected: "s3cr3t".to_owned(),
     };
-    let reply = drive_initialize(Some(policy), Some("nope")).await;
+    let reply = drive_initialize(policy, Some("nope"));
     log_step("stdio_init_wrong_token", reply.clone());
     assert!(
         reply.get("error").is_some(),
@@ -269,12 +277,12 @@ async fn stdio_initialize_required_rejects_wrong_token() {
     );
 }
 
-#[tokio::test]
-async fn stdio_initialize_required_accepts_correct_token() {
+#[test]
+fn stdio_initialize_required_accepts_correct_token() {
     let policy = StdioAuthPolicy::Required {
         expected: "s3cr3t".to_owned(),
     };
-    let reply = drive_initialize(Some(policy), Some("s3cr3t")).await;
+    let reply = drive_initialize(policy, Some("s3cr3t"));
     log_step("stdio_init_correct_token", reply.clone());
     assert!(
         reply.get("result").is_some(),
@@ -286,9 +294,9 @@ async fn stdio_initialize_required_accepts_correct_token() {
     );
 }
 
-#[tokio::test]
-async fn stdio_initialize_disabled_accepts_any() {
-    let reply = drive_initialize(Some(StdioAuthPolicy::Disabled), None).await;
+#[test]
+fn stdio_initialize_disabled_accepts_any() {
+    let reply = drive_initialize(StdioAuthPolicy::Disabled, None);
     log_step("stdio_init_disabled", reply.clone());
     assert!(
         reply.get("result").is_some(),

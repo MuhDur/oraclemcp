@@ -1,11 +1,11 @@
 //! Golden behavior harness for the shipped stdio-facing server surface.
 //!
-//! The server is driven over rmcp's newline-delimited stdio transport using
-//! synthetic mock connections. Goldens freeze observable JSON-RPC replies
-//! before the native transport rewrite work starts.
+//! The server is driven over the native newline-delimited JSON-RPC stdio
+//! transport using synthetic mock connections. Goldens freeze observable
+//! JSON-RPC replies for agent-facing compatibility.
 
+use std::io::Cursor;
 use std::sync::Arc;
-use std::time::Duration;
 
 use oraclemcp::dispatch::OracleDispatcher;
 use oraclemcp::registry::{capabilities, tool_registry};
@@ -16,9 +16,7 @@ use oraclemcp_db::{
     DbError, OracleBackend, OracleBind, OracleCell, OracleConnection, OracleConnectionInfo,
     OracleRow,
 };
-use rmcp::ServiceExt as _;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[path = "../../../tests/golden/support.rs"]
 mod golden_support;
@@ -161,52 +159,35 @@ struct ClientEvent {
     expect_response: bool,
 }
 
-async fn read_stdio_reply<R>(reader: &mut BufReader<R>) -> Value
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut line = String::new();
-    tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
-        .await
-        .expect("server replies to scripted stdio request")
-        .expect("read reply");
-    assert!(
-        !line.trim().is_empty(),
-        "server returned a non-empty JSON-RPC reply"
-    );
-    serde_json::from_str::<Value>(&line).expect("reply is JSON")
-}
-
-async fn run_stdio_script(server: OracleMcpServer, init: Value, events: Vec<ClientEvent>) -> Value {
-    let (server_io, client_io) = tokio::io::duplex(256 * 1024);
-    let serve = tokio::spawn(async move {
-        if let Ok(running) = server.serve(server_io).await {
-            let _ = running.waiting().await;
-        }
-    });
-
-    let (read_half, mut write_half) = tokio::io::split(client_io);
-    write_half
-        .write_all(&frame(&init))
-        .await
-        .expect("write initialize");
+fn run_stdio_script(
+    server: OracleMcpServer,
+    auth: StdioAuthPolicy,
+    init: Value,
+    events: Vec<ClientEvent>,
+) -> Value {
+    let mut input = Vec::new();
+    input.extend(frame(&init));
     let expected_replies = 1 + events.iter().filter(|event| event.expect_response).count();
-    let mut reader = BufReader::new(read_half);
-    let mut responses = Vec::with_capacity(expected_replies);
-    responses.push(read_stdio_reply(&mut reader).await);
 
     for event in &events {
-        write_half
-            .write_all(&frame(&event.message))
-            .await
-            .expect("write scripted event");
-        if event.expect_response {
-            responses.push(read_stdio_reply(&mut reader).await);
-        }
+        input.extend(frame(&event.message));
     }
 
-    drop(write_half);
-    let _ = tokio::time::timeout(Duration::from_secs(5), serve).await;
+    let mut output = Vec::new();
+    server
+        .serve_stdio_with_io(Cursor::new(input), &mut output, &auth)
+        .expect("stdio script completes");
+    let responses: Vec<Value> = String::from_utf8(output)
+        .expect("stdio replies are UTF-8")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("reply is JSON"))
+        .collect();
+    assert_eq!(
+        responses.len(),
+        expected_replies,
+        "script returned expected JSON-RPC replies"
+    );
 
     json!({
         "initialize": init,
@@ -222,26 +203,26 @@ async fn run_stdio_script(server: OracleMcpServer, init: Value, events: Vec<Clie
     })
 }
 
-fn required_auth_server(conn: Box<dyn OracleConnection>) -> OracleMcpServer {
-    server_over(conn).with_stdio_auth(StdioAuthPolicy::Required {
+fn required_auth() -> StdioAuthPolicy {
+    StdioAuthPolicy::Required {
         expected: "expected-init-token".to_owned(),
-    })
+    }
 }
 
-#[tokio::test]
-async fn golden_stdio_init_token_failures() {
+#[test]
+fn golden_stdio_init_token_failures() {
     let missing = run_stdio_script(
-        required_auth_server(Box::new(OneRowMock)),
+        server_over(Box::new(OneRowMock)),
+        required_auth(),
         initialize(1, None),
         vec![],
-    )
-    .await;
+    );
     let wrong = run_stdio_script(
-        required_auth_server(Box::new(OneRowMock)),
+        server_over(Box::new(OneRowMock)),
+        required_auth(),
         initialize(1, Some("wrong-init-token")),
         vec![],
-    )
-    .await;
+    );
 
     let actual = json!({
         "case": "stdio initialize fail-closed init-token errors",
@@ -254,10 +235,11 @@ async fn golden_stdio_init_token_failures() {
     golden_support::assert_golden("stdio/init_token_failures", &actual);
 }
 
-#[tokio::test]
-async fn golden_stdio_main_tool_transcript() {
+#[test]
+fn golden_stdio_main_tool_transcript() {
     let transcript = run_stdio_script(
-        required_auth_server(Box::new(OneRowMock)),
+        server_over(Box::new(OneRowMock)),
+        required_auth(),
         initialize(1, Some("expected-init-token")),
         vec![
             ClientEvent {
@@ -314,8 +296,7 @@ async fn golden_stdio_main_tool_transcript() {
                 }),
             },
         ],
-    )
-    .await;
+    );
 
     let actual = json!({
         "case": "stdio initialize, initialized notification, tools/list, oracle_capabilities, structured success, and unknown tool",
@@ -324,10 +305,11 @@ async fn golden_stdio_main_tool_transcript() {
     golden_support::assert_golden("stdio/main_tool_transcript", &actual);
 }
 
-#[tokio::test]
-async fn golden_stdio_structured_error_envelope() {
+#[test]
+fn golden_stdio_structured_error_envelope() {
     let transcript = run_stdio_script(
-        required_auth_server(Box::new(FailingMock)),
+        server_over(Box::new(FailingMock)),
+        required_auth(),
         initialize(1, Some("expected-init-token")),
         vec![
             ClientEvent {
@@ -352,8 +334,7 @@ async fn golden_stdio_structured_error_envelope() {
                 }),
             },
         ],
-    )
-    .await;
+    );
 
     let actual = json!({
         "case": "stdio live tool maps Oracle failure to structured MCP tool error",

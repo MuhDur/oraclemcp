@@ -524,14 +524,6 @@ fn run_serve(
         .map(|tool| tool.name.clone())
         .collect();
 
-    let transport_runtime = match build_rmcp_transport_runtime() {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("oraclemcp serve: failed to start rmcp/axum transport runtime: {e}");
-            return ExitCode::from(1);
-        }
-    };
-
     match listen {
         // ── stdio transport (default) ──────────────────────────────────────
         None => {
@@ -547,7 +539,7 @@ fn run_serve(
             };
             let server = build_server(conn, active_profile, level, false, custom_catalog);
             emit_serve_status(robot_json, "stdio", None, &advertised_tools);
-            match transport_runtime.block_on(server.serve_stdio(&auth)) {
+            match server.serve_stdio(&auth) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("oraclemcp serve: stdio transport error: {e}");
@@ -572,6 +564,13 @@ fn run_serve(
             let server = build_server(conn, active_profile, level, true, custom_catalog);
             let cfg = HttpTransportConfig::default();
             emit_serve_status(robot_json, "http", Some(&addr), &advertised_tools);
+            let transport_runtime = match build_rmcp_transport_runtime() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("oraclemcp serve: failed to start rmcp/axum transport runtime: {e}");
+                    return ExitCode::from(1);
+                }
+            };
             let bind_addr = addr.clone();
             let result = transport_runtime.block_on(async move {
                 let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
@@ -592,10 +591,9 @@ fn run_serve(
     }
 }
 
-// COMPAT-REMOVE(oraclemcp-w8-native-stdio-mcp-sk2, oraclemcp-w9-native-http-mcp-or0):
-// Tokio remains here only to host the current rmcp stdio and axum/hyper HTTP
-// transports. The native Asupersync dispatch path is already explicit in
-// oraclemcp-core; W8/W9 delete this boundary with the SDK transports.
+// COMPAT-REMOVE(oraclemcp-w9-native-http-mcp-or0):
+// Tokio remains here only to host the current axum/hyper HTTP transport. The
+// default stdio transport is native blocking JSON-RPC plus Asupersync dispatch.
 fn build_rmcp_transport_runtime() -> Result<tokio::runtime::Runtime, std::io::Error> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
