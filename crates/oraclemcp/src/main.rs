@@ -7,7 +7,7 @@
 //! `oraclemcp` — the engine-free Oracle Database MCP server binary (Phase-E
 //! E-2b).
 //!
-//! A thin consumer of `oraclemcp-core` (the rmcp [`OracleMcpServer`] +
+//! A thin consumer of `oraclemcp-core` ([`OracleMcpServer`] +
 //! `oracle_capabilities`) and `oraclemcp-db` (the read-only dictionary ops plus
 //! one guarded execute primitive). It advertises safe-by-default
 //! live-DB/config-inspection tools ([`registry`]) and dispatches them through
@@ -22,6 +22,7 @@
 mod robot_docs;
 
 use std::collections::HashSet;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -564,22 +565,8 @@ fn run_serve(
             let server = build_server(conn, active_profile, level, true, custom_catalog);
             let cfg = HttpTransportConfig::default();
             emit_serve_status(robot_json, "http", Some(&addr), &advertised_tools);
-            let transport_runtime = match build_rmcp_transport_runtime() {
-                Ok(rt) => rt,
-                Err(e) => {
-                    eprintln!("oraclemcp serve: failed to start rmcp/axum transport runtime: {e}");
-                    return ExitCode::from(1);
-                }
-            };
-            let bind_addr = addr.clone();
-            let result = transport_runtime.block_on(async move {
-                let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-                // Graceful shutdown on Ctrl-C; ignore the join error.
-                let shutdown = async {
-                    let _ = tokio::signal::ctrl_c().await;
-                };
-                serve_http(listener, server, &cfg, shutdown).await
-            });
+            let result =
+                TcpListener::bind(&addr).and_then(|listener| serve_http(listener, server, &cfg));
             match result {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
@@ -589,16 +576,6 @@ fn run_serve(
             }
         }
     }
-}
-
-// COMPAT-REMOVE(oraclemcp-w9-native-http-mcp-or0):
-// Tokio remains here only to host the current axum/hyper HTTP transport. The
-// default stdio transport is native blocking JSON-RPC plus Asupersync dispatch.
-fn build_rmcp_transport_runtime() -> Result<tokio::runtime::Runtime, std::io::Error> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 /// Emit a serve startup status line on stderr (stdout stays JSON-RPC data).

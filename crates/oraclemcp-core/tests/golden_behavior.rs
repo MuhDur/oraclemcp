@@ -1,26 +1,23 @@
-//! Golden behavior harness for the current rmcp + axum transport surface.
+//! Golden behavior harness for the native HTTP and stdio transport surface.
 //!
 //! These tests intentionally compare observable protocol responses against
 //! reviewed fixtures under `tests/golden/`. The fixtures are synthetic and
 //! contain no real credentials or business data.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use asupersync::Cx;
-use axum::body::Body;
-use axum::http::{HeaderMap, HeaderName, Method, Request, StatusCode, header};
 use oraclemcp_auth::ResourceServerConfig;
 use oraclemcp_core::OracleMcpServer;
 use oraclemcp_core::capabilities::{CapabilitiesReport, FeatureTiers};
 use oraclemcp_core::http::{
-    HttpTransportConfig, MCP_PATH, OAuthEnforcement, PROTECTED_RESOURCE_METADATA_PATH, build_router,
+    HttpRequest, HttpResponse, HttpTransportConfig, MCP_PATH, OAuthEnforcement,
+    PROTECTED_RESOURCE_METADATA_PATH, handle_http_request,
 };
 use oraclemcp_core::server::{DispatchFuture, ToolDispatch};
 use oraclemcp_core::tools::{ToolDescriptor, ToolRegistry, ToolTier};
 use oraclemcp_guard::OperatingLevel;
 use serde_json::{Value, json};
-use tower::ServiceExt;
 
 #[path = "../../../tests/golden/support.rs"]
 mod golden_support;
@@ -76,26 +73,22 @@ fn initialize_body(id: i64, client: &str) -> Value {
     })
 }
 
-fn json_post(path: &str, body: &Value) -> Request<Body> {
+fn json_post(path: &str, body: &Value) -> HttpRequest {
     request(
-        Method::POST,
+        "POST",
         path,
         default_post_headers(),
-        Body::from(body.to_string()),
+        body.to_string().into_bytes(),
     )
 }
 
 fn request(
-    method: Method,
+    method: &str,
     path: &str,
     headers: Vec<(&'static str, String)>,
-    body: Body,
-) -> Request<Body> {
-    let mut builder = Request::builder().method(method).uri(path);
-    for (name, value) in headers {
-        builder = builder.header(name, value);
-    }
-    builder.body(body).expect("request builds")
+    body: Vec<u8>,
+) -> HttpRequest {
+    HttpRequest::new(method, path, headers, body)
 }
 
 fn default_post_headers() -> Vec<(&'static str, String)> {
@@ -116,52 +109,39 @@ fn headers_with(extra: &[(&'static str, &str)]) -> Vec<(&'static str, String)> {
     headers
 }
 
-async fn capture_response(response: axum::response::Response) -> Value {
-    let status = response.status();
-    let content_type = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let headers = selected_headers(response.headers());
-    let bytes = tokio::time::timeout(
-        Duration::from_secs(5),
-        axum::body::to_bytes(response.into_body(), 512 * 1024),
-    )
-    .await
-    .expect("response body completes")
-    .expect("response body reads");
+fn capture_response(response: HttpResponse) -> Value {
+    let content_type = response.header("content-type").map(str::to_owned);
+    let headers = selected_headers(&response.headers);
     json!({
-        "status": status.as_u16(),
+        "status": response.status,
         "headers": headers,
-        "body": golden_support::body_value(content_type.as_deref(), &bytes),
+        "body": golden_support::body_value(content_type.as_deref(), &response.body),
     })
 }
 
-fn selected_headers(headers: &HeaderMap) -> Value {
+fn selected_headers(headers: &[(String, String)]) -> Value {
     let names = [
-        header::CONTENT_TYPE,
-        header::CACHE_CONTROL,
-        header::WWW_AUTHENTICATE,
-        header::ALLOW,
-        HeaderName::from_static("mcp-session-id"),
+        "content-type",
+        "cache-control",
+        "www-authenticate",
+        "allow",
+        "mcp-session-id",
     ];
     let mut out = serde_json::Map::new();
     for name in names {
-        if let Some(value) = headers.get(&name) {
-            out.insert(
-                name.as_str().to_ascii_lowercase(),
-                Value::String(value.to_str().unwrap_or("<non-utf8>").to_owned()),
-            );
+        if let Some((_, value)) = headers
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+        {
+            out.insert(name.to_owned(), Value::String(value.clone()));
         }
     }
     Value::Object(out)
 }
 
-fn session_id(headers: &HeaderMap) -> String {
-    headers
-        .get(HeaderName::from_static("mcp-session-id"))
-        .and_then(|value| value.to_str().ok())
+fn session_id(response: &HttpResponse) -> String {
+    response
+        .header("mcp-session-id")
         .expect("stateful initialize returns Mcp-Session-Id")
         .to_owned()
 }
@@ -181,17 +161,17 @@ fn oauth_enforcement() -> Arc<OAuthEnforcement> {
     })
 }
 
-#[tokio::test]
-async fn golden_http_stateless_initialize_json_response() {
+#[test]
+fn golden_http_stateless_initialize_json_response() {
     let cfg = HttpTransportConfig {
         json_response: true,
         stateful: false,
         ..Default::default()
     };
-    let router = build_router(harness_server(), &cfg);
+    let server = harness_server();
     let body = initialize_body(1, "golden-http-json");
 
-    let response = router.oneshot(json_post(MCP_PATH, &body)).await.unwrap();
+    let response = handle_http_request(&server, &cfg, json_post(MCP_PATH, &body));
     let actual = json!({
         "case": "stateless /mcp initialize returns direct JSON",
         "request": {
@@ -200,13 +180,13 @@ async fn golden_http_stateless_initialize_json_response() {
             "headers": default_post_headers(),
             "body": body,
         },
-        "response": capture_response(response).await,
+        "response": capture_response(response),
     });
     golden_support::assert_golden("http/stateless_initialize_json_response", &actual);
 }
 
-#[tokio::test]
-async fn golden_http_protected_resource_metadata() {
+#[test]
+fn golden_http_protected_resource_metadata() {
     let metadata = json!({
         "resource": "https://oraclemcp.example/mcp",
         "authorization_servers": ["https://idp.example"],
@@ -216,15 +196,15 @@ async fn golden_http_protected_resource_metadata() {
         resource_metadata: Some(metadata.clone()),
         ..Default::default()
     };
-    let router = build_router(harness_server(), &cfg);
     let req = request(
-        Method::GET,
+        "GET",
         PROTECTED_RESOURCE_METADATA_PATH,
         vec![("host", "127.0.0.1".to_owned())],
-        Body::empty(),
+        Vec::new(),
     );
 
-    let response = router.oneshot(req).await.unwrap();
+    let server = harness_server();
+    let response = handle_http_request(&server, &cfg, req);
     let actual = json!({
         "case": "RFC 9728 protected-resource metadata stays publicly discoverable",
         "request": {
@@ -234,23 +214,23 @@ async fn golden_http_protected_resource_metadata() {
             "body": "",
         },
         "configured_metadata": metadata,
-        "response": capture_response(response).await,
+        "response": capture_response(response),
     });
     golden_support::assert_golden("http/protected_resource_metadata", &actual);
 }
 
-#[tokio::test]
-async fn golden_http_unauthorized_www_authenticate() {
+#[test]
+fn golden_http_unauthorized_www_authenticate() {
     let cfg = HttpTransportConfig {
         json_response: true,
         stateful: false,
         oauth: Some(oauth_enforcement()),
         ..Default::default()
     };
-    let router = build_router(harness_server(), &cfg);
+    let server = harness_server();
     let body = initialize_body(1, "golden-http-unauthorized");
 
-    let response = router.oneshot(json_post(MCP_PATH, &body)).await.unwrap();
+    let response = handle_http_request(&server, &cfg, json_post(MCP_PATH, &body));
     let actual = json!({
         "case": "OAuth-protected /mcp refuses missing bearer with WWW-Authenticate",
         "request": {
@@ -259,44 +239,47 @@ async fn golden_http_unauthorized_www_authenticate() {
             "headers": default_post_headers(),
             "body": body,
         },
-        "response": capture_response(response).await,
+        "response": capture_response(response),
     });
     golden_support::assert_golden("http/unauthorized_www_authenticate", &actual);
 }
 
-#[tokio::test]
-async fn golden_http_host_and_origin_guards() {
+#[test]
+fn golden_http_host_and_origin_guards() {
     let init = initialize_body(1, "golden-http-guard");
-    let host_response = build_router(harness_server(), &HttpTransportConfig::default())
-        .oneshot(request(
-            Method::POST,
+    let server = harness_server();
+    let host_response = handle_http_request(
+        &server,
+        &HttpTransportConfig::default(),
+        request(
+            "POST",
             MCP_PATH,
             vec![
                 ("host", "attacker.example".to_owned()),
                 ("content-type", "application/json".to_owned()),
                 ("accept", "application/json, text/event-stream".to_owned()),
             ],
-            Body::from(init.to_string()),
-        ))
-        .await
-        .unwrap();
+            init.to_string().into_bytes(),
+        ),
+    );
 
     let origin_cfg = HttpTransportConfig {
         allowed_origins: vec!["https://app.example".to_owned()],
         ..Default::default()
     };
-    let origin_response = build_router(harness_server(), &origin_cfg)
-        .oneshot(request(
-            Method::POST,
+    let origin_response = handle_http_request(
+        &server,
+        &origin_cfg,
+        request(
+            "POST",
             MCP_PATH,
             headers_with(&[("origin", "https://evil.example")]),
-            Body::from(init.to_string()),
-        ))
-        .await
-        .unwrap();
+            init.to_string().into_bytes(),
+        ),
+    );
 
     let actual = json!({
-        "case": "rmcp DNS-rebinding Host guard and browser Origin allowlist",
+        "case": "native DNS-rebinding Host guard and browser Origin allowlist",
         "requests": [
             {
                 "name": "untrusted host",
@@ -308,7 +291,7 @@ async fn golden_http_host_and_origin_guards() {
                     ["accept", "application/json, text/event-stream"]
                 ],
                 "body": init,
-                "response": capture_response(host_response).await,
+                "response": capture_response(host_response),
             },
             {
                 "name": "forbidden origin",
@@ -316,31 +299,27 @@ async fn golden_http_host_and_origin_guards() {
                 "path": MCP_PATH,
                 "headers": headers_with(&[("origin", "https://evil.example")]),
                 "body": init,
-                "response": capture_response(origin_response).await,
+                "response": capture_response(origin_response),
             }
         ]
     });
     golden_support::assert_golden("http/host_origin_guards", &actual);
 }
 
-#[tokio::test]
-async fn golden_http_stateful_streamable_session() {
+#[test]
+fn golden_http_stateful_streamable_session() {
     let cfg = HttpTransportConfig {
         json_response: true,
         stateful: true,
         ..Default::default()
     };
-    let router = build_router(harness_server(), &cfg);
+    let server = harness_server();
 
     let init = initialize_body(1, "golden-http-stateful");
-    let init_response = router
-        .clone()
-        .oneshot(json_post(MCP_PATH, &init))
-        .await
-        .unwrap();
-    assert_eq!(init_response.status(), StatusCode::OK);
-    let session_id = session_id(init_response.headers());
-    let init_exchange = capture_response(init_response).await;
+    let init_response = handle_http_request(&server, &cfg, json_post(MCP_PATH, &init));
+    assert_eq!(init_response.status, 200);
+    let session_id = session_id(&init_response);
+    let init_exchange = capture_response(init_response);
 
     let initialized = json!({
         "jsonrpc": "2.0",
@@ -350,18 +329,17 @@ async fn golden_http_stateful_streamable_session() {
         ("mcp-session-id", &session_id),
         ("mcp-protocol-version", "2025-11-25"),
     ]);
-    let initialized_response = router
-        .clone()
-        .oneshot(request(
-            Method::POST,
+    let initialized_response = handle_http_request(
+        &server,
+        &cfg,
+        request(
+            "POST",
             MCP_PATH,
             initialized_headers.clone(),
-            Body::from(initialized.to_string()),
-        ))
-        .await
-        .unwrap();
-    let initialized_exchange = capture_response(initialized_response).await;
-    tokio::time::sleep(Duration::from_millis(20)).await;
+            initialized.to_string().into_bytes(),
+        ),
+    );
+    let initialized_exchange = capture_response(initialized_response);
 
     let list = json!({
         "jsonrpc": "2.0",
@@ -372,17 +350,17 @@ async fn golden_http_stateful_streamable_session() {
         ("mcp-session-id", &session_id),
         ("mcp-protocol-version", "2025-11-25"),
     ]);
-    let list_response = router
-        .clone()
-        .oneshot(request(
-            Method::POST,
+    let list_response = handle_http_request(
+        &server,
+        &cfg,
+        request(
+            "POST",
             MCP_PATH,
             list_headers.clone(),
-            Body::from(list.to_string()),
-        ))
-        .await
-        .unwrap();
-    let list_exchange = capture_response(list_response).await;
+            list.to_string().into_bytes(),
+        ),
+    );
+    let list_exchange = capture_response(list_response);
     assert!(
         list_exchange["body"]
             .as_array()
@@ -390,19 +368,20 @@ async fn golden_http_stateful_streamable_session() {
         "stateful tools/list SSE response must include the JSON-RPC response event: {list_exchange}"
     );
 
-    let delete_response = router
-        .oneshot(request(
-            Method::DELETE,
+    let delete_response = handle_http_request(
+        &server,
+        &cfg,
+        request(
+            "DELETE",
             MCP_PATH,
             vec![
                 ("host", "127.0.0.1".to_owned()),
                 ("mcp-session-id", session_id),
                 ("mcp-protocol-version", "2025-11-25".to_owned()),
             ],
-            Body::empty(),
-        ))
-        .await
-        .unwrap();
+            Vec::new(),
+        ),
+    );
 
     let actual = json!({
         "case": "stateful Streamable HTTP session uses SSE, session header, initialized notification, and session-bound request",
@@ -449,7 +428,7 @@ async fn golden_http_stateful_streamable_session() {
                     ],
                     "body": "",
                 },
-                "response": capture_response(delete_response).await,
+                "response": capture_response(delete_response),
             }
         ]
     });

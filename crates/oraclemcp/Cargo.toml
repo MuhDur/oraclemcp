@@ -34,7 +34,6 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 getrandom = "0.2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sync", "time", "net", "signal"] }
 tracing.workspace = true
 tracing-subscriber = "0.3"
 

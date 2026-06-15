@@ -1,5 +1,5 @@
 {
-  "case": "rmcp DNS-rebinding Host guard and browser Origin allowlist",
+  "case": "native DNS-rebinding Host guard and browser Origin allowlist",
   "requests": [
     {
       "body": {

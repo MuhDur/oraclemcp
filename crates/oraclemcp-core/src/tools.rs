@@ -4,7 +4,7 @@
 //! [`ToolRegistry`]. The engine-side (or operator-defined) code contributes
 //! its slice of tools by registering descriptors — the core never reaches into
 //! a tool's implementation. Relocated from `plsql-mcp`'s `tools.rs` (bead
-//! P0-0); P0-6 builds the `rmcp` `ServerHandler` over this registry.
+//! P0-0); native transports render descriptors from this registry.
 
 use serde::{Deserialize, Serialize};
 

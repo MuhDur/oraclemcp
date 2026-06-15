@@ -5,10 +5,9 @@
 //! provider is `ring`, pinned explicitly (no reliance on a process-global
 //! default install).
 //!
-//! `build_server_config` returns the `Arc<ServerConfig>` the binary feeds to its
-//! TLS-terminating listener (e.g. `axum-server`'s `RustlsConfig::from_config`),
-//! so the heavy listener glue stays in the binary while the security-relevant
-//! configuration — and the mTLS decision — lives here and is unit-tested.
+//! `build_server_config` returns the `Arc<ServerConfig>` a TLS-terminating
+//! listener can use while the security-relevant configuration — and the mTLS
+//! decision — lives here and is unit-tested.
 
 use std::sync::Arc;
 

@@ -2,8 +2,8 @@
 //! agent calls first to discover the server's tools, operating level + gates,
 //! connection/standby status, feature tiers, and version.
 //!
-//! Kept serializable as a **standalone document** (no rmcp/session types) so the
-//! move to per-request `_meta` in a later MCP spec is cheap (§2.5).
+//! Kept serializable as a **standalone document** (no transport/session types)
+//! so the move to per-request `_meta` in a later MCP spec is cheap (§2.5).
 
 use oraclemcp_db::{CloudStatus, PrivilegeProfile};
 use oraclemcp_guard::OperatingLevel;

@@ -1,34 +1,24 @@
-//! Streamable HTTP(S) transport (plan §7.1, §2.5; bead P1-9a / oracle-qmwz.2.9.1).
+//! Native Streamable HTTP(S) transport (plan §7.1, §2.5; bead P1-9a /
+//! oracle-qmwz.2.9.1).
 //!
-//! Mounts the [`OracleMcpServer`] as an `rmcp` [`StreamableHttpService`] on an
-//! axum router — the modern **Streamable HTTP** transport (MCP spec 2025-06-18+),
-//! **NO legacy HTTP+SSE**. The DNS-rebinding `Host` guard and `Origin` allowlist
-//! are enforced natively by `rmcp` (configured from [`HttpTransportConfig`],
-//! mirroring `oraclemcp_auth::http_guard`'s policy intent); OAuth 2.1 resource-server
-//! validation (P1-9b, [`oraclemcp_auth::oauth_rs`]) is advertised via the RFC
-//! 9728 protected-resource-metadata route mounted here; TLS/mTLS (P1-9c) wraps
-//! the listener with rustls.
-//!
-//! The engine stays synchronous behind `spawn_blocking` inside the server's tool
-//! dispatch — this transport is purely the HTTP front.
-//!
-//! COMPAT-REMOVE(oraclemcp-w9-native-http-mcp-or0): this module is the current
-//! rmcp/axum/hyper HTTP boundary. W9 replaces it with native HTTP while
-//! preserving the security checks and Streamable HTTP behavior.
+//! This module owns the small HTTP/1.1 surface oraclemcp actually needs: the
+//! `/mcp` Streamable HTTP endpoint, RFC 9728 protected-resource metadata, the
+//! DNS-rebinding `Host` guard, the browser `Origin` allowlist, and OAuth bearer
+//! validation. It deliberately does not depend on a web framework or ambient
+//! async runtime.
 
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::thread::JoinHandle;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::Router;
-use axum::extract::State;
-use axum::http::{StatusCode, header};
-use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
-use oraclemcp_auth::{ResourceServerConfig, SignatureVerifier, TokenError, extract_bearer};
-use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+use oraclemcp_auth::{
+    HttpGuardError, HttpGuardPolicy, ResourceServerConfig, SignatureVerifier, TokenError,
+    extract_bearer,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::server::OracleMcpServer;
 
@@ -41,14 +31,14 @@ pub const PROTECTED_RESOURCE_METADATA_PATH: &str = "/.well-known/oauth-protected
 #[derive(Clone, Debug, Default)]
 pub struct HttpTransportConfig {
     /// Allowed `Host` authorities beyond loopback (DNS-rebinding guard). Empty
-    /// keeps the rmcp default (loopback-only).
+    /// keeps the default loopback-only policy.
     pub allowed_hosts: Vec<String>,
-    /// Allowed browser `Origin`s (empty disables Origin validation per rmcp).
+    /// Allowed browser `Origin`s (empty allows only loopback origins).
     pub allowed_origins: Vec<String>,
-    /// Stateless `application/json` responses instead of SSE framing (simpler
-    /// request/response; `false` = stateful SSE, the rmcp default).
+    /// Stateless `application/json` responses instead of SSE framing when
+    /// `stateful` is false.
     pub json_response: bool,
-    /// Stateful session mode (SSE priming + reconnect). `true` is the rmcp default.
+    /// Stateful session mode (SSE priming + session-bound requests).
     pub stateful: bool,
     /// The RFC 9728 protected-resource metadata document to serve, if OAuth is
     /// enabled (from [`oraclemcp_auth::oauth_rs::ResourceServerConfig`]).
@@ -78,159 +68,6 @@ impl std::fmt::Debug for OAuthEnforcement {
             .field("metadata_url", &self.metadata_url)
             .finish()
     }
-}
-
-/// The OAuth scopes a validated request carries, attached to the request
-/// extensions by [`oauth_guard`].
-///
-/// **NOT YET ENFORCED (captured-only).** This grant is currently *recorded* on
-/// the request extensions but is **not consulted by any dispatch path** — there
-/// is no reader of `ScopeGrant`, and `call_tool`
-/// ([`crate::server::OracleMcpServer`]) discards the request context, so a
-/// validated bearer's scope does **not** lower the session operating-level
-/// ceiling. The intended control (read `ScopeGrant` from the rmcp
-/// `RequestContext` extensions in `call_tool`, feed it through
-/// `oraclemcp_auth::apply_oauth_scopes` — monotone-down: a scope can only LOWER
-/// the ceiling, never raise it, P1-9e — and gate the resolved tool's required
-/// `OperatingLevel` before dispatch) requires a per-session `SessionLevelState`
-/// plumbed into the HTTP dispatch path that does not exist yet.
-///
-/// Until that wiring lands (deferred to the HTTP-transport-wiring phase), do
-/// **not** assume scope-based least-privilege is in effect on the HTTP
-/// transport: a narrowly-scoped token (e.g. `oracle:read`) can still reach
-/// write/DDL tools whenever the profile/session default ceiling permits.
-/// Tracking: bead `oraclemcp-w10-http-scope-enforcement-b5a`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ScopeGrant(pub Vec<String>);
-
-fn token_error_code(e: &TokenError) -> &'static str {
-    match e {
-        TokenError::InsufficientScope => "insufficient_scope",
-        // RFC 6750: every other validation failure is `invalid_token`.
-        _ => "invalid_token",
-    }
-}
-
-/// Axum middleware enforcing OAuth 2.1 resource-server validation on `/mcp`.
-async fn oauth_guard(
-    State(enforcement): State<Arc<OAuthEnforcement>>,
-    request: axum::extract::Request,
-    next: Next,
-) -> Response {
-    let now_unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    // Decide while borrowing the request headers; release the borrow before
-    // handing the request on (so the body can be consumed downstream).
-    let decision: Result<Vec<String>, Option<TokenError>> = {
-        let header = request
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok());
-        match extract_bearer(header) {
-            Ok(token) => enforcement
-                .config
-                .validate(token, enforcement.verifier.as_ref(), now_unix)
-                .map_err(Some),
-            Err(_) => Err(None), // missing/blank bearer
-        }
-    };
-    match decision {
-        Ok(scopes) => {
-            // Record the granted scopes on the request extensions. NOTE: this is
-            // captured-only and NOT YET ENFORCED — no dispatch path reads
-            // `ScopeGrant`, so the scope does not currently lower the session
-            // operating-level ceiling. Wiring it through
-            // `oraclemcp_auth::apply_oauth_scopes` (monotone-down) into a
-            // per-session `SessionLevelState` is deferred to the
-            // HTTP-transport-wiring phase. See `ScopeGrant` docs / bead
-            // `oraclemcp-w10-http-scope-enforcement-b5a`.
-            let mut request = request;
-            request.extensions_mut().insert(ScopeGrant(scopes));
-            next.run(request).await
-        }
-        Err(err) => {
-            let challenge = enforcement.config.www_authenticate(
-                &enforcement.metadata_url,
-                err.as_ref().map(token_error_code),
-            );
-            (
-                StatusCode::UNAUTHORIZED,
-                [(header::WWW_AUTHENTICATE, challenge)],
-                "unauthorized",
-            )
-                .into_response()
-        }
-    }
-}
-
-impl HttpTransportConfig {
-    fn to_rmcp(&self) -> StreamableHttpServerConfig {
-        let mut cfg = StreamableHttpServerConfig::default()
-            .with_json_response(self.json_response)
-            .with_stateful_mode(self.stateful);
-        if !self.allowed_hosts.is_empty() {
-            cfg = cfg.with_allowed_hosts(self.allowed_hosts.clone());
-        }
-        if !self.allowed_origins.is_empty() {
-            cfg = cfg.with_allowed_origins(self.allowed_origins.clone());
-        }
-        cfg
-    }
-}
-
-/// Build the axum [`Router`] that serves the MCP server over Streamable HTTP at
-/// [`MCP_PATH`], plus (when configured) the RFC 9728 metadata route. The
-/// `server` is cloned per session by the service factory.
-pub fn build_router(server: OracleMcpServer, config: &HttpTransportConfig) -> Router {
-    let factory_server = server.clone();
-    let service: StreamableHttpService<OracleMcpServer, LocalSessionManager> =
-        StreamableHttpService::new(
-            move || Ok(factory_server.clone()),
-            Arc::new(LocalSessionManager::default()),
-            config.to_rmcp(),
-        );
-
-    let mut router = Router::new().nest_service(MCP_PATH, service);
-
-    // Enforce OAuth on /mcp (the layer applies to routes added BEFORE it, so the
-    // metadata route added afterwards stays open for authorization discovery).
-    if let Some(enforcement) = &config.oauth {
-        router = router.layer(axum::middleware::from_fn_with_state(
-            Arc::clone(enforcement),
-            oauth_guard,
-        ));
-    }
-
-    if let Some(meta) = &config.resource_metadata {
-        let meta = meta.clone();
-        router = router.route(
-            PROTECTED_RESOURCE_METADATA_PATH,
-            axum::routing::get(move || {
-                let meta = meta.clone();
-                async move { axum::Json(meta) }
-            }),
-        );
-    }
-    router
-}
-
-/// Serve the MCP server over plaintext Streamable HTTP on `listener` until
-/// `shutdown` completes. TLS/mTLS (P1-9c) wraps the accept loop separately.
-///
-/// # Errors
-/// Returns any fatal I/O error from the axum accept loop.
-pub async fn serve_http(
-    listener: tokio::net::TcpListener,
-    server: OracleMcpServer,
-    config: &HttpTransportConfig,
-    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-) -> std::io::Result<()> {
-    let router = build_router(server, config);
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown)
-        .await
 }
 
 #[cfg(test)]
@@ -263,127 +100,34 @@ mod tests {
         OracleMcpServer::new("0.1.0", ToolRegistry::new(), report, Arc::new(NoopDispatch))
     }
 
-    #[test]
-    fn config_maps_guards_to_rmcp() {
-        let cfg = HttpTransportConfig {
-            allowed_hosts: vec!["mcp.example:8443".to_owned()],
-            allowed_origins: vec!["https://app.example".to_owned()],
-            json_response: true,
-            stateful: false,
-            resource_metadata: None,
-            oauth: None,
-        };
-        let rmcp = cfg.to_rmcp();
-        assert!(rmcp.allowed_hosts.contains(&"mcp.example:8443".to_owned()));
-        assert!(
-            rmcp.allowed_origins
-                .contains(&"https://app.example".to_owned())
-        );
-        assert!(rmcp.json_response);
-        assert!(!rmcp.stateful_mode);
+    fn init_body() -> Value {
+        serde_json::json!({
+            "jsonrpc":"2.0",
+            "id":1,
+            "method":"initialize",
+            "params":{
+                "protocolVersion":"2025-11-25",
+                "capabilities":{},
+                "clientInfo":{"name":"t","version":"1.0"}
+            }
+        })
     }
 
-    #[tokio::test]
-    async fn metadata_route_serves_rfc9728_document() {
-        use tower::ServiceExt;
-        let meta = serde_json::json!({
-            "resource": "https://oraclemcp.example/mcp",
-            "authorization_servers": ["https://idp.example"],
-        });
-        let cfg = HttpTransportConfig {
-            resource_metadata: Some(meta),
-            ..Default::default()
-        };
-        let router = build_router(test_server(), &cfg);
-
-        let req = axum::http::Request::builder()
-            .uri(PROTECTED_RESOURCE_METADATA_PATH)
-            .header("host", "127.0.0.1")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let resp = router.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
-            .await
-            .unwrap();
-        let doc: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(
-            doc["resource"],
-            serde_json::json!("https://oraclemcp.example/mcp")
-        );
+    fn post(body: &Value) -> HttpRequest {
+        HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("content-type", "application/json"),
+                ("accept", "application/json, text/event-stream"),
+            ],
+            body.to_string().into_bytes(),
+        )
     }
 
-    #[tokio::test]
-    async fn initialize_over_streamable_http_returns_json() {
-        use tower::ServiceExt;
-        // Stateless + json_response -> initialize returns application/json directly.
-        let cfg = HttpTransportConfig {
-            json_response: true,
-            stateful: false,
-            ..Default::default()
-        };
-        let router = build_router(test_server(), &cfg);
-
-        const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"1.0"}}}"#;
-        let req = axum::http::Request::builder()
-            .method("POST")
-            .uri(MCP_PATH)
-            .header("host", "127.0.0.1")
-            .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream")
-            .body(axum::body::Body::from(INIT))
-            .unwrap();
-        let resp = router.oneshot(req).await.unwrap();
-        assert_eq!(
-            resp.status(),
-            axum::http::StatusCode::OK,
-            "initialize handshake succeeds over HTTP"
-        );
-        let ct = resp
-            .headers()
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default()
-            .to_owned();
-        assert!(
-            ct.contains("application/json"),
-            "stateless json mode -> application/json, got {ct}"
-        );
-        let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
-            .await
-            .unwrap();
-        let body: Value = serde_json::from_slice(&bytes).unwrap();
-        // A well-formed JSON-RPC initialize result that advertises the server.
-        assert!(
-            body.get("result").is_some(),
-            "initialize returns a JSON-RPC result: {body}"
-        );
-        assert!(
-            String::from_utf8_lossy(&bytes).contains("oraclemcp"),
-            "the initialize result advertises the oraclemcp server"
-        );
-    }
-
-    #[tokio::test]
-    async fn dns_rebinding_host_is_rejected_by_the_transport() {
-        use tower::ServiceExt;
-        // Default config = loopback-only Host allowlist; an attacker Host is refused.
-        let router = build_router(test_server(), &HttpTransportConfig::default());
-        const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"1.0"}}}"#;
-        let req = axum::http::Request::builder()
-            .method("POST")
-            .uri(MCP_PATH)
-            .header("host", "attacker.example")
-            .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream")
-            .body(axum::body::Body::from(INIT))
-            .unwrap();
-        let resp = router.oneshot(req).await.unwrap();
-        assert_ne!(
-            resp.status(),
-            axum::http::StatusCode::OK,
-            "non-loopback Host is refused (DNS-rebinding guard)"
-        );
+    fn response_json(response: &HttpResponse) -> Value {
+        serde_json::from_slice(&response.body).expect("response body is JSON")
     }
 
     fn oauth_enforcement() -> Arc<OAuthEnforcement> {
@@ -402,46 +146,132 @@ mod tests {
         })
     }
 
-    #[tokio::test]
-    async fn oauth_enabled_rejects_missing_token_with_www_authenticate() {
-        use tower::ServiceExt;
+    #[test]
+    fn metadata_route_serves_rfc9728_document() {
+        let meta = serde_json::json!({
+            "resource": "https://oraclemcp.example/mcp",
+            "authorization_servers": ["https://idp.example"],
+        });
+        let cfg = HttpTransportConfig {
+            resource_metadata: Some(meta),
+            ..Default::default()
+        };
+        let response = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                PROTECTED_RESOURCE_METADATA_PATH,
+                [("host", "127.0.0.1")],
+                Vec::new(),
+            ),
+        );
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response_json(&response)["resource"],
+            serde_json::json!("https://oraclemcp.example/mcp")
+        );
+    }
+
+    #[test]
+    fn initialize_over_streamable_http_returns_json() {
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            stateful: false,
+            ..Default::default()
+        };
+        let response = handle_http_request(&test_server(), &cfg, post(&init_body()));
+        assert_eq!(response.status, 200);
+        assert_eq!(response.header("content-type"), Some("application/json"));
+        let body = response_json(&response);
+        assert!(body.get("result").is_some(), "JSON-RPC initialize result");
+        assert_eq!(body["result"]["serverInfo"]["name"], "oraclemcp");
+    }
+
+    #[test]
+    fn stateful_initialize_uses_sse_and_session_header() {
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            stateful: true,
+            ..Default::default()
+        };
+        let response = handle_http_request(&test_server(), &cfg, post(&init_body()));
+        assert_eq!(response.status, 200);
+        assert_eq!(response.header("content-type"), Some("text/event-stream"));
+        assert_eq!(response.header("cache-control"), Some("no-cache"));
+        assert!(response.header("mcp-session-id").is_some());
+        let body = String::from_utf8(response.body).expect("SSE is UTF-8");
+        assert!(body.contains("id: 0\nretry: 3000\ndata:\n\n"));
+        assert!(!body.contains("\"method\""));
+        assert!(body.contains("\"result\""));
+    }
+
+    #[test]
+    fn dns_rebinding_host_is_rejected_by_the_transport() {
+        let request = HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [
+                ("host", "attacker.example"),
+                ("content-type", "application/json"),
+                ("accept", "application/json, text/event-stream"),
+            ],
+            init_body().to_string().into_bytes(),
+        );
+        let response =
+            handle_http_request(&test_server(), &HttpTransportConfig::default(), request);
+        assert_eq!(response.status, 403);
+        assert_eq!(
+            String::from_utf8_lossy(&response.body),
+            "Forbidden: Host header is not allowed"
+        );
+    }
+
+    #[test]
+    fn forbidden_browser_origin_is_rejected_by_the_transport() {
+        let cfg = HttpTransportConfig {
+            allowed_origins: vec!["https://app.example".to_owned()],
+            ..Default::default()
+        };
+        let request = HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("origin", "https://evil.example"),
+                ("content-type", "application/json"),
+                ("accept", "application/json, text/event-stream"),
+            ],
+            init_body().to_string().into_bytes(),
+        );
+        let response = handle_http_request(&test_server(), &cfg, request);
+        assert_eq!(response.status, 403);
+        assert_eq!(
+            String::from_utf8_lossy(&response.body),
+            "Forbidden: Origin header is not allowed"
+        );
+    }
+
+    #[test]
+    fn oauth_enabled_rejects_missing_token_with_www_authenticate() {
         let cfg = HttpTransportConfig {
             json_response: true,
             stateful: false,
             oauth: Some(oauth_enforcement()),
             ..Default::default()
         };
-        let router = build_router(test_server(), &cfg);
-        const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"1.0"}}}"#;
-        let req = axum::http::Request::builder()
-            .method("POST")
-            .uri(MCP_PATH)
-            .header("host", "127.0.0.1")
-            .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream")
-            // No Authorization header.
-            .body(axum::body::Body::from(INIT))
-            .unwrap();
-        let resp = router.oneshot(req).await.unwrap();
+        let response = handle_http_request(&test_server(), &cfg, post(&init_body()));
+        assert_eq!(response.status, 401);
         assert_eq!(
-            resp.status(),
-            axum::http::StatusCode::UNAUTHORIZED,
-            "no token -> 401"
-        );
-        let chal = resp
-            .headers()
-            .get(axum::http::header::WWW_AUTHENTICATE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default();
-        assert!(
-            chal.contains("Bearer resource_metadata="),
-            "401 carries the RFC 9728 challenge: {chal}"
+            response.header("www-authenticate"),
+            Some(
+                "Bearer resource_metadata=\"https://oraclemcp.example/.well-known/oauth-protected-resource\""
+            )
         );
     }
 
-    #[tokio::test]
-    async fn oauth_enabled_rejects_bad_token_but_keeps_metadata_open() {
-        use tower::ServiceExt;
+    #[test]
+    fn oauth_enabled_rejects_bad_token_but_keeps_metadata_open() {
         let cfg = HttpTransportConfig {
             json_response: true,
             stateful: false,
@@ -451,48 +281,103 @@ mod tests {
             oauth: Some(oauth_enforcement()),
             ..Default::default()
         };
-        // A garbage bearer token -> 401.
-        const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
-        let req = axum::http::Request::builder()
-            .method("POST")
-            .uri(MCP_PATH)
-            .header("host", "127.0.0.1")
-            .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream")
-            .header("authorization", "Bearer not.a.jwt")
-            .body(axum::body::Body::from(INIT))
-            .unwrap();
-        let resp = build_router(test_server(), &cfg)
-            .oneshot(req)
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            axum::http::StatusCode::UNAUTHORIZED,
-            "bad token -> 401"
+        let bad = HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("content-type", "application/json"),
+                ("accept", "application/json, text/event-stream"),
+                ("authorization", "Bearer not.a.jwt"),
+            ],
+            init_body().to_string().into_bytes(),
+        );
+        let response = handle_http_request(&test_server(), &cfg, bad);
+        assert_eq!(response.status, 401);
+        assert!(
+            response
+                .header("www-authenticate")
+                .is_some_and(|value| value.contains("error=\"invalid_token\""))
         );
 
-        // The metadata route is NOT behind auth (authorization-server discovery).
-        let req = axum::http::Request::builder()
-            .uri(PROTECTED_RESOURCE_METADATA_PATH)
-            .header("host", "127.0.0.1")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let resp = build_router(test_server(), &cfg)
-            .oneshot(req)
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            axum::http::StatusCode::OK,
-            "metadata route stays open for discovery"
+        let metadata = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                PROTECTED_RESOURCE_METADATA_PATH,
+                [("host", "127.0.0.1")],
+                Vec::new(),
+            ),
         );
+        assert_eq!(metadata.status, 200);
     }
 
-    // --- oracle-ajm2.5 regression: ScopeGrant is captured-only, NOT enforced ---
+    #[test]
+    fn oversized_request_is_rejected_before_oauth() {
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            stateful: false,
+            oauth: Some(oauth_enforcement()),
+            ..Default::default()
+        };
+        let response = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "POST",
+                MCP_PATH,
+                [
+                    ("host", "127.0.0.1"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json, text/event-stream"),
+                ],
+                vec![b'x'; MAX_BODY_BYTES + 1],
+            ),
+        );
+        assert_eq!(response.status, 413);
+        assert!(response.header("www-authenticate").is_none());
+    }
 
-    /// base64url (no padding) — minimal encoder so the test can mint a JWT
-    /// payload without pulling in a base64 crate.
+    #[test]
+    fn serve_http_until_stops_accepting_and_drains_worker() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback test listener");
+        let addr = listener.local_addr().expect("listener has local addr");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || {
+            serve_http_until(
+                listener,
+                test_server(),
+                &HttpTransportConfig {
+                    json_response: true,
+                    stateful: false,
+                    ..Default::default()
+                },
+                server_shutdown,
+            )
+            .expect("native HTTP server exits cleanly")
+        });
+
+        let body = init_body().to_string();
+        let mut stream = TcpStream::connect(addr).expect("connect to test listener");
+        write!(
+            stream,
+            "POST {MCP_PATH} HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+            body.len()
+        )
+        .expect("write partial request");
+        std::thread::sleep(Duration::from_millis(30));
+        shutdown.store(true, Ordering::SeqCst);
+        stream
+            .write_all(body.as_bytes())
+            .expect("finish request body");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read response");
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        handle.join().expect("server thread joins after draining");
+    }
+
     fn b64url(bytes: &[u8]) -> String {
         const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
         let mut out = String::new();
@@ -515,8 +400,6 @@ mod tests {
         out
     }
 
-    /// A test-only verifier that accepts any HS256 signature, so the test can
-    /// drive `validate` past the signature check without minting a real HMAC.
     struct AcceptHs256;
     impl oraclemcp_auth::SignatureVerifier for AcceptHs256 {
         fn verify(&self, alg: &str, _signing_input: &[u8], _signature: &[u8]) -> bool {
@@ -524,8 +407,6 @@ mod tests {
         }
     }
 
-    /// Mint a structurally-valid JWT carrying the given `scope`, accepted by
-    /// [`AcceptHs256`]. `exp` is far in the future so it never expires in CI.
     fn jwt_with_scope(scope: &str) -> String {
         let header = b64url(br#"{"alg":"HS256","typ":"JWT"}"#);
         let claims = serde_json::json!({
@@ -535,12 +416,12 @@ mod tests {
             "scope": scope,
         });
         let payload = b64url(serde_json::to_string(&claims).unwrap().as_bytes());
-        // Signature segment is ignored by AcceptHs256; any base64url is fine.
         format!("{header}.{payload}.{}", b64url(b"sig"))
     }
 
-    fn accept_enforcement() -> Arc<OAuthEnforcement> {
-        Arc::new(OAuthEnforcement {
+    #[test]
+    fn oauth_scope_is_captured_but_not_enforced_at_the_guard() {
+        let enforcement = OAuthEnforcement {
             config: ResourceServerConfig {
                 resource: "https://oraclemcp.example/mcp".to_owned(),
                 allowed_issuers: vec!["https://idp.example".to_owned()],
@@ -550,78 +431,516 @@ mod tests {
             verifier: Arc::new(AcceptHs256),
             metadata_url: "https://oraclemcp.example/.well-known/oauth-protected-resource"
                 .to_owned(),
-        })
+        };
+        let request = HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [
+                ("host", "127.0.0.1"),
+                (
+                    "authorization",
+                    &format!("Bearer {}", jwt_with_scope("oracle:read")),
+                ),
+            ],
+            Vec::new(),
+        );
+        let grant = validate_oauth_request(&request, &enforcement)
+            .expect("valid narrowly-scoped bearer is admitted");
+        assert_eq!(grant, ScopeGrant(vec!["oracle:read".to_owned()]));
+    }
+}
+
+/// The OAuth scopes a validated request carries.
+///
+/// **NOT YET ENFORCED (captured-only).** This grant is currently *recorded* on
+/// the request but is **not consulted by any dispatch path** — a validated
+/// bearer's scope does **not** lower the session operating-level ceiling yet.
+/// The intended control (feed it through `oraclemcp_auth::apply_oauth_scopes` —
+/// monotone-down: a scope can only LOWER the ceiling, never raise it, P1-9e —
+/// and gate the resolved tool's required `OperatingLevel` before dispatch)
+/// requires a per-session `SessionLevelState` plumbed into the HTTP dispatch
+/// path that does not exist yet.
+///
+/// Until that wiring lands (deferred to the HTTP-transport-wiring phase), do
+/// **not** assume scope-based least-privilege is in effect on the HTTP
+/// transport: a narrowly-scoped token (e.g. `oracle:read`) can still reach
+/// write/DDL tools whenever the profile/session default ceiling permits.
+/// Tracking: bead `oraclemcp-w10-http-scope-enforcement-b5a`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScopeGrant(pub Vec<String>);
+
+/// A parsed native HTTP request. Header names are stored lowercase.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpRequest {
+    pub method: String,
+    pub path: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl HttpRequest {
+    #[must_use]
+    pub fn new<I, K, V, B>(
+        method: impl Into<String>,
+        path: impl Into<String>,
+        headers: I,
+        body: B,
+    ) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+        B: Into<Vec<u8>>,
+    {
+        let headers = headers
+            .into_iter()
+            .map(|(name, value)| (name.into().to_ascii_lowercase(), value.into()))
+            .collect();
+        Self {
+            method: method.into().to_ascii_uppercase(),
+            path: path.into(),
+            headers,
+            body: body.into(),
+        }
     }
 
-    /// A narrowly-scoped (`oracle:read`) but otherwise-valid bearer is admitted
-    /// by `oauth_guard` and its scope is *captured* into [`ScopeGrant`] on the
-    /// request extensions — but the guard performs NO scope→operating-level
-    /// enforcement: the request reaches the inner handler unblocked. This pins
-    /// the captured-but-not-yet-enforced contract documented on [`ScopeGrant`]
-    /// (bead `oracle-ajm2.5`). If a future change wires real enforcement (so a
-    /// read scope is gated against a write/DDL tool), this test must be revised
-    /// alongside the `ScopeGrant` docs — preventing a silent contract drift in
-    /// either direction (and guarding against the capture being dropped).
-    #[tokio::test]
-    async fn oauth_scope_is_captured_but_not_enforced_at_the_guard() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use tower::ServiceExt;
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<&str> {
+        let name = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find(|(candidate, _)| candidate == &name)
+            .map(|(_, value)| value.as_str())
+    }
+}
 
-        // Inner handler records whether it was reached and what scope was
-        // captured — proving the guard does not gate on scope.
-        static REACHED: AtomicBool = AtomicBool::new(false);
-        REACHED.store(false, Ordering::SeqCst);
+/// A native HTTP response used by the listener and by protocol tests.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
 
-        async fn inner(request: axum::extract::Request) -> Response {
-            REACHED.store(true, Ordering::SeqCst);
-            let grant = request
-                .extensions()
-                .get::<ScopeGrant>()
-                .cloned()
-                .map(|g| g.0.join(","))
-                .unwrap_or_else(|| "<none>".to_owned());
-            (StatusCode::OK, grant).into_response()
+impl HttpResponse {
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<&str> {
+        let name = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find(|(candidate, _)| candidate == &name)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+fn token_error_code(e: &TokenError) -> &'static str {
+    match e {
+        TokenError::InsufficientScope => "insufficient_scope",
+        // RFC 6750: every other validation failure is `invalid_token`.
+        _ => "invalid_token",
+    }
+}
+
+fn validate_oauth_request(
+    request: &HttpRequest,
+    enforcement: &OAuthEnforcement,
+) -> Result<ScopeGrant, HttpResponse> {
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let decision = match extract_bearer(request.header("authorization")) {
+        Ok(token) => enforcement
+            .config
+            .validate(token, enforcement.verifier.as_ref(), now_unix)
+            .map_err(Some),
+        Err(_) => Err(None),
+    };
+    decision.map(ScopeGrant).map_err(|err| {
+        let challenge = enforcement.config.www_authenticate(
+            &enforcement.metadata_url,
+            err.as_ref().map(token_error_code),
+        );
+        HttpResponse {
+            status: 401,
+            headers: vec![
+                (
+                    "content-type".to_owned(),
+                    "text/plain; charset=utf-8".to_owned(),
+                ),
+                ("www-authenticate".to_owned(), challenge),
+            ],
+            body: b"unauthorized".to_vec(),
         }
+    })
+}
 
-        let enforcement = accept_enforcement();
-        let router = Router::new()
-            .route("/probe", axum::routing::post(inner))
-            .layer(axum::middleware::from_fn_with_state(
-                Arc::clone(&enforcement),
-                oauth_guard,
-            ));
+fn guard_http_request(config: &HttpTransportConfig, request: &HttpRequest) -> Option<HttpResponse> {
+    let policy = HttpGuardPolicy {
+        allowed_origins: config.allowed_origins.clone(),
+        allowed_hosts: config.allowed_hosts.clone(),
+        // The CLI's listen guard owns the plaintext remote-bind policy. This
+        // per-request guard preserves the previous Streamable HTTP behavior:
+        // loopback hosts pass by default, explicit allowed_hosts pass when set.
+        allow_non_loopback_http: true,
+    };
+    match policy.check("http", request.header("host"), request.header("origin")) {
+        Ok(()) => None,
+        Err(HttpGuardError::ForbiddenOrigin(_)) => Some(HttpResponse {
+            status: 403,
+            headers: vec![],
+            body: b"Forbidden: Origin header is not allowed".to_vec(),
+        }),
+        Err(_) => Some(HttpResponse {
+            status: 403,
+            headers: vec![],
+            body: b"Forbidden: Host header is not allowed".to_vec(),
+        }),
+    }
+}
 
-        let req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/probe")
-            .header("host", "127.0.0.1")
-            .header(
-                "authorization",
-                format!("Bearer {}", jwt_with_scope("oracle:read")),
-            )
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let resp = router.oneshot(req).await.unwrap();
+/// Handle one parsed native HTTP request.
+#[must_use]
+pub fn handle_http_request(
+    server: &OracleMcpServer,
+    config: &HttpTransportConfig,
+    request: HttpRequest,
+) -> HttpResponse {
+    if request.path == PROTECTED_RESOURCE_METADATA_PATH && request.method == "GET" {
+        return match &config.resource_metadata {
+            Some(meta) => json_response(200, meta),
+            None => empty_response(404),
+        };
+    }
+    if request.path != MCP_PATH {
+        return empty_response(404);
+    }
+    if let Some(response) = guard_http_request(config, &request) {
+        return response;
+    }
+    if request.body.len() > MAX_BODY_BYTES {
+        return empty_response(413);
+    }
+    if let Some(enforcement) = &config.oauth
+        && let Err(response) = validate_oauth_request(&request, enforcement)
+    {
+        return response;
+    }
+    match request.method.as_str() {
+        "DELETE" => empty_response(202),
+        "POST" => handle_mcp_post(server, config, &request),
+        "GET" => empty_response(405).with_header("allow", "POST, DELETE"),
+        _ => empty_response(405).with_header("allow", "GET, POST, DELETE"),
+    }
+}
 
-        // The token is valid -> admitted (NOT a 401), and the inner handler is
-        // reached: the guard never gates on the (narrow) scope.
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "valid narrowly-scoped bearer is admitted (no scope gating at the guard)"
-        );
-        assert!(
-            REACHED.load(Ordering::SeqCst),
-            "the request reached the inner handler — scope was not enforced"
-        );
+fn handle_mcp_post(
+    server: &OracleMcpServer,
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+) -> HttpResponse {
+    let parsed = match serde_json::from_slice::<Value>(&request.body) {
+        Ok(value) => value,
+        Err(_) => {
+            return json_response(200, &jsonrpc_error(Value::Null, -32700, "Parse error"));
+        }
+    };
+    let method = parsed
+        .get("method")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let response = server.handle_jsonrpc_request(parsed, None);
+    let Some(response) = response else {
+        return empty_response(202);
+    };
+    if config.stateful {
+        return sse_response(method.as_deref(), response);
+    }
+    json_response(200, &response)
+}
 
-        // The scope is *captured* (so wiring it later is possible) but it is the
-        // dispatch path's job to enforce it — which is not yet done (ajm2.5).
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&body),
-            "oracle:read",
-            "the guard captures ScopeGrant on the extensions (captured-only)"
-        );
+fn jsonrpc_error(id: Value, code: i64, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": code,
+            "message": message,
+        },
+    })
+}
+
+fn json_response(status: u16, value: &Value) -> HttpResponse {
+    HttpResponse {
+        status,
+        headers: vec![("content-type".to_owned(), "application/json".to_owned())],
+        body: serde_json::to_vec(value).expect("JSON response serializes"),
+    }
+}
+
+fn empty_response(status: u16) -> HttpResponse {
+    HttpResponse {
+        status,
+        headers: vec![],
+        body: Vec::new(),
+    }
+}
+
+impl HttpResponse {
+    fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_owned(), value.to_owned()));
+        self
+    }
+}
+
+fn sse_response(method: Option<&str>, response: Value) -> HttpResponse {
+    let mut body = Vec::new();
+    let session_id = if method == Some("initialize") {
+        write_sse_event(&mut body, Some("0"), Some(3000), Some(&Value::Null));
+        write_sse_event(&mut body, None, None, Some(&response));
+        Some(new_session_id())
+    } else {
+        write_sse_event(&mut body, Some("0/0"), Some(3000), Some(&Value::Null));
+        write_sse_event(&mut body, Some("1/0"), None, Some(&response));
+        None
+    };
+    let mut headers = vec![
+        ("content-type".to_owned(), "text/event-stream".to_owned()),
+        ("cache-control".to_owned(), "no-cache".to_owned()),
+    ];
+    if let Some(session_id) = session_id {
+        headers.push(("mcp-session-id".to_owned(), session_id));
+    }
+    HttpResponse {
+        status: 200,
+        headers,
+        body,
+    }
+}
+
+fn write_sse_event(body: &mut Vec<u8>, id: Option<&str>, retry: Option<u64>, data: Option<&Value>) {
+    if let Some(id) = id {
+        body.extend_from_slice(format!("id: {id}\n").as_bytes());
+    }
+    if let Some(retry) = retry {
+        body.extend_from_slice(format!("retry: {retry}\n").as_bytes());
+    }
+    if let Some(data) = data {
+        if data.is_null() {
+            body.extend_from_slice(b"data:\n");
+        } else {
+            body.extend_from_slice(b"data: ");
+            body.extend_from_slice(
+                serde_json::to_string(data)
+                    .expect("SSE event data serializes")
+                    .as_bytes(),
+            );
+            body.push(b'\n');
+        }
+    }
+    body.push(b'\n');
+}
+
+fn new_session_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("00000000-0000-4000-8000-{n:012x}")
+}
+
+/// Serve the MCP server over plaintext Streamable HTTP on `listener`.
+///
+/// # Errors
+/// Returns fatal listener or connection write errors. Individual malformed
+/// client requests are answered with HTTP errors and the listener continues.
+pub fn serve_http(
+    listener: TcpListener,
+    server: OracleMcpServer,
+    config: &HttpTransportConfig,
+) -> std::io::Result<()> {
+    serve_http_until(listener, server, config, Arc::new(AtomicBool::new(false)))
+}
+
+/// Serve HTTP until `shutdown` becomes true, then stop accepting new
+/// connections and join active request workers before returning.
+///
+/// This is primarily used by tests and future signal wiring; the production
+/// `serve_http` wrapper passes a never-set flag and therefore runs until the
+/// listener itself fails or the process exits.
+pub fn serve_http_until(
+    listener: TcpListener,
+    server: OracleMcpServer,
+    config: &HttpTransportConfig,
+    shutdown: Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    listener.set_nonblocking(true)?;
+    let config = Arc::new(config.clone());
+    let mut workers: Vec<JoinHandle<()>> = Vec::new();
+    while !shutdown.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((stream, _addr)) => {
+                let server = server.clone();
+                let config = Arc::clone(&config);
+                workers.push(std::thread::spawn(move || {
+                    if let Err(e) = handle_connection(stream, &server, &config) {
+                        tracing::debug!(error = %e, "native HTTP connection failed");
+                    }
+                }));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    for worker in workers {
+        let _ = worker.join();
+    }
+    Ok(())
+}
+
+fn handle_connection(
+    mut stream: TcpStream,
+    server: &OracleMcpServer,
+    config: &HttpTransportConfig,
+) -> std::io::Result<()> {
+    let response = match read_http_request(&mut stream) {
+        Ok(Some(request)) => handle_http_request(server, config, request),
+        Ok(None) => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => HttpResponse {
+            status: 400,
+            headers: vec![],
+            body: e.to_string().into_bytes(),
+        },
+        Err(e) => return Err(e),
+    };
+    write_http_response(&mut stream, &response)
+}
+
+const MAX_HEADER_BYTES: usize = 64 * 1024;
+const MAX_BODY_BYTES: usize = 1024 * 1024;
+
+fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequest>> {
+    let mut buf = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    let header_end = loop {
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            if buf.is_empty() {
+                return Ok(None);
+            }
+            return Err(invalid_data("incomplete HTTP request"));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(end) = find_header_end(&buf) {
+            break end;
+        }
+        if buf.len() > MAX_HEADER_BYTES {
+            return Err(invalid_data("HTTP headers exceed native transport limit"));
+        }
+    };
+
+    let header_text = std::str::from_utf8(&buf[..header_end])
+        .map_err(|_| invalid_data("HTTP headers are not UTF-8"))?;
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines
+        .next()
+        .ok_or_else(|| invalid_data("missing HTTP request line"))?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts
+        .next()
+        .ok_or_else(|| invalid_data("missing HTTP method"))?;
+    let target = request_parts
+        .next()
+        .ok_or_else(|| invalid_data("missing HTTP target"))?;
+    let version = request_parts
+        .next()
+        .ok_or_else(|| invalid_data("missing HTTP version"))?;
+    if !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
+        return Err(invalid_data("unsupported HTTP version"));
+    }
+
+    let mut headers = Vec::new();
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(invalid_data("malformed HTTP header"));
+        };
+        headers.push((name.trim().to_owned(), value.trim().to_owned()));
+    }
+    let mut request = HttpRequest::new(
+        method,
+        target.split('?').next().unwrap_or(target),
+        headers,
+        Vec::new(),
+    );
+    let content_length = request
+        .header("content-length")
+        .map(str::parse::<usize>)
+        .transpose()
+        .map_err(|_| invalid_data("invalid Content-Length"))?
+        .unwrap_or(0);
+    if content_length > MAX_BODY_BYTES {
+        return Err(invalid_data("HTTP body exceeds native transport limit"));
+    }
+    let body_start = header_end + 4;
+    request.body.extend_from_slice(&buf[body_start..]);
+    while request.body.len() < content_length {
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            return Err(invalid_data("incomplete HTTP body"));
+        }
+        request.body.extend_from_slice(&chunk[..n]);
+    }
+    request.body.truncate(content_length);
+    Ok(Some(request))
+}
+
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn invalid_data(message: &'static str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+}
+
+fn write_http_response(stream: &mut TcpStream, response: &HttpResponse) -> std::io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 {} {}\r\n",
+        response.status,
+        reason_phrase(response.status)
+    )?;
+    let mut has_content_length = false;
+    let mut has_connection = false;
+    for (name, value) in &response.headers {
+        if name.eq_ignore_ascii_case("content-length") {
+            has_content_length = true;
+        }
+        if name.eq_ignore_ascii_case("connection") {
+            has_connection = true;
+        }
+        write!(stream, "{name}: {value}\r\n")?;
+    }
+    if !has_content_length {
+        write!(stream, "content-length: {}\r\n", response.body.len())?;
+    }
+    if !has_connection {
+        write!(stream, "connection: close\r\n")?;
+    }
+    stream.write_all(b"\r\n")?;
+    stream.write_all(&response.body)?;
+    stream.flush()
+}
+
+fn reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        202 => "Accepted",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        413 => "Payload Too Large",
+        _ => "OK",
     }
 }
