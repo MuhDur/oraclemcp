@@ -1,0 +1,83 @@
+{
+  "case": "rmcp DNS-rebinding Host guard and browser Origin allowlist",
+  "requests": [
+    {
+      "body": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+          "capabilities": {},
+          "clientInfo": {
+            "name": "golden-http-guard",
+            "version": "1.0"
+          },
+          "protocolVersion": "2025-11-25"
+        }
+      },
+      "headers": [
+        [
+          "host",
+          "attacker.example"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ],
+        [
+          "accept",
+          "application/json, text/event-stream"
+        ]
+      ],
+      "method": "POST",
+      "name": "untrusted host",
+      "path": "/mcp",
+      "response": {
+        "body": "Forbidden: Host header is not allowed",
+        "headers": {},
+        "status": 403
+      }
+    },
+    {
+      "body": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+          "capabilities": {},
+          "clientInfo": {
+            "name": "golden-http-guard",
+            "version": "1.0"
+          },
+          "protocolVersion": "2025-11-25"
+        }
+      },
+      "headers": [
+        [
+          "host",
+          "127.0.0.1"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ],
+        [
+          "accept",
+          "application/json, text/event-stream"
+        ],
+        [
+          "origin",
+          "https://evil.example"
+        ]
+      ],
+      "method": "POST",
+      "name": "forbidden origin",
+      "path": "/mcp",
+      "response": {
+        "body": "Forbidden: Origin header is not allowed",
+        "headers": {},
+        "status": 403
+      }
+    }
+  ]
+}

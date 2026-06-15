@@ -1,0 +1,67 @@
+{
+  "case": "stdio initialize fail-closed init-token errors",
+  "expected_token": "expected-init-token",
+  "transcripts": [
+    {
+      "name": "missing token",
+      "transcript": {
+        "events": [],
+        "initialize": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "method": "initialize",
+          "params": {
+            "capabilities": {},
+            "clientInfo": {
+              "name": "oraclemcp-golden-stdio",
+              "version": "1.0"
+            },
+            "protocolVersion": "2025-11-25"
+          }
+        },
+        "responses": [
+          {
+            "error": {
+              "code": -32600,
+              "message": "stdio init token missing from initialize request"
+            },
+            "id": 1,
+            "jsonrpc": "2.0"
+          }
+        ]
+      }
+    },
+    {
+      "name": "wrong token",
+      "transcript": {
+        "events": [],
+        "initialize": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "method": "initialize",
+          "params": {
+            "_meta": {
+              "oraclemcp/initToken": "wrong-init-token"
+            },
+            "capabilities": {},
+            "clientInfo": {
+              "name": "oraclemcp-golden-stdio",
+              "version": "1.0"
+            },
+            "protocolVersion": "2025-11-25"
+          }
+        },
+        "responses": [
+          {
+            "error": {
+              "code": -32600,
+              "message": "stdio init token mismatch"
+            },
+            "id": 1,
+            "jsonrpc": "2.0"
+          }
+        ]
+      }
+    }
+  ]
+}

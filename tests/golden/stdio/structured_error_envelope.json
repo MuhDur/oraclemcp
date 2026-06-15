@@ -1,0 +1,85 @@
+{
+  "case": "stdio live tool maps Oracle failure to structured MCP tool error",
+  "transcript": {
+    "events": [
+      {
+        "expect_response": false,
+        "message": {
+          "jsonrpc": "2.0",
+          "method": "notifications/initialized"
+        },
+        "name": "initialized notification"
+      },
+      {
+        "expect_response": true,
+        "message": {
+          "id": 2,
+          "jsonrpc": "2.0",
+          "method": "tools/call",
+          "params": {
+            "arguments": {
+              "owner": "HR"
+            },
+            "name": "oracle_schema_inspect"
+          }
+        },
+        "name": "structured db error envelope"
+      }
+    ],
+    "initialize": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "method": "initialize",
+      "params": {
+        "_meta": {
+          "oraclemcp/initToken": "expected-init-token"
+        },
+        "capabilities": {},
+        "clientInfo": {
+          "name": "oraclemcp-golden-stdio",
+          "version": "1.0"
+        },
+        "protocolVersion": "2025-11-25"
+      }
+    },
+    "responses": [
+      {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {
+          "capabilities": {
+            "tools": {}
+          },
+          "instructions": "Call oracle_capabilities first to discover tools, the current/max operating level, and connection status. Reads are frictionless; writes/DDL require a gated escalation.",
+          "protocolVersion": "2025-11-25",
+          "serverInfo": {
+            "description": "Safe-by-default Oracle Database MCP server with PL/SQL intelligence.",
+            "name": "oraclemcp",
+            "title": "Oracle MCP server",
+            "version": "0.2.1"
+          }
+        }
+      },
+      {
+        "id": 2,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"error_class\":\"OBJECT_NOT_FOUND\",\"isError\":true,\"message\":\"ORA-00942: table or view does not exist\",\"ora_code\":942,\"suggested_tool\":\"oracle_schema_inspect\"}",
+              "type": "text"
+            }
+          ],
+          "isError": true,
+          "structuredContent": {
+            "error_class": "OBJECT_NOT_FOUND",
+            "isError": true,
+            "message": "ORA-00942: table or view does not exist",
+            "ora_code": 942,
+            "suggested_tool": "oracle_schema_inspect"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "case": "stateless /mcp initialize returns direct JSON",
+  "request": {
+    "body": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "method": "initialize",
+      "params": {
+        "capabilities": {},
+        "clientInfo": {
+          "name": "golden-http-json",
+          "version": "1.0"
+        },
+        "protocolVersion": "2025-11-25"
+      }
+    },
+    "headers": [
+      [
+        "host",
+        "127.0.0.1"
+      ],
+      [
+        "content-type",
+        "application/json"
+      ],
+      [
+        "accept",
+        "application/json, text/event-stream"
+      ]
+    ],
+    "method": "POST",
+    "path": "/mcp"
+  },
+  "response": {
+    "body": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "result": {
+        "capabilities": {
+          "tools": {}
+        },
+        "instructions": "Call oracle_capabilities first to discover tools, the current/max operating level, and connection status. Reads are frictionless; writes/DDL require a gated escalation.",
+        "protocolVersion": "2025-11-25",
+        "serverInfo": {
+          "description": "Safe-by-default Oracle Database MCP server with PL/SQL intelligence.",
+          "name": "oraclemcp",
+          "title": "Oracle MCP server",
+          "version": "0.2.1"
+        }
+      }
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status": 200
+  }
+}

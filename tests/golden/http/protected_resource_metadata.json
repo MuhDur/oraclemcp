@@ -1,0 +1,38 @@
+{
+  "case": "RFC 9728 protected-resource metadata stays publicly discoverable",
+  "configured_metadata": {
+    "authorization_servers": [
+      "https://idp.example"
+    ],
+    "resource": "https://oraclemcp.example/mcp",
+    "scopes_supported": [
+      "oracle:read"
+    ]
+  },
+  "request": {
+    "body": "",
+    "headers": [
+      [
+        "host",
+        "127.0.0.1"
+      ]
+    ],
+    "method": "GET",
+    "path": "/.well-known/oauth-protected-resource"
+  },
+  "response": {
+    "body": {
+      "authorization_servers": [
+        "https://idp.example"
+      ],
+      "resource": "https://oraclemcp.example/mcp",
+      "scopes_supported": [
+        "oracle:read"
+      ]
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status": 200
+  }
+}

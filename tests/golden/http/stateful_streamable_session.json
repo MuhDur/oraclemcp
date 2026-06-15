@@ -1,0 +1,221 @@
+{
+  "case": "stateful Streamable HTTP session uses SSE, session header, initialized notification, and session-bound request",
+  "exchanges": [
+    {
+      "name": "initialize",
+      "request": {
+        "body": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "method": "initialize",
+          "params": {
+            "capabilities": {},
+            "clientInfo": {
+              "name": "golden-http-stateful",
+              "version": "1.0"
+            },
+            "protocolVersion": "2025-11-25"
+          }
+        },
+        "headers": [
+          [
+            "host",
+            "127.0.0.1"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ]
+        ],
+        "method": "POST",
+        "path": "/mcp"
+      },
+      "response": {
+        "body": [
+          {
+            "data": null,
+            "id": "0",
+            "retry": 3000
+          },
+          {
+            "data": {
+              "id": 1,
+              "jsonrpc": "2.0",
+              "result": {
+                "capabilities": {
+                  "tools": {}
+                },
+                "instructions": "Call oracle_capabilities first to discover tools, the current/max operating level, and connection status. Reads are frictionless; writes/DDL require a gated escalation.",
+                "protocolVersion": "2025-11-25",
+                "serverInfo": {
+                  "description": "Safe-by-default Oracle Database MCP server with PL/SQL intelligence.",
+                  "name": "oraclemcp",
+                  "title": "Oracle MCP server",
+                  "version": "0.2.1"
+                }
+              }
+            }
+          }
+        ],
+        "headers": {
+          "cache-control": "no-cache",
+          "content-type": "text/event-stream",
+          "mcp-session-id": "[SESSION_ID]"
+        },
+        "status": 200
+      }
+    },
+    {
+      "name": "notifications/initialized",
+      "request": {
+        "body": {
+          "jsonrpc": "2.0",
+          "method": "notifications/initialized"
+        },
+        "headers": [
+          [
+            "host",
+            "127.0.0.1"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "mcp-session-id",
+            "[SESSION_ID]"
+          ],
+          [
+            "mcp-protocol-version",
+            "2025-11-25"
+          ]
+        ],
+        "method": "POST",
+        "path": "/mcp"
+      },
+      "response": {
+        "body": "",
+        "headers": {},
+        "status": 202
+      }
+    },
+    {
+      "name": "tools/list",
+      "request": {
+        "body": {
+          "id": 2,
+          "jsonrpc": "2.0",
+          "method": "tools/list"
+        },
+        "headers": [
+          [
+            "host",
+            "127.0.0.1"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "mcp-session-id",
+            "[SESSION_ID]"
+          ],
+          [
+            "mcp-protocol-version",
+            "2025-11-25"
+          ]
+        ],
+        "method": "POST",
+        "path": "/mcp"
+      },
+      "response": {
+        "body": [
+          {
+            "data": null,
+            "id": "0/0",
+            "retry": 3000
+          },
+          {
+            "data": {
+              "id": 2,
+              "jsonrpc": "2.0",
+              "result": {
+                "tools": [
+                  {
+                    "description": "Zero-arg entry point: tools, operating level + gates, connection/standby status, feature tiers, version.",
+                    "inputSchema": {
+                      "type": "object"
+                    },
+                    "name": "oracle_capabilities"
+                  },
+                  {
+                    "description": "inspect a schema",
+                    "inputSchema": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "name_like": {
+                          "type": "string"
+                        },
+                        "owner": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [],
+                      "type": "object"
+                    },
+                    "name": "oracle_schema_inspect"
+                  }
+                ]
+              }
+            },
+            "id": "1/0"
+          }
+        ],
+        "headers": {
+          "cache-control": "no-cache",
+          "content-type": "text/event-stream"
+        },
+        "status": 200
+      }
+    },
+    {
+      "name": "delete session",
+      "request": {
+        "body": "",
+        "headers": [
+          [
+            "host",
+            "127.0.0.1"
+          ],
+          [
+            "mcp-session-id",
+            "[SESSION_ID]"
+          ],
+          [
+            "mcp-protocol-version",
+            "2025-11-25"
+          ]
+        ],
+        "method": "DELETE",
+        "path": "/mcp"
+      },
+      "response": {
+        "body": "",
+        "headers": {},
+        "status": 202
+      }
+    }
+  ]
+}
