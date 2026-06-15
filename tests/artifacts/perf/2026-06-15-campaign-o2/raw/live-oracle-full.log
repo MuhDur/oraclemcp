@@ -1,0 +1,19 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/live_oracle.rs (/tmp/cargo-target/debug/deps/live_oracle-aa764f4ca5f2c60f)
+
+running 10 tests
+test live_perf_phase_split_connect_ping_query_describe ... ignored, profiling helper; run explicitly with --ignored --nocapture
+[live-xe] type-fidelity row: {"BD":3.5,"BIG_NUM":"12345678901234567890","D":"2026-06-01T12:00:00"}
+test live_type_fidelity_number_string_and_iso_date ... ok
+[live-xe] SKIP live_dbms_output_capture: thin driver does not expose capture yet (DBMS_OUTPUT capture needs PL/SQL OUT binds; the published thin driver does not expose that API yet)
+test live_dbms_output_capture_is_verified_or_explicitly_skipped ... ok
+[live-xe] connected: version=Some("23.26.1.0.0") role=Some("PRIMARY") open_mode=Some("READ WRITE") schema=Some("SYSTEM")
+test live_connect_ping_query_bind_describe ... ok
+test live_lease_lifecycle_on_a_pinned_session ... ok
+test live_tier1_intelligence_dictionary_tools ... ok
+test live_pool_thin_roundtrip ... ok
+test live_cancelled_query_context_leaves_pool_usable ... ok
+test live_savepoint_preview_is_ground_truth_and_rolls_back ... ok
+test live_query_pagination_caps_and_cursor ... ok
+
+test result: ok. 9 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.61s

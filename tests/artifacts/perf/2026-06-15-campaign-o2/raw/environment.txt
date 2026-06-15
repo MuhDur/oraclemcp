@@ -1,0 +1,8 @@
+git=862edb66166e064c11e446140f3c729ec6d7a710
+diff=live-phase-split-working-tree
+rustc=rustc 1.97.0-nightly (4b0c9d76a 2026-05-10)
+cargo=cargo 1.97.0-nightly (a343accce 2026-05-08)
+toolchain=nightly-2026-05-11-x86_64-unknown-linux-gnu (overridden by '/home/durakovic/projects/oraclemcp/rust-toolchain.toml')
+date=2026-06-15T21:28:50Z
+container=plsql-intelligence-xe
+dsn=//localhost:1521/FREEPDB1

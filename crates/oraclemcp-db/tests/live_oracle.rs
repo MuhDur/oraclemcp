@@ -18,7 +18,7 @@ use oraclemcp_db::{
 };
 use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use serde_json::json;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn test_opts() -> OracleConnectOptions {
     OracleConnectOptions {
@@ -92,6 +92,62 @@ fn live_connect_ping_query_bind_describe() {
         "[live-xe] connected: version={:?} role={:?} open_mode={:?} schema={:?}",
         info.server_version, info.database_role, info.open_mode, info.current_schema
     );
+
+    let rows = conn
+        .query_rows("SELECT 1 AS after_describe FROM dual", &[])
+        .expect("query after describe");
+    assert_eq!(rows[0].text("AFTER_DESCRIBE"), Some("1"));
+}
+
+#[test]
+#[ignore = "profiling helper; run explicitly with --ignored --nocapture"]
+fn live_perf_phase_split_connect_ping_query_describe() {
+    let opts = test_opts();
+    if let Err(e) = RustOracleConnection::connect(opts.clone()) {
+        eprintln!(
+            "[live-xe] SKIP live_perf_phase_split_connect_ping_query_describe: no reachable Oracle ({e}); \
+             set ORACLEMCP_TEST_*"
+        );
+        return;
+    }
+
+    eprintln!("scope,run,phase,ns");
+    for run in 1..=20 {
+        let start = Instant::now();
+        let conn = RustOracleConnection::connect(opts.clone()).expect("cold connect");
+        eprintln!("cold,{run},connect,{}", start.elapsed().as_nanos());
+
+        emit_live_phase("cold", run, "ping", || conn.ping());
+        emit_live_phase("cold", run, "query_scalar", || {
+            conn.query_rows("SELECT 1 AS one FROM dual", &[])
+                .map(|_| ())
+        });
+        emit_live_phase("cold", run, "query_bind", || {
+            conn.query_rows("SELECT :1 AS v FROM dual", &[OracleBind::from("hello")])
+                .map(|_| ())
+        });
+        emit_live_phase("cold", run, "describe", || conn.describe().map(|_| ()));
+    }
+
+    let conn = RustOracleConnection::connect(opts).expect("steady connect");
+    for run in 1..=50 {
+        emit_live_phase("steady", run, "ping", || conn.ping());
+        emit_live_phase("steady", run, "query_scalar", || {
+            conn.query_rows("SELECT 1 AS one FROM dual", &[])
+                .map(|_| ())
+        });
+        emit_live_phase("steady", run, "query_bind", || {
+            conn.query_rows("SELECT :1 AS v FROM dual", &[OracleBind::from("hello")])
+                .map(|_| ())
+        });
+        emit_live_phase("steady", run, "describe", || conn.describe().map(|_| ()));
+    }
+}
+
+fn emit_live_phase(scope: &str, run: usize, phase: &str, f: impl FnOnce() -> Result<(), DbError>) {
+    let start = Instant::now();
+    f().unwrap_or_else(|e| panic!("{scope} {phase} failed: {e}"));
+    eprintln!("{scope},{run},{phase},{}", start.elapsed().as_nanos());
 }
 
 #[test]

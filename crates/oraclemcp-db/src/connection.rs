@@ -470,7 +470,7 @@ mod driver {
             result.more_rows = fetched.more_rows;
         }
         if cursor_id != 0 {
-            inner.close_cursor(cursor_id);
+            inner.release_cursor(cursor_id);
         }
         rows_to_oracle_rows(&columns, rows)
     }
