@@ -14,15 +14,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CRATES_DIR="$ROOT/crates"
 violations=0
+cd "$ROOT"
 
-core_crates=$(find "$CRATES_DIR" -maxdepth 1 -type d -name 'oraclemcp-*' | sort)
+mapfile -t core_crates < <(find "$CRATES_DIR" -maxdepth 1 -type d -name 'oraclemcp-*' | sort)
 
-if [ -z "$core_crates" ]; then
+if [ "${#core_crates[@]}" -eq 0 ]; then
   echo "oraclemcp-boundary-lint: no oraclemcp-* crates found under $CRATES_DIR" >&2
   exit 1
 fi
 
-for crate in $core_crates; do
+for crate in "${core_crates[@]}"; do
   name="$(basename "$crate")"
 
   # 1) Cargo.toml must not declare any plsql-* dependency.
@@ -55,9 +56,9 @@ if [ "$violations" -ne 0 ]; then
   exit 1
 fi
 
-echo "oraclemcp-boundary-lint: OK — $(echo "$core_crates" | wc -l | tr -d ' ') core crate(s) are engine-free."
+echo "oraclemcp-boundary-lint: OK — ${#core_crates[@]} core crate(s) are engine-free."
 
-advisory_packages=(
+forbidden_production_packages=(
   tokio
   tokio-stream
   tokio-util
@@ -74,28 +75,98 @@ advisory_packages=(
   smol
 )
 
-check_dependency_graph() {
-  local label="$1"
-  shift
-  local cargo_args=("$@")
-
-  echo "oraclemcp-boundary-lint: advisory dependency holdouts for $label graph (non-failing until W12)."
-
-  for package in "${advisory_packages[@]}"; do
-    tree_file="$(mktemp)"
-    if cargo tree -e normal --workspace "${cargo_args[@]}" -i "$package" >"$tree_file" 2>&1; then
-      echo "ADVISORY[$label]: forbidden final dependency currently present: $package" >&2
-      sed 's/^/  /' "$tree_file" >&2
-    else
-      if grep -Eiq 'did not match|nothing to print|could not find package|not found' "$tree_file"; then
-        echo "OK[$label]: $package absent from the normal workspace dependency graph."
-      else
-        echo "ADVISORY[$label]: could not inspect dependency '$package'; cargo tree said:" >&2
-        sed 's/^/  /' "$tree_file" >&2
-      fi
-    fi
-    rm -f "$tree_file"
+indent_text() {
+  local line
+  while IFS= read -r line; do
+    printf '  %s\n' "$line"
   done
 }
 
-check_dependency_graph "default"
+tree_package_present() {
+  local label="$1"
+  local package="$2"
+  shift 2
+  local output
+  local status
+
+  output="$(cargo tree --locked --workspace "$@" -i "$package" 2>&1)" && status=0 || status=$?
+  if [ "$status" -eq 0 ]; then
+    printf '%s\n' "$output"
+    return 0
+  fi
+
+  if grep -Eiq 'did not match|nothing to print|could not find package|not found' <<<"$output"; then
+    return 1
+  fi
+
+  echo "oraclemcp-boundary-lint: could not inspect dependency '$package' for $label graph:" >&2
+  indent_text <<<"$output" >&2
+  return 2
+}
+
+check_production_dependency_graph() {
+  echo "oraclemcp-boundary-lint: hard forbidden dependency gate for normal production graph."
+  echo "oraclemcp-boundary-lint: cargo tree -e normal --workspace --target all -i <package>"
+
+  local package
+  local tree
+  for package in "${forbidden_production_packages[@]}"; do
+    if tree="$(tree_package_present "production" "$package" -e normal --target all)"; then
+      echo "FORBIDDEN[production]: '$package' is present in the normal workspace dependency graph:" >&2
+      indent_text <<<"$tree" >&2
+      violations=$((violations + 1))
+    else
+      case "$?" in
+        1) echo "OK[production]: $package absent from the normal workspace dependency graph." ;;
+        2) violations=$((violations + 1)) ;;
+      esac
+    fi
+  done
+}
+
+show_all_target_dependency_graph() {
+  echo "oraclemcp-boundary-lint: all-target dependency visibility for forbidden package names."
+  echo "oraclemcp-boundary-lint: cargo tree -e all --workspace --target all -i <package>"
+
+  local package
+  local tree
+  for package in "${forbidden_production_packages[@]}"; do
+    if tree="$(tree_package_present "all-target" "$package" -e all --target all)"; then
+      echo "VISIBLE[all-target]: '$package' appears somewhere in all targets/edges:"
+      indent_text <<<"$tree"
+    else
+      case "$?" in
+        1) echo "OK[all-target]: $package absent from all workspace targets/edges." ;;
+        2) violations=$((violations + 1)) ;;
+      esac
+    fi
+  done
+}
+
+check_compat_markers() {
+  local hits
+
+  hits="$(grep -RIn 'COMPAT-REMOVE' "$ROOT/Cargo.toml" "$ROOT/crates" 2>/dev/null || true)"
+  if [ -n "$hits" ]; then
+    echo "FORBIDDEN[compat-marker]: temporary compat marker(s) remain in production paths:" >&2
+    indent_text <<<"$hits" >&2
+    echo "oraclemcp-boundary-lint: remove compat code or tie it to an open bead before release." >&2
+    violations=$((violations + 1))
+  else
+    echo "OK[compat-marker]: no COMPAT-REMOVE markers remain in production paths."
+  fi
+}
+
+check_production_dependency_graph
+show_all_target_dependency_graph
+check_compat_markers
+
+if [ "$violations" -ne 0 ]; then
+  echo "" >&2
+  echo "oraclemcp-boundary-lint: $violations violation(s). The thin-native release" >&2
+  echo "must stay free of Tokio, rmcp, Axum, Hyper, ODPI-C/oracle, r2d2, and" >&2
+  echo "temporary Tokio compatibility dependencies in the production graph." >&2
+  exit 1
+fi
+
+echo "oraclemcp-boundary-lint: OK — thin-native dependency boundary holds."
