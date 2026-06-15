@@ -10,7 +10,7 @@ real query text.
 
 | Area | Current fact | Evidence |
 | --- | --- | --- |
-| Workspace | Cargo workspace with 9 crates plus `oraclemcp` binary, `resolver = "2"`, edition 2024, Rust 1.88 in `Cargo.toml`. | `Cargo.toml` |
+| Workspace | Cargo workspace with 9 crates plus `oraclemcp` binary, `resolver = "2"`, edition 2024, pinned nightly `nightly-2026-05-11`, and no stable MSRV on the thin-native line. | `Cargo.toml`, `rust-toolchain.toml` |
 | Safety posture | Every crate forbids unsafe code; raw SQL safety is centered on `oraclemcp-guard`. | `Cargo.toml`, crate roots, `AGENTS.md` |
 | Current release line | All package versions and `server.json` are aligned at 0.2.1. | `Cargo.toml`, crate `Cargo.toml` files, `server.json` |
 | Current DB mode | Default build is offline; live Oracle support is feature-gated behind `live-db`/`oracle-driver` and the `oracle` thick driver. | `README.md`, `crates/oraclemcp-db/Cargo.toml` |
@@ -160,7 +160,7 @@ real query text.
 | Protocol behavior | Existing e2e tests cover current rmcp stdio/HTTP paths but fixtures are not yet golden transcripts. | W1 |
 | DB behavior | Unit/live tests cover type fidelity, live Oracle smoke, leases, chaos rollback, privilege degradation, dictionary tools, and pool offload. Live tests skip without Oracle env. | W4/W11 |
 | Dependency graph | Current default graph contains Tokio/rmcp/Axum/Hyper; live-db graph adds `oracle` and `r2d2`. | W2 advisory, W12 hard gate |
-| Release gates | CI runs fmt, clippy, tests, doc, MSRV, boundary lint, release preflight, cargo deny, live-db build, sensitive lint, and nightly fuzz build best-effort. Release workflow publishes crates, GitHub release assets, GHCR, and MCP registry from tags. | W14 |
+| Release gates | CI runs fmt, clippy, tests, doc, pinned-nightly build, boundary lint, advisory forbidden-dependency reporting, release preflight, cargo deny, live-db build, sensitive lint, and fuzz build best-effort. Release workflow publishes crates, GitHub release assets, GHCR, and MCP registry from tags. | W2, W14 |
 | Docker | Current image builds live-db binary and bundles Oracle Instant Client. | W14 must remove Instant Client for thin-native release. |
 | Performance | No local oraclemcp binary/startup/query benchmarks were produced in W0. Existing rust-oracledb docs contain thin-driver performance evidence, but those numbers are not oraclemcp release claims. | W13 |
 

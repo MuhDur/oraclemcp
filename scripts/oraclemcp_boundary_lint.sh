@@ -56,3 +56,47 @@ if [ "$violations" -ne 0 ]; then
 fi
 
 echo "oraclemcp-boundary-lint: OK — $(echo "$core_crates" | wc -l | tr -d ' ') core crate(s) are engine-free."
+
+advisory_packages=(
+  tokio
+  tokio-stream
+  tokio-util
+  asupersync-tokio-compat
+  rmcp
+  axum
+  hyper
+  hyper-util
+  oracle
+  odpic-sys
+  r2d2
+  reqwest
+  async-std
+  smol
+)
+
+check_dependency_graph() {
+  local label="$1"
+  shift
+  local cargo_args=("$@")
+
+  echo "oraclemcp-boundary-lint: advisory dependency holdouts for $label graph (non-failing until W12)."
+
+  for package in "${advisory_packages[@]}"; do
+    tree_file="$(mktemp)"
+    if cargo tree -e normal --workspace "${cargo_args[@]}" -i "$package" >"$tree_file" 2>&1; then
+      echo "ADVISORY[$label]: forbidden final dependency currently present: $package" >&2
+      sed 's/^/  /' "$tree_file" >&2
+    else
+      if grep -Eiq 'did not match|nothing to print|could not find package|not found' "$tree_file"; then
+        echo "OK[$label]: $package absent from the normal workspace dependency graph."
+      else
+        echo "ADVISORY[$label]: could not inspect dependency '$package'; cargo tree said:" >&2
+        sed 's/^/  /' "$tree_file" >&2
+      fi
+    fi
+    rm -f "$tree_file"
+  done
+}
+
+check_dependency_graph "default"
+check_dependency_graph "live-db" --features live-db

@@ -4,7 +4,6 @@ version = "0.2.1"
 description = "Fail-closed statement classifier, operating levels, policy and approval tokens for oraclemcp (Apache-2.0 OR MIT)"
 edition.workspace = true
 license.workspace = true
-rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true

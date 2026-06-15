@@ -4,7 +4,6 @@ version = "0.2.1"
 description = "Oracle connectivity, pooling, session leases and the type/NLS serializer for oraclemcp."
 edition.workspace = true
 license.workspace = true
-rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true

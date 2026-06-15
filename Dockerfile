@@ -14,7 +14,7 @@
 FROM oraclelinux:9 AS builder
 RUN dnf -y install gcc && dnf clean all && \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --profile minimal --default-toolchain stable
+      | sh -s -- -y --profile minimal --default-toolchain nightly-2026-05-11
 ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /src
 COPY . .

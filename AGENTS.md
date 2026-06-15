@@ -26,10 +26,13 @@ deliberate step.
 
 ## Rust toolchain & gates
 
-- Cargo workspace, `resolver = "2"`, MSRV **1.88**, `edition = "2024"`.
+- Cargo workspace, `resolver = "2"`, pinned nightly
+  **`nightly-2026-05-11`**, `edition = "2024"`. The thin-native line has no
+  stable MSRV while Asupersync/oracledb require nightly-only features.
 - Every crate is `#![forbid(unsafe_code)]`. Do not introduce `unsafe`.
 - Before committing: `cargo fmt --all -- --check`, `cargo clippy --workspace
-  --all-targets -- -D warnings`, `cargo test --workspace`, `cargo deny check`.
+  --all-targets -- -D warnings`, `cargo test --workspace`, `cargo deny check`
+  using the pinned toolchain from `rust-toolchain.toml`.
 - The default build is offline (no native deps). The Oracle driver (ODPI-C) is
   behind the opt-in `live-db` feature and needs Oracle Instant Client at runtime.
 

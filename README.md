@@ -7,7 +7,7 @@
   <a href="https://crates.io/crates/oraclemcp"><img src="https://img.shields.io/crates/v/oraclemcp.svg" alt="crates.io"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg" alt="license"></a>
   <img src="https://img.shields.io/badge/unsafe-forbidden-success.svg" alt="forbid(unsafe_code)">
-  <img src="https://img.shields.io/badge/rustc-1.88%2B-orange.svg" alt="MSRV 1.88">
+  <img src="https://img.shields.io/badge/rustc-nightly--2026--05--11-orange.svg" alt="nightly-2026-05-11">
 </p>
 
 > **Safe-by-default Oracle Database MCP server, in pure Rust.**
@@ -25,10 +25,19 @@
 
 ## Quick start
 
+This branch is pinned to **`nightly-2026-05-11`**. The thin-native line has no
+stable MSRV because the planned Asupersync/oracledb stack uses nightly-only
+language features. The repository's `rust-toolchain.toml` selects the pin for
+local builds; direct `cargo install` users should use the same toolchain.
+
+```sh
+rustup toolchain install nightly-2026-05-11 --component rustfmt --component clippy
+```
+
 For live database access, build with the `live-db` feature, which pulls the ODPI-C Oracle driver:
 
 ```sh
-cargo install oraclemcp --features live-db
+cargo +nightly-2026-05-11 install oraclemcp --features live-db
 ```
 
 **Runtime requirements** for `live-db`:
@@ -40,7 +49,7 @@ cargo install oraclemcp --features live-db
 The default build is **offline** (no native dependencies) and cannot reach a database; it is useful for CI and for inspecting the tool surface, but a binary built this way returns `RuntimeStateRequired` for any live call:
 
 ```sh
-cargo install oraclemcp   # tool surface only (no DB)
+cargo +nightly-2026-05-11 install oraclemcp   # tool surface only (no DB)
 ```
 
 Generate generic local setup templates for profiles, wrappers, and MCP client

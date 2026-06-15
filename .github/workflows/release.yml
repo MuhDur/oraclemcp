@@ -15,6 +15,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  ORACLEMCP_RUST_TOOLCHAIN: nightly-2026-05-11
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -30,8 +31,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.ORACLEMCP_RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
@@ -53,21 +55,23 @@ jobs:
       - run: cargo build -p oraclemcp --features live-db
       - run: cargo package --workspace --locked
 
-  msrv:
-    name: build on MSRV (1.88)
+  pinned-nightly:
+    name: build on pinned nightly
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.ORACLEMCP_RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
 
   build:
     name: build ${{ matrix.target }}
-    needs: [checks, msrv]
+    needs: [checks, pinned-nightly]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -84,8 +88,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.ORACLEMCP_RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
@@ -186,7 +191,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.ORACLEMCP_RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - name: Publish crates in dependency order
         env:

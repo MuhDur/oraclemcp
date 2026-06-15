@@ -1,5 +1,5 @@
 # cargo-fuzz target for the fail-closed classifier (bead T-CORPUS / 6.2).
-# A standing artifact: run with `cargo +nightly fuzz run classify_fuzz` (needs
+# A standing artifact: run with `cargo +nightly-2026-05-11 fuzz run classify_fuzz` (needs
 # nightly + cargo-fuzz). The empty [workspace] table detaches this from the
 # parent workspace so it is not built by `cargo build --workspace`.
 [package]

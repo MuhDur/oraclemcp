@@ -4,7 +4,6 @@ version = "0.2.1"
 description = "MCP protocol surface, Tool/ToolRegistry contract and capabilities for the oraclemcp server."
 edition.workspace = true
 license.workspace = true
-rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
