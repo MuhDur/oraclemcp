@@ -1,17 +1,16 @@
 name: Docker image
 
-# Build the Instant-Client container image and push it to GHCR
-# (ghcr.io/muhdur/oraclemcp). Runs on a version tag or on demand. The image
-# carries the io.modelcontextprotocol.server.name label the MCP registry needs.
+# Manual rebuild path for the Instant-Client container image. Normal tag
+# releases publish this image from release.yml after tests, GitHub release, and
+# crates.io publishing have succeeded. This workflow is for rebuilding an image
+# for the current Cargo/server.json version without cutting a new release.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: "Image version tag (e.g. 0.1.0)"
-        required: true
-        default: "0.1.0"
+        description: "Image version tag. Empty means the current Cargo package version."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -23,15 +22,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Resolve version
         id: ver
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "v=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          if [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"
           else
-            echo "v=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+            version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "oraclemcp") | .version')"
           fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid image version: $version" >&2
+            exit 1
+          }
+          echo "v=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release metadata
+        env:
+          RELEASE_TAG: v${{ steps.ver.outputs.v }}
+        run: bash scripts/release_preflight.sh
 
       - uses: docker/setup-buildx-action@v3
 

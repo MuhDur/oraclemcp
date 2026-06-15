@@ -1,6 +1,6 @@
 [package]
 name = "oraclemcp-core"
-version = "0.2.0"
+version = "0.2.1"
 description = "MCP protocol surface, Tool/ToolRegistry contract and capabilities for the oraclemcp server."
 edition.workspace = true
 license.workspace = true
@@ -11,13 +11,13 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-oraclemcp-error = { path = "../oraclemcp-error", version = "0.2.0" }
-oraclemcp-config = { path = "../oraclemcp-config", version = "0.2.0" }
-oraclemcp-db = { path = "../oraclemcp-db", version = "0.2.0" }
-oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.2.0" }
-oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.2.0" }
-oraclemcp-auth = { path = "../oraclemcp-auth", version = "0.2.0" }
-oraclemcp-telemetry = { path = "../oraclemcp-telemetry", version = "0.2.0" }
+oraclemcp-error = { path = "../oraclemcp-error", version = "0.2.1" }
+oraclemcp-config = { path = "../oraclemcp-config", version = "0.2.1" }
+oraclemcp-db = { path = "../oraclemcp-db", version = "0.2.1" }
+oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.2.1" }
+oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.2.1" }
+oraclemcp-auth = { path = "../oraclemcp-auth", version = "0.2.1" }
+oraclemcp-telemetry = { path = "../oraclemcp-telemetry", version = "0.2.1" }
 rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server"] }
 axum = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

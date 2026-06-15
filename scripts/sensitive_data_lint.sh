@@ -45,7 +45,7 @@ hits=0
 report() { echo "SENSITIVE-DATA LEAK SUSPECTED ($1):" >&2; echo "  $2" >&2; hits=$((hits + 1)); }
 
 scan_pattern() {
-  local label="$1" pat="$2"
+  local pat="$1"
   # -I skips binary files; -n gives line numbers; -E extended regex.
   grep -InE "$pat" "${FILES[@]}" 2>/dev/null | grep -v 'sensitive-lint:allow' | while IFS= read -r line; do
     printf '%s\n' "$line"
@@ -55,18 +55,19 @@ scan_pattern() {
 for pat in "${GENERIC_PATTERNS[@]}"; do
   while IFS= read -r line; do
     [ -n "$line" ] && report "generic" "$line"
-  done < <(scan_pattern generic "$pat")
+  done < <(scan_pattern "$pat")
 done
 
 DENYLIST="${ORACLEMCP_SENSITIVE_DENYLIST_FILE:-}"
 if [ -n "$DENYLIST" ]; then
   [ -f "$DENYLIST" ] || { echo "sensitive-data-lint: denylist file not found: $DENYLIST" >&2; exit 2; }
   while IFS= read -r raw; do
-    pat="${raw%%#*}"; pat="$(echo "$pat" | sed 's/[[:space:]]*$//')"
+    pat="${raw%%#*}"
+    pat="${pat%"${pat##*[![:space:]]}"}"
     [ -z "$pat" ] && continue
     while IFS= read -r line; do
       [ -n "$line" ] && report "site-denylist" "$line"
-    done < <(scan_pattern denylist "$pat")
+    done < <(scan_pattern "$pat")
   done < "$DENYLIST"
 else
   echo "sensitive-data-lint: note — \$ORACLEMCP_SENSITIVE_DENYLIST_FILE not set; running generic heuristics only." >&2

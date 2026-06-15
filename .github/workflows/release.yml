@@ -1,24 +1,75 @@
 name: Release
 
-# Tag-driven binary release. The default build is engine-free with no native
-# dependencies (the Oracle driver is an opt-in feature), so the `oraclemcp`
-# binary cross-compiles cleanly to every target below. `workflow_dispatch`
-# runs the build matrix on demand to validate it without cutting a release.
+# Tag-driven full release. A pushed vX.Y.Z tag is the source of truth: it must
+# match Cargo/package metadata, runs the release gates, publishes crates.io in
+# dependency order, builds GitHub assets, pushes the GHCR image, then publishes
+# server.json to the MCP registry. `workflow_dispatch` validates the gates/build
+# without publishing anything.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch: {}
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  checks:
+    name: release gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Validate release metadata
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          RELEASE_REQUIRE_MAIN: ${{ startsWith(github.ref, 'refs/tags/') }}
+        run: bash scripts/release_preflight.sh
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --all-targets
+      - run: cargo test --workspace --doc
+      - run: cargo doc --workspace --no-deps
+      - run: bash scripts/oraclemcp_boundary_lint.sh
+      - run: bash scripts/sensitive_data_lint.sh
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny check
+      - run: cargo build -p oraclemcp --features live-db
+      - run: cargo package --workspace --locked
+
+  msrv:
+    name: build on MSRV (1.88)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+
   build:
     name: build ${{ matrix.target }}
+    needs: [checks, msrv]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -31,6 +82,8 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -86,39 +139,127 @@ jobs:
 
   release:
     name: publish GitHub release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build, publish-crates]
+    if: >-
+      ${{
+        always() &&
+        startsWith(github.ref, 'refs/tags/') &&
+        needs.build.result == 'success' &&
+        (contains(github.ref_name, '-') || needs.publish-crates.result == 'success')
+      }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
+      - name: Resolve version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       - name: Publish release with checksums
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ github.ref_name }}
           files: |
             artifacts/*.tar.gz
             artifacts/*.tar.gz.sha256
             artifacts/*.zip
             artifacts/*.zip.sha256
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
-  # Publish the workspace to crates.io on a (non-pre-release) version tag.
-  # Skipped unless a CARGO_REGISTRY_TOKEN repo secret is set — so it is a no-op
-  # until you opt in (v0.1.0 was published manually). cargo computes the
-  # topological order across the 9 crates itself.
+  # Publish the workspace to crates.io on a non-pre-release version tag before
+  # the GitHub release exists. The script is idempotent for release retries and
+  # skips exact versions that are already on crates.io.
   publish-crates:
     name: Publish to crates.io
     needs: build
-    if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref, '-') }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    environment: crates-io
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: cargo publish --workspace (skipped if no token secret)
-        if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
-        run: cargo publish --workspace --locked
+      - name: Publish crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: bash scripts/publish_crates.sh
+
+  docker:
+    name: publish GHCR image
+    needs: release
+    if: >-
+      ${{
+        always() &&
+        startsWith(github.ref, 'refs/tags/') &&
+        needs.release.result == 'success'
+      }}
+    runs-on: ubuntu-latest
+    environment: ghcr
+    permissions:
+      contents: read
+      packages: write
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Resolve Docker tags
+        id: tags
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          {
+            echo "tags<<EOF"
+            echo "ghcr.io/muhdur/oraclemcp:${version}"
+            if [[ "$version" != *-* ]]; then
+              echo "ghcr.io/muhdur/oraclemcp:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          provenance: false
+      - name: Verify pushed image
+        run: docker buildx imagetools inspect "ghcr.io/muhdur/oraclemcp:${GITHUB_REF_NAME#v}"
+
+  publish-mcp-registry:
+    name: publish MCP registry entry
+    needs: docker
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    environment: mcp-registry
+    permissions:
+      id-token: write
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+      - name: Authenticate to the MCP Registry (GitHub OIDC)
+        run: ./mcp-publisher login github-oidc
+      - name: Publish server.json
+        run: ./mcp-publisher publish

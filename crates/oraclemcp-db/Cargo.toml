@@ -1,6 +1,6 @@
 [package]
 name = "oraclemcp-db"
-version = "0.2.0"
+version = "0.2.1"
 description = "Oracle connectivity, pooling, session leases and the type/NLS serializer for oraclemcp."
 edition.workspace = true
 license.workspace = true
@@ -20,8 +20,8 @@ oracle-driver = ["dep:oracle", "dep:r2d2", "dep:tokio"]
 live-xe = ["oracle-driver"]
 
 [dependencies]
-oraclemcp-error = { path = "../oraclemcp-error", version = "0.2.0" }
-oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.2.0" }
+oraclemcp-error = { path = "../oraclemcp-error", version = "0.2.1" }
+oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.2.1" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

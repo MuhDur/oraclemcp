@@ -701,7 +701,7 @@ fn setup_payload(
         "principle": "one generic binary; all environment-specific database names, credentials, session identity, and custom tools live in local config",
         "install": {
             "cargo_live_db": "cargo install oraclemcp --features live-db",
-            "docker_stdio": "docker run -i --rm ghcr.io/muhdur/oraclemcp:0.1.0"
+            "docker_stdio": format!("docker run -i --rm ghcr.io/muhdur/oraclemcp:{}", env!("CARGO_PKG_VERSION"))
         },
         "paths": {
             "profiles": config_path,
