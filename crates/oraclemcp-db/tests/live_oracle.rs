@@ -11,11 +11,12 @@
 //! Override target with ORACLEMCP_TEST_DSN / _USER / _PASSWORD.
 #![cfg(feature = "live-xe")]
 
-use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
+use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
-    OracleBind, OracleConnectOptions, OracleConnection, OracleSessionIdentity, QueryCaps,
+    DbError, OracleBind, OracleConnectOptions, OracleConnection, OracleSessionIdentity, QueryCaps,
     RustOracleConnection,
 };
+use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use serde_json::json;
 use std::time::Duration;
 
@@ -308,4 +309,70 @@ fn live_pool_thin_roundtrip() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].parse_i64("N"), Some(7));
     assert!(pool.state_connections() >= 1);
+}
+
+#[test]
+fn live_dbms_output_capture_is_verified_or_explicitly_skipped() {
+    let conn = match RustOracleConnection::connect(test_opts()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[live-xe] SKIP live_dbms_output_capture: {e}");
+            return;
+        }
+    };
+
+    conn.enable_dbms_output(Some(2_000))
+        .expect("enable DBMS_OUTPUT");
+    conn.execute(
+        "BEGIN DBMS_OUTPUT.PUT_LINE('oraclemcp-live-output'); END;",
+        &[],
+    )
+    .expect("write DBMS_OUTPUT line");
+    match conn.read_dbms_output(10, 200) {
+        Ok(out) => {
+            assert_eq!(out.lines, vec!["oraclemcp-live-output"]);
+            assert_eq!(out.line_count, 1);
+            assert!(!out.truncated);
+        }
+        Err(DbError::UnsupportedFeature(reason)) => {
+            eprintln!(
+                "[live-xe] SKIP live_dbms_output_capture: thin driver does not expose capture yet ({reason})"
+            );
+        }
+        Err(e) => panic!("unexpected DBMS_OUTPUT capture error: {e}"),
+    }
+}
+
+#[test]
+fn live_cancelled_query_context_leaves_pool_usable() {
+    let pool = match OraclePool::connect(test_opts(), PoolSettings::default()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[live-xe] SKIP live_cancelled_query_context: {e}");
+            return;
+        }
+    };
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync runtime builds");
+    runtime.block_on(async {
+        let cx = asupersync::Cx::current().expect("block_on installs a request Cx");
+        cx.set_cancel_requested(true);
+        let err = pool
+            .read_query_cx(
+                &cx,
+                "SELECT 1 AS n FROM dual",
+                vec![],
+                QueryCaps::default(),
+                0,
+                SerializeOptions::default(),
+            )
+            .expect_err("cancelled context must abort query boundary");
+        assert!(matches!(err, DbError::Cancelled(_)), "{err}");
+    });
+
+    let rows = pool
+        .query_rows("SELECT 7 AS n FROM dual", vec![])
+        .expect("pool remains usable after cancelled request context");
+    assert_eq!(rows[0].parse_i64("N"), Some(7));
 }

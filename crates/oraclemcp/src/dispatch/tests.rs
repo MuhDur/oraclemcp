@@ -7,6 +7,7 @@ use crate::registry::TOOL_NAMES;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_core::{DispatchContext, ScopeGrant};
 use oraclemcp_db::{OracleBackend, OracleCell, OracleRow};
+use std::sync::Barrier;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn run_with_current_cx(f: impl FnOnce(&Cx)) {
@@ -1347,6 +1348,67 @@ impl OracleConnection for NoExecMock {
     }
 }
 
+#[derive(Default)]
+struct TouchCounts {
+    ping: AtomicUsize,
+    describe: AtomicUsize,
+    query: AtomicUsize,
+    execute: AtomicUsize,
+    commit: AtomicUsize,
+    rollback: AtomicUsize,
+}
+
+impl TouchCounts {
+    fn total(&self) -> usize {
+        self.ping.load(Ordering::SeqCst)
+            + self.describe.load(Ordering::SeqCst)
+            + self.query.load(Ordering::SeqCst)
+            + self.execute.load(Ordering::SeqCst)
+            + self.commit.load(Ordering::SeqCst)
+            + self.rollback.load(Ordering::SeqCst)
+    }
+}
+
+struct TouchCountingMock {
+    counts: Arc<TouchCounts>,
+}
+
+impl OracleConnection for TouchCountingMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    fn ping(&self) -> Result<(), DbError> {
+        self.counts.ping.fetch_add(1, Ordering::SeqCst);
+        panic!("guard-before-I/O test must not ping the database")
+    }
+
+    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        self.counts.describe.fetch_add(1, Ordering::SeqCst);
+        panic!("guard-before-I/O test must not describe the database")
+    }
+
+    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        self.counts.query.fetch_add(1, Ordering::SeqCst);
+        panic!("guard-before-I/O test must not query the database")
+    }
+
+    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        self.counts.execute.fetch_add(1, Ordering::SeqCst);
+        panic!("guard-before-I/O test must not execute against the database")
+    }
+
+    fn commit(&self) -> Result<(), DbError> {
+        self.counts.commit.fetch_add(1, Ordering::SeqCst);
+        panic!("guard-before-I/O test must not commit")
+    }
+
+    fn rollback(&self) -> Result<(), DbError> {
+        self.counts.rollback.fetch_add(1, Ordering::SeqCst);
+        panic!("guard-before-I/O test must not roll back")
+    }
+}
+
 #[test]
 fn writes_ddl_and_dcl_are_refused_before_touching_the_db() {
     let dispatcher = OracleDispatcher::new(Box::new(NoExecMock));
@@ -1374,6 +1436,41 @@ fn writes_ddl_and_dcl_are_refused_before_touching_the_db() {
             err.error_class
         );
     }
+}
+
+#[test]
+fn malformed_and_unauthorized_sql_are_refused_before_any_db_io() {
+    let counts = Arc::new(TouchCounts::default());
+    let dispatcher = OracleDispatcher::new(Box::new(TouchCountingMock {
+        counts: counts.clone(),
+    }));
+
+    for sql in [
+        "SELECT * FROM",
+        "DELETE FROM important_table",
+        "SELECT 1 FROM dual; GRANT DBA TO scott",
+    ] {
+        let err = match dispatcher.dispatch("oracle_query", json!({ "sql": sql })) {
+            Ok(value) => panic!("expected fail-closed refusal for {sql}, got {value}"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(
+                err.error_class,
+                ErrorClass::SyntaxError
+                    | ErrorClass::ForbiddenStatement
+                    | ErrorClass::OperatingLevelTooLow
+            ),
+            "{sql} -> unexpected class {:?}",
+            err.error_class
+        );
+    }
+
+    assert_eq!(
+        counts.total(),
+        0,
+        "malformed or unauthorized SQL must be classified before any DB I/O or transaction state"
+    );
 }
 
 #[test]
@@ -2275,6 +2372,69 @@ fn execute_approved_replays_preview_token_once() {
         .expect_err("token is one shot");
     assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
     assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+}
+
+#[test]
+fn execute_approved_preview_token_race_allows_exactly_one_success() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = Arc::new(OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        Some("dev".to_owned()),
+        read_write_level(),
+    ));
+    let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+    let preview = dispatcher
+        .dispatch("preview_sql", json!({ "sql": sql }))
+        .expect("preview stores one-shot token");
+    let token = preview["execute_confirmation"]["confirm"]
+        .as_str()
+        .expect("token")
+        .to_owned();
+    let barrier = Arc::new(Barrier::new(3));
+    let results = Arc::new(Mutex::new(Vec::new()));
+
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            let dispatcher = dispatcher.clone();
+            let barrier = barrier.clone();
+            let results = results.clone();
+            let token = token.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                let result = dispatcher
+                    .dispatch("execute_approved", json!({ "token": token }))
+                    .map(|value| value["committed"] == json!(true))
+                    .map_err(|err| err.error_class);
+                results.lock().expect("results mutex").push(result);
+            });
+        }
+        barrier.wait();
+    });
+
+    let results = results.lock().expect("results mutex");
+    let successes = results
+        .iter()
+        .filter(|result| matches!(result, Ok(true)))
+        .count();
+    let one_shot_refusals = results
+        .iter()
+        .filter(|result| matches!(result, Err(ErrorClass::ChallengeRequired)))
+        .count();
+    assert_eq!(successes, 1, "exactly one racing region may redeem token");
+    assert_eq!(
+        one_shot_refusals, 1,
+        "the losing region must get a structured one-shot refusal"
+    );
+    assert_eq!(
+        state.commits.load(Ordering::SeqCst),
+        1,
+        "only the winning region commits"
+    );
+    assert_eq!(
+        state.executed.lock().expect("exec mutex").len(),
+        1,
+        "only the winning region reaches the database"
+    );
 }
 
 #[test]

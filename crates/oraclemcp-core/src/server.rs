@@ -512,6 +512,7 @@ mod tests {
     use oraclemcp_error::ErrorClass;
     use oraclemcp_guard::OperatingLevel;
     use std::io::Cursor;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct EchoDispatcher;
     impl ToolDispatch for EchoDispatcher {
@@ -539,6 +540,44 @@ mod tests {
                     ));
                 }
                 Ok(serde_json::json!({ "echoed": name, "args": args }))
+            })
+        }
+    }
+
+    struct ActiveCallGuard {
+        active: Arc<AtomicUsize>,
+    }
+
+    impl Drop for ActiveCallGuard {
+        fn drop(&mut self) {
+            self.active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    struct TrackingCancelDispatcher {
+        active: Arc<AtomicUsize>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ToolDispatch for TrackingCancelDispatcher {
+        fn dispatch<'a>(
+            &'a self,
+            cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            let active = self.active.clone();
+            let calls = self.calls.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                active.fetch_add(1, Ordering::SeqCst);
+                let _guard = ActiveCallGuard { active };
+                cx.checkpoint_with("oraclemcp.test.tool-call.quiescence")
+                    .map_err(|err| {
+                        ErrorEnvelope::new(ErrorClass::Timeout, format!("cancelled: {err}"))
+                    })?;
+                Ok(serde_json::json!({ "completed": true }))
             })
         }
     }
@@ -774,6 +813,59 @@ mod tests {
         assert_eq!(
             ok["structuredContent"]["echoed"],
             serde_json::json!("oracle_query")
+        );
+    }
+
+    #[test]
+    fn cancelled_tool_call_returns_timeout_and_quiesces_active_work() {
+        let mut registry = ToolRegistry::new();
+        registry.register(ToolDescriptor::new(
+            "oracle_query",
+            ToolTier::FoundationLiveDb,
+            "run a query",
+        ));
+        let caps = CapabilitiesReport::new(
+            "0.1.0",
+            registry.tools.clone(),
+            OperatingLevel::ReadOnly,
+            FeatureTiers {
+                live_db: true,
+                engine: true,
+                http_transport: false,
+            },
+        );
+        let active = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let s = OracleMcpServer::new(
+            "0.1.0",
+            registry,
+            caps,
+            Arc::new(TrackingCancelDispatcher {
+                active: active.clone(),
+                calls: calls.clone(),
+            }),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("test runtime builds");
+
+        let response = runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a request Cx");
+            cx.set_cancel_requested(true);
+            s.run_tool_with_cx(&cx, "oracle_query".to_owned(), serde_json::json!({}))
+                .await
+        });
+
+        assert_eq!(response["isError"], serde_json::json!(true));
+        assert_eq!(
+            response["structuredContent"]["error_class"],
+            serde_json::json!("TIMEOUT")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            active.load(Ordering::SeqCst),
+            0,
+            "tool-call region must have no active work after cancellation resolves"
         );
     }
 

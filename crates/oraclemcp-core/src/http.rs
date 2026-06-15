@@ -341,6 +341,18 @@ mod tests {
                 .header("www-authenticate")
                 .is_some_and(|value| value.contains("error=\"invalid_token\""))
         );
+        let body = String::from_utf8_lossy(&response.body);
+        assert_eq!(body, "unauthorized");
+        assert!(
+            !body.contains("not.a.jwt"),
+            "bad bearer token must not be echoed in the response body"
+        );
+        for (name, value) in &response.headers {
+            assert!(
+                !value.contains("not.a.jwt"),
+                "bad bearer token leaked in response header {name}: {value}"
+            );
+        }
 
         let metadata = handle_http_request(
             &test_server(),
