@@ -13,7 +13,7 @@ real query text.
 | Workspace | Cargo workspace with 9 crates plus `oraclemcp` binary, `resolver = "2"`, edition 2024, pinned nightly `nightly-2026-05-11`, and no stable MSRV on the thin-native line. | `Cargo.toml`, `rust-toolchain.toml` |
 | Safety posture | Every crate forbids unsafe code; raw SQL safety is centered on `oraclemcp-guard`. | `Cargo.toml`, crate roots, `AGENTS.md` |
 | Current release line | All package versions and `server.json` are aligned at 0.2.1. | `Cargo.toml`, crate `Cargo.toml` files, `server.json` |
-| Current DB mode | Default build is offline; live Oracle support is feature-gated behind `live-db`/`oracle-driver` and the `oracle` thick driver. | `README.md`, `crates/oraclemcp-db/Cargo.toml` |
+| Current DB mode | Default build includes live Oracle support through the pure-Rust `oracledb` thin driver. | `README.md`, `crates/oraclemcp-db/Cargo.toml` |
 | Current runtime/transport | Stdio uses `rmcp`; HTTP uses Axum/Hyper plus `rmcp` Streamable HTTP; DB pool offloads blocking calls through Tokio. | `crates/oraclemcp-core/src/server.rs`, `crates/oraclemcp-core/src/http.rs`, `crates/oraclemcp-db/src/pool.rs` |
 | Current bead state | Repo-local `.beads/` contains the migration graph; W0 is the only actionable bead. | `br list --json`, `bv --robot-triage` |
 | Local release artifacts | No local `target/release` artifact was present during inventory, so binary-size and startup baselines are not measured yet. | `find target/release ...` |
@@ -88,12 +88,12 @@ real query text.
 
 | Crate/family | Current reason present | Migration target |
 | --- | --- | --- |
-| `tokio` | Binary runtime, rmcp, Axum/Hyper, HTTP tests, DB pool `spawn_blocking`, live-db feature. | Remove from production graph; use Asupersync runtime, scopes, time, sync, net, and deterministic test helpers. |
+| `tokio` | Binary runtime, rmcp, Axum/Hyper, and HTTP tests. | Remove from production graph; use Asupersync runtime, scopes, time, sync, net, and deterministic test helpers. |
 | `rmcp` | Current MCP SDK for stdio and Streamable HTTP. | Replace with native JSON-RPC/MCP stdio first, then native HTTP. |
 | `axum` | HTTP router/middleware around Streamable HTTP and metadata route. | Replace with Asupersync web/http primitives or a minimal audited non-Tokio HTTP layer. |
 | `hyper` / `hyper-util` | Transitive HTTP stack through Axum/rmcp HTTP. | Remove from production graph. |
-| `oracle` / ODPI-C | Thick Oracle driver behind `live-db`; requires native Oracle client at runtime. | Replace with pure-Rust `oracledb` thin driver. |
-| `r2d2` | Thick-driver connection pool. | Replace with an Asupersync-aware thin pool/session manager. |
+| `oracle` / ODPI-C | Removed from the DB crate in W4. | Keep absent. |
+| `r2d2` | Removed from the DB crate in W4. | Keep absent; W6b should move the remaining sync pool surface to explicit `&Cx`. |
 | `reqwest`, `async-std` | Not present in current dependency graph checked during W0. | Keep absent. |
 | `smol` | Not known as a current dependency; W12 should make this explicit in forbidden-dependency checks. | Keep absent from production graph. |
 | `asupersync-tokio-compat` | Not present now. | Do not introduce in final production graph; any temporary compat must carry a removal bead. |
@@ -146,14 +146,21 @@ Semver, ownership, and security-fix flow:
 
 | oraclemcp need | Current thick behavior | `oracledb` / thin migration note |
 | --- | --- | --- |
-| Connect | `oracle::Connection::connect` via `RustOracleConnection`; applies wallet/connect string, identity, NLS, session statements. | `oracledb::Connection::connect(&Cx, ConnectOptions)` and `BlockingConnection` exist in `/home/durakovic/projects/rust-oracledb`; final adapter should use `&Cx`, not the blocking shim except as a short-lived bridge. |
+| Connect | Thin `oracledb` connect via `RustOracleConnection`; applies username/password, wallet location, identity, NLS, and session statements. | W4 uses `BlockingConnection` as the synchronous bridge. W6b must thread `&Cx` through the DB surface and remove that bridge from production paths. |
 | Query rows | Positional and named binds; pagination wraps SQL with `OFFSET ... FETCH`; first page fetches max rows plus one. | `execute_query_with_binds*`, named/positional bind APIs, and fetch APIs exist. W4 must map `QueryValue` to current JSON serialization exactly. |
 | Execute | Thick adapter reports rows affected, commit/rollback, and savepoint rollback preview. | Thin adapter must preserve row counts, savepoints, commit/rollback, and uncertain-session cleanup. |
 | Call timeout/cancel | Thick adapter has call timeout setters and DB pool offloading. | Thin driver exposes timeout/cancel APIs; W7b must wire cancellation to connection cleanup and discard dirty sessions when certainty is lost. |
 | LOBs/JSON/NUMBER | Current serialization caps LOBs and keeps NUMBER lossless by default. | Thin values include lossless `QueryValue`; W4 must preserve current JSON schema and truncation markers. |
-| DBMS_OUTPUT | Current code uses PL/SQL calls against the connection. | Thin adapter can issue equivalent PL/SQL; W4/W11 must test enable/read limits and cleanup. |
-| Pooling | Current pool is `r2d2` plus Tokio blocking bridge. | Replace with thin/Asupersync-native pool; no ambient Tokio handle. |
-| Session identity | Current thick connection sets edition, driver_name, module, action, client_identifier, client_info where configured. | Thin driver exposes `ClientIdentity`; W4 must preserve profile fields or fail explicitly. |
+| DBMS_OUTPUT | `ENABLE` still executes through PL/SQL. `GET_LINE` capture is an explicit unsupported feature because `oracledb 0.1.1` does not expose the old ODPI-C OUT-bind surface used here. | File granular `rust-oracledb` work if DBMS_OUTPUT capture is required before W11. |
+| Pooling | W4 replaced `r2d2`/Tokio blocking pool with a small bounded thin session pool. | W6b should make checkout/use/release cancellation-aware with `&Cx`. |
+| Session identity | Thin connection maps driver name/program/machine/osuser/terminal through `ClientIdentity`, then applies module/action/client_identifier/client_info with PL/SQL. Edition selection is explicitly unsupported on `oracledb 0.1.1`. | If edition support is required, file granular `rust-oracledb` work or add a safe session-level implementation. |
+
+W4 upstream follow-up beads filed in `/home/durakovic/projects/rust-oracledb`:
+
+- `rust-oracledb-acj`: PL/SQL OUT-bind API for `DBMS_OUTPUT.GET_LINE`.
+- `rust-oracledb-o0b`: external wallet auth without username/password.
+- `rust-oracledb-5bh`: OCI IAM database-token authentication.
+- `rust-oracledb-jr9`: edition selection for Edition-Based Redefinition.
 
 ## Proxy Auth, DRCP, and Enterprise Auth
 
@@ -202,10 +209,10 @@ Semver, ownership, and security-fix flow:
 | Baseline | Current state | Next bead |
 | --- | --- | --- |
 | Protocol behavior | Existing e2e tests cover current rmcp stdio/HTTP paths but fixtures are not yet golden transcripts. | W1 |
-| DB behavior | Unit/live tests cover type fidelity, live Oracle smoke, leases, chaos rollback, privilege degradation, dictionary tools, and pool offload. Live tests skip without Oracle env. | W4/W11 |
-| Dependency graph | Current default graph contains Tokio/rmcp/Axum/Hyper; live-db graph adds `oracle` and `r2d2`. | W2 advisory, W12 hard gate |
-| Release gates | CI runs fmt, clippy, tests, doc, pinned-nightly build, boundary lint, advisory forbidden-dependency reporting, release preflight, cargo deny, live-db build, sensitive lint, and fuzz build best-effort. Release workflow publishes crates, GitHub release assets, GHCR, and MCP registry from tags. | W2, W14 |
-| Docker | Current image builds live-db binary and bundles Oracle Instant Client. | W14 must remove Instant Client for thin-native release. |
+| DB behavior | Unit/live tests cover type fidelity, live Oracle smoke, leases, chaos rollback, privilege degradation, dictionary tools, and thin pool behavior. Live tests skip without Oracle env. | W4/W11 |
+| Dependency graph | Current default graph still contains Tokio/rmcp/Axum/Hyper outside the DB layer. `oracle`, `odpic-sys`, and `r2d2` should remain absent. | W12 hard gate |
+| Release gates | CI runs fmt, clippy, tests, doc, pinned-nightly build, boundary lint, advisory forbidden-dependency reporting, release preflight, cargo deny, thin build, sensitive lint, and fuzz build best-effort. Release workflow publishes crates, GitHub release assets, GHCR, and MCP registry from tags. | W2, W14 |
+| Docker | W4 image builds the default thin binary and no longer uses the Oracle Instant Client runtime base. | W14 should still audit image size, labels, registry metadata, and installer docs. |
 | Performance | No local oraclemcp binary/startup/query benchmarks were produced in W0. Existing rust-oracledb docs contain thin-driver performance evidence, but those numbers are not oraclemcp release claims. | W13 |
 
 ## Current Gaps Already Reflected In Beads

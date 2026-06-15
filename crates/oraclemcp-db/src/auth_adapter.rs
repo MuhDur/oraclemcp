@@ -1,7 +1,7 @@
 //! Enterprise Oracle Net authentication adapters (plan §7.5; bead P3-1 /
-//! oracle-qmwz.4.1). Thick-mode ODPI-C enables Kerberos, RADIUS/native MFA, and
-//! proxy (`CONNECT THROUGH`) authentication — **hop-2** (Oracle Net), distinct
-//! from the MCP transport auth and from OCI IAM (that is P1-11).
+//! oracle-qmwz.4.1). Thin mode supports username/password and proxy user
+//! shaping today; Kerberos, RADIUS/native MFA, and external wallet auth are
+//! explicit unsupported-auth cases until the thin driver exposes those paths.
 //!
 //! These apply to interactive DBA users; pooled service accounts enforce MFA at
 //! the MCP layer instead. This module maps each adapter to the `sqlnet.ora`
@@ -114,10 +114,13 @@ impl AuthAdapter {
         )
     }
 
-    /// Whether the adapter requires thick-mode ODPI-C (Instant Client).
+    /// Whether the adapter is currently unsupported by the thin driver.
     #[must_use]
-    pub fn requires_thick_mode(&self) -> bool {
-        matches!(self, AuthAdapter::Kerberos { .. } | AuthAdapter::Radius)
+    pub fn unsupported_in_thin_mode(&self) -> bool {
+        matches!(
+            self,
+            AuthAdapter::Kerberos { .. } | AuthAdapter::Radius | AuthAdapter::External
+        )
     }
 }
 
@@ -145,7 +148,7 @@ mod tests {
             "SQLNET.KERBEROS5_DELEGATION_MODE".to_owned(),
             "CONSTRAINED".to_owned()
         )));
-        assert!(a.uses_external_auth() && a.requires_thick_mode());
+        assert!(a.uses_external_auth() && a.unsupported_in_thin_mode());
     }
 
     #[test]
@@ -158,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn radius_sets_the_radius_service_and_thick_mode() {
+    fn radius_sets_the_radius_service_and_is_unsupported_in_thin_mode() {
         let a = AuthAdapter::Radius;
         assert_eq!(
             a.sqlnet_settings(),
@@ -167,7 +170,7 @@ mod tests {
                 "(RADIUS)".to_owned()
             )]
         );
-        assert!(a.requires_thick_mode());
+        assert!(a.unsupported_in_thin_mode());
     }
 
     #[test]
@@ -200,8 +203,8 @@ mod tests {
     fn password_and_external_are_plain() {
         assert!(AuthAdapter::Password.sqlnet_settings().is_empty());
         assert!(AuthAdapter::Password.proxy_connect_user().is_none());
-        assert!(!AuthAdapter::Password.requires_thick_mode());
+        assert!(!AuthAdapter::Password.unsupported_in_thin_mode());
         assert!(AuthAdapter::External.uses_external_auth());
-        assert!(!AuthAdapter::External.requires_thick_mode());
+        assert!(AuthAdapter::External.unsupported_in_thin_mode());
     }
 }

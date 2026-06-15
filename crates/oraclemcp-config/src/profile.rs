@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ConfigError;
 
-/// `r2d2`-style pool settings (plan §10). Concrete with documented defaults.
+/// Thin session-pool settings (plan §10). Concrete with documented defaults.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PoolConfig {

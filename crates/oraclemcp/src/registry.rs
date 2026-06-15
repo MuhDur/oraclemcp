@@ -1093,8 +1093,8 @@ pub fn tool_registry() -> ToolRegistry {
 }
 
 /// Assemble the `oracle_capabilities` report for this build. `live_db` reflects
-/// whether the Oracle driver is compiled in (the `live-db` feature); `http`
-/// reflects whether the Streamable HTTP transport is exposed by `serve`. The
+/// whether the Oracle driver is compiled in; `http` reflects whether the
+/// Streamable HTTP transport is exposed by `serve`. The
 /// engine tier is always `false` — this is the engine-free server.
 pub fn capabilities(version: impl Into<String>, live_db: bool, http: bool) -> CapabilitiesReport {
     let registry = tool_registry();

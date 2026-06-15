@@ -52,7 +52,7 @@ jobs:
       - run: bash scripts/sensitive_data_lint.sh
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check
-      - run: cargo build -p oraclemcp --features live-db
+      - run: cargo build -p oraclemcp
       # Cargo verifies a packaged workspace crate by resolving its rewritten
       # path dependencies from crates.io. For a fresh tag, sibling crates are
       # not all on crates.io yet, so package assembly is checked here and

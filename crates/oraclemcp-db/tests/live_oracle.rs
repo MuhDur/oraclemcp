@@ -2,13 +2,12 @@
 //! §12 real-Oracle matrix, T-INTEG).
 //!
 //! Gated behind the `live-xe` feature AND a runtime reachability probe: if no
-//! Oracle is reachable (no Instant Client, no DB), each test prints a loud SKIP
-//! banner and returns rather than failing — so CI without a database stays
+//! Oracle is reachable, each test prints a loud SKIP banner and returns rather
+//! than failing — so CI without a database stays
 //! green, matching the repo's `live-xe` / estate-absent convention.
 //!
 //! To run against the repo's containerized Oracle 23ai Free:
-//!   LD_LIBRARY_PATH=/tmp/instantclient_23_7 \
-//!     cargo test -p oraclemcp-db --features live-xe -- --nocapture
+//!   cargo test -p oraclemcp-db --features live-xe -- --nocapture
 //! Override target with ORACLEMCP_TEST_DSN / _USER / _PASSWORD.
 #![cfg(feature = "live-xe")]
 
@@ -46,7 +45,7 @@ fn live_connect_ping_query_bind_describe() {
         Err(e) => {
             eprintln!(
                 "[live-xe] SKIP live_connect_ping_query_bind_describe: no reachable Oracle ({e}); \
-                 set LD_LIBRARY_PATH + ORACLEMCP_TEST_*"
+                 set ORACLEMCP_TEST_*"
             );
             return;
         }
@@ -160,8 +159,8 @@ fn live_lease_lifecycle_on_a_pinned_session() {
     assert!(mgr.info(&id).is_err(), "released lease is gone");
 }
 
-#[tokio::test]
-async fn live_query_pagination_caps_and_cursor() {
+#[test]
+fn live_query_pagination_caps_and_cursor() {
     let pool = match OraclePool::connect(test_opts(), PoolSettings::default()) {
         Ok(p) => p,
         Err(e) => {
@@ -177,7 +176,6 @@ async fn live_query_pagination_caps_and_cursor() {
     let sql = "SELECT object_name FROM all_objects ORDER BY object_name";
     let page1 = pool
         .read_query(sql, vec![], caps, 0, SerializeOptions::default())
-        .await
         .expect("page1");
     assert_eq!(page1.row_count, 5);
     assert!(page1.truncated, "all_objects has > 5 rows");
@@ -186,7 +184,6 @@ async fn live_query_pagination_caps_and_cursor() {
 
     let page2 = pool
         .read_query(sql, vec![], caps, offset, SerializeOptions::default())
-        .await
         .expect("page2");
     assert_eq!(page2.row_count, 5);
     // Page 2 is a disjoint window (OFFSET/FETCH wrapping is valid Oracle SQL).
@@ -284,7 +281,8 @@ fn live_tier1_intelligence_dictionary_tools() {
         .expect("errors query runs");
 
     // search_source over ALL_SOURCE.
-    let hits = oraclemcp_db::search_source(&conn, "demo", "AUTONOMOUS", 50).expect("search");
+    let hits = oraclemcp_db::search_source(&conn, Some("demo"), "AUTONOMOUS", None, None, 50)
+        .expect("search");
     assert!(
         !hits.is_empty(),
         "PKG_AUTONOMOUS source should mention AUTONOMOUS"
@@ -294,19 +292,18 @@ fn live_tier1_intelligence_dictionary_tools() {
     assert!(oraclemcp_db::get_ddl(&conn, "TABLE; DROP", "demo", "x").is_err());
 }
 
-#[tokio::test]
-async fn live_pool_spawn_blocking_roundtrip() {
+#[test]
+fn live_pool_thin_roundtrip() {
     let pool = match OraclePool::connect(test_opts(), PoolSettings::default()) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("[live-xe] SKIP live_pool_spawn_blocking_roundtrip: pool build failed ({e})");
+            eprintln!("[live-xe] SKIP live_pool_thin_roundtrip: pool build failed ({e})");
             return;
         }
     };
-    pool.ping().await.expect("pool ping");
+    pool.ping().expect("pool ping");
     let rows = pool
         .query_rows("SELECT 7 AS n FROM dual", vec![])
-        .await
         .expect("pool query");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].parse_i64("N"), Some(7));

@@ -11,12 +11,8 @@ categories.workspace = true
 
 [features]
 default = []
-# Pulls in the Oracle driver (ODPI-C) + r2d2 pool + tokio spawn_blocking
-# boundary. Off = pure offline build, no native deps (RustOracleConnection
-# returns BackendNotCompiled).
-oracle-driver = ["dep:oracle", "dep:r2d2", "dep:tokio"]
-# Live Oracle integration tests (gated; require a reachable DB + Instant Client).
-live-xe = ["oracle-driver"]
+# Live Oracle integration tests (gated; require a reachable DB).
+live-xe = []
 
 [dependencies]
 oraclemcp-error = { path = "../oraclemcp-error", version = "0.2.1" }
@@ -25,12 +21,9 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-oracle = { version = "0.6.3", optional = true }
-r2d2 = { version = "0.8", optional = true }
-tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
+oracledb.workspace = true
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]

@@ -34,23 +34,18 @@ local builds; direct `cargo install` users should use the same toolchain.
 rustup toolchain install nightly-2026-05-11 --component rustfmt --component clippy
 ```
 
-For live database access, build with the `live-db` feature, which pulls the ODPI-C Oracle driver:
+Live database access is built in through the pure-Rust thin `oracledb` driver:
 
 ```sh
-cargo +nightly-2026-05-11 install oraclemcp --features live-db
+cargo +nightly-2026-05-11 install oraclemcp
 ```
 
-**Runtime requirements** for `live-db`:
+**Runtime requirements** for live database access:
 
-- A C toolchain at **build** time (the ODPI-C driver compiles native code).
-- [Oracle Instant Client](https://www.oracle.com/database/technologies/instant-client.html) at **run** time, on the library path (`LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS, `PATH` on Windows).
 - Optionally `TNS_ADMIN` pointing at a directory with `tnsnames.ora` if you connect by net-service name.
 
-The default build is **offline** (no native dependencies) and cannot reach a database; it is useful for CI and for inspecting the tool surface, but a binary built this way returns `RuntimeStateRequired` for any live call:
-
-```sh
-cargo +nightly-2026-05-11 install oraclemcp   # tool surface only (no DB)
-```
+No Oracle Instant Client, ODPI-C library, or C toolchain is required by the
+driver.
 
 Generate generic local setup templates for profiles, wrappers, and MCP client
 snippets:
@@ -59,7 +54,7 @@ snippets:
 oraclemcp --json setup --profile db_ro
 ```
 
-**Docker:** a ready-to-run image with Oracle Instant Client bundled (so live-db works out of the box), published to GHCR and listed in the [MCP registry](https://registry.modelcontextprotocol.io) on release as `io.github.MuhDur/oraclemcp`. Mount a profiles config and pass the credential the profile's `credential_ref` expects:
+**Docker:** a ready-to-run thin-driver image, published to GHCR and listed in the [MCP registry](https://registry.modelcontextprotocol.io) on release as `io.github.MuhDur/oraclemcp`. Mount a profiles config and pass the credential the profile's `credential_ref` expects:
 
 ```sh
 docker run -i --rm \
@@ -70,7 +65,7 @@ docker run -i --rm \
 docker run -i --rm ghcr.io/muhdur/oraclemcp:0.2.1   # tool surface only (no DB)
 ```
 
-> The Docker image bundles Oracle Instant Client (Oracle Free Use Terms) and is therefore a mixed-license artifact; the crates themselves are Apache-2.0 OR MIT.
+> The Docker image and crates are Apache-2.0 OR MIT and do not redistribute Oracle Instant Client.
 
 Wire it into an MCP client (e.g. Claude Desktop) over stdio:
 
@@ -103,7 +98,7 @@ oraclemcp capabilities               # the advertised tool surface + feature tie
 oraclemcp --json profiles            # configured profile names and non-secret metadata
 oraclemcp doctor                     # offline diagnostics (classifier self-test, NLS, …)
 oraclemcp doctor --profile dev_ro    # include live connectivity/role/privilege checks
-oraclemcp info                       # build info: version, tools, transports, live-db
+oraclemcp info                       # build info: version, tools, transports, thin DB
 oraclemcp robot-docs guide           # compact in-binary guide for agents
 ```
 
@@ -404,7 +399,10 @@ oraclemcp            → core, db, …        this binary
 
 ## Offline behavior
 
-Without `live-db`, `RustOracleConnection::connect` returns `BackendNotCompiled` and `oraclemcp` falls back to a stub connection: `serve`, `capabilities`, and `doctor` all work, and any live tool call returns a structured `RuntimeStateRequired` envelope rather than crashing. This makes the binary safe to install, inspect, and test anywhere, CI included.
+If no profile is configured or Oracle is unreachable, `oraclemcp` falls back to
+a stub connection: `serve`, `capabilities`, and `doctor` all work, and any live
+tool call returns a structured error envelope rather than crashing. This makes
+the binary safe to install, inspect, and test anywhere, CI included.
 
 ## License
 

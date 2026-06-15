@@ -17,8 +17,8 @@ pub enum ToolTier {
     /// catalog snapshots only. Available regardless of profile; never touches
     /// a live database.
     FoundationStatic,
-    /// Live-DB tool — gated by the `live-db` build feature and an operating
-    /// level / safety profile that allows the operation.
+    /// Live-DB tool — gated by an operating level / safety profile that allows
+    /// the operation.
     FoundationLiveDb,
 }
 

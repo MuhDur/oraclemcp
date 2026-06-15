@@ -9,14 +9,6 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
-[features]
-default = []
-# Pulls in the Oracle driver (ODPI-C / Instant Client) via oraclemcp-db so the
-# live-DB tools can actually connect. Off = pure offline build with no native
-# deps: RustOracleConnection::connect returns BackendNotCompiled and live tool
-# calls return a structured RuntimeStateRequired envelope rather than panicking.
-live-db = ["oraclemcp-db/oracle-driver"]
-
 [[bin]]
 name = "oraclemcp"
 path = "src/main.rs"

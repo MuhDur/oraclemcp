@@ -1,9 +1,8 @@
 //! Backend-independent value, row, and connect-option types (plan §5.2).
 //!
-//! These are deliberately driver-free so the offline build (no `oracle-driver`)
-//! still compiles the full type surface. P0-3 fetches cells as nullable text
-//! plus the Oracle type name; the deterministic NUMBER→string / ISO-8601 / NLS
-//! serializer (P0-5) builds the precise JSON mapping on top.
+//! These are deliberately driver-free at the boundary. P0-3 fetches cells as
+//! nullable text plus the Oracle type name; the deterministic NUMBER→string /
+//! ISO-8601 / NLS serializer (P0-5) builds the precise JSON mapping on top.
 
 use std::{path::PathBuf, time::Duration};
 
@@ -14,14 +13,14 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum OracleBackend {
-    /// The `oracle` crate (kubo/rust-oracle) over ODPI-C / Instant Client.
+    /// The pure-Rust `oracledb` thin driver.
     RustOracle,
 }
 
 impl std::fmt::Display for OracleBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OracleBackend::RustOracle => f.write_str("rust-oracle"),
+            OracleBackend::RustOracle => f.write_str("oracledb-thin"),
         }
     }
 }

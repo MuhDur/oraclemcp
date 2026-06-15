@@ -1,18 +1,16 @@
-//! `r2d2` connection pool + the `tokio::task::spawn_blocking` async boundary
-//! (plan §3.1, §4.3, §10). Compiled only with the `oracle-driver` feature.
+//! Bounded thin-mode connection pool for callers that need reusable sessions.
 //!
-//! The one invariant above all (§4.3): an `oracle::Connection` is never held
-//! across an `.await`. It enters and leaves the `spawn_blocking` closure by
-//! ownership (the pooled connection is moved into the closure and dropped
-//! there), so the compiler guarantees the rule.
+//! This is deliberately small: W4 removes the old r2d2/Tokio boundary, while
+//! W6b moves the DB surface to explicit `&asupersync::Cx` cancellation.
 
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::connection::{OracleConnection, RustOracleConnection};
 use crate::error::DbError;
 use crate::types::{OracleBind, OracleConnectOptions, OracleConnectionInfo, OracleRow};
 
-/// An `r2d2` manager that opens [`RustOracleConnection`]s from one profile.
+/// Opens thin [`RustOracleConnection`]s from one profile.
 #[derive(Clone, Debug)]
 pub struct OracleConnectionManager {
     opts: OracleConnectOptions,
@@ -26,19 +24,16 @@ impl OracleConnectionManager {
     }
 }
 
-impl r2d2::ManageConnection for OracleConnectionManager {
-    type Connection = RustOracleConnection;
-    type Error = DbError;
-
-    fn connect(&self) -> Result<Self::Connection, Self::Error> {
+impl OracleConnectionManager {
+    fn connect(&self) -> Result<RustOracleConnection, DbError> {
         RustOracleConnection::connect(self.opts.clone())
     }
 
-    fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
+    fn is_valid(&self, conn: &RustOracleConnection) -> Result<(), DbError> {
         conn.ping()
     }
 
-    fn has_broken(&self, conn: &mut Self::Connection) -> bool {
+    fn has_broken(&self, conn: &RustOracleConnection) -> bool {
         conn.ping().is_err()
     }
 }
@@ -65,67 +60,71 @@ impl Default for PoolSettings {
     }
 }
 
-/// An async-friendly Oracle connection pool. Every DB round-trip is dispatched
-/// to a blocking worker via [`tokio::task::spawn_blocking`]; the pooled
-/// connection is owned by the closure and never crosses an `.await`.
+struct PoolState {
+    idle: Vec<RustOracleConnection>,
+    open_count: u32,
+}
+
+/// A small synchronous thin-mode Oracle connection pool.
 #[derive(Clone)]
 pub struct OraclePool {
-    pool: r2d2::Pool<OracleConnectionManager>,
+    manager: OracleConnectionManager,
+    settings: PoolSettings,
+    state: Arc<Mutex<PoolState>>,
 }
 
 impl OraclePool {
     /// Build a pool, eagerly establishing `min_idle` connections (so a bad
-    /// profile fails fast). Requires a reachable database + Instant Client.
+    /// profile fails fast). Requires a reachable database.
     pub fn connect(opts: OracleConnectOptions, settings: PoolSettings) -> Result<Self, DbError> {
         let manager = OracleConnectionManager::new(opts);
-        let pool = r2d2::Pool::builder()
-            .max_size(settings.max_size.max(1))
-            .min_idle(Some(settings.min_idle))
-            .connection_timeout(Duration::from_secs(settings.acquire_timeout_secs.max(1)))
-            .build(manager)
-            .map_err(|e| DbError::Pool(e.to_string()))?;
-        Ok(OraclePool { pool })
+        let settings = PoolSettings {
+            max_size: settings.max_size.max(1),
+            min_idle: settings.min_idle.min(settings.max_size.max(1)),
+            acquire_timeout_secs: settings.acquire_timeout_secs.max(1),
+        };
+        let mut idle = Vec::new();
+        for _ in 0..settings.min_idle {
+            idle.push(manager.connect()?);
+        }
+        Ok(OraclePool {
+            manager,
+            settings,
+            state: Arc::new(Mutex::new(PoolState {
+                open_count: idle.len() as u32,
+                idle,
+            })),
+        })
     }
 
     /// Current number of idle + in-use connections in the pool.
     #[must_use]
     pub fn state_connections(&self) -> u32 {
-        self.pool.state().connections
+        self.state
+            .lock()
+            .map(|state| state.open_count)
+            .unwrap_or_default()
     }
 
-    /// Run a query on a pooled connection, off the async executor.
-    pub async fn query_rows(
+    /// Run a query on a pooled connection.
+    pub fn query_rows(
         &self,
         sql: impl Into<String>,
         binds: Vec<OracleBind>,
     ) -> Result<Vec<OracleRow>, DbError> {
-        let pool = self.pool.clone();
         let sql = sql.into();
-        spawn_blocking_db(move || {
-            let conn = pool.get().map_err(|e| DbError::Pool(e.to_string()))?;
-            conn.query_rows(&sql, &binds)
-        })
-        .await
+        self.with_conn(|conn| conn.query_rows(&sql, &binds))
     }
 
-    /// Run a DML/DDL statement on a pooled connection, off the async executor.
-    pub async fn execute(
-        &self,
-        sql: impl Into<String>,
-        binds: Vec<OracleBind>,
-    ) -> Result<u64, DbError> {
-        let pool = self.pool.clone();
+    /// Run a DML/DDL statement on a pooled connection.
+    pub fn execute(&self, sql: impl Into<String>, binds: Vec<OracleBind>) -> Result<u64, DbError> {
         let sql = sql.into();
-        spawn_blocking_db(move || {
-            let conn = pool.get().map_err(|e| DbError::Pool(e.to_string()))?;
-            conn.execute(&sql, &binds)
-        })
-        .await
+        self.with_conn(|conn| conn.execute(&sql, &binds))
     }
 
     /// Run one page of a read query (bind-first, paginated, capped) on a pooled
-    /// connection, off the async executor (plan §8.2, bead P1-2).
-    pub async fn read_query(
+    /// connection (plan §8.2, bead P1-2).
+    pub fn read_query(
         &self,
         sql: impl Into<String>,
         binds: Vec<OracleBind>,
@@ -133,45 +132,89 @@ impl OraclePool {
         offset: usize,
         serialize_opts: crate::serialize::SerializeOptions,
     ) -> Result<crate::query::QueryResponse, DbError> {
-        let pool = self.pool.clone();
         let sql = sql.into();
-        spawn_blocking_db(move || {
-            let conn = pool.get().map_err(|e| DbError::Pool(e.to_string()))?;
-            crate::query::read_query(&*conn, &sql, &binds, caps, offset, &serialize_opts)
+        self.with_conn(|conn| {
+            crate::query::read_query(conn, &sql, &binds, caps, offset, &serialize_opts)
         })
-        .await
     }
 
     /// Describe a pooled connection (version / role / open-mode / schema).
-    pub async fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
-        let pool = self.pool.clone();
-        spawn_blocking_db(move || {
-            let conn = pool.get().map_err(|e| DbError::Pool(e.to_string()))?;
-            conn.describe()
-        })
-        .await
+    pub fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        self.with_conn(OracleConnection::describe)
     }
 
     /// Confirm a pooled connection is live.
-    pub async fn ping(&self) -> Result<(), DbError> {
-        let pool = self.pool.clone();
-        spawn_blocking_db(move || {
-            let conn = pool.get().map_err(|e| DbError::Pool(e.to_string()))?;
-            conn.ping()
-        })
-        .await
+    pub fn ping(&self) -> Result<(), DbError> {
+        self.with_conn(OracleConnection::ping)
     }
-}
 
-/// Run a blocking DB closure on the blocking pool, flattening the join error.
-async fn spawn_blocking_db<T, F>(f: F) -> Result<T, DbError>
-where
-    F: FnOnce() -> Result<T, DbError> + Send + 'static,
-    T: Send + 'static,
-{
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| DbError::Internal(format!("blocking task failed: {e}")))?
+    fn with_conn<T>(
+        &self,
+        f: impl FnOnce(&RustOracleConnection) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        let conn = self.checkout()?;
+        let result = f(&conn);
+        let broken = self.manager.has_broken(&conn);
+        self.checkin(conn, broken)?;
+        result
+    }
+
+    fn checkout(&self) -> Result<RustOracleConnection, DbError> {
+        let deadline = Instant::now() + Duration::from_secs(self.settings.acquire_timeout_secs);
+        loop {
+            if let Some(conn) = self.try_checkout()? {
+                return Ok(conn);
+            }
+            if Instant::now() >= deadline {
+                return Err(DbError::Pool(
+                    "timed out waiting for thin Oracle connection".to_owned(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn try_checkout(&self) -> Result<Option<RustOracleConnection>, DbError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
+        while let Some(conn) = state.idle.pop() {
+            if self.manager.is_valid(&conn).is_ok() {
+                return Ok(Some(conn));
+            }
+            state.open_count = state.open_count.saturating_sub(1);
+        }
+        if state.open_count < self.settings.max_size {
+            state.open_count += 1;
+            drop(state);
+            match self.manager.connect() {
+                Ok(conn) => Ok(Some(conn)),
+                Err(err) => {
+                    let mut state = self.state.lock().map_err(|lock_err| {
+                        DbError::Internal(format!("pool lock poisoned: {lock_err}"))
+                    })?;
+                    state.open_count = state.open_count.saturating_sub(1);
+                    Err(err)
+                }
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn checkin(&self, conn: RustOracleConnection, broken: bool) -> Result<(), DbError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
+        if broken {
+            state.open_count = state.open_count.saturating_sub(1);
+        } else {
+            state.idle.push(conn);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

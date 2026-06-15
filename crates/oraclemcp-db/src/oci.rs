@@ -1,8 +1,9 @@
 //! OCI / Oracle Cloud (Autonomous DB) connectivity hardening (plan §9.1; bead
 //! P1-11 / oracle-qmwz.2.11). This is **hop-2** (Oracle Net), independent of the
-//! MCP transport. Thick-mode ODPI-C natively connects to OCI-hosted Oracle and
-//! Autonomous DB; no special driver path. P0-3 gave basic connect — this layer
-//! hardens the cloud edge:
+//! MCP transport. Thin mode handles TCPS/wallet location directly where the
+//! published driver supports it; IAM database-token auth remains an explicit
+//! unsupported-auth path until the driver exposes the required connect hook.
+//! This layer hardens the cloud edge:
 //!
 //! - **Wallet discovery** — validate a downloaded ADB wallet directory has the
 //!   files mTLS auto-login needs (`cwallet.sso` + `tnsnames.ora`) and surface its

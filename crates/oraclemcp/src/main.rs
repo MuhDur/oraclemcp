@@ -41,8 +41,8 @@ use oraclemcp_db::{DbError, OracleConnectOptions, OracleConnection, RustOracleCo
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel, SessionLevelState};
 
-/// Whether this build compiled in the Oracle driver (the `live-db` feature).
-const LIVE_DB: bool = cfg!(feature = "live-db");
+/// Whether this build includes live Oracle connectivity.
+const LIVE_DB: bool = true;
 const CUSTOM_TOOLS_DIR_ENV: &str = "ORACLEMCP_TOOLS_DIR";
 const CUSTOM_TOOLS_HMAC_KEY_ENV: &str = "ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY";
 
@@ -265,17 +265,7 @@ fn connect_profile(profile: &str) -> Result<Box<dyn OracleConnection>, DbError> 
 }
 
 fn try_open_connection(opts: OracleConnectOptions) -> Result<Box<dyn OracleConnection>, DbError> {
-    #[cfg(feature = "live-db")]
-    {
-        RustOracleConnection::connect(opts).map(|conn| Box::new(conn) as Box<dyn OracleConnection>)
-    }
-    #[cfg(not(feature = "live-db"))]
-    {
-        match RustOracleConnection::connect(opts) {
-            Ok(_) => unreachable!("offline build cannot open a live connection"),
-            Err(e) => Err(e),
-        }
-    }
+    RustOracleConnection::connect(opts).map(|conn| Box::new(conn) as Box<dyn OracleConnection>)
 }
 
 /// Open the live connection, or — when the driver is absent / the connect fails
@@ -683,7 +673,7 @@ fn setup_payload(
         "kind": "oraclemcp_setup",
         "principle": "one generic binary; all environment-specific database names, credentials, session identity, and custom tools live in local config",
         "install": {
-            "cargo_live_db": "cargo install oraclemcp --features live-db",
+            "cargo": "cargo install oraclemcp",
             "docker_stdio": format!("docker run -i --rm ghcr.io/muhdur/oraclemcp:{}", env!("CARGO_PKG_VERSION"))
         },
         "paths": {
@@ -747,7 +737,7 @@ fn run_setup(
         println!("{}", serde_json::to_string(&payload).unwrap());
     } else {
         println!("oraclemcp setup\n");
-        println!("Install:\n  cargo install oraclemcp --features live-db\n");
+        println!("Install:\n  cargo install oraclemcp\n");
         println!("Profiles path:\n  {config_path}\n");
         println!(
             "profiles.toml template:\n{}\n",
@@ -1143,9 +1133,9 @@ mod tests {
 
     #[test]
     fn stub_connection_returns_an_envelopable_error() {
-        let stub = stub::StubConnection::new(oraclemcp_db::DbError::BackendNotCompiled {
-            backend: oraclemcp_db::OracleBackend::RustOracle,
-        });
+        let stub = stub::StubConnection::new(oraclemcp_db::DbError::Connect(
+            "listener refused the connection".to_owned(),
+        ));
         let err = stub.ping().expect_err("stub always errors");
         // It maps to a structured envelope (no panic).
         let _ = err.into_envelope();

@@ -1,27 +1,23 @@
 # syntax=docker/dockerfile:1
 #
 # oraclemcp container image — the engine-free Oracle Database MCP server with
-# Oracle Instant Client bundled, so the live-db tools work out of the box.
+# the pure-Rust thin Oracle driver compiled in.
 #
-# Licensing: the oraclemcp binary is Apache-2.0 OR MIT. The runtime layers come
-# from Oracle's official Instant Client image (Oracle Free Use Terms), so this
-# image is a mixed-license artifact that redistributes Oracle Instant Client
-# under Oracle's terms. Unofficial — not affiliated with Oracle Corporation.
+# Licensing: the oraclemcp binary and image are Apache-2.0 OR MIT. Unofficial —
+# not affiliated with Oracle Corporation.
 
-# ---- builder: compile the binary with the live-db (ODPI-C) feature ----
-# ODPI-C is vendored + compiled by the `oracle` crate and dlopen()s the Oracle
-# client at RUNTIME, so the build stage needs only a C toolchain, not the client.
+# ---- builder: compile the thin-driver binary ----
 FROM oraclelinux:9 AS builder
-RUN dnf -y install gcc && dnf clean all && \
+RUN dnf -y install ca-certificates curl && dnf clean all && \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --profile minimal --default-toolchain nightly-2026-05-11
 ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /src
 COPY . .
-RUN cargo build --release -p oraclemcp --features live-db
+RUN cargo build --release -p oraclemcp
 
-# ---- runtime: Oracle's official Instant Client image (public, FUTC) ----
-FROM ghcr.io/oracle/oraclelinux9-instantclient:23
+# ---- runtime: no Oracle native client required ----
+FROM oraclelinux:9
 COPY --from=builder /src/target/release/oraclemcp /usr/local/bin/oraclemcp
 
 # Required by the MCP registry to verify image ownership against server.json's

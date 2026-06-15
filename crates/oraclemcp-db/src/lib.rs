@@ -5,12 +5,10 @@
 //!
 //! Layers:
 //! - [`OracleConnection`] — the backend-independent sync connection trait, with
-//!   the `oracle`-crate-backed [`RustOracleConnection`].
-//! - `OraclePool` — an `r2d2` pool behind a `tokio::task::spawn_blocking`
-//!   boundary so DB I/O never blocks the async executor and an
-//!   `oracle::Connection` is never held across an `.await` (`oracle-driver`).
-//! - [`detect_instant_client`] — the offline-safe Instant Client posture probe
-//!   for `doctor`.
+//!   the thin [`oracledb`]-backed [`RustOracleConnection`].
+//! - [`OraclePool`] — a bounded pure-Rust thin session pool.
+//! - [`detect_instant_client`] — compatibility posture data for `doctor`; thin
+//!   mode never requires Instant Client.
 //!
 //! The session-lease primitive (P0-4) and the deterministic NUMBER→string /
 //! ISO-8601 / NLS serializer (P0-5) build on these.
@@ -32,7 +30,6 @@ mod serialize;
 mod standby;
 mod types;
 
-#[cfg(feature = "oracle-driver")]
 mod pool;
 
 pub use auth_adapter::{AuthAdapter, AuthAdapterError};
@@ -78,7 +75,6 @@ pub use types::{
     OracleSessionIdentity,
 };
 
-#[cfg(feature = "oracle-driver")]
 pub use pool::{OracleConnectionManager, OraclePool, PoolSettings};
 
 /// Re-export the shared agent-facing error envelope.

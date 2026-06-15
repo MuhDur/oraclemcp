@@ -38,8 +38,7 @@ unsafe_code = "forbid"
 dbg_macro = "deny"
 todo = "deny"
 
-# Crash safety: the shipped server aborts on panic rather than unwinding across
-# the ODPI-C FFI / async tasks. Only affects release builds; `cargo test` still
-# unwinds (so #[should_panic] works).
+# Crash safety: the shipped server aborts on panic. Only affects release
+# builds; `cargo test` still unwinds (so #[should_panic] works).
 [profile.release]
 panic = "abort"

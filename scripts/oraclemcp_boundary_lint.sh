@@ -99,4 +99,3 @@ check_dependency_graph() {
 }
 
 check_dependency_graph "default"
-check_dependency_graph "live-db" --features live-db

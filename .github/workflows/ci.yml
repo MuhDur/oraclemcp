@@ -130,13 +130,10 @@ jobs:
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check
 
-  # The flagship artifact is the live-db binary; the default offline build
-  # cannot connect to Oracle. rust-oracle bundles ODPI-C and links the Instant
-  # Client at runtime, so this compiles in CI without the client present (a C
-  # toolchain is enough). Build-only — live connectivity is covered by the
-  # env-gated `live-xe` tests, not run here.
-  live-db:
-    name: build --features live-db
+  # The flagship artifact is the thin-db binary. Build-only — live connectivity
+  # is covered by the env-gated `live-xe` tests, not run here.
+  thin-db:
+    name: build thin driver
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -146,7 +143,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p oraclemcp --features live-db
+      - run: cargo build -p oraclemcp
 
   # No deployment-specific identifiers or secrets may reach the public repo.
   # Generic heuristics run here; operators add a site denylist locally via

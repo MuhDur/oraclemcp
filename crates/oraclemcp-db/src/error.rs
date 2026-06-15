@@ -13,9 +13,8 @@ use crate::types::OracleBackend;
 #[derive(Clone, Debug, Error)]
 #[non_exhaustive]
 pub enum DbError {
-    /// The requested backend was not compiled in (the `oracle-driver` feature
-    /// is off — the offline build).
-    #[error("oracle backend `{backend}` not compiled (build with the `oracle-driver` feature)")]
+    /// The requested backend was not compiled in.
+    #[error("oracle backend `{backend}` not compiled")]
     BackendNotCompiled {
         /// The backend that was requested.
         backend: OracleBackend,
@@ -35,6 +34,10 @@ pub enum DbError {
     /// An auth mode is configured that this build cannot satisfy yet.
     #[error("unsupported auth mode: {0}")]
     UnsupportedAuth(String),
+    /// A database feature is configured or requested that this backend cannot
+    /// satisfy yet.
+    #[error("unsupported database feature: {0}")]
+    UnsupportedFeature(String),
     /// A stateful operation (transaction / savepoint) was attempted without a
     /// session lease (§5.1) — never a silent best-effort.
     #[error("session lease required: {0}")]
@@ -71,7 +74,9 @@ impl DbError {
             DbError::Pool(msg) => {
                 ErrorEnvelope::new(ErrorClass::Busy, msg).with_retry_after_ms(250)
             }
-            DbError::UnsupportedAuth(msg) => ErrorEnvelope::new(ErrorClass::InvalidArguments, msg),
+            DbError::UnsupportedAuth(msg) | DbError::UnsupportedFeature(msg) => {
+                ErrorEnvelope::new(ErrorClass::InvalidArguments, msg)
+            }
             DbError::LeaseRequired(msg) => ErrorEnvelope::new(ErrorClass::LeaseRequired, msg)
                 .with_next_step("call oracle_session(acquire_lease) and pass the lease_id"),
             DbError::LeaseNotFound(msg) => ErrorEnvelope::new(ErrorClass::LeaseRequired, msg)

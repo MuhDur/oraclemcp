@@ -193,26 +193,12 @@ fn check_instant_client() -> CheckResult {
     if !p.driver_compiled {
         return CheckResult::new(
             1,
-            "Instant Client",
+            "Oracle thin driver",
             CheckStatus::Skip,
-            "built without the oracle-driver feature; live DB disabled",
+            "built without Oracle connectivity",
         );
     }
-    if p.libclntsh_found {
-        let v = p
-            .version_hint
-            .unwrap_or_else(|| "version unknown".to_owned());
-        CheckResult::new(
-            1,
-            "Instant Client",
-            CheckStatus::Pass,
-            format!("loadable ({v})"),
-        )
-    } else {
-        CheckResult::new(1, "Instant Client", CheckStatus::Fail, p.note).with_fix(
-            "install Oracle Instant Client (Basic) and add its directory to LD_LIBRARY_PATH (or DYLD_LIBRARY_PATH / PATH)",
-        )
-    }
+    CheckResult::new(1, "Oracle thin driver", CheckStatus::Pass, p.note)
 }
 
 fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
@@ -253,13 +239,20 @@ fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
 
 fn check_connectivity(ctx: &DoctorContext) -> CheckResult {
     if let Some(error) = &ctx.connection_error {
+        let fix = if error.contains("unsupported auth mode")
+            || error.contains("unsupported database feature")
+        {
+            "use username/password thin auth for this profile, or upgrade the thin driver once that auth feature is supported"
+        } else {
+            "verify the connect string, credentials, and listener reachability"
+        };
         return CheckResult::new(
             3,
             "Connectivity",
             CheckStatus::Fail,
             format!("connect failed: {error}"),
         )
-        .with_fix("verify the connect string, credentials, and listener reachability");
+        .with_fix(fix);
     }
     match ctx.conn {
         None => CheckResult::new(
@@ -597,6 +590,27 @@ mod tests {
         assert_eq!(
             report.checks.iter().find(|c| c.id == 6).unwrap().status,
             CheckStatus::Skip
+        );
+    }
+
+    #[test]
+    fn unsupported_thin_auth_has_actionable_doctor_fix() {
+        let ctx = DoctorContext {
+            connection_error: Some(
+                "unsupported auth mode: external/wallet auth without username and password is not supported by the published thin driver yet"
+                    .to_owned(),
+            ),
+            ..DoctorContext::default()
+        };
+        let report = run_doctor(&ctx);
+        let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
+        assert_eq!(connectivity.status, CheckStatus::Fail);
+        assert!(
+            connectivity
+                .fix
+                .as_deref()
+                .unwrap()
+                .contains("username/password thin auth")
         );
     }
 
