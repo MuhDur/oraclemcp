@@ -8,7 +8,7 @@
 use std::future::Future;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use asupersync::Cx;
 use asupersync::runtime::{Runtime, RuntimeBuilder};
@@ -81,6 +81,8 @@ pub trait ToolDispatch: Send + Sync + 'static {
 pub struct OracleMcpServer {
     version: String,
     registry: Arc<ToolRegistry>,
+    tool_descriptors_json: Arc<OnceLock<Vec<Value>>>,
+    tools_list_result_json: Arc<OnceLock<Value>>,
     capabilities: Arc<CapabilitiesReport>,
     dispatcher: Arc<dyn ToolDispatch>,
     dispatch_runtime: Arc<Runtime>,
@@ -98,9 +100,12 @@ impl OracleMcpServer {
         let dispatch_runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("Asupersync current-thread runtime builds for MCP dispatch");
+        let registry = Arc::new(registry);
         OracleMcpServer {
             version: version.into(),
-            registry: Arc::new(registry),
+            registry,
+            tool_descriptors_json: Arc::new(OnceLock::new()),
+            tools_list_result_json: Arc::new(OnceLock::new()),
             capabilities: Arc::new(capabilities),
             dispatcher,
             dispatch_runtime: Arc::new(dispatch_runtime),
@@ -108,30 +113,19 @@ impl OracleMcpServer {
     }
 
     /// Map the registry descriptors to native MCP JSON tool descriptors.
+    #[must_use]
     pub fn tools_json(&self) -> Vec<Value> {
-        let mut tools = Vec::with_capacity(self.registry.tools.len() + 1);
-        tools.push(json!({
-            "name": CAPABILITIES_TOOL,
-            "description": "Zero-arg entry point: tools, operating level + gates, connection/standby status, feature tiers, version.",
-            "inputSchema": empty_object_schema(),
-        }));
-        for d in &self.registry.tools {
-            if d.name == CAPABILITIES_TOOL {
-                continue;
-            }
-            tools.push(json!({
-                "name": d.name,
-                "description": d.summary,
-                "inputSchema": descriptor_input_schema(d),
-            }));
-        }
-        tools
+        self.tool_descriptors_json
+            .get_or_init(|| tools_json_for_registry(&self.registry))
+            .clone()
     }
 
     /// Build the native MCP `tools/list` result object.
     #[must_use]
     pub fn tools_list_result_json(&self) -> Value {
-        json!({ "tools": self.tools_json() })
+        self.tools_list_result_json
+            .get_or_init(|| json!({ "tools": self.tools_json() }))
+            .clone()
     }
 
     /// Serve over stdio until the client disconnects. `auth` must already be
@@ -454,6 +448,26 @@ fn descriptor_input_schema(descriptor: &ToolDescriptor) -> Map<String, Value> {
     }
 }
 
+fn tools_json_for_registry(registry: &ToolRegistry) -> Vec<Value> {
+    let mut tools = Vec::with_capacity(registry.tools.len() + 1);
+    tools.push(json!({
+        "name": CAPABILITIES_TOOL,
+        "description": "Zero-arg entry point: tools, operating level + gates, connection/standby status, feature tiers, version.",
+        "inputSchema": empty_object_schema(),
+    }));
+    for d in &registry.tools {
+        if d.name == CAPABILITIES_TOOL {
+            continue;
+        }
+        tools.push(json!({
+            "name": d.name,
+            "description": d.summary,
+            "inputSchema": descriptor_input_schema(d),
+        }));
+    }
+    tools
+}
+
 fn jsonrpc_result(id: Value, result: Value) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -696,6 +710,15 @@ mod tests {
             serde_json::json!("string")
         );
         assert_eq!(query["inputSchema"]["required"], serde_json::json!(["sql"]));
+    }
+
+    #[test]
+    fn tools_list_result_matches_advertised_tools_on_repeated_calls() {
+        let s = server();
+        let expected = serde_json::json!({ "tools": s.tools_json() });
+
+        assert_eq!(s.tools_list_result_json(), expected);
+        assert_eq!(s.tools_list_result_json(), expected);
     }
 
     #[test]
