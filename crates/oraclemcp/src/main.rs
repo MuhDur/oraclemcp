@@ -22,6 +22,7 @@
 mod robot_docs;
 
 use std::collections::HashSet;
+use std::io::{self, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -189,6 +190,37 @@ fn main() -> ExitCode {
             &tools_dir,
         ),
         Command::SignTool { path, tool } => run_sign_tool(robot_json, &path, tool.as_deref()),
+    }
+}
+
+fn write_stdout<F>(write: F) -> io::Result<()>
+where
+    F: FnOnce(&mut dyn Write) -> io::Result<()>,
+{
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    write(&mut out)
+}
+
+fn write_stdout_text(text: &str) -> io::Result<()> {
+    write_stdout(|out| out.write_all(text.as_bytes()))
+}
+
+fn write_stdout_line(text: &str) -> io::Result<()> {
+    write_stdout(|out| {
+        out.write_all(text.as_bytes())?;
+        out.write_all(b"\n")
+    })
+}
+
+fn stdout_exit(result: io::Result<()>, success: ExitCode) -> ExitCode {
+    match result {
+        Ok(()) => success,
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("oraclemcp: failed writing to stdout: {e}");
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -653,12 +685,12 @@ fn run_info(robot_json: bool) -> ExitCode {
         "tools": &registry::TOOL_NAMES[..],
         "mcp_protocol_version": oraclemcp_core::PROTOCOL_VERSION,
     });
-    if robot_json {
-        println!("{}", serde_json::to_string(&info).unwrap());
+    let output = if robot_json {
+        serde_json::to_string(&info).unwrap()
     } else {
-        println!("{}", serde_json::to_string_pretty(&info).unwrap());
-    }
-    ExitCode::SUCCESS
+        serde_json::to_string_pretty(&info).unwrap()
+    };
+    stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
 }
 
 fn setup_payload(
@@ -734,34 +766,36 @@ fn run_setup(
         tools_dir,
     );
     if robot_json {
-        println!("{}", serde_json::to_string(&payload).unwrap());
+        let output = serde_json::to_string(&payload).unwrap();
+        stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
     } else {
-        println!("oraclemcp setup\n");
-        println!("Install:\n  cargo install oraclemcp\n");
-        println!("Profiles path:\n  {config_path}\n");
-        println!(
-            "profiles.toml template:\n{}\n",
+        let mut output = String::new();
+        output.push_str("oraclemcp setup\n\n");
+        output.push_str("Install:\n  cargo install oraclemcp\n\n");
+        output.push_str(&format!("Profiles path:\n  {config_path}\n\n"));
+        output.push_str(&format!(
+            "profiles.toml template:\n{}\n\n",
             payload["profiles_toml"].as_str().unwrap_or("")
-        );
-        println!("Wrapper path:\n  {wrapper_path}\n");
-        println!(
-            "wrapper script template:\n{}\n",
+        ));
+        output.push_str(&format!("Wrapper path:\n  {wrapper_path}\n\n"));
+        output.push_str(&format!(
+            "wrapper script template:\n{}\n\n",
             payload["wrapper_script"].as_str().unwrap_or("")
-        );
-        println!("Custom tools path:\n  {tools_dir}\n");
-        println!(
-            "custom tool template:\n{}\n",
+        ));
+        output.push_str(&format!("Custom tools path:\n  {tools_dir}\n\n"));
+        output.push_str(&format!(
+            "custom tool template:\n{}\n\n",
             payload["custom_tool_toml"].as_str().unwrap_or("")
-        );
-        println!(
-            "Claude MCP JSON:\n{}\n",
+        ));
+        output.push_str(&format!(
+            "Claude MCP JSON:\n{}\n\n",
             serde_json::to_string_pretty(&payload["claude_mcp_json"]).unwrap()
-        );
-        println!(
+        ));
+        output.push_str(&format!(
             "Codex config TOML:\n{}",
             payload["codex_config_toml"].as_str().unwrap_or("")
-        );
-        println!("Validation commands:");
+        ));
+        output.push_str("Validation commands:\n");
         for command in payload["validation_commands"]
             .as_array()
             .into_iter()
@@ -774,10 +808,10 @@ fn run_setup(
                 .filter_map(|part| part.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
-            println!("  {rendered}");
+            output.push_str(&format!("  {rendered}\n"));
         }
+        stdout_exit(write_stdout_text(&output), ExitCode::SUCCESS)
     }
-    ExitCode::SUCCESS
 }
 
 fn custom_tool_signatures(
@@ -831,12 +865,12 @@ fn custom_tool_signatures(
 fn run_sign_tool(robot_json: bool, path: &Path, only_tool: Option<&str>) -> ExitCode {
     match custom_tool_signatures(path, only_tool) {
         Ok(payload) => {
-            if robot_json {
-                println!("{}", serde_json::to_string(&payload).unwrap());
+            let output = if robot_json {
+                serde_json::to_string(&payload).unwrap()
             } else {
-                println!("{}", serde_json::to_string_pretty(&payload).unwrap());
-            }
-            ExitCode::SUCCESS
+                serde_json::to_string_pretty(&payload).unwrap()
+            };
+            stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
         }
         Err(e) => {
             emit_status_error(robot_json, "ORACLEMCP_SIGN_TOOL_FAILED", &e.message);
@@ -850,24 +884,24 @@ fn run_capabilities(robot_json: bool) -> ExitCode {
     // the compiled driver feature.
     let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), LIVE_DB, true);
     let value = serde_json::to_value(&caps).unwrap_or(serde_json::Value::Null);
-    if robot_json {
-        println!("{}", serde_json::to_string(&value).unwrap());
+    let output = if robot_json {
+        serde_json::to_string(&value).unwrap()
     } else {
-        println!("{}", serde_json::to_string_pretty(&value).unwrap());
-    }
-    ExitCode::SUCCESS
+        serde_json::to_string_pretty(&value).unwrap()
+    };
+    stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
 }
 
 fn run_robot_docs_guide(robot_json: bool) -> ExitCode {
     if robot_json {
-        println!(
-            "{}",
-            serde_json::to_string(&robot_docs::robot_docs_guide_json()).unwrap()
-        );
+        let output = serde_json::to_string(&robot_docs::robot_docs_guide_json()).unwrap();
+        stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
     } else {
-        print!("{}", robot_docs::robot_docs_guide_text());
+        stdout_exit(
+            write_stdout_text(robot_docs::robot_docs_guide_text()),
+            ExitCode::SUCCESS,
+        )
     }
-    ExitCode::SUCCESS
 }
 
 fn profiles_json(cfg: &OracleMcpConfig) -> serde_json::Value {
@@ -932,30 +966,31 @@ fn run_profiles(robot_json: bool) -> ExitCode {
     match OracleMcpConfig::load(None) {
         Ok(cfg) => {
             if robot_json {
-                println!("{}", profiles_json(&cfg));
+                stdout_exit(
+                    write_stdout_line(&profiles_json(&cfg).to_string()),
+                    ExitCode::SUCCESS,
+                )
             } else {
-                print!("{}", profiles_text(&cfg));
+                stdout_exit(write_stdout_text(&profiles_text(&cfg)), ExitCode::SUCCESS)
             }
-            ExitCode::SUCCESS
         }
         Err(e) => {
             if robot_json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "ok": false,
-                        "exit_code": 2,
-                        "error": {
-                            "class": "ConfigError",
-                            "message": e.to_string(),
-                        }
-                    })
-                );
+                let output = serde_json::json!({
+                    "ok": false,
+                    "exit_code": 2,
+                    "error": {
+                        "class": "ConfigError",
+                        "message": e.to_string(),
+                    }
+                })
+                .to_string();
+                stdout_exit(write_stdout_line(&output), ExitCode::from(2))
             } else {
                 eprintln!("oraclemcp profiles: {e}");
                 eprintln!("fix: correct ~/.config/oraclemcp/profiles.toml or set ORACLEMCP_CONFIG");
+                ExitCode::from(2)
             }
-            ExitCode::from(2)
         }
     }
 }
@@ -1066,12 +1101,17 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>) -> ExitCode {
     let report = run_doctor(&ctx);
     let exit_code = doctor_process_exit_code(&report);
     if robot_json {
-        println!("{}", report.to_json_with_exit_code(i32::from(exit_code)));
+        let output = report
+            .to_json_with_exit_code(i32::from(exit_code))
+            .to_string();
+        stdout_exit(write_stdout_line(&output), ExitCode::from(exit_code))
     } else {
         // The human report is the data here; print it on stdout.
-        print!("{}", report.to_text_with_exit_code(i32::from(exit_code)));
+        stdout_exit(
+            write_stdout_text(&report.to_text_with_exit_code(i32::from(exit_code))),
+            ExitCode::from(exit_code),
+        )
     }
-    ExitCode::from(exit_code)
 }
 
 /// A no-driver / failed-connect stub connection: every operation returns the
@@ -1170,6 +1210,15 @@ mod tests {
         let err = stub.ping().expect_err("stub always errors");
         // It maps to a structured envelope (no panic).
         let _ = err.into_envelope();
+    }
+
+    #[test]
+    fn stdout_exit_treats_broken_pipe_as_success_path() {
+        let code = stdout_exit(
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe closed")),
+            ExitCode::from(2),
+        );
+        assert_eq!(format!("{code:?}"), "ExitCode(unix_exit_status(0))");
     }
 
     #[test]

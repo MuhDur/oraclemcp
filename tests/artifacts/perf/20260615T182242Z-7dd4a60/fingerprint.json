@@ -1,0 +1,56 @@
+{
+  "run_id": "20260615T182242Z-7dd4a60",
+  "captured_at_utc": "2026-06-15T18:22:42Z",
+  "git_sha": "7dd4a60786207162fb05cb3af6523598c39ddb38",
+  "source_state": {
+    "description": "Final W13 measurements include worktree changes on top of git_sha before the W13 commit.",
+    "uncommitted_changes_included": true,
+    "notable_changes": [
+      "Dockerfile builder stage installs gcc for Rust linking; runtime image does not include gcc.",
+      "CLI stdout emission uses fallible writes so Unix broken-pipe pipelines exit cleanly."
+    ]
+  },
+  "hardware": {
+    "cpu_model": "AMD EPYC 7713 64-Core Processor",
+    "cpu_sockets": 1,
+    "cpu_cores": 64,
+    "cpu_threads": 128,
+    "ram_total": "247 GiB",
+    "swap_total": "8.0 GiB"
+  },
+  "storage": {
+    "source": "/dev/mapper/ubuntu--vg-ubuntu--lv",
+    "filesystem": "ext4",
+    "mount_options": "rw,relatime",
+    "available": "3.0T"
+  },
+  "os": {
+    "uname": "Linux durakovic 6.17.0-35-generic #35-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:10:28 UTC 2026 x86_64 GNU/Linux",
+    "distribution": "Ubuntu 25.10.0 (questing)"
+  },
+  "toolchain": {
+    "rustc": "rustc 1.97.0-nightly (4b0c9d76a 2026-05-10)",
+    "rustc_commit": "4b0c9d76ae7d387229caea55cfa73c280b08b8a7",
+    "cargo": "cargo 1.97.0-nightly (a343accce 2026-05-08)",
+    "docker_server": "29.1.3"
+  },
+  "build_profile": {
+    "name": "release",
+    "cargo_target_dir": "/tmp/cargo-target",
+    "profile_tuning": "workspace default release profile"
+  },
+  "workload_isolation": {
+    "taskset": null,
+    "cgroup": null,
+    "bare": true
+  },
+  "tuning_applied": {
+    "cpu_governor": "schedutil",
+    "cpu_boost": 1,
+    "kernel_perf_event_paranoid": 4,
+    "kernel_kptr_restrict": 1,
+    "kernel_nmi_watchdog": 1
+  },
+  "cache_state": "warm for CLI probes; Criterion performed its own warmup",
+  "notes": "No Oracle credentials, connect strings, wallets, or schema names were used."
+}

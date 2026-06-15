@@ -1,0 +1,3 @@
+oraclemcp-info-smoke: semantic check only; output includes tool list and was not stored verbatim here.
+docker-info-smoke: semantic check only; output includes tool list and was not stored verbatim here.
+broken-pipe-smoke: semantic check only; capabilities piped through head exits successfully under pipefail.
