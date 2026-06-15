@@ -100,6 +100,50 @@ real query text.
 
 ## Thin Driver API Coverage
 
+## W3 Thin Driver Release Dependency Decision
+
+Verified on 2026-06-15:
+
+- `oracledb = 0.1.1` is published on crates.io and docs.rs as the latest public
+  version.
+- The published docs expose the Asupersync-native `Connection` API with `&Cx`
+  parameters plus the blocking facade needed for short-lived migration
+  experiments.
+- The local `/home/durakovic/projects/rust-oracledb` checkout is a normal
+  upstream checkout, not an `oraclemcp` release dependency. Its `v0.1.1` tag is
+  the public version selected here; any post-tag local APIs needed by W4 must be
+  filed as granular `rust-oracledb` work and released before `oraclemcp` can
+  consume them.
+
+Decision:
+
+- `oraclemcp` will consume `oracledb = 0.1.1` from crates.io, declared in the
+  workspace dependency table with `default-features = false`.
+- No vendoring is needed for W3. No releaseable `oraclemcp` crate may depend on
+  `/home/durakovic/projects/rust-oracledb` or any other external local path.
+- W4 should use the async `oracledb::Connection` surface first. The
+  `BlockingConnection` facade is acceptable only as a short-lived bridge inside
+  an explicitly temporary local migration step, not in the final production
+  graph.
+- Release package validation uses `cargo package --workspace --locked
+  --no-verify` in the tag workflow to prove tarball assembly without hidden
+  external path dependencies. `scripts/publish_crates.sh` then runs
+  `cargo publish -p <crate> --locked --dry-run` immediately before each real
+  publish, in dependency order, after earlier sibling crates have appeared in
+  the crates.io index.
+
+Semver, ownership, and security-fix flow:
+
+- `oracledb` remains independently owned and released from
+  `https://github.com/MuhDur/rust-oracledb`; `oraclemcp` consumes it like any
+  other public crate.
+- Driver fixes flow into `oraclemcp` through normal published `oracledb` version
+  bumps and lockfile updates, with release notes in the driver repo for
+  downstream users.
+- If W4 discovers that `0.1.1` lacks a required Oracle thin capability, the
+  next step is a self-contained `rust-oracledb` issue and a new published
+  driver version, not a hidden path dependency.
+
 | oraclemcp need | Current thick behavior | `oracledb` / thin migration note |
 | --- | --- | --- |
 | Connect | `oracle::Connection::connect` via `RustOracleConnection`; applies wallet/connect string, identity, NLS, session statements. | `oracledb::Connection::connect(&Cx, ConnectOptions)` and `BlockingConnection` exist in `/home/durakovic/projects/rust-oracledb`; final adapter should use `&Cx`, not the blocking shim except as a short-lived bridge. |

@@ -53,7 +53,12 @@ jobs:
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check
       - run: cargo build -p oraclemcp --features live-db
-      - run: cargo package --workspace --locked
+      # Cargo verifies a packaged workspace crate by resolving its rewritten
+      # path dependencies from crates.io. For a fresh tag, sibling crates are
+      # not all on crates.io yet, so package assembly is checked here and
+      # per-crate packaged verification runs in dependency order immediately
+      # before each publish in scripts/publish_crates.sh.
+      - run: cargo package --workspace --locked --no-verify
 
   pinned-nightly:
     name: build on pinned nightly

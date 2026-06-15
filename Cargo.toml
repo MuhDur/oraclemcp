@@ -24,6 +24,7 @@ categories = ["database", "development-tools"]
 
 [workspace.dependencies]
 asupersync = { version = "0.3.4", default-features = false }
+oracledb = { version = "0.1.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

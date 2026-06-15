@@ -78,6 +78,7 @@ for crate in "${order[@]}"; do
   fi
 
   echo "publish-crates: publishing $crate $version"
+  cargo publish -p "$crate" --locked --dry-run
   cargo publish -p "$crate" --locked
   wait_for_index "$crate"
 done
