@@ -1,0 +1,106 @@
+{
+  "run_id": "2026-06-15-campaign-p1",
+  "captured_at_utc": "2026-06-15T20:46:41Z",
+  "purpose": "P1 profiling definition and environment fingerprint only; no benchmark loop and no production Rust edits.",
+  "git": {
+    "head": "6a39e437face9e950a91fec508458797b41879b6",
+    "branch_status": "main...origin/main",
+    "pre_existing_worktree_notes": [
+      ".beads/issues.jsonl had 7 inserted lines before this pass touched artifacts",
+      ".skill-loop-progress.md already existed untracked before this pass and is the reserved campaign ledger",
+      "PLAN_ASUPERSYNC_THIN_NATIVE.md remains intentionally untracked"
+    ]
+  },
+  "toolchain": {
+    "rustc": "rustc 1.97.0-nightly (4b0c9d76a 2026-05-10)",
+    "cargo": "cargo 1.97.0-nightly (a343accce 2026-05-08)",
+    "active_toolchain": "nightly-2026-05-11-x86_64-unknown-linux-gnu",
+    "toolchain_source": "rust-toolchain.toml override"
+  },
+  "workspace": {
+    "root": "/home/durakovic/projects/oraclemcp",
+    "target_directory": "/tmp/cargo-target",
+    "package_count": 9,
+    "packages": [
+      "oraclemcp-error",
+      "oraclemcp-telemetry",
+      "oraclemcp-audit",
+      "oraclemcp-guard",
+      "oraclemcp-config",
+      "oraclemcp-db",
+      "oraclemcp-auth",
+      "oraclemcp-core",
+      "oraclemcp"
+    ],
+    "existing_benchmarks": [
+      "oraclemcp-db/benches/classify_type.rs",
+      "oraclemcp-db/benches/lob_capping.rs",
+      "oraclemcp-db/benches/page_serialization.rs",
+      "oraclemcp-guard/tests/perf_classifier.rs"
+    ],
+    "release_perf_profile_present": false
+  },
+  "host": {
+    "kernel": "Linux durakovic 6.17.0-35-generic #35-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:10:28 UTC 2026 x86_64 GNU/Linux",
+    "cpu_model": "AMD EPYC 7713 64-Core Processor",
+    "logical_cpus": 128,
+    "threads_per_core": 2,
+    "cores_per_socket": 64,
+    "sockets": 1,
+    "numa_nodes": 1,
+    "ram_total": "247Gi",
+    "ram_available": "114Gi",
+    "swap_total": "8.0Gi",
+    "swap_used": "6.7Gi",
+    "cpu_governor": "schedutil",
+    "frequency_boost": "enabled",
+    "kernel_tuning_applied": false
+  },
+  "storage": {
+    "workspace_filesystem": "ext4",
+    "workspace_mount": "/",
+    "workspace_used_percent": 31,
+    "tmp_filesystem": "tmpfs",
+    "tmp_used_percent": 94
+  },
+  "tool_availability": {
+    "hyperfine": "missing",
+    "samply": "missing",
+    "heaptrack": "missing",
+    "cargo-flamegraph": "missing",
+    "flamegraph": "missing",
+    "perf": "/usr/bin/perf",
+    "perf_version": "perf version 6.17.13",
+    "perf_event_paranoid": 4,
+    "perf_stat_smoke": "failed: unprivileged access blocked",
+    "cargo-deny": "/home/durakovic/.cargo/bin/cargo-deny",
+    "br": "/home/durakovic/.local/bin/br",
+    "bv": "/home/durakovic/.local/bin/bv",
+    "docker": "/usr/bin/docker",
+    "jq": "/usr/bin/jq",
+    "rg": "available",
+    "cargo": "/home/durakovic/.cargo/bin/cargo",
+    "rustc": "/home/durakovic/.cargo/bin/rustc",
+    "rustup": "/home/durakovic/.cargo/bin/rustup"
+  },
+  "oracle_23ai_local_path": {
+    "container_name": "plsql-intelligence-xe",
+    "image": "gvenzl/oracle-free:23-slim",
+    "state": "running",
+    "health": "healthy",
+    "published_listener": "localhost:1521",
+    "password_env_present": true,
+    "credential_values_recorded": false,
+    "availability_smoke": {
+      "command": "cargo test -p oraclemcp-db --features live-xe --test live_oracle live_connect_ping_query_bind_describe -- --exact",
+      "result": "passed",
+      "tests": "1 passed; 0 failed; 8 filtered out",
+      "duration": "0.19s after build reuse"
+    }
+  },
+  "constraints": [
+    "Do not run OS or kernel tuning without operator approval.",
+    "Do not print or artifact credential values.",
+    "Do not touch production Rust code in P1."
+  ]
+}
