@@ -3,12 +3,16 @@
 //! Replaces `plsql-mcp`'s hand-rolled JSON-RPC with the official `rmcp` SDK.
 //! [`OracleMcpServer`] implements rmcp's [`ServerHandler`] over the dynamic
 //! [`ToolRegistry`] + an injected [`ToolDispatch`], so engine and operator
-//! tools register from the consumer side (the one-way boundary, §0). Engine
-//! work stays synchronous behind `spawn_blocking` (§4.3): `call_tool` dispatches
-//! on a blocking worker and never blocks the async executor.
+//! tools register from the consumer side (the one-way boundary, §0). Tool
+//! dispatch is Cx-aware so the runtime/transport migration can move away from
+//! ambient Tokio handles without changing the fail-closed tool surface.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use asupersync::Cx;
+use asupersync::runtime::{Runtime, RuntimeBuilder};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, Content, Implementation, InitializeRequestParams,
@@ -32,11 +36,17 @@ pub const INIT_TOKEN_META_KEY: &str = "oraclemcp/initToken";
 /// The zero-arg discovery tool name (§8.1).
 pub const CAPABILITIES_TOOL: &str = "oracle_capabilities";
 
-/// Synchronous tool dispatch, injected by the engine/operator side. Runs on a
-/// blocking worker; returns the tool's structured JSON or an [`ErrorEnvelope`].
+/// Boxed tool-dispatch future. This keeps [`ToolDispatch`] object-safe while
+/// making runtime context explicit at the server boundary.
+pub type DispatchFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Value, ErrorEnvelope>> + Send + 'a>>;
+
+/// Cx-aware tool dispatch, injected by the engine/operator side. Returns the
+/// tool's structured JSON or an [`ErrorEnvelope`].
 pub trait ToolDispatch: Send + Sync + 'static {
-    /// Dispatch a tool call by name with JSON arguments.
-    fn dispatch(&self, name: &str, args: Value) -> Result<Value, ErrorEnvelope>;
+    /// Dispatch a tool call by name with JSON arguments in the supplied
+    /// Asupersync context.
+    fn dispatch<'a>(&'a self, cx: &'a Cx, name: &'a str, args: Value) -> DispatchFuture<'a>;
 }
 
 /// The rmcp server handler.
@@ -46,6 +56,10 @@ pub struct OracleMcpServer {
     registry: Arc<ToolRegistry>,
     capabilities: Arc<CapabilitiesReport>,
     dispatcher: Arc<dyn ToolDispatch>,
+    /// Temporary bridge for rmcp/Tokio callers until the native Asupersync
+    /// transport beads replace this caller path. Native server code should call
+    /// `run_tool_with_cx` with an explicit context.
+    dispatch_runtime: Arc<Runtime>,
     /// The resolved stdio init-token policy enforced on `initialize`. `None`
     /// for the HTTP path (already guarded by `oauth_guard`, §7.1); `Some` only
     /// when `serve_stdio` wires the stdio transport. Fail-closed: a `Required`
@@ -62,11 +76,15 @@ impl OracleMcpServer {
         capabilities: CapabilitiesReport,
         dispatcher: Arc<dyn ToolDispatch>,
     ) -> Self {
+        let dispatch_runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("Asupersync current-thread runtime builds for MCP dispatch");
         OracleMcpServer {
             version: version.into(),
             registry: Arc::new(registry),
             capabilities: Arc::new(capabilities),
             dispatcher,
+            dispatch_runtime: Arc::new(dispatch_runtime),
             auth: None,
         }
     }
@@ -207,18 +225,42 @@ impl OracleMcpServer {
         envelope
     }
 
-    /// Run a tool by name + JSON args, returning a [`CallToolResult`]. Context-
-    /// free so it is unit-testable without an rmcp `RequestContext`. Engine/DB
-    /// dispatch runs on a blocking worker (§4.3); a join failure becomes a tool
-    /// error, never a panic.
-    pub async fn run_tool(&self, name: String, args: Value) -> CallToolResult {
+    /// Run a tool by name + JSON args in an explicit Asupersync context.
+    pub async fn run_tool_with_cx(&self, cx: &Cx, name: String, args: Value) -> CallToolResult {
         if name == CAPABILITIES_TOOL {
             return self.capabilities_result();
         }
-        let dispatcher = Arc::clone(&self.dispatcher);
-        match tokio::task::spawn_blocking(move || dispatcher.dispatch(&name, args)).await {
-            Ok(Ok(value)) => tool_result_ok(value),
-            Ok(Err(envelope)) => tool_result_err(&self.sanitize_error_envelope(envelope)),
+        match self.dispatcher.dispatch(cx, &name, args).await {
+            Ok(value) => tool_result_ok(value),
+            Err(envelope) => tool_result_err(&self.sanitize_error_envelope(envelope)),
+        }
+    }
+
+    /// Run a tool by name + JSON args, returning a [`CallToolResult`]. This is
+    /// the legacy rmcp/Tokio entrypoint; native Asupersync callers should prefer
+    /// [`Self::run_tool_with_cx`].
+    pub async fn run_tool(&self, name: String, args: Value) -> CallToolResult {
+        if let Some(cx) = Cx::current() {
+            return self.run_tool_with_cx(&cx, name, args).await;
+        }
+
+        let server = self.clone();
+        let runtime = Arc::clone(&self.dispatch_runtime);
+        match tokio::task::spawn_blocking(move || {
+            runtime.block_on(async move {
+                let Some(cx) = Cx::current() else {
+                    let envelope = ErrorEnvelope::new(
+                        ErrorClass::RuntimeStateRequired,
+                        "Asupersync context was not installed for tool dispatch",
+                    );
+                    return tool_result_err(&envelope);
+                };
+                server.run_tool_with_cx(&cx, name, args).await
+            })
+        })
+        .await
+        {
+            Ok(result) => result,
             Err(e) => tool_result_err(&ErrorEnvelope::new(
                 ErrorClass::Internal,
                 format!("dispatch task failed: {e}"),
@@ -327,23 +369,25 @@ mod tests {
 
     struct EchoDispatcher;
     impl ToolDispatch for EchoDispatcher {
-        fn dispatch(&self, name: &str, args: Value) -> Result<Value, ErrorEnvelope> {
-            if name == "boom" {
-                return Err(ErrorEnvelope::new(ErrorClass::Internal, "boom"));
-            }
-            if name == "connect_fail" {
-                return Err(ErrorEnvelope::new(
-                    ErrorClass::ConnectionFailed,
-                    "connection unavailable",
-                ));
-            }
-            if name == "missing_object" {
-                return Err(ErrorEnvelope::new(
-                    ErrorClass::ObjectNotFound,
-                    "object not found",
-                ));
-            }
-            Ok(serde_json::json!({ "echoed": name, "args": args }))
+        fn dispatch<'a>(&'a self, _cx: &'a Cx, name: &'a str, args: Value) -> DispatchFuture<'a> {
+            Box::pin(async move {
+                if name == "boom" {
+                    return Err(ErrorEnvelope::new(ErrorClass::Internal, "boom"));
+                }
+                if name == "connect_fail" {
+                    return Err(ErrorEnvelope::new(
+                        ErrorClass::ConnectionFailed,
+                        "connection unavailable",
+                    ));
+                }
+                if name == "missing_object" {
+                    return Err(ErrorEnvelope::new(
+                        ErrorClass::ObjectNotFound,
+                        "object not found",
+                    ));
+                }
+                Ok(serde_json::json!({ "echoed": name, "args": args }))
+            })
         }
     }
 
@@ -461,6 +505,24 @@ mod tests {
         assert_eq!(
             err.structured_content.unwrap()["error_class"],
             serde_json::json!("INTERNAL")
+        );
+    }
+
+    #[test]
+    fn run_tool_with_cx_dispatches_without_tokio_bridge() {
+        let s = server();
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("test runtime builds");
+        let ok = runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a request Cx");
+            s.run_tool_with_cx(&cx, "oracle_query".to_owned(), serde_json::json!({}))
+                .await
+        });
+        assert_eq!(ok.is_error, Some(false));
+        assert_eq!(
+            ok.structured_content.unwrap()["echoed"],
+            serde_json::json!("oracle_query")
         );
     }
 

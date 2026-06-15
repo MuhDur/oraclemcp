@@ -41,6 +41,25 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+# Approved by the operator for the thin-native Asupersync migration. Keep this
+# scoped to the exact upstream package family instead of globally allowing the
+# custom LicenseRef for arbitrary future dependencies.
+[[licenses.exceptions]]
+name = "asupersync"
+allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"]
+
+[[licenses.exceptions]]
+name = "franken-kernel"
+allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"]
+
+[[licenses.exceptions]]
+name = "franken-evidence"
+allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"]
+
+[[licenses.exceptions]]
+name = "franken-decision"
+allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"]
+
 [bans]
 multiple-versions = "allow"
 wildcards = "allow"

@@ -13,12 +13,13 @@
 
 use std::sync::Arc;
 
+use asupersync::Cx;
+use oraclemcp_core::OracleMcpServer;
 use oraclemcp_core::capabilities::{CapabilitiesReport, FeatureTiers};
 use oraclemcp_core::http::{HttpTransportConfig, MCP_PATH, build_router};
 use oraclemcp_core::init_token::StdioAuthPolicy;
-use oraclemcp_core::server::{INIT_TOKEN_META_KEY, ToolDispatch};
+use oraclemcp_core::server::{DispatchFuture, INIT_TOKEN_META_KEY, ToolDispatch};
 use oraclemcp_core::tools::{ToolDescriptor, ToolRegistry, ToolTier};
-use oraclemcp_core::{OracleMcpServer, error::ErrorEnvelope};
 use oraclemcp_guard::OperatingLevel;
 use rmcp::ServiceExt as _;
 use serde_json::{Value, json};
@@ -29,8 +30,8 @@ use tower::ServiceExt;
 /// container-gated; the protocol surface does not need them).
 struct EchoDispatch;
 impl ToolDispatch for EchoDispatch {
-    fn dispatch(&self, name: &str, _args: Value) -> Result<Value, ErrorEnvelope> {
-        Ok(json!({ "tool": name, "ok": true }))
+    fn dispatch<'a>(&'a self, _cx: &'a Cx, name: &'a str, _args: Value) -> DispatchFuture<'a> {
+        Box::pin(async move { Ok(json!({ "tool": name, "ok": true })) })
     }
 }
 

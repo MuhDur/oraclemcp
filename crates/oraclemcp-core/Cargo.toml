@@ -17,6 +17,7 @@ oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.2.1" }
 oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.2.1" }
 oraclemcp-auth = { path = "../oraclemcp-auth", version = "0.2.1" }
 oraclemcp-telemetry = { path = "../oraclemcp-telemetry", version = "0.2.1" }
+asupersync.workspace = true
 rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server"] }
 axum = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

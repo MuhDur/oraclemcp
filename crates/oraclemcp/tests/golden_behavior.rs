@@ -161,6 +161,22 @@ struct ClientEvent {
     expect_response: bool,
 }
 
+async fn read_stdio_reply<R>(reader: &mut BufReader<R>) -> Value
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+        .await
+        .expect("server replies to scripted stdio request")
+        .expect("read reply");
+    assert!(
+        !line.trim().is_empty(),
+        "server returned a non-empty JSON-RPC reply"
+    );
+    serde_json::from_str::<Value>(&line).expect("reply is JSON")
+}
+
 async fn run_stdio_script(server: OracleMcpServer, init: Value, events: Vec<ClientEvent>) -> Value {
     let (server_io, client_io) = tokio::io::duplex(256 * 1024);
     let serve = tokio::spawn(async move {
@@ -174,29 +190,20 @@ async fn run_stdio_script(server: OracleMcpServer, init: Value, events: Vec<Clie
         .write_all(&frame(&init))
         .await
         .expect("write initialize");
+    let expected_replies = 1 + events.iter().filter(|event| event.expect_response).count();
+    let mut reader = BufReader::new(read_half);
+    let mut responses = Vec::with_capacity(expected_replies);
+    responses.push(read_stdio_reply(&mut reader).await);
+
     for event in &events {
         write_half
             .write_all(&frame(&event.message))
             .await
             .expect("write scripted event");
-    }
-
-    let expected_replies = 1 + events.iter().filter(|event| event.expect_response).count();
-    let mut reader = BufReader::new(read_half);
-    let mut responses = Vec::with_capacity(expected_replies);
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while responses.len() < expected_replies {
-            let mut line = String::new();
-            if reader.read_line(&mut line).await.expect("read reply") == 0 {
-                break;
-            }
-            if !line.trim().is_empty() {
-                responses.push(serde_json::from_str::<Value>(&line).expect("reply is JSON"));
-            }
+        if event.expect_response {
+            responses.push(read_stdio_reply(&mut reader).await);
         }
-    })
-    .await
-    .expect("server replies to scripted stdio session");
+    }
 
     drop(write_half);
     let _ = tokio::time::timeout(Duration::from_secs(5), serve).await;

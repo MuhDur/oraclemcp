@@ -7,16 +7,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use asupersync::Cx;
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderName, Method, Request, StatusCode, header};
 use oraclemcp_auth::ResourceServerConfig;
+use oraclemcp_core::OracleMcpServer;
 use oraclemcp_core::capabilities::{CapabilitiesReport, FeatureTiers};
 use oraclemcp_core::http::{
     HttpTransportConfig, MCP_PATH, OAuthEnforcement, PROTECTED_RESOURCE_METADATA_PATH, build_router,
 };
-use oraclemcp_core::server::ToolDispatch;
+use oraclemcp_core::server::{DispatchFuture, ToolDispatch};
 use oraclemcp_core::tools::{ToolDescriptor, ToolRegistry, ToolTier};
-use oraclemcp_core::{OracleMcpServer, error::ErrorEnvelope};
 use oraclemcp_guard::OperatingLevel;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -26,8 +27,8 @@ mod golden_support;
 
 struct EchoDispatch;
 impl ToolDispatch for EchoDispatch {
-    fn dispatch(&self, name: &str, args: Value) -> Result<Value, ErrorEnvelope> {
-        Ok(json!({ "tool": name, "args": args, "ok": true }))
+    fn dispatch<'a>(&'a self, _cx: &'a Cx, name: &'a str, args: Value) -> DispatchFuture<'a> {
+        Box::pin(async move { Ok(json!({ "tool": name, "args": args, "ok": true })) })
     }
 }
 

@@ -2,11 +2,11 @@
 //! ([`crate::registry`]) to the engine-free `oraclemcp-db` dictionary ops.
 //!
 //! [`OracleDispatcher`] implements [`oraclemcp_core::ToolDispatch`]: the server
-//! calls [`dispatch`](OracleDispatcher::dispatch) on a `spawn_blocking` worker
-//! (never across an `.await`), so this stays FULLY synchronous and guards the
-//! single connection with a `std::sync::Mutex`. Every arm deserializes a small
-//! args struct, runs the matching `oraclemcp_db` op against the connection, and
-//! maps the result to JSON; a [`oraclemcp_db::DbError`] becomes the agent-facing
+//! passes an explicit Asupersync [`Cx`](asupersync::Cx) at the dispatch boundary.
+//! The DB-facing work remains synchronous for this slice and guards the single
+//! connection with a `std::sync::Mutex`. Every arm deserializes a small args
+//! struct, runs the matching `oraclemcp_db` op against the connection, and maps
+//! the result to JSON; a [`oraclemcp_db::DbError`] becomes the agent-facing
 //! [`ErrorEnvelope`] via `DbError::into_envelope`. The `oracle_capabilities`
 //! discovery tool is answered by the server itself and never reaches here.
 
@@ -14,9 +14,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use asupersync::Cx;
 use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::{
-    CustomToolCatalog, CustomToolExecutor, ToolBody, ToolDispatch, execute_custom_tool,
+    CustomToolCatalog, CustomToolExecutor, DispatchFuture, ToolBody, ToolDispatch,
+    execute_custom_tool,
 };
 use oraclemcp_db::{
     DbError, DbmsOutput, OracleBind, OracleConnection, OracleConnectionInfo, QueryCaps,
@@ -2746,7 +2748,24 @@ fn canonical_tool_name(name: &str) -> &str {
 }
 
 impl ToolDispatch for OracleDispatcher {
-    fn dispatch(&self, name: &str, args: Value) -> Result<Value, ErrorEnvelope> {
+    fn dispatch<'a>(&'a self, cx: &'a Cx, name: &'a str, args: Value) -> DispatchFuture<'a> {
+        Box::pin(async move {
+            cx.checkpoint().map_err(|e| {
+                ErrorEnvelope::new(
+                    ErrorClass::Internal,
+                    format!("dispatch context checkpoint failed: {e}"),
+                )
+            })?;
+            OracleDispatcher::dispatch(self, name, args)
+        })
+    }
+}
+
+impl OracleDispatcher {
+    /// Synchronous concrete dispatch used by the current DB adapter and focused
+    /// dispatcher tests. The server-facing trait method wraps this behind an
+    /// explicit Asupersync context.
+    pub fn dispatch(&self, name: &str, args: Value) -> Result<Value, ErrorEnvelope> {
         let tool = canonical_tool_name(name);
         if tool == "oracle_switch_profile" {
             let a: SwitchProfileArgs = parse_args(name, args)?;

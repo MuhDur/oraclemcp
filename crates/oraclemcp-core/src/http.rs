@@ -233,15 +233,15 @@ pub async fn serve_http(
 mod tests {
     use super::*;
     use crate::capabilities::{CapabilitiesReport, FeatureTiers};
-    use crate::server::ToolDispatch;
+    use crate::server::{DispatchFuture, ToolDispatch};
     use crate::tools::ToolRegistry;
-    use oraclemcp_error::ErrorEnvelope;
+    use asupersync::Cx;
     use oraclemcp_guard::OperatingLevel;
 
     struct NoopDispatch;
     impl ToolDispatch for NoopDispatch {
-        fn dispatch(&self, _name: &str, _args: Value) -> Result<Value, ErrorEnvelope> {
-            Ok(serde_json::json!({}))
+        fn dispatch<'a>(&'a self, _cx: &'a Cx, _name: &'a str, _args: Value) -> DispatchFuture<'a> {
+            Box::pin(async { Ok(serde_json::json!({})) })
         }
     }
 
