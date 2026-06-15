@@ -6,6 +6,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use asupersync::Cx;
+
 use crate::connection::{OracleConnection, RustOracleConnection};
 use crate::error::DbError;
 use crate::types::{OracleBind, OracleConnectOptions, OracleConnectionInfo, OracleRow};
@@ -29,8 +31,21 @@ impl OracleConnectionManager {
         RustOracleConnection::connect(self.opts.clone())
     }
 
+    fn connect_cx(&self, cx: &Cx) -> Result<RustOracleConnection, DbError> {
+        cx.checkpoint_with("oracle_pool.connect.before")
+            .map_err(|err| DbError::Cancelled(format!("oracle_pool.connect.before: {err}")))?;
+        let conn = self.connect()?;
+        cx.checkpoint_with("oracle_pool.connect.after")
+            .map_err(|err| DbError::Cancelled(format!("oracle_pool.connect.after: {err}")))?;
+        Ok(conn)
+    }
+
     fn is_valid(&self, conn: &RustOracleConnection) -> Result<(), DbError> {
         conn.ping()
+    }
+
+    fn is_valid_cx(&self, cx: &Cx, conn: &RustOracleConnection) -> Result<(), DbError> {
+        conn.ping_cx(cx)
     }
 
     fn has_broken(&self, conn: &RustOracleConnection) -> bool {
@@ -116,10 +131,35 @@ impl OraclePool {
         self.with_conn(|conn| conn.query_rows(&sql, &binds))
     }
 
+    /// Run a query on a pooled connection with cancellation-aware checkout and
+    /// DB execution boundaries.
+    pub fn query_rows_cx(
+        &self,
+        cx: &Cx,
+        sql: impl Into<String>,
+        binds: Vec<OracleBind>,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let sql = sql.into();
+        self.with_conn_cx(cx, |conn| conn.query_rows_cx(cx, &sql, &binds))
+    }
+
     /// Run a DML/DDL statement on a pooled connection.
     pub fn execute(&self, sql: impl Into<String>, binds: Vec<OracleBind>) -> Result<u64, DbError> {
         let sql = sql.into();
         self.with_conn(|conn| conn.execute(&sql, &binds))
+    }
+
+    /// Run a DML/DDL statement on a pooled connection with cancellation-aware
+    /// checkout and DB execution boundaries. Cancelled or failed mutating calls
+    /// discard the checked-out connection.
+    pub fn execute_cx(
+        &self,
+        cx: &Cx,
+        sql: impl Into<String>,
+        binds: Vec<OracleBind>,
+    ) -> Result<u64, DbError> {
+        let sql = sql.into();
+        self.with_conn_cx(cx, |conn| conn.execute_cx(cx, &sql, &binds))
     }
 
     /// Run one page of a read query (bind-first, paginated, capped) on a pooled
@@ -138,14 +178,41 @@ impl OraclePool {
         })
     }
 
+    /// Cancellation-aware variant of [`Self::read_query`].
+    pub fn read_query_cx(
+        &self,
+        cx: &Cx,
+        sql: impl Into<String>,
+        binds: Vec<OracleBind>,
+        caps: crate::query::QueryCaps,
+        offset: usize,
+        serialize_opts: crate::serialize::SerializeOptions,
+    ) -> Result<crate::query::QueryResponse, DbError> {
+        let sql = sql.into();
+        self.with_conn_cx(cx, |conn| {
+            crate::query::read_query_cx(cx, conn, &sql, &binds, caps, offset, &serialize_opts)
+        })
+    }
+
     /// Describe a pooled connection (version / role / open-mode / schema).
     pub fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
         self.with_conn(OracleConnection::describe)
     }
 
+    /// Describe a pooled connection with cancellation-aware checkout and DB
+    /// execution boundaries.
+    pub fn describe_cx(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        self.with_conn_cx(cx, |conn| conn.describe_cx(cx))
+    }
+
     /// Confirm a pooled connection is live.
     pub fn ping(&self) -> Result<(), DbError> {
         self.with_conn(OracleConnection::ping)
+    }
+
+    /// Confirm a pooled connection is live with cancellation-aware checkout.
+    pub fn ping_cx(&self, cx: &Cx) -> Result<(), DbError> {
+        self.with_conn_cx(cx, |conn| conn.ping_cx(cx))
     }
 
     fn with_conn<T>(
@@ -159,10 +226,41 @@ impl OraclePool {
         result
     }
 
+    fn with_conn_cx<T>(
+        &self,
+        cx: &Cx,
+        f: impl FnOnce(&RustOracleConnection) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        cx.checkpoint_with("oracle_pool.checkout.before")
+            .map_err(|err| DbError::Cancelled(format!("oracle_pool.checkout.before: {err}")))?;
+        let conn = self.checkout_cx(cx)?;
+        let result = f(&conn);
+        let broken = result.is_err() || self.manager.has_broken(&conn);
+        self.checkin(conn, broken)?;
+        result
+    }
+
     fn checkout(&self) -> Result<RustOracleConnection, DbError> {
         let deadline = Instant::now() + Duration::from_secs(self.settings.acquire_timeout_secs);
         loop {
             if let Some(conn) = self.try_checkout()? {
+                return Ok(conn);
+            }
+            if Instant::now() >= deadline {
+                return Err(DbError::Pool(
+                    "timed out waiting for thin Oracle connection".to_owned(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn checkout_cx(&self, cx: &Cx) -> Result<RustOracleConnection, DbError> {
+        let deadline = Instant::now() + Duration::from_secs(self.settings.acquire_timeout_secs);
+        loop {
+            cx.checkpoint_with("oracle_pool.checkout.loop")
+                .map_err(|err| DbError::Cancelled(format!("oracle_pool.checkout.loop: {err}")))?;
+            if let Some(conn) = self.try_checkout_cx(cx)? {
                 return Ok(conn);
             }
             if Instant::now() >= deadline {
@@ -189,6 +287,35 @@ impl OraclePool {
             state.open_count += 1;
             drop(state);
             match self.manager.connect() {
+                Ok(conn) => Ok(Some(conn)),
+                Err(err) => {
+                    let mut state = self.state.lock().map_err(|lock_err| {
+                        DbError::Internal(format!("pool lock poisoned: {lock_err}"))
+                    })?;
+                    state.open_count = state.open_count.saturating_sub(1);
+                    Err(err)
+                }
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn try_checkout_cx(&self, cx: &Cx) -> Result<Option<RustOracleConnection>, DbError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
+        while let Some(conn) = state.idle.pop() {
+            if self.manager.is_valid_cx(cx, &conn).is_ok() {
+                return Ok(Some(conn));
+            }
+            state.open_count = state.open_count.saturating_sub(1);
+        }
+        if state.open_count < self.settings.max_size {
+            state.open_count += 1;
+            drop(state);
+            match self.manager.connect_cx(cx) {
                 Ok(conn) => Ok(Some(conn)),
                 Err(err) => {
                     let mut state = self.state.lock().map_err(|lock_err| {

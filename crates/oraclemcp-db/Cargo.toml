@@ -15,6 +15,7 @@ default = []
 live-xe = []
 
 [dependencies]
+asupersync.workspace = true
 oraclemcp-error = { path = "../oraclemcp-error", version = "0.2.1" }
 oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.2.1" }
 serde.workspace = true

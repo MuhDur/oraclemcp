@@ -4,8 +4,19 @@
 
 use super::*;
 use crate::registry::TOOL_NAMES;
+use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{OracleBackend, OracleCell, OracleRow};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+fn run_with_current_cx(f: impl FnOnce(&Cx)) {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("block_on installs a current Cx");
+        f(&cx);
+    });
+}
 
 fn read_write_level() -> SessionLevelState {
     let mut level = SessionLevelState::new(OperatingLevel::ReadWrite, false);
@@ -257,6 +268,59 @@ struct ExecState {
 struct ExecRecordingMock {
     state: Arc<ExecState>,
     rows_affected: u64,
+}
+
+struct CancelAfterExecuteMock {
+    state: Arc<ExecState>,
+}
+
+impl OracleConnection for CancelAfterExecuteMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    fn ping(&self) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            backend: Some(OracleBackend::RustOracle),
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+
+    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        Ok(Vec::new())
+    }
+
+    fn execute(&self, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
+        self.state
+            .executed
+            .lock()
+            .expect("exec mutex")
+            .push((sql.to_owned(), b.to_vec()));
+        Ok(1)
+    }
+
+    fn execute_cx(&self, cx: &Cx, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
+        let _ = self.execute(sql, b)?;
+        cx.set_cancel_requested(true);
+        Err(DbError::Cancelled(
+            "test cancellation after execute".to_owned(),
+        ))
+    }
+
+    fn commit(&self) -> Result<(), DbError> {
+        self.state.commits.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn rollback(&self) -> Result<(), DbError> {
+        self.state.rollbacks.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 impl ExecRecordingMock {
@@ -2497,4 +2561,62 @@ fn multi_statement_batch_with_a_write_is_refused() {
         err.error_class,
         ErrorClass::ForbiddenStatement | ErrorClass::OperatingLevelTooLow
     ));
+}
+
+#[test]
+fn cancelled_query_never_reaches_database() {
+    let dispatcher = OracleDispatcher::new(Box::new(NoExecMock));
+    run_with_current_cx(|cx| {
+        cx.set_cancel_requested(true);
+        let err = dispatcher
+            .dispatch_with_cx(cx, "oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect_err("cancelled context must stop before DB query");
+        assert_eq!(err.error_class, ErrorClass::Timeout);
+    });
+}
+
+#[test]
+fn cancellation_after_mutating_execute_rolls_back_dirty_session() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(CancelAfterExecuteMock {
+            state: state.clone(),
+        }),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+    let sql = "UPDATE employees SET salary = salary WHERE employee_id = 100";
+    let confirm =
+        execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("dev")).expect("confirm");
+
+    run_with_current_cx(|cx| {
+        let err = dispatcher
+            .dispatch_with_cx(
+                cx,
+                "oracle_execute",
+                json!({
+                    "sql": sql,
+                    "commit": true,
+                    "confirm": confirm
+                }),
+            )
+            .expect_err("post-execute cancellation must be surfaced");
+        assert_eq!(err.error_class, ErrorClass::Timeout);
+    });
+
+    assert_eq!(
+        state.executed.lock().expect("exec mutex").len(),
+        1,
+        "the mock simulates an Oracle-side execute before cancellation"
+    );
+    assert_eq!(
+        state.rollbacks.load(Ordering::SeqCst),
+        1,
+        "dirty session must be rolled back after cancellation"
+    );
+    assert_eq!(
+        state.commits.load(Ordering::SeqCst),
+        0,
+        "cancelled dirty session must not commit"
+    );
 }

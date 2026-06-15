@@ -9,9 +9,27 @@ use crate::error::DbError;
 use crate::types::{
     OracleBackend, OracleBind, OracleConnectOptions, OracleConnectionInfo, OracleRow,
 };
+use asupersync::Cx;
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
+
+fn db_checkpoint(cx: &Cx, phase: &'static str) -> Result<(), DbError> {
+    cx.checkpoint_with(phase)
+        .map_err(|err| DbError::Cancelled(format!("{phase}: {err}")))
+}
+
+fn db_checkpointed<T>(
+    cx: &Cx,
+    before: &'static str,
+    after: &'static str,
+    f: impl FnOnce() -> Result<T, DbError>,
+) -> Result<T, DbError> {
+    db_checkpoint(cx, before)?;
+    let value = f()?;
+    db_checkpoint(cx, after)?;
+    Ok(value)
+}
 
 /// Bounded `DBMS_OUTPUT` lines captured from a single Oracle session.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,11 +46,40 @@ pub trait OracleConnection: Send {
     fn backend(&self) -> OracleBackend;
     /// Round-trip the server to confirm liveness (`SELECT 1 FROM dual`).
     fn ping(&self) -> Result<(), DbError>;
+    /// Cancellation-aware liveness check.
+    fn ping_cx(&self, cx: &Cx) -> Result<(), DbError> {
+        db_checkpointed(cx, "oracle_db.ping.before", "oracle_db.ping.after", || {
+            self.ping()
+        })
+    }
     /// Best-effort connection metadata (version, role/open-mode, schema).
     fn describe(&self) -> Result<OracleConnectionInfo, DbError>;
+    /// Cancellation-aware connection metadata.
+    fn describe_cx(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        db_checkpointed(
+            cx,
+            "oracle_db.describe.before",
+            "oracle_db.describe.after",
+            || self.describe(),
+        )
+    }
     /// Run a query, binding `binds` positionally (`:1`, `:2`, …). Values are
     /// always bound, never interpolated.
     fn query_rows(&self, sql: &str, binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError>;
+    /// Cancellation-aware positional query.
+    fn query_rows_cx(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        db_checkpointed(
+            cx,
+            "oracle_db.query_rows.before",
+            "oracle_db.query_rows.after",
+            || self.query_rows(sql, binds),
+        )
+    }
     /// Run a query, binding `binds` by name (`:name`). Values are always bound,
     /// never interpolated. Backends that cannot bind by name should fail
     /// explicitly instead of trying to rewrite SQL.
@@ -46,8 +93,34 @@ pub trait OracleConnection: Send {
             "named binds are not supported by this Oracle backend".to_owned(),
         ))
     }
+    /// Cancellation-aware named-bind query.
+    fn query_rows_named_cx(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[(String, OracleBind)],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        db_checkpointed(
+            cx,
+            "oracle_db.query_rows_named.before",
+            "oracle_db.query_rows_named.after",
+            || self.query_rows_named(sql, binds),
+        )
+    }
     /// Run a DML/DDL statement; returns rows affected (`SQL%ROWCOUNT`).
     fn execute(&self, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError>;
+    /// Cancellation-aware DML/DDL execution.
+    ///
+    /// If this observes cancellation after Oracle has returned success, callers
+    /// must treat the session as dirty and run cleanup rollback/discard logic.
+    fn execute_cx(&self, cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
+        db_checkpointed(
+            cx,
+            "oracle_db.execute.before",
+            "oracle_db.execute.after",
+            || self.execute(sql, binds),
+        )
+    }
 
     /// Current Oracle per-round-trip call timeout, when supported by the backend.
     fn call_timeout(&self) -> Result<Option<Duration>, DbError> {
@@ -75,6 +148,15 @@ pub trait OracleConnection: Send {
                 .map(|_| ()),
         }
     }
+    /// Cancellation-aware `DBMS_OUTPUT.ENABLE`.
+    fn enable_dbms_output_cx(&self, cx: &Cx, buffer_bytes: Option<u32>) -> Result<(), DbError> {
+        db_checkpointed(
+            cx,
+            "oracle_db.enable_dbms_output.before",
+            "oracle_db.enable_dbms_output.after",
+            || self.enable_dbms_output(buffer_bytes),
+        )
+    }
 
     /// Drain `DBMS_OUTPUT` from this session, bounded by line and character
     /// limits. Backends without output-bind support must fail explicitly.
@@ -84,12 +166,37 @@ pub trait OracleConnection: Send {
             "DBMS_OUTPUT capture is not supported by this Oracle backend".to_owned(),
         ))
     }
+    /// Cancellation-aware `DBMS_OUTPUT` drain.
+    fn read_dbms_output_cx(
+        &self,
+        cx: &Cx,
+        max_lines: usize,
+        max_chars: usize,
+    ) -> Result<DbmsOutput, DbError> {
+        db_checkpointed(
+            cx,
+            "oracle_db.read_dbms_output.before",
+            "oracle_db.read_dbms_output.after",
+            || self.read_dbms_output(max_lines, max_chars),
+        )
+    }
 
     /// Commit the current transaction on this session.
     fn commit(&self) -> Result<(), DbError>;
+    /// Cancellation-aware commit. There is intentionally no post-commit
+    /// checkpoint: once Oracle commits, cancellation cannot undo it.
+    fn commit_cx(&self, cx: &Cx) -> Result<(), DbError> {
+        db_checkpoint(cx, "oracle_db.commit.before")?;
+        self.commit()
+    }
 
     /// Roll back the current transaction on this session.
     fn rollback(&self) -> Result<(), DbError>;
+    /// Cancellation-aware user-requested rollback.
+    fn rollback_cx(&self, cx: &Cx) -> Result<(), DbError> {
+        db_checkpoint(cx, "oracle_db.rollback.before")?;
+        self.rollback()
+    }
 
     /// Run a query expecting at most one row.
     fn query_optional_row(
@@ -98,6 +205,15 @@ pub trait OracleConnection: Send {
         binds: &[OracleBind],
     ) -> Result<Option<OracleRow>, DbError> {
         Ok(self.query_rows(sql, binds)?.into_iter().next())
+    }
+    /// Cancellation-aware query expecting at most one row.
+    fn query_optional_row_cx(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Option<OracleRow>, DbError> {
+        Ok(self.query_rows_cx(cx, sql, binds)?.into_iter().next())
     }
 }
 

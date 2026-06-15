@@ -31,6 +31,9 @@ pub enum DbError {
     /// A pool operation failed (acquire timeout, build failure, …).
     #[error("connection pool error: {0}")]
     Pool(String),
+    /// The request context was cancelled before or after a DB boundary.
+    #[error("database call cancelled: {0}")]
+    Cancelled(String),
     /// An auth mode is configured that this build cannot satisfy yet.
     #[error("unsupported auth mode: {0}")]
     UnsupportedAuth(String),
@@ -74,6 +77,7 @@ impl DbError {
             DbError::Pool(msg) => {
                 ErrorEnvelope::new(ErrorClass::Busy, msg).with_retry_after_ms(250)
             }
+            DbError::Cancelled(msg) => ErrorEnvelope::new(ErrorClass::Timeout, msg),
             DbError::UnsupportedAuth(msg) | DbError::UnsupportedFeature(msg) => {
                 ErrorEnvelope::new(ErrorClass::InvalidArguments, msg)
             }

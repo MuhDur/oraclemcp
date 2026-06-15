@@ -6,10 +6,20 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use asupersync::Cx;
+
 use crate::connection::OracleConnection;
 use crate::error::DbError;
 use crate::serialize::{PageColumnCache, SerializeOptions, json_byte_len};
 use crate::types::OracleBind;
+
+fn query_checkpoint(cx: Option<&Cx>, phase: &'static str) -> Result<(), DbError> {
+    let Some(cx) = cx else {
+        return Ok(());
+    };
+    cx.checkpoint_with(phase)
+        .map_err(|err| DbError::Cancelled(format!("{phase}: {err}")))
+}
 
 /// Caps on a single page of results (plan §8.2 / §10).
 #[derive(Clone, Copy, Debug)]
@@ -81,7 +91,23 @@ pub fn read_query(
     let fetch = caps.max_rows.saturating_add(1).max(1);
     let wrapped = paginated_sql(sql, offset, fetch);
     let rows = conn.query_rows(&wrapped, binds)?;
-    Ok(query_response_from_rows(rows, caps, offset, serialize_opts))
+    query_response_from_rows_checked(None, rows, caps, offset, serialize_opts)
+}
+
+/// Cancellation-aware variant of [`read_query`].
+pub fn read_query_cx(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    sql: &str,
+    binds: &[OracleBind],
+    caps: QueryCaps,
+    offset: usize,
+    serialize_opts: &SerializeOptions,
+) -> Result<QueryResponse, DbError> {
+    let fetch = caps.max_rows.saturating_add(1).max(1);
+    let wrapped = paginated_sql(sql, offset, fetch);
+    let rows = conn.query_rows_cx(cx, &wrapped, binds)?;
+    query_response_from_rows_checked(Some(cx), rows, caps, offset, serialize_opts)
 }
 
 /// Execute one page of a read query with named binds (`:name`). This is used by
@@ -98,15 +124,44 @@ pub fn read_query_named(
     let fetch = caps.max_rows.saturating_add(1).max(1);
     let wrapped = paginated_sql(sql, offset, fetch);
     let rows = conn.query_rows_named(&wrapped, binds)?;
-    Ok(query_response_from_rows(rows, caps, offset, serialize_opts))
+    query_response_from_rows_checked(None, rows, caps, offset, serialize_opts)
 }
 
+/// Cancellation-aware variant of [`read_query_named`].
+pub fn read_query_named_cx(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    sql: &str,
+    binds: &[(String, OracleBind)],
+    caps: QueryCaps,
+    offset: usize,
+    serialize_opts: &SerializeOptions,
+) -> Result<QueryResponse, DbError> {
+    let fetch = caps.max_rows.saturating_add(1).max(1);
+    let wrapped = paginated_sql(sql, offset, fetch);
+    let rows = conn.query_rows_named_cx(cx, &wrapped, binds)?;
+    query_response_from_rows_checked(Some(cx), rows, caps, offset, serialize_opts)
+}
+
+#[cfg(test)]
 fn query_response_from_rows(
     rows: Vec<crate::types::OracleRow>,
     caps: QueryCaps,
     offset: usize,
     serialize_opts: &SerializeOptions,
 ) -> QueryResponse {
+    query_response_from_rows_checked(None, rows, caps, offset, serialize_opts)
+        .expect("non-cancellable query response construction cannot be cancelled")
+}
+
+fn query_response_from_rows_checked(
+    cx: Option<&Cx>,
+    rows: Vec<crate::types::OracleRow>,
+    caps: QueryCaps,
+    offset: usize,
+    serialize_opts: &SerializeOptions,
+) -> Result<QueryResponse, DbError> {
+    query_checkpoint(cx, "oracle_query.serialize.before")?;
     let more_by_rows = rows.len() > caps.max_rows;
     let page = &rows[..rows.len().min(caps.max_rows)];
 
@@ -119,7 +174,10 @@ fn query_response_from_rows(
     let mut out_rows: Vec<Value> = Vec::with_capacity(page.len());
     let mut total_bytes = 0usize;
     let mut byte_truncated = false;
-    for row in page {
+    for (idx, row) in page.iter().enumerate() {
+        if idx % 64 == 0 {
+            query_checkpoint(cx, "oracle_query.serialize.rows")?;
+        }
         let value = match &column_cache {
             Some(cache) => cache.serialize_row(row, serialize_opts),
             None => crate::serialize::serialize_row(row, serialize_opts),
@@ -141,14 +199,15 @@ fn query_response_from_rows(
         None
     };
 
-    QueryResponse {
+    query_checkpoint(cx, "oracle_query.serialize.after")?;
+    Ok(QueryResponse {
         columns,
         row_count: out_rows.len(),
         rows: out_rows,
         truncated,
         next_cursor,
         total_bytes,
-    }
+    })
 }
 
 #[cfg(test)]
