@@ -15,9 +15,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use asupersync::Cx;
+use oraclemcp_auth::apply_oauth_scopes;
 use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::{
-    CustomToolCatalog, CustomToolExecutor, DispatchFuture, ToolBody, ToolDispatch,
+    CustomToolCatalog, CustomToolExecutor, DispatchContext, DispatchFuture, ToolBody, ToolDispatch,
     execute_custom_tool,
 };
 use oraclemcp_db::{
@@ -832,6 +833,53 @@ fn escalation_error_to_envelope(e: EscalationError) -> ErrorEnvelope {
     }
 }
 
+fn scoped_session_level(
+    session: &SessionLevelState,
+    context: DispatchContext<'_>,
+) -> SessionLevelState {
+    let mut scoped = session.clone();
+    if let Some(grant) = context.scope_grant() {
+        let scopes = grant.0.iter().map(String::as_str).collect::<Vec<_>>();
+        apply_oauth_scopes(&mut scoped, &scopes);
+    }
+    scoped
+}
+
+fn session_level_response_changed(response: &Value) -> bool {
+    response
+        .get("changed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && !response
+            .get("preview")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+fn set_session_level_with_scope(
+    stored_session: &mut SessionLevelState,
+    scoped_session: &SessionLevelState,
+    active_profile: Option<&str>,
+    invoked_as: &str,
+    args: SetSessionLevelArgs,
+    scoped: bool,
+) -> Result<Value, ErrorEnvelope> {
+    if !scoped {
+        return set_session_level(stored_session, active_profile, invoked_as, args);
+    }
+    let mut request_session = scoped_session.clone();
+    let response = set_session_level(
+        &mut request_session,
+        active_profile,
+        invoked_as,
+        args.clone(),
+    )?;
+    if session_level_response_changed(&response) {
+        set_session_level(stored_session, active_profile, invoked_as, args)?;
+    }
+    Ok(response)
+}
+
 fn set_session_level(
     session: &mut SessionLevelState,
     active_profile: Option<&str>,
@@ -1345,6 +1393,7 @@ fn remember_execute_approved_token(state: &mut DispatcherState, sql: &str, previ
 
 fn execute_approved_args(
     state: &mut DispatcherState,
+    session: &SessionLevelState,
     args: ExecuteApprovedArgs,
 ) -> Result<ExecuteArgs, ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
@@ -1394,11 +1443,11 @@ fn execute_approved_args(
             "switch back to the previewed profile or preview the SQL again on the active profile",
         ));
     }
-    if state.level.evaluate(Some(grant.required_level)) != LevelDecision::Allow {
+    if session.evaluate(Some(grant.required_level)) != LevelDecision::Allow {
         return Err(execute_gate_error(
             &Classifier::new(ClassifierConfig::new()).classify(&grant.sql),
-            state.level.evaluate(Some(grant.required_level)),
-            &state.level,
+            session.evaluate(Some(grant.required_level)),
+            session,
         ));
     }
 
@@ -2921,8 +2970,14 @@ fn canonical_tool_name(name: &str) -> &str {
 }
 
 impl ToolDispatch for OracleDispatcher {
-    fn dispatch<'a>(&'a self, cx: &'a Cx, name: &'a str, args: Value) -> DispatchFuture<'a> {
-        Box::pin(async move { self.dispatch_with_cx(cx, name, args) })
+    fn dispatch<'a>(
+        &'a self,
+        cx: &'a Cx,
+        context: DispatchContext<'a>,
+        name: &'a str,
+        args: Value,
+    ) -> DispatchFuture<'a> {
+        Box::pin(async move { self.dispatch_with_optional_cx(Some(cx), context, name, args) })
     }
 }
 
@@ -2931,7 +2986,7 @@ impl OracleDispatcher {
     /// dispatcher tests. The server-facing trait method wraps this behind an
     /// explicit Asupersync context.
     pub fn dispatch(&self, name: &str, args: Value) -> Result<Value, ErrorEnvelope> {
-        self.dispatch_with_optional_cx(None, name, args)
+        self.dispatch_with_optional_cx(None, DispatchContext::default(), name, args)
     }
 
     /// Synchronous concrete dispatch with an explicit Asupersync cancellation
@@ -2943,12 +2998,23 @@ impl OracleDispatcher {
         name: &str,
         args: Value,
     ) -> Result<Value, ErrorEnvelope> {
-        self.dispatch_with_optional_cx(Some(cx), name, args)
+        self.dispatch_with_optional_cx(Some(cx), DispatchContext::default(), name, args)
+    }
+
+    /// Synchronous concrete dispatch with a transport authorization context.
+    pub fn dispatch_with_context(
+        &self,
+        name: &str,
+        args: Value,
+        context: DispatchContext<'_>,
+    ) -> Result<Value, ErrorEnvelope> {
+        self.dispatch_with_optional_cx(None, context, name, args)
     }
 
     fn dispatch_with_optional_cx(
         &self,
         cx: Option<&Cx>,
+        context: DispatchContext<'_>,
         name: &str,
         args: Value,
     ) -> Result<Value, ErrorEnvelope> {
@@ -2997,27 +3063,36 @@ impl OracleDispatcher {
             .state
             .lock()
             .map_err(|_| ErrorEnvelope::new(ErrorClass::Internal, "connection mutex poisoned"))?;
+        let scoped_level = scoped_session_level(&state.level, context);
+        let scoped = context.scope_grant().is_some();
         if tool == "oracle_set_session_level" {
             let a: SetSessionLevelArgs = parse_args(name, args)?;
             let active_profile = state.active_profile.clone();
-            return set_session_level(&mut state.level, active_profile.as_deref(), name, a);
+            return set_session_level_with_scope(
+                &mut state.level,
+                &scoped_level,
+                active_profile.as_deref(),
+                name,
+                a,
+                scoped,
+            );
         }
         if tool == "oracle_preview_sql" {
             let a: PreviewSqlArgs = parse_args(name, args)?;
-            let preview = preview_sql(&a.sql, &state.level, state.active_profile.as_deref());
+            let preview = preview_sql(&a.sql, &scoped_level, state.active_profile.as_deref());
             remember_execute_approved_token(&mut state, &a.sql, &preview);
             return Ok(preview);
         }
         if tool == "execute_approved" {
             let a: ExecuteApprovedArgs = parse_args(name, args)?;
-            let execute_args = execute_approved_args(&mut state, a)?;
+            let execute_args = execute_approved_args(&mut state, &scoped_level, a)?;
             let active_profile = state.active_profile.clone();
             let conn: &dyn OracleConnection = state.conn.as_ref();
             return execute_sql(
                 cx,
                 conn,
                 active_profile.as_deref(),
-                &state.level,
+                &scoped_level,
                 execute_args,
             );
         }
@@ -3025,7 +3100,7 @@ impl OracleDispatcher {
             let a: DeployDdlArgs = parse_args(name, args)?;
             let active_profile = state.active_profile.clone();
             let conn: &dyn OracleConnection = state.conn.as_ref();
-            return deploy_ddl(cx, conn, active_profile.as_deref(), &state.level, a);
+            return deploy_ddl(cx, conn, active_profile.as_deref(), &scoped_level, a);
         }
         if tool == "read_patch_preview" {
             let a: ReadPatchPreviewArgs = parse_args(name, args)?;
@@ -3036,7 +3111,7 @@ impl OracleDispatcher {
         let result: Result<Value, DbError> = match tool {
             "oracle_execute" => {
                 let a: ExecuteArgs = parse_args(name, args)?;
-                return execute_sql(cx, conn, state.active_profile.as_deref(), &state.level, a);
+                return execute_sql(cx, conn, state.active_profile.as_deref(), &scoped_level, a);
             }
             "oracle_compile_object" => {
                 let a: CompileObjectArgs = parse_args(name, args)?;
@@ -3044,7 +3119,7 @@ impl OracleDispatcher {
                     cx,
                     conn,
                     state.active_profile.as_deref(),
-                    &state.level,
+                    &scoped_level,
                     name,
                     a,
                 );
@@ -3055,7 +3130,7 @@ impl OracleDispatcher {
                     cx,
                     conn,
                     state.active_profile.as_deref(),
-                    &state.level,
+                    &scoped_level,
                     name,
                     a,
                 );
@@ -3066,7 +3141,7 @@ impl OracleDispatcher {
                     cx,
                     conn,
                     state.active_profile.as_deref(),
-                    &state.level,
+                    &scoped_level,
                     name,
                     a,
                 )?;
@@ -3411,7 +3486,7 @@ impl OracleDispatcher {
             "oracle_explain_plan" => {
                 let a: ExplainPlanArgs = parse_args(name, args)?;
                 ensure_read_only(&a.sql)?;
-                ensure_explain_plan_write_allowed(&a, &state.level)?;
+                ensure_explain_plan_write_allowed(&a, &scoped_level)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.before")?;
                 explain_plan(conn, &a.sql, a.read_only_standby).and_then(|rows| {
                     dispatch_checkpoint_db(cx, "oraclemcp.dispatch.explain_plan.after")?;

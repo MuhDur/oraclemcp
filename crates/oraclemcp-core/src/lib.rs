@@ -38,7 +38,9 @@ pub mod trace;
 pub use resilience::{
     CircuitBreaker, CircuitState, RetryPolicy, is_transient_error, run_with_timeout,
 };
-pub use server::{CAPABILITIES_TOOL, DispatchFuture, OracleMcpServer, ToolDispatch};
+pub use server::{
+    CAPABILITIES_TOOL, DispatchContext, DispatchFuture, OracleMcpServer, ToolDispatch,
+};
 pub use shutdown::{CancelOutcome, ShutdownCoordinator, install_panic_hook};
 
 pub use admin_auth::{AdminAssertionVerifier, AdminAuthError, AdminAuthPolicy};

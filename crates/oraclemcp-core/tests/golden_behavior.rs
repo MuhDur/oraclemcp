@@ -14,7 +14,7 @@ use oraclemcp_core::http::{
     HttpRequest, HttpResponse, HttpTransportConfig, MCP_PATH, OAuthEnforcement,
     PROTECTED_RESOURCE_METADATA_PATH, handle_http_request,
 };
-use oraclemcp_core::server::{DispatchFuture, ToolDispatch};
+use oraclemcp_core::server::{DispatchContext, DispatchFuture, ToolDispatch};
 use oraclemcp_core::tools::{ToolDescriptor, ToolRegistry, ToolTier};
 use oraclemcp_guard::OperatingLevel;
 use serde_json::{Value, json};
@@ -24,7 +24,13 @@ mod golden_support;
 
 struct EchoDispatch;
 impl ToolDispatch for EchoDispatch {
-    fn dispatch<'a>(&'a self, _cx: &'a Cx, name: &'a str, args: Value) -> DispatchFuture<'a> {
+    fn dispatch<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        _context: DispatchContext<'a>,
+        name: &'a str,
+        args: Value,
+    ) -> DispatchFuture<'a> {
         Box::pin(async move { Ok(json!({ "tool": name, "args": args, "ok": true })) })
     }
 }

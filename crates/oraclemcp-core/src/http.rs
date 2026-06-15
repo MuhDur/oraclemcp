@@ -20,7 +20,7 @@ use oraclemcp_auth::{
 };
 use serde_json::{Value, json};
 
-use crate::server::OracleMcpServer;
+use crate::server::{DispatchContext, OracleMcpServer};
 
 /// The MCP endpoint path the Streamable HTTP transport is mounted at.
 pub const MCP_PATH: &str = "/mcp";
@@ -74,15 +74,38 @@ impl std::fmt::Debug for OAuthEnforcement {
 mod tests {
     use super::*;
     use crate::capabilities::{CapabilitiesReport, FeatureTiers};
-    use crate::server::{DispatchFuture, ToolDispatch};
+    use crate::server::{DispatchContext, DispatchFuture, ToolDispatch};
     use crate::tools::ToolRegistry;
     use asupersync::Cx;
     use oraclemcp_guard::OperatingLevel;
 
     struct NoopDispatch;
     impl ToolDispatch for NoopDispatch {
-        fn dispatch<'a>(&'a self, _cx: &'a Cx, _name: &'a str, _args: Value) -> DispatchFuture<'a> {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
             Box::pin(async { Ok(serde_json::json!({})) })
+        }
+    }
+
+    struct ScopeEchoDispatch;
+    impl ToolDispatch for ScopeEchoDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            context: DispatchContext<'a>,
+            name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            let scopes = context
+                .scope_grant()
+                .map(|grant| grant.0.clone())
+                .unwrap_or_default();
+            Box::pin(async move { Ok(serde_json::json!({ "tool": name, "scopes": scopes })) })
         }
     }
 
@@ -98,6 +121,25 @@ mod tests {
             },
         );
         OracleMcpServer::new("0.1.0", ToolRegistry::new(), report, Arc::new(NoopDispatch))
+    }
+
+    fn scope_echo_server() -> OracleMcpServer {
+        let report = CapabilitiesReport::new(
+            "0.1.0",
+            vec![],
+            OperatingLevel::ReadOnly,
+            FeatureTiers {
+                live_db: false,
+                engine: true,
+                http_transport: true,
+            },
+        );
+        OracleMcpServer::new(
+            "0.1.0",
+            ToolRegistry::new(),
+            report,
+            Arc::new(ScopeEchoDispatch),
+        )
     }
 
     fn init_body() -> Value {
@@ -420,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_scope_is_captured_but_not_enforced_at_the_guard() {
+    fn oauth_scope_is_captured_for_dispatch_enforcement() {
         let enforcement = OAuthEnforcement {
             config: ResourceServerConfig {
                 resource: "https://oraclemcp.example/mcp".to_owned(),
@@ -448,24 +490,67 @@ mod tests {
             .expect("valid narrowly-scoped bearer is admitted");
         assert_eq!(grant, ScopeGrant(vec!["oracle:read".to_owned()]));
     }
+
+    #[test]
+    fn oauth_scope_is_forwarded_to_tool_dispatch() {
+        let enforcement = OAuthEnforcement {
+            config: ResourceServerConfig {
+                resource: "https://oraclemcp.example/mcp".to_owned(),
+                allowed_issuers: vec!["https://idp.example".to_owned()],
+                authorization_servers: vec!["https://idp.example".to_owned()],
+                required_scopes: vec![],
+            },
+            verifier: Arc::new(AcceptHs256),
+            metadata_url: "https://oraclemcp.example/.well-known/oauth-protected-resource"
+                .to_owned(),
+        };
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "oracle_preview_sql",
+                "arguments": { "sql": "SELECT 1 FROM dual" }
+            }
+        });
+        let request = HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("content-type", "application/json"),
+                ("accept", "application/json, text/event-stream"),
+                (
+                    "authorization",
+                    &format!("Bearer {}", jwt_with_scope("oracle:read")),
+                ),
+            ],
+            body.to_string().into_bytes(),
+        );
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            stateful: false,
+            oauth: Some(Arc::new(enforcement)),
+            ..Default::default()
+        };
+
+        let response = handle_http_request(&scope_echo_server(), &cfg, request);
+        assert_eq!(response.status, 200);
+        let body = response_json(&response);
+        assert_eq!(
+            body["result"]["structuredContent"]["scopes"],
+            serde_json::json!(["oracle:read"])
+        );
+    }
 }
 
 /// The OAuth scopes a validated request carries.
 ///
-/// **NOT YET ENFORCED (captured-only).** This grant is currently *recorded* on
-/// the request but is **not consulted by any dispatch path** — a validated
-/// bearer's scope does **not** lower the session operating-level ceiling yet.
-/// The intended control (feed it through `oraclemcp_auth::apply_oauth_scopes` —
-/// monotone-down: a scope can only LOWER the ceiling, never raise it, P1-9e —
-/// and gate the resolved tool's required `OperatingLevel` before dispatch)
-/// requires a per-session `SessionLevelState` plumbed into the HTTP dispatch
-/// path that does not exist yet.
-///
-/// Until that wiring lands (deferred to the HTTP-transport-wiring phase), do
-/// **not** assume scope-based least-privilege is in effect on the HTTP
-/// transport: a narrowly-scoped token (e.g. `oracle:read`) can still reach
-/// write/DDL tools whenever the profile/session default ceiling permits.
-/// Tracking: bead `oraclemcp-w10-http-scope-enforcement-b5a`.
+/// The HTTP transport passes this grant into `ToolDispatch`, where it lowers
+/// the request's effective session ceiling through
+/// `oraclemcp_auth::apply_oauth_scopes`. A scope can only lower the profile
+/// ceiling for the current request; it never raises a profile and it never
+/// permanently narrows later requests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScopeGrant(pub Vec<String>);
 
@@ -621,14 +706,16 @@ pub fn handle_http_request(
     if request.body.len() > MAX_BODY_BYTES {
         return empty_response(413);
     }
-    if let Some(enforcement) = &config.oauth
-        && let Err(response) = validate_oauth_request(&request, enforcement)
-    {
-        return response;
-    }
+    let scope_grant = match &config.oauth {
+        Some(enforcement) => match validate_oauth_request(&request, enforcement) {
+            Ok(grant) => Some(grant),
+            Err(response) => return response,
+        },
+        None => None,
+    };
     match request.method.as_str() {
         "DELETE" => empty_response(202),
-        "POST" => handle_mcp_post(server, config, &request),
+        "POST" => handle_mcp_post(server, config, &request, scope_grant.as_ref()),
         "GET" => empty_response(405).with_header("allow", "POST, DELETE"),
         _ => empty_response(405).with_header("allow", "GET, POST, DELETE"),
     }
@@ -638,6 +725,7 @@ fn handle_mcp_post(
     server: &OracleMcpServer,
     config: &HttpTransportConfig,
     request: &HttpRequest,
+    scope_grant: Option<&ScopeGrant>,
 ) -> HttpResponse {
     let parsed = match serde_json::from_slice::<Value>(&request.body) {
         Ok(value) => value,
@@ -649,7 +737,10 @@ fn handle_mcp_post(
         .get("method")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let response = server.handle_jsonrpc_request(parsed, None);
+    let context = scope_grant
+        .map(DispatchContext::with_scope_grant)
+        .unwrap_or_default();
+    let response = server.handle_jsonrpc_request_with_context(parsed, None, context);
     let Some(response) = response else {
         return empty_response(202);
     };

@@ -14,7 +14,7 @@ real query text.
 | Safety posture | Every crate forbids unsafe code; raw SQL safety is centered on `oraclemcp-guard`. | `Cargo.toml`, crate roots, `AGENTS.md` |
 | Current release line | All package versions and `server.json` are aligned at 0.2.1. | `Cargo.toml`, crate `Cargo.toml` files, `server.json` |
 | Current DB mode | Default build includes live Oracle support through the pure-Rust `oracledb` thin driver. | `README.md`, `crates/oraclemcp-db/Cargo.toml` |
-| Current runtime/transport | Stdio uses `rmcp`; HTTP uses Axum/Hyper plus `rmcp` Streamable HTTP; DB pool offloads blocking calls through Tokio. | `crates/oraclemcp-core/src/server.rs`, `crates/oraclemcp-core/src/http.rs`, `crates/oraclemcp-db/src/pool.rs` |
+| Current runtime/transport | Native stdio and native Streamable HTTP live in `oraclemcp-core`; dispatch receives explicit Asupersync `Cx` contexts; Tokio, `rmcp`, Axum, Hyper, ODPI-C, and `r2d2` are absent from the current manifests and lockfile. | `crates/oraclemcp-core/src/server.rs`, `crates/oraclemcp-core/src/http.rs`, `Cargo.lock`, `Cargo.toml` |
 | Current bead state | Repo-local `.beads/` contains the migration graph; W0 is the only actionable bead. | `br list --json`, `bv --robot-triage` |
 | Local release artifacts | No local `target/release` artifact was present during inventory, so binary-size and startup baselines are not measured yet. | `find target/release ...` |
 
@@ -36,13 +36,13 @@ real query text.
 
 | Surface | Current contract | Evidence |
 | --- | --- | --- |
-| Stdio initialize | `rmcp` handles MCP initialize over stdin/stdout; optional init token is validated by constant-time comparison before normal use. | `crates/oraclemcp-core/src/server.rs`, `crates/oraclemcp-auth/src/init_token.rs`, `crates/oraclemcp-core/tests/e2e_mcp.rs` |
+| Stdio initialize | The native JSON-RPC loop handles MCP initialize over stdin/stdout; optional init token is validated by constant-time comparison before normal use. | `crates/oraclemcp-core/src/server.rs`, `crates/oraclemcp-auth/src/init_token.rs`, `crates/oraclemcp-core/tests/e2e_mcp.rs` |
 | Stdio tools | `tools/list` exposes registry descriptors; `tools/call` routes through `ToolDispatch`. | `crates/oraclemcp-core/src/server.rs`, `crates/oraclemcp-core/src/tools.rs` |
 | HTTP endpoint | Streamable HTTP is mounted at `/mcp`; JSON response and stateful/session behavior are configurable. | `crates/oraclemcp-core/src/http.rs` |
 | OAuth metadata | `/.well-known/oauth-protected-resource` remains public when OAuth is enabled. | `crates/oraclemcp-core/src/http.rs` |
 | HTTP guards | Remote bind requires explicit opt-in; Host and Origin guards protect loopback usage; missing auth returns WWW-Authenticate when OAuth is enabled. | `crates/oraclemcp/src/main.rs`, `crates/oraclemcp-auth/src/http_guard.rs`, `crates/oraclemcp-core/src/http.rs` |
-| Current OAuth scope gap | HTTP validates bearer scopes but only stores `ScopeGrant`; dispatch does not yet apply scope-to-level lowering. This is a security bug already represented by W10. | `crates/oraclemcp-core/src/http.rs`, `oraclemcp-w10-http-scope-enforcement-b5a` |
-| Golden baseline need | Existing e2e tests cover stdio/HTTP happy paths and auth regressions, but W1 must freeze protocol transcripts before removing `rmcp`/Axum/Hyper. | `crates/oraclemcp-core/tests/e2e_mcp.rs`, `crates/oraclemcp/tests/e2e_stdio.rs`, `oraclemcp-w1-golden-behavior-harness-y8p` |
+| HTTP OAuth scope enforcement | HTTP validates bearer scopes and carries `ScopeGrant` into `ToolDispatch`; dispatch applies monotone-down scope ceilings so narrow tokens cannot reach higher-level tools, broad tokens cannot exceed profile `max_level`, and protected profiles remain `READ_ONLY`. | `crates/oraclemcp-core/src/http.rs`, `crates/oraclemcp-core/src/server.rs`, `crates/oraclemcp/src/dispatch/mod.rs`, `crates/oraclemcp/src/dispatch/tests.rs` |
+| Golden baseline | Golden protocol tests cover stdio/HTTP happy paths, auth regressions, protected-resource metadata, host/origin guards, and stateful Streamable HTTP behavior. | `crates/oraclemcp-core/tests/golden_behavior.rs`, `tests/golden/http`, `tests/golden/stdio` |
 
 ## Tool Registry
 
@@ -88,10 +88,10 @@ real query text.
 
 | Crate/family | Current reason present | Migration target |
 | --- | --- | --- |
-| `tokio` | Binary runtime, rmcp, Axum/Hyper, and HTTP tests. | Remove from production graph; use Asupersync runtime, scopes, time, sync, net, and deterministic test helpers. |
-| `rmcp` | Current MCP SDK for stdio and Streamable HTTP. | Replace with native JSON-RPC/MCP stdio first, then native HTTP. |
-| `axum` | HTTP router/middleware around Streamable HTTP and metadata route. | Replace with Asupersync web/http primitives or a minimal audited non-Tokio HTTP layer. |
-| `hyper` / `hyper-util` | Transitive HTTP stack through Axum/rmcp HTTP. | Remove from production graph. |
+| `tokio` | Absent from the current manifests and lockfile. | Keep absent from the production graph; retain Asupersync `Cx` as the runtime context boundary. |
+| `rmcp` | Absent from the current manifests and lockfile. | Keep the native JSON-RPC/MCP stdio and HTTP implementation as the release surface. |
+| `axum` | Absent from the current manifests and lockfile. | Keep HTTP routing in the native transport surface. |
+| `hyper` / `hyper-util` | Absent from the current manifests and lockfile. | Keep absent from the production graph. |
 | `oracle` / ODPI-C | Removed from the DB crate in W4. | Keep absent. |
 | `r2d2` | Removed from the DB crate in W4. | Keep absent; W6b should move the remaining sync pool surface to explicit `&Cx`. |
 | `reqwest`, `async-std` | Not present in current dependency graph checked during W0. | Keep absent. |
@@ -208,9 +208,9 @@ W4 upstream follow-up beads filed in `/home/durakovic/projects/rust-oracledb`:
 
 | Baseline | Current state | Next bead |
 | --- | --- | --- |
-| Protocol behavior | Existing e2e tests cover current rmcp stdio/HTTP paths but fixtures are not yet golden transcripts. | W1 |
+| Protocol behavior | Golden stdio/HTTP transcripts and e2e protocol tests cover the native MCP surface. | W1/W9 |
 | DB behavior | Unit/live tests cover type fidelity, live Oracle smoke, leases, chaos rollback, privilege degradation, dictionary tools, and thin pool behavior. Live tests skip without Oracle env. | W4/W11 |
-| Dependency graph | Current default graph still contains Tokio/rmcp/Axum/Hyper outside the DB layer. `oracle`, `odpic-sys`, and `r2d2` should remain absent. | W12 hard gate |
+| Dependency graph | Current manifests and lockfile contain none of Tokio, `rmcp`, Axum, Hyper, `oracle`, `odpic-sys`, or `r2d2`. | W12 hard gate |
 | Release gates | CI runs fmt, clippy, tests, doc, pinned-nightly build, boundary lint, advisory forbidden-dependency reporting, release preflight, cargo deny, thin build, sensitive lint, and fuzz build best-effort. Release workflow publishes crates, GitHub release assets, GHCR, and MCP registry from tags. | W2, W14 |
 | Docker | W4 image builds the default thin binary and no longer uses the Oracle Instant Client runtime base. | W14 should still audit image size, labels, registry metadata, and installer docs. |
 | Performance | No local oraclemcp binary/startup/query benchmarks were produced in W0. Existing rust-oracledb docs contain thin-driver performance evidence, but those numbers are not oraclemcp release claims. | W13 |
@@ -219,10 +219,10 @@ W4 upstream follow-up beads filed in `/home/durakovic/projects/rust-oracledb`:
 
 | Gap | Bead |
 | --- | --- |
-| Need golden stdio/HTTP transcripts before transport rewrite. | `oraclemcp-w1-golden-behavior-harness-y8p` |
+| Keep golden stdio/HTTP transcripts current as transport behavior evolves. | `oraclemcp-w1-golden-behavior-harness-y8p` |
 | Need honest nightly toolchain contract before Asupersync/oracledb adoption. | `oraclemcp-w2-nightly-toolchain-ci-7ks` |
 | Need published-or-vendored `oracledb` dependency decision. | `oraclemcp-w3-oracledb-release-dependency-y3a` |
 | Need explicit explain-plan/`PLAN_TABLE` contract before W4. | `oraclemcp-thin-only-oracle-driver-kod.1` |
-| Need HTTP OAuth scope enforcement at dispatch, not just capture. | `oraclemcp-w10-http-scope-enforcement-b5a` |
+| Continue to cover HTTP OAuth scope enforcement at dispatch, including narrow token, broad token, protected profile, missing token, and metadata cases. | `oraclemcp-w10-http-scope-enforcement-b5a` |
 | Need forbidden production dependency gate. | `oraclemcp-w12-forbidden-dependency-gate-sbu` |
 | Need measured install/runtime evidence before public claims. | `oraclemcp-w13-performance-footprint-evidence-o5y` |

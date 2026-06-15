@@ -117,6 +117,15 @@ fails closed: it refuses to start without `--allow-no-auth`, and refuses any
 non-loopback bind unless `ORACLEMCP_HTTP_ALLOW_REMOTE=1` is set. Treat remote
 binds as opt-in and front them with your own TLS/auth.
 
+The reusable HTTP transport core also supports OAuth resource-server
+enforcement when configured by an embedding caller: the protected-resource
+metadata route stays public, `/mcp` requires a valid bearer token, and granted
+`oracle:*` scopes lower the request's effective operating ceiling
+monotonically. `oracle:read` caps the request at `READ_ONLY`,
+`oracle:write`/`oracle:execute` at `READ_WRITE`, `oracle:ddl` at `DDL`, and
+`oracle:admin` at `ADMIN`; none of them can raise a profile above its
+`max_level`, and protected profiles remain `READ_ONLY`.
+
 Connection profiles are resolved from layered configuration (`oraclemcp-config`); select one with `serve --profile <name>`.
 
 ### Connection profiles

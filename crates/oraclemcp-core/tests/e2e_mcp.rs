@@ -19,7 +19,7 @@ use oraclemcp_core::OracleMcpServer;
 use oraclemcp_core::capabilities::{CapabilitiesReport, FeatureTiers};
 use oraclemcp_core::http::{HttpRequest, HttpTransportConfig, MCP_PATH, handle_http_request};
 use oraclemcp_core::init_token::StdioAuthPolicy;
-use oraclemcp_core::server::{DispatchFuture, INIT_TOKEN_META_KEY, ToolDispatch};
+use oraclemcp_core::server::{DispatchContext, DispatchFuture, INIT_TOKEN_META_KEY, ToolDispatch};
 use oraclemcp_core::tools::{ToolDescriptor, ToolRegistry, ToolTier};
 use oraclemcp_guard::OperatingLevel;
 use serde_json::{Value, json};
@@ -28,7 +28,13 @@ use serde_json::{Value, json};
 /// container-gated; the protocol surface does not need them).
 struct EchoDispatch;
 impl ToolDispatch for EchoDispatch {
-    fn dispatch<'a>(&'a self, _cx: &'a Cx, name: &'a str, _args: Value) -> DispatchFuture<'a> {
+    fn dispatch<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        _context: DispatchContext<'a>,
+        name: &'a str,
+        _args: Value,
+    ) -> DispatchFuture<'a> {
         Box::pin(async move { Ok(json!({ "tool": name, "ok": true })) })
     }
 }

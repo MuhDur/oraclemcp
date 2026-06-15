@@ -5,6 +5,7 @@
 use super::*;
 use crate::registry::TOOL_NAMES;
 use asupersync::runtime::RuntimeBuilder;
+use oraclemcp_core::{DispatchContext, ScopeGrant};
 use oraclemcp_db::{OracleBackend, OracleCell, OracleRow};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -32,6 +33,10 @@ fn ddl_level() -> SessionLevelState {
         .set_current_level(OperatingLevel::Ddl)
         .expect("ddl is within ceiling");
     level
+}
+
+fn scope_grant(scope: &str) -> ScopeGrant {
+    ScopeGrant(vec![scope.to_owned()])
 }
 
 /// A driver-free mock that returns one synthetic row for any query — mirrors
@@ -1787,6 +1792,118 @@ fn set_session_level_cannot_exceed_profile_ceiling() {
             )
             .expect_err("ceiling blocks even with execute=true");
     assert_eq!(err.error_class, ErrorClass::OperatingLevelTooLow);
+}
+
+#[test]
+fn oauth_read_scope_blocks_write_tool_even_when_session_is_elevated() {
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(NoExecMock),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+    let read = scope_grant("oracle:read");
+    let sql = "UPDATE employees SET salary = salary WHERE employee_id = 100";
+    let err = dispatcher
+        .dispatch_with_context(
+            "oracle_execute",
+            json!({
+                "sql": sql,
+                "commit": true,
+                "confirm": "wrong"
+            }),
+            DispatchContext::with_scope_grant(&read),
+        )
+        .expect_err("read-scoped HTTP token must block write tools before DB access");
+
+    assert_eq!(err.error_class, ErrorClass::OperatingLevelTooLow);
+    assert!(
+        err.message.contains("READ_WRITE"),
+        "message should name the blocked required level: {}",
+        err.message
+    );
+    assert!(
+        err.message.contains("READ_ONLY"),
+        "message should name the scoped ceiling: {}",
+        err.message
+    );
+}
+
+#[test]
+fn oauth_read_scope_does_not_persistently_lower_session_level() {
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(NoExecMock),
+        Some("dev".to_owned()),
+        SessionLevelState::new(OperatingLevel::ReadWrite, false),
+    );
+    let read = scope_grant("oracle:read");
+
+    let scoped = dispatcher
+        .dispatch_with_context(
+            "oracle_set_session_level",
+            json!({ "level": "READ_WRITE", "ttl_seconds": 60 }),
+            DispatchContext::with_scope_grant(&read),
+        )
+        .expect("scoped blocked preview is inspectable");
+    assert_eq!(scoped["gate"]["decision"], json!("blocked"));
+    assert_eq!(scoped["session"]["profile_ceiling"], json!("READ_ONLY"));
+    assert_eq!(scoped["confirmation"], Value::Null);
+
+    let unscoped = dispatcher
+        .dispatch(
+            "oracle_set_session_level",
+            json!({ "level": "READ_WRITE", "ttl_seconds": 60 }),
+        )
+        .expect("later unscoped request still sees the profile ceiling");
+    assert_eq!(unscoped["gate"]["decision"], json!("require_step_up"));
+    assert_eq!(unscoped["session"]["profile_ceiling"], json!("READ_WRITE"));
+    assert!(unscoped["confirmation"]["confirm"].as_str().is_some());
+}
+
+#[test]
+fn oauth_admin_scope_cannot_exceed_profile_max_level() {
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(NoExecMock),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+    let admin = scope_grant("oracle:admin");
+
+    let preview = dispatcher
+        .dispatch_with_context(
+            "oracle_preview_sql",
+            json!({ "sql": "CREATE TABLE scoped_test (id NUMBER)" }),
+            DispatchContext::with_scope_grant(&admin),
+        )
+        .expect("DDL preview is inspectable");
+    assert_eq!(preview["gate_decision"], json!("blocked"));
+    assert_eq!(preview["blocked_reason"]["type"], json!("exceeds_ceiling"));
+    assert_eq!(preview["blocked_reason"]["required"], json!("DDL"));
+    assert_eq!(preview["blocked_reason"]["ceiling"], json!("READ_WRITE"));
+    assert_eq!(preview["profile_ceiling"], json!("READ_WRITE"));
+}
+
+#[test]
+fn oauth_admin_scope_keeps_protected_profile_read_only() {
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(NoExecMock),
+        Some("prod".to_owned()),
+        SessionLevelState::new(OperatingLevel::ReadOnly, true),
+    );
+    let admin = scope_grant("oracle:admin");
+
+    let preview = dispatcher
+        .dispatch_with_context(
+            "oracle_preview_sql",
+            json!({ "sql": "DELETE FROM important_table" }),
+            DispatchContext::with_scope_grant(&admin),
+        )
+        .expect("blocked preview is inspectable");
+    assert_eq!(preview["gate_decision"], json!("blocked"));
+    assert_eq!(preview["blocked_reason"]["type"], json!("exceeds_ceiling"));
+    assert_eq!(preview["blocked_reason"]["required"], json!("READ_WRITE"));
+    assert_eq!(preview["blocked_reason"]["ceiling"], json!("READ_ONLY"));
+    assert_eq!(preview["profile_ceiling"], json!("READ_ONLY"));
+    assert_eq!(preview["protected"], json!(true));
 }
 
 #[test]

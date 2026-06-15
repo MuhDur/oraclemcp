@@ -72,7 +72,7 @@ pub(super) struct ExecuteApprovedArgs {
     pub(super) dbms_output_max_chars: Option<usize>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct SetSessionLevelArgs {
     #[serde(default, alias = "target_level")]
     pub(super) level: Option<String>,

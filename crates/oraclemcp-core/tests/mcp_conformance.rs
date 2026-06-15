@@ -10,7 +10,7 @@ use std::sync::Arc;
 use asupersync::Cx;
 use oraclemcp_core::capabilities::{CapabilitiesReport, FeatureTiers};
 use oraclemcp_core::init_token::StdioAuthPolicy;
-use oraclemcp_core::server::{DispatchFuture, INIT_TOKEN_META_KEY, ToolDispatch};
+use oraclemcp_core::server::{DispatchContext, DispatchFuture, INIT_TOKEN_META_KEY, ToolDispatch};
 use oraclemcp_core::tools::{ToolDescriptor, ToolRegistry, ToolTier};
 use oraclemcp_core::{CAPABILITIES_TOOL, OracleMcpServer};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
@@ -107,7 +107,13 @@ const REQUIREMENTS: &[Requirement] = &[
 
 struct EchoDispatch;
 impl ToolDispatch for EchoDispatch {
-    fn dispatch<'a>(&'a self, _cx: &'a Cx, name: &'a str, args: Value) -> DispatchFuture<'a> {
+    fn dispatch<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        _context: DispatchContext<'a>,
+        name: &'a str,
+        args: Value,
+    ) -> DispatchFuture<'a> {
         Box::pin(async move {
             if name == "oracle_schema_inspect" {
                 return Ok(json!({

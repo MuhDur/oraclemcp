@@ -40,12 +40,40 @@ const SERVER_INSTRUCTIONS: &str = "Call oracle_capabilities first to discover to
 pub type DispatchFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Value, ErrorEnvelope>> + Send + 'a>>;
 
+/// Per-request authorization context supplied by transports.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DispatchContext<'a> {
+    scope_grant: Option<&'a crate::http::ScopeGrant>,
+}
+
+impl<'a> DispatchContext<'a> {
+    /// Build a context from a validated OAuth scope grant.
+    #[must_use]
+    pub fn with_scope_grant(scope_grant: &'a crate::http::ScopeGrant) -> Self {
+        Self {
+            scope_grant: Some(scope_grant),
+        }
+    }
+
+    /// The validated OAuth scopes for this request, if any.
+    #[must_use]
+    pub fn scope_grant(self) -> Option<&'a crate::http::ScopeGrant> {
+        self.scope_grant
+    }
+}
+
 /// Cx-aware tool dispatch, injected by the engine/operator side. Returns the
 /// tool's structured JSON or an [`ErrorEnvelope`].
 pub trait ToolDispatch: Send + Sync + 'static {
     /// Dispatch a tool call by name with JSON arguments in the supplied
     /// Asupersync context.
-    fn dispatch<'a>(&'a self, cx: &'a Cx, name: &'a str, args: Value) -> DispatchFuture<'a>;
+    fn dispatch<'a>(
+        &'a self,
+        cx: &'a Cx,
+        context: DispatchContext<'a>,
+        name: &'a str,
+        args: Value,
+    ) -> DispatchFuture<'a>;
 }
 
 /// The MCP server surface shared by native stdio and HTTP transports.
@@ -240,10 +268,23 @@ impl OracleMcpServer {
     /// Run a tool by name + JSON args in an explicit Asupersync context,
     /// returning the native MCP `tools/call` result object.
     pub async fn run_tool_json_with_cx(&self, cx: &Cx, name: String, args: Value) -> Value {
+        self.run_tool_json_with_context(cx, DispatchContext::default(), name, args)
+            .await
+    }
+
+    /// Run a tool by name + JSON args in an explicit Asupersync context and
+    /// transport authorization context.
+    pub async fn run_tool_json_with_context(
+        &self,
+        cx: &Cx,
+        context: DispatchContext<'_>,
+        name: String,
+        args: Value,
+    ) -> Value {
         if name == CAPABILITIES_TOOL {
             return self.capabilities_result_json();
         }
-        match self.dispatcher.dispatch(cx, &name, args).await {
+        match self.dispatcher.dispatch(cx, context, &name, args).await {
             Ok(value) => tool_result_ok_json(value),
             Err(envelope) => tool_result_err_json(&self.sanitize_error_envelope(envelope)),
         }
@@ -258,6 +299,18 @@ impl OracleMcpServer {
     /// transports use this to keep request handling synchronous without Tokio.
     #[must_use]
     pub fn run_tool_blocking(&self, name: String, args: Value) -> Value {
+        self.run_tool_blocking_with_context(DispatchContext::default(), name, args)
+    }
+
+    /// Run a tool through the server-owned Asupersync runtime with transport
+    /// authorization context.
+    #[must_use]
+    pub fn run_tool_blocking_with_context(
+        &self,
+        context: DispatchContext<'_>,
+        name: String,
+        args: Value,
+    ) -> Value {
         self.dispatch_runtime.block_on(async {
             let Some(cx) = Cx::current() else {
                 let envelope = ErrorEnvelope::new(
@@ -266,7 +319,8 @@ impl OracleMcpServer {
                 );
                 return tool_result_err_json(&envelope);
             };
-            self.run_tool_json_with_cx(&cx, name, args).await
+            self.run_tool_json_with_context(&cx, context, name, args)
+                .await
         })
     }
 
@@ -292,6 +346,17 @@ impl OracleMcpServer {
         request: Value,
         auth: Option<&StdioAuthPolicy>,
     ) -> Option<Value> {
+        self.handle_jsonrpc_request_with_context(request, auth, DispatchContext::default())
+    }
+
+    /// Handle one parsed JSON-RPC request with a transport authorization
+    /// context. HTTP uses this to apply OAuth scopes to `tools/call` dispatch.
+    pub fn handle_jsonrpc_request_with_context(
+        &self,
+        request: Value,
+        auth: Option<&StdioAuthPolicy>,
+        context: DispatchContext<'_>,
+    ) -> Option<Value> {
         let Value::Object(object) = request else {
             return Some(jsonrpc_error(
                 Value::Null,
@@ -311,7 +376,7 @@ impl OracleMcpServer {
             "initialize" => Some(self.handle_initialize(id, object.get("params"), auth)),
             "notifications/initialized" => None,
             "tools/list" => Some(jsonrpc_result(id, self.tools_list_result_json())),
-            "tools/call" => Some(self.handle_tool_call(id, object.get("params"))),
+            "tools/call" => Some(self.handle_tool_call(id, object.get("params"), context)),
             _ => Some(jsonrpc_error(
                 id,
                 JSONRPC_METHOD_NOT_FOUND,
@@ -339,7 +404,12 @@ impl OracleMcpServer {
         jsonrpc_result(id, self.initialize_result_json())
     }
 
-    fn handle_tool_call(&self, id: Value, params: Option<&Value>) -> Value {
+    fn handle_tool_call(
+        &self,
+        id: Value,
+        params: Option<&Value>,
+        context: DispatchContext<'_>,
+    ) -> Value {
         let Some(Value::Object(params)) = params else {
             return jsonrpc_error(
                 id,
@@ -365,7 +435,7 @@ impl OracleMcpServer {
                 );
             }
         };
-        let result = self.run_tool_blocking(name.to_owned(), args);
+        let result = self.run_tool_blocking_with_context(context, name.to_owned(), args);
         jsonrpc_result(id, result)
     }
 }
@@ -445,7 +515,13 @@ mod tests {
 
     struct EchoDispatcher;
     impl ToolDispatch for EchoDispatcher {
-        fn dispatch<'a>(&'a self, _cx: &'a Cx, name: &'a str, args: Value) -> DispatchFuture<'a> {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            name: &'a str,
+            args: Value,
+        ) -> DispatchFuture<'a> {
             Box::pin(async move {
                 if name == "boom" {
                     return Err(ErrorEnvelope::new(ErrorClass::Internal, "boom"));
