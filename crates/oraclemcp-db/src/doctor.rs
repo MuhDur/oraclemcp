@@ -1,4 +1,4 @@
-//! Thin driver posture probe (plan §13 `oraclemcp doctor` check 1).
+//! Thin driver posture probe for `oraclemcp doctor`.
 //!
 //! The DB driver is pure Rust and always compiled into the binary; no Oracle
 //! Instant Client, ODPI-C library, or C toolchain is required.
@@ -13,29 +13,24 @@ pub fn oracle_driver_compiled() -> bool {
 
 /// The thin-driver runtime posture.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InstantClientPosture {
+pub struct OracleDriverPosture {
     /// Whether the thin driver is compiled in (live-DB capable).
     pub driver_compiled: bool,
-    /// Whether a `libclntsh` shared object was located on the library path.
-    /// Thin mode does not require this and always reports `false`.
-    pub libclntsh_found: bool,
-    /// The directory the library was found in, if any. Thin mode does not scan.
-    pub search_dir: Option<String>,
-    /// A best-effort version hint parsed from the directory name. Thin mode
-    /// does not scan.
-    pub version_hint: Option<String>,
+    /// Whether a native Oracle client library is required at runtime.
+    pub native_client_required: bool,
+    /// Whether the default DB path is ODPI-C/thick mode.
+    pub thick_mode_enabled: bool,
     /// A human-readable note / next step.
     pub note: String,
 }
 
 /// Probe thin driver posture without touching the host environment.
 #[must_use]
-pub fn detect_instant_client() -> InstantClientPosture {
-    InstantClientPosture {
+pub fn detect_oracle_driver() -> OracleDriverPosture {
+    OracleDriverPosture {
         driver_compiled: true,
-        libclntsh_found: false,
-        search_dir: None,
-        version_hint: None,
+        native_client_required: false,
+        thick_mode_enabled: false,
         note: "thin oracledb driver compiled; Oracle Instant Client is not required".to_owned(),
     }
 }
@@ -46,9 +41,10 @@ mod tests {
 
     #[test]
     fn posture_reflects_driver_compilation() {
-        let posture = detect_instant_client();
+        let posture = detect_oracle_driver();
         assert!(posture.driver_compiled);
-        assert!(!posture.libclntsh_found);
+        assert!(!posture.native_client_required);
+        assert!(!posture.thick_mode_enabled);
         assert!(posture.note.contains("Instant Client is not required"));
     }
 }

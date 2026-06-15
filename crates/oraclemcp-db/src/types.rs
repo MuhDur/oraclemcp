@@ -296,8 +296,9 @@ impl OracleSessionIdentity {
 /// here transiently; the full secrets-backend + zeroize discipline (§6.5) lands
 /// with the auth layer.
 ///
-/// `Debug` is hand-written: `password` and `iam_token` must never reach a log or
-/// panic message in plaintext, so they render as a redaction marker.
+/// `Debug` is hand-written: connect material must never reach a log or panic
+/// message in plaintext, so values render as redaction markers while preserving
+/// presence/absence.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct OracleConnectOptions {
     /// Oracle Net connect identifier (EZConnect / EZConnect-Plus / TNS alias).
@@ -329,12 +330,18 @@ impl std::fmt::Debug for OracleConnectOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Presence is preserved (`Some`/`None`) but the secret value is never rendered.
         let redact = |secret: &Option<String>| secret.as_ref().map(|_| "<redacted>");
+        let redact_path = |path: &Option<PathBuf>| path.as_ref().map(|_| "<redacted>");
+        let connect_string = if self.connect_string.is_empty() {
+            None
+        } else {
+            Some("<redacted>")
+        };
         f.debug_struct("OracleConnectOptions")
-            .field("connect_string", &self.connect_string)
-            .field("username", &self.username)
+            .field("connect_string", &connect_string)
+            .field("username", &redact(&self.username))
             .field("password", &redact(&self.password))
             .field("external_auth", &self.external_auth)
-            .field("wallet_location", &self.wallet_location)
+            .field("wallet_location", &redact_path(&self.wallet_location))
             .field("use_iam_token", &self.use_iam_token)
             .field("iam_token", &redact(&self.iam_token))
             .field("session_identity", &self.session_identity)
@@ -424,39 +431,48 @@ mod tests {
     }
 
     #[test]
-    fn debug_redacts_password_and_iam_token() {
+    fn debug_redacts_connect_material() {
         let opts = OracleConnectOptions {
             connect_string: "host:1521/svc".to_owned(),
             username: Some("scott".to_owned()),
             password: Some("hunter2-SUPER-SECRET".to_owned()),
+            wallet_location: Some("/home/scott/private-wallet".into()),
             use_iam_token: true,
             iam_token: Some("eyJ-IAM-TOKEN-VALUE".to_owned()),
             ..Default::default()
         };
         let rendered = format!("{opts:?}");
         assert!(
+            !rendered.contains("host:1521/svc"),
+            "connect string leaked: {rendered}"
+        );
+        assert!(!rendered.contains("scott"), "username leaked: {rendered}");
+        assert!(
             !rendered.contains("hunter2-SUPER-SECRET"),
             "password leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("/home/scott/private-wallet"),
+            "wallet path leaked: {rendered}"
         );
         assert!(
             !rendered.contains("eyJ-IAM-TOKEN-VALUE"),
             "iam_token leaked: {rendered}"
         );
         assert!(rendered.contains("<redacted>"));
-        // Non-secret fields remain visible, and secret presence is preserved.
-        assert!(rendered.contains("host:1521/svc"));
-        assert!(rendered.contains("scott"));
+        // Presence is preserved without exposing values.
+        assert!(rendered.contains("connect_string"));
+        assert!(rendered.contains("username: Some"));
         assert!(rendered.contains("password: Some"));
+        assert!(rendered.contains("wallet_location: Some"));
         assert!(rendered.contains("iam_token: Some"));
     }
 
     #[test]
     fn debug_renders_absent_secrets_as_none() {
-        let opts = OracleConnectOptions {
-            connect_string: "host/svc".to_owned(),
-            ..Default::default()
-        };
+        let opts = OracleConnectOptions::default();
         let rendered = format!("{opts:?}");
+        assert!(rendered.contains("connect_string: None"));
         assert!(rendered.contains("password: None"));
         assert!(rendered.contains("iam_token: None"));
         assert!(!rendered.contains("<redacted>"));

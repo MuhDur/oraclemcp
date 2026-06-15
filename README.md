@@ -47,6 +47,13 @@ cargo +nightly-2026-05-11 install oraclemcp
 No Oracle Instant Client, ODPI-C library, or C toolchain is required by the
 driver.
 
+Use `oraclemcp --json doctor` to verify the binary and offline setup, and
+`oraclemcp --json doctor --profile <profile>` to add live connectivity,
+authentication, role/open-mode, standby, and privilege checks. Doctor output is
+safe to paste into agent sessions: it omits connect strings, usernames,
+`credential_ref` values, passwords, IAM tokens, and wallet paths while keeping
+structured failure classes and ORA codes visible.
+
 Generate generic local setup templates for profiles, wrappers, and MCP client
 snippets:
 
@@ -96,8 +103,8 @@ oraclemcp serve --listen 127.0.0.1:7070   # Streamable HTTP (bind loopback only)
 oraclemcp --json setup --profile db_ro    # generic onboarding templates
 oraclemcp capabilities               # the advertised tool surface + feature tiers (JSON)
 oraclemcp --json profiles            # configured profile names and non-secret metadata
-oraclemcp doctor                     # offline diagnostics (classifier self-test, NLS, …)
-oraclemcp doctor --profile dev_ro    # include live connectivity/role/privilege checks
+oraclemcp doctor                     # offline diagnostics (thin driver, TNS/wallet, classifier, NLS)
+oraclemcp doctor --profile dev_ro    # include live connectivity/auth/role/privilege checks
 oraclemcp info                       # build info: version, tools, transports, thin DB
 oraclemcp robot-docs guide           # compact in-binary guide for agents
 ```
@@ -199,6 +206,12 @@ Config discovery order is:
 3. `~/.config/oraclemcp/config.toml`
 
 `credential_ref` supports `env:VAR` for environment-injected credentials and `literal:value` for local development only. Literal credentials are rejected when `protected = true`.
+
+The published thin driver currently fails explicitly for auth/features it cannot
+serve safely, such as external wallet auth without username/password, OCI IAM
+database-token auth, and edition selection. These appear as structured
+unsupported diagnostics in `oraclemcp doctor --profile <profile>` and MCP error
+envelopes; the binary does not silently fall back to thick mode.
 
 If `serve --profile <name>` is provided, it overrides `default_profile`. If neither is set and exactly one profile exists, that sole profile is used.
 

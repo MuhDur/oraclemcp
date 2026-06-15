@@ -24,7 +24,7 @@ real query text.
 | --- | --- | --- |
 | `oraclemcp serve` | Serves stdio by default; `--listen` enables HTTP; `--allow-no-auth` gates unauthenticated HTTP; `--stdio-token` may resolve from `$ORACLEMCP_STDIO_TOKEN`; `--profile` selects active profile. | `crates/oraclemcp/src/main.rs`, `README.md` |
 | `oraclemcp info` | Prints package/runtime metadata without requiring a DB connection. | `crates/oraclemcp/src/main.rs` |
-| `oraclemcp doctor [--profile]` | Offline checks always run; profile mode adds live connectivity, role, and privilege checks when possible. Must redact secrets. | `crates/oraclemcp/src/main.rs`, `README.md` |
+| `oraclemcp doctor [--profile]` | Offline checks always run; profile mode adds live connectivity, auth, role/open-mode, standby, and privilege checks when possible. Output must redact connect strings, usernames, credential refs, passwords, IAM tokens, and wallet paths while preserving ORA codes/failure classes. | `crates/oraclemcp/src/main.rs`, `README.md` |
 | `oraclemcp profiles` / `list-profiles` | Lists configured profiles and safe metadata. Connect strings and credential refs are omitted from metadata. | `crates/oraclemcp/src/main.rs`, `crates/oraclemcp-config/src/profile.rs` |
 | `oraclemcp capabilities` | Emits robot-readable config, tools, tiers, auth posture, and environment guidance. | `crates/oraclemcp/src/main.rs`, `crates/oraclemcp/src/robot_docs.rs` |
 | `oraclemcp robot-docs guide` | Emits agent-oriented setup and usage docs. | `crates/oraclemcp/src/robot_docs.rs` |
@@ -67,7 +67,7 @@ real query text.
 | Custom tool signing | `ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY` signs/verifies custom tool definitions; missing keys fail when signatures are required. | `crates/oraclemcp/src/main.rs`, `README.md` |
 | Release secrets | crates.io publishing uses `CARGO_REGISTRY_TOKEN` in the `crates-io` environment; GHCR uses `GITHUB_TOKEN`; MCP registry publishing uses GitHub OIDC. No separate GHCR or MCP registry secret is required by current workflows. | `.github/workflows/release.yml`, `.github/workflows/docker.yml`, `.github/workflows/publish-mcp.yml` |
 | Secret lint | Sensitive-data lint scans for embedded URL credentials, cloud keys, private keys, and optional denylist entries. | `scripts/sensitive_data_lint.sh`, `.github/workflows/ci.yml` |
-| Logs/errors/fixtures | Migration tests and docs must use synthetic SQL/profile names and must not include real Oracle hosts, usernames, wallet paths, bind values, tokens, or customer schema names. | `AGENTS.md`, W1/W11/W13/W14 beads |
+| Logs/errors/fixtures | Migration tests, docs, and doctor output must use synthetic SQL/profile names and must not include real Oracle hosts, usernames, wallet paths, bind values, tokens, or customer schema names. | `AGENTS.md`, W1/W5/W11/W13/W14 beads |
 
 ## Safety and Data Invariants
 
@@ -144,15 +144,15 @@ Semver, ownership, and security-fix flow:
   next step is a self-contained `rust-oracledb` issue and a new published
   driver version, not a hidden path dependency.
 
-| oraclemcp need | Current thick behavior | `oracledb` / thin migration note |
+| oraclemcp need | Legacy/current behavior | `oracledb` / thin migration note |
 | --- | --- | --- |
-| Connect | Thin `oracledb` connect via `RustOracleConnection`; applies username/password, wallet location, identity, NLS, and session statements. | W4 uses `BlockingConnection` as the synchronous bridge. W6b must thread `&Cx` through the DB surface and remove that bridge from production paths. |
+| Connect | Thin `oracledb` connect via `RustOracleConnection`; applies username/password, wallet location, identity, NLS, and session statements. | W4 uses `BlockingConnection` as the synchronous bridge. W6b threads `&Cx` through DB-facing dispatch and adds cancellation checkpoints; W7b must complete child-budget/cancel cleanup. |
 | Query rows | Positional and named binds; pagination wraps SQL with `OFFSET ... FETCH`; first page fetches max rows plus one. | `execute_query_with_binds*`, named/positional bind APIs, and fetch APIs exist. W4 must map `QueryValue` to current JSON serialization exactly. |
 | Execute | Thick adapter reports rows affected, commit/rollback, and savepoint rollback preview. | Thin adapter must preserve row counts, savepoints, commit/rollback, and uncertain-session cleanup. |
 | Call timeout/cancel | Thick adapter has call timeout setters and DB pool offloading. | Thin driver exposes timeout/cancel APIs; W7b must wire cancellation to connection cleanup and discard dirty sessions when certainty is lost. |
 | LOBs/JSON/NUMBER | Current serialization caps LOBs and keeps NUMBER lossless by default. | Thin values include lossless `QueryValue`; W4 must preserve current JSON schema and truncation markers. |
 | DBMS_OUTPUT | `ENABLE` still executes through PL/SQL. `GET_LINE` capture is an explicit unsupported feature because `oracledb 0.1.1` does not expose the old ODPI-C OUT-bind surface used here. | File granular `rust-oracledb` work if DBMS_OUTPUT capture is required before W11. |
-| Pooling | W4 replaced `r2d2`/Tokio blocking pool with a small bounded thin session pool. | W6b should make checkout/use/release cancellation-aware with `&Cx`. |
+| Pooling | W4 replaced `r2d2`/Tokio blocking pool with a small bounded thin session pool. | W6b made checkout/use/release cancellation-aware with `&Cx`; W7b should add deeper driver cancellation cleanup for uncertain live calls. |
 | Session identity | Thin connection maps driver name/program/machine/osuser/terminal through `ClientIdentity`, then applies module/action/client_identifier/client_info with PL/SQL. Edition selection is explicitly unsupported on `oracledb 0.1.1`. | If edition support is required, file granular `rust-oracledb` work or add a safe session-level implementation. |
 
 W4 upstream follow-up beads filed in `/home/durakovic/projects/rust-oracledb`:
@@ -167,7 +167,7 @@ W4 upstream follow-up beads filed in `/home/durakovic/projects/rust-oracledb`:
 | Capability | Current behavior | Thin migration requirement |
 | --- | --- | --- |
 | Proxy auth | Formats proxy users such as `proxy_user[target_schema]` and treats proxy auth as an Oracle Net profile mode. | Preserve if thin driver supports equivalent username/connect metadata; otherwise fail with a precise unsupported-auth error. |
-| External/wallet auth | Empty username/password with wallet/external auth can be attempted by thick mode. | Thin-only W4/W5 must document support or explicit unsupported behavior; never silently fall back to password auth. |
+| External/wallet auth | Legacy thick mode could attempt empty username/password wallet auth. Thin mode now reports unsupported external wallet auth explicitly until the published driver grows that path. | Never silently fall back to password auth or thick mode. |
 | Kerberos/RADIUS | Current adapter labels these thick-mode requirements. | Thin-only migration should remove or explicitly reject with actionable diagnostics. |
 | IAM token | Current thick path reports unsupported for `use_iam_token`. | Thin path should either implement from `oci.rs` token source or report a targeted unsupported-cloud-auth error. |
 | DRCP | Current `drcp.rs` appends connect string parameters such as `server=pooled`, class, and purity. | Preserve connect-string semantics if thin parser supports them; add live or parser tests. |
@@ -177,9 +177,9 @@ W4 upstream follow-up beads filed in `/home/durakovic/projects/rust-oracledb`:
 
 | Area | Current behavior | Thin migration requirement |
 | --- | --- | --- |
-| Wallet discovery | Requires `cwallet.sso` and `tnsnames.ora`; parses aliases. | Preserve diagnostics; do not log wallet paths if policy treats paths as sensitive. |
+| Wallet discovery | Requires `cwallet.sso` and `tnsnames.ora`; parses aliases. | Preserve diagnostics; doctor/log output must not print local wallet paths. |
 | ADB validation | Accepts `tcps://`, TLS descriptor, or bare wallet alias; rejects plaintext `tcp://`. | Preserve fail-closed TLS/ADB validation before connection. |
-| TCPS/SNI/wallet | Thick mode relies on Oracle client behavior. | W3/W4 must verify the published `oracledb` crate supports required TLS/wallet/SNI behavior or split unsupported cases into explicit beads. |
+| TCPS/SNI/wallet | Thin mode routes TCPS/wallet setup through the published `oracledb` driver where available and otherwise fails explicitly. | Preserve fail-closed diagnostics; unsupported auth/features must not silently fall back to thick mode. |
 | IAM refresh | `oci.rs` has token structures and refresh seam. | W4/W5 must either wire to thin auth or return structured unsupported diagnostics. |
 | Read-only standby | Standby detection caps write behavior and disables `EXPLAIN PLAN` into `PLAN_TABLE`. | Preserve standby cap and diagnostic clarity. |
 

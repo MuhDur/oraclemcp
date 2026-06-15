@@ -47,16 +47,7 @@ pub(crate) fn setup_wrapper_template() -> &'static str {
     r#"#!/usr/bin/env sh
 set -eu
 
-ORACLE_IC_HOME="${ORACLE_IC_HOME:-/opt/oracle/instantclient}"
 ORACLE_NET_HOME="${ORACLE_NET_HOME:-$HOME/.config/oraclemcp/network}"
-
-if [ -d "$ORACLE_IC_HOME" ]; then
-  if [ -n "${LD_LIBRARY_PATH:-}" ]; then
-    export LD_LIBRARY_PATH="$ORACLE_IC_HOME:$LD_LIBRARY_PATH"
-  else
-    export LD_LIBRARY_PATH="$ORACLE_IC_HOME"
-  fi
-fi
 
 if [ -d "$ORACLE_NET_HOME" ]; then
   export TNS_ADMIN="${TNS_ADMIN:-$ORACLE_NET_HOME}"
@@ -104,7 +95,7 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
                 "argv": ["oraclemcp", "serve", "--profile", "<profile>", "--allow-no-auth"],
                 "notes": [
                     "Use --allow-no-auth only for local stdio clients you already trust.",
-                    "If Oracle client libraries or network files need environment setup, point every MCP client at the same small wrapper script."
+                    "The thin driver does not need Oracle Instant Client; if Oracle Net files need TNS_ADMIN, point every MCP client at the same small wrapper script."
                 ]
             },
             "secure_stdio": {
@@ -226,6 +217,13 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
             "secret_refs": "prefer credential_ref over literal passwords",
             "environment_specifics": "database aliases, session identity, client module/program labels, and custom workflow tools belong in profiles or tools.d config, not in the general core"
         },
+        "thin_diagnostics": {
+            "driver": "pure-Rust oracledb thin driver; no Oracle Instant Client, ODPI-C, libclntsh, or C toolchain required",
+            "offline": "oraclemcp --json doctor checks thin-driver posture, TNS/wallet directory presence, NLS setup, classifier self-test, and custom-tool availability without opening a database",
+            "profile": "oraclemcp --json doctor --profile <profile> adds live connectivity, authentication, role/open-mode, standby, and privilege-tier checks",
+            "secret_handling": "doctor and profiles output omit connect strings, usernames, credential_ref values, passwords, IAM tokens, and wallet paths",
+            "unsupported_auth": "published thin driver gaps such as external wallet auth, OCI IAM token auth, and edition selection are returned as structured unsupported diagnostics rather than falling back silently"
+        },
         "diagnostic_flow": [
             {
                 "intent": "binary and build posture",
@@ -284,7 +282,8 @@ Client setup
 - Generate generic setup templates with: oraclemcp --json setup --profile <profile>
 - Local stdio command: oraclemcp serve --profile <profile> --allow-no-auth
 - Secure stdio command: ORACLEMCP_STDIO_TOKEN=<token> oraclemcp serve --profile <profile>
-- If Oracle client libraries or network files need environment setup, point every MCP client at the same small wrapper script.
+- The thin driver does not need Oracle Instant Client, ODPI-C, libclntsh, or a C toolchain.
+- If Oracle Net files need TNS_ADMIN, point every MCP client at the same small wrapper script.
 - After replacing the binary or wrapper, restart or reconnect each MCP client so it imports the fresh tool schema.
 
 Client smoke tests
@@ -346,6 +345,12 @@ Diagnostic flow
 4. oraclemcp --json doctor
 5. oraclemcp --json doctor --profile <profile>
 6. oraclemcp --json capabilities
+
+Thin diagnostics
+- Offline doctor checks the thin driver posture, optional TNS/wallet directories, canonical NLS setup, classifier self-test, and custom-tool availability without opening a database.
+- Profile doctor adds live connectivity, authentication, role/open-mode, standby, and privilege-tier checks.
+- Doctor output omits connect strings, usernames, credential_ref values, passwords, IAM tokens, and wallet paths.
+- Unsupported thin auth/features are explicit diagnostics; the binary never silently falls back to thick mode.
 
 Agent rules
 - Prefer oracle_query for SELECT/WITH statements.

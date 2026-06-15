@@ -7,7 +7,7 @@
 //! - [`OracleConnection`] — the backend-independent sync connection trait, with
 //!   the thin [`oracledb`]-backed [`RustOracleConnection`].
 //! - [`OraclePool`] — a bounded pure-Rust thin session pool.
-//! - [`detect_instant_client`] — compatibility posture data for `doctor`; thin
+//! - [`detect_oracle_driver`] — thin-driver posture data for `doctor`; thin
 //!   mode never requires Instant Client.
 //!
 //! The session-lease primitive (P0-4) and the deterministic NUMBER→string /
@@ -35,7 +35,7 @@ mod pool;
 pub use auth_adapter::{AuthAdapter, AuthAdapterError};
 pub use awr::{DiagnosticsSource, detect_statspack, select_diagnostics_source, top_sql_query};
 pub use connection::{DbmsOutput, OracleConnection, RustOracleConnection};
-pub use doctor::{InstantClientPosture, detect_instant_client, oracle_driver_compiled};
+pub use doctor::{OracleDriverPosture, detect_oracle_driver, oracle_driver_compiled};
 pub use drcp::{DrcpConfig, SessionPurity};
 pub use error::DbError;
 pub use intelligence::{

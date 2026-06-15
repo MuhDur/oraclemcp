@@ -970,6 +970,30 @@ struct DoctorProfileContext {
     connection_error: Option<String>,
     wallet_location: Option<String>,
     protected_profile_writable: bool,
+    sensitive_values: Vec<String>,
+}
+
+fn doctor_sensitive_values(opts: &OracleConnectOptions) -> Vec<String> {
+    let mut values = Vec::new();
+    values.push(opts.connect_string.clone());
+    if let Some(username) = &opts.username {
+        values.push(username.clone());
+    }
+    if let Some(password) = &opts.password {
+        values.push(password.clone());
+    }
+    if let Some(token) = &opts.iam_token {
+        values.push(token.clone());
+    }
+    if let Some(wallet) = &opts.wallet_location {
+        values.push(wallet.display().to_string());
+    }
+    values.retain(|value| !value.is_empty());
+    values
+}
+
+fn doctor_connection_error(error: DbError) -> String {
+    error.into_envelope().message
 }
 
 fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
@@ -979,6 +1003,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
             connection_error: None,
             wallet_location: None,
             protected_profile_writable: false,
+            sensitive_values: Vec::new(),
         };
     };
 
@@ -990,18 +1015,21 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
                 .map(|path| path.display().to_string());
             let protected_profile_writable =
                 level.is_protected() && level.max_level() > OperatingLevel::ReadOnly;
+            let sensitive_values = doctor_sensitive_values(&opts);
             match try_open_connection(opts) {
                 Ok(conn) => DoctorProfileContext {
                     conn: Some(conn),
                     connection_error: None,
                     wallet_location,
                     protected_profile_writable,
+                    sensitive_values,
                 },
                 Err(e) => DoctorProfileContext {
                     conn: None,
-                    connection_error: Some(e.to_string()),
+                    connection_error: Some(doctor_connection_error(e)),
                     wallet_location,
                     protected_profile_writable,
+                    sensitive_values,
                 },
             }
         }
@@ -1010,12 +1038,14 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
             connection_error: Some(format!("connection profile `{profile}` not found")),
             wallet_location: None,
             protected_profile_writable: false,
+            sensitive_values: Vec::new(),
         },
         Err(e) => DoctorProfileContext {
             conn: None,
-            connection_error: Some(e.to_string()),
+            connection_error: Some(doctor_connection_error(e)),
             wallet_location: None,
             protected_profile_writable: false,
+            sensitive_values: Vec::new(),
         },
     }
 }
@@ -1031,6 +1061,7 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>) -> ExitCode {
         tns_admin: std::env::var("TNS_ADMIN").ok(),
         wallet_location: profile_ctx.wallet_location,
         protected_profile_writable: profile_ctx.protected_profile_writable,
+        sensitive_values: profile_ctx.sensitive_values,
     };
     let report = run_doctor(&ctx);
     let exit_code = doctor_process_exit_code(&report);
@@ -1153,6 +1184,8 @@ mod tests {
                 status: oraclemcp_core::CheckStatus::Fail,
                 detail: "failed".to_owned(),
                 fix: None,
+                failure_class: None,
+                ora_code: None,
             }],
         };
         let process_code = doctor_process_exit_code(&failed);
@@ -1161,6 +1194,37 @@ mod tests {
             failed.to_json_with_exit_code(i32::from(process_code))["exit_code"],
             serde_json::json!(2)
         );
+    }
+
+    #[test]
+    fn doctor_sensitive_values_include_connect_material() {
+        let opts = OracleConnectOptions {
+            connect_string: "dbhost:1521/private_service".to_owned(),
+            username: Some("APP_USER".to_owned()),
+            password: Some("super_secret".to_owned()),
+            wallet_location: Some("/home/operator/private-wallet".into()),
+            use_iam_token: true,
+            iam_token: Some("iam.jwt.token".to_owned()),
+            ..Default::default()
+        };
+        let values = doctor_sensitive_values(&opts);
+        for expected in [
+            "dbhost:1521/private_service",
+            "APP_USER",
+            "super_secret",
+            "/home/operator/private-wallet",
+            "iam.jwt.token",
+        ] {
+            assert!(values.iter().any(|value| value == expected), "{values:?}");
+        }
+    }
+
+    #[test]
+    fn doctor_connection_error_uses_agent_envelope_message() {
+        let message = doctor_connection_error(oraclemcp_db::DbError::UnsupportedAuth(
+            "connection profile `missing_ro` not found".to_owned(),
+        ));
+        assert_eq!(message, "connection profile `missing_ro` not found");
     }
 
     #[test]
@@ -1330,6 +1394,8 @@ mod tests {
         );
         assert!(text.contains("Client smoke tests"));
         assert!(text.contains("oraclemcp --json setup --profile <profile>"));
+        assert!(text.contains("Thin diagnostics"));
+        assert!(text.contains("does not need Oracle Instant Client"));
         assert!(
             serde_json::to_string(&out)
                 .expect("json")
@@ -1379,6 +1445,18 @@ mod tests {
         assert_eq!(
             out["safety_model"]["levels"],
             serde_json::json!(["READ_ONLY", "READ_WRITE", "DDL", "ADMIN"])
+        );
+        assert_eq!(
+            out["thin_diagnostics"]["driver"],
+            serde_json::json!(
+                "pure-Rust oracledb thin driver; no Oracle Instant Client, ODPI-C, libclntsh, or C toolchain required"
+            )
+        );
+        assert!(
+            out["thin_diagnostics"]["secret_handling"]
+                .as_str()
+                .expect("secret handling text")
+                .contains("wallet paths")
         );
         assert!(
             serde_json::to_string(&out)

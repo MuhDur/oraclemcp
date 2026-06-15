@@ -6,17 +6,18 @@
 //! Checks are **progressive** (per the bead's design note): each lights up as
 //! its backing feature lands. A check whose feature/state is not present this
 //! run is reported `Skip` *with a reason* — never a fake `Pass`. The offline
-//! subset (Instant Client, TNS/wallet, NLS, classifier self-test) runs WITHOUT a
-//! live database; the live subset (connectivity, role/standby, privilege tier)
-//! runs only when a connection is supplied.
+//! subset (thin driver posture, TNS/wallet, NLS, classifier self-test) runs
+//! WITHOUT a live database; the live subset (connectivity, role/standby,
+//! privilege tier) runs only when a connection is supplied.
 //!
 //! In-MCP, the live-state subset is mirrored by `oracle_capabilities` (an agent
 //! can call it); `doctor` is the CLI mode.
 
 use oraclemcp_db::{
-    OracleConnection, canonical_nls_statements, detect_instant_client, detect_standby,
+    OracleConnection, canonical_nls_statements, detect_oracle_driver, detect_standby,
     probe_privileges,
 };
+use oraclemcp_error::{ErrorClass, classify_ora_code, parse_ora_code};
 use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -60,6 +61,12 @@ pub struct CheckResult {
     /// An actionable fix (present on `Warn`/`Fail`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<String>,
+    /// Machine-stable failure class for agent triage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_class: Option<ErrorClass>,
+    /// Parsed Oracle error code, when a check failed because Oracle returned ORA-NNNNN.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ora_code: Option<i32>,
 }
 
 impl CheckResult {
@@ -70,10 +77,23 @@ impl CheckResult {
             status,
             detail: detail.into(),
             fix: None,
+            failure_class: None,
+            ora_code: None,
         }
     }
     fn with_fix(mut self, fix: impl Into<String>) -> Self {
         self.fix = Some(fix.into());
+        self
+    }
+    fn with_failure_class(mut self, class: ErrorClass) -> Self {
+        self.failure_class = Some(class);
+        self
+    }
+    fn with_oracle_error(mut self, message: &str) -> Self {
+        if let Some(code) = parse_ora_code(message) {
+            self.ora_code = Some(code);
+            self.failure_class = Some(classify_ora_code(code));
+        }
         self
     }
 }
@@ -92,6 +112,8 @@ pub struct DoctorContext<'a> {
     /// True if a `protected` profile has `max_level` above `READ_ONLY` — a
     /// misconfiguration the privilege check warns about (offline-detectable).
     pub protected_profile_writable: bool,
+    /// Exact setup values that must never appear in doctor output.
+    pub sensitive_values: Vec<String>,
 }
 
 /// The full diagnostic report.
@@ -175,7 +197,7 @@ const ADVERSARIAL_CORPUS: &[&str] = &[
 #[must_use]
 pub fn run_doctor(ctx: &DoctorContext) -> DoctorReport {
     let checks = vec![
-        check_instant_client(),
+        check_oracle_driver(),
         check_tns_admin(ctx),
         check_connectivity(ctx),
         check_role_standby(ctx),
@@ -188,8 +210,8 @@ pub fn run_doctor(ctx: &DoctorContext) -> DoctorReport {
     DoctorReport { checks }
 }
 
-fn check_instant_client() -> CheckResult {
-    let p = detect_instant_client();
+fn check_oracle_driver() -> CheckResult {
+    let p = detect_oracle_driver();
     if !p.driver_compiled {
         return CheckResult::new(
             1,
@@ -199,6 +221,18 @@ fn check_instant_client() -> CheckResult {
         );
     }
     CheckResult::new(1, "Oracle thin driver", CheckStatus::Pass, p.note)
+}
+
+fn sanitized_detail(ctx: &DoctorContext, detail: impl Into<String>) -> String {
+    let mut message = detail.into();
+    for value in ctx
+        .sensitive_values
+        .iter()
+        .filter(|value| !value.is_empty())
+    {
+        message = message.replace(value, "<redacted>");
+    }
+    message
 }
 
 fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
@@ -220,9 +254,11 @@ fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
                             2,
                             "TNS/wallet",
                             CheckStatus::Fail,
-                            format!("{label} directory does not exist: {d}"),
+                            format!("{label} directory is configured but is not readable as a directory"),
                         )
-                        .with_fix(format!("create {d} or correct the {label} setting"));
+                        .with_fix(format!(
+                            "create the configured directory or correct the {label} setting, then rerun `oraclemcp --json doctor --profile <profile>`"
+                        ));
                     }
                     _ => {}
                 }
@@ -237,22 +273,67 @@ fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
     }
 }
 
+fn connectivity_fix(error: &str) -> &'static str {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("connection profile") || lower.contains("default_profile") {
+        "run `oraclemcp --json profiles` to list configured profiles, then rerun doctor with a valid `--profile` name"
+    } else if lower.contains("failed to resolve credential_ref") {
+        "verify the profile credential_ref and its backing environment variable or secrets backend"
+    } else if lower.contains("config load failed") {
+        "fix profiles.toml or ORACLEMCP_CONFIG, then rerun `oraclemcp --json profiles`"
+    } else if lower.contains("unsupported auth mode")
+        || lower.contains("unsupported database feature")
+        || lower.contains("not supported by the published thin driver")
+        || lower.contains("unsupported")
+    {
+        "use username/password thin auth for this profile, or upgrade the thin driver once that auth feature is supported"
+    } else if lower.contains("ora-01017") || lower.contains("invalid username/password") {
+        "verify the profile username and credential_ref environment variable; do not put literal production passwords in profiles.toml"
+    } else if lower.contains("ora-12154")
+        || lower.contains("tns")
+        || lower.contains("could not resolve")
+    {
+        "verify the connect string, TNS_ADMIN directory, and net-service alias; use an EZConnect string to isolate TNS lookup issues"
+    } else if lower.contains("ora-12514")
+        || lower.contains("ora-12541")
+        || lower.contains("listener")
+    {
+        "verify listener reachability, host/port, service name, and database registration"
+    } else if lower.contains("tcps") || lower.contains("wallet") {
+        "verify the wallet directory, cwallet.sso/tnsnames.ora presence, TCPS alias, and file permissions"
+    } else {
+        "verify the connect string, credentials, and listener reachability"
+    }
+}
+
+fn connectivity_failure_class(error: &str) -> ErrorClass {
+    let lower = error.to_ascii_lowercase();
+    if let Some(code) = parse_ora_code(error) {
+        classify_ora_code(code)
+    } else if lower.contains("config load failed")
+        || lower.contains("connection profile")
+        || lower.contains("default_profile")
+        || lower.contains("unsupported auth mode")
+        || lower.contains("unsupported database feature")
+        || lower.contains("not supported by the published thin driver")
+        || lower.contains("unsupported")
+    {
+        ErrorClass::InvalidArguments
+    } else if lower.contains("invalid username/password") {
+        ErrorClass::InsufficientPrivilege
+    } else {
+        ErrorClass::ConnectionFailed
+    }
+}
+
 fn check_connectivity(ctx: &DoctorContext) -> CheckResult {
     if let Some(error) = &ctx.connection_error {
-        let fix = if error.contains("unsupported auth mode")
-            || error.contains("unsupported database feature")
-        {
-            "use username/password thin auth for this profile, or upgrade the thin driver once that auth feature is supported"
-        } else {
-            "verify the connect string, credentials, and listener reachability"
-        };
-        return CheckResult::new(
-            3,
-            "Connectivity",
-            CheckStatus::Fail,
-            format!("connect failed: {error}"),
-        )
-        .with_fix(fix);
+        let detail = sanitized_detail(ctx, format!("connect failed: {error}"));
+        let fix = connectivity_fix(&detail);
+        return CheckResult::new(3, "Connectivity", CheckStatus::Fail, detail)
+            .with_fix(fix)
+            .with_failure_class(connectivity_failure_class(error))
+            .with_oracle_error(error);
     }
     match ctx.conn {
         None => CheckResult::new(
@@ -272,9 +353,11 @@ fn check_connectivity(ctx: &DoctorContext) -> CheckResult {
                 3,
                 "Connectivity",
                 CheckStatus::Fail,
-                format!("ping failed: {e}"),
+                sanitized_detail(ctx, format!("ping failed: {e}")),
             )
-            .with_fix("verify the connect string, credentials, and listener reachability"),
+            .with_fix(connectivity_fix(&e.to_string()))
+            .with_failure_class(connectivity_failure_class(&e.to_string()))
+            .with_oracle_error(&e.to_string()),
         },
     }
 }
@@ -315,7 +398,7 @@ fn check_role_standby(ctx: &DoctorContext) -> CheckResult {
                 4,
                 "Role/standby",
                 CheckStatus::Warn,
-                format!("could not determine role: {e}"),
+                sanitized_detail(ctx, format!("could not determine role: {e}")),
             )
             .with_fix("grant SELECT on V$DATABASE or accept reduced standby detection"),
         },
@@ -558,7 +641,69 @@ mod tests {
         let tns = report.checks.iter().find(|c| c.id == 2).unwrap();
         assert_eq!(tns.status, CheckStatus::Fail);
         assert!(tns.fix.is_some());
+        let rendered = report.to_json().to_string();
+        assert!(!rendered.contains("/nonexistent/tns/dir/xyz"));
         assert_eq!(report.exit_code(), 1, "a failed check exits non-zero");
+    }
+
+    #[test]
+    fn wallet_path_is_not_rendered_in_doctor_output() {
+        let ctx = DoctorContext {
+            wallet_location: Some("/home/operator/private-wallet".to_owned()),
+            ..DoctorContext::default()
+        };
+        let report = run_doctor(&ctx);
+        let rendered = report.to_json().to_string();
+        assert!(!rendered.contains("/home/operator/private-wallet"));
+        let tns = report.checks.iter().find(|c| c.id == 2).unwrap();
+        assert_eq!(tns.status, CheckStatus::Fail);
+        assert!(tns.detail.contains("wallet directory is configured"));
+    }
+
+    #[test]
+    fn connection_error_redacts_profile_sensitive_values() {
+        let ctx = DoctorContext {
+            connection_error: Some(
+                "ORA-01017 for APP_USER/super_secret@dbhost:1521/private_service using /wallets/private and iam.jwt.token"
+                    .to_owned(),
+            ),
+            sensitive_values: vec![
+                "APP_USER".to_owned(),
+                "super_secret".to_owned(),
+                "dbhost:1521/private_service".to_owned(),
+                "/wallets/private".to_owned(),
+                "iam.jwt.token".to_owned(),
+            ],
+            ..DoctorContext::default()
+        };
+        let report = run_doctor(&ctx);
+        let serialized = serde_json::to_string(&report.to_json()).expect("json");
+        for forbidden in [
+            "APP_USER",
+            "super_secret",
+            "dbhost:1521/private_service",
+            "/wallets/private",
+            "iam.jwt.token",
+        ] {
+            assert!(!serialized.contains(forbidden), "{serialized}");
+        }
+        assert!(serialized.contains("ORA-01017"));
+        assert!(serialized.contains("\"ora_code\":1017"));
+        assert!(serialized.contains("\"failure_class\":\"INSUFFICIENT_PRIVILEGE\""));
+        let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
+        assert_eq!(connectivity.status, CheckStatus::Fail);
+        assert_eq!(connectivity.ora_code, Some(1017));
+        assert_eq!(
+            connectivity.failure_class,
+            Some(oraclemcp_error::ErrorClass::InsufficientPrivilege)
+        );
+        assert!(
+            connectivity
+                .fix
+                .as_deref()
+                .unwrap()
+                .contains("credential_ref")
+        );
     }
 
     #[test]
@@ -597,7 +742,7 @@ mod tests {
     fn unsupported_thin_auth_has_actionable_doctor_fix() {
         let ctx = DoctorContext {
             connection_error: Some(
-                "unsupported auth mode: external/wallet auth without username and password is not supported by the published thin driver yet"
+                "external/wallet auth without username and password is not supported by the published thin driver yet"
                     .to_owned(),
             ),
             ..DoctorContext::default()
@@ -605,6 +750,11 @@ mod tests {
         let report = run_doctor(&ctx);
         let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
         assert_eq!(connectivity.status, CheckStatus::Fail);
+        assert_eq!(
+            connectivity.failure_class,
+            Some(oraclemcp_error::ErrorClass::InvalidArguments)
+        );
+        assert_eq!(connectivity.ora_code, None);
         assert!(
             connectivity
                 .fix
@@ -612,6 +762,22 @@ mod tests {
                 .unwrap()
                 .contains("username/password thin auth")
         );
+    }
+
+    #[test]
+    fn missing_profile_is_a_structured_setup_error() {
+        let ctx = DoctorContext {
+            connection_error: Some("connection profile `missing_ro` not found".to_owned()),
+            ..DoctorContext::default()
+        };
+        let report = run_doctor(&ctx);
+        let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
+        assert_eq!(connectivity.status, CheckStatus::Fail);
+        assert_eq!(
+            connectivity.failure_class,
+            Some(oraclemcp_error::ErrorClass::InvalidArguments)
+        );
+        assert_eq!(connectivity.ora_code, None);
     }
 
     #[test]
