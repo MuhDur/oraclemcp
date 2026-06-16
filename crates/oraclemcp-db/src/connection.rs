@@ -271,14 +271,15 @@ mod driver {
     use oracledb::protocol::{
         ClientIdentity,
         thin::{
-            BindValue, ColumnMetadata, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE,
-            ORA_TYPE_NUM_BINARY_FLOAT, ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB,
-            ORA_TYPE_NUM_BOOLEAN, ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR,
-            ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_INTERVAL_DS, ORA_TYPE_NUM_INTERVAL_YM,
-            ORA_TYPE_NUM_JSON, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER,
-            ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_ROWID, ORA_TYPE_NUM_TIMESTAMP,
-            ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_UROWID,
-            ORA_TYPE_NUM_VARCHAR, ORA_TYPE_NUM_VECTOR, QueryResult, QueryValue,
+            BindValue, CS_FORM_IMPLICIT, ColumnMetadata, ORA_TYPE_NUM_BFILE,
+            ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_FLOAT, ORA_TYPE_NUM_BINARY_INTEGER,
+            ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_BOOLEAN, ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB,
+            ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_INTERVAL_DS,
+            ORA_TYPE_NUM_INTERVAL_YM, ORA_TYPE_NUM_JSON, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW,
+            ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_ROWID,
+            ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ,
+            ORA_TYPE_NUM_UROWID, ORA_TYPE_NUM_VARCHAR, ORA_TYPE_NUM_VECTOR, QueryResult,
+            QueryValue,
         },
     };
     use std::fmt::Display;
@@ -448,6 +449,13 @@ mod driver {
             timeout_ms,
         )
         .map_err(|err| DbError::Query(format!("{context}: {}", sanitize_driver_error(err, opts))))
+    }
+
+    fn output_value(result: &QueryResult, bind_index: usize) -> Option<&QueryValue> {
+        result
+            .out_values
+            .iter()
+            .find_map(|(index, value)| (*index == bind_index).then_some(value.as_ref()).flatten())
     }
 
     fn collect_all_rows(
@@ -799,11 +807,64 @@ mod driver {
             max_lines: usize,
             max_chars: usize,
         ) -> Result<DbmsOutput, DbError> {
-            let _ = (max_lines, max_chars);
-            Err(DbError::UnsupportedFeature(
-                "DBMS_OUTPUT capture needs PL/SQL OUT binds; the published thin driver does not expose that API yet"
-                    .to_owned(),
-            ))
+            let timeout = self.timeout_ms()?;
+            let mut lines = Vec::new();
+            let mut char_count = 0usize;
+            let mut truncated = false;
+            let mut inner = self.lock_inner()?;
+            for _ in 0..max_lines {
+                let result = oracledb::BlockingConnection::execute_query_with_binds_and_timeout(
+                    &mut inner,
+                    "BEGIN DBMS_OUTPUT.GET_LINE(:1, :2); END;",
+                    0,
+                    &[
+                        BindValue::Output {
+                            ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                            csfrm: CS_FORM_IMPLICIT,
+                            buffer_size: 32_767,
+                        },
+                        BindValue::Output {
+                            ora_type_num: ORA_TYPE_NUM_NUMBER,
+                            csfrm: CS_FORM_IMPLICIT,
+                            buffer_size: 22,
+                        },
+                    ],
+                    timeout,
+                )
+                .map_err(|err| DbError::Execute(sanitize_driver_error(err, &self.opts)))?;
+                let status = output_value(&result, 1)
+                    .and_then(QueryValue::as_i64)
+                    .ok_or_else(|| {
+                        DbError::Execute(
+                            "DBMS_OUTPUT.GET_LINE did not return a numeric status".to_owned(),
+                        )
+                    })?;
+                if status != 0 {
+                    break;
+                }
+                let line = match output_value(&result, 0) {
+                    Some(QueryValue::Text(value) | QueryValue::Rowid(value)) => value.to_owned(),
+                    Some(QueryValue::Number(value)) => value.to_canonical_string(),
+                    Some(value) => format!("{value:?}"),
+                    None => String::new(),
+                };
+                let next_count = char_count.saturating_add(line.chars().count());
+                if next_count > max_chars {
+                    truncated = true;
+                    break;
+                }
+                char_count = next_count;
+                lines.push(line);
+            }
+            if lines.len() == max_lines {
+                truncated = true;
+            }
+            Ok(DbmsOutput {
+                line_count: lines.len(),
+                lines,
+                char_count,
+                truncated,
+            })
         }
 
         fn commit(&self) -> Result<(), DbError> {

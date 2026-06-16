@@ -368,7 +368,7 @@ fn live_pool_thin_roundtrip() {
 }
 
 #[test]
-fn live_dbms_output_capture_is_verified_or_explicitly_skipped() {
+fn live_dbms_output_capture_uses_thin_output_binds() {
     let conn = match RustOracleConnection::connect(test_opts()) {
         Ok(c) => c,
         Err(e) => {
@@ -384,19 +384,12 @@ fn live_dbms_output_capture_is_verified_or_explicitly_skipped() {
         &[],
     )
     .expect("write DBMS_OUTPUT line");
-    match conn.read_dbms_output(10, 200) {
-        Ok(out) => {
-            assert_eq!(out.lines, vec!["oraclemcp-live-output"]);
-            assert_eq!(out.line_count, 1);
-            assert!(!out.truncated);
-        }
-        Err(DbError::UnsupportedFeature(reason)) => {
-            eprintln!(
-                "[live-xe] SKIP live_dbms_output_capture: thin driver does not expose capture yet ({reason})"
-            );
-        }
-        Err(e) => panic!("unexpected DBMS_OUTPUT capture error: {e}"),
-    }
+    let out = conn
+        .read_dbms_output(10, 200)
+        .expect("capture DBMS_OUTPUT from thin output binds");
+    assert_eq!(out.lines, vec!["oraclemcp-live-output"]);
+    assert_eq!(out.line_count, 1);
+    assert!(!out.truncated);
 }
 
 #[test]
