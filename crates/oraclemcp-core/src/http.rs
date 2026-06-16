@@ -906,6 +906,8 @@ fn handle_connection(
     server: &OracleMcpServer,
     config: &HttpTransportConfig,
 ) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT))?;
     let response = match read_http_request(&mut stream) {
         Ok(Some(request)) => handle_http_request(server, config, request),
         Ok(None) => return Ok(()),
@@ -921,6 +923,7 @@ fn handle_connection(
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequest>> {
     let mut buf = Vec::new();

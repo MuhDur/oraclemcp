@@ -1,7 +1,8 @@
 //! Bounded thin-mode connection pool for callers that need reusable sessions.
 //!
-//! This is deliberately small: W4 removes the old r2d2/Tokio boundary, while
-//! W6b moves the DB surface to explicit `&asupersync::Cx` cancellation.
+//! This is deliberately small and synchronous: callers get bounded session
+//! reuse without a Tokio/r2d2 boundary, and cancellation is observed through
+//! explicit `&asupersync::Cx` checkpoints around checkout and DB calls.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -273,61 +274,77 @@ impl OraclePool {
     }
 
     fn try_checkout(&self) -> Result<Option<RustOracleConnection>, DbError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
-        while let Some(conn) = state.idle.pop() {
-            if self.manager.is_valid(&conn).is_ok() {
-                return Ok(Some(conn));
+        loop {
+            if let Some(conn) = self.take_idle_connection()? {
+                if self.manager.is_valid(&conn).is_ok() {
+                    return Ok(Some(conn));
+                }
+                self.forget_open_connection()?;
+                continue;
             }
-            state.open_count = state.open_count.saturating_sub(1);
-        }
-        if state.open_count < self.settings.max_size {
-            state.open_count += 1;
-            drop(state);
-            match self.manager.connect() {
-                Ok(conn) => Ok(Some(conn)),
-                Err(err) => {
-                    let mut state = self.state.lock().map_err(|lock_err| {
-                        DbError::Internal(format!("pool lock poisoned: {lock_err}"))
-                    })?;
-                    state.open_count = state.open_count.saturating_sub(1);
-                    Err(err)
+            if self.reserve_new_connection()? {
+                match self.manager.connect() {
+                    Ok(conn) => return Ok(Some(conn)),
+                    Err(err) => {
+                        self.forget_open_connection()?;
+                        return Err(err);
+                    }
                 }
             }
-        } else {
-            Ok(None)
+            return Ok(None);
         }
     }
 
     fn try_checkout_cx(&self, cx: &Cx) -> Result<Option<RustOracleConnection>, DbError> {
+        loop {
+            if let Some(conn) = self.take_idle_connection()? {
+                if self.manager.is_valid_cx(cx, &conn).is_ok() {
+                    return Ok(Some(conn));
+                }
+                self.forget_open_connection()?;
+                continue;
+            }
+            if self.reserve_new_connection()? {
+                match self.manager.connect_cx(cx) {
+                    Ok(conn) => return Ok(Some(conn)),
+                    Err(err) => {
+                        self.forget_open_connection()?;
+                        return Err(err);
+                    }
+                }
+            }
+            return Ok(None);
+        }
+    }
+
+    fn take_idle_connection(&self) -> Result<Option<RustOracleConnection>, DbError> {
         let mut state = self
             .state
             .lock()
             .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
-        while let Some(conn) = state.idle.pop() {
-            if self.manager.is_valid_cx(cx, &conn).is_ok() {
-                return Ok(Some(conn));
-            }
-            state.open_count = state.open_count.saturating_sub(1);
-        }
+        Ok(state.idle.pop())
+    }
+
+    fn reserve_new_connection(&self) -> Result<bool, DbError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
         if state.open_count < self.settings.max_size {
             state.open_count += 1;
-            drop(state);
-            match self.manager.connect_cx(cx) {
-                Ok(conn) => Ok(Some(conn)),
-                Err(err) => {
-                    let mut state = self.state.lock().map_err(|lock_err| {
-                        DbError::Internal(format!("pool lock poisoned: {lock_err}"))
-                    })?;
-                    state.open_count = state.open_count.saturating_sub(1);
-                    Err(err)
-                }
-            }
+            Ok(true)
         } else {
-            Ok(None)
+            Ok(false)
         }
+    }
+
+    fn forget_open_connection(&self) -> Result<(), DbError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
+        state.open_count = state.open_count.saturating_sub(1);
+        Ok(())
     }
 
     fn checkin(&self, conn: RustOracleConnection, broken: bool) -> Result<(), DbError> {
