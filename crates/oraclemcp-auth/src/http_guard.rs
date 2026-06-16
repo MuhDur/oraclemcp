@@ -1,20 +1,20 @@
 //! Streamable-HTTP transport hardening (plan §7.1, risk R12; bead P1-9d /
-//! oracle-qmwz.2.9.4). These are the known rmcp local-HTTP failure modes the
+//! oracle-qmwz.2.9.4). These are the known local-HTTP failure modes the
 //! MCP spec (2025-11-25) calls out for servers that bind a port:
 //!
-//! - **DNS-rebinding guard** — a malicious page can point a victim browser at
+//! - **DNS-rebinding guard**: a malicious page can point a victim browser at
 //!   `http://attacker.example` that resolves to `127.0.0.1`, smuggling requests
 //!   to a localhost MCP server. We defend by validating the `Host` header is one
-//!   we actually serve (loopback, or an operator allowlist) — a rebinding
+//!   we actually serve (loopback, or an operator allowlist). A rebinding
 //!   request carries the attacker's hostname in `Host` and is rejected.
-//! - **Origin check** — reject cross-origin browser requests whose `Origin` is
+//! - **Origin check**: reject cross-origin browser requests whose `Origin` is
 //!   not loopback and not on the operator allowlist.
-//! - **Reject non-loopback `http://`** — off-box traffic must be HTTPS; plain
+//! - **Reject non-loopback `http://`**: off-box traffic must be HTTPS; plain
 //!   `http` to a non-loopback host is refused unless the operator explicitly
 //!   opts in (e.g. a TLS-terminating reverse proxy on the same host).
 //!
-//! This module is transport-agnostic pure logic: the axum/rmcp transport
-//! (P1-9a) calls [`HttpGuardPolicy::check`] on every request before dispatch.
+//! This module is transport-agnostic pure logic. The native HTTP transport and
+//! any embedding transport call [`HttpGuardPolicy::check`] before dispatch.
 
 /// Why an inbound HTTP request was rejected by the transport guard.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -41,7 +41,7 @@ pub struct HttpGuardPolicy {
     /// Exact-match allowed `Origin` values (e.g. `https://app.example`).
     /// Loopback origins are always allowed regardless of this list.
     pub allowed_origins: Vec<String>,
-    /// Allowed `Host` authorities (host or `host:port`) beyond loopback — set
+    /// Allowed `Host` authorities (host or `host:port`) beyond loopback. Set
     /// when the server is reached via a known external name / reverse proxy.
     pub allowed_hosts: Vec<String>,
     /// Permit plain `http://` to a non-loopback host (default `false`: HTTPS

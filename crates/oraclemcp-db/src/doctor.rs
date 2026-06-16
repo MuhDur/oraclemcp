@@ -18,7 +18,8 @@ pub struct OracleDriverPosture {
     pub driver_compiled: bool,
     /// Whether a native Oracle client library is required at runtime.
     pub native_client_required: bool,
-    /// Whether the default DB path is ODPI-C/thick mode.
+    /// Always false for this thin-native binary; retained in the diagnostic
+    /// shape so older automation can tell thick mode is unavailable.
     pub thick_mode_enabled: bool,
     /// A human-readable note / next step.
     pub note: String,

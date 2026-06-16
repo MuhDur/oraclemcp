@@ -1,9 +1,9 @@
 //! The backend-independent [`OracleConnection`] trait and the thin
-//! [`oracledb`]-backed [`RustOracleConnection`] (plan §4.3).
+//! [`oracledb`]-backed [`RustOracleConnection`].
 //!
-//! W4 keeps this trait synchronous while replacing the thick ODPI-C adapter.
-//! W6b threads `&asupersync::Cx` through this surface so cancellation/deadline
-//! semantics become part of the DB API contract.
+//! The trait is synchronous because the current Oracle driver surface is
+//! blocking. Cancellation and deadline boundaries are explicit
+//! `&asupersync::Cx` checkpoints around DB calls.
 
 use crate::error::DbError;
 use crate::types::{

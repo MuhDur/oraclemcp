@@ -5,16 +5,16 @@
 //! crypto-edge-agnostic so it is fully unit-testable and the highest-CVE surface
 //! is small and audited:
 //!
-//! - **JWT parse** — `header.payload.signature`, base64url, alg check.
-//! - **Signature** — real HS256 (HMAC-SHA256) verification built on `sha2`;
+//! - **JWT parse**: `header.payload.signature`, base64url, alg check.
+//! - **Signature**: real HS256 (HMAC-SHA256) verification built on `sha2`;
 //!   asymmetric algs (RS256/ES256 via JWKS) go through the [`SignatureVerifier`]
-//!   seam, wired with `jsonwebtoken` at the axum transport (P1-9a) so this crate
-//!   carries no RSA/ring dependency.
-//! - **Claims** — issuer allowlist; **RFC 8707 audience binding** (the token's
-//!   `aud` MUST contain our resource — prevents a token minted for another
+//!   boundary supplied by the embedding transport, so this crate carries no
+//!   RSA/ring dependency.
+//! - **Claims**: issuer allowlist; **RFC 8707 audience binding** (the token's
+//!   `aud` MUST contain our resource, which prevents a token minted for another
 //!   resource being replayed here); `exp`/`nbf` against an injected wall clock;
 //!   scope extraction (`scope` string or `scp` array).
-//! - **RFC 9728** — the Protected Resource Metadata document + the
+//! - **RFC 9728**: the Protected Resource Metadata document + the
 //!   `WWW-Authenticate: Bearer` challenge for a 401.
 //!
 //! Downstream, [`crate::scope`] maps the validated scopes to the operating-level
@@ -79,7 +79,7 @@ impl SignatureVerifier for Hs256Verifier {
 /// Resource-server configuration.
 #[derive(Clone, Debug, Default)]
 pub struct ResourceServerConfig {
-    /// The canonical resource identifier this server represents — the token's
+    /// The canonical resource identifier this server represents. The token's
     /// `aud` must contain it (RFC 8707).
     pub resource: String,
     /// Allowed token issuers (`iss`). Empty = reject all (fail-closed).
