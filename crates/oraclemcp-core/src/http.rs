@@ -7,10 +7,11 @@
 //! validation. It deliberately does not depend on a web framework or ambient
 //! async runtime.
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -49,6 +50,9 @@ pub struct HttpTransportConfig {
     /// request must carry a valid bearer token; the metadata route stays open so
     /// clients can discover the authorization server.
     pub oauth: Option<Arc<OAuthEnforcement>>,
+    /// Issued stateful Streamable HTTP session ids. Listener wrappers install a
+    /// store automatically when `stateful` is true.
+    pub session_store: Option<Arc<HttpSessionStore>>,
 }
 
 /// OAuth 2.1 resource-server enforcement wiring for the HTTP transport (P1-9b).
@@ -69,6 +73,28 @@ impl std::fmt::Debug for OAuthEnforcement {
             .field("verifier", &"<SignatureVerifier>")
             .field("metadata_url", &self.metadata_url)
             .finish()
+    }
+}
+
+/// Shared stateful Streamable HTTP session-id registry.
+#[derive(Debug, Default)]
+pub struct HttpSessionStore {
+    ids: Mutex<HashSet<String>>,
+}
+
+impl HttpSessionStore {
+    fn insert(&self, id: String) {
+        if let Ok(mut ids) = self.ids.lock() {
+            ids.insert(id);
+        }
+    }
+
+    fn contains(&self, id: &str) -> bool {
+        self.ids.lock().is_ok_and(|ids| ids.contains(id))
+    }
+
+    fn remove(&self, id: &str) -> bool {
+        self.ids.lock().is_ok_and(|mut ids| ids.remove(id))
     }
 }
 
@@ -250,6 +276,99 @@ mod tests {
         assert!(body.contains("id: 0\nretry: 3000\ndata:\n\n"));
         assert!(!body.contains("\"method\""));
         assert!(body.contains("\"result\""));
+    }
+
+    #[test]
+    fn stateful_requests_require_a_known_session_id_after_initialize() {
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            stateful: true,
+            session_store: Some(Arc::new(HttpSessionStore::default())),
+            ..Default::default()
+        };
+        let init = handle_http_request(&test_server(), &cfg, post(&init_body()));
+        let session_id = init
+            .header("mcp-session-id")
+            .expect("initialize returns a session id")
+            .to_owned();
+
+        let call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "oracle_preview_sql",
+                "arguments": { "sql": "SELECT 1 FROM dual" }
+            }
+        });
+        let missing = handle_http_request(&scope_echo_server(), &cfg, post(&call));
+        assert_eq!(missing.status, 400);
+        assert_eq!(
+            String::from_utf8_lossy(&missing.body),
+            "Missing mcp-session-id"
+        );
+
+        let forged = HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("content-type", "application/json"),
+                ("accept", "application/json, text/event-stream"),
+                ("mcp-session-id", "00000000-0000-4000-8000-deadbeefdead"),
+            ],
+            call.to_string().into_bytes(),
+        );
+        let forged = handle_http_request(&scope_echo_server(), &cfg, forged);
+        assert_eq!(forged.status, 404);
+        assert_eq!(
+            String::from_utf8_lossy(&forged.body),
+            "Unknown mcp-session-id"
+        );
+
+        let valid = HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("content-type", "application/json"),
+                ("accept", "application/json, text/event-stream"),
+                ("mcp-session-id", session_id.as_str()),
+            ],
+            call.to_string().into_bytes(),
+        );
+        let valid = handle_http_request(&scope_echo_server(), &cfg, valid);
+        assert_eq!(valid.status, 200);
+        assert!(
+            String::from_utf8_lossy(&valid.body).contains("\"tool\":\"oracle_preview_sql\""),
+            "valid session id reaches dispatch"
+        );
+
+        let delete = HttpRequest::new(
+            "DELETE",
+            MCP_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("mcp-session-id", session_id.as_str()),
+            ],
+            Vec::new(),
+        );
+        let deleted = handle_http_request(&test_server(), &cfg, delete);
+        assert_eq!(deleted.status, 202);
+
+        let stale = HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("content-type", "application/json"),
+                ("accept", "application/json, text/event-stream"),
+                ("mcp-session-id", session_id.as_str()),
+            ],
+            call.to_string().into_bytes(),
+        );
+        let stale = handle_http_request(&scope_echo_server(), &cfg, stale);
+        assert_eq!(stale.status, 404);
     }
 
     #[test]
@@ -937,11 +1056,26 @@ pub fn handle_http_request(
         None => None,
     };
     match request.method.as_str() {
-        "DELETE" => empty_response(202),
+        "DELETE" => handle_mcp_delete(config, &request),
         "POST" => handle_mcp_post(server, config, &request, scope_grant.as_ref()),
         "GET" => empty_response(405).with_header("allow", "POST, DELETE"),
         _ => empty_response(405).with_header("allow", "GET, POST, DELETE"),
     }
+}
+
+fn handle_mcp_delete(config: &HttpTransportConfig, request: &HttpRequest) -> HttpResponse {
+    if config.stateful {
+        return match validate_stateful_session(config, request) {
+            Ok(session_id) => {
+                if let Some(store) = &config.session_store {
+                    store.remove(session_id);
+                }
+                empty_response(202)
+            }
+            Err(response) => response,
+        };
+    }
+    empty_response(202)
 }
 
 fn handle_mcp_post(
@@ -960,6 +1094,12 @@ fn handle_mcp_post(
         .get("method")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    if config.stateful
+        && method.as_deref() != Some("initialize")
+        && let Err(response) = validate_stateful_session(config, request)
+    {
+        return response;
+    }
     let context = scope_grant
         .map(DispatchContext::with_scope_grant)
         .unwrap_or_default();
@@ -968,9 +1108,35 @@ fn handle_mcp_post(
         return empty_response(202);
     };
     if config.stateful {
-        return sse_response(method.as_deref(), response);
+        return sse_response(config, method.as_deref(), response);
     }
     json_response(200, &response)
+}
+
+fn validate_stateful_session<'a>(
+    config: &HttpTransportConfig,
+    request: &'a HttpRequest,
+) -> Result<&'a str, HttpResponse> {
+    let Some(session_id) = request.header("mcp-session-id") else {
+        return Err(HttpResponse {
+            status: 400,
+            headers: vec![],
+            body: b"Missing mcp-session-id".to_vec(),
+        });
+    };
+    let known = config
+        .session_store
+        .as_ref()
+        .is_some_and(|store| store.contains(session_id));
+    if known {
+        Ok(session_id)
+    } else {
+        Err(HttpResponse {
+            status: 404,
+            headers: vec![],
+            body: b"Unknown mcp-session-id".to_vec(),
+        })
+    }
 }
 
 fn jsonrpc_error(id: Value, code: i64, message: &str) -> Value {
@@ -1007,7 +1173,11 @@ impl HttpResponse {
     }
 }
 
-fn sse_response(method: Option<&str>, response: Value) -> HttpResponse {
+fn sse_response(
+    config: &HttpTransportConfig,
+    method: Option<&str>,
+    response: Value,
+) -> HttpResponse {
     let mut body = Vec::new();
     let session_id = if method == Some("initialize") {
         write_sse_event(&mut body, Some("0"), Some(3000), Some(&Value::Null));
@@ -1023,6 +1193,9 @@ fn sse_response(method: Option<&str>, response: Value) -> HttpResponse {
         ("cache-control".to_owned(), "no-cache".to_owned()),
     ];
     if let Some(session_id) = session_id {
+        if let Some(store) = &config.session_store {
+            store.insert(session_id.clone());
+        }
         headers.push(("mcp-session-id".to_owned(), session_id));
     }
     HttpResponse {
@@ -1087,7 +1260,7 @@ pub fn serve_http_until(
     shutdown: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
     listener.set_nonblocking(true)?;
-    let config = Arc::new(config.clone());
+    let config = Arc::new(listener_config(config));
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -1142,7 +1315,7 @@ pub fn serve_https_until(
     shutdown: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
     listener.set_nonblocking(true)?;
-    let config = Arc::new(config.clone());
+    let config = Arc::new(listener_config(config));
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -1166,6 +1339,14 @@ pub fn serve_https_until(
         let _ = worker.join();
     }
     Ok(())
+}
+
+fn listener_config(config: &HttpTransportConfig) -> HttpTransportConfig {
+    let mut config = config.clone();
+    if config.stateful && config.session_store.is_none() {
+        config.session_store = Some(Arc::new(HttpSessionStore::default()));
+    }
+    config
 }
 
 fn handle_connection(

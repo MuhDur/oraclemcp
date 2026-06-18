@@ -11,7 +11,7 @@ use oraclemcp_auth::ResourceServerConfig;
 use oraclemcp_core::OracleMcpServer;
 use oraclemcp_core::capabilities::{CapabilitiesReport, FeatureTiers};
 use oraclemcp_core::http::{
-    HttpRequest, HttpResponse, HttpTransportConfig, MCP_PATH, OAuthEnforcement,
+    HttpRequest, HttpResponse, HttpSessionStore, HttpTransportConfig, MCP_PATH, OAuthEnforcement,
     PROTECTED_RESOURCE_METADATA_PATH, handle_http_request,
 };
 use oraclemcp_core::server::{DispatchContext, DispatchFuture, ToolDispatch};
@@ -317,6 +317,7 @@ fn golden_http_stateful_streamable_session() {
     let cfg = HttpTransportConfig {
         json_response: true,
         stateful: true,
+        session_store: Some(Arc::new(HttpSessionStore::default())),
         ..Default::default()
     };
     let server = harness_server();

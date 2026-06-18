@@ -823,6 +823,7 @@ fn http_transport_config_from_merged(
             stateful: http.stateful,
             resource_metadata,
             oauth,
+            session_store: None,
         },
         tls,
         mtls_required,
