@@ -97,8 +97,7 @@ pub struct HttpConfig {
     pub stateful: bool,
     /// Optional OAuth 2.1 resource-server protection for `/mcp`.
     pub oauth: Option<HttpOAuthConfig>,
-    /// Optional TLS material. Parsed by config but rejected by the binary until
-    /// the native TLS listener is wired; use a terminating proxy for v0.3.0.
+    /// Optional TLS material for the native HTTPS listener.
     pub tls: Option<HttpTlsConfig>,
 }
 
@@ -155,7 +154,7 @@ impl HttpOAuthConfig {
     }
 }
 
-/// TLS material paths for future native HTTPS serving.
+/// TLS material paths for native HTTPS serving.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HttpTlsConfig {

@@ -22,6 +22,7 @@
 mod robot_docs;
 
 use std::collections::HashSet;
+use std::fs;
 use std::io::{self, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -32,12 +33,13 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use oraclemcp::dispatch::{OracleDispatcher, StatelessReadStrategy};
 use oraclemcp::registry;
 use oraclemcp_auth::{Hs256Verifier, ResourceServerConfig, SecretError, resolve_secret};
-use oraclemcp_config::{HttpConfig, OracleMcpConfig};
+use oraclemcp_config::{HttpConfig, HttpTlsConfig, OracleMcpConfig};
 use oraclemcp_core::{
     CapabilitiesReport, CustomToolCatalog, CustomToolDef, DoctorContext, FeatureTiers,
     HttpTransportConfig, MCP_PATH, OAuthEnforcement, OracleMcpServer,
-    PROTECTED_RESOURCE_METADATA_PATH, StdioAuthPolicy, load_tools, load_tools_for_profile,
-    parse_tools_file, run_doctor, serve_http, sign,
+    PROTECTED_RESOURCE_METADATA_PATH, StdioAuthPolicy, TlsMaterial, TlsServerConfig,
+    build_server_config, load_tools, load_tools_for_profile, parse_tools_file, requires_mtls,
+    run_doctor, serve_http, serve_https, sign,
 };
 use oraclemcp_db::{
     DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
@@ -721,10 +723,17 @@ fn default_oauth_metadata_url(resource: &str) -> String {
     format!("{base}{PROTECTED_RESOURCE_METADATA_PATH}")
 }
 
+#[derive(Clone, Debug)]
+struct ResolvedHttpTransportConfig {
+    transport: HttpTransportConfig,
+    tls: Option<Arc<TlsServerConfig>>,
+    mtls_required: bool,
+}
+
 fn resolve_http_transport_config(
     cli: &HttpServeArgs,
     level: &SessionLevelState,
-) -> Result<HttpTransportConfig, (&'static str, String)> {
+) -> Result<ResolvedHttpTransportConfig, (&'static str, String)> {
     let cfg = OracleMcpConfig::load(None).map_err(|e| {
         (
             "ORACLEMCP_CONFIG_INVALID",
@@ -739,7 +748,7 @@ fn http_transport_config_from_merged(
     http: HttpConfig,
     protected: bool,
     env_lookup: impl Fn(&str) -> Option<String>,
-) -> Result<HttpTransportConfig, (&'static str, String)> {
+) -> Result<ResolvedHttpTransportConfig, (&'static str, String)> {
     http.validate().map_err(|e| {
         (
             "ORACLEMCP_HTTP_CONFIG_INVALID",
@@ -747,14 +756,21 @@ fn http_transport_config_from_merged(
         )
     })?;
 
-    if http.tls.is_some() {
-        return Err((
-            "ORACLEMCP_HTTP_TLS_UNSUPPORTED",
-            "native TLS/mTLS listener flags are parsed but not served in v0.3.0; \
-             terminate TLS in a local reverse proxy and pass OAuth/Host/Origin config to oraclemcp"
-                .to_owned(),
-        ));
-    }
+    let tls_material = match http.tls.as_ref() {
+        Some(tls) => tls_material_from_config(tls)?,
+        None => None,
+    };
+    let mtls_required = tls_material.as_ref().is_some_and(requires_mtls);
+    let tls = tls_material
+        .as_ref()
+        .map(build_server_config)
+        .transpose()
+        .map_err(|e| {
+            (
+                "ORACLEMCP_HTTP_TLS_INVALID",
+                format!("invalid HTTP TLS/mTLS material: {e}"),
+            )
+        })?;
 
     let (resource_metadata, oauth) = match http.oauth {
         Some(oauth_cfg) => {
@@ -799,13 +815,50 @@ fn http_transport_config_from_merged(
         None => (None, None),
     };
 
-    Ok(HttpTransportConfig {
-        allowed_hosts: http.allowed_hosts,
-        allowed_origins: http.allowed_origins,
-        json_response: http.json_response,
-        stateful: http.stateful,
-        resource_metadata,
-        oauth,
+    Ok(ResolvedHttpTransportConfig {
+        transport: HttpTransportConfig {
+            allowed_hosts: http.allowed_hosts,
+            allowed_origins: http.allowed_origins,
+            json_response: http.json_response,
+            stateful: http.stateful,
+            resource_metadata,
+            oauth,
+        },
+        tls,
+        mtls_required,
+    })
+}
+
+fn tls_material_from_config(
+    tls: &HttpTlsConfig,
+) -> Result<Option<TlsMaterial>, (&'static str, String)> {
+    let Some(cert_path) = tls.cert_chain_path.as_deref() else {
+        return Ok(None);
+    };
+    let key_path = tls
+        .private_key_path
+        .as_deref()
+        .expect("validated TLS private_key_path");
+    let cert_chain_pem = read_tls_pem("server certificate chain", cert_path)?;
+    let private_key_pem = read_tls_pem("server private key", key_path)?;
+    let client_ca_pem = tls
+        .client_ca_path
+        .as_deref()
+        .map(|path| read_tls_pem("client CA", path))
+        .transpose()?;
+    Ok(Some(TlsMaterial {
+        cert_chain_pem,
+        private_key_pem,
+        client_ca_pem,
+    }))
+}
+
+fn read_tls_pem(role: &'static str, path: &Path) -> Result<Vec<u8>, (&'static str, String)> {
+    fs::read(path).map_err(|e| {
+        (
+            "ORACLEMCP_HTTP_TLS_INVALID",
+            format!("failed to read HTTP TLS {role} at {}: {e}", path.display()),
+        )
     })
 }
 
@@ -900,24 +953,47 @@ fn run_serve(
         }
         // ── Streamable HTTP transport (--listen) ───────────────────────────
         Some(addr) => {
-            let cfg = match resolve_http_transport_config(&http, &level) {
+            let resolved_http = match resolve_http_transport_config(&http, &level) {
                 Ok(cfg) => cfg,
                 Err((code, message)) => {
                     emit_status_error(robot_json, code, &message);
                     return ExitCode::from(2);
                 }
             };
-            let oauth_enabled = cfg.oauth.is_some();
+            let oauth_enabled = resolved_http.transport.oauth.is_some();
+            let tls_enabled = resolved_http.tls.is_some();
+            let auth_enabled = oauth_enabled || resolved_http.mtls_required;
             let allow_remote = std::env::var("ORACLEMCP_HTTP_ALLOW_REMOTE")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-            if let Err((code, message)) =
-                http_listen_guard(allow_no_auth, oauth_enabled, &addr, allow_remote)
-            {
+            if let Err((code, message)) = http_listen_guard(
+                allow_no_auth,
+                auth_enabled,
+                tls_enabled,
+                &addr,
+                allow_remote,
+            ) {
                 emit_status_error(robot_json, code, &message);
                 return ExitCode::from(2);
             }
-            if oauth_enabled {
+            if tls_enabled {
+                eprintln!(
+                    "oraclemcp serve: HTTPS transport on {addr} has native TLS{} enabled.",
+                    if resolved_http.mtls_required {
+                        " with mTLS client-certificate verification"
+                    } else if oauth_enabled {
+                        " with OAuth bearer enforcement"
+                    } else {
+                        ""
+                    }
+                );
+                if !oauth_enabled && !resolved_http.mtls_required {
+                    eprintln!(
+                        "oraclemcp serve: WARNING — HTTPS transport on {addr} has TLS \
+                         encryption but no OAuth or mTLS client authentication."
+                    );
+                }
+            } else if oauth_enabled {
                 eprintln!(
                     "oraclemcp serve: HTTP transport on {addr} has OAuth bearer enforcement \
                      enabled. The native listener is still plaintext; bind loopback or front it \
@@ -938,13 +1014,24 @@ fn run_serve(
                 true,
                 custom_catalog,
             );
-            emit_serve_status(robot_json, "http", Some(&addr), &advertised_tools);
-            let result =
-                TcpListener::bind(&addr).and_then(|listener| serve_http(listener, server, &cfg));
+            let ResolvedHttpTransportConfig { transport, tls, .. } = resolved_http;
+            emit_serve_status(
+                robot_json,
+                if tls_enabled { "https" } else { "http" },
+                Some(&addr),
+                &advertised_tools,
+            );
+            let result = TcpListener::bind(&addr).and_then(|listener| match tls {
+                Some(tls) => serve_https(listener, server, &transport, tls),
+                None => serve_http(listener, server, &transport),
+            });
             match result {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("oraclemcp serve: http transport error on {addr}: {e}");
+                    eprintln!(
+                        "oraclemcp serve: {} transport error on {addr}: {e}",
+                        if tls_enabled { "https" } else { "http" }
+                    );
                     ExitCode::from(1)
                 }
             }
@@ -979,26 +1066,28 @@ fn emit_serve_status(robot_json: bool, transport: &str, addr: Option<&str>, tool
     }
 }
 
-/// Decide whether a plaintext `--listen` HTTP server may start.
+/// Decide whether a `--listen` HTTP(S) server may start.
 /// `Ok(())` = proceed (the caller still emits a transport warning);
 /// `Err((code, message))` = refuse with exit code 2.
 ///
 /// Fail-closed parity with stdio (§7.1): `/mcp` must either have OAuth bearer
-/// enforcement or the operator must explicitly accept unauthenticated local dev
+/// enforcement/mTLS or the operator must explicitly accept unauthenticated local dev
 /// mode with `--allow-no-auth`. Binding a routable (non-loopback) address still
-/// needs a second deliberate opt-in because the native listener is plaintext.
+/// needs a second deliberate opt-in.
 fn http_listen_guard(
     allow_no_auth: bool,
-    oauth_enabled: bool,
+    auth_enabled: bool,
+    tls_enabled: bool,
     addr: &str,
     allow_remote: bool,
 ) -> Result<(), (&'static str, String)> {
-    if !oauth_enabled && !allow_no_auth {
+    if !auth_enabled && !allow_no_auth {
         return Err((
             "ORACLEMCP_AUTH_REQUIRED",
-            "the HTTP transport (--listen) has no OAuth enforcement configured; \
-             configure [http.oauth] / --oauth-* or re-run with --allow-no-auth \
-             to accept unauthenticated local development mode explicitly"
+            "the HTTP transport (--listen) has no OAuth enforcement or mTLS \
+             client-certificate verification configured; configure [http.oauth] / \
+             --oauth-* / [http.tls.client_ca_path], or re-run with --allow-no-auth \
+             to accept unauthenticated development mode explicitly"
                 .to_owned(),
         ));
     }
@@ -1010,9 +1099,14 @@ fn http_listen_guard(
         return Err((
             "ORACLEMCP_HTTP_REMOTE_BIND_REFUSED",
             format!(
-                "refusing to bind plaintext HTTP to non-loopback {addr}; bind a \
-                 loopback address or set ORACLEMCP_HTTP_ALLOW_REMOTE=1 when a \
-                 same-host TLS/auth proxy or equivalent network control is in front"
+                "refusing to bind {} to non-loopback {addr}; bind a loopback \
+                 address or set ORACLEMCP_HTTP_ALLOW_REMOTE=1 when equivalent \
+                 network controls are in front",
+                if tls_enabled {
+                    "HTTPS"
+                } else {
+                    "plaintext HTTP"
+                }
             ),
         ));
     }
@@ -1587,40 +1681,61 @@ mod tests {
     use super::*;
     use oraclemcp_config::HttpOAuthConfig;
 
+    fn self_signed_cert() -> (Vec<u8>, Vec<u8>) {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        (
+            cert.cert.pem().into_bytes(),
+            cert.key_pair.serialize_pem().into_bytes(),
+        )
+    }
+
+    fn target_tmp_file(name: &str) -> PathBuf {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("../../target/tmp/oraclemcp-main-tests");
+        fs::create_dir_all(&path).expect("test temp dir exists");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        path.push(format!("{}-{}-{name}", std::process::id(), nanos));
+        path
+    }
+
     #[test]
     fn http_listen_refused_without_allow_no_auth() {
-        let err = http_listen_guard(false, false, "127.0.0.1:7070", false).unwrap_err();
+        let err = http_listen_guard(false, false, false, "127.0.0.1:7070", false).unwrap_err();
         assert_eq!(err.0, "ORACLEMCP_AUTH_REQUIRED");
     }
 
     #[test]
     fn http_listen_loopback_allowed_with_allow_no_auth() {
-        assert!(http_listen_guard(true, false, "127.0.0.1:7070", false).is_ok());
-        assert!(http_listen_guard(true, false, "[::1]:7070", false).is_ok());
+        assert!(http_listen_guard(true, false, false, "127.0.0.1:7070", false).is_ok());
+        assert!(http_listen_guard(true, false, true, "[::1]:7070", false).is_ok());
     }
 
     #[test]
-    fn http_listen_loopback_allowed_with_oauth() {
-        assert!(http_listen_guard(false, true, "127.0.0.1:7070", false).is_ok());
+    fn http_listen_loopback_allowed_with_oauth_or_mtls() {
+        assert!(http_listen_guard(false, true, false, "127.0.0.1:7070", false).is_ok());
+        assert!(http_listen_guard(false, true, true, "127.0.0.1:7070", false).is_ok());
     }
 
     #[test]
     fn http_listen_non_loopback_refused_without_remote_optin() {
-        let err = http_listen_guard(true, false, "0.0.0.0:7070", false).unwrap_err();
+        let err = http_listen_guard(true, false, false, "0.0.0.0:7070", false).unwrap_err();
         assert_eq!(err.0, "ORACLEMCP_HTTP_REMOTE_BIND_REFUSED");
-        let err = http_listen_guard(false, true, "192.168.1.10:7070", false).unwrap_err();
+        let err = http_listen_guard(false, true, true, "192.168.1.10:7070", false).unwrap_err();
         assert_eq!(err.0, "ORACLEMCP_HTTP_REMOTE_BIND_REFUSED");
     }
 
     #[test]
     fn http_listen_non_loopback_allowed_with_remote_optin() {
-        assert!(http_listen_guard(true, false, "0.0.0.0:7070", true).is_ok());
-        assert!(http_listen_guard(false, true, "0.0.0.0:7070", true).is_ok());
+        assert!(http_listen_guard(true, false, false, "0.0.0.0:7070", true).is_ok());
+        assert!(http_listen_guard(false, true, true, "0.0.0.0:7070", true).is_ok());
     }
 
     #[test]
     fn http_listen_auth_refusal_precedes_remote_check() {
-        let err = http_listen_guard(false, false, "0.0.0.0:7070", true).unwrap_err();
+        let err = http_listen_guard(false, false, true, "0.0.0.0:7070", true).unwrap_err();
         assert_eq!(err.0, "ORACLEMCP_AUTH_REQUIRED");
     }
 
@@ -1642,15 +1757,19 @@ mod tests {
         let cfg = http_transport_config_from_merged(http, false, |_| None)
             .expect("valid OAuth transport config");
 
-        assert!(cfg.oauth.is_some());
+        assert!(cfg.transport.oauth.is_some());
         assert_eq!(
-            cfg.resource_metadata.as_ref().expect("metadata")["resource"],
+            cfg.transport.resource_metadata.as_ref().expect("metadata")["resource"],
             serde_json::json!("https://mcp.example.com/mcp")
         );
-        assert_eq!(cfg.allowed_hosts, ["mcp.example.com"]);
-        assert_eq!(cfg.allowed_origins, ["https://client.example.com"]);
-        assert!(cfg.json_response);
-        assert!(cfg.stateful);
+        assert_eq!(cfg.transport.allowed_hosts, ["mcp.example.com"]);
+        assert_eq!(
+            cfg.transport.allowed_origins,
+            ["https://client.example.com"]
+        );
+        assert!(cfg.transport.json_response);
+        assert!(cfg.transport.stateful);
+        assert!(cfg.tls.is_none());
     }
 
     #[test]
@@ -1675,11 +1794,20 @@ mod tests {
     }
 
     #[test]
-    fn http_tls_material_is_rejected_until_native_tls_listener_exists() {
+    fn http_tls_material_builds_native_tls_config() {
+        let (server_cert, server_key) = self_signed_cert();
+        let (client_ca, _client_ca_key) = self_signed_cert();
+        let cert_path = target_tmp_file("server.pem");
+        let key_path = target_tmp_file("server.key");
+        let client_ca_path = target_tmp_file("client-ca.pem");
+        fs::write(&cert_path, server_cert).expect("server cert fixture");
+        fs::write(&key_path, server_key).expect("server key fixture");
+        fs::write(&client_ca_path, client_ca).expect("client CA fixture");
+
         let args = HttpServeArgs {
-            tls_cert: Some("/etc/oraclemcp/server.pem".into()),
-            tls_key: Some("/etc/oraclemcp/server.key".into()),
-            mtls_client_ca: Some("/etc/oraclemcp/client-ca.pem".into()),
+            tls_cert: Some(cert_path.clone()),
+            tls_key: Some(key_path),
+            mtls_client_ca: Some(client_ca_path.clone()),
             ..Default::default()
         };
         let http = apply_http_cli_overrides(HttpConfig::default(), &args);
@@ -1687,12 +1815,13 @@ mod tests {
             http.tls
                 .as_ref()
                 .and_then(|tls| tls.client_ca_path.as_deref()),
-            Some(std::path::Path::new("/etc/oraclemcp/client-ca.pem"))
+            Some(client_ca_path.as_path())
         );
 
-        let err = http_transport_config_from_merged(http, false, |_| None)
-            .expect_err("native TLS listener is not wired");
-        assert_eq!(err.0, "ORACLEMCP_HTTP_TLS_UNSUPPORTED");
+        let cfg = http_transport_config_from_merged(http, false, |_| None)
+            .expect("native TLS listener config builds");
+        assert!(cfg.tls.is_some());
+        assert!(cfg.mtls_required);
     }
 
     #[test]

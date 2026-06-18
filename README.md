@@ -138,11 +138,12 @@ request at `READ_ONLY`, `oracle:write`/`oracle:execute` at `READ_WRITE`,
 `oracle:ddl` at `DDL`, and `oracle:admin` at `ADMIN`; none of them can raise a
 profile above its `max_level`, and protected profiles remain `READ_ONLY`.
 
-The native HTTP listener is still plaintext in v0.3.0. Remote deployments
-should bind loopback and place a same-host TLS-terminating proxy in front of
-`oraclemcp`. `[http.tls]` / `--tls-cert` / `--tls-key` / `--mtls-client-ca` are
-parsed and validated as configuration, but the binary rejects them at startup
-until the native rustls listener is wired.
+Native TLS uses rustls when `[http.tls]` or `--tls-cert` / `--tls-key` are
+configured. Adding `[http.tls.client_ca_path]` or `--mtls-client-ca` requires
+client certificates (mTLS) verified against that CA. Server-only TLS encrypts
+the transport but is not application authentication, so `/mcp` still needs OAuth
+or an explicit `--allow-no-auth` development opt-in. Non-loopback binds require
+`ORACLEMCP_HTTP_ALLOW_REMOTE=1` even with TLS.
 
 Connection profiles are resolved from layered configuration (`oraclemcp-config`); select one with `serve --profile <name>`.
 

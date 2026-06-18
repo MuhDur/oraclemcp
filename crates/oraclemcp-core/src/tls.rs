@@ -16,6 +16,9 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 
+/// Re-exported TLS server config type used by the native HTTP listener.
+pub type TlsServerConfig = ServerConfig;
+
 /// Operator TLS material (PEM bytes).
 #[derive(Clone)]
 pub struct TlsMaterial {

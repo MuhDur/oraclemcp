@@ -18,9 +18,11 @@ use oraclemcp_auth::{
     HttpGuardError, HttpGuardPolicy, ResourceServerConfig, SignatureVerifier, TokenError,
     extract_bearer,
 };
+use rustls::{ServerConnection, StreamOwned};
 use serde_json::{Value, json};
 
 use crate::server::{DispatchContext, OracleMcpServer};
+use crate::tls::TlsServerConfig;
 
 /// The MCP endpoint path the Streamable HTTP transport is mounted at.
 pub const MCP_PATH: &str = "/mcp";
@@ -78,6 +80,8 @@ mod tests {
     use crate::tools::ToolRegistry;
     use asupersync::Cx;
     use oraclemcp_guard::OperatingLevel;
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 
     struct NoopDispatch;
     impl ToolDispatch for NoopDispatch {
@@ -430,6 +434,165 @@ mod tests {
         stream.read_to_string(&mut response).expect("read response");
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         handle.join().expect("server thread joins after draining");
+    }
+
+    fn self_signed_cert() -> (Vec<u8>, Vec<u8>) {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        (
+            cert.cert.pem().into_bytes(),
+            cert.key_pair.serialize_pem().into_bytes(),
+        )
+    }
+
+    fn ca_cert() -> (rcgen::Certificate, rcgen::KeyPair) {
+        let mut params =
+            rcgen::CertificateParams::new(vec!["oraclemcp-test-ca".to_owned()]).expect("CA params");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let key = rcgen::KeyPair::generate().expect("CA key");
+        let cert = params.self_signed(&key).expect("self-signed CA");
+        (cert, key)
+    }
+
+    fn cert_signed_by(
+        name: &str,
+        ca_cert: &rcgen::Certificate,
+        ca_key: &rcgen::KeyPair,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let params = rcgen::CertificateParams::new(vec![name.to_owned()]).expect("cert params");
+        let key = rcgen::KeyPair::generate().expect("cert key");
+        let cert = params
+            .signed_by(&key, ca_cert, ca_key)
+            .expect("certificate signed by test CA");
+        (cert.pem().into_bytes(), key.serialize_pem().into_bytes())
+    }
+
+    fn pem_certs(pem: &[u8]) -> Vec<CertificateDer<'static>> {
+        CertificateDer::pem_slice_iter(pem)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("certificate PEM parses")
+    }
+
+    fn pem_key(pem: &[u8]) -> PrivateKeyDer<'static> {
+        PrivateKeyDer::from_pem_slice(pem).expect("private-key PEM parses")
+    }
+
+    fn tls_client_config(
+        server_cert_pem: &[u8],
+        client_cert_and_key: Option<(&[u8], &[u8])>,
+    ) -> Arc<rustls::ClientConfig> {
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in pem_certs(server_cert_pem) {
+            roots.add(cert).expect("server cert added to roots");
+        }
+        let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("default TLS versions")
+        .with_root_certificates(roots);
+        match client_cert_and_key {
+            Some((cert_pem, key_pem)) => builder
+                .with_client_auth_cert(pem_certs(cert_pem), pem_key(key_pem))
+                .expect("client auth cert config"),
+            None => builder.with_no_client_auth(),
+        }
+        .into()
+    }
+
+    fn spawn_https(
+        tls: Arc<TlsServerConfig>,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback HTTPS listener");
+        let addr = listener.local_addr().expect("listener has local addr");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || {
+            serve_https_until(
+                listener,
+                test_server(),
+                &HttpTransportConfig {
+                    json_response: true,
+                    stateful: false,
+                    ..Default::default()
+                },
+                tls,
+                server_shutdown,
+            )
+            .expect("native HTTPS server exits cleanly")
+        });
+        (addr, shutdown, handle)
+    }
+
+    fn https_get(
+        addr: std::net::SocketAddr,
+        config: Arc<rustls::ClientConfig>,
+    ) -> std::io::Result<String> {
+        let stream = TcpStream::connect(addr)?;
+        let connection =
+            rustls::ClientConnection::new(config, ServerName::try_from("localhost").unwrap())
+                .map_err(|e| std::io::Error::other(format!("TLS client setup: {e}")))?;
+        let mut stream = rustls::StreamOwned::new(connection, stream);
+        write!(
+            stream,
+            "GET {MCP_PATH} HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 0\r\n\r\n"
+        )?;
+        stream.flush()?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        Ok(response)
+    }
+
+    #[test]
+    fn serve_https_accepts_tls_handshake() {
+        let (cert, key) = self_signed_cert();
+        let tls = crate::tls::build_server_config(&crate::tls::TlsMaterial {
+            cert_chain_pem: cert.clone(),
+            private_key_pem: key,
+            client_ca_pem: None,
+        })
+        .expect("server-only TLS config builds");
+        let (addr, shutdown, handle) = spawn_https(tls);
+
+        let response = https_get(addr, tls_client_config(&cert, None)).expect("HTTPS request");
+        assert!(response.starts_with("HTTP/1.1 405 Method Not Allowed"));
+
+        shutdown.store(true, Ordering::SeqCst);
+        handle.join().expect("HTTPS server thread joins");
+    }
+
+    #[test]
+    fn serve_https_requires_client_certificate_when_mtls_is_configured() {
+        let (server_cert, server_key) = self_signed_cert();
+        let (client_ca, client_ca_key) = ca_cert();
+        let (client_cert, client_key) =
+            cert_signed_by("oraclemcp-test-client", &client_ca, &client_ca_key);
+        let tls = crate::tls::build_server_config(&crate::tls::TlsMaterial {
+            cert_chain_pem: server_cert.clone(),
+            private_key_pem: server_key,
+            client_ca_pem: Some(client_ca.pem().into_bytes()),
+        })
+        .expect("mTLS config builds");
+        let (addr, shutdown, handle) = spawn_https(tls);
+
+        let without_client_cert = https_get(addr, tls_client_config(&server_cert, None));
+        assert!(
+            without_client_cert.is_err(),
+            "mTLS listener must reject clients without a certificate"
+        );
+
+        let response = https_get(
+            addr,
+            tls_client_config(&server_cert, Some((&client_cert, &client_key))),
+        )
+        .expect("mTLS request with client certificate");
+        assert!(response.starts_with("HTTP/1.1 405 Method Not Allowed"));
+
+        shutdown.store(true, Ordering::SeqCst);
+        handle.join().expect("mTLS server thread joins");
     }
 
     fn b64url(bytes: &[u8]) -> String {
@@ -949,6 +1112,62 @@ pub fn serve_http_until(
     Ok(())
 }
 
+/// Serve the MCP server over TLS-terminating Streamable HTTPS on `listener`.
+///
+/// # Errors
+/// Returns fatal listener or connection write errors. Individual malformed
+/// client requests are answered with HTTP errors and the listener continues.
+pub fn serve_https(
+    listener: TcpListener,
+    server: OracleMcpServer,
+    config: &HttpTransportConfig,
+    tls: Arc<TlsServerConfig>,
+) -> std::io::Result<()> {
+    serve_https_until(
+        listener,
+        server,
+        config,
+        tls,
+        Arc::new(AtomicBool::new(false)),
+    )
+}
+
+/// Serve HTTPS until `shutdown` becomes true, then stop accepting new
+/// connections and join active request workers before returning.
+pub fn serve_https_until(
+    listener: TcpListener,
+    server: OracleMcpServer,
+    config: &HttpTransportConfig,
+    tls: Arc<TlsServerConfig>,
+    shutdown: Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    listener.set_nonblocking(true)?;
+    let config = Arc::new(config.clone());
+    let mut workers: Vec<JoinHandle<()>> = Vec::new();
+    while !shutdown.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((stream, _addr)) => {
+                let server = server.clone();
+                let config = Arc::clone(&config);
+                let tls = Arc::clone(&tls);
+                workers.push(std::thread::spawn(move || {
+                    if let Err(e) = handle_tls_connection(stream, &server, &config, tls) {
+                        tracing::debug!(error = %e, "native HTTPS connection failed");
+                    }
+                }));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    for worker in workers {
+        let _ = worker.join();
+    }
+    Ok(())
+}
+
 fn handle_connection(
     mut stream: TcpStream,
     server: &OracleMcpServer,
@@ -956,7 +1175,33 @@ fn handle_connection(
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT))?;
     stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT))?;
-    let response = match read_http_request(&mut stream) {
+    handle_stream(&mut stream, server, config)
+}
+
+fn handle_tls_connection(
+    stream: TcpStream,
+    server: &OracleMcpServer,
+    config: &HttpTransportConfig,
+    tls: Arc<TlsServerConfig>,
+) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT))?;
+    let connection = ServerConnection::new(tls).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("TLS setup: {e}"))
+    })?;
+    let mut stream = StreamOwned::new(connection, stream);
+    let result = handle_stream(&mut stream, server, config);
+    stream.conn.send_close_notify();
+    let _ = stream.flush();
+    result
+}
+
+fn handle_stream(
+    stream: &mut (impl Read + Write),
+    server: &OracleMcpServer,
+    config: &HttpTransportConfig,
+) -> std::io::Result<()> {
+    let response = match read_http_request(stream) {
         Ok(Some(request)) => handle_http_request(server, config, request),
         Ok(None) => return Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::InvalidData => HttpResponse {
@@ -966,14 +1211,14 @@ fn handle_connection(
         },
         Err(e) => return Err(e),
     };
-    write_http_response(&mut stream, &response)
+    write_http_response(stream, &response)
 }
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequest>> {
+fn read_http_request(stream: &mut impl Read) -> std::io::Result<Option<HttpRequest>> {
     let mut buf = Vec::new();
     let mut chunk = [0_u8; 8192];
     let header_end = loop {
@@ -1056,7 +1301,7 @@ fn invalid_data(message: &'static str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, message)
 }
 
-fn write_http_response(stream: &mut TcpStream, response: &HttpResponse) -> std::io::Result<()> {
+fn write_http_response(stream: &mut impl Write, response: &HttpResponse) -> std::io::Result<()> {
     write!(
         stream,
         "HTTP/1.1 {} {}\r\n",

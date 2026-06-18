@@ -58,7 +58,7 @@ pub use custom_tools::{
 pub use doctor::{CheckResult, CheckStatus, DoctorContext, DoctorReport, run_doctor};
 pub use http::{
     HttpRequest, HttpResponse, HttpTransportConfig, MCP_PATH, OAuthEnforcement,
-    PROTECTED_RESOURCE_METADATA_PATH, ScopeGrant, handle_http_request, serve_http,
+    PROTECTED_RESOURCE_METADATA_PATH, ScopeGrant, handle_http_request, serve_http, serve_https,
 };
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
 pub use plugin::{
@@ -72,7 +72,7 @@ pub use resources::{
 };
 pub use session_tool::{LeaseAcquirer, SessionAction, SessionDeps, oracle_session};
 pub use subscriptions::SubscriptionRegistry;
-pub use tls::{TlsError, TlsMaterial, build_server_config, requires_mtls};
+pub use tls::{TlsError, TlsMaterial, TlsServerConfig, build_server_config, requires_mtls};
 pub use tools::{ToolDescriptor, ToolRegistry, ToolTier};
 pub use trace::TraceContext;
 
