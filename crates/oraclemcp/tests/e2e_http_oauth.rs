@@ -237,10 +237,11 @@ fn binary_http_oauth_rejects_missing_invalid_and_insufficient_tokens() {
     let (status, headers, body) = request_json(harness.addr, "POST", MCP_PATH, None, Some(b"{}"));
     assert_eq!(status, 401);
     assert_eq!(body, json!("unauthorized"));
-    assert!(
-        header(&headers, "www-authenticate")
-            .expect("challenge")
-            .contains("resource_metadata=")
+    assert_eq!(
+        header(&headers, "www-authenticate"),
+        Some(
+            "Bearer resource_metadata=\"https://oraclemcp.example/.well-known/oauth-protected-resource\""
+        )
     );
 
     let (status, headers, body) = request_json(
@@ -252,10 +253,11 @@ fn binary_http_oauth_rejects_missing_invalid_and_insufficient_tokens() {
     );
     assert_eq!(status, 401);
     assert_eq!(body, json!("unauthorized"));
-    assert!(
-        header(&headers, "www-authenticate")
-            .expect("challenge")
-            .contains("error=\"invalid_token\"")
+    assert_eq!(
+        header(&headers, "www-authenticate"),
+        Some(
+            "Bearer resource_metadata=\"https://oraclemcp.example/.well-known/oauth-protected-resource\", error=\"invalid_token\""
+        )
     );
     assert!(
         !headers.iter().any(|(_, value)| value.contains("not.a.jwt")),
@@ -272,10 +274,11 @@ fn binary_http_oauth_rejects_missing_invalid_and_insufficient_tokens() {
     );
     assert_eq!(status, 403);
     assert_eq!(body, json!("forbidden"));
-    assert!(
-        header(&headers, "www-authenticate")
-            .expect("challenge")
-            .contains("error=\"insufficient_scope\"")
+    assert_eq!(
+        header(&headers, "www-authenticate"),
+        Some(
+            "Bearer resource_metadata=\"https://oraclemcp.example/.well-known/oauth-protected-resource\", error=\"insufficient_scope\""
+        )
     );
 }
 
@@ -291,6 +294,15 @@ fn binary_http_oauth_serves_metadata_and_applies_scope_ceilings() {
     );
     assert_eq!(status, 200);
     assert_eq!(metadata["resource"], json!("https://oraclemcp.example/mcp"));
+    assert_eq!(
+        metadata["authorization_servers"],
+        json!(["https://idp.example"])
+    );
+    assert_eq!(metadata["bearer_methods_supported"], json!(["header"]));
+    assert_eq!(
+        metadata["scopes_supported"],
+        json!(["oracle:read", "oracle:write", "oracle:ddl", "oracle:admin"])
+    );
 
     let update = tool_call(
         "oracle_preview_sql",
