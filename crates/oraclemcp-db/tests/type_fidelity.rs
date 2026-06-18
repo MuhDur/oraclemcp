@@ -40,6 +40,27 @@ fn numbers_as_float_opt_in_is_lossy_number() {
     };
     let v = serialize_cell(&OracleCell::new("NUMBER", Some("42".to_owned())), &opts);
     assert_eq!(v, json!(42.0));
+
+    let exact = "12345678901234567890123456789012345678";
+    let lossless = serialize_cell(
+        &OracleCell::new("NUMBER(38,0)", Some(exact.to_owned())),
+        &SerializeOptions::default(),
+    );
+    assert_eq!(lossless, json!(exact));
+
+    let lossy = serialize_cell(
+        &OracleCell::new("NUMBER(38,0)", Some(exact.to_owned())),
+        &opts,
+    );
+    assert!(
+        lossy.is_number(),
+        "opt-in float mode should emit a JSON number"
+    );
+    assert_ne!(
+        lossy.to_string(),
+        exact,
+        "opt-in float mode must be visibly lossy for 38-digit NUMBER"
+    );
 }
 
 #[test]
