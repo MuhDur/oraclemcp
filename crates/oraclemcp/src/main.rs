@@ -28,17 +28,20 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use clap::{CommandFactory, Parser, Subcommand};
-use oraclemcp::dispatch::OracleDispatcher;
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use oraclemcp::dispatch::{OracleDispatcher, StatelessReadStrategy};
 use oraclemcp::registry;
-use oraclemcp_auth::resolve_secret;
-use oraclemcp_config::OracleMcpConfig;
+use oraclemcp_auth::{Hs256Verifier, ResourceServerConfig, SecretError, resolve_secret};
+use oraclemcp_config::{HttpConfig, OracleMcpConfig};
 use oraclemcp_core::{
     CapabilitiesReport, CustomToolCatalog, CustomToolDef, DoctorContext, FeatureTiers,
-    HttpTransportConfig, OracleMcpServer, StdioAuthPolicy, load_tools, load_tools_for_profile,
+    HttpTransportConfig, MCP_PATH, OAuthEnforcement, OracleMcpServer,
+    PROTECTED_RESOURCE_METADATA_PATH, StdioAuthPolicy, load_tools, load_tools_for_profile,
     parse_tools_file, run_doctor, serve_http, sign,
 };
-use oraclemcp_db::{DbError, OracleConnectOptions, OracleConnection, RustOracleConnection};
+use oraclemcp_db::{
+    DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
+};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel, SessionLevelState};
 
@@ -71,13 +74,14 @@ struct Cli {
     command: Option<Command>,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Start the MCP server (stdio by default; --listen <ADDR> for HTTP).
     Serve {
         /// Bind a Streamable HTTP listener at <ADDR> (e.g. 127.0.0.1:7070)
-        /// instead of stdio. The HTTP transport is unauthenticated at this
-        /// layer; bind loopback only.
+        /// instead of stdio. HTTP starts only with configured OAuth enforcement
+        /// or explicit --allow-no-auth; bind loopback or front it with TLS.
         #[arg(long)]
         listen: Option<String>,
         /// Run stdio without an init token (development only). Without this and
@@ -90,6 +94,9 @@ enum Command {
         /// Connect using this named profile from the loaded config.
         #[arg(long)]
         profile: Option<String>,
+        /// Streamable HTTP transport options.
+        #[command(flatten)]
+        http: HttpServeArgs,
     },
     /// Print build information (version, enabled features) and exit.
     Info,
@@ -140,6 +147,49 @@ enum Command {
     },
 }
 
+#[derive(Args, Debug, Default)]
+struct HttpServeArgs {
+    /// Allow this Host authority in addition to loopback authorities.
+    #[arg(long = "http-allowed-host")]
+    allowed_hosts: Vec<String>,
+    /// Allow this browser Origin in addition to loopback origins.
+    #[arg(long = "http-allowed-origin")]
+    allowed_origins: Vec<String>,
+    /// Use Streamable HTTP stateful session framing.
+    #[arg(long = "http-stateful")]
+    stateful: bool,
+    /// Prefer direct JSON responses for stateless requests.
+    #[arg(long = "http-json-response")]
+    json_response: bool,
+    /// OAuth resource/audience identifier expected in JWT aud.
+    #[arg(long = "oauth-resource")]
+    oauth_resource: Option<String>,
+    /// Allowed OAuth issuer. Repeat for multiple issuers.
+    #[arg(long = "oauth-issuer")]
+    oauth_issuers: Vec<String>,
+    /// OAuth authorization server advertised in protected-resource metadata.
+    #[arg(long = "oauth-authorization-server")]
+    oauth_authorization_servers: Vec<String>,
+    /// Required OAuth scope. Repeat for multiple required scopes.
+    #[arg(long = "oauth-required-scope")]
+    oauth_required_scopes: Vec<String>,
+    /// Secret reference for the built-in HS256 verifier, e.g. env:JWT_SECRET.
+    #[arg(long = "oauth-hs256-secret-ref")]
+    oauth_hs256_secret_ref: Option<String>,
+    /// Metadata URL advertised in WWW-Authenticate.
+    #[arg(long = "oauth-metadata-url")]
+    oauth_metadata_url: Option<String>,
+    /// Server certificate-chain PEM path. Not served natively in v0.3.0.
+    #[arg(long = "tls-cert")]
+    tls_cert: Option<PathBuf>,
+    /// Server private-key PEM path. Not served natively in v0.3.0.
+    #[arg(long = "tls-key")]
+    tls_key: Option<PathBuf>,
+    /// Client CA PEM path for mTLS. Not served natively in v0.3.0.
+    #[arg(long = "mtls-client-ca")]
+    mtls_client_ca: Option<PathBuf>,
+}
+
 #[derive(Subcommand, Debug)]
 enum RobotDocsCommand {
     /// Print the compact agent guide.
@@ -167,7 +217,15 @@ fn main() -> ExitCode {
             allow_no_auth,
             stdio_token,
             profile,
-        } => run_serve(listen, allow_no_auth, stdio_token, profile, robot_json),
+            http,
+        } => run_serve(
+            listen,
+            allow_no_auth,
+            stdio_token,
+            profile,
+            http,
+            robot_json,
+        ),
         Command::Info => run_info(robot_json),
         Command::Doctor { profile } => run_doctor_cmd(robot_json, profile),
         Command::Profiles => run_profiles(robot_json),
@@ -243,9 +301,15 @@ fn default_read_only_level() -> SessionLevelState {
     SessionLevelState::new(OperatingLevel::ReadOnly, false)
 }
 
-fn resolve_profile_options(
-    profile: Option<&str>,
-) -> Result<Option<(String, OracleConnectOptions, SessionLevelState)>, DbError> {
+#[derive(Clone)]
+struct ResolvedProfile {
+    name: String,
+    opts: OracleConnectOptions,
+    level: SessionLevelState,
+    pool_settings: Option<PoolSettings>,
+}
+
+fn resolve_profile_options(profile: Option<&str>) -> Result<Option<ResolvedProfile>, DbError> {
     let cfg = OracleMcpConfig::load(None)
         .map_err(|e| DbError::UnsupportedAuth(format!("config load failed: {e}")))?;
 
@@ -267,37 +331,109 @@ fn resolve_profile_options(
         return Ok(None);
     };
 
-    let password = match chosen.credential_ref.as_deref() {
-        Some(reference) => {
-            let secret = resolve_secret(reference, chosen.protected(), |name| {
-                std::env::var(name).ok()
-            })
-            .map_err(|e| {
-                DbError::UnsupportedAuth(format!(
-                    "failed to resolve credential_ref for profile `{}`: {e}",
-                    chosen.name
-                ))
-            })?;
-            Some(secret.expose().to_owned())
-        }
-        None => None,
-    };
+    let password = resolve_profile_secret(
+        "credential_ref",
+        &chosen.name,
+        chosen.credential_ref.as_deref(),
+        chosen.protected(),
+    )?;
+    let wallet_password = resolve_profile_secret(
+        "wallet_password_ref",
+        &chosen.name,
+        chosen
+            .oci
+            .as_ref()
+            .and_then(|oci| oci.wallet_password_ref.as_deref()),
+        chosen.protected(),
+    )?;
 
-    let ctx = oraclemcp_core::build_session_context(chosen, password, false)?;
-    Ok(Some((chosen.name.clone(), ctx.options, ctx.level_state)))
+    let ctx = oraclemcp_core::build_session_context(chosen, password, wallet_password, false)?;
+    Ok(Some(ResolvedProfile {
+        name: chosen.name.clone(),
+        opts: ctx.options,
+        level: ctx.level_state,
+        pool_settings: ctx.pool_settings,
+    }))
+}
+
+fn resolve_profile_secret(
+    field: &str,
+    profile_name: &str,
+    secret_ref: Option<&str>,
+    protected: bool,
+) -> Result<Option<String>, DbError> {
+    let Some(reference) = secret_ref else {
+        return Ok(None);
+    };
+    let secret =
+        resolve_secret(reference, protected, |name| std::env::var(name).ok()).map_err(|e| {
+            DbError::UnsupportedAuth(format!(
+                "failed to resolve {field} for profile `{profile_name}`: {}",
+                secret_error_summary(&e)
+            ))
+        })?;
+    Ok(Some(secret.expose().to_owned()))
+}
+
+fn secret_error_summary(error: &SecretError) -> String {
+    match error {
+        SecretError::Malformed(_) => {
+            "malformed secret reference (expected scheme:locator)".to_owned()
+        }
+        SecretError::NotFound(_) => "secret not found".to_owned(),
+        SecretError::PlaintextForbidden => {
+            "plaintext literal credential is forbidden on a protected profile".to_owned()
+        }
+        SecretError::BackendUnavailable(scheme) => {
+            format!("secrets backend not available for scheme `{scheme}` (feature-gated)")
+        }
+        _ => "secret resolution failed".to_owned(),
+    }
 }
 
 fn connect_profile(profile: &str) -> Result<Box<dyn OracleConnection>, DbError> {
-    let Some((_, opts, _level)) = resolve_profile_options(Some(profile))? else {
+    let Some(resolved) = resolve_profile_options(Some(profile))? else {
         return Err(DbError::UnsupportedAuth(format!(
             "connection profile `{profile}` not found"
         )));
     };
-    try_open_connection(opts)
+    try_open_connection(resolved.opts)
+}
+
+fn connect_profile_stateless(profile: &str) -> Result<Option<Box<dyn OracleConnection>>, DbError> {
+    let Some(resolved) = resolve_profile_options(Some(profile))? else {
+        return Err(DbError::UnsupportedAuth(format!(
+            "connection profile `{profile}` not found"
+        )));
+    };
+    try_open_stateless_connection(resolved.opts, resolved.pool_settings)
 }
 
 fn try_open_connection(opts: OracleConnectOptions) -> Result<Box<dyn OracleConnection>, DbError> {
     RustOracleConnection::connect(opts).map(|conn| Box::new(conn) as Box<dyn OracleConnection>)
+}
+
+fn try_open_stateless_connection(
+    opts: OracleConnectOptions,
+    pool_settings: Option<PoolSettings>,
+) -> Result<Option<Box<dyn OracleConnection>>, DbError> {
+    pool_settings
+        .map(|settings| {
+            OraclePool::connect(opts, settings)
+                .map(|pool| Box::new(pool) as Box<dyn OracleConnection>)
+        })
+        .transpose()
+}
+
+struct RuntimeConnections {
+    session: Box<dyn OracleConnection>,
+    stateless: Option<Box<dyn OracleConnection>>,
+}
+
+fn try_open_runtime_connections(resolved: ResolvedProfile) -> Result<RuntimeConnections, DbError> {
+    let session = try_open_connection(resolved.opts.clone())?;
+    let stateless = try_open_stateless_connection(resolved.opts, resolved.pool_settings)?;
+    Ok(RuntimeConnections { session, stateless })
 }
 
 /// Open the live connection, or — when the driver is absent / the connect fails
@@ -310,6 +446,19 @@ fn open_connection(opts: OracleConnectOptions) -> Box<dyn OracleConnection> {
         Err(e) => {
             tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
             Box::new(stub::StubConnection::new(e))
+        }
+    }
+}
+
+fn open_runtime_connections(resolved: ResolvedProfile) -> RuntimeConnections {
+    match try_open_runtime_connections(resolved) {
+        Ok(connections) => connections,
+        Err(e) => {
+            tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
+            RuntimeConnections {
+                session: Box::new(stub::StubConnection::new(e)),
+                stateless: None,
+            }
         }
     }
 }
@@ -470,6 +619,7 @@ fn load_custom_catalog_for_profile(
 /// Build the server from the registry + capabilities + dispatcher over `conn`.
 fn build_server(
     conn: Box<dyn OracleConnection>,
+    stateless_conn: Option<Box<dyn OracleConnection>>,
     active_profile: Option<String>,
     level: SessionLevelState,
     http: bool,
@@ -488,15 +638,175 @@ fn build_server(
             http_transport: http,
         },
     );
-    let dispatcher = OracleDispatcher::new_switchable_with_custom_tools(
+    let dispatcher = OracleDispatcher::new_switchable_with_custom_tools_and_stateless(
         conn,
         active_profile,
         level,
         Arc::new(connect_profile),
+        StatelessReadStrategy::new(stateless_conn, Some(Arc::new(connect_profile_stateless))),
         custom_catalog,
         Some(Arc::new(load_custom_catalog_for_profile)),
     );
     OracleMcpServer::new(version, registry, caps, Arc::new(dispatcher))
+}
+
+fn apply_http_cli_overrides(mut config: HttpConfig, cli: &HttpServeArgs) -> HttpConfig {
+    config
+        .allowed_hosts
+        .extend(cli.allowed_hosts.iter().cloned());
+    config
+        .allowed_origins
+        .extend(cli.allowed_origins.iter().cloned());
+    if cli.stateful {
+        config.stateful = true;
+    }
+    if cli.json_response {
+        config.json_response = true;
+    }
+
+    let cli_has_oauth = cli.oauth_resource.is_some()
+        || !cli.oauth_issuers.is_empty()
+        || !cli.oauth_authorization_servers.is_empty()
+        || !cli.oauth_required_scopes.is_empty()
+        || cli.oauth_hs256_secret_ref.is_some()
+        || cli.oauth_metadata_url.is_some();
+    if cli_has_oauth {
+        let mut oauth = config.oauth.unwrap_or_default();
+        if let Some(resource) = &cli.oauth_resource {
+            oauth.resource = Some(resource.clone());
+        }
+        if !cli.oauth_issuers.is_empty() {
+            oauth.allowed_issuers = cli.oauth_issuers.clone();
+        }
+        if !cli.oauth_authorization_servers.is_empty() {
+            oauth.authorization_servers = cli.oauth_authorization_servers.clone();
+        }
+        if !cli.oauth_required_scopes.is_empty() {
+            oauth.required_scopes = cli.oauth_required_scopes.clone();
+        }
+        if let Some(secret_ref) = &cli.oauth_hs256_secret_ref {
+            oauth.hs256_secret_ref = Some(secret_ref.clone());
+        }
+        if let Some(metadata_url) = &cli.oauth_metadata_url {
+            oauth.metadata_url = Some(metadata_url.clone());
+        }
+        config.oauth = Some(oauth);
+    }
+
+    let cli_has_tls =
+        cli.tls_cert.is_some() || cli.tls_key.is_some() || cli.mtls_client_ca.is_some();
+    if cli_has_tls {
+        let mut tls = config.tls.unwrap_or_default();
+        if let Some(cert) = &cli.tls_cert {
+            tls.cert_chain_path = Some(cert.clone());
+        }
+        if let Some(key) = &cli.tls_key {
+            tls.private_key_path = Some(key.clone());
+        }
+        if let Some(ca) = &cli.mtls_client_ca {
+            tls.client_ca_path = Some(ca.clone());
+        }
+        config.tls = Some(tls);
+    }
+
+    config
+}
+
+fn default_oauth_metadata_url(resource: &str) -> String {
+    let base = resource
+        .trim_end_matches('/')
+        .strip_suffix(MCP_PATH)
+        .unwrap_or_else(|| resource.trim_end_matches('/'))
+        .trim_end_matches('/');
+    format!("{base}{PROTECTED_RESOURCE_METADATA_PATH}")
+}
+
+fn resolve_http_transport_config(
+    cli: &HttpServeArgs,
+    level: &SessionLevelState,
+) -> Result<HttpTransportConfig, (&'static str, String)> {
+    let cfg = OracleMcpConfig::load(None).map_err(|e| {
+        (
+            "ORACLEMCP_CONFIG_INVALID",
+            format!("failed to load HTTP transport config: {e}"),
+        )
+    })?;
+    let http = apply_http_cli_overrides(cfg.http, cli);
+    http_transport_config_from_merged(http, level.is_protected(), |name| std::env::var(name).ok())
+}
+
+fn http_transport_config_from_merged(
+    http: HttpConfig,
+    protected: bool,
+    env_lookup: impl Fn(&str) -> Option<String>,
+) -> Result<HttpTransportConfig, (&'static str, String)> {
+    http.validate().map_err(|e| {
+        (
+            "ORACLEMCP_HTTP_CONFIG_INVALID",
+            format!("invalid HTTP transport config: {e}"),
+        )
+    })?;
+
+    if http.tls.is_some() {
+        return Err((
+            "ORACLEMCP_HTTP_TLS_UNSUPPORTED",
+            "native TLS/mTLS listener flags are parsed but not served in v0.3.0; \
+             terminate TLS in a local reverse proxy and pass OAuth/Host/Origin config to oraclemcp"
+                .to_owned(),
+        ));
+    }
+
+    let (resource_metadata, oauth) = match http.oauth {
+        Some(oauth_cfg) => {
+            let resource = oauth_cfg
+                .resource
+                .as_deref()
+                .expect("validated oauth resource")
+                .to_owned();
+            let metadata_url = oauth_cfg
+                .metadata_url
+                .clone()
+                .unwrap_or_else(|| default_oauth_metadata_url(&resource));
+            let secret_ref = oauth_cfg
+                .hs256_secret_ref
+                .as_deref()
+                .expect("validated oauth secret ref");
+            let secret = resolve_secret(secret_ref, protected, env_lookup).map_err(|e| {
+                (
+                    "ORACLEMCP_HTTP_OAUTH_SECRET_INVALID",
+                    format!(
+                        "failed to resolve http.oauth.hs256_secret_ref: {}",
+                        secret_error_summary(&e)
+                    ),
+                )
+            })?;
+            let resource_config = ResourceServerConfig {
+                resource,
+                allowed_issuers: oauth_cfg.allowed_issuers,
+                authorization_servers: oauth_cfg.authorization_servers,
+                required_scopes: oauth_cfg.required_scopes,
+            };
+            let metadata = resource_config.protected_resource_metadata();
+            let enforcement = OAuthEnforcement {
+                config: resource_config,
+                verifier: Arc::new(Hs256Verifier {
+                    secret: secret.expose().as_bytes().to_vec(),
+                }),
+                metadata_url,
+            };
+            (Some(metadata), Some(Arc::new(enforcement)))
+        }
+        None => (None, None),
+    };
+
+    Ok(HttpTransportConfig {
+        allowed_hosts: http.allowed_hosts,
+        allowed_origins: http.allowed_origins,
+        json_response: http.json_response,
+        stateful: http.stateful,
+        resource_metadata,
+        oauth,
+    })
 }
 
 fn run_serve(
@@ -504,13 +814,21 @@ fn run_serve(
     allow_no_auth: bool,
     stdio_token: Option<String>,
     profile: Option<String>,
+    http: HttpServeArgs,
     robot_json: bool,
 ) -> ExitCode {
     init_tracing();
-    let (conn, active_profile, level) = match resolve_profile_options(profile.as_deref()) {
-        Ok(Some((profile_name, opts, level))) => (open_connection(opts), Some(profile_name), level),
+    let (connections, active_profile, level) = match resolve_profile_options(profile.as_deref()) {
+        Ok(Some(resolved)) => {
+            let active_profile = Some(resolved.name.clone());
+            let level = resolved.level.clone();
+            (open_runtime_connections(resolved), active_profile, level)
+        }
         Ok(None) => (
-            open_connection(OracleConnectOptions::default()),
+            RuntimeConnections {
+                session: open_connection(OracleConnectOptions::default()),
+                stateless: None,
+            },
             None,
             default_read_only_level(),
         ),
@@ -525,7 +843,10 @@ fn run_serve(
         Err(e) => {
             tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
             (
-                Box::new(stub::StubConnection::new(e)) as Box<dyn OracleConnection>,
+                RuntimeConnections {
+                    session: Box::new(stub::StubConnection::new(e)) as Box<dyn OracleConnection>,
+                    stateless: None,
+                },
                 None,
                 default_read_only_level(),
             )
@@ -560,7 +881,14 @@ fn run_serve(
                     return ExitCode::from(2);
                 }
             };
-            let server = build_server(conn, active_profile, level, false, custom_catalog);
+            let server = build_server(
+                connections.session,
+                connections.stateless,
+                active_profile,
+                level,
+                false,
+                custom_catalog,
+            );
             emit_serve_status(robot_json, "stdio", None, &advertised_tools);
             match server.serve_stdio(&auth) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -572,20 +900,44 @@ fn run_serve(
         }
         // ── Streamable HTTP transport (--listen) ───────────────────────────
         Some(addr) => {
+            let cfg = match resolve_http_transport_config(&http, &level) {
+                Ok(cfg) => cfg,
+                Err((code, message)) => {
+                    emit_status_error(robot_json, code, &message);
+                    return ExitCode::from(2);
+                }
+            };
+            let oauth_enabled = cfg.oauth.is_some();
             let allow_remote = std::env::var("ORACLEMCP_HTTP_ALLOW_REMOTE")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-            if let Err((code, message)) = http_listen_guard(allow_no_auth, &addr, allow_remote) {
+            if let Err((code, message)) =
+                http_listen_guard(allow_no_auth, oauth_enabled, &addr, allow_remote)
+            {
                 emit_status_error(robot_json, code, &message);
                 return ExitCode::from(2);
             }
-            eprintln!(
-                "oraclemcp serve: WARNING — HTTP transport on {addr} is UNAUTHENTICATED and \
-                 UNENCRYPTED. Do not expose it to untrusted networks; front it with a \
-                 TLS-terminating authenticated proxy, or use stdio."
+            if oauth_enabled {
+                eprintln!(
+                    "oraclemcp serve: HTTP transport on {addr} has OAuth bearer enforcement \
+                     enabled. The native listener is still plaintext; bind loopback or front it \
+                     with a TLS-terminating proxy for off-box clients."
+                );
+            } else {
+                eprintln!(
+                    "oraclemcp serve: WARNING — HTTP transport on {addr} is UNAUTHENTICATED and \
+                     UNENCRYPTED. Do not expose it to untrusted networks; front it with a \
+                     TLS-terminating authenticated proxy, or use stdio."
+                );
+            }
+            let server = build_server(
+                connections.session,
+                connections.stateless,
+                active_profile,
+                level,
+                true,
+                custom_catalog,
             );
-            let server = build_server(conn, active_profile, level, true, custom_catalog);
-            let cfg = HttpTransportConfig::default();
             emit_serve_status(robot_json, "http", Some(&addr), &advertised_tools);
             let result =
                 TcpListener::bind(&addr).and_then(|listener| serve_http(listener, server, &cfg));
@@ -627,23 +979,26 @@ fn emit_serve_status(robot_json: bool, transport: &str, addr: Option<&str>, tool
     }
 }
 
-/// Decide whether an unauthenticated, plaintext `--listen` HTTP server may
-/// start. `Ok(())` = proceed (the caller still emits a loud warning);
+/// Decide whether a plaintext `--listen` HTTP server may start.
+/// `Ok(())` = proceed (the caller still emits a transport warning);
 /// `Err((code, message))` = refuse with exit code 2.
 ///
-/// Fail-closed parity with stdio (§7.1): the HTTP transport has no OAuth wired
-/// from config yet, so it starts only with an explicit `--allow-no-auth`, and
-/// binding a routable (non-loopback) address needs a second deliberate opt-in.
+/// Fail-closed parity with stdio (§7.1): `/mcp` must either have OAuth bearer
+/// enforcement or the operator must explicitly accept unauthenticated local dev
+/// mode with `--allow-no-auth`. Binding a routable (non-loopback) address still
+/// needs a second deliberate opt-in because the native listener is plaintext.
 fn http_listen_guard(
     allow_no_auth: bool,
+    oauth_enabled: bool,
     addr: &str,
     allow_remote: bool,
 ) -> Result<(), (&'static str, String)> {
-    if !allow_no_auth {
+    if !oauth_enabled && !allow_no_auth {
         return Err((
             "ORACLEMCP_AUTH_REQUIRED",
-            "the HTTP transport (--listen) is unauthenticated plaintext; \
-             re-run with --allow-no-auth to accept that explicitly"
+            "the HTTP transport (--listen) has no OAuth enforcement configured; \
+             configure [http.oauth] / --oauth-* or re-run with --allow-no-auth \
+             to accept unauthenticated local development mode explicitly"
                 .to_owned(),
         ));
     }
@@ -655,8 +1010,9 @@ fn http_listen_guard(
         return Err((
             "ORACLEMCP_HTTP_REMOTE_BIND_REFUSED",
             format!(
-                "refusing to bind unauthenticated plaintext HTTP to non-loopback {addr}; \
-                 bind a loopback address or set ORACLEMCP_HTTP_ALLOW_REMOTE=1 to override"
+                "refusing to bind plaintext HTTP to non-loopback {addr}; bind a \
+                 loopback address or set ORACLEMCP_HTTP_ALLOW_REMOTE=1 when a \
+                 same-host TLS/auth proxy or equivalent network control is in front"
             ),
         ));
     }
@@ -914,6 +1270,7 @@ fn profiles_json(cfg: &OracleMcpConfig) -> serde_json::Value {
                 "description": profile.description,
                 "is_default": profile.is_default,
                 "call_timeout_seconds": profile.call_timeout_seconds,
+                "pool": profile.pool,
                 "max_level": profile.max_level,
                 "default_level": profile.default_level,
                 "protected": profile.protected,
@@ -958,6 +1315,12 @@ fn profiles_text(cfg: &OracleMcpConfig) -> String {
             out.push_str(&format!(" — {description}"));
         }
         out.push('\n');
+        if let Some(pool) = profile.pool {
+            out.push_str(&format!(
+                "  pool: {} max_size={} min_idle={} acquire_timeout_secs={}\n",
+                pool.strategy, pool.max_size, pool.min_idle, pool.acquire_timeout_secs
+            ));
+        }
     }
     out
 }
@@ -1005,6 +1368,7 @@ struct DoctorProfileContext {
     connection_error: Option<String>,
     wallet_location: Option<String>,
     protected_profile_writable: bool,
+    connection_strategy: Option<String>,
     sensitive_values: Vec<String>,
 }
 
@@ -1017,11 +1381,47 @@ fn doctor_sensitive_values(opts: &OracleConnectOptions) -> Vec<String> {
     if let Some(password) = &opts.password {
         values.push(password.clone());
     }
+    values.extend(
+        opts.auth_adapter
+            .sensitive_values()
+            .into_iter()
+            .map(ToOwned::to_owned),
+    );
     if let Some(token) = &opts.iam_token {
         values.push(token.clone());
     }
     if let Some(wallet) = &opts.wallet_location {
         values.push(wallet.display().to_string());
+    }
+    if let Some(wallet_password) = &opts.wallet_password {
+        values.push(wallet_password.clone());
+    }
+    if let Some(dn) = &opts.ssl_server_cert_dn {
+        values.push(dn.clone());
+    }
+    for (namespace, key, value) in &opts.app_context {
+        values.push(namespace.clone());
+        values.push(key.clone());
+        values.push(value.clone());
+    }
+    if let Some(identity) = &opts.session_identity {
+        for value in [
+            &identity.edition,
+            &identity.program,
+            &identity.machine,
+            &identity.os_user,
+            &identity.terminal,
+            &identity.module,
+            &identity.action,
+            &identity.client_identifier,
+            &identity.client_info,
+            &identity.driver_name,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            values.push(value.clone());
+        }
     }
     values.retain(|value| !value.is_empty());
     values
@@ -1038,25 +1438,36 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
             connection_error: None,
             wallet_location: None,
             protected_profile_writable: false,
+            connection_strategy: None,
             sensitive_values: Vec::new(),
         };
     };
 
     match resolve_profile_options(Some(profile)) {
-        Ok(Some((_, opts, level))) => {
-            let wallet_location = opts
+        Ok(Some(resolved)) => {
+            let wallet_location = resolved
+                .opts
                 .wallet_location
                 .as_ref()
                 .map(|path| path.display().to_string());
-            let protected_profile_writable =
-                level.is_protected() && level.max_level() > OperatingLevel::ReadOnly;
-            let sensitive_values = doctor_sensitive_values(&opts);
-            match try_open_connection(opts) {
-                Ok(conn) => DoctorProfileContext {
-                    conn: Some(conn),
+            let protected_profile_writable = resolved.level.is_protected()
+                && resolved.level.max_level() > OperatingLevel::ReadOnly;
+            let sensitive_values = doctor_sensitive_values(&resolved.opts);
+            let connection_strategy = Some(
+                if resolved.pool_settings.is_some() {
+                    "hybrid_pool"
+                } else {
+                    "single_session"
+                }
+                .to_owned(),
+            );
+            match try_open_runtime_connections(resolved) {
+                Ok(connections) => DoctorProfileContext {
+                    conn: Some(connections.session),
                     connection_error: None,
                     wallet_location,
                     protected_profile_writable,
+                    connection_strategy,
                     sensitive_values,
                 },
                 Err(e) => DoctorProfileContext {
@@ -1064,6 +1475,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
                     connection_error: Some(doctor_connection_error(e)),
                     wallet_location,
                     protected_profile_writable,
+                    connection_strategy,
                     sensitive_values,
                 },
             }
@@ -1073,6 +1485,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
             connection_error: Some(format!("connection profile `{profile}` not found")),
             wallet_location: None,
             protected_profile_writable: false,
+            connection_strategy: None,
             sensitive_values: Vec::new(),
         },
         Err(e) => DoctorProfileContext {
@@ -1080,6 +1493,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
             connection_error: Some(doctor_connection_error(e)),
             wallet_location: None,
             protected_profile_writable: false,
+            connection_strategy: None,
             sensitive_values: Vec::new(),
         },
     }
@@ -1096,6 +1510,7 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>) -> ExitCode {
         tns_admin: std::env::var("TNS_ADMIN").ok(),
         wallet_location: profile_ctx.wallet_location,
         protected_profile_writable: profile_ctx.protected_profile_writable,
+        connection_strategy: profile_ctx.connection_strategy,
         sensitive_values: profile_ctx.sensitive_values,
     };
     let report = run_doctor(&ctx);
@@ -1170,36 +1585,114 @@ mod stub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oraclemcp_config::HttpOAuthConfig;
 
     #[test]
     fn http_listen_refused_without_allow_no_auth() {
-        let err = http_listen_guard(false, "127.0.0.1:7070", false).unwrap_err();
+        let err = http_listen_guard(false, false, "127.0.0.1:7070", false).unwrap_err();
         assert_eq!(err.0, "ORACLEMCP_AUTH_REQUIRED");
     }
 
     #[test]
     fn http_listen_loopback_allowed_with_allow_no_auth() {
-        assert!(http_listen_guard(true, "127.0.0.1:7070", false).is_ok());
-        assert!(http_listen_guard(true, "[::1]:7070", false).is_ok());
+        assert!(http_listen_guard(true, false, "127.0.0.1:7070", false).is_ok());
+        assert!(http_listen_guard(true, false, "[::1]:7070", false).is_ok());
+    }
+
+    #[test]
+    fn http_listen_loopback_allowed_with_oauth() {
+        assert!(http_listen_guard(false, true, "127.0.0.1:7070", false).is_ok());
     }
 
     #[test]
     fn http_listen_non_loopback_refused_without_remote_optin() {
-        let err = http_listen_guard(true, "0.0.0.0:7070", false).unwrap_err();
+        let err = http_listen_guard(true, false, "0.0.0.0:7070", false).unwrap_err();
         assert_eq!(err.0, "ORACLEMCP_HTTP_REMOTE_BIND_REFUSED");
-        let err = http_listen_guard(true, "192.168.1.10:7070", false).unwrap_err();
+        let err = http_listen_guard(false, true, "192.168.1.10:7070", false).unwrap_err();
         assert_eq!(err.0, "ORACLEMCP_HTTP_REMOTE_BIND_REFUSED");
     }
 
     #[test]
     fn http_listen_non_loopback_allowed_with_remote_optin() {
-        assert!(http_listen_guard(true, "0.0.0.0:7070", true).is_ok());
+        assert!(http_listen_guard(true, false, "0.0.0.0:7070", true).is_ok());
+        assert!(http_listen_guard(false, true, "0.0.0.0:7070", true).is_ok());
     }
 
     #[test]
     fn http_listen_auth_refusal_precedes_remote_check() {
-        let err = http_listen_guard(false, "0.0.0.0:7070", true).unwrap_err();
+        let err = http_listen_guard(false, false, "0.0.0.0:7070", true).unwrap_err();
         assert_eq!(err.0, "ORACLEMCP_AUTH_REQUIRED");
+    }
+
+    #[test]
+    fn http_cli_oauth_builds_enforced_transport_config() {
+        let args = HttpServeArgs {
+            allowed_hosts: vec!["mcp.example.com".to_owned()],
+            allowed_origins: vec!["https://client.example.com".to_owned()],
+            json_response: true,
+            stateful: true,
+            oauth_resource: Some("https://mcp.example.com/mcp".to_owned()),
+            oauth_issuers: vec!["https://idp.example.com".to_owned()],
+            oauth_authorization_servers: vec!["https://idp.example.com".to_owned()],
+            oauth_required_scopes: vec!["oracle:read".to_owned()],
+            oauth_hs256_secret_ref: Some("literal:test-secret".to_owned()),
+            ..Default::default()
+        };
+        let http = apply_http_cli_overrides(HttpConfig::default(), &args);
+        let cfg = http_transport_config_from_merged(http, false, |_| None)
+            .expect("valid OAuth transport config");
+
+        assert!(cfg.oauth.is_some());
+        assert_eq!(
+            cfg.resource_metadata.as_ref().expect("metadata")["resource"],
+            serde_json::json!("https://mcp.example.com/mcp")
+        );
+        assert_eq!(cfg.allowed_hosts, ["mcp.example.com"]);
+        assert_eq!(cfg.allowed_origins, ["https://client.example.com"]);
+        assert!(cfg.json_response);
+        assert!(cfg.stateful);
+    }
+
+    #[test]
+    fn http_oauth_literal_secret_is_rejected_for_protected_profiles() {
+        let http = HttpConfig {
+            oauth: Some(HttpOAuthConfig {
+                resource: Some("https://mcp.example.com/mcp".to_owned()),
+                allowed_issuers: vec!["https://idp.example.com".to_owned()],
+                authorization_servers: vec!["https://idp.example.com".to_owned()],
+                required_scopes: vec!["oracle:read".to_owned()],
+                hs256_secret_ref: Some("literal:test-secret".to_owned()),
+                metadata_url: None,
+            }),
+            ..Default::default()
+        };
+
+        let err = http_transport_config_from_merged(http, true, |_| None)
+            .expect_err("protected profile rejects literal OAuth secret");
+        assert_eq!(err.0, "ORACLEMCP_HTTP_OAUTH_SECRET_INVALID");
+        assert!(err.1.contains("plaintext literal credential is forbidden"));
+        assert!(!err.1.contains("test-secret"));
+    }
+
+    #[test]
+    fn http_tls_material_is_rejected_until_native_tls_listener_exists() {
+        let args = HttpServeArgs {
+            tls_cert: Some("/etc/oraclemcp/server.pem".into()),
+            tls_key: Some("/etc/oraclemcp/server.key".into()),
+            mtls_client_ca: Some("/etc/oraclemcp/client-ca.pem".into()),
+            ..Default::default()
+        };
+        let http = apply_http_cli_overrides(HttpConfig::default(), &args);
+        assert_eq!(
+            http.tls
+                .as_ref()
+                .and_then(|tls| tls.client_ca_path.as_deref()),
+            Some(std::path::Path::new("/etc/oraclemcp/client-ca.pem"))
+        );
+
+        let err = http_transport_config_from_merged(http, false, |_| None)
+            .expect_err("native TLS listener is not wired");
+        assert_eq!(err.0, "ORACLEMCP_HTTP_TLS_UNSUPPORTED");
     }
 
     #[test]
@@ -1251,9 +1744,32 @@ mod tests {
             connect_string: "dbhost:1521/private_service".to_owned(),
             username: Some("APP_USER".to_owned()),
             password: Some("super_secret".to_owned()),
+            auth_adapter: oraclemcp_db::AuthAdapter::Proxy {
+                proxy_user: "MCP_PROXY".to_owned(),
+                target_schema: "APP_OWNER".to_owned(),
+            },
             wallet_location: Some("/home/operator/private-wallet".into()),
+            wallet_password: Some("wallet_secret".to_owned()),
+            ssl_server_cert_dn: Some("CN=private-db,O=Example,C=US".to_owned()),
             use_iam_token: true,
             iam_token: Some("iam.jwt.token".to_owned()),
+            app_context: vec![(
+                "private-namespace".to_owned(),
+                "private-key".to_owned(),
+                "private-value".to_owned(),
+            )],
+            session_identity: Some(oraclemcp_db::OracleSessionIdentity {
+                program: Some("private-program".to_owned()),
+                machine: Some("private-machine".to_owned()),
+                os_user: Some("private-os-user".to_owned()),
+                terminal: Some("private-terminal".to_owned()),
+                module: Some("private-module".to_owned()),
+                action: Some("private-action".to_owned()),
+                client_identifier: Some("private-client-id".to_owned()),
+                client_info: Some("private-client-info".to_owned()),
+                driver_name: Some("private-driver".to_owned()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let values = doctor_sensitive_values(&opts);
@@ -1261,11 +1777,69 @@ mod tests {
             "dbhost:1521/private_service",
             "APP_USER",
             "super_secret",
+            "MCP_PROXY",
+            "APP_OWNER",
             "/home/operator/private-wallet",
+            "wallet_secret",
+            "CN=private-db,O=Example,C=US",
             "iam.jwt.token",
+            "private-program",
+            "private-machine",
+            "private-os-user",
+            "private-terminal",
+            "private-module",
+            "private-action",
+            "private-client-id",
+            "private-client-info",
+            "private-driver",
+            "private-namespace",
+            "private-key",
+            "private-value",
         ] {
             assert!(values.iter().any(|value| value == expected), "{values:?}");
         }
+    }
+
+    #[test]
+    fn wallet_password_ref_uses_profile_secret_resolution_policy() {
+        let secret =
+            resolve_profile_secret("wallet_password_ref", "dev", Some("literal:wallet"), false)
+                .expect("dev literal")
+                .expect("secret");
+        assert_eq!(secret, "wallet");
+
+        let err =
+            resolve_profile_secret("wallet_password_ref", "prod", Some("literal:wallet"), true)
+                .expect_err("protected literal rejected");
+        assert!(err.to_string().contains("wallet_password_ref"));
+        assert!(
+            err.to_string()
+                .contains("plaintext literal credential is forbidden")
+        );
+    }
+
+    #[test]
+    fn profile_secret_resolution_errors_do_not_echo_secret_locators() {
+        let err = resolve_profile_secret(
+            "wallet_password_ref",
+            "prod",
+            Some("env:PRIVATE_WALLET_PASSWORD_NAME"),
+            true,
+        )
+        .expect_err("missing env var");
+        let rendered = err.to_string();
+        assert!(rendered.contains("wallet_password_ref"));
+        assert!(rendered.contains("secret not found"));
+        assert!(!rendered.contains("PRIVATE_WALLET_PASSWORD_NAME"));
+        assert!(!rendered.contains("env:"));
+
+        let err =
+            resolve_profile_secret("credential_ref", "prod", Some("noscheme-secret-ref"), true)
+                .expect_err("malformed ref");
+        let rendered = err.to_string();
+        assert!(rendered.contains("credential_ref"));
+        assert!(rendered.contains("malformed secret reference"));
+        assert!(!rendered.contains("noscheme-secret-ref"));
     }
 
     #[test]
@@ -1292,6 +1866,26 @@ mod tests {
             max_level = "READ_ONLY"
             default_level = "READ_ONLY"
             require_signed_tools = true
+            sdu = 32768
+
+            [profiles.oci]
+            wallet_location = "/wallets/private"
+            wallet_password_ref = "env:WALLET_PASSWORD"
+            ssl_server_cert_dn = "CN=private-db"
+
+            [profiles.proxy_auth]
+            proxy_user = "APP_USER"
+            target_schema = "APP_OWNER"
+
+            [profiles.drcp]
+            pooled = true
+            connection_class = "PRIVATE_CLASS"
+            purity = "reuse"
+
+            [[profiles.app_context]]
+            namespace = "ORACLEMCP_CTX"
+            key = "tenant_id"
+            value = "tenant-123"
             "#,
         )
         .expect("valid config");
@@ -1308,8 +1902,21 @@ mod tests {
         );
         let serialized = serde_json::to_string(&out).expect("json");
         assert!(!serialized.contains("APP_USER"));
+        assert!(!serialized.contains("APP_OWNER"));
         assert!(!serialized.contains("ORACLE_PASSWORD"));
+        assert!(!serialized.contains("WALLET_PASSWORD"));
+        assert!(!serialized.contains("/wallets/private"));
+        assert!(!serialized.contains("CN=private-db"));
         assert!(!serialized.contains("credential_ref"));
+        assert!(!serialized.contains("wallet_password_ref"));
+        assert!(!serialized.contains("proxy_auth"));
+        assert!(!serialized.contains("target_schema"));
+        assert!(!serialized.contains("PRIVATE_CLASS"));
+        assert!(!serialized.contains("drcp"));
+        assert!(!serialized.contains("ORACLEMCP_CTX"));
+        assert!(!serialized.contains("tenant_id"));
+        assert!(!serialized.contains("tenant-123"));
+        assert!(!serialized.contains("app_context"));
         assert!(!serialized.contains("FREEPDB1"));
         assert!(!serialized.contains("connect_string"));
     }
@@ -1339,6 +1946,26 @@ mod tests {
                 .expect("profiles_toml")
                 .contains("credential_ref = \"env:APP_PASSWORD\"")
         );
+        let profiles_toml = out["profiles_toml"].as_str().expect("profiles_toml");
+        OracleMcpConfig::from_toml_str(profiles_toml).expect("setup profiles TOML parses");
+        assert!(profiles_toml.contains("wallet_password_ref = \"env:WALLET_PASSWORD\""));
+        assert!(profiles_toml.contains("ssl_server_dn_match = true"));
+        assert!(profiles_toml.contains("ssl_server_cert_dn = \"CN=dbhost.example.com\""));
+        assert!(profiles_toml.contains("use_sni = true"));
+        assert!(profiles_toml.contains("sdu = 32768"));
+        assert!(profiles_toml.contains("[profiles.drcp]"));
+        assert!(profiles_toml.contains("connection_class = \"ORACLE_MCP_AGENTS\""));
+        assert!(profiles_toml.contains("purity = \"reuse\""));
+        assert!(profiles_toml.contains("# [profiles.pool]"));
+        assert!(profiles_toml.contains("# max_size = 4"));
+        assert!(profiles_toml.contains("[profiles.proxy_auth]"));
+        assert!(profiles_toml.contains("proxy_user = \"MCP_PROXY\""));
+        assert!(profiles_toml.contains("target_schema = \"APP_OWNER\""));
+        assert!(profiles_toml.contains("# edition = \"ORA$BASE\""));
+        assert!(profiles_toml.contains("program = \"oraclemcp\""));
+        assert!(profiles_toml.contains("machine = \"local-workstation\""));
+        assert!(profiles_toml.contains("os_user = \"local-agent\""));
+        assert!(profiles_toml.contains("terminal = \"agent\""));
         assert_eq!(
             out["claude_mcp_json"]["mcpServers"]["oracle"]["command"],
             serde_json::json!("/opt/oraclemcp-wrapper")
@@ -1445,6 +2072,7 @@ mod tests {
         assert!(text.contains("oraclemcp --json setup --profile <profile>"));
         assert!(text.contains("Thin diagnostics"));
         assert!(text.contains("does not need Oracle Instant Client"));
+        assert!(text.contains("Result materialization"));
         assert!(
             serde_json::to_string(&out)
                 .expect("json")
@@ -1508,6 +2136,12 @@ mod tests {
                 .contains("wallet paths")
         );
         assert!(
+            out["result_materialization"]["ref_cursors"]
+                .as_str()
+                .expect("ref cursor text")
+                .contains("nested result objects")
+        );
+        assert!(
             serde_json::to_string(&out)
                 .expect("json")
                 .contains("oracle_preview_sql")
@@ -1545,6 +2179,7 @@ mod tests {
         let conn = open_connection(OracleConnectOptions::default());
         let server = build_server(
             conn,
+            None,
             None,
             default_read_only_level(),
             false,

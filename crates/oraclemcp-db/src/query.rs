@@ -90,7 +90,7 @@ pub fn read_query(
 ) -> Result<QueryResponse, DbError> {
     let fetch = caps.max_rows.saturating_add(1).max(1);
     let wrapped = paginated_sql(sql, offset, fetch);
-    let rows = conn.query_rows(&wrapped, binds)?;
+    let rows = conn.query_rows_with_serialize_options(&wrapped, binds, serialize_opts)?;
     query_response_from_rows_checked(None, rows, caps, offset, serialize_opts)
 }
 
@@ -106,7 +106,7 @@ pub fn read_query_cx(
 ) -> Result<QueryResponse, DbError> {
     let fetch = caps.max_rows.saturating_add(1).max(1);
     let wrapped = paginated_sql(sql, offset, fetch);
-    let rows = conn.query_rows_cx(cx, &wrapped, binds)?;
+    let rows = conn.query_rows_with_serialize_options_cx(cx, &wrapped, binds, serialize_opts)?;
     query_response_from_rows_checked(Some(cx), rows, caps, offset, serialize_opts)
 }
 
@@ -123,7 +123,7 @@ pub fn read_query_named(
 ) -> Result<QueryResponse, DbError> {
     let fetch = caps.max_rows.saturating_add(1).max(1);
     let wrapped = paginated_sql(sql, offset, fetch);
-    let rows = conn.query_rows_named(&wrapped, binds)?;
+    let rows = conn.query_rows_named_with_serialize_options(&wrapped, binds, serialize_opts)?;
     query_response_from_rows_checked(None, rows, caps, offset, serialize_opts)
 }
 
@@ -139,7 +139,8 @@ pub fn read_query_named_cx(
 ) -> Result<QueryResponse, DbError> {
     let fetch = caps.max_rows.saturating_add(1).max(1);
     let wrapped = paginated_sql(sql, offset, fetch);
-    let rows = conn.query_rows_named_cx(cx, &wrapped, binds)?;
+    let rows =
+        conn.query_rows_named_with_serialize_options_cx(cx, &wrapped, binds, serialize_opts)?;
     query_response_from_rows_checked(Some(cx), rows, caps, offset, serialize_opts)
 }
 

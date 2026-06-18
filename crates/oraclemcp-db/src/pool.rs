@@ -11,7 +11,9 @@ use asupersync::Cx;
 
 use crate::connection::{OracleConnection, RustOracleConnection};
 use crate::error::DbError;
-use crate::types::{OracleBind, OracleConnectOptions, OracleConnectionInfo, OracleRow};
+use crate::types::{
+    OracleBackend, OracleBind, OracleConnectOptions, OracleConnectionInfo, OracleRow,
+};
 
 /// Opens thin [`RustOracleConnection`]s from one profile.
 #[derive(Clone, Debug)]
@@ -64,6 +66,8 @@ pub struct PoolSettings {
     pub min_idle: u32,
     /// Seconds to wait for a connection before `BUSY`.
     pub acquire_timeout_secs: u64,
+    /// Per-connection statement-cache size for pool-created sessions.
+    pub statement_cache_size: u32,
 }
 
 impl Default for PoolSettings {
@@ -72,6 +76,7 @@ impl Default for PoolSettings {
             max_size: 20,
             min_idle: 2,
             acquire_timeout_secs: 5,
+            statement_cache_size: 50,
         }
     }
 }
@@ -98,6 +103,7 @@ impl OraclePool {
             max_size: settings.max_size.max(1),
             min_idle: settings.min_idle.min(settings.max_size.max(1)),
             acquire_timeout_secs: settings.acquire_timeout_secs.max(1),
+            statement_cache_size: settings.statement_cache_size,
         };
         let mut idle = Vec::new();
         for _ in 0..settings.min_idle {
@@ -361,6 +367,65 @@ impl OraclePool {
     }
 }
 
+impl OracleConnection for OraclePool {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    fn ping(&self) -> Result<(), DbError> {
+        OraclePool::ping(self)
+    }
+
+    fn ping_cx(&self, cx: &Cx) -> Result<(), DbError> {
+        OraclePool::ping_cx(self, cx)
+    }
+
+    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        let mut info = OraclePool::describe(self)?;
+        info.connection_strategy = Some("stateless_metadata_pool".to_owned());
+        info.pool_open_connections = Some(self.state_connections());
+        Ok(info)
+    }
+
+    fn describe_cx(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        let mut info = OraclePool::describe_cx(self, cx)?;
+        info.connection_strategy = Some("stateless_metadata_pool".to_owned());
+        info.pool_open_connections = Some(self.state_connections());
+        Ok(info)
+    }
+
+    fn query_rows(&self, sql: &str, binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        OraclePool::query_rows(self, sql.to_owned(), binds.to_vec())
+    }
+
+    fn query_rows_cx(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        OraclePool::query_rows_cx(self, cx, sql.to_owned(), binds.to_vec())
+    }
+
+    fn execute(&self, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        Err(DbError::Execute(
+            "pooled stateless metadata connection does not execute statements".to_owned(),
+        ))
+    }
+
+    fn commit(&self) -> Result<(), DbError> {
+        Err(DbError::Execute(
+            "pooled stateless metadata connection does not own transactions".to_owned(),
+        ))
+    }
+
+    fn rollback(&self) -> Result<(), DbError> {
+        Err(DbError::Execute(
+            "pooled stateless metadata connection does not own transactions".to_owned(),
+        ))
+    }
+}
+
 fn should_discard_after_cx_call<T>(result: &Result<T, DbError>, manager_broken: bool) -> bool {
     result.is_err() || manager_broken
 }
@@ -375,6 +440,7 @@ mod tests {
         assert_eq!(s.max_size, 20);
         assert_eq!(s.min_idle, 2);
         assert_eq!(s.acquire_timeout_secs, 5);
+        assert_eq!(s.statement_cache_size, 50);
     }
 
     #[test]

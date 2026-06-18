@@ -72,6 +72,14 @@ pub struct SerializeOptions {
     pub max_lob_chars: usize,
     /// Max bytes of a BLOB to base64-inline before truncating.
     pub max_blob_bytes: usize,
+    /// Max rows fetched from a nested REF CURSOR / implicit result.
+    pub max_nested_cursor_rows: usize,
+    /// Max cells fetched from a nested REF CURSOR / implicit result.
+    pub max_nested_cursor_cells: usize,
+    /// Max serialized bytes for one nested REF CURSOR / implicit result.
+    pub max_nested_cursor_bytes: usize,
+    /// Max nested cursor depth. A top-level REF CURSOR cell is depth 0.
+    pub max_nested_cursor_depth: usize,
 }
 
 impl Default for SerializeOptions {
@@ -81,6 +89,10 @@ impl Default for SerializeOptions {
             max_text_chars: None,
             max_lob_chars: 32_768,
             max_blob_bytes: 1_048_576,
+            max_nested_cursor_rows: 100,
+            max_nested_cursor_cells: 1_000,
+            max_nested_cursor_bytes: 1_048_576,
+            max_nested_cursor_depth: 2,
         }
     }
 }
@@ -239,18 +251,23 @@ pub fn serialize_cell(cell: &OracleCell, opts: &SerializeOptions) -> Value {
 /// Serialize a cell whose column classification is already known, so a page of
 /// rows classifies each column once instead of once per cell.
 fn serialize_cell_classified(cell: &OracleCell, col: ColumnRepr, opts: &SerializeOptions) -> Value {
+    if let Some(nested) = &cell.nested_result {
+        return serialize_nested_result(nested, opts);
+    }
     // Binary columns carrying raw bytes always base64 (with a cap).
     if let Some(bytes) = &cell.bytes {
-        let truncated = bytes.len() > opts.max_blob_bytes;
-        let slice = if truncated {
-            &bytes[..opts.max_blob_bytes]
+        let byte_length = cell.source_length.unwrap_or(bytes.len());
+        let truncated = byte_length > opts.max_blob_bytes || bytes.len() > opts.max_blob_bytes;
+        let slice_len = if truncated {
+            bytes.len().min(opts.max_blob_bytes)
         } else {
-            &bytes[..]
+            bytes.len()
         };
+        let slice = &bytes[..slice_len];
         return json!({
             "encoding": "base64",
             "data": base64_encode(slice),
-            "byte_length": bytes.len(),
+            "byte_length": byte_length,
             "truncated": truncated,
         });
     }
@@ -283,7 +300,7 @@ fn serialize_cell_classified(cell: &OracleCell, col: ColumnRepr, opts: &Serializ
         }
         TypeRepr::Text | TypeRepr::Raw => capped_text_value(text, opts.max_text_chars),
         TypeRepr::Clob => {
-            let char_length = text.chars().count();
+            let char_length = cell.source_length.unwrap_or_else(|| text.chars().count());
             if char_length > opts.max_lob_chars {
                 let s: String = text.chars().take(opts.max_lob_chars).collect();
                 json!({ "value": s, "truncated": true, "char_length": char_length })
@@ -300,6 +317,37 @@ fn serialize_cell_classified(cell: &OracleCell, col: ColumnRepr, opts: &Serializ
             json!({ "unsupported": cell.oracle_type, "value": null, "warning": "type not serialized yet (§5.2)" })
         }
     }
+}
+
+fn serialize_nested_result(
+    nested: &crate::types::OracleNestedResult,
+    opts: &SerializeOptions,
+) -> Value {
+    let column_cache = nested.rows.first().map(PageColumnCache::from_row);
+    let mut rows = Vec::with_capacity(nested.rows.len());
+    let mut total_bytes = 0usize;
+    let mut byte_truncated = false;
+    for row in &nested.rows {
+        let value = match &column_cache {
+            Some(cache) => cache.serialize_row(row, opts),
+            None => serialize_row(row, opts),
+        };
+        let size = json_byte_len(&value);
+        if !rows.is_empty() && total_bytes + size > opts.max_nested_cursor_bytes {
+            byte_truncated = true;
+            break;
+        }
+        total_bytes = total_bytes.saturating_add(size);
+        rows.push(value);
+    }
+    let row_count = rows.len();
+    json!({
+        "columns": nested.columns,
+        "rows": rows,
+        "row_count": row_count,
+        "fetched_count": nested.fetched_count,
+        "truncated": nested.truncated || byte_truncated || row_count < nested.rows.len(),
+    })
 }
 
 /// Serialize a row to a JSON object keyed by (last-wins) column name.
@@ -351,6 +399,7 @@ impl PageColumnCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::OracleNestedResult;
 
     fn cell(t: &str, v: &str) -> OracleCell {
         OracleCell::new(t, Some(v.to_owned()))
@@ -491,6 +540,69 @@ mod tests {
         let v = serialize_cell(&c, &opts);
         assert_eq!(v["byte_length"], json!(5));
         assert_eq!(v["truncated"], json!(true));
+    }
+
+    #[test]
+    fn nested_result_serializes_rows_and_counts() {
+        let nested = OracleNestedResult {
+            columns: vec!["N".to_owned(), "LABEL".to_owned()],
+            rows: vec![
+                OracleRow {
+                    columns: vec![
+                        ("N".to_owned(), cell("NUMBER", "1")),
+                        ("LABEL".to_owned(), cell("VARCHAR2", "one")),
+                    ],
+                },
+                OracleRow {
+                    columns: vec![
+                        ("N".to_owned(), cell("NUMBER", "2")),
+                        ("LABEL".to_owned(), cell("VARCHAR2", "two")),
+                    ],
+                },
+            ],
+            row_count: 2,
+            fetched_count: 2,
+            truncated: false,
+        };
+        let rendered = serialize_cell(
+            &OracleCell::nested_result("REF CURSOR", nested),
+            &SerializeOptions::default(),
+        );
+
+        assert_eq!(rendered["columns"], json!(["N", "LABEL"]));
+        assert_eq!(rendered["row_count"], json!(2));
+        assert_eq!(rendered["fetched_count"], json!(2));
+        assert_eq!(rendered["truncated"], json!(false));
+        assert_eq!(rendered["rows"][0], json!({ "N": "1", "LABEL": "one" }));
+    }
+
+    #[test]
+    fn nested_result_byte_cap_marks_truncated() {
+        let nested = OracleNestedResult {
+            columns: vec!["TEXT".to_owned()],
+            rows: vec![
+                OracleRow {
+                    columns: vec![("TEXT".to_owned(), cell("VARCHAR2", "short"))],
+                },
+                OracleRow {
+                    columns: vec![("TEXT".to_owned(), cell("VARCHAR2", "longer row"))],
+                },
+            ],
+            row_count: 2,
+            fetched_count: 2,
+            truncated: false,
+        };
+        let rendered = serialize_cell(
+            &OracleCell::nested_result("REF CURSOR", nested),
+            &SerializeOptions {
+                max_nested_cursor_bytes: 16,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(rendered["row_count"], json!(1));
+        assert_eq!(rendered["fetched_count"], json!(2));
+        assert_eq!(rendered["truncated"], json!(true));
     }
 
     #[test]

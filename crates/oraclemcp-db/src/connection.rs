@@ -6,6 +6,7 @@
 //! `&asupersync::Cx` checkpoints around DB calls.
 
 use crate::error::DbError;
+use crate::serialize::SerializeOptions;
 use crate::types::{
     OracleBackend, OracleBind, OracleConnectOptions, OracleConnectionInfo, OracleRow,
 };
@@ -66,6 +67,18 @@ pub trait OracleConnection: Send {
     /// Run a query, binding `binds` positionally (`:1`, `:2`, …). Values are
     /// always bound, never interpolated.
     fn query_rows(&self, sql: &str, binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError>;
+    /// Run a query with serialization caps available to the backend. Backends
+    /// that materialize driver-side locators should use these caps; backends
+    /// without locator values can fall back to [`OracleConnection::query_rows`].
+    fn query_rows_with_serialize_options(
+        &self,
+        sql: &str,
+        binds: &[OracleBind],
+        serialize_opts: &SerializeOptions,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let _ = serialize_opts;
+        self.query_rows(sql, binds)
+    }
     /// Cancellation-aware positional query.
     fn query_rows_cx(
         &self,
@@ -78,6 +91,21 @@ pub trait OracleConnection: Send {
             "oracle_db.query_rows.before",
             "oracle_db.query_rows.after",
             || self.query_rows(sql, binds),
+        )
+    }
+    /// Cancellation-aware positional query with serialization caps.
+    fn query_rows_with_serialize_options_cx(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+        serialize_opts: &SerializeOptions,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        db_checkpointed(
+            cx,
+            "oracle_db.query_rows.before",
+            "oracle_db.query_rows.after",
+            || self.query_rows_with_serialize_options(sql, binds, serialize_opts),
         )
     }
     /// Run a query, binding `binds` by name (`:name`). Values are always bound,
@@ -93,6 +121,16 @@ pub trait OracleConnection: Send {
             "named binds are not supported by this Oracle backend".to_owned(),
         ))
     }
+    /// Run a named-bind query with serialization caps available to the backend.
+    fn query_rows_named_with_serialize_options(
+        &self,
+        sql: &str,
+        binds: &[(String, OracleBind)],
+        serialize_opts: &SerializeOptions,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let _ = serialize_opts;
+        self.query_rows_named(sql, binds)
+    }
     /// Cancellation-aware named-bind query.
     fn query_rows_named_cx(
         &self,
@@ -105,6 +143,21 @@ pub trait OracleConnection: Send {
             "oracle_db.query_rows_named.before",
             "oracle_db.query_rows_named.after",
             || self.query_rows_named(sql, binds),
+        )
+    }
+    /// Cancellation-aware named-bind query with serialization caps.
+    fn query_rows_named_with_serialize_options_cx(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[(String, OracleBind)],
+        serialize_opts: &SerializeOptions,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        db_checkpointed(
+            cx,
+            "oracle_db.query_rows_named.before",
+            "oracle_db.query_rows_named.after",
+            || self.query_rows_named_with_serialize_options(sql, binds, serialize_opts),
         )
     }
     /// Run a DML/DDL statement; returns rows affected (`SQL%ROWCOUNT`).
@@ -263,11 +316,14 @@ fn duration_to_millis(duration: Duration) -> u32 {
 
 mod driver {
     use super::{DbmsOutput, RustOracleConnection};
+    use crate::auth_adapter::AuthAdapter;
     use crate::error::DbError;
+    use crate::serialize::SerializeOptions;
     use crate::types::{
-        OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow,
-        OracleSessionIdentity,
+        OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleNestedResult,
+        OracleRow, OracleSessionIdentity,
     };
+    use oracledb::protocol::thin::{CursorValue, LobValue};
     use oracledb::protocol::{
         ClientIdentity,
         thin::{
@@ -279,13 +335,33 @@ mod driver {
             ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_ROWID,
             ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ,
             ORA_TYPE_NUM_UROWID, ORA_TYPE_NUM_VARCHAR, ORA_TYPE_NUM_VECTOR, QueryResult,
-            QueryValue,
+            QueryValue, decode_lob_text,
         },
     };
     use std::fmt::Display;
     use std::sync::Mutex;
 
     const FETCH_BATCH_ROWS: u32 = 512;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct LobReadLimits {
+        max_lob_chars: usize,
+        max_blob_bytes: usize,
+    }
+
+    impl From<&SerializeOptions> for LobReadLimits {
+        fn from(opts: &SerializeOptions) -> Self {
+            Self {
+                max_lob_chars: opts.max_lob_chars,
+                max_blob_bytes: opts.max_blob_bytes,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    struct LobReadData {
+        data: Option<Vec<u8>>,
+    }
 
     pub(super) fn connect(opts: OracleConnectOptions) -> Result<RustOracleConnection, DbError> {
         let mut inner = oracledb::BlockingConnection::connect(to_connect_options(&opts)?)
@@ -305,9 +381,33 @@ mod driver {
         })
     }
 
-    fn to_connect_options(
+    pub(super) fn to_connect_options(
         opts: &OracleConnectOptions,
     ) -> Result<oracledb::ConnectOptions, DbError> {
+        opts.auth_adapter
+            .validate()
+            .map_err(|err| DbError::UnsupportedAuth(err.to_string()))?;
+        match &opts.auth_adapter {
+            AuthAdapter::Kerberos { .. } => {
+                return Err(DbError::UnsupportedAuth(
+                    "Kerberos authentication is not supported by the published thin driver yet"
+                        .to_owned(),
+                ));
+            }
+            AuthAdapter::Radius => {
+                return Err(DbError::UnsupportedAuth(
+                    "RADIUS/native MFA authentication is not supported by the published thin driver yet"
+                        .to_owned(),
+                ));
+            }
+            AuthAdapter::External => {
+                return Err(DbError::UnsupportedAuth(
+                    "external/wallet auth without username and password is not supported by the published thin driver yet"
+                        .to_owned(),
+                ));
+            }
+            AuthAdapter::Password | AuthAdapter::Proxy { .. } => {}
+        }
         if opts.use_iam_token || opts.iam_token.is_some() {
             return Err(DbError::UnsupportedAuth(
                 "OCI IAM database-token auth is not supported by the published thin driver yet"
@@ -329,8 +429,43 @@ mod driver {
         let identity = client_identity(opts.session_identity.as_ref())?;
         let mut connect_options =
             oracledb::ConnectOptions::new(&opts.connect_string, user, password, identity);
+        // session_identity.edition must be sent during authentication so no user
+        // SQL runs under the default edition before the requested edition applies.
+        if let Some(edition) = opts
+            .session_identity
+            .as_ref()
+            .and_then(|identity| identity.edition.as_deref())
+        {
+            connect_options = connect_options.with_edition(edition.to_owned());
+        }
+        if !opts.app_context.is_empty() {
+            connect_options = connect_options.with_app_context(opts.app_context.clone());
+        }
+        if let Some(sdu) = opts.sdu {
+            connect_options = connect_options.with_sdu(sdu);
+        }
+        if let Some(statement_cache_size) = opts.statement_cache_size {
+            connect_options =
+                connect_options.with_statement_cache_size(statement_cache_size as usize);
+        }
+        if let Some(proxy_user) = opts.auth_adapter.proxy_connect_user() {
+            connect_options = connect_options.with_proxy_user(Some(proxy_user));
+        }
         if let Some(wallet) = &opts.wallet_location {
             connect_options = connect_options.with_wallet_location(wallet.display().to_string());
+        }
+        if let Some(wallet_password) = &opts.wallet_password {
+            connect_options = connect_options.with_wallet_password(wallet_password.clone());
+        }
+        if let Some(enabled) = opts.ssl_server_dn_match {
+            connect_options = connect_options.with_ssl_server_dn_match(enabled);
+        }
+        if let Some(dn) = &opts.ssl_server_cert_dn {
+            connect_options = connect_options.with_ssl_server_cert_dn(dn.clone());
+        }
+        if let Some(use_sni) = opts.use_sni {
+            connect_options = connect_options.with_use_sni(use_sni);
+        } else if opts.wallet_location.is_some() {
             connect_options = connect_options.with_use_sni(true);
         }
         Ok(connect_options)
@@ -339,18 +474,26 @@ mod driver {
     fn client_identity(
         identity: Option<&OracleSessionIdentity>,
     ) -> Result<ClientIdentity, DbError> {
-        let module = identity
-            .and_then(|value| value.module.as_deref())
+        let program = identity
+            .and_then(|value| value.program.as_deref())
+            .or_else(|| identity.and_then(|value| value.module.as_deref()))
             .unwrap_or("oraclemcp");
         let terminal = identity
-            .and_then(|value| value.client_identifier.as_deref())
+            .and_then(|value| value.terminal.as_deref())
+            .or_else(|| identity.and_then(|value| value.client_identifier.as_deref()))
             .unwrap_or("oraclemcp");
         let driver_name = identity
             .and_then(|value| value.driver_name.as_deref())
             .unwrap_or("oraclemcp-thin");
-        let machine = std::env::var("HOSTNAME").unwrap_or_else(|_| "oraclemcp".to_owned());
-        let osuser = std::env::var("USER").unwrap_or_else(|_| "oraclemcp".to_owned());
-        ClientIdentity::new(module, machine, osuser, terminal, driver_name)
+        let machine = identity
+            .and_then(|value| value.machine.clone())
+            .unwrap_or_else(|| {
+                std::env::var("HOSTNAME").unwrap_or_else(|_| "oraclemcp".to_owned())
+            });
+        let osuser = identity
+            .and_then(|value| value.os_user.clone())
+            .unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "oraclemcp".to_owned()));
+        ClientIdentity::new(program, machine, osuser, terminal, driver_name)
             .map_err(|err| DbError::Connect(err.to_string()))
     }
 
@@ -362,12 +505,6 @@ mod driver {
         let Some(identity) = identity.filter(|identity| !identity.is_empty()) else {
             return Ok(());
         };
-        if identity.edition.is_some() {
-            return Err(DbError::UnsupportedFeature(
-                "edition-based redefinition selection is not supported by the published thin driver yet"
-                    .to_owned(),
-            ));
-        }
         if let Some(module) = identity.module.as_deref() {
             let action = identity.action.as_deref().unwrap_or("");
             execute_raw(
@@ -451,6 +588,19 @@ mod driver {
         .map_err(|err| DbError::Query(format!("{context}: {}", sanitize_driver_error(err, opts))))
     }
 
+    pub(super) fn prefetch_rows_for_statement(sql: &str) -> u32 {
+        if sql
+            .trim_start()
+            .split(|ch: char| !ch.is_ascii_alphabetic())
+            .next()
+            .is_some_and(|keyword| keyword.eq_ignore_ascii_case("select"))
+        {
+            FETCH_BATCH_ROWS
+        } else {
+            0
+        }
+    }
+
     fn output_value(result: &QueryResult, bind_index: usize) -> Option<&QueryValue> {
         result
             .out_values
@@ -458,22 +608,118 @@ mod driver {
             .find_map(|(index, value)| (*index == bind_index).then_some(value.as_ref()).flatten())
     }
 
+    fn order_named_binds_for_driver(sql: &str, named: Vec<(String, BindValue)>) -> Vec<BindValue> {
+        let order = placeholder_order(sql);
+        let mut remaining = named;
+        let mut out = Vec::with_capacity(remaining.len());
+        for placeholder in &order {
+            if let Some(pos) = remaining
+                .iter()
+                .position(|(name, _)| name_matches(name, placeholder))
+            {
+                let (_, value) = remaining.remove(pos);
+                out.push(value);
+            }
+        }
+        for (_, value) in remaining {
+            out.push(value);
+        }
+        out
+    }
+
+    fn name_matches(supplied: &str, scanned: &str) -> bool {
+        supplied
+            .trim_start_matches(':')
+            .eq_ignore_ascii_case(scanned.trim_start_matches(':'))
+    }
+
+    fn placeholder_order(sql: &str) -> Vec<String> {
+        let bytes = sql.as_bytes();
+        let mut seen: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\'' => {
+                    i += 1;
+                    while i < bytes.len() {
+                        if bytes[i] == b'\'' {
+                            if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                                i += 2;
+                                continue;
+                            }
+                            i += 1;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        i += 1;
+                    }
+                    i = i.saturating_add(1);
+                }
+                b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                    i += 2;
+                    while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                        i += 1;
+                    }
+                    i = i.saturating_add(2).min(bytes.len());
+                }
+                b':' => {
+                    let start = i + 1;
+                    let mut j = start;
+                    while j < bytes.len()
+                        && (bytes[j].is_ascii_alphanumeric()
+                            || bytes[j] == b'_'
+                            || bytes[j] == b'$')
+                    {
+                        j += 1;
+                    }
+                    if j > start {
+                        let name = sql[start..j].to_owned();
+                        if !seen.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                            seen.push(name);
+                        }
+                    }
+                    i = j;
+                }
+                _ => i += 1,
+            }
+        }
+        seen
+    }
+
     fn collect_all_rows(
         inner: &mut oracledb::Connection,
         mut result: QueryResult,
         opts: &OracleConnectOptions,
+        serialize_opts: &SerializeOptions,
+        timeout_ms: Option<u32>,
     ) -> Result<Vec<OracleRow>, DbError> {
         let cursor_id = result.cursor_id;
+        let implicit_resultsets = result.implicit_resultsets.take();
         let mut columns = result.columns.clone();
         let mut rows = std::mem::take(&mut result.rows);
         let mut previous_row = rows.last().cloned();
-        while result.more_rows && cursor_id != 0 {
-            let fetched = oracledb::BlockingConnection::fetch_rows_with_columns(
+        let has_parent_result = !columns.is_empty();
+        if has_parent_result
+            && rows.is_empty()
+            && cursor_id != 0
+            && columns_require_define(&columns)
+        {
+            let fetched = oracledb::BlockingConnection::define_and_fetch_rows_with_columns(
                 inner,
                 cursor_id,
                 FETCH_BATCH_ROWS,
                 &columns,
-                previous_row.as_deref(),
+                None,
             )
             .map_err(|err| DbError::Query(sanitize_driver_error(err, opts)))?;
             if !fetched.columns.is_empty() {
@@ -483,31 +729,95 @@ mod driver {
             rows.extend(fetched.rows);
             result.more_rows = fetched.more_rows;
         }
+        while has_parent_result && result.more_rows && cursor_id != 0 {
+            let fetched = if columns_require_define(&columns) {
+                oracledb::BlockingConnection::define_and_fetch_rows_with_columns(
+                    inner,
+                    cursor_id,
+                    FETCH_BATCH_ROWS,
+                    &columns,
+                    previous_row.as_deref(),
+                )
+            } else {
+                oracledb::BlockingConnection::fetch_rows_with_columns(
+                    inner,
+                    cursor_id,
+                    FETCH_BATCH_ROWS,
+                    &columns,
+                    previous_row.as_deref(),
+                )
+            }
+            .map_err(|err| DbError::Query(sanitize_driver_error(err, opts)))?;
+            if !fetched.columns.is_empty() {
+                columns = fetched.columns.clone();
+            }
+            previous_row = fetched.rows.last().cloned();
+            rows.extend(fetched.rows);
+            result.more_rows = fetched.more_rows;
+        }
+        let mut converted =
+            rows_to_oracle_rows(inner, &columns, rows, opts, serialize_opts, timeout_ms, 0)?;
+        if let Some(implicit_resultsets) = implicit_resultsets
+            && let Some(row) = implicit_resultsets_to_row(
+                inner,
+                implicit_resultsets,
+                opts,
+                serialize_opts,
+                timeout_ms,
+            )?
+        {
+            converted.push(row);
+        }
         if cursor_id != 0 {
             inner.release_cursor(cursor_id);
         }
-        rows_to_oracle_rows(&columns, rows)
+        Ok(converted)
+    }
+
+    fn columns_require_define(columns: &[ColumnMetadata]) -> bool {
+        columns.iter().any(|column| {
+            matches!(
+                column.ora_type_num,
+                ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR | ORA_TYPE_NUM_JSON
+            )
+        })
     }
 
     fn rows_to_oracle_rows(
+        inner: &mut oracledb::Connection,
         columns: &[ColumnMetadata],
         rows: Vec<Vec<Option<QueryValue>>>,
+        opts: &OracleConnectOptions,
+        serialize_opts: &SerializeOptions,
+        timeout_ms: Option<u32>,
+        depth: usize,
     ) -> Result<Vec<OracleRow>, DbError> {
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let mut cells = Vec::with_capacity(columns.len());
             for (idx, meta) in columns.iter().enumerate() {
                 let value = row.get(idx).cloned().flatten();
-                cells.push((meta.name.clone(), value_to_cell(meta, value)));
+                cells.push((
+                    meta.name.clone(),
+                    value_to_cell(inner, meta, value, opts, serialize_opts, timeout_ms, depth)?,
+                ));
             }
             out.push(OracleRow { columns: cells });
         }
         Ok(out)
     }
 
-    fn value_to_cell(meta: &ColumnMetadata, value: Option<QueryValue>) -> OracleCell {
+    fn value_to_cell(
+        inner: &mut oracledb::Connection,
+        meta: &ColumnMetadata,
+        value: Option<QueryValue>,
+        opts: &OracleConnectOptions,
+        serialize_opts: &SerializeOptions,
+        timeout_ms: Option<u32>,
+        depth: usize,
+    ) -> Result<OracleCell, DbError> {
         let oracle_type = oracle_type_name(meta);
-        match value {
+        let cell = match value {
             None => OracleCell::new(oracle_type, None),
             Some(
                 QueryValue::Text(value)
@@ -553,19 +863,35 @@ mod driver {
             Some(QueryValue::IntervalYM { years, months }) => {
                 OracleCell::new(oracle_type, Some(format!("{years}-{months}")))
             }
-            Some(QueryValue::Cursor(cursor)) => OracleCell::new(
-                oracle_type,
-                Some(format!(
-                    "<unsupported REF CURSOR {} columns cursor_id={}>",
-                    cursor.columns.len(),
-                    cursor.cursor_id
-                )),
-            ),
+            Some(QueryValue::Cursor(cursor)) => {
+                return materialize_cursor_cell(
+                    inner,
+                    oracle_type,
+                    &cursor,
+                    opts,
+                    serialize_opts,
+                    timeout_ms,
+                    depth,
+                );
+            }
             Some(QueryValue::Object(value)) => OracleCell::binary(oracle_type, value.packed_data),
-            Some(QueryValue::Lob(value)) => OracleCell::new(
-                oracle_type,
-                Some(format!("<unsupported LOB locator size={}>", value.size)),
-            ),
+            Some(QueryValue::Lob(value)) => {
+                let limits = LobReadLimits::from(serialize_opts);
+                let mut read_lob =
+                    |locator: &[u8], offset: u64, amount: u64| -> Result<LobReadData, DbError> {
+                        oracledb::BlockingConnection::read_lob_with_timeout(
+                            inner, locator, offset, amount, timeout_ms,
+                        )
+                        .map(|result| LobReadData { data: result.data })
+                        .map_err(|err| {
+                            DbError::Query(format!(
+                                "LOB locator read failed: {}",
+                                sanitize_driver_error(err, opts)
+                            ))
+                        })
+                    };
+                return materialize_lob_cell(oracle_type, &value, limits, &mut read_lob);
+            }
             Some(QueryValue::Vector(value)) => {
                 OracleCell::new(oracle_type, Some(format!("{value:?}")))
             }
@@ -576,6 +902,501 @@ mod driver {
                 oracle_type,
                 Some(format!("<unsupported ARRAY len={}>", values.len())),
             ),
+        };
+        Ok(cell)
+    }
+
+    fn implicit_resultsets_to_row(
+        inner: &mut oracledb::Connection,
+        values: Vec<QueryValue>,
+        opts: &OracleConnectOptions,
+        serialize_opts: &SerializeOptions,
+        timeout_ms: Option<u32>,
+    ) -> Result<Option<OracleRow>, DbError> {
+        let mut columns = Vec::with_capacity(values.len());
+        for (idx, value) in values.into_iter().enumerate() {
+            let name = format!("IMPLICIT_RESULT_{}", idx + 1);
+            let cell = match value {
+                QueryValue::Cursor(cursor) => materialize_cursor_cell(
+                    inner,
+                    "REF CURSOR".to_owned(),
+                    &cursor,
+                    opts,
+                    serialize_opts,
+                    timeout_ms,
+                    0,
+                )?,
+                other => OracleCell::new(
+                    "VARCHAR2",
+                    Some(format!(
+                        "<unsupported implicit resultset value {}: {other:?}>",
+                        idx + 1
+                    )),
+                ),
+            };
+            columns.push((name, cell));
+        }
+        if columns.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(OracleRow { columns }))
+        }
+    }
+
+    fn materialize_cursor_cell(
+        inner: &mut oracledb::Connection,
+        oracle_type: String,
+        cursor: &CursorValue,
+        opts: &OracleConnectOptions,
+        serialize_opts: &SerializeOptions,
+        timeout_ms: Option<u32>,
+        depth: usize,
+    ) -> Result<OracleCell, DbError> {
+        if depth >= serialize_opts.max_nested_cursor_depth {
+            inner.release_cursor(cursor.cursor_id);
+            return Ok(OracleCell::nested_result(
+                oracle_type,
+                OracleNestedResult {
+                    columns: cursor_column_names(&cursor.columns),
+                    truncated: true,
+                    ..Default::default()
+                },
+            ));
+        }
+        let (row_cap, fetch_limit, cell_limited) = cursor_caps(cursor, serialize_opts);
+        let result = match oracledb::BlockingConnection::fetch_cursor(inner, cursor, fetch_limit) {
+            Ok(result) => result,
+            Err(err) => {
+                inner.release_cursor(cursor.cursor_id);
+                return Err(DbError::Query(format!(
+                    "REF CURSOR fetch failed: {}",
+                    sanitize_driver_error(err, opts)
+                )));
+            }
+        };
+        let mut rows = result.rows;
+        let fetched_count = rows.len().min(row_cap);
+        let row_limited = rows.len() > row_cap;
+        rows.truncate(row_cap);
+        let columns = if result.columns.is_empty() {
+            cursor.columns.clone()
+        } else {
+            result.columns
+        };
+        let nested_rows = rows_to_oracle_rows(
+            inner,
+            &columns,
+            rows,
+            opts,
+            serialize_opts,
+            timeout_ms,
+            depth + 1,
+        )?;
+        Ok(OracleCell::nested_result(
+            oracle_type,
+            OracleNestedResult {
+                columns: cursor_column_names(&columns),
+                row_count: nested_rows.len(),
+                fetched_count,
+                rows: nested_rows,
+                truncated: row_limited || cell_limited,
+            },
+        ))
+    }
+
+    fn cursor_caps(cursor: &CursorValue, opts: &SerializeOptions) -> (usize, usize, bool) {
+        let column_count = cursor.columns.len().max(1);
+        let rows_by_cells = opts.max_nested_cursor_cells / column_count;
+        let row_cap = opts.max_nested_cursor_rows.min(rows_by_cells);
+        let cell_limited = row_cap < opts.max_nested_cursor_rows;
+        let fetch_limit = row_cap.saturating_add(1).max(1);
+        (row_cap, fetch_limit, cell_limited)
+    }
+
+    fn cursor_column_names(columns: &[ColumnMetadata]) -> Vec<String> {
+        columns.iter().map(|column| column.name.clone()).collect()
+    }
+
+    fn materialize_lob_cell(
+        oracle_type: String,
+        lob: &LobValue,
+        limits: LobReadLimits,
+        read_lob: &mut impl FnMut(&[u8], u64, u64) -> Result<LobReadData, DbError>,
+    ) -> Result<OracleCell, DbError> {
+        match lob.ora_type_num {
+            ORA_TYPE_NUM_CLOB => materialize_text_lob(oracle_type, lob, limits, read_lob),
+            ORA_TYPE_NUM_BLOB => materialize_binary_lob(
+                oracle_type,
+                lob,
+                Some(lob.size),
+                limits.max_blob_bytes,
+                read_lob,
+            ),
+            ORA_TYPE_NUM_BFILE => {
+                materialize_binary_lob(oracle_type, lob, None, limits.max_blob_bytes, read_lob)
+            }
+            other => Err(DbError::Query(format!(
+                "unsupported LOB locator type ORA_TYPE_{other}"
+            ))),
+        }
+    }
+
+    fn materialize_text_lob(
+        oracle_type: String,
+        lob: &LobValue,
+        limits: LobReadLimits,
+        read_lob: &mut impl FnMut(&[u8], u64, u64) -> Result<LobReadData, DbError>,
+    ) -> Result<OracleCell, DbError> {
+        let source_length = saturating_usize(lob.size);
+        let amount = known_lob_read_amount(lob.size, limits.max_lob_chars);
+        let data = read_lob_bytes(lob, amount, read_lob)?;
+        let text = if data.is_empty() {
+            String::new()
+        } else {
+            decode_lob_text(&data, lob.csfrm, Some(&lob.locator))
+                .map_err(|err| DbError::Query(format!("LOB text decode failed: {err}")))?
+        };
+        Ok(OracleCell::new(oracle_type, Some(text)).with_source_length(source_length))
+    }
+
+    fn materialize_binary_lob(
+        oracle_type: String,
+        lob: &LobValue,
+        known_size: Option<u64>,
+        cap: usize,
+        read_lob: &mut impl FnMut(&[u8], u64, u64) -> Result<LobReadData, DbError>,
+    ) -> Result<OracleCell, DbError> {
+        let amount = known_size.map_or_else(
+            || unknown_lob_read_amount(cap),
+            |size| known_lob_read_amount(size, cap),
+        );
+        let data = read_lob_bytes(lob, amount, read_lob)?;
+        let mut cell = OracleCell::binary(oracle_type, data);
+        if let Some(source_length) = known_size.map(saturating_usize) {
+            cell = cell.with_source_length(source_length);
+        }
+        Ok(cell)
+    }
+
+    fn read_lob_bytes(
+        lob: &LobValue,
+        amount: u64,
+        read_lob: &mut impl FnMut(&[u8], u64, u64) -> Result<LobReadData, DbError>,
+    ) -> Result<Vec<u8>, DbError> {
+        if amount == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(read_lob(&lob.locator, 1, amount)?.data.unwrap_or_default())
+    }
+
+    fn known_lob_read_amount(size: u64, cap: usize) -> u64 {
+        size.min(u64::try_from(cap).unwrap_or(u64::MAX))
+    }
+
+    fn unknown_lob_read_amount(cap: usize) -> u64 {
+        u64::try_from(cap).unwrap_or(u64::MAX).saturating_add(1)
+    }
+
+    fn saturating_usize(value: u64) -> usize {
+        usize::try_from(value).unwrap_or(usize::MAX)
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::items_after_test_module)]
+    mod lob_tests {
+        use super::*;
+        use crate::serialize::serialize_cell;
+        use oracledb::protocol::thin::{CS_FORM_IMPLICIT, ORA_TYPE_NUM_RAW};
+        use serde_json::json;
+
+        fn lob(ora_type_num: u8, size: u64) -> LobValue {
+            LobValue {
+                ora_type_num,
+                csfrm: CS_FORM_IMPLICIT,
+                locator: vec![7; 40],
+                size,
+                chunk_size: 8192,
+            }
+        }
+
+        fn cursor(column_count: usize) -> CursorValue {
+            CursorValue {
+                columns: (0..column_count)
+                    .map(|idx| ColumnMetadata {
+                        name: format!("C{idx}"),
+                        ..Default::default()
+                    })
+                    .collect(),
+                cursor_id: 42,
+            }
+        }
+
+        #[cfg(feature = "live-xe")]
+        fn live_opts_from_env() -> Option<OracleConnectOptions> {
+            Some(OracleConnectOptions {
+                connect_string: std::env::var("ORACLEMCP_TEST_DSN").ok()?,
+                username: Some(std::env::var("ORACLEMCP_TEST_USER").ok()?),
+                password: Some(std::env::var("ORACLEMCP_TEST_PASSWORD").ok()?),
+                ..Default::default()
+            })
+        }
+
+        #[test]
+        fn cursor_caps_enforce_rows_and_cells_with_sentinel_fetch() {
+            let opts = SerializeOptions {
+                max_nested_cursor_rows: 10,
+                max_nested_cursor_cells: 12,
+                ..Default::default()
+            };
+
+            assert_eq!(cursor_caps(&cursor(2), &opts), (6, 7, true));
+            assert_eq!(cursor_caps(&cursor(1), &opts), (10, 11, false));
+        }
+
+        #[test]
+        fn named_binds_are_ordered_by_first_real_placeholder() {
+            let ordered = order_named_binds_for_driver(
+                "select ':ignored' as s, :a, :b, :a from dual -- :commented\n\
+                 where c = :c /* :also_ignored */ and quoted = \":identifier\"",
+                vec![
+                    (":c".to_owned(), BindValue::Text("three".to_owned())),
+                    (":b".to_owned(), BindValue::Number("2".to_owned())),
+                    (":a".to_owned(), BindValue::Number("1".to_owned())),
+                    (":unused".to_owned(), BindValue::Text("tail".to_owned())),
+                ],
+            );
+
+            assert_eq!(ordered.len(), 4);
+            assert!(matches!(&ordered[0], BindValue::Number(value) if value == "1"));
+            assert!(matches!(&ordered[1], BindValue::Number(value) if value == "2"));
+            assert!(matches!(&ordered[2], BindValue::Text(value) if value == "three"));
+            assert!(matches!(&ordered[3], BindValue::Text(value) if value == "tail"));
+        }
+
+        #[cfg(feature = "live-xe")]
+        #[test]
+        fn cursor_fetch_failure_leaves_connection_usable() {
+            let Some(opts) = live_opts_from_env() else {
+                eprintln!(
+                    "[live-xe] SKIP cursor_fetch_failure_leaves_connection_usable: set ORACLEMCP_TEST_*"
+                );
+                return;
+            };
+            let mut inner = match oracledb::BlockingConnection::connect(
+                to_connect_options(&opts).expect("connect options"),
+            ) {
+                Ok(conn) => conn,
+                Err(err) => {
+                    eprintln!(
+                        "[live-xe] SKIP cursor_fetch_failure_leaves_connection_usable: no reachable Oracle ({})",
+                        sanitize_driver_error(err, &opts)
+                    );
+                    return;
+                }
+            };
+            let mut invalid_cursor = cursor(1);
+            invalid_cursor.cursor_id = u32::MAX;
+
+            let err = materialize_cursor_cell(
+                &mut inner,
+                "REF CURSOR".to_owned(),
+                &invalid_cursor,
+                &opts,
+                &SerializeOptions::default(),
+                None,
+                0,
+            )
+            .expect_err("invalid cursor id should fail");
+
+            assert!(
+                err.to_string().contains("REF CURSOR fetch failed"),
+                "unexpected error: {err}"
+            );
+            let probe = oracledb::BlockingConnection::execute_query(
+                &mut inner,
+                "SELECT 1 AS n FROM dual",
+                1,
+            )
+            .expect("connection remains usable after cursor fetch failure");
+            let n = probe.rows[0][0]
+                .as_ref()
+                .and_then(QueryValue::as_i64)
+                .expect("numeric probe cell");
+            assert_eq!(n, 1);
+        }
+
+        #[test]
+        fn materializes_clob_locator_as_text() {
+            let lob = lob(ORA_TYPE_NUM_CLOB, 5);
+            let mut calls = Vec::new();
+            let mut read_lob = |locator: &[u8], offset: u64, amount: u64| {
+                assert_eq!(locator, lob.locator.as_slice());
+                calls.push((offset, amount));
+                Ok(LobReadData {
+                    data: Some(b"hello".to_vec()),
+                })
+            };
+
+            let cell = materialize_lob_cell(
+                "CLOB".to_owned(),
+                &lob,
+                LobReadLimits {
+                    max_lob_chars: 32,
+                    max_blob_bytes: 1024,
+                },
+                &mut read_lob,
+            )
+            .expect("clob materialized");
+
+            assert_eq!(cell.text(), Some("hello"));
+            assert_eq!(cell.source_length, Some(5));
+            assert_eq!(calls, vec![(1, 5)]);
+        }
+
+        #[test]
+        fn materializes_blob_locator_as_binary() {
+            let lob = lob(ORA_TYPE_NUM_BLOB, 3);
+            let mut read_lob = |_locator: &[u8], offset: u64, amount: u64| {
+                assert_eq!((offset, amount), (1, 3));
+                Ok(LobReadData {
+                    data: Some(vec![1, 2, 3]),
+                })
+            };
+
+            let cell = materialize_lob_cell(
+                "BLOB".to_owned(),
+                &lob,
+                LobReadLimits {
+                    max_lob_chars: 32,
+                    max_blob_bytes: 1024,
+                },
+                &mut read_lob,
+            )
+            .expect("blob materialized");
+
+            assert_eq!(cell.bytes.as_deref(), Some([1, 2, 3].as_slice()));
+            assert_eq!(cell.source_length, Some(3));
+        }
+
+        #[test]
+        fn null_clob_cell_serializes_as_null() {
+            let cell = OracleCell::new("CLOB", None);
+
+            assert_eq!(
+                serialize_cell(&cell, &SerializeOptions::default()),
+                serde_json::Value::Null
+            );
+        }
+
+        #[test]
+        fn clob_locator_read_is_bounded_and_reports_full_length() {
+            let lob = lob(ORA_TYPE_NUM_CLOB, 100);
+            let mut read_lob = |_locator: &[u8], offset: u64, amount: u64| {
+                assert_eq!((offset, amount), (1, 4));
+                Ok(LobReadData {
+                    data: Some(b"abcd".to_vec()),
+                })
+            };
+
+            let cell = materialize_lob_cell(
+                "CLOB".to_owned(),
+                &lob,
+                LobReadLimits {
+                    max_lob_chars: 4,
+                    max_blob_bytes: 1024,
+                },
+                &mut read_lob,
+            )
+            .expect("clob materialized");
+            let rendered = serialize_cell(
+                &cell,
+                &SerializeOptions {
+                    max_lob_chars: 4,
+                    ..Default::default()
+                },
+            );
+
+            assert_eq!(
+                rendered,
+                json!({ "value": "abcd", "truncated": true, "char_length": 100 })
+            );
+        }
+
+        #[test]
+        fn bfile_locator_read_is_bounded_when_size_is_unknown() {
+            let lob = lob(ORA_TYPE_NUM_BFILE, 0);
+            let mut read_lob = |_locator: &[u8], offset: u64, amount: u64| {
+                assert_eq!((offset, amount), (1, 3));
+                Ok(LobReadData {
+                    data: Some(vec![1, 2, 3]),
+                })
+            };
+
+            let cell = materialize_lob_cell(
+                "BFILE".to_owned(),
+                &lob,
+                LobReadLimits {
+                    max_lob_chars: 32,
+                    max_blob_bytes: 2,
+                },
+                &mut read_lob,
+            )
+            .expect("bfile materialized");
+            let rendered = serialize_cell(
+                &cell,
+                &SerializeOptions {
+                    max_blob_bytes: 2,
+                    ..Default::default()
+                },
+            );
+
+            assert_eq!(rendered["byte_length"], json!(3));
+            assert_eq!(rendered["truncated"], json!(true));
+        }
+
+        #[test]
+        fn locator_read_failure_is_structured() {
+            let lob = lob(ORA_TYPE_NUM_CLOB, 8);
+            let mut read_lob = |_locator: &[u8], _offset: u64, _amount: u64| {
+                Err(DbError::Query("read failed".to_owned()))
+            };
+
+            let err = materialize_lob_cell(
+                "CLOB".to_owned(),
+                &lob,
+                LobReadLimits {
+                    max_lob_chars: 4,
+                    max_blob_bytes: 1024,
+                },
+                &mut read_lob,
+            )
+            .expect_err("read failure should propagate");
+
+            assert!(err.to_string().contains("read failed"));
+        }
+
+        #[test]
+        fn unsupported_lob_subtype_is_explicit_error() {
+            let lob = lob(ORA_TYPE_NUM_RAW, 8);
+            let mut read_lob = |_locator: &[u8], _offset: u64, _amount: u64| {
+                panic!("unsupported subtype must not read")
+            };
+
+            let err = materialize_lob_cell(
+                "RAW".to_owned(),
+                &lob,
+                LobReadLimits {
+                    max_lob_chars: 4,
+                    max_blob_bytes: 1024,
+                },
+                &mut read_lob,
+            )
+            .expect_err("unsupported subtype");
+
+            assert!(
+                err.to_string()
+                    .contains("unsupported LOB locator type ORA_TYPE_23")
+            );
         }
     }
 
@@ -648,6 +1469,42 @@ mod driver {
         if let Some(wallet) = &opts.wallet_location {
             secrets.push(wallet.display().to_string());
         }
+        if let Some(wallet_password) = &opts.wallet_password {
+            secrets.push(wallet_password.clone());
+        }
+        if let Some(dn) = &opts.ssl_server_cert_dn {
+            secrets.push(dn.clone());
+        }
+        for (namespace, key, value) in &opts.app_context {
+            secrets.push(namespace.clone());
+            secrets.push(key.clone());
+            secrets.push(value.clone());
+        }
+        secrets.extend(
+            opts.auth_adapter
+                .sensitive_values()
+                .into_iter()
+                .map(ToOwned::to_owned),
+        );
+        if let Some(identity) = &opts.session_identity {
+            for value in [
+                &identity.edition,
+                &identity.program,
+                &identity.machine,
+                &identity.os_user,
+                &identity.terminal,
+                &identity.module,
+                &identity.action,
+                &identity.client_identifier,
+                &identity.client_info,
+                &identity.driver_name,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                secrets.push(value.clone());
+            }
+        }
         for secret in secrets.iter().filter(|value| !value.is_empty()) {
             message = message.replace(secret, "<redacted>");
         }
@@ -674,6 +1531,7 @@ mod driver {
         fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
             let mut info = OracleConnectionInfo {
                 backend: Some(crate::types::OracleBackend::RustOracle),
+                connection_strategy: Some("single_session".to_owned()),
                 ..Default::default()
             };
             if let Some(r) = self.query_first_row(
@@ -743,19 +1601,37 @@ mod driver {
         }
 
         fn query_rows(&self, sql: &str, binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+            self.query_rows_with_serialize_options(sql, binds, &SerializeOptions::default())
+        }
+
+        fn query_rows_with_serialize_options(
+            &self,
+            sql: &str,
+            binds: &[OracleBind],
+            serialize_opts: &SerializeOptions,
+        ) -> Result<Vec<OracleRow>, DbError> {
             let binds: Vec<BindValue> = binds.iter().map(to_bind).collect();
             let timeout = self.timeout_ms()?;
             let mut inner = self.lock_inner()?;
-            let result = execute_with_timeout(
-                &mut inner,
-                sql,
-                FETCH_BATCH_ROWS,
-                &binds,
-                timeout,
-                &self.opts,
-                "query",
-            )?;
-            collect_all_rows(&mut inner, result, &self.opts)
+            let result = if binds.is_empty() && timeout.is_none() {
+                oracledb::BlockingConnection::execute_query(
+                    &mut inner,
+                    sql,
+                    prefetch_rows_for_statement(sql),
+                )
+                .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?
+            } else {
+                execute_with_timeout(
+                    &mut inner,
+                    sql,
+                    prefetch_rows_for_statement(sql),
+                    &binds,
+                    timeout,
+                    &self.opts,
+                    "query",
+                )?
+            };
+            collect_all_rows(&mut inner, result, &self.opts, serialize_opts, timeout)
         }
 
         fn query_rows_named(
@@ -763,14 +1639,53 @@ mod driver {
             sql: &str,
             binds: &[(String, OracleBind)],
         ) -> Result<Vec<OracleRow>, DbError> {
+            self.query_rows_named_with_serialize_options(sql, binds, &SerializeOptions::default())
+        }
+
+        fn query_rows_named_with_serialize_options(
+            &self,
+            sql: &str,
+            binds: &[(String, OracleBind)],
+            serialize_opts: &SerializeOptions,
+        ) -> Result<Vec<OracleRow>, DbError> {
             let binds: Vec<(String, BindValue)> = binds
                 .iter()
                 .map(|(name, bind)| (name.clone(), to_bind(bind)))
                 .collect();
+            let timeout = self.timeout_ms()?;
             let mut inner = self.lock_inner()?;
-            let result = oracledb::BlockingConnection::query_named(&mut inner, sql, binds)
-                .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?;
-            collect_all_rows(&mut inner, result, &self.opts)
+            let result = if binds.is_empty() {
+                if timeout.is_none() {
+                    oracledb::BlockingConnection::execute_query(
+                        &mut inner,
+                        sql,
+                        prefetch_rows_for_statement(sql),
+                    )
+                    .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?
+                } else {
+                    execute_with_timeout(
+                        &mut inner,
+                        sql,
+                        prefetch_rows_for_statement(sql),
+                        &[],
+                        timeout,
+                        &self.opts,
+                        "query named",
+                    )?
+                }
+            } else {
+                let ordered_binds = order_named_binds_for_driver(sql, binds);
+                execute_with_timeout(
+                    &mut inner,
+                    sql,
+                    prefetch_rows_for_statement(sql),
+                    &ordered_binds,
+                    timeout,
+                    &self.opts,
+                    "query named",
+                )?
+            };
+            collect_all_rows(&mut inner, result, &self.opts, serialize_opts, timeout)
         }
 
         fn execute(&self, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
@@ -884,6 +1799,8 @@ mod driver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth_adapter::AuthAdapter;
+    use crate::types::OracleSessionIdentity;
 
     #[test]
     fn thin_mode_rejects_external_auth_before_connecting() {
@@ -903,25 +1820,322 @@ mod tests {
     }
 
     #[test]
+    fn prefetch_rows_only_for_select_statements() {
+        assert_eq!(
+            driver::prefetch_rows_for_statement("SELECT 1 FROM dual"),
+            512
+        );
+        assert_eq!(
+            driver::prefetch_rows_for_statement("  \nselect * from dual"),
+            512
+        );
+        assert_eq!(
+            driver::prefetch_rows_for_statement("BEGIN DBMS_SQL.RETURN_RESULT(NULL); END;"),
+            0
+        );
+        assert_eq!(
+            driver::prefetch_rows_for_statement("DECLARE rc SYS_REFCURSOR; BEGIN NULL; END;"),
+            0
+        );
+    }
+
+    #[test]
+    fn thin_connect_options_use_explicit_client_identity_fields() {
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1".to_owned(),
+            username: Some("app".to_owned()),
+            password: Some("secret".to_owned()),
+            session_identity: Some(OracleSessionIdentity {
+                program: Some("profile-program".to_owned()),
+                machine: Some("profile-machine".to_owned()),
+                os_user: Some("profile-os-user".to_owned()),
+                terminal: Some("profile-terminal".to_owned()),
+                module: Some("session-module".to_owned()),
+                client_identifier: Some("session-client-id".to_owned()),
+                driver_name: Some("profile-driver".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("connect options");
+
+        assert_eq!(connect.identity.program, "profile-program");
+        assert_eq!(connect.identity.machine, "profile-machine");
+        assert_eq!(connect.identity.osuser, "profile-os-user");
+        assert_eq!(connect.identity.terminal, "profile-terminal");
+        assert_eq!(connect.identity.driver_name, "profile-driver");
+    }
+
+    #[test]
+    fn thin_connect_options_keep_legacy_identity_fallbacks() {
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1".to_owned(),
+            username: Some("app".to_owned()),
+            password: Some("secret".to_owned()),
+            session_identity: Some(OracleSessionIdentity {
+                module: Some("legacy-module-program".to_owned()),
+                client_identifier: Some("legacy-client-terminal".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("connect options");
+
+        assert_eq!(connect.identity.program, "legacy-module-program");
+        assert_eq!(connect.identity.terminal, "legacy-client-terminal");
+        assert_eq!(connect.identity.driver_name, "oraclemcp-thin");
+        assert!(!connect.identity.machine.is_empty());
+        assert!(!connect.identity.osuser.is_empty());
+    }
+
+    #[test]
+    fn thin_connect_options_apply_explicit_tls_fields() {
+        let opts = OracleConnectOptions {
+            connect_string: "tcps://adb.example.com/service".to_owned(),
+            username: Some("app".to_owned()),
+            password: Some("secret".to_owned()),
+            wallet_location: Some("/wallets/private".into()),
+            wallet_password: Some("wallet-secret".to_owned()),
+            ssl_server_dn_match: Some(false),
+            ssl_server_cert_dn: Some("CN=db.example.com,O=Example,C=US".to_owned()),
+            use_sni: Some(false),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("connect options");
+
+        assert_eq!(connect.wallet_location.as_deref(), Some("/wallets/private"));
+        assert_eq!(connect.wallet_password.as_deref(), Some("wallet-secret"));
+        assert!(!connect.ssl_server_dn_match);
+        assert_eq!(
+            connect.ssl_server_cert_dn.as_deref(),
+            Some("CN=db.example.com,O=Example,C=US")
+        );
+        assert!(!connect.use_sni);
+    }
+
+    #[test]
+    fn thin_connect_options_keep_wallet_sni_default() {
+        let opts = OracleConnectOptions {
+            connect_string: "tcps://adb.example.com/service".to_owned(),
+            username: Some("app".to_owned()),
+            password: Some("secret".to_owned()),
+            wallet_location: Some("/wallets/private".into()),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("connect options");
+
+        assert_eq!(connect.wallet_location.as_deref(), Some("/wallets/private"));
+        assert!(
+            connect.use_sni,
+            "existing wallet profiles default to SNI on"
+        );
+        assert!(connect.ssl_server_dn_match);
+        assert_eq!(connect.wallet_password, None);
+        assert_eq!(connect.ssl_server_cert_dn, None);
+    }
+
+    #[test]
+    fn thin_connect_options_apply_proxy_auth() {
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1".to_owned(),
+            username: Some("MCP_PROXY".to_owned()),
+            password: Some("proxy-secret".to_owned()),
+            auth_adapter: AuthAdapter::Proxy {
+                proxy_user: "MCP_PROXY".to_owned(),
+                target_schema: "APP_OWNER".to_owned(),
+            },
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("connect options");
+
+        assert_eq!(connect.user, "MCP_PROXY");
+        assert_eq!(connect.proxy_user.as_deref(), Some("APP_OWNER"));
+    }
+
+    #[test]
+    fn thin_connect_options_apply_app_context_in_order() {
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1".to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            app_context: vec![
+                (
+                    "ORACLEMCP_CTX".to_owned(),
+                    "tenant_id".to_owned(),
+                    "tenant-123".to_owned(),
+                ),
+                (
+                    "ORACLEMCP_CTX".to_owned(),
+                    "request_id".to_owned(),
+                    "req-456".to_owned(),
+                ),
+            ],
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("connect options");
+
+        assert_eq!(connect.app_context, opts.app_context);
+    }
+
+    #[test]
+    fn thin_connect_options_apply_sdu_when_configured() {
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1".to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            sdu: Some(32_768),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("connect options");
+
+        assert_eq!(connect.sdu, 32_768u16);
+    }
+
+    #[test]
+    fn thin_connect_options_keep_driver_default_sdu_when_unset() {
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1".to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("connect options");
+
+        assert_eq!(connect.sdu, 8192u16);
+    }
+
+    #[test]
+    fn thin_connect_options_apply_statement_cache_size_when_configured() {
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1".to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            statement_cache_size: Some(128),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("connect options");
+
+        assert_eq!(connect.statement_cache_size, 128);
+    }
+
+    #[test]
+    fn thin_connect_options_keep_driver_default_statement_cache_when_unset() {
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1".to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("connect options");
+
+        assert_eq!(connect.statement_cache_size, 20);
+    }
+
+    #[test]
+    fn thin_connect_options_apply_edition_when_configured() {
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1".to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            session_identity: Some(OracleSessionIdentity {
+                edition: Some("E_TEST".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("connect options");
+
+        assert_eq!(connect.edition.as_deref(), Some("E_TEST"));
+    }
+
+    #[test]
+    fn thin_connect_options_reject_unsupported_enterprise_auth() {
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1".to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            auth_adapter: AuthAdapter::Radius,
+            ..Default::default()
+        };
+
+        let err = driver::to_connect_options(&opts).expect_err("unsupported");
+        assert!(matches!(err, DbError::UnsupportedAuth(_)));
+        assert!(err.to_string().contains("RADIUS/native MFA"));
+    }
+
+    #[test]
     fn driver_error_redaction_removes_connect_material() {
         let opts = OracleConnectOptions {
             connect_string: "dbhost:1521/private_service".to_owned(),
             username: Some("app_user".to_owned()),
             password: Some("super_secret".to_owned()),
+            auth_adapter: AuthAdapter::Proxy {
+                proxy_user: "MCP_PROXY".to_owned(),
+                target_schema: "APP_OWNER".to_owned(),
+            },
             wallet_location: Some("/wallets/private".into()),
+            wallet_password: Some("wallet_secret".to_owned()),
+            ssl_server_cert_dn: Some("CN=private-db,O=Example,C=US".to_owned()),
             iam_token: Some("iam.jwt.token".to_owned()),
+            app_context: vec![(
+                "private-namespace".to_owned(),
+                "private-key".to_owned(),
+                "private-value".to_owned(),
+            )],
+            session_identity: Some(OracleSessionIdentity {
+                program: Some("private-program".to_owned()),
+                machine: Some("private-machine".to_owned()),
+                os_user: Some("private-os-user".to_owned()),
+                terminal: Some("private-terminal".to_owned()),
+                module: Some("private-module".to_owned()),
+                action: Some("private-action".to_owned()),
+                client_identifier: Some("private-client-id".to_owned()),
+                client_info: Some("private-client-info".to_owned()),
+                driver_name: Some("private-driver".to_owned()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let redacted = driver::sanitize_driver_error(
-            "connect app_user/super_secret@dbhost:1521/private_service with /wallets/private and iam.jwt.token failed",
+            "connect app_user/super_secret@dbhost:1521/private_service proxy MCP_PROXY APP_OWNER with /wallets/private \
+             wallet_secret CN=private-db,O=Example,C=US and iam.jwt.token failed for private-program private-machine private-os-user \
+             private-terminal private-module private-action private-client-id private-client-info \
+             private-driver private-namespace private-key private-value",
             &opts,
         );
         for forbidden in [
             "app_user",
             "super_secret",
+            "MCP_PROXY",
+            "APP_OWNER",
             "dbhost:1521/private_service",
             "/wallets/private",
+            "wallet_secret",
+            "CN=private-db",
             "iam.jwt.token",
+            "private-program",
+            "private-machine",
+            "private-os-user",
+            "private-terminal",
+            "private-module",
+            "private-action",
+            "private-client-id",
+            "private-client-info",
+            "private-driver",
+            "private-namespace",
+            "private-key",
+            "private-value",
         ] {
             assert!(!redacted.contains(forbidden), "{redacted}");
         }

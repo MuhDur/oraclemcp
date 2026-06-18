@@ -112,6 +112,9 @@ pub struct DoctorContext<'a> {
     /// True if a `protected` profile has `max_level` above `READ_ONLY` — a
     /// misconfiguration the privilege check warns about (offline-detectable).
     pub protected_profile_writable: bool,
+    /// Runtime connection strategy label, such as `single_session` or
+    /// `hybrid_pool`. This is non-secret operator-facing metadata.
+    pub connection_strategy: Option<String>,
     /// Exact setup values that must never appear in doctor output.
     pub sensitive_values: Vec<String>,
 }
@@ -275,12 +278,18 @@ fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
 
 fn connectivity_fix(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
-    if lower.contains("connection profile") || lower.contains("default_profile") {
+    if lower.contains("proxy_auth") {
+        "set both profiles.proxy_auth.proxy_user and target_schema; if username is present it must match proxy_user"
+    } else if lower.contains("connection profile") || lower.contains("default_profile") {
         "run `oraclemcp --json profiles` to list configured profiles, then rerun doctor with a valid `--profile` name"
-    } else if lower.contains("failed to resolve credential_ref") {
-        "verify the profile credential_ref and its backing environment variable or secrets backend"
+    } else if lower.contains("failed to resolve credential_ref")
+        || lower.contains("failed to resolve wallet_password_ref")
+    {
+        "verify the profile credential_ref or wallet_password_ref and its backing environment variable or secrets backend"
     } else if lower.contains("config load failed") {
         "fix profiles.toml or ORACLEMCP_CONFIG, then rerun `oraclemcp --json profiles`"
+    } else if lower.contains("external/wallet auth without username and password") {
+        "for TCPS wallets, keep wallet_location but add username plus credential_ref for thin username/password auth; passwordless external wallet auth is not supported by this thin driver"
     } else if lower.contains("unsupported auth mode")
         || lower.contains("unsupported database feature")
         || lower.contains("not supported by the published thin driver")
@@ -343,12 +352,13 @@ fn check_connectivity(ctx: &DoctorContext) -> CheckResult {
             "offline — supply a profile/connection to test connectivity + auth",
         ),
         Some(conn) => match conn.ping() {
-            Ok(()) => CheckResult::new(
-                3,
-                "Connectivity",
-                CheckStatus::Pass,
-                "connected + authenticated",
-            ),
+            Ok(()) => {
+                let detail = ctx.connection_strategy.as_deref().map_or_else(
+                    || "connected + authenticated".to_owned(),
+                    |strategy| format!("connected + authenticated (strategy: {strategy})"),
+                );
+                CheckResult::new(3, "Connectivity", CheckStatus::Pass, detail)
+            }
             Err(e) => CheckResult::new(
                 3,
                 "Connectivity",
@@ -618,6 +628,24 @@ mod tests {
     }
 
     #[test]
+    fn live_connectivity_detail_reports_connection_strategy() {
+        let conn = LiveMock;
+        let ctx = DoctorContext {
+            conn: Some(&conn),
+            connection_strategy: Some("hybrid_pool".to_owned()),
+            ..DoctorContext::default()
+        };
+        let report = run_doctor(&ctx);
+        let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
+
+        assert_eq!(connectivity.status, CheckStatus::Pass);
+        assert_eq!(
+            connectivity.detail,
+            "connected + authenticated (strategy: hybrid_pool)"
+        );
+    }
+
+    #[test]
     fn protected_profile_with_write_ceiling_warns() {
         let ctx = DoctorContext {
             protected_profile_writable: true,
@@ -707,6 +735,44 @@ mod tests {
     }
 
     #[test]
+    fn wallet_password_ref_resolution_error_has_actionable_fix() {
+        let ctx = DoctorContext {
+            connection_error: Some(
+                "failed to resolve wallet_password_ref for profile `tcps`: secret not found"
+                    .to_owned(),
+            ),
+            ..DoctorContext::default()
+        };
+        let report = run_doctor(&ctx);
+        let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
+        assert_eq!(connectivity.status, CheckStatus::Fail);
+        assert!(
+            connectivity
+                .fix
+                .as_deref()
+                .unwrap()
+                .contains("wallet_password_ref")
+        );
+    }
+
+    #[test]
+    fn proxy_auth_config_error_has_actionable_fix() {
+        let ctx = DoctorContext {
+            connection_error: Some(
+                "config load failed: connection profile `proxy` proxy_auth requires non-empty proxy_user and target_schema"
+                    .to_owned(),
+            ),
+            ..DoctorContext::default()
+        };
+        let report = run_doctor(&ctx);
+        let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
+        assert_eq!(connectivity.status, CheckStatus::Fail);
+        let fix = connectivity.fix.as_deref().unwrap();
+        assert!(fix.contains("proxy_auth.proxy_user"));
+        assert!(fix.contains("target_schema"));
+    }
+
+    #[test]
     fn text_and_json_render() {
         let report = run_doctor(&DoctorContext::default());
         let text = report.to_text();
@@ -760,7 +826,7 @@ mod tests {
                 .fix
                 .as_deref()
                 .unwrap()
-                .contains("username/password thin auth")
+                .contains("username plus credential_ref")
         );
     }
 

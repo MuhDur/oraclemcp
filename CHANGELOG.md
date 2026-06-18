@@ -25,12 +25,25 @@ assumptions, the next release is minor rather than patch.
   conformance tests, removing the rmcp/Axum/Hyper runtime surface.
 - Release automation for synchronized crates.io, GitHub release, GHCR, and MCP
   registry publication from a single version tag.
+- Thin profile coverage for proxy authentication, wallet username/password
+  connections, TLS DN/SNI options, application contexts, SDU, DRCP connect-string
+  shaping, and edition selection during authentication.
+- Bounded DBMS_OUTPUT capture for `oracle_execute` / `execute_approved`, returned
+  inline as `dbms_output.lines` without writing operator files.
+- Binary-level Streamable HTTP configuration for Host/Origin allowlists,
+  JSON-vs-streaming responses, stateful sessions, OAuth protected-resource
+  metadata, OAuth issuer/resource/scope validation, and HS256 secret references.
 
 ### Changed
 
-- Live Oracle access now uses the pure-Rust thin `oracledb` driver by default.
+- Live Oracle access now uses the pure-Rust thin `oracledb` 0.2.2 driver by
+  default.
   The runtime no longer requires Oracle Instant Client, ODPI-C, r2d2, or a C
   Oracle connectivity library.
+- Query serialization now materializes thin LOB locators, REF CURSOR cells, and
+  implicit result sets under the existing response-size caps.
+- Profile `statement_cache_size` now reaches the thin driver's bounded
+  per-connection statement cache instead of being metadata-only.
 - The workspace is pinned to `nightly-2026-05-11`; stable/MSRV claims were
   removed because the thin-native Asupersync/oracledb stack is nightly-bound.
 - Docker images are thin-driver images and do not redistribute Oracle Instant
@@ -46,6 +59,10 @@ assumptions, the next release is minor rather than patch.
   async-std, smol, or related removed crate families.
 - HTTP OAuth scope validation is enforced at dispatch so bearer-token scopes can
   only lower effective authority and never raise profile/session ceilings.
+- `oraclemcp serve --listen` now starts only with configured OAuth enforcement
+  or explicit `--allow-no-auth`; native TLS/mTLS listener material is parsed but
+  rejected until the rustls listener is wired, so remote deployments must still
+  use a TLS-terminating proxy.
 
 ## [0.2.1] — 2026-06-15
 

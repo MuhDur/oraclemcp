@@ -21,7 +21,8 @@
 - **Fail-closed by construction.** A SELECT that an agent dreams up should never silently turn into a `DELETE`. Each raw statement runs through the hardened classifier. Read tools admit only **proven** read-only `SELECT`/`WITH` and dictionary introspection. Non-read execution is isolated in `oracle_execute`, bounded by profile `max_level`/`default_level`, rollback-by-default for DML, and explicit-confirm-before-commit. Temporary elevation through `oracle_set_session_level` can never exceed the profile ceiling. *Forbidden* constructs (multi-statement batches, string-concat dynamic SQL, an unproven function call inside a SELECT) are rejected before touching the database, with an `OperatingLevelTooLow` or `ForbiddenStatement` envelope and a suggested safe alternative.
 - **Agent-first UX.** Every tool ships a real JSON Schema. Errors are structured [`ErrorEnvelope`](crates/oraclemcp-error)s with machine-stable classes, fuzzy suggestions, and next-step hints, not bare strings. A zero-arg `oracle_capabilities` tool lets an agent discover the surface, and an offline build degrades to a `RuntimeStateRequired` contract instead of crashing.
 - **Pure Rust, no `unsafe`.** Every crate is `#![forbid(unsafe_code)]`; the fail-closed classifier carries a differential cargo-fuzz target.
-- **Two transports.** stdio (default) and Streamable HTTP (`--listen`).
+- **Two transports.** stdio (default) and Streamable HTTP (`--listen`) with
+  fail-closed auth defaults and optional OAuth bearer enforcement.
 
 ## Quick start
 
@@ -51,7 +52,8 @@ Use `oraclemcp --json doctor` to verify the binary and offline setup, and
 `oraclemcp --json doctor --profile <profile>` to add live connectivity,
 authentication, role/open-mode, standby, and privilege checks. Doctor output is
 safe to paste into agent sessions: it omits connect strings, usernames,
-`credential_ref` values, passwords, IAM tokens, and wallet paths while keeping
+`credential_ref` values, passwords, proxy identities, wallet passwords, IAM
+tokens, wallet paths, and server DNs while keeping
 structured failure classes and ORA codes visible.
 
 Generate generic local setup templates for profiles, wrappers, and MCP client
@@ -112,19 +114,35 @@ oraclemcp robot-docs guide           # compact in-binary guide for agents
 `--json` is a visible alias for `--robot-json` and keeps stdout as a single
 machine-readable JSON object.
 
-The Streamable HTTP transport (`--listen`) is unauthenticated plaintext. It now
-fails closed: it refuses to start without `--allow-no-auth`, and refuses any
-non-loopback bind unless `ORACLEMCP_HTTP_ALLOW_REMOTE=1` is set. Treat remote
-binds as opt-in and front them with your own TLS/auth.
+The Streamable HTTP transport (`--listen`) fails closed. It starts only when
+OAuth bearer enforcement is configured or `--allow-no-auth` is supplied, and it
+refuses any non-loopback bind unless `ORACLEMCP_HTTP_ALLOW_REMOTE=1` is set.
+OAuth configuration can come from `profiles.toml` or CLI flags:
 
-The reusable HTTP transport core also supports OAuth resource-server
-enforcement when configured by an embedding caller: the protected-resource
-metadata route stays public, `/mcp` requires a valid bearer token, and granted
-`oracle:*` scopes lower the request's effective operating ceiling
-monotonically. `oracle:read` caps the request at `READ_ONLY`,
-`oracle:write`/`oracle:execute` at `READ_WRITE`, `oracle:ddl` at `DDL`, and
-`oracle:admin` at `ADMIN`; none of them can raise a profile above its
-`max_level`, and protected profiles remain `READ_ONLY`.
+```sh
+export ORACLEMCP_OAUTH_HS256_SECRET='replace-with-a-long-random-secret'
+oraclemcp serve --listen 127.0.0.1:7070 \
+  --oauth-resource http://127.0.0.1:7070/mcp \
+  --oauth-issuer https://issuer.example.com \
+  --oauth-authorization-server https://issuer.example.com \
+  --oauth-required-scope oracle:read \
+  --oauth-hs256-secret-ref env:ORACLEMCP_OAUTH_HS256_SECRET \
+  --http-allowed-host 127.0.0.1:7070 \
+  --http-allowed-origin https://client.example.com
+```
+
+When OAuth is enabled, `/.well-known/oauth-protected-resource` stays public,
+`/mcp` requires a valid bearer token, and granted `oracle:*` scopes lower the
+request's effective operating ceiling monotonically. `oracle:read` caps the
+request at `READ_ONLY`, `oracle:write`/`oracle:execute` at `READ_WRITE`,
+`oracle:ddl` at `DDL`, and `oracle:admin` at `ADMIN`; none of them can raise a
+profile above its `max_level`, and protected profiles remain `READ_ONLY`.
+
+The native HTTP listener is still plaintext in v0.3.0. Remote deployments
+should bind loopback and place a same-host TLS-terminating proxy in front of
+`oraclemcp`. `[http.tls]` / `--tls-cert` / `--tls-key` / `--mtls-client-ca` are
+parsed and validated as configuration, but the binary rejects them at startup
+until the native rustls listener is wired.
 
 Connection profiles are resolved from layered configuration (`oraclemcp-config`); select one with `serve --profile <name>`.
 
@@ -135,6 +153,19 @@ For live database access, create `~/.config/oraclemcp/profiles.toml`:
 ```toml
 schema_version = 1
 default_profile = "dev_ro"
+
+[http]
+allowed_hosts = ["127.0.0.1:7070"]
+allowed_origins = ["https://client.example.com"]
+json_response = true
+stateful = false
+
+[http.oauth]
+resource = "http://127.0.0.1:7070/mcp"
+allowed_issuers = ["https://issuer.example.com"]
+authorization_servers = ["https://issuer.example.com"]
+required_scopes = ["oracle:read"]
+hs256_secret_ref = "env:ORACLEMCP_OAUTH_HS256_SECRET"
 
 [[profiles]]
 name = "dev_ro"
@@ -148,6 +179,8 @@ require_signed_tools = true
 # Optional Oracle per-round-trip timeout. Tool calls can override it with
 # timeout_seconds where advertised.
 call_timeout_seconds = 30
+# Optional thin Session Data Unit request. Validated as 512..=65535 bytes.
+sdu = 32768
 login_statements = [
   "ALTER SESSION SET NLS_LANGUAGE = english",
   "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'",
@@ -158,15 +191,68 @@ trusted_session_statements = [
   "BEGIN DBMS_OUTPUT.ENABLE(500000); END;",
 ]
 
+[profiles.oci]
+# Optional TCPS/wallet fields. Prefer these named fields over raw
+# connect_string query parameters when the value should be validated or redacted.
+wallet_location = "/etc/oracle/wallet"
+wallet_password_ref = "env:WALLET_PASSWORD"
+ssl_server_dn_match = true
+ssl_server_cert_dn = "CN=dbhost.example.com"
+use_sni = true
+
+# Optional proxy authentication. If enabled, `credential_ref` belongs to
+# `proxy_user`; omit top-level `username` or set it to the same value.
+# The database needs: ALTER USER <target_schema> GRANT CONNECT THROUGH <proxy_user>
+# [profiles.proxy_auth]
+# proxy_user = "MCP_PROXY"
+# target_schema = "APP_OWNER"
+
+# Optional DRCP server routing. Prefer these named fields over raw
+# connect_string query parameters so inheritance, validation, and redaction stay
+# predictable. This is separate from [profiles.pool], which controls local
+# client-side reuse.
+[profiles.drcp]
+pooled = true
+connection_class = "ORACLE_MCP_AGENTS"
+purity = "reuse"
+
+# Optional local client-side pool for stateless metadata/catalog reads.
+# User SQL, LOB/sample reads, DBMS_OUTPUT, transactions, and session state stay
+# on the pinned main session.
+# [profiles.pool]
+# max_size = 4
+# min_idle = 1
+# acquire_timeout_secs = 5
+# statement_cache_size = 50
+
+# Optional driver-level application context, applied during thin logon. Values
+# can carry tenant/session identifiers, so list_profiles and diagnostics redact
+# them. If inherited, setting entries here replaces the base list; omit to
+# inherit or set app_context = [] in the profile table to clear it.
+[[profiles.app_context]]
+namespace = "ORACLEMCP_CTX"
+key = "tenant_id"
+value = "tenant-123"
+
+[[profiles.app_context]]
+namespace = "ORACLEMCP_CTX"
+key = "request_id"
+value = "req-456"
+
 [profiles.session_identity]
 # Optional: all values are profile-local and are not shown by list_profiles.
 # oracle_connection_info reports the session-visible fields for verification.
-edition = "ORA$BASE"
+# Edition selection is applied during thin authentication before user SQL.
+# edition = "ORA$BASE"
+program = "oraclemcp"
+machine = "local-workstation"
+os_user = "local-operator"
+terminal = "agent"
+driver_name = "oraclemcp"
 module = "oraclemcp"
 action = "inspect"
 client_identifier = "agent"
 client_info = "local-workstation"
-driver_name = "oraclemcp"
 ```
 
 `max_level` is the profile ceiling; `default_level` is the starting session
@@ -183,10 +269,13 @@ contexts, or `DBMS_OUTPUT`; they are never accepted from agent tool calls, and
 they keep environment-specific conventions in private config rather than in the
 open-source core.
 The `oracle_connection_info` tool also reports diagnostic fields such as
-`os_user`, `program`, and `client_driver` when the database exposes them. In the
-current Rust backend, profile config can set the session identity fields shown
-above and the driver name, but `os_user` and `program` remain backend-reported
-values unless the underlying driver exposes setters for them.
+`os_user`, `program`, `machine`, `terminal`, and `client_driver` when the
+database exposes them. The Rust thin backend can set the connect-time client
+identity fields (`program`, `machine`, `os_user`, `terminal`, and
+`driver_name`) from profile config. It also applies `module`, `action`,
+`client_identifier`, and `client_info` after connect through Oracle session
+APIs, so operators can keep driver identity and DBMS session attributes
+separate.
 `require_signed_tools = true` requires HMAC signatures for operator-defined
 custom tools on that profile; `protected = true` implies the same policy.
 
@@ -195,9 +284,40 @@ A few further profile keys are optional:
 - `base = "other_profile"`: inherit from another profile and override only the
   keys you set. Inheritance is resolved before validation, so a child still
   honors the effective `max_level` ceiling.
-- `[profiles.pool]`: connection-pool sizing for the physical connection
-  (`min`, `max`, `increment`).
+- `[profiles.pool]`: local client-side connection reuse settings
+  (`max_size`, `min_idle`, `acquire_timeout_secs`, `statement_cache_size`).
+  This enables the hybrid runtime strategy: catalog and metadata tools such as
+  schema/object/source inspection use a bounded stateless read pool, while
+  agent queries, sampled rows, LOB reads, DDL/write previews, transactions,
+  savepoints, temp tables, package globals, login setup, session identity, and
+  `DBMS_OUTPUT` stay on the pinned main session. `statement_cache_size` is
+  passed to the thin driver's bounded per-connection statement cache; omit it to
+  keep the driver default. This is separate from DRCP server routing.
 - `[profiles.oci]`: OCI-specific connection settings for the underlying driver.
+  For TCPS/wallet connections, named fields are available for `wallet_location`,
+  `wallet_password_ref`, `ssl_server_dn_match`, `ssl_server_cert_dn`, and
+  `use_sni`. Use the named fields for values that should inherit through
+  profiles, be redacted from diagnostics, or be validated by strict config
+  parsing.
+- `sdu = 32768`: optional thin driver Session Data Unit request size. Values are
+  validated as `512..=65535`; omit it to keep the driver's negotiated default.
+- `[profiles.drcp]`: Database Resident Connection Pooling server routing.
+  `pooled = true` appends `server=pooled`; `connection_class` maps to
+  `pool_connection_class`; `purity = "reuse" | "new"` maps to `pool_purity`.
+  Existing `connect_string` query parameters such as `wallet_location` are
+  preserved and DRCP parameters are appended with `&`. Prefer these named fields
+  over raw DRCP query parameters when the values should inherit, validate, and be
+  covered by redaction tests.
+- `[profiles.proxy_auth]`: thin proxy authentication. `proxy_user` is the
+  account that authenticates with `credential_ref`; `target_schema` is the
+  Oracle user granted `CONNECT THROUGH`. The connect `username`, if present,
+  must match `proxy_user`.
+- `[[profiles.app_context]]`: driver-level application context triples sent
+  during thin logon. Use typed `namespace` / `key` / `value` entries instead of
+  raw strings; values are treated as sensitive and omitted from ordinary profile
+  output. A child profile inherits the base list when omitted, replaces the whole
+  list when entries are set, and can clear inherited entries with
+  `app_context = []`.
 - `read_only_standby = true`: mark the target as a read-only standby so the
   profile cannot be elevated above `READ_ONLY` regardless of `max_level`.
 
@@ -214,13 +334,63 @@ Config discovery order is:
 2. `~/.config/oraclemcp/profiles.toml`
 3. `~/.config/oraclemcp/config.toml`
 
-`credential_ref` supports `env:VAR` for environment-injected credentials and `literal:value` for local development only. Literal credentials are rejected when `protected = true`.
+`credential_ref` and `wallet_password_ref` support `env:VAR` for
+environment-injected credentials and `literal:value` for local development
+only. Literal credentials are rejected when `protected = true`.
 
-The published thin driver currently fails explicitly for auth/features it cannot
-serve safely, such as external wallet auth without username/password, OCI IAM
-database-token auth, and edition selection. These appear as structured
-unsupported diagnostics in `oraclemcp doctor --profile <profile>` and MCP error
-envelopes; the binary does not silently fall back to thick mode.
+The current `oraclemcp` thin adapter fails explicitly for auth/features it
+cannot serve end-to-end safely, such as external wallet auth without
+username/password, OCI IAM token retrieval from local OCI config, and
+Kerberos/RADIUS auth. These appear as structured unsupported diagnostics in
+`oraclemcp doctor --profile <profile>` and MCP error envelopes; the binary does
+not silently fall back to thick mode. The published `oracledb` 0.2.2 driver has
+lower-level access-token support, but `oraclemcp` does not yet wire a complete
+IAM token source and refresh flow into connection profiles.
+
+Thin result conversion materializes driver-side locators and cursors before
+serializing tool output: CLOB/BLOB/BFILE locators are read with the query LOB
+caps, and valid REF CURSOR values or implicit result sets are returned as nested
+objects containing child `columns`, `rows`, `row_count`, `fetched_count`, and
+`truncated` metadata. Nested cursor materialization has separate row, cell, byte,
+and depth caps, and unsupported shapes remain explicit instead of silently
+flattening or guessing.
+
+To live-verify driver-level application context against Oracle 23ai/FREE, create
+an application context namespace in the test database, configure matching
+`[[profiles.app_context]]` triples, then query
+`SYS_CONTEXT('<namespace>', '<key>')` through `oracle_query` or run the optional
+live test with `ORACLEMCP_TEST_APP_CONTEXT='namespace:key:value;namespace:key2:value2'`.
+Invalid or unauthorized context namespaces should fail at connect time with a
+structured Oracle server error rather than falling back to post-connect SQL.
+
+To live-verify edition selection against Oracle 23ai/FREE, create or reuse a
+valid edition, set `[profiles.session_identity].edition`, connect with that
+profile, and query `SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME')` through
+`oracle_query` or `oracle_connection_info`. Invalid or unauthorized editions
+should fail during connect/authentication with a structured Oracle server error;
+oraclemcp must not silently fall back to the database default edition.
+
+Profile/config regression commands:
+
+```sh
+# Local, non-secret profile parsing/redaction/setup checks.
+cargo test -p oraclemcp-config -p oraclemcp-core profile -- --nocapture
+cargo test -p oraclemcp setup_payload_is_generic_and_client_ready -- --nocapture
+cargo test -p oraclemcp profiles_json_reports_non_secret_metadata -- --nocapture
+
+# Live Oracle 23ai/FREE thin profile/config matrix.
+# Required: ORACLEMCP_TEST_DSN, ORACLEMCP_TEST_USER, ORACLEMCP_TEST_PASSWORD.
+# Optional: ORACLEMCP_TEST_WALLET_LOCATION, ORACLEMCP_TEST_WALLET_PASSWORD,
+# ORACLEMCP_TEST_SSL_SERVER_DN_MATCH, ORACLEMCP_TEST_SSL_SERVER_CERT_DN,
+# ORACLEMCP_TEST_USE_SNI, ORACLEMCP_TEST_PROXY_USER,
+# ORACLEMCP_TEST_PROXY_TARGET_SCHEMA, ORACLEMCP_TEST_EDITION,
+# ORACLEMCP_TEST_APP_CONTEXT, ORACLEMCP_TEST_DRCP=1,
+# ORACLEMCP_TEST_DRCP_CLASS.
+cargo test -p oraclemcp-db --features live-xe --test live_oracle -- --nocapture
+
+# Faster profile-only smoke subset.
+cargo test -p oraclemcp-db --features live-xe live_profile_config -- --nocapture
+```
 
 If `serve --profile <name>` is provided, it overrides `default_profile`. If neither is set and exactly one profile exists, that sole profile is used.
 

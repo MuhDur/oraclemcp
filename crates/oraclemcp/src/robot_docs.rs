@@ -20,16 +20,66 @@ default_level = "READ_ONLY"
 protected = true
 require_signed_tools = true
 call_timeout_seconds = 30
+sdu = 32768
 login_statements = [
   "ALTER SESSION SET NLS_LANGUAGE = english",
 ]
 
+[profiles.oci]
+# Optional TCPS/wallet fields. Prefer these named fields over raw
+# connect_string query parameters when the value should be validated or redacted.
+wallet_location = "/etc/oracle/wallet"
+wallet_password_ref = "env:WALLET_PASSWORD"
+ssl_server_dn_match = true
+ssl_server_cert_dn = "CN=dbhost.example.com"
+use_sni = true
+
+# Optional proxy authentication. If enabled, `credential_ref` belongs to
+# `proxy_user`; omit top-level `username` or set it to the same value.
+# [profiles.proxy_auth]
+# proxy_user = "MCP_PROXY"
+# target_schema = "APP_OWNER"
+
+# Optional DRCP server routing. This is separate from the local [profiles.pool]
+# client-side reuse settings. [profiles.pool] enables a hybrid strategy: metadata
+# and catalog reads may use a bounded stateless pool, while user SQL, LOB/sample
+# reads, transactions, DBMS_OUTPUT, login setup, and session identity stay pinned
+# to the main session.
+[profiles.drcp]
+pooled = true
+connection_class = "ORACLE_MCP_AGENTS"
+purity = "reuse"
+
+# Optional local client-side pool for stateless metadata/catalog reads.
+# User SQL, LOB/sample reads, DBMS_OUTPUT, transactions, and session state stay
+# on the pinned main session.
+# [profiles.pool]
+# max_size = 4
+# min_idle = 1
+# acquire_timeout_secs = 5
+
+[[profiles.app_context]]
+namespace = "ORACLEMCP_CTX"
+key = "tenant_id"
+value = "tenant-123"
+
+[[profiles.app_context]]
+namespace = "ORACLEMCP_CTX"
+key = "request_id"
+value = "req-456"
+
 [profiles.session_identity]
+# Optional edition for Edition-Based Redefinition; applied during thin auth.
+# edition = "ORA$BASE"
+program = "oraclemcp"
+machine = "local-workstation"
+os_user = "local-agent"
+terminal = "agent"
+driver_name = "oraclemcp"
 module = "oraclemcp"
 action = "inspect"
 client_identifier = "agent"
 client_info = "local-agent"
-driver_name = "oraclemcp"
 
 [[profiles]]
 name = "db_ddl"
@@ -214,15 +264,25 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
             "profiles": "~/.config/oraclemcp/profiles.toml or ORACLEMCP_CONFIG",
             "custom_tools": "~/.config/oraclemcp/tools.d/*.toml or ORACLEMCP_TOOLS_DIR",
             "custom_tool_signing": "protected profiles and profiles with require_signed_tools=true require ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY plus per-tool signatures from oraclemcp sign-tool",
-            "secret_refs": "prefer credential_ref over literal passwords",
+            "secret_refs": "prefer credential_ref and wallet_password_ref over literal passwords",
+            "http_transport": "use top-level http config or serve --oauth-* / --http-* flags for Streamable HTTP; native TLS material is parsed but rejected in v0.3.0 until the rustls listener is wired",
+            "proxy_auth": "use profiles.proxy_auth for thin proxy auth; credential_ref belongs to proxy_user and target_schema is the CONNECT THROUGH client",
+            "network_routing": "use top-level sdu and profiles.drcp for validated thin SDU and DRCP server routing instead of raw connect_string query parameters",
+            "local_pool": "profiles.pool enables hybrid_pool: stateless catalog/metadata reads can use the bounded local pool, while user SQL, LOB/sample reads, transactions, DBMS_OUTPUT, login setup, and session identity remain on the pinned main session; statement_cache_size reaches the thin driver",
+            "app_context": "use repeated profiles.app_context entries for typed thin logon application-context triples; values are sensitive and redacted from profile output",
             "environment_specifics": "database aliases, session identity, client module/program labels, and custom workflow tools belong in profiles or tools.d config, not in the general core"
         },
         "thin_diagnostics": {
             "driver": "pure-Rust oracledb thin driver; no Oracle Instant Client, ODPI-C, libclntsh, or C toolchain required",
             "offline": "oraclemcp --json doctor checks thin-driver posture, TNS/wallet directory presence, NLS setup, classifier self-test, and custom-tool availability without opening a database",
             "profile": "oraclemcp --json doctor --profile <profile> adds live connectivity, authentication, role/open-mode, standby, and privilege-tier checks",
-            "secret_handling": "doctor and profiles output omit connect strings, usernames, credential_ref values, passwords, IAM tokens, and wallet paths",
-            "unsupported_auth": "published thin driver gaps such as external wallet auth, OCI IAM token auth, and edition selection are returned as structured unsupported diagnostics rather than falling back silently"
+            "secret_handling": "doctor and profiles output omit connect strings, usernames, credential_ref values, passwords, proxy identities, wallet passwords, IAM tokens, wallet paths, and server DNs",
+            "unsupported_auth": "username/password over TCPS wallet is supported; passwordless external wallet auth, profile-driven OCI IAM token retrieval, and Kerberos/RADIUS auth are returned as structured unsupported diagnostics rather than falling back silently"
+        },
+        "result_materialization": {
+            "lobs": "CLOB/BLOB/BFILE locators are materialized with bounded reads before JSON serialization.",
+            "ref_cursors": "Valid REF CURSOR values and implicit resultsets serialize as nested result objects with child columns, rows, row_count, fetched_count, and truncation metadata.",
+            "caps": "Nested cursor materialization is bounded by row, cell, byte, and depth caps; unsupported shapes remain explicit."
         },
         "diagnostic_flow": [
             {
@@ -282,6 +342,7 @@ Client setup
 - Generate generic setup templates with: oraclemcp --json setup --profile <profile>
 - Local stdio command: oraclemcp serve --profile <profile> --allow-no-auth
 - Secure stdio command: ORACLEMCP_STDIO_TOKEN=<token> oraclemcp serve --profile <profile>
+- Streamable HTTP starts only with configured OAuth or explicit --allow-no-auth; use --oauth-* / --http-* flags or top-level [http] config, and put a TLS proxy in front for remote clients.
 - The thin driver does not need Oracle Instant Client, ODPI-C, libclntsh, or a C toolchain.
 - If Oracle Net files need TNS_ADMIN, point every MCP client at the same small wrapper script.
 - After replacing the binary or wrapper, restart or reconnect each MCP client so it imports the fresh tool schema.
@@ -335,7 +396,11 @@ Configuration
 - Profiles: ~/.config/oraclemcp/profiles.toml or ORACLEMCP_CONFIG.
 - Custom tools: ~/.config/oraclemcp/tools.d/*.toml or ORACLEMCP_TOOLS_DIR.
 - Custom tool signing: protected profiles and profiles with require_signed_tools=true require ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY and signatures from oraclemcp sign-tool.
-- Prefer credential_ref over literal passwords.
+- Prefer credential_ref and wallet_password_ref over literal passwords.
+- Use profiles.proxy_auth for thin proxy authentication: credential_ref belongs to proxy_user and target_schema is the CONNECT THROUGH client.
+- Use top-level sdu and profiles.drcp for validated thin SDU and DRCP server routing instead of raw connect_string query parameters.
+- Use profiles.pool for hybrid_pool: stateless catalog/metadata reads can use the bounded local pool, while user SQL, LOB/sample reads, transactions, DBMS_OUTPUT, login setup, and session identity remain on the pinned main session.
+- Use repeated profiles.app_context entries for thin logon application-context triples; values are redacted from profile output.
 - Database aliases, session identity, client module/program labels, and custom workflow tools belong in profiles or tools.d config, not in the general core.
 
 Diagnostic flow
@@ -349,8 +414,13 @@ Diagnostic flow
 Thin diagnostics
 - Offline doctor checks the thin driver posture, optional TNS/wallet directories, canonical NLS setup, classifier self-test, and custom-tool availability without opening a database.
 - Profile doctor adds live connectivity, authentication, role/open-mode, standby, and privilege-tier checks.
-- Doctor output omits connect strings, usernames, credential_ref values, passwords, IAM tokens, and wallet paths.
+- Doctor output omits connect strings, usernames, credential_ref values, passwords, proxy identities, wallet passwords, IAM tokens, wallet paths, and server DNs.
 - Unsupported thin auth/features are explicit diagnostics; the binary never silently falls back to thick mode.
+
+Result materialization
+- CLOB/BLOB/BFILE locators are materialized with bounded reads before JSON serialization.
+- Valid REF CURSOR values and implicit resultsets serialize as nested result objects with child columns, rows, row_count, fetched_count, and truncation metadata.
+- Nested cursor materialization is bounded by row, cell, byte, and depth caps; unsupported shapes remain explicit.
 
 Agent rules
 - Prefer oracle_query for SELECT/WITH statements.

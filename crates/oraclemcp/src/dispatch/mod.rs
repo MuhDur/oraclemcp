@@ -95,11 +95,43 @@ const MAX_CALL_TIMEOUT_SECONDS: u64 = 3_600;
 pub type ProfileConnector =
     dyn Fn(&str) -> Result<Box<dyn OracleConnection>, DbError> + Send + Sync + 'static;
 
+/// Optional stateless metadata-read connector used when a profile configures a
+/// local client-side pool.
+pub type ProfileStatelessConnector =
+    dyn Fn(&str) -> Result<Option<Box<dyn OracleConnection>>, DbError> + Send + Sync + 'static;
+
 /// Profile-scoped custom-tool loader used by `oracle_switch_profile`.
 pub type CustomToolLoader = dyn Fn(Option<&str>, &SessionLevelState) -> Result<CustomToolCatalog, ErrorEnvelope>
     + Send
     + Sync
     + 'static;
+
+/// Initial connection and profile-switch connector for the optional stateless
+/// metadata-read pool.
+pub struct StatelessReadStrategy {
+    conn: Option<Box<dyn OracleConnection>>,
+    connector: Option<Arc<ProfileStatelessConnector>>,
+}
+
+impl StatelessReadStrategy {
+    /// Disable the stateless metadata-read path.
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            conn: None,
+            connector: None,
+        }
+    }
+
+    /// Configure the initial stateless connection and profile-switch connector.
+    #[must_use]
+    pub fn new(
+        conn: Option<Box<dyn OracleConnection>>,
+        connector: Option<Arc<ProfileStatelessConnector>>,
+    ) -> Self {
+        Self { conn, connector }
+    }
+}
 
 fn default_read_only_level() -> SessionLevelState {
     SessionLevelState::new(OperatingLevel::ReadOnly, false)
@@ -117,6 +149,7 @@ fn profile_level(profile: &str) -> SessionLevelState {
 
 struct DispatcherState {
     conn: Box<dyn OracleConnection>,
+    stateless_conn: Option<Box<dyn OracleConnection>>,
     active_profile: Option<String>,
     level: SessionLevelState,
     custom_catalog: CustomToolCatalog,
@@ -148,6 +181,7 @@ struct PatchPreviewEntry {
 pub struct OracleDispatcher {
     state: Mutex<DispatcherState>,
     connector: Option<Arc<ProfileConnector>>,
+    stateless_connector: Option<Arc<ProfileStatelessConnector>>,
     custom_loader: Option<Arc<CustomToolLoader>>,
 }
 
@@ -174,6 +208,7 @@ impl OracleDispatcher {
         OracleDispatcher {
             state: Mutex::new(DispatcherState {
                 conn,
+                stateless_conn: None,
                 active_profile,
                 level,
                 custom_catalog: CustomToolCatalog::default(),
@@ -181,6 +216,7 @@ impl OracleDispatcher {
                 patch_previews: HashMap::new(),
             }),
             connector: None,
+            stateless_connector: None,
             custom_loader: None,
         }
     }
@@ -211,9 +247,32 @@ impl OracleDispatcher {
         custom_catalog: CustomToolCatalog,
         custom_loader: Option<Arc<CustomToolLoader>>,
     ) -> Self {
+        Self::new_switchable_with_custom_tools_and_stateless(
+            conn,
+            active_profile,
+            level,
+            connector,
+            StatelessReadStrategy::none(),
+            custom_catalog,
+            custom_loader,
+        )
+    }
+
+    /// Build a switchable dispatcher with a separate stateless metadata-read
+    /// connection path for profile-backed pools.
+    pub fn new_switchable_with_custom_tools_and_stateless(
+        conn: Box<dyn OracleConnection>,
+        active_profile: Option<String>,
+        level: SessionLevelState,
+        connector: Arc<ProfileConnector>,
+        stateless: StatelessReadStrategy,
+        custom_catalog: CustomToolCatalog,
+        custom_loader: Option<Arc<CustomToolLoader>>,
+    ) -> Self {
         OracleDispatcher {
             state: Mutex::new(DispatcherState {
                 conn,
+                stateless_conn: stateless.conn,
                 active_profile,
                 level,
                 custom_catalog,
@@ -221,6 +280,7 @@ impl OracleDispatcher {
                 patch_previews: HashMap::new(),
             }),
             connector: Some(connector),
+            stateless_connector: stateless.connector,
             custom_loader,
         }
     }
@@ -268,6 +328,7 @@ fn query_serialize_options_from_args(args: &QueryArgs) -> SerializeOptions {
             .max_blob_bytes
             .unwrap_or(defaults.max_blob_bytes)
             .clamp(1, MAX_QUERY_BLOB_BYTES),
+        ..defaults
     }
 }
 
@@ -2942,6 +3003,20 @@ fn connection_info_json(
     }
 }
 
+fn connection_strategy_json(cx: Option<&Cx>, conn: &dyn OracleConnection) -> Value {
+    match describe_conn(cx, conn) {
+        Ok(info) => json!({
+            "connected": true,
+            "strategy": info.connection_strategy,
+            "pool_open_connections": info.pool_open_connections,
+        }),
+        Err(err) => json!({
+            "connected": false,
+            "connection_error": err.into_envelope(),
+        }),
+    }
+}
+
 fn canonical_tool_name(name: &str) -> &str {
     match name {
         "current_database" => "oracle_connection_info",
@@ -3032,8 +3107,20 @@ impl OracleDispatcher {
             };
 
             let new_conn = connector(&profile).map_err(DbError::into_envelope)?;
+            let new_stateless_conn = match &self.stateless_connector {
+                Some(connector) => connector(&profile).map_err(DbError::into_envelope)?,
+                None => None,
+            };
             let mut response =
                 connection_info_json(Some(profile.clone()), describe_conn(cx, new_conn.as_ref()));
+            if let Value::Object(map) = &mut response
+                && let Some(stateless_conn) = new_stateless_conn.as_ref()
+            {
+                map.insert(
+                    "stateless_read_connection".to_owned(),
+                    connection_strategy_json(cx, stateless_conn.as_ref()),
+                );
+            }
             let new_level = profile_level(&profile);
             let new_custom_catalog = match &self.custom_loader {
                 Some(loader) => loader(Some(&profile), &new_level)?,
@@ -3043,6 +3130,7 @@ impl OracleDispatcher {
                 ErrorEnvelope::new(ErrorClass::Internal, "connection mutex poisoned")
             })?;
             state.conn = new_conn;
+            state.stateless_conn = new_stateless_conn;
             state.active_profile = Some(profile.clone());
             state.level = new_level;
             state.custom_catalog = new_custom_catalog;
@@ -3107,6 +3195,10 @@ impl OracleDispatcher {
             return read_patch_preview(&state, name, a);
         }
         let conn: &dyn OracleConnection = state.conn.as_ref();
+        let metadata_conn: &dyn OracleConnection = state
+            .stateless_conn
+            .as_deref()
+            .unwrap_or_else(|| state.conn.as_ref());
 
         let result: Result<Value, DbError> = match tool {
             "oracle_execute" => {
@@ -3158,10 +3250,17 @@ impl OracleDispatcher {
             }
             "oracle_connection_info" => {
                 ensure_no_args(name, args)?;
-                Ok(connection_info_json(
-                    state.active_profile.clone(),
-                    describe_conn(cx, conn),
-                ))
+                let mut value =
+                    connection_info_json(state.active_profile.clone(), describe_conn(cx, conn));
+                if let Value::Object(map) = &mut value
+                    && let Some(stateless_conn) = state.stateless_conn.as_ref()
+                {
+                    map.insert(
+                        "stateless_read_connection".to_owned(),
+                        connection_strategy_json(cx, stateless_conn.as_ref()),
+                    );
+                }
+                Ok(value)
             }
             "oracle_query" => {
                 let a: QueryArgs = parse_args(name, args)?;
@@ -3208,7 +3307,7 @@ impl OracleDispatcher {
                 let owner_result: Result<Option<String>, DbError> = match owner_arg.as_deref() {
                     Some("*") => Ok(None),
                     Some(owner) => Ok(Some(owner.to_owned())),
-                    None => describe_conn(cx, conn).and_then(|info| {
+                    None => describe_conn(cx, metadata_conn).and_then(|info| {
                         info.current_schema.map(Some).ok_or_else(|| {
                             DbError::Query(
                                 "owner is required because current_schema could not be detected"
@@ -3220,7 +3319,7 @@ impl OracleDispatcher {
                 owner_result.and_then(|owner_filter| {
                     dispatch_checkpoint_db(cx, "oraclemcp.dispatch.schema_inspect.before")?;
                     list_objects(
-                        conn,
+                        metadata_conn,
                         owner_filter.as_deref(),
                         object_type.as_deref(),
                         name_like.as_deref(),
@@ -3247,7 +3346,7 @@ impl OracleDispatcher {
                     .unwrap_or(DEFAULT_SCHEMA_LIST_MAX_ROWS)
                     .clamp(1, MAX_SCHEMA_LIST_MAX_ROWS);
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.list_schemas.before")?;
-                list_schemas(conn, name_like.as_deref(), max_rows).and_then(|rows| {
+                list_schemas(metadata_conn, name_like.as_deref(), max_rows).and_then(|rows| {
                     dispatch_checkpoint_db(cx, "oraclemcp.dispatch.list_schemas.after")?;
                     Ok(json!({
                         "schemas": rows_to_json(&rows),
@@ -3260,11 +3359,12 @@ impl OracleDispatcher {
             "oracle_describe" => {
                 let a: DescribeArgs = parse_args(name, args)?;
                 let table = required_non_empty_arg(name, "table", a.table)?;
-                let (owner, table) = owner_and_name_arg(cx, conn, a.owner, table, "table")?;
+                let (owner, table) =
+                    owner_and_name_arg(cx, metadata_conn, a.owner, table, "table")?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_columns.before")?;
-                describe_columns(conn, &owner, &table).and_then(|columns| {
+                describe_columns(metadata_conn, &owner, &table).and_then(|columns| {
                     dispatch_checkpoint_db(cx, "oraclemcp.dispatch.describe_constraints.before")?;
-                    describe_constraints(conn, &owner, &table).and_then(|constraints| {
+                    describe_constraints(metadata_conn, &owner, &table).and_then(|constraints| {
                         dispatch_checkpoint_db(
                             cx,
                             "oraclemcp.dispatch.describe_constraints.after",
@@ -3280,9 +3380,10 @@ impl OracleDispatcher {
             }
             "oracle_describe_index" => {
                 let a: DescribeIndexArgs = parse_args(name, args)?;
-                let (owner, object_name) = owner_and_name_arg(cx, conn, a.owner, a.name, "index")?;
+                let (owner, object_name) =
+                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "index")?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_index.before")?;
-                describe_index(conn, &owner, &object_name).and_then(|desc| {
+                describe_index(metadata_conn, &owner, &object_name).and_then(|desc| {
                     dispatch_checkpoint_db(cx, "oraclemcp.dispatch.describe_index.after")?;
                     Ok(json!({
                         "owner": owner,
@@ -3296,9 +3397,9 @@ impl OracleDispatcher {
             "oracle_describe_trigger" => {
                 let a: DescribeTriggerArgs = parse_args(name, args)?;
                 let (owner, object_name) =
-                    owner_and_name_arg(cx, conn, a.owner, a.name, "trigger")?;
+                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "trigger")?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_trigger.before")?;
-                describe_trigger(conn, &owner, &object_name).and_then(|desc| {
+                describe_trigger(metadata_conn, &owner, &object_name).and_then(|desc| {
                     dispatch_checkpoint_db(cx, "oraclemcp.dispatch.describe_trigger.after")?;
                     Ok(json!({
                         "owner": owner,
@@ -3309,9 +3410,10 @@ impl OracleDispatcher {
             }
             "oracle_describe_view" => {
                 let a: DescribeViewArgs = parse_args(name, args)?;
-                let (owner, object_name) = owner_and_name_arg(cx, conn, a.owner, a.name, "view")?;
+                let (owner, object_name) =
+                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "view")?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_view.before")?;
-                describe_view(conn, &owner, &object_name).and_then(|desc| {
+                describe_view(metadata_conn, &owner, &object_name).and_then(|desc| {
                     dispatch_checkpoint_db(cx, "oraclemcp.dispatch.describe_view.after")?;
                     Ok(json!({
                         "owner": owner,
@@ -3323,9 +3425,10 @@ impl OracleDispatcher {
             }
             "oracle_get_ddl" => {
                 let a: GetDdlArgs = parse_args(name, args)?;
-                let (owner, object_name) = owner_and_name_arg(cx, conn, a.owner, a.name, "name")?;
+                let (owner, object_name) =
+                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "name")?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.get_ddl.before")?;
-                get_ddl(conn, &a.object_type, &owner, &object_name).and_then(|ddl| {
+                get_ddl(metadata_conn, &a.object_type, &owner, &object_name).and_then(|ddl| {
                     dispatch_checkpoint_db(cx, "oraclemcp.dispatch.get_ddl.after")?;
                     Ok(json!({ "owner": owner, "name": object_name, "ddl": ddl }))
                 })
@@ -3333,21 +3436,21 @@ impl OracleDispatcher {
             "oracle_get_source" => {
                 let a: GetSourceArgs = parse_args(name, args)?;
                 let max_chars = a.max_chars.unwrap_or(DEFAULT_SOURCE_MAX_CHARS);
-                let (owner, object_name) = owner_and_name_arg(cx, conn, a.owner, a.name, "name")?;
+                let (owner, object_name) =
+                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "name")?;
                 match a.object_type.as_deref().filter(|s| !s.trim().is_empty()) {
                     Some(object_type) => {
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.get_source.before")?;
-                        get_source(conn, &owner, &object_name, object_type, max_chars).and_then(
-                            |source| {
+                        get_source(metadata_conn, &owner, &object_name, object_type, max_chars)
+                            .and_then(|source| {
                                 dispatch_checkpoint_db(cx, "oraclemcp.dispatch.get_source.after")?;
                                 Ok(json!({ "source": source }))
-                            },
-                        )
+                            })
                     }
                     None => {
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.get_sources_by_name.before")?;
-                        get_sources_by_name(conn, &owner, &object_name, max_chars).and_then(
-                            |sources| {
+                        get_sources_by_name(metadata_conn, &owner, &object_name, max_chars)
+                            .and_then(|sources| {
                                 dispatch_checkpoint_db(
                                     cx,
                                     "oraclemcp.dispatch.get_sources_by_name.after",
@@ -3358,8 +3461,7 @@ impl OracleDispatcher {
                                     "source_count": sources.len(),
                                     "sources": sources,
                                 }))
-                            },
-                        )
+                            })
                     }
                 }
             }
@@ -3401,9 +3503,9 @@ impl OracleDispatcher {
                 match object_name {
                     Some(object_name) => {
                         let (owner, object_name) =
-                            owner_and_name_arg(cx, conn, a.owner, object_name, "name")?;
+                            owner_and_name_arg(cx, metadata_conn, a.owner, object_name, "name")?;
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.before")?;
-                        compile_errors(conn, &owner, Some(&object_name))
+                        compile_errors(metadata_conn, &owner, Some(&object_name))
                             .and_then(|rows| {
                                 dispatch_checkpoint_db(
                                     cx,
@@ -3412,9 +3514,9 @@ impl OracleDispatcher {
                                 Ok(json!({ "owner": owner, "name": object_name, "errors": rows_to_json(&rows) }))
                             })
                     }
-                    None => owner_or_current_cx(cx, conn, a.owner).and_then(|owner| {
+                    None => owner_or_current_cx(cx, metadata_conn, a.owner).and_then(|owner| {
                         dispatch_checkpoint_db(cx, "oraclemcp.dispatch.compile_errors.before")?;
-                        compile_errors(conn, &owner, None).and_then(|rows| {
+                        compile_errors(metadata_conn, &owner, None).and_then(|rows| {
                             dispatch_checkpoint_db(cx, "oraclemcp.dispatch.compile_errors.after")?;
                             Ok(json!({ "owner": owner, "errors": rows_to_json(&rows) }))
                         })
@@ -3431,15 +3533,16 @@ impl OracleDispatcher {
                 let owner = match requested_owner.as_deref() {
                     Some("*") => None,
                     Some(owner) => Some(owner.to_ascii_uppercase()),
-                    None => {
-                        Some(owner_or_current_cx(cx, conn, None).map_err(DbError::into_envelope)?)
-                    }
+                    None => Some(
+                        owner_or_current_cx(cx, metadata_conn, None)
+                            .map_err(DbError::into_envelope)?,
+                    ),
                 };
                 let object_type = non_empty_arg(a.object_type);
                 let name_like = non_empty_arg(a.name_like);
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.search_source.before")?;
                 search_source(
-                    conn,
+                    metadata_conn,
                     owner.as_deref(),
                     &a.needle,
                     object_type.as_deref(),
@@ -3461,13 +3564,13 @@ impl OracleDispatcher {
                 let a: PlscopeInspectArgs = parse_args(name, args)?;
                 let object_name = required_non_empty_arg(name, "name", a.name)?;
                 let (owner, object_name) =
-                    owner_and_name_arg(cx, conn, a.owner, object_name, "name")?;
+                    owner_and_name_arg(cx, metadata_conn, a.owner, object_name, "name")?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_identifiers.before")?;
-                let identifiers = plscope_identifiers(conn, &owner, &object_name)
+                let identifiers = plscope_identifiers(metadata_conn, &owner, &object_name)
                     .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_identifiers.after")?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_statements.before")?;
-                let statements = plscope_statements(conn, &owner, &object_name)
+                let statements = plscope_statements(metadata_conn, &owner, &object_name)
                     .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_statements.after")?;
                 let unused_declarations = find_unused_declarations(&identifiers);

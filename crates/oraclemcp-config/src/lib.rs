@@ -21,7 +21,8 @@ use thiserror::Error;
 pub use oraclemcp_error as error;
 pub use oraclemcp_guard::OperatingLevel;
 pub use profile::{
-    ConnectionProfile, OciConfig, PoolConfig, ProfileMetadata, SessionIdentityConfig,
+    AppContextConfig, ConnectionProfile, DrcpRoutingConfig, DrcpSessionPurity, OciConfig,
+    PoolConfig, PoolMetadata, ProfileMetadata, ProxyAuthConfig, SessionIdentityConfig,
     resolve_inheritance,
 };
 
@@ -63,6 +64,9 @@ pub struct OracleMcpConfig {
     /// `serve --profile <name>`. This keeps multi-client MCP config small.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_profile: Option<String>,
+    /// Native Streamable HTTP transport configuration.
+    #[serde(default)]
+    pub http: HttpConfig,
     /// Named connection profiles.
     #[serde(default)]
     pub profiles: Vec<ConnectionProfile>,
@@ -73,9 +77,134 @@ impl Default for OracleMcpConfig {
         OracleMcpConfig {
             schema_version: SUPPORTED_SCHEMA_VERSION,
             default_profile: None,
+            http: HttpConfig::default(),
             profiles: Vec::new(),
         }
     }
+}
+
+/// Native Streamable HTTP transport configuration.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HttpConfig {
+    /// Allowed `Host` authorities beyond loopback.
+    pub allowed_hosts: Vec<String>,
+    /// Allowed browser `Origin` values beyond loopback origins.
+    pub allowed_origins: Vec<String>,
+    /// Prefer direct JSON responses for stateless requests.
+    pub json_response: bool,
+    /// Enable Streamable HTTP stateful session framing.
+    pub stateful: bool,
+    /// Optional OAuth 2.1 resource-server protection for `/mcp`.
+    pub oauth: Option<HttpOAuthConfig>,
+    /// Optional TLS material. Parsed by config but rejected by the binary until
+    /// the native TLS listener is wired; use a terminating proxy for v0.3.0.
+    pub tls: Option<HttpTlsConfig>,
+}
+
+impl HttpConfig {
+    /// Validate the HTTP transport config in isolation.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        validate_non_empty_list("http.allowed_hosts", &self.allowed_hosts)?;
+        validate_non_empty_list("http.allowed_origins", &self.allowed_origins)?;
+        if let Some(oauth) = &self.oauth {
+            oauth.validate()?;
+        }
+        if let Some(tls) = &self.tls {
+            tls.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// OAuth 2.1 resource-server configuration for the native HTTP transport.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HttpOAuthConfig {
+    /// Canonical resource/audience identifier expected in JWT `aud`.
+    pub resource: Option<String>,
+    /// Allowed JWT issuers (`iss`). Empty means invalid config.
+    pub allowed_issuers: Vec<String>,
+    /// Authorization servers advertised in RFC 9728 metadata.
+    pub authorization_servers: Vec<String>,
+    /// Scopes that every token must carry before dispatch.
+    pub required_scopes: Vec<String>,
+    /// Secret reference used by the built-in HS256 verifier.
+    pub hs256_secret_ref: Option<String>,
+    /// Metadata URL advertised in `WWW-Authenticate`; defaults from resource.
+    pub metadata_url: Option<String>,
+}
+
+impl HttpOAuthConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        validate_required_string("http.oauth.resource", self.resource.as_deref())?;
+        validate_non_empty_list("http.oauth.allowed_issuers", &self.allowed_issuers)?;
+        validate_non_empty_list(
+            "http.oauth.authorization_servers",
+            &self.authorization_servers,
+        )?;
+        validate_non_empty_list("http.oauth.required_scopes", &self.required_scopes)?;
+        validate_required_string(
+            "http.oauth.hs256_secret_ref",
+            self.hs256_secret_ref.as_deref(),
+        )?;
+        if let Some(metadata_url) = self.metadata_url.as_deref() {
+            validate_required_string("http.oauth.metadata_url", Some(metadata_url))?;
+        }
+        Ok(())
+    }
+}
+
+/// TLS material paths for future native HTTPS serving.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HttpTlsConfig {
+    /// Server certificate chain PEM path.
+    pub cert_chain_path: Option<PathBuf>,
+    /// Server private key PEM path.
+    pub private_key_path: Option<PathBuf>,
+    /// Client CA PEM path. When present, mTLS is required.
+    pub client_ca_path: Option<PathBuf>,
+}
+
+impl HttpTlsConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        let has_cert = self.cert_chain_path.is_some();
+        let has_key = self.private_key_path.is_some();
+        if has_cert != has_key {
+            return Err(ConfigError::InvalidHttp {
+                field: "http.tls",
+                reason: "cert_chain_path and private_key_path must be configured together",
+            });
+        }
+        if self.client_ca_path.is_some() && !has_cert {
+            return Err(ConfigError::InvalidHttp {
+                field: "http.tls.client_ca_path",
+                reason: "requires cert_chain_path and private_key_path",
+            });
+        }
+        Ok(())
+    }
+}
+
+fn validate_required_string(field: &'static str, value: Option<&str>) -> Result<(), ConfigError> {
+    match value.map(str::trim) {
+        Some(value) if !value.is_empty() => Ok(()),
+        _ => Err(ConfigError::InvalidHttp {
+            field,
+            reason: "must be non-empty",
+        }),
+    }
+}
+
+fn validate_non_empty_list(field: &'static str, values: &[String]) -> Result<(), ConfigError> {
+    if values.iter().any(|value| value.trim().is_empty()) {
+        return Err(ConfigError::InvalidHttp {
+            field,
+            reason: "entries must be non-empty",
+        });
+    }
+    Ok(())
 }
 
 impl OracleMcpConfig {
@@ -151,6 +280,7 @@ impl OracleMcpConfig {
                 supported: SUPPORTED_SCHEMA_VERSION,
             });
         }
+        self.http.validate()?;
         resolve_inheritance(&mut self.profiles)?;
         if let Some(default_profile) = self.default_profile.as_deref()
             && !self.profiles.iter().any(|p| p.name == default_profile)
@@ -176,6 +306,23 @@ impl OracleMcpConfig {
                     default_level: prof.default_level(),
                     max_level: prof.max_level(),
                 });
+            }
+            if let Some(proxy) = &prof.proxy_auth {
+                let proxy_user = proxy
+                    .proxy_user()
+                    .ok_or_else(|| ConfigError::IncompleteProxyAuth(prof.name.clone()))?;
+                proxy
+                    .target_schema()
+                    .ok_or_else(|| ConfigError::IncompleteProxyAuth(prof.name.clone()))?;
+                if let Some(username) = prof.username.as_deref()
+                    && username.trim() != proxy_user
+                {
+                    return Err(ConfigError::ProxyUsernameMismatch(prof.name.clone()));
+                }
+            }
+            prof.validate_thin_routing()?;
+            if let Some(entries) = &prof.app_context {
+                AppContextConfig::validate_list(&prof.name, entries)?;
             }
         }
         Ok(self)
@@ -248,6 +395,64 @@ pub enum ConfigError {
         /// Configured ceiling.
         max_level: OperatingLevel,
     },
+    /// Proxy auth was enabled without both required identities.
+    #[error("connection profile `{0}` proxy_auth requires non-empty proxy_user and target_schema")]
+    IncompleteProxyAuth(String),
+    /// Top-level username conflicts with `proxy_auth.proxy_user`.
+    #[error("connection profile `{0}` proxy_auth.proxy_user must match username when both are set")]
+    ProxyUsernameMismatch(String),
+    /// A profile declared an SDU outside the thin driver's supported range.
+    #[error("connection profile `{profile}` has invalid sdu {sdu}; expected {min}..={max}")]
+    InvalidSdu {
+        /// Profile name.
+        profile: String,
+        /// Configured SDU value.
+        sdu: u32,
+        /// Minimum supported SDU.
+        min: u32,
+        /// Maximum supported SDU.
+        max: u32,
+    },
+    /// A profile declared invalid DRCP routing settings.
+    #[error("connection profile `{profile}` has invalid drcp.{field}: {reason}")]
+    InvalidDrcp {
+        /// Profile name.
+        profile: String,
+        /// Field name.
+        field: &'static str,
+        /// Static validation reason.
+        reason: &'static str,
+    },
+    /// A profile declared invalid local client-side pool settings.
+    #[error("connection profile `{profile}` has invalid pool.{field}: {reason}")]
+    InvalidPool {
+        /// Profile name.
+        profile: String,
+        /// Field name.
+        field: &'static str,
+        /// Static validation reason.
+        reason: &'static str,
+    },
+    /// Driver-level app-context entry is malformed.
+    #[error("connection profile `{profile}` app_context[{index}].{field} {reason}")]
+    InvalidAppContext {
+        /// Profile name.
+        profile: String,
+        /// Entry index in the configured list.
+        index: usize,
+        /// Field name.
+        field: &'static str,
+        /// Validation failure.
+        reason: &'static str,
+    },
+    /// Native HTTP transport configuration is malformed.
+    #[error("invalid {field}: {reason}")]
+    InvalidHttp {
+        /// Field name.
+        field: &'static str,
+        /// Validation failure.
+        reason: &'static str,
+    },
 }
 
 impl From<figment::Error> for ConfigError {
@@ -264,7 +469,77 @@ mod tests {
     fn empty_config_is_valid_with_default_schema_version() {
         let cfg = OracleMcpConfig::from_toml_str("").expect("empty config loads");
         assert_eq!(cfg.schema_version, SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(cfg.http, HttpConfig::default());
         assert!(cfg.profiles.is_empty());
+    }
+
+    #[test]
+    fn http_oauth_config_loads_and_validates() {
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [http]
+            allowed_hosts = ["mcp.example.com"]
+            allowed_origins = ["https://app.example.com"]
+            json_response = true
+            stateful = true
+
+            [http.oauth]
+            resource = "https://mcp.example.com/mcp"
+            allowed_issuers = ["https://idp.example.com"]
+            authorization_servers = ["https://idp.example.com"]
+            required_scopes = ["oracle:read"]
+            hs256_secret_ref = "env:ORACLEMCP_OAUTH_HS256_SECRET"
+            metadata_url = "https://mcp.example.com/.well-known/oauth-protected-resource"
+            "#,
+        )
+        .expect("http oauth config loads");
+
+        assert_eq!(cfg.http.allowed_hosts, vec!["mcp.example.com"]);
+        assert!(cfg.http.stateful);
+        let oauth = cfg.http.oauth.expect("oauth config");
+        assert_eq!(
+            oauth.resource.as_deref(),
+            Some("https://mcp.example.com/mcp")
+        );
+        assert_eq!(oauth.required_scopes, vec!["oracle:read"]);
+    }
+
+    #[test]
+    fn partial_http_oauth_config_is_rejected() {
+        let err = OracleMcpConfig::from_toml_str(
+            r#"
+            [http.oauth]
+            resource = "https://mcp.example.com/mcp"
+            allowed_issuers = ["https://idp.example.com"]
+            authorization_servers = ["https://idp.example.com"]
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidHttp {
+                field: "http.oauth.hs256_secret_ref",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn half_configured_http_tls_is_rejected() {
+        let err = OracleMcpConfig::from_toml_str(
+            r#"
+            [http.tls]
+            cert_chain_path = "/etc/oraclemcp/server.pem"
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidHttp {
+                field: "http.tls",
+                ..
+            }
+        ));
     }
 
     #[test]

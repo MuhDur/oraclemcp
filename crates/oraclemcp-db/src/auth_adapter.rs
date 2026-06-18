@@ -11,9 +11,10 @@
 use std::path::PathBuf;
 
 /// An Oracle Net authentication adapter.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub enum AuthAdapter {
     /// Username + password (the default).
+    #[default]
     Password,
     /// Kerberos 5 with a keytab; `delegation_constrained` sets
     /// `KERBEROS5_DELEGATION_MODE=CONSTRAINED` (the safer, scoped delegation).
@@ -36,6 +37,26 @@ pub enum AuthAdapter {
     },
     /// OS / wallet external authentication.
     External,
+}
+
+impl std::fmt::Debug for AuthAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthAdapter::Password => f.write_str("AuthAdapter::Password"),
+            AuthAdapter::Kerberos { .. } => f
+                .debug_struct("AuthAdapter::Kerberos")
+                .field("keytab", &"<redacted>")
+                .field("delegation_constrained", &"<redacted>")
+                .finish(),
+            AuthAdapter::Radius => f.write_str("AuthAdapter::Radius"),
+            AuthAdapter::Proxy { .. } => f
+                .debug_struct("AuthAdapter::Proxy")
+                .field("proxy_user", &"<redacted>")
+                .field("target_schema", &"<redacted>")
+                .finish(),
+            AuthAdapter::External => f.write_str("AuthAdapter::External"),
+        }
+    }
 }
 
 /// Why an auth adapter is invalid.
@@ -91,17 +112,45 @@ impl AuthAdapter {
         }
     }
 
-    /// The proxy connect specifier (`proxy_user[target_schema]`) for `CONNECT
-    /// THROUGH`, or `None` for non-proxy adapters. Stamps per-agent identity into
-    /// Unified Auditing without a per-agent password.
+    /// The target schema for the driver's `with_proxy_user(...)` setter, or
+    /// `None` for non-proxy adapters. The normal connect username is the
+    /// authenticating proxy account; this value is the `CONNECT THROUGH` client.
     #[must_use]
     pub fn proxy_connect_user(&self) -> Option<String> {
+        self.proxy_target_schema().map(ToOwned::to_owned)
+    }
+
+    /// The target schema/client identity for proxy authentication.
+    #[must_use]
+    pub fn proxy_target_schema(&self) -> Option<&str> {
         match self {
+            AuthAdapter::Proxy { target_schema, .. } => {
+                Some(target_schema.trim()).filter(|value| !value.is_empty())
+            }
+            _ => None,
+        }
+    }
+
+    /// Values from this adapter that should be redacted from driver errors.
+    #[must_use]
+    pub fn sensitive_values(&self) -> Vec<&str> {
+        match self {
+            AuthAdapter::Kerberos { keytab, .. } => keytab.to_str().into_iter().collect(),
             AuthAdapter::Proxy {
                 proxy_user,
                 target_schema,
-            } => Some(format!("{proxy_user}[{target_schema}]")),
-            _ => None,
+            } => {
+                let mut values = Vec::new();
+                for value in [proxy_user.as_str(), target_schema.as_str()] {
+                    values.push(value);
+                    let trimmed = value.trim();
+                    if trimmed != value && !trimmed.is_empty() {
+                        values.push(trimmed);
+                    }
+                }
+                values
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -181,13 +230,31 @@ mod tests {
         };
         a.validate().expect("valid");
         // Per-agent identity for Unified Auditing without a per-agent password.
-        assert_eq!(
-            a.proxy_connect_user().as_deref(),
-            Some("mcp_proxy[APP_OWNER]")
-        );
+        assert_eq!(a.proxy_connect_user().as_deref(), Some("APP_OWNER"));
         // Proxy itself adds no sqlnet auth service.
         assert!(a.sqlnet_settings().is_empty());
         assert!(!a.uses_external_auth());
+    }
+
+    #[test]
+    fn proxy_debug_is_redacted_but_sensitive_values_are_available() {
+        let a = AuthAdapter::Proxy {
+            proxy_user: "mcp_proxy".to_owned(),
+            target_schema: "APP_OWNER".to_owned(),
+        };
+        let rendered = format!("{a:?}");
+        assert!(!rendered.contains("mcp_proxy"));
+        assert!(!rendered.contains("APP_OWNER"));
+        assert_eq!(a.sensitive_values(), vec!["mcp_proxy", "APP_OWNER"]);
+
+        let a = AuthAdapter::Proxy {
+            proxy_user: " mcp_proxy ".to_owned(),
+            target_schema: " APP_OWNER ".to_owned(),
+        };
+        assert_eq!(
+            a.sensitive_values(),
+            vec![" mcp_proxy ", "mcp_proxy", " APP_OWNER ", "APP_OWNER"]
+        );
     }
 
     #[test]

@@ -8,6 +8,8 @@ use std::{path::PathBuf, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
+use crate::auth_adapter::AuthAdapter;
+
 /// The connectivity backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,6 +87,14 @@ pub struct OracleCell {
     /// serializer base64-encodes these. `None` for text/NULL cells.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes: Option<Vec<u8>>,
+    /// Internal full-source length hint for bounded LOB reads: characters for
+    /// CLOB/NCLOB text, bytes for binary LOBs. It is folded into serialized
+    /// truncation metadata instead of exposed directly.
+    #[serde(skip)]
+    pub source_length: Option<usize>,
+    /// Nested REF CURSOR / implicit result-set payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested_result: Option<Box<OracleNestedResult>>,
 }
 
 impl OracleCell {
@@ -95,6 +105,8 @@ impl OracleCell {
             oracle_type: oracle_type.into(),
             value,
             bytes: None,
+            source_length: None,
+            nested_result: None,
         }
     }
 
@@ -105,6 +117,20 @@ impl OracleCell {
             oracle_type: oracle_type.into(),
             value: None,
             bytes: Some(bytes),
+            source_length: None,
+            nested_result: None,
+        }
+    }
+
+    /// Construct a nested result-set cell.
+    #[must_use]
+    pub fn nested_result(oracle_type: impl Into<String>, result: OracleNestedResult) -> Self {
+        OracleCell {
+            oracle_type: oracle_type.into(),
+            value: None,
+            bytes: None,
+            source_length: None,
+            nested_result: Some(Box::new(result)),
         }
     }
 
@@ -113,6 +139,28 @@ impl OracleCell {
     pub fn text(&self) -> Option<&str> {
         self.value.as_deref()
     }
+
+    /// Attach the original LOB length when the stored value is a capped prefix.
+    #[must_use]
+    pub fn with_source_length(mut self, source_length: usize) -> Self {
+        self.source_length = Some(source_length);
+        self
+    }
+}
+
+/// A bounded nested result set from a REF CURSOR or implicit result.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OracleNestedResult {
+    /// Child cursor columns in select-list order.
+    pub columns: Vec<String>,
+    /// Fetched child rows, already capped by the backend.
+    pub rows: Vec<OracleRow>,
+    /// Rows returned after serialization caps are applied.
+    pub row_count: usize,
+    /// Rows fetched from the child cursor before serialization byte caps.
+    pub fetched_count: usize,
+    /// Whether row, cell, byte, or nesting caps stopped materialization.
+    pub truncated: bool,
 }
 
 /// One result row: ordered `(column_name, cell)` pairs. Column names are
@@ -153,6 +201,12 @@ pub struct OracleConnectionInfo {
     /// The backend in use.
     #[serde(default)]
     pub backend: Option<OracleBackend>,
+    /// Runtime connection strategy, e.g. `single_session` or `hybrid_pool`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_strategy: Option<String>,
+    /// Number of currently open stateless read-pool connections, when pooled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_open_connections: Option<u32>,
     /// The Oracle server version banner.
     pub server_version: Option<String>,
     /// `V$DATABASE.DATABASE_ROLE` (e.g. `PRIMARY`, `PHYSICAL STANDBY`).
@@ -262,6 +316,18 @@ pub struct OracleSessionIdentity {
     /// Optional Oracle edition for Edition-Based Redefinition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edition: Option<String>,
+    /// Connect-time client program recorded by Oracle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+    /// Connect-time client machine recorded by Oracle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    /// Connect-time operating-system user recorded by Oracle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_user: Option<String>,
+    /// Connect-time terminal recorded by Oracle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
     /// Oracle module (`SYS_CONTEXT('USERENV','MODULE')`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
@@ -284,6 +350,10 @@ impl OracleSessionIdentity {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.edition.is_none()
+            && self.program.is_none()
+            && self.machine.is_none()
+            && self.os_user.is_none()
+            && self.terminal.is_none()
             && self.module.is_none()
             && self.action.is_none()
             && self.client_identifier.is_none()
@@ -292,9 +362,9 @@ impl OracleSessionIdentity {
     }
 }
 
-/// Options for opening a physical Oracle connection. Credentials are referenced
-/// here transiently; the full secrets-backend + zeroize discipline (§6.5) lands
-/// with the auth layer.
+/// Options for opening a physical Oracle connection. Credentials and
+/// profile-owned setup statements may be present transiently after secret
+/// resolution; `Debug` must never expose their values.
 ///
 /// `Debug` is hand-written: connect material must never reach a log or panic
 /// message in plaintext, so values render as redaction markers while preserving
@@ -305,21 +375,39 @@ pub struct OracleConnectOptions {
     pub connect_string: String,
     /// Username, or `None` for wallet / external / OS / IAM auth.
     pub username: Option<String>,
-    /// Password, or `None` for non-password auth. (Plaintext only transiently;
-    /// the secrets layer keeps it zeroized end-to-end.)
+    /// Password, or `None` for non-password auth. Plaintext is resolved by the
+    /// caller and must never be logged.
     pub password: Option<String>,
+    /// Enterprise authentication mode. Password is the default; proxy auth is
+    /// supported by the thin driver and still authenticates with `password`.
+    pub auth_adapter: AuthAdapter,
     /// Use external / wallet auth (`/@alias`) rather than a password.
     pub external_auth: bool,
     /// Cloud wallet directory; folded into an EZConnect-Plus descriptor so the
     /// library never has to mutate `TNS_ADMIN` (which would require `unsafe`
     /// `std::env::set_var` under edition 2024 — forbidden workspace-wide).
     pub wallet_location: Option<PathBuf>,
+    /// Password for encrypted TCPS wallets. Plaintext only transiently after
+    /// resolving `wallet_password_ref`; never sourced directly from profile TOML.
+    pub wallet_password: Option<String>,
+    /// Override Oracle server-DN match. `None` keeps the driver's default.
+    pub ssl_server_dn_match: Option<bool>,
+    /// Explicit expected server certificate DN. Treated as topology-sensitive.
+    pub ssl_server_cert_dn: Option<String>,
+    /// Override Oracle TCPS SNI behavior. `None` preserves oraclemcp defaults.
+    pub use_sni: Option<bool>,
     /// Authenticate with an OCI IAM database token (P1-11 hardens this path).
     pub use_iam_token: bool,
     /// A pre-fetched OCI IAM database token, when `use_iam_token` is set.
     pub iam_token: Option<String>,
     /// Optional profile-driven session identity.
     pub session_identity: Option<OracleSessionIdentity>,
+    /// Application-context triples applied by the thin driver during logon.
+    pub app_context: Vec<(String, String, String)>,
+    /// Optional Session Data Unit request size. `None` keeps the driver's default.
+    pub sdu: Option<u32>,
+    /// Optional statement-cache size. `None` keeps the driver's default.
+    pub statement_cache_size: Option<u32>,
     /// Optional Oracle per-round-trip call timeout.
     pub call_timeout: Option<Duration>,
     /// Extra guarded session setup statements to run after canonical NLS setup.
@@ -336,17 +424,28 @@ impl std::fmt::Debug for OracleConnectOptions {
         } else {
             Some("<redacted>")
         };
+        let session_identity = self.session_identity.as_ref().map(|_| "<redacted>");
+        let app_context_count = self.app_context.len();
+        let session_statement_count = self.session_statements.len();
         f.debug_struct("OracleConnectOptions")
             .field("connect_string", &connect_string)
             .field("username", &redact(&self.username))
             .field("password", &redact(&self.password))
+            .field("auth_adapter", &self.auth_adapter)
             .field("external_auth", &self.external_auth)
             .field("wallet_location", &redact_path(&self.wallet_location))
+            .field("wallet_password", &redact(&self.wallet_password))
+            .field("ssl_server_dn_match", &self.ssl_server_dn_match)
+            .field("ssl_server_cert_dn", &redact(&self.ssl_server_cert_dn))
+            .field("use_sni", &self.use_sni)
             .field("use_iam_token", &self.use_iam_token)
             .field("iam_token", &redact(&self.iam_token))
-            .field("session_identity", &self.session_identity)
+            .field("session_identity", &session_identity)
+            .field("app_context_count", &app_context_count)
+            .field("sdu", &self.sdu)
+            .field("statement_cache_size", &self.statement_cache_size)
             .field("call_timeout", &self.call_timeout)
-            .field("session_statements", &self.session_statements)
+            .field("session_statement_count", &session_statement_count)
             .finish()
     }
 }
@@ -436,9 +535,27 @@ mod tests {
             connect_string: "host:1521/svc".to_owned(),
             username: Some("scott".to_owned()),
             password: Some("hunter2-SUPER-SECRET".to_owned()),
+            auth_adapter: AuthAdapter::Proxy {
+                proxy_user: "MCP_PROXY".to_owned(),
+                target_schema: "APP_OWNER".to_owned(),
+            },
             wallet_location: Some("/home/scott/private-wallet".into()),
+            wallet_password: Some("wallet-password-SUPER-SECRET".to_owned()),
+            ssl_server_dn_match: Some(false),
+            ssl_server_cert_dn: Some("CN=private-db,O=Example,C=US".to_owned()),
+            use_sni: Some(false),
             use_iam_token: true,
             iam_token: Some("eyJ-IAM-TOKEN-VALUE".to_owned()),
+            app_context: vec![(
+                "private-namespace".to_owned(),
+                "private-key".to_owned(),
+                "private-value".to_owned(),
+            )],
+            sdu: Some(32_768),
+            session_statements: vec![
+                "BEGIN DBMS_SESSION.SET_CONTEXT('PRIVATE_NS','TOKEN','secret-token'); END;"
+                    .to_owned(),
+            ],
             ..Default::default()
         };
         let rendered = format!("{opts:?}");
@@ -452,20 +569,51 @@ mod tests {
             "password leaked: {rendered}"
         );
         assert!(
+            !rendered.contains("MCP_PROXY") && !rendered.contains("APP_OWNER"),
+            "proxy auth leaked: {rendered}"
+        );
+        assert!(
             !rendered.contains("/home/scott/private-wallet"),
             "wallet path leaked: {rendered}"
         );
         assert!(
+            !rendered.contains("wallet-password-SUPER-SECRET"),
+            "wallet password leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("CN=private-db"),
+            "server DN leaked: {rendered}"
+        );
+        assert!(
             !rendered.contains("eyJ-IAM-TOKEN-VALUE"),
             "iam_token leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("private-namespace")
+                && !rendered.contains("private-key")
+                && !rendered.contains("private-value"),
+            "app_context leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("secret-token") && !rendered.contains("PRIVATE_NS"),
+            "session statement leaked: {rendered}"
         );
         assert!(rendered.contains("<redacted>"));
         // Presence is preserved without exposing values.
         assert!(rendered.contains("connect_string"));
         assert!(rendered.contains("username: Some"));
         assert!(rendered.contains("password: Some"));
+        assert!(rendered.contains("auth_adapter"));
+        assert!(rendered.contains("AuthAdapter::Proxy"));
         assert!(rendered.contains("wallet_location: Some"));
+        assert!(rendered.contains("wallet_password: Some"));
+        assert!(rendered.contains("ssl_server_dn_match: Some"));
+        assert!(rendered.contains("ssl_server_cert_dn: Some"));
+        assert!(rendered.contains("use_sni: Some"));
         assert!(rendered.contains("iam_token: Some"));
+        assert!(rendered.contains("app_context_count: 1"));
+        assert!(rendered.contains("sdu: Some(32768)"));
+        assert!(rendered.contains("session_statement_count: 1"));
     }
 
     #[test]
@@ -474,7 +622,45 @@ mod tests {
         let rendered = format!("{opts:?}");
         assert!(rendered.contains("connect_string: None"));
         assert!(rendered.contains("password: None"));
+        assert!(rendered.contains("wallet_password: None"));
+        assert!(rendered.contains("ssl_server_cert_dn: None"));
         assert!(rendered.contains("iam_token: None"));
+        assert!(rendered.contains("app_context_count: 0"));
+        assert!(rendered.contains("sdu: None"));
+        assert!(rendered.contains("session_statement_count: 0"));
         assert!(!rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn debug_redacts_session_identity_values() {
+        let opts = OracleConnectOptions {
+            session_identity: Some(OracleSessionIdentity {
+                program: Some("private-program".to_owned()),
+                machine: Some("private-machine".to_owned()),
+                os_user: Some("private-os-user".to_owned()),
+                terminal: Some("private-terminal".to_owned()),
+                module: Some("private-module".to_owned()),
+                client_identifier: Some("private-client-id".to_owned()),
+                client_info: Some("private-client-info".to_owned()),
+                driver_name: Some("private-driver".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let rendered = format!("{opts:?}");
+        for forbidden in [
+            "private-program",
+            "private-machine",
+            "private-os-user",
+            "private-terminal",
+            "private-module",
+            "private-client-id",
+            "private-client-info",
+            "private-driver",
+        ] {
+            assert!(!rendered.contains(forbidden), "{rendered}");
+        }
+        assert!(rendered.contains("session_identity: Some"));
+        assert!(rendered.contains("<redacted>"));
     }
 }

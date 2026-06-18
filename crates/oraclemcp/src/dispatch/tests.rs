@@ -53,6 +53,8 @@ impl OracleConnection for OneRowMock {
     fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
+            connection_strategy: Some("single_session".to_owned()),
+            pool_open_connections: None,
             server_version: Some("23.0.0".to_owned()),
             database_role: Some("PRIMARY".to_owned()),
             open_mode: Some("READ WRITE".to_owned()),
@@ -129,6 +131,74 @@ impl OracleConnection for OneRowMock {
         Ok(())
     }
     fn rollback(&self) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+struct LabeledMock {
+    label: &'static str,
+    strategy: &'static str,
+    counts: Arc<TouchCounts>,
+}
+
+impl LabeledMock {
+    fn new(label: &'static str, strategy: &'static str, counts: Arc<TouchCounts>) -> Self {
+        Self {
+            label,
+            strategy,
+            counts,
+        }
+    }
+}
+
+impl OracleConnection for LabeledMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    fn ping(&self) -> Result<(), DbError> {
+        self.counts.ping.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        self.counts.describe.fetch_add(1, Ordering::SeqCst);
+        Ok(OracleConnectionInfo {
+            backend: Some(OracleBackend::RustOracle),
+            connection_strategy: Some(self.strategy.to_owned()),
+            pool_open_connections: (self.strategy == "stateless_metadata_pool").then_some(1),
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+
+    fn query_rows(&self, sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        self.counts.query.fetch_add(1, Ordering::SeqCst);
+        let column = if sql.to_ascii_lowercase().contains("all_objects") {
+            "SCHEMA_NAME"
+        } else {
+            "LABEL"
+        };
+        Ok(vec![OracleRow {
+            columns: vec![(
+                column.to_owned(),
+                OracleCell::new("VARCHAR2", Some(self.label.to_owned())),
+            )],
+        }])
+    }
+
+    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        self.counts.execute.fetch_add(1, Ordering::SeqCst);
+        Ok(1)
+    }
+
+    fn commit(&self) -> Result<(), DbError> {
+        self.counts.commit.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn rollback(&self) -> Result<(), DbError> {
+        self.counts.rollback.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -634,6 +704,103 @@ fn connection_info_reports_the_active_profile() {
 }
 
 #[test]
+fn connection_info_reports_stateless_read_strategy_when_configured() {
+    let session_counts = Arc::new(TouchCounts::default());
+    let stateless_counts = Arc::new(TouchCounts::default());
+    let dispatcher = OracleDispatcher::new_switchable_with_custom_tools_and_stateless(
+        Box::new(LabeledMock::new(
+            "session",
+            "single_session",
+            session_counts.clone(),
+        )),
+        Some("dev".to_owned()),
+        default_read_only_level(),
+        Arc::new(|_| Err(DbError::Connect("unused".to_owned()))),
+        StatelessReadStrategy::new(
+            Some(Box::new(LabeledMock::new(
+                "pool",
+                "stateless_metadata_pool",
+                stateless_counts.clone(),
+            ))),
+            None,
+        ),
+        CustomToolCatalog::default(),
+        None,
+    );
+
+    let out = dispatcher
+        .dispatch("oracle_connection_info", json!({}))
+        .expect("connection info");
+
+    assert_eq!(
+        out["connection"]["connection_strategy"],
+        json!("single_session")
+    );
+    assert_eq!(
+        out["stateless_read_connection"]["strategy"],
+        json!("stateless_metadata_pool")
+    );
+    assert_eq!(
+        out["stateless_read_connection"]["pool_open_connections"],
+        json!(1)
+    );
+    assert_eq!(session_counts.describe.load(Ordering::SeqCst), 1);
+    assert_eq!(stateless_counts.describe.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn stateless_pool_is_used_only_for_metadata_tools() {
+    let session_counts = Arc::new(TouchCounts::default());
+    let stateless_counts = Arc::new(TouchCounts::default());
+    let dispatcher = OracleDispatcher::new_switchable_with_custom_tools_and_stateless(
+        Box::new(LabeledMock::new(
+            "session",
+            "single_session",
+            session_counts.clone(),
+        )),
+        Some("dev".to_owned()),
+        default_read_only_level(),
+        Arc::new(|_| Err(DbError::Connect("unused".to_owned()))),
+        StatelessReadStrategy::new(
+            Some(Box::new(LabeledMock::new(
+                "pool",
+                "stateless_metadata_pool",
+                stateless_counts.clone(),
+            ))),
+            None,
+        ),
+        CustomToolCatalog::default(),
+        None,
+    );
+
+    let schemas = dispatcher
+        .dispatch("oracle_list_schemas", json!({ "max_rows": 1 }))
+        .expect("metadata uses stateless connection");
+    assert_eq!(schemas["schemas"][0]["SCHEMA_NAME"], json!("pool"));
+    assert_eq!(session_counts.query.load(Ordering::SeqCst), 0);
+    assert_eq!(stateless_counts.query.load(Ordering::SeqCst), 1);
+
+    let query = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({ "sql": "SELECT 1 AS label FROM dual" }),
+        )
+        .expect("read query stays on pinned session");
+    assert_eq!(query["rows"][0]["LABEL"], json!("session"));
+    assert_eq!(session_counts.query.load(Ordering::SeqCst), 1);
+    assert_eq!(stateless_counts.query.load(Ordering::SeqCst), 1);
+
+    let _sample = dispatcher
+        .dispatch(
+            "oracle_sample_rows",
+            json!({ "owner": "APP", "table": "T", "max_rows": 1 }),
+        )
+        .expect("sample rows stays on pinned session");
+    assert_eq!(session_counts.query.load(Ordering::SeqCst), 2);
+    assert_eq!(stateless_counts.query.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn connection_info_degrades_when_describe_fails() {
     let dispatcher =
         OracleDispatcher::new_with_profile(Box::new(DescribeFailingMock), Some("dev".to_owned()));
@@ -679,6 +846,10 @@ fn profile_response_omits_connection_and_secret_material() {
             credential_ref = "env:ORACLE_PASSWORD"
             max_level = "READ_ONLY"
             default_level = "READ_ONLY"
+
+            [profiles.proxy_auth]
+            proxy_user = "svc_acct"
+            target_schema = "APP_OWNER"
             "#,
     )
     .expect("valid config");
@@ -691,9 +862,12 @@ fn profile_response_omits_connection_and_secret_material() {
     for hidden in [
         "prod:1521/svc",
         "svc_acct",
+        "APP_OWNER",
         "ORACLE_PASSWORD",
         "connect_string",
         "credential_ref",
+        "proxy_auth",
+        "target_schema",
         "username",
     ] {
         assert!(

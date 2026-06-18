@@ -34,6 +34,8 @@ impl OracleConnection for OneRowMock {
     fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
+            connection_strategy: Some("single_session".to_owned()),
+            pool_open_connections: None,
             server_version: Some("23.0.0".to_owned()),
             database_role: Some("PRIMARY".to_owned()),
             open_mode: Some("READ WRITE".to_owned()),
