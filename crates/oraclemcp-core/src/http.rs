@@ -504,6 +504,42 @@ mod tests {
     }
 
     #[test]
+    fn oauth_insufficient_scope_is_forbidden() {
+        let enforcement = OAuthEnforcement {
+            config: ResourceServerConfig {
+                resource: "https://oraclemcp.example/mcp".to_owned(),
+                allowed_issuers: vec!["https://idp.example".to_owned()],
+                authorization_servers: vec!["https://idp.example".to_owned()],
+                required_scopes: vec!["oracle:write".to_owned()],
+            },
+            verifier: Arc::new(AcceptHs256),
+            metadata_url: "https://oraclemcp.example/.well-known/oauth-protected-resource"
+                .to_owned(),
+        };
+        let request = HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [
+                ("host", "127.0.0.1"),
+                (
+                    "authorization",
+                    &format!("Bearer {}", jwt_with_scope("oracle:read")),
+                ),
+            ],
+            Vec::new(),
+        );
+        let response = validate_oauth_request(&request, &enforcement)
+            .expect_err("valid token without required scope is forbidden");
+        assert_eq!(response.status, 403);
+        assert_eq!(String::from_utf8_lossy(&response.body), "forbidden");
+        assert!(
+            response
+                .header("www-authenticate")
+                .is_some_and(|value| value.contains("error=\"insufficient_scope\""))
+        );
+    }
+
+    #[test]
     fn oauth_scope_is_forwarded_to_tool_dispatch() {
         let enforcement = OAuthEnforcement {
             config: ResourceServerConfig {
@@ -638,6 +674,13 @@ fn token_error_code(e: &TokenError) -> &'static str {
     }
 }
 
+fn token_error_status(e: Option<&TokenError>) -> u16 {
+    match e {
+        Some(TokenError::InsufficientScope) => 403,
+        _ => 401,
+    }
+}
+
 fn validate_oauth_request(
     request: &HttpRequest,
     enforcement: &OAuthEnforcement,
@@ -658,8 +701,9 @@ fn validate_oauth_request(
             &enforcement.metadata_url,
             err.as_ref().map(token_error_code),
         );
+        let status = token_error_status(err.as_ref());
         HttpResponse {
-            status: 401,
+            status,
             headers: vec![
                 (
                     "content-type".to_owned(),
@@ -667,7 +711,11 @@ fn validate_oauth_request(
                 ),
                 ("www-authenticate".to_owned(), challenge),
             ],
-            body: b"unauthorized".to_vec(),
+            body: if status == 403 {
+                b"forbidden".to_vec()
+            } else {
+                b"unauthorized".to_vec()
+            },
         }
     })
 }
