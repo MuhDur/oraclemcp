@@ -40,6 +40,8 @@ assumptions, the next release is minor rather than patch.
   the same guarded dispatch path as the read tools.
 - Native MCP prompt handlers for the built-in expert playbook catalog via
   `prompts/list` and `prompts/get`.
+- Explicit MCP tool titles and advisory annotations for every advertised tool,
+  including read-only, destructive, idempotent, and open-world hints.
 
 ### Changed
 

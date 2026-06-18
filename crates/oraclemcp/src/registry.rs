@@ -1155,6 +1155,33 @@ mod tests {
     }
 
     #[test]
+    fn annotations_follow_the_destructive_classification() {
+        for tool in tool_registry().tools {
+            assert!(!tool.title.is_empty(), "{} has an MCP title", tool.name);
+            assert_eq!(
+                tool.annotations.read_only_hint, !tool.destructive,
+                "{} readOnlyHint mirrors destructive=false",
+                tool.name
+            );
+            assert_eq!(
+                tool.annotations.destructive_hint, tool.destructive,
+                "{} destructiveHint mirrors destructive=true",
+                tool.name
+            );
+            assert_eq!(
+                tool.annotations.idempotent_hint, !tool.destructive,
+                "{} idempotentHint is conservative for destructive tools",
+                tool.name
+            );
+            assert!(
+                !tool.annotations.open_world_hint,
+                "{} never opts into open-world behavior",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
     fn every_tool_advertises_an_input_schema() {
         let top_level_keywords_rejected_by_function_adapters =
             ["oneOf", "anyOf", "allOf", "enum", "not"];

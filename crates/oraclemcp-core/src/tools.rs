@@ -27,6 +27,8 @@ pub enum ToolTier {
 pub struct ToolDescriptor {
     /// The tool's stable name (e.g. `oracle_query`).
     pub name: String,
+    /// Human-readable title for MCP clients that render tool catalogs.
+    pub title: String,
     /// The tool's tier.
     pub tier: ToolTier,
     /// A one-line agent-facing summary.
@@ -44,6 +46,54 @@ pub struct ToolDescriptor {
     /// (oracle-da9j.9). Defaults to `false`.
     #[serde(default)]
     pub destructive: bool,
+    /// Explicit MCP tool annotations. These are advisory hints for clients; the
+    /// SQL classifier and operating-level gate remain the enforcement path.
+    pub annotations: ToolAnnotations,
+}
+
+/// Advisory MCP tool annotations, emitted with every advertised tool so
+/// clients do not fall back to unsafe defaults.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolAnnotations {
+    /// Whether the tool is read-only.
+    pub read_only_hint: bool,
+    /// Whether the tool may perform destructive or irreversible writes.
+    pub destructive_hint: bool,
+    /// Whether repeating the same call is expected to be safe.
+    pub idempotent_hint: bool,
+    /// Whether the tool interacts with open-world external systems.
+    pub open_world_hint: bool,
+}
+
+impl ToolAnnotations {
+    /// Conservative hints for the read-only Oracle tool surface.
+    pub const fn read_only() -> Self {
+        Self {
+            read_only_hint: true,
+            destructive_hint: false,
+            idempotent_hint: true,
+            open_world_hint: false,
+        }
+    }
+
+    /// Conservative hints for gated session elevation, DML, DDL, and deploy
+    /// tools. They remain fail-closed at runtime; these hints only guide MCP
+    /// clients.
+    pub const fn destructive() -> Self {
+        Self {
+            read_only_hint: false,
+            destructive_hint: true,
+            idempotent_hint: false,
+            open_world_hint: false,
+        }
+    }
+}
+
+impl Default for ToolAnnotations {
+    fn default() -> Self {
+        Self::read_only()
+    }
 }
 
 impl ToolDescriptor {
@@ -52,12 +102,16 @@ impl ToolDescriptor {
     /// [`Self::destructive`] to enrich it.
     #[must_use]
     pub fn new(name: impl Into<String>, tier: ToolTier, summary: impl Into<String>) -> Self {
+        let name = name.into();
+        let title = title_from_name(&name);
         Self {
-            name: name.into(),
+            name,
+            title,
             tier,
             summary: summary.into(),
             input_schema: None,
             destructive: false,
+            annotations: ToolAnnotations::read_only(),
         }
     }
 
@@ -68,11 +122,48 @@ impl ToolDescriptor {
         self
     }
 
+    /// Override the generated human-readable MCP title.
+    #[must_use]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = title.into();
+        self
+    }
+
     /// Mark the tool as performing a destructive / irreversible write.
     #[must_use]
     pub fn destructive(mut self) -> Self {
         self.destructive = true;
+        self.annotations = ToolAnnotations::destructive();
         self
+    }
+}
+
+fn title_from_name(name: &str) -> String {
+    name.split('_')
+        .filter(|part| !part.is_empty())
+        .map(title_part)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn title_part(part: &str) -> String {
+    match part.to_ascii_lowercase().as_str() {
+        "clob" => "CLOB".to_owned(),
+        "ddl" => "DDL".to_owned(),
+        "dml" => "DML".to_owned(),
+        "sql" => "SQL".to_owned(),
+        "dbms" => "DBMS".to_owned(),
+        "http" => "HTTP".to_owned(),
+        "mcp" => "MCP".to_owned(),
+        "oauth" => "OAuth".to_owned(),
+        "plscope" => "PL/Scope".to_owned(),
+        _ => {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+                None => String::new(),
+            }
+        }
     }
 }
 
@@ -136,5 +227,32 @@ mod tests {
         registry.register(tool.clone());
         registry.register(tool);
         assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn descriptors_generate_titles_and_explicit_read_only_annotations() {
+        let tool = ToolDescriptor::new("oracle_query", ToolTier::FoundationLiveDb, "Run a query");
+        assert_eq!(tool.title, "Oracle Query");
+        assert_eq!(tool.annotations, ToolAnnotations::read_only());
+        assert!(!tool.destructive);
+    }
+
+    #[test]
+    fn generated_titles_preserve_common_database_acronyms() {
+        assert_eq!(title_from_name("oracle_preview_sql"), "Oracle Preview SQL");
+        assert_eq!(title_from_name("deploy_ddl"), "Deploy DDL");
+        assert_eq!(title_from_name("oracle_read_clob"), "Oracle Read CLOB");
+        assert_eq!(
+            title_from_name("oracle_plscope_inspect"),
+            "Oracle PL/Scope Inspect"
+        );
+    }
+
+    #[test]
+    fn destructive_descriptor_flips_advisory_annotations() {
+        let tool = ToolDescriptor::new("oracle_execute", ToolTier::FoundationLiveDb, "Execute SQL")
+            .destructive();
+        assert_eq!(tool.annotations, ToolAnnotations::destructive());
+        assert!(tool.destructive);
     }
 }

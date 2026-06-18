@@ -19,7 +19,7 @@
 ## Why oraclemcp
 
 - **Fail-closed by construction.** A SELECT that an agent dreams up should never silently turn into a `DELETE`. Each raw statement runs through the hardened classifier. Read tools admit only **proven** read-only `SELECT`/`WITH` and dictionary introspection. Non-read execution is isolated in `oracle_execute`, bounded by profile `max_level`/`default_level`, rollback-by-default for DML, and explicit-confirm-before-commit. Temporary elevation through `oracle_set_session_level` can never exceed the profile ceiling. *Forbidden* constructs (multi-statement batches, string-concat dynamic SQL, an unproven function call inside a SELECT) are rejected before touching the database, with an `OperatingLevelTooLow` or `ForbiddenStatement` envelope and a suggested safe alternative.
-- **Agent-first UX.** Every tool ships a real JSON Schema. Errors are structured [`ErrorEnvelope`](crates/oraclemcp-error)s with machine-stable classes, fuzzy suggestions, and next-step hints, not bare strings. A zero-arg `oracle_capabilities` tool lets an agent discover the surface; MCP resources expose the capability/tool documents plus schema/object read templates; and an offline build degrades to a `RuntimeStateRequired` contract instead of crashing.
+- **Agent-first UX.** Every tool ships a real JSON Schema, title, and explicit MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) so clients do not infer unsafe defaults. Errors are structured [`ErrorEnvelope`](crates/oraclemcp-error)s with machine-stable classes, fuzzy suggestions, and next-step hints, not bare strings. A zero-arg `oracle_capabilities` tool lets an agent discover the surface; MCP resources expose the capability/tool documents plus schema/object read templates; and an offline build degrades to a `RuntimeStateRequired` contract instead of crashing.
 - **Pure Rust, no `unsafe`.** Every crate is `#![forbid(unsafe_code)]`; the fail-closed classifier carries a differential cargo-fuzz target.
 - **Two transports.** stdio (default) and Streamable HTTP (`--listen`) with
   fail-closed auth defaults, optional OAuth bearer enforcement, and native
@@ -484,6 +484,14 @@ blocks; it does not print the HMAC key.
 | `oracle_plscope_inspect` | Read PL/Scope identifiers/statements for one object and report unused declarations plus dynamic-SQL lines when metadata is populated |
 | `oracle_explain_plan` | Diagnostic `EXPLAIN PLAN` for a vetted read-only statement; writes `PLAN_TABLE` and requires `READ_WRITE` plus `allow_plan_table_write=true` |
 | `oracle_capabilities` | Zero-arg discovery: tools, operating level, feature tiers |
+
+Every advertised tool descriptor includes a human title plus explicit MCP
+annotations. Read-only tools set `readOnlyHint=true`,
+`destructiveHint=false`, `idempotentHint=true`, and `openWorldHint=false`.
+Guarded execution, session elevation, compile, patch, deploy, and diagnostic
+write tools set `destructiveHint=true` and `readOnlyHint=false`. These hints
+are advisory for MCP clients; the fail-closed classifier and operating-level
+gate remain the enforcement boundary.
 
 ### MCP resources
 

@@ -151,6 +151,29 @@ fn tools_list_advertises_registry_tools_plus_capabilities() {
     );
 
     for tool in tools {
+        assert!(
+            tool.get("title")
+                .and_then(Value::as_str)
+                .is_some_and(|title| !title.is_empty()),
+            "{} must advertise a title",
+            tool["name"]
+        );
+        let annotations = tool
+            .get("annotations")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("{} must advertise annotations", tool["name"]));
+        for hint in [
+            "readOnlyHint",
+            "destructiveHint",
+            "idempotentHint",
+            "openWorldHint",
+        ] {
+            assert!(
+                annotations.get(hint).is_some_and(Value::is_boolean),
+                "{} annotation {hint} must be explicit",
+                tool["name"]
+            );
+        }
         let schema = tool
             .get("inputSchema")
             .or_else(|| tool.get("input_schema"))

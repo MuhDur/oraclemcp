@@ -20,7 +20,7 @@ use crate::init_token::StdioAuthPolicy;
 use crate::resources::{
     PromptMessage, ResourceContents, ResourceUri, prompt_catalog, render_prompt, resource_templates,
 };
-use crate::tools::{ToolDescriptor, ToolRegistry};
+use crate::tools::{ToolAnnotations, ToolDescriptor, ToolRegistry};
 
 /// The `_meta` field carrying the stdio init token on the `initialize` request.
 /// The client places its shared token here so the server can gate the handshake
@@ -787,8 +787,10 @@ fn tools_json_for_registry(registry: &ToolRegistry) -> Vec<Value> {
     let mut tools = Vec::with_capacity(registry.tools.len() + 1);
     tools.push(json!({
         "name": CAPABILITIES_TOOL,
+        "title": "Oracle Capabilities",
         "description": "Zero-arg entry point: tools, operating level + gates, connection/standby status, feature tiers, version.",
         "inputSchema": empty_object_schema(),
+        "annotations": ToolAnnotations::read_only(),
     }));
     for d in &registry.tools {
         if d.name == CAPABILITIES_TOOL {
@@ -796,8 +798,10 @@ fn tools_json_for_registry(registry: &ToolRegistry) -> Vec<Value> {
         }
         tools.push(json!({
             "name": d.name,
+            "title": d.title,
             "description": d.summary,
             "inputSchema": descriptor_input_schema(d),
+            "annotations": d.annotations,
         }));
     }
     tools
@@ -1045,6 +1049,36 @@ mod tests {
             serde_json::json!("string")
         );
         assert_eq!(query["inputSchema"]["required"], serde_json::json!(["sql"]));
+        assert_eq!(query["title"], serde_json::json!("Oracle Query"));
+        assert_eq!(
+            query["annotations"],
+            serde_json::json!({
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            })
+        );
+    }
+
+    #[test]
+    fn tools_json_gives_capabilities_explicit_safe_annotations() {
+        let s = server();
+        let capabilities = &s.tools_json()[0];
+        assert_eq!(capabilities["name"], serde_json::json!(CAPABILITIES_TOOL));
+        assert_eq!(
+            capabilities["title"],
+            serde_json::json!("Oracle Capabilities")
+        );
+        assert_eq!(
+            capabilities["annotations"],
+            serde_json::json!({
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            })
+        );
     }
 
     #[test]

@@ -56,6 +56,12 @@ const REQUIREMENTS: &[Requirement] = &[
         description: "tools/list returns tool descriptors with MCP inputSchema objects",
     },
     Requirement {
+        id: "MCP-STDIO-009",
+        section: "Tools",
+        level: RequirementLevel::Must,
+        description: "tools/list emits explicit title and tool annotations so clients do not rely on unsafe defaults",
+    },
+    Requirement {
         id: "MCP-STDIO-004",
         section: "Tools",
         level: RequirementLevel::Must,
@@ -191,6 +197,14 @@ fn conformance_server() -> OracleMcpServer {
         ToolTier::FoundationLiveDb,
         "fetch object DDL",
     ));
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_execute",
+            ToolTier::FoundationLiveDb,
+            "execute gated SQL",
+        )
+        .destructive(),
+    );
     let report = CapabilitiesReport::new(
         "0.3.0",
         registry.tools.clone(),
@@ -258,7 +272,7 @@ fn run_script(requests: Vec<Value>) -> Vec<Value> {
 
 #[test]
 fn conformance_requirement_matrix_is_accounted_for() {
-    assert_eq!(REQUIREMENTS.len(), 14);
+    assert_eq!(REQUIREMENTS.len(), 15);
     let must = REQUIREMENTS
         .iter()
         .filter(|requirement| requirement.level == RequirementLevel::Must)
@@ -267,7 +281,7 @@ fn conformance_requirement_matrix_is_accounted_for() {
         .iter()
         .filter(|requirement| requirement.level == RequirementLevel::Should)
         .count();
-    assert_eq!(must, 12);
+    assert_eq!(must, 13);
     assert_eq!(should, 2);
     let mut ids = REQUIREMENTS
         .iter()
@@ -534,7 +548,7 @@ fn initialized_notification_produces_no_response() {
 }
 
 #[test]
-fn tools_list_returns_input_schema_objects_and_echoes_string_ids() {
+fn tools_list_returns_input_schema_annotations_and_echoes_string_ids() {
     let replies = run_script(vec![json!({
         "jsonrpc": "2.0",
         "id": "tools-1",
@@ -550,11 +564,55 @@ fn tools_list_returns_input_schema_objects_and_echoes_string_ids() {
     assert_eq!(tools[0]["name"], json!(CAPABILITIES_TOOL));
     for tool in tools {
         assert!(
+            tool.get("title")
+                .and_then(Value::as_str)
+                .is_some_and(|title| !title.is_empty()),
+            "tools/list descriptor must carry a non-empty title: {tool}"
+        );
+        let annotations = tool
+            .get("annotations")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("tools/list descriptor must carry annotations: {tool}"));
+        for hint in [
+            "readOnlyHint",
+            "destructiveHint",
+            "idempotentHint",
+            "openWorldHint",
+        ] {
+            assert!(
+                annotations.get(hint).is_some_and(Value::is_boolean),
+                "tools/list descriptor must carry boolean annotation {hint}: {tool}"
+            );
+        }
+        assert!(
             tool.get("input_schema").is_none(),
             "MCP uses inputSchema, not input_schema: {tool}"
         );
         assert_eq!(tool["inputSchema"]["type"], json!("object"));
     }
+    let capabilities = &tools[0]["annotations"];
+    assert_eq!(capabilities["readOnlyHint"], json!(true));
+    assert_eq!(capabilities["destructiveHint"], json!(false));
+    assert_eq!(capabilities["idempotentHint"], json!(true));
+    assert_eq!(capabilities["openWorldHint"], json!(false));
+
+    let schema_inspect = tools
+        .iter()
+        .find(|tool| tool["name"] == json!("oracle_schema_inspect"))
+        .expect("read tool advertised");
+    assert_eq!(schema_inspect["annotations"]["readOnlyHint"], json!(true));
+    assert_eq!(
+        schema_inspect["annotations"]["destructiveHint"],
+        json!(false)
+    );
+
+    let execute = tools
+        .iter()
+        .find(|tool| tool["name"] == json!("oracle_execute"))
+        .expect("destructive tool advertised");
+    assert_eq!(execute["annotations"]["readOnlyHint"], json!(false));
+    assert_eq!(execute["annotations"]["destructiveHint"], json!(true));
+    assert_eq!(execute["annotations"]["idempotentHint"], json!(false));
 }
 
 #[test]

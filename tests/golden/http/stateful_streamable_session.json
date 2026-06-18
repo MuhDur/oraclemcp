@@ -163,13 +163,26 @@
               "result": {
                 "tools": [
                   {
+                    "annotations": {
+                      "destructiveHint": false,
+                      "idempotentHint": true,
+                      "openWorldHint": false,
+                      "readOnlyHint": true
+                    },
                     "description": "Zero-arg entry point: tools, operating level + gates, connection/standby status, feature tiers, version.",
                     "inputSchema": {
                       "type": "object"
                     },
-                    "name": "oracle_capabilities"
+                    "name": "oracle_capabilities",
+                    "title": "Oracle Capabilities"
                   },
                   {
+                    "annotations": {
+                      "destructiveHint": false,
+                      "idempotentHint": true,
+                      "openWorldHint": false,
+                      "readOnlyHint": true
+                    },
                     "description": "inspect a schema",
                     "inputSchema": {
                       "additionalProperties": false,
@@ -184,7 +197,8 @@
                       "required": [],
                       "type": "object"
                     },
-                    "name": "oracle_schema_inspect"
+                    "name": "oracle_schema_inspect",
+                    "title": "Oracle Schema Inspect"
                   }
                 ]
               }
