@@ -16,6 +16,12 @@
 //! Lease-bound actions error without a live lease (the [`LeaseManager`] returns
 //! `LeaseNotFound`). `lease_acquire` opens a connection engine/DB-side, so it is
 //! injected via [`LeaseAcquirer`] to keep this router engine-free and testable.
+//!
+//! Product-surface decision for `oraclemcp` v0.3.x: this router is deliberately
+//! not advertised by the read-only `oraclemcp` binary. It is guarded-write
+//! machinery for the broader Oracle MCP family; surfacing it here would weaken
+//! the binary's safe-by-default contract. If this tool is ever exposed, it
+//! belongs behind a separate explicit opt-in surface with its own release gates.
 
 use std::time::Duration;
 
