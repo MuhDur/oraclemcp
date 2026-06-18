@@ -17,7 +17,9 @@ use serde_json::{Map, Value, json};
 
 use crate::capabilities::CapabilitiesReport;
 use crate::init_token::StdioAuthPolicy;
-use crate::resources::{ResourceContents, ResourceUri, resource_templates};
+use crate::resources::{
+    PromptMessage, ResourceContents, ResourceUri, prompt_catalog, render_prompt, resource_templates,
+};
 use crate::tools::{ToolDescriptor, ToolRegistry};
 
 /// The `_meta` field carrying the stdio init token on the `initialize` request.
@@ -372,6 +374,8 @@ impl OracleMcpServer {
             "resources/list" => Some(self.handle_resources_list(id)),
             "resources/templates/list" => Some(self.handle_resource_templates_list(id)),
             "resources/read" => Some(self.handle_resource_read(id, object.get("params"), context)),
+            "prompts/list" => Some(self.handle_prompts_list(id)),
+            "prompts/get" => Some(self.handle_prompt_get(id, object.get("params"))),
             "tools/list" => Some(jsonrpc_result(id, self.tools_list_result_json())),
             "tools/call" => Some(self.handle_tool_call(id, object.get("params"), context)),
             _ => Some(jsonrpc_error(
@@ -399,6 +403,52 @@ impl OracleMcpServer {
             }
         }
         jsonrpc_result(id, self.initialize_result_json())
+    }
+
+    fn handle_prompts_list(&self, id: Value) -> Value {
+        jsonrpc_result(id, json!({ "prompts": prompt_catalog() }))
+    }
+
+    fn handle_prompt_get(&self, id: Value, params: Option<&Value>) -> Value {
+        let Some(Value::Object(params)) = params else {
+            return jsonrpc_error(
+                id,
+                JSONRPC_INVALID_PARAMS,
+                "prompts/get params must be an object",
+            );
+        };
+        let Some(name) = params.get("name").and_then(Value::as_str) else {
+            return jsonrpc_error(
+                id,
+                JSONRPC_INVALID_PARAMS,
+                "prompts/get name must be a string",
+            );
+        };
+        let args = match params.get("arguments") {
+            Some(Value::Object(args)) => Value::Object(args.clone()),
+            Some(Value::Null) | None => json!({}),
+            Some(_) => {
+                return jsonrpc_error(
+                    id,
+                    JSONRPC_INVALID_PARAMS,
+                    "prompts/get arguments must be an object",
+                );
+            }
+        };
+        match render_prompt(name, &args) {
+            Ok(messages) => jsonrpc_result(
+                id,
+                json!({
+                    "description": prompt_description(name),
+                    "messages": prompt_messages_json(messages),
+                }),
+            ),
+            Err(envelope) => jsonrpc_error_from_envelope(
+                id,
+                resource_error_code(envelope.error_class),
+                &envelope,
+            ),
+        }
     }
 
     fn handle_resources_list(&self, id: Value) -> Value {
@@ -621,6 +671,9 @@ fn served_capabilities_json() -> Value {
             "subscribe": false,
             "listChanged": false,
         },
+        "prompts": {
+            "listChanged": false,
+        },
     })
 }
 
@@ -671,6 +724,30 @@ fn extract_source_text(value: &Value) -> Option<String> {
         .get("source")
         .and_then(Value::as_str)
         .map(str::to_owned)
+}
+
+fn prompt_description(name: &str) -> Option<String> {
+    prompt_catalog()
+        .into_iter()
+        .find(|prompt| prompt.name == name)
+        .map(|prompt| prompt.description)
+}
+
+fn prompt_messages_json(messages: Vec<PromptMessage>) -> Value {
+    Value::Array(
+        messages
+            .into_iter()
+            .map(|message| {
+                json!({
+                    "role": message.role,
+                    "content": {
+                        "type": "text",
+                        "text": message.text,
+                    },
+                })
+            })
+            .collect(),
+    )
 }
 
 fn resource_error_code(class: ErrorClass) -> i64 {

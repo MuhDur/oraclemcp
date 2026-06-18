@@ -138,6 +138,9 @@
               "jsonrpc": "2.0",
               "result": {
                 "capabilities": {
+                  "prompts": {
+                    "listChanged": false
+                  },
                   "resources": {
                     "listChanged": false,
                     "subscribe": false

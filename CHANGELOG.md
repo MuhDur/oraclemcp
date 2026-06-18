@@ -38,6 +38,8 @@ assumptions, the next release is minor rather than patch.
   `resources/templates/list`, and `resources/read`; static capability/tool
   resources resolve directly, while schema/object resource reads route through
   the same guarded dispatch path as the read tools.
+- Native MCP prompt handlers for the built-in expert playbook catalog via
+  `prompts/list` and `prompts/get`.
 
 ### Changed
 

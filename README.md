@@ -494,9 +494,10 @@ and `oracle://tools`. `resources/templates/list` exposes read templates for
 `oracle://schema/{owner}` and `oracle://object/{owner}/{type}/{name}`; reading
 those routes through the same safe tool dispatch path as
 `oracle_schema_inspect`, `oracle_get_source`, and `oracle_get_ddl`, including
-the active transport authorization context. Prompts, completion, subscriptions,
-and lease-backed `oracle://session/{lease_id}` resources are not advertised in
-this release.
+the active transport authorization context. `prompts/list` and `prompts/get`
+serve the built-in expert playbook catalog. Completion, subscriptions, and
+lease-backed `oracle://session/{lease_id}` resources are not advertised in this
+release.
 
 ### Compatibility aliases
 

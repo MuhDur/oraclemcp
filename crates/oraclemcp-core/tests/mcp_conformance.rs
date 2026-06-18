@@ -80,6 +80,12 @@ const REQUIREMENTS: &[Requirement] = &[
         description: "resources/list, resources/templates/list, and resources/read are served with MCP resource content objects",
     },
     Requirement {
+        id: "MCP-STDIO-008",
+        section: "Prompts",
+        level: RequirementLevel::Must,
+        description: "prompts/list and prompts/get are served only after prompt capability negotiation",
+    },
+    Requirement {
         id: "JSONRPC-STDIO-001",
         section: "JSON-RPC errors",
         level: RequirementLevel::Must,
@@ -252,7 +258,7 @@ fn run_script(requests: Vec<Value>) -> Vec<Value> {
 
 #[test]
 fn conformance_requirement_matrix_is_accounted_for() {
-    assert_eq!(REQUIREMENTS.len(), 13);
+    assert_eq!(REQUIREMENTS.len(), 14);
     let must = REQUIREMENTS
         .iter()
         .filter(|requirement| requirement.level == RequirementLevel::Must)
@@ -261,7 +267,7 @@ fn conformance_requirement_matrix_is_accounted_for() {
         .iter()
         .filter(|requirement| requirement.level == RequirementLevel::Should)
         .count();
-    assert_eq!(must, 11);
+    assert_eq!(must, 12);
     assert_eq!(should, 2);
     let mut ids = REQUIREMENTS
         .iter()
@@ -297,10 +303,14 @@ fn initialize_returns_mcp_2025_11_25_server_info_and_tools_capability() {
         result["capabilities"]["resources"]["listChanged"],
         json!(false)
     );
+    assert_eq!(
+        result["capabilities"]["prompts"]["listChanged"],
+        json!(false)
+    );
 }
 
 #[test]
-fn resources_are_advertised_and_served_without_advertising_unserved_arms() {
+fn resources_and_prompts_are_advertised_and_served_without_unserved_arms() {
     let replies = run_script(vec![
         json!({
             "jsonrpc": "2.0",
@@ -343,6 +353,24 @@ fn resources_are_advertised_and_served_without_advertising_unserved_arms() {
         }),
         json!({
             "jsonrpc": "2.0",
+            "id": "prompts-get",
+            "method": "prompts/get",
+            "params": {
+                "name": "investigate_slow_query",
+                "arguments": { "sql": "SELECT * FROM employees" }
+            }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": "prompts-get-missing-arg",
+            "method": "prompts/get",
+            "params": {
+                "name": "investigate_slow_query",
+                "arguments": {}
+            }
+        }),
+        json!({
+            "jsonrpc": "2.0",
             "id": "completion-complete",
             "method": "completion/complete",
             "params": {}
@@ -356,7 +384,7 @@ fn resources_are_advertised_and_served_without_advertising_unserved_arms() {
     assert!(capabilities["tools"].is_object());
     assert_eq!(capabilities["resources"]["subscribe"], json!(false));
     assert_eq!(capabilities["resources"]["listChanged"], json!(false));
-    assert!(capabilities.get("prompts").is_none());
+    assert_eq!(capabilities["prompts"]["listChanged"], json!(false));
     assert!(capabilities.get("completion").is_none());
 
     let resource_list = replies
@@ -444,17 +472,53 @@ fn resources_are_advertised_and_served_without_advertising_unserved_arms() {
             .contains("PACKAGE emp_api")
     );
 
-    for id in ["prompts-list", "completion-complete"] {
-        let reply = replies
-            .iter()
-            .find(|reply| reply["id"] == json!(id))
-            .expect("method-not-found reply");
-        assert_eq!(
-            reply["error"]["code"],
-            json!(JSONRPC_METHOD_NOT_FOUND),
-            "{id} must stay unadvertised until the handler is served"
-        );
-    }
+    let prompts = replies
+        .iter()
+        .find(|reply| reply["id"] == json!("prompts-list"))
+        .expect("prompts/list reply");
+    let prompts = prompts["result"]["prompts"]
+        .as_array()
+        .expect("prompt catalog is an array");
+    assert_eq!(prompts.len(), 5);
+    assert!(prompts.iter().any(|prompt| {
+        prompt["name"] == json!("investigate_slow_query")
+            && prompt["arguments"][0]["name"] == json!("sql")
+    }));
+
+    let prompt = replies
+        .iter()
+        .find(|reply| reply["id"] == json!("prompts-get"))
+        .expect("prompts/get reply");
+    assert_eq!(prompt["result"]["messages"][0]["role"], json!("user"));
+    assert_eq!(
+        prompt["result"]["messages"][0]["content"]["type"],
+        json!("text")
+    );
+    assert!(
+        prompt["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("SELECT * FROM employees")
+    );
+
+    let missing_arg = replies
+        .iter()
+        .find(|reply| reply["id"] == json!("prompts-get-missing-arg"))
+        .expect("prompts/get missing arg reply");
+    assert_eq!(
+        missing_arg["error"]["data"]["error_class"],
+        json!("INVALID_ARGUMENTS")
+    );
+
+    let reply = replies
+        .iter()
+        .find(|reply| reply["id"] == json!("completion-complete"))
+        .expect("method-not-found reply");
+    assert_eq!(
+        reply["error"]["code"],
+        json!(JSONRPC_METHOD_NOT_FOUND),
+        "completion must stay unadvertised until the handler is served"
+    );
 }
 
 #[test]
