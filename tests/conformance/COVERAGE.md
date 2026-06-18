@@ -27,7 +27,7 @@ Harnesses:
 | Notifications | 1 | 0 | 1 | 1 | 0 | 100% |
 | Resources | 1 | 0 | 1 | 1 | 0 | 100% |
 | Prompts | 1 | 0 | 1 | 1 | 0 | 100% |
-| Tools | 4 | 0 | 4 | 4 | 0 | 100% |
+| Tools | 5 | 0 | 5 | 5 | 0 | 100% |
 | JSON-RPC errors | 3 | 2 | 5 | 5 | 1 | 100% |
 | Security | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTP OAuth | 4 | 0 | 4 | 4 | 0 | 100% |
@@ -35,7 +35,7 @@ Harnesses:
 | HTTP sessions | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
 
-Total tracked requirements: 21 MUST, 2 SHOULD, 23 tested.
+Total tracked requirements: 22 MUST, 2 SHOULD, 24 tested.
 
 ## Requirement IDs
 
@@ -45,6 +45,7 @@ Total tracked requirements: 21 MUST, 2 SHOULD, 23 tested.
 | MCP-STDIO-002 | MUST | Notifications | `notifications/initialized` produces no response. |
 | MCP-STDIO-003 | MUST | Tools | `tools/list` returns MCP `inputSchema` objects. |
 | MCP-STDIO-009 | MUST | Tools | `tools/list` returns non-empty titles and explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint` annotations. |
+| MCP-STDIO-010 | MUST | Tools | `tools/list` preserves declared `outputSchema` for structured-content validation. |
 | MCP-STDIO-004 | MUST | Tools | `tools/call` returns `content`, `structuredContent`, and `isError`. |
 | MCP-STDIO-005 | MUST | Tools | Unknown tools are MCP tool errors, not transport crashes. |
 | MCP-STDIO-006 | MUST | Initialize | Initialize capabilities advertise resources only after resource handlers are served. |

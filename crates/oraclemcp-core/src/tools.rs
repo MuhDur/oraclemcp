@@ -40,6 +40,10 @@ pub struct ToolDescriptor {
     /// schemars-derive it without this crate depending on either.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_schema: Option<serde_json::Value>,
+    /// Optional JSON-Schema for the tool's `structuredContent`, advertised to
+    /// MCP clients as `outputSchema`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
     /// Whether the tool performs a destructive / irreversible write (DDL,
     /// deploy, drop). Surfaced over the wire so an agent (and a gating layer)
     /// can isolate the destructive cluster from read-only tools
@@ -110,6 +114,7 @@ impl ToolDescriptor {
             tier,
             summary: summary.into(),
             input_schema: None,
+            output_schema: None,
             destructive: false,
             annotations: ToolAnnotations::read_only(),
         }
@@ -119,6 +124,13 @@ impl ToolDescriptor {
     #[must_use]
     pub fn with_input_schema(mut self, schema: serde_json::Value) -> Self {
         self.input_schema = Some(schema);
+        self
+    }
+
+    /// Attach the tool's structured-content JSON-Schema.
+    #[must_use]
+    pub fn with_output_schema(mut self, schema: serde_json::Value) -> Self {
+        self.output_schema = Some(schema);
         self
     }
 

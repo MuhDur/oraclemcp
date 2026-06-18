@@ -62,6 +62,12 @@ const REQUIREMENTS: &[Requirement] = &[
         description: "tools/list emits explicit title and tool annotations so clients do not rely on unsafe defaults",
     },
     Requirement {
+        id: "MCP-STDIO-010",
+        section: "Tools",
+        level: RequirementLevel::Must,
+        description: "tools/list preserves declared outputSchema for structuredContent validation",
+    },
+    Requirement {
         id: "MCP-STDIO-004",
         section: "Tools",
         level: RequirementLevel::Must,
@@ -185,6 +191,15 @@ fn conformance_server() -> OracleMcpServer {
             },
             "required": ["owner"],
             "additionalProperties": false
+        }))
+        .with_output_schema(json!({
+            "type": "object",
+            "properties": {
+                "ok": { "type": "boolean" },
+                "tool": { "type": "string" }
+            },
+            "required": ["ok", "tool"],
+            "additionalProperties": true
         })),
     );
     registry.register(ToolDescriptor::new(
@@ -272,7 +287,7 @@ fn run_script(requests: Vec<Value>) -> Vec<Value> {
 
 #[test]
 fn conformance_requirement_matrix_is_accounted_for() {
-    assert_eq!(REQUIREMENTS.len(), 15);
+    assert_eq!(REQUIREMENTS.len(), 16);
     let must = REQUIREMENTS
         .iter()
         .filter(|requirement| requirement.level == RequirementLevel::Must)
@@ -281,7 +296,7 @@ fn conformance_requirement_matrix_is_accounted_for() {
         .iter()
         .filter(|requirement| requirement.level == RequirementLevel::Should)
         .count();
-    assert_eq!(must, 13);
+    assert_eq!(must, 14);
     assert_eq!(should, 2);
     let mut ids = REQUIREMENTS
         .iter()
@@ -604,6 +619,11 @@ fn tools_list_returns_input_schema_annotations_and_echoes_string_ids() {
     assert_eq!(
         schema_inspect["annotations"]["destructiveHint"],
         json!(false)
+    );
+    assert_eq!(schema_inspect["outputSchema"]["type"], json!("object"));
+    assert_eq!(
+        schema_inspect["outputSchema"]["required"],
+        json!(["ok", "tool"])
     );
 
     let execute = tools

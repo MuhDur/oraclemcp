@@ -18,7 +18,8 @@ use oraclemcp::dispatch::OracleDispatcher;
 use oraclemcp::registry::{TOOL_NAMES, capabilities, tool_registry};
 use oraclemcp_core::{CAPABILITIES_TOOL, OracleMcpServer, StdioAuthPolicy};
 use oraclemcp_db::{
-    DbError, OracleBackend, OracleBind, OracleConnection, OracleConnectionInfo, OracleRow,
+    DbError, OracleBackend, OracleBind, OracleCell, OracleConnection, OracleConnectionInfo,
+    OracleRow,
 };
 use serde_json::{Value, json};
 
@@ -42,6 +43,36 @@ impl OracleConnection for FailingMock {
     }
     fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         Err(DbError::Execute("ORA-00942".to_owned()))
+    }
+    fn commit(&self) -> Result<(), DbError> {
+        Ok(())
+    }
+    fn rollback(&self) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+struct SuccessfulQueryMock;
+impl OracleConnection for SuccessfulQueryMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+    fn ping(&self) -> Result<(), DbError> {
+        Ok(())
+    }
+    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo::default())
+    }
+    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        Ok(vec![OracleRow {
+            columns: vec![(
+                "OBJECT_COUNT".to_owned(),
+                OracleCell::new("NUMBER", Some("42".to_owned())),
+            )],
+        }])
+    }
+    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        Err(DbError::Execute("unexpected execute".to_owned()))
     }
     fn commit(&self) -> Result<(), DbError> {
         Ok(())
@@ -105,6 +136,56 @@ fn run_session(server: OracleMcpServer, requests: Vec<Value>) -> Vec<Value> {
         .filter(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str::<Value>(line).expect("reply is JSON"))
         .collect()
+}
+
+#[test]
+fn oracle_query_structured_content_matches_advertised_output_schema_fields() {
+    let list_req = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+    let call_req = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "oracle_query",
+            "arguments": { "sql": "SELECT object_count FROM dual" }
+        }
+    });
+    let replies = run_session(
+        server_over(Box::new(SuccessfulQueryMock)),
+        vec![list_req, call_req],
+    );
+    let tools = replies
+        .iter()
+        .find(|reply| reply["id"] == json!(2))
+        .expect("tools/list reply")["result"]["tools"]
+        .as_array()
+        .expect("tools array");
+    let query_tool = tools
+        .iter()
+        .find(|tool| tool["name"] == json!("oracle_query"))
+        .expect("oracle_query advertised");
+    let required = query_tool["outputSchema"]["required"]
+        .as_array()
+        .expect("query outputSchema required array");
+
+    let structured = &replies
+        .iter()
+        .find(|reply| reply["id"] == json!(3))
+        .expect("oracle_query reply")["result"]["structuredContent"];
+    for field in required {
+        let field = field.as_str().expect("required field is a string");
+        assert!(
+            structured.get(field).is_some(),
+            "structuredContent must include required outputSchema field {field}"
+        );
+    }
+    assert_eq!(structured["rows"][0]["OBJECT_COUNT"], json!("42"));
+    assert_eq!(
+        query_tool["outputSchema"]["properties"]["rows"]["items"]["additionalProperties"]["oneOf"]
+            [0]["type"],
+        json!("string"),
+        "Oracle NUMBER remains schema-compatible as a lossless string"
+    );
 }
 
 #[test]
@@ -192,6 +273,37 @@ fn tools_list_advertises_registry_tools_plus_capabilities() {
             );
         }
     }
+
+    let tool = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool["name"] == json!(name))
+            .unwrap_or_else(|| panic!("{name} advertised"))
+    };
+    for name in ["oracle_query", "query"] {
+        let output_schema = tool(name)
+            .get("outputSchema")
+            .unwrap_or_else(|| panic!("{name} must advertise outputSchema"));
+        assert_eq!(output_schema["type"], json!("object"));
+        assert_eq!(
+            output_schema["required"],
+            json!(["columns", "rows", "row_count", "truncated", "total_bytes"])
+        );
+        assert_eq!(
+            output_schema["properties"]["rows"]["items"]["additionalProperties"]["oneOf"][0]["type"],
+            json!("string"),
+            "{name} outputSchema must preserve NUMBER-as-string by default"
+        );
+    }
+    assert!(
+        tool("oracle_execute").get("outputSchema").is_none(),
+        "oracle_execute must not advertise the query/explain outputSchema"
+    );
+    assert_eq!(
+        tool("oracle_explain_plan")["outputSchema"]["properties"]["diagnostic_write"]["properties"]
+            ["required_level"]["enum"],
+        json!(["READ_WRITE"])
+    );
 }
 
 #[test]

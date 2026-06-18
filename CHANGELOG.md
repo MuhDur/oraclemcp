@@ -42,6 +42,9 @@ assumptions, the next release is minor rather than patch.
   `prompts/list` and `prompts/get`.
 - Explicit MCP tool titles and advisory annotations for every advertised tool,
   including read-only, destructive, idempotent, and open-world hints.
+- MCP `outputSchema` declarations for `oracle_query`, the `query` alias, and
+  `oracle_explain_plan`, with the query schema preserving Oracle NUMBER as a
+  lossless string by default.
 
 ### Changed
 

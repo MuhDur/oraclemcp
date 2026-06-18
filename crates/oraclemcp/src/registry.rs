@@ -129,6 +129,80 @@ fn dbms_output_props(capture_description: &str) -> Value {
     })
 }
 
+/// Canonical JSON cell value emitted by the row serializer. Oracle NUMBER is a
+/// string by default for lossless precision; JSON numbers appear only for
+/// binary float/double or explicit `numbers_as_float=true`.
+fn row_cell_schema() -> Value {
+    json!({
+        "description": "Serialized Oracle cell value. Oracle NUMBER values are strings by default for lossless precision; JSON numbers are used only for binary float/double or numbers_as_float=true.",
+        "oneOf": [
+            { "type": "string" },
+            { "type": "number" },
+            { "type": "boolean" },
+            { "type": "null" },
+            { "type": "object", "additionalProperties": true },
+            { "type": "array", "items": {} }
+        ]
+    })
+}
+
+fn row_object_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": row_cell_schema()
+    })
+}
+
+fn query_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "columns": {
+                "type": "array",
+                "description": "Column names in select-list order.",
+                "items": { "type": "string" }
+            },
+            "rows": {
+                "type": "array",
+                "description": "Serialized rows keyed by column name. NUMBER cells are strings unless numbers_as_float=true.",
+                "items": row_object_schema()
+            },
+            "row_count": { "type": "integer", "minimum": 0 },
+            "truncated": { "type": "boolean" },
+            "next_cursor": { "type": "string" },
+            "total_bytes": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["columns", "rows", "row_count", "truncated", "total_bytes"],
+        "additionalProperties": false
+    })
+}
+
+fn explain_plan_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "plan": {
+                "type": "array",
+                "description": "Rows returned by DBMS_XPLAN.DISPLAY, usually keyed by PLAN_TABLE_OUTPUT.",
+                "items": row_object_schema()
+            },
+            "diagnostic_write": {
+                "type": "object",
+                "properties": {
+                    "statement": { "type": "string", "enum": ["EXPLAIN PLAN"] },
+                    "writes": { "type": "string", "enum": ["PLAN_TABLE"] },
+                    "required_level": { "type": "string", "enum": ["READ_WRITE"] },
+                    "explicitly_allowed": { "type": "boolean" }
+                },
+                "required": ["statement", "writes", "required_level", "explicitly_allowed"],
+                "additionalProperties": false
+            }
+        },
+        "required": ["plan", "diagnostic_write"],
+        "additionalProperties": false
+    })
+}
+
 /// Build the public tool registry. Each descriptor carries a hand-written
 /// argument JSON-Schema mirroring the matching `dispatch` arg struct so an
 /// agent can construct a call first-try.
@@ -217,7 +291,8 @@ pub fn tool_registry() -> ToolRegistry {
                 &[timeout_seconds_prop()],
             ),
             &["sql"],
-        )),
+        ))
+        .with_output_schema(query_output_schema()),
     );
 
     registry.register(
@@ -586,6 +661,7 @@ pub fn tool_registry() -> ToolRegistry {
             }),
             &["sql"],
         ))
+        .with_output_schema(explain_plan_output_schema())
         .destructive(),
     );
 
@@ -672,7 +748,8 @@ pub fn tool_registry() -> ToolRegistry {
                 &[timeout_seconds_prop()],
             ),
             &["sql"],
-        )),
+        ))
+        .with_output_schema(query_output_schema()),
     );
 
     registry.register(
@@ -1179,6 +1256,56 @@ mod tests {
                 tool.name
             );
         }
+    }
+
+    #[test]
+    fn query_and_explain_plan_declare_truthful_output_schemas() {
+        let registry = tool_registry();
+        let tool = |name: &str| {
+            registry
+                .tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} registered"))
+        };
+
+        for name in ["oracle_query", "query"] {
+            let schema = tool(name)
+                .output_schema
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} declares output_schema"));
+            assert_eq!(schema["type"], json!("object"), "{name}");
+            assert_eq!(
+                schema["required"],
+                json!(["columns", "rows", "row_count", "truncated", "total_bytes"]),
+                "{name}"
+            );
+            assert_eq!(
+                schema["properties"]["rows"]["items"]["additionalProperties"]["oneOf"][0]["type"],
+                json!("string"),
+                "{name} keeps string cells first so Oracle NUMBER is lossless by default"
+            );
+            assert!(
+                schema["properties"]["rows"]["description"]
+                    .as_str()
+                    .is_some_and(|description| description.contains("NUMBER")),
+                "{name} documents NUMBER-as-string output"
+            );
+        }
+
+        let explain = tool("oracle_explain_plan")
+            .output_schema
+            .as_ref()
+            .expect("oracle_explain_plan declares output_schema");
+        assert_eq!(explain["properties"]["plan"]["type"], json!("array"));
+        assert_eq!(
+            explain["properties"]["diagnostic_write"]["properties"]["required_level"]["enum"],
+            json!(["READ_WRITE"])
+        );
+        assert!(
+            tool("oracle_execute").output_schema.is_none(),
+            "oracle_execute must not inherit the explain-plan output schema"
+        );
     }
 
     #[test]

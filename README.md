@@ -492,6 +492,10 @@ Guarded execution, session elevation, compile, patch, deploy, and diagnostic
 write tools set `destructiveHint=true` and `readOnlyHint=false`. These hints
 are advisory for MCP clients; the fail-closed classifier and operating-level
 gate remain the enforcement boundary.
+`oracle_query`/`query` and `oracle_explain_plan` also advertise
+`outputSchema` for their `structuredContent`; the query schema keeps Oracle
+`NUMBER` cells as strings by default unless the caller explicitly opts into
+`numbers_as_float=true`.
 
 ### MCP resources
 

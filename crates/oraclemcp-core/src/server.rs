@@ -783,6 +783,13 @@ fn descriptor_input_schema(descriptor: &ToolDescriptor) -> Map<String, Value> {
     }
 }
 
+fn descriptor_output_schema(descriptor: &ToolDescriptor) -> Option<Map<String, Value>> {
+    match descriptor.output_schema.as_ref() {
+        Some(Value::Object(schema)) => Some(schema.clone()),
+        _ => None,
+    }
+}
+
 fn tools_json_for_registry(registry: &ToolRegistry) -> Vec<Value> {
     let mut tools = Vec::with_capacity(registry.tools.len() + 1);
     tools.push(json!({
@@ -796,13 +803,19 @@ fn tools_json_for_registry(registry: &ToolRegistry) -> Vec<Value> {
         if d.name == CAPABILITIES_TOOL {
             continue;
         }
-        tools.push(json!({
+        let mut tool = json!({
             "name": d.name,
             "title": d.title,
             "description": d.summary,
             "inputSchema": descriptor_input_schema(d),
             "annotations": d.annotations,
-        }));
+        });
+        if let Some(output_schema) = descriptor_output_schema(d)
+            && let Value::Object(tool) = &mut tool
+        {
+            tool.insert("outputSchema".to_owned(), Value::Object(output_schema));
+        }
+        tools.push(tool);
     }
     tools
 }
@@ -946,6 +959,14 @@ mod tests {
                     },
                     "required": ["sql"],
                     "additionalProperties": false
+                }))
+                .with_output_schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "rows": { "type": "array" }
+                    },
+                    "required": ["rows"],
+                    "additionalProperties": true
                 })),
         );
         let caps = CapabilitiesReport::new(
@@ -1058,6 +1079,11 @@ mod tests {
                 "idempotentHint": true,
                 "openWorldHint": false
             })
+        );
+        assert_eq!(query["outputSchema"]["type"], serde_json::json!("object"));
+        assert_eq!(
+            query["outputSchema"]["required"],
+            serde_json::json!(["rows"])
         );
     }
 
