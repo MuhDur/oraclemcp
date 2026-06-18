@@ -104,6 +104,10 @@ fn jwt_with_scope(scope: &str) -> String {
 }
 
 fn server() -> OracleMcpServer {
+    server_with_max_level(OperatingLevel::ReadWrite)
+}
+
+fn server_with_max_level(max_level: OperatingLevel) -> OracleMcpServer {
     let registry = tool_registry();
     OracleMcpServer::new(
         "0.3.0",
@@ -112,7 +116,7 @@ fn server() -> OracleMcpServer {
         Arc::new(OracleDispatcher::new_with_profile_level(
             Box::new(NoExecMock),
             Some("http-oauth-e2e".to_owned()),
-            SessionLevelState::new(OperatingLevel::ReadWrite, false),
+            SessionLevelState::new(max_level, false),
         )),
     )
 }
@@ -139,12 +143,23 @@ fn oauth_config(required_scopes: Vec<String>) -> HttpTransportConfig {
 }
 
 fn spawn_http(config: HttpTransportConfig) -> HttpHarness {
+    spawn_http_with_server(config, server())
+}
+
+fn spawn_http_with_max_level(
+    config: HttpTransportConfig,
+    max_level: OperatingLevel,
+) -> HttpHarness {
+    spawn_http_with_server(config, server_with_max_level(max_level))
+}
+
+fn spawn_http_with_server(config: HttpTransportConfig, server: OracleMcpServer) -> HttpHarness {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback test listener");
     let addr = listener.local_addr().expect("local addr");
     let shutdown = Arc::new(AtomicBool::new(false));
     let thread_shutdown = Arc::clone(&shutdown);
     let handle = thread::spawn(move || {
-        serve_http_until(listener, server(), &config, thread_shutdown)
+        serve_http_until(listener, server, &config, thread_shutdown)
             .expect("HTTP server exits cleanly");
     });
     HttpHarness {
@@ -172,12 +187,27 @@ fn request_json(
     token: Option<&str>,
     body: Option<&[u8]>,
 ) -> (u16, Vec<(String, String)>, Value) {
+    request_json_with_extra_headers(addr, method, path, token, &[], body)
+}
+
+fn request_json_with_extra_headers(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    extra_headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+) -> (u16, Vec<(String, String)>, Value) {
     let body = body.unwrap_or_default();
     let auth = token
         .map(|token| format!("authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
+    let extra_headers = extra_headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect::<String>();
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: application/json\r\naccept: application/json, text/event-stream\r\n{auth}content-length: {}\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: application/json\r\naccept: application/json, text/event-stream\r\n{auth}{extra_headers}content-length: {}\r\n\r\n",
         body.len()
     );
     let mut stream = TcpStream::connect(addr).expect("connect to HTTP test server");
@@ -332,4 +362,110 @@ fn binary_http_oauth_serves_metadata_and_applies_scope_ceilings() {
     assert_eq!(ddl_gate["gate_decision"], json!("blocked"));
     assert_eq!(ddl_gate["blocked_reason"]["required"], json!("DDL"));
     assert_eq!(ddl_gate["blocked_reason"]["ceiling"], json!("READ_WRITE"));
+
+    let protected = spawn_http_with_max_level(oauth_config(Vec::new()), OperatingLevel::ReadOnly);
+    let (status, _headers, protected_scoped) = request_json(
+        protected.addr,
+        "POST",
+        MCP_PATH,
+        Some(&jwt_with_scope("oracle:admin")),
+        Some(update.to_string().as_bytes()),
+    );
+    assert_eq!(status, 200);
+    let protected_gate = &protected_scoped["result"]["structuredContent"];
+    assert_eq!(protected_gate["gate_decision"], json!("blocked"));
+    assert_eq!(
+        protected_gate["blocked_reason"]["required"],
+        json!("READ_WRITE")
+    );
+    assert_eq!(
+        protected_gate["blocked_reason"]["ceiling"],
+        json!("READ_ONLY")
+    );
+}
+
+#[test]
+fn binary_http_rejects_bad_origin_and_forged_stateful_sessions() {
+    let mut config = oauth_config(Vec::new());
+    config.stateful = true;
+    config.allowed_origins = vec!["https://app.example".to_owned()];
+    let harness = spawn_http(config);
+    let token = jwt_with_scope("oracle:read");
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": { "name": "http-origin-session-e2e", "version": "1.0" }
+        }
+    });
+
+    let (status, _headers, body) = request_json_with_extra_headers(
+        harness.addr,
+        "POST",
+        MCP_PATH,
+        Some(&token),
+        &[("origin", "https://evil.example")],
+        Some(initialize.to_string().as_bytes()),
+    );
+    assert_eq!(status, 403);
+    assert_eq!(body, json!("Forbidden: Origin header is not allowed"));
+
+    let (status, headers, body) = request_json_with_extra_headers(
+        harness.addr,
+        "POST",
+        MCP_PATH,
+        Some(&token),
+        &[("origin", "https://app.example")],
+        Some(initialize.to_string().as_bytes()),
+    );
+    assert_eq!(status, 200);
+    let session_id = header(&headers, "mcp-session-id")
+        .expect("stateful initialize returns mcp-session-id")
+        .to_owned();
+    assert!(
+        body.as_str()
+            .is_some_and(|body| body.contains("\"protocolVersion\":\"2025-11-25\"")),
+        "stateful initialize returns an SSE JSON-RPC response: {body}"
+    );
+
+    let tools_list = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list"
+    });
+    let (status, _headers, body) = request_json_with_extra_headers(
+        harness.addr,
+        "POST",
+        MCP_PATH,
+        Some(&token),
+        &[
+            ("origin", "https://app.example"),
+            ("mcp-session-id", &session_id),
+            ("mcp-protocol-version", "2025-11-25"),
+        ],
+        Some(tools_list.to_string().as_bytes()),
+    );
+    assert_eq!(status, 200);
+    assert!(
+        body.as_str().is_some_and(|body| body.contains("\"tools\"")),
+        "stateful tools/list request is admitted and streamed: {body}"
+    );
+
+    let (status, _headers, body) = request_json_with_extra_headers(
+        harness.addr,
+        "POST",
+        MCP_PATH,
+        Some(&token),
+        &[
+            ("origin", "https://app.example"),
+            ("mcp-session-id", "00000000-0000-4000-8000-999999999999"),
+            ("mcp-protocol-version", "2025-11-25"),
+        ],
+        Some(tools_list.to_string().as_bytes()),
+    );
+    assert_eq!(status, 404);
+    assert_eq!(body, json!("Unknown mcp-session-id"));
 }

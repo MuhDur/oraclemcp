@@ -1,0 +1,300 @@
+{
+  "case": "served native HTTP enforces OAuth, Origin, scope forwarding, and stateful session ids",
+  "exchanges": [
+    {
+      "name": "anonymous initialize refused",
+      "request": {
+        "body": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "method": "initialize",
+          "params": {
+            "capabilities": {},
+            "clientInfo": {
+              "name": "golden-served-http",
+              "version": "1.0"
+            },
+            "protocolVersion": "2025-11-25"
+          }
+        },
+        "headers": [
+          [
+            "host",
+            "127.0.0.1"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ]
+        ],
+        "method": "POST",
+        "path": "/mcp"
+      },
+      "response": {
+        "body": "unauthorized",
+        "headers": {
+          "content-type": "text/plain; charset=utf-8",
+          "www-authenticate": "Bearer resource_metadata=\"https://oraclemcp.example/.well-known/oauth-protected-resource\""
+        },
+        "status": 401
+      }
+    },
+    {
+      "name": "bad Origin refused before dispatch",
+      "request": {
+        "authorization": "[TOKEN: oracle:read]",
+        "body": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "method": "initialize",
+          "params": {
+            "capabilities": {},
+            "clientInfo": {
+              "name": "golden-served-http",
+              "version": "1.0"
+            },
+            "protocolVersion": "2025-11-25"
+          }
+        },
+        "headers": [
+          [
+            "host",
+            "127.0.0.1"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "origin",
+            "https://evil.example"
+          ]
+        ],
+        "method": "POST",
+        "path": "/mcp"
+      },
+      "response": {
+        "body": "Forbidden: Origin header is not allowed",
+        "headers": {},
+        "status": 403
+      }
+    },
+    {
+      "name": "valid bearer creates stateful session",
+      "request": {
+        "authorization": "[TOKEN: oracle:read]",
+        "body": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "method": "initialize",
+          "params": {
+            "capabilities": {},
+            "clientInfo": {
+              "name": "golden-served-http",
+              "version": "1.0"
+            },
+            "protocolVersion": "2025-11-25"
+          }
+        },
+        "headers": [
+          [
+            "host",
+            "127.0.0.1"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "origin",
+            "https://app.example"
+          ]
+        ],
+        "method": "POST",
+        "path": "/mcp"
+      },
+      "response": {
+        "body": [
+          {
+            "data": null,
+            "id": "0",
+            "retry": 3000
+          },
+          {
+            "data": {
+              "id": 1,
+              "jsonrpc": "2.0",
+              "result": {
+                "capabilities": {
+                  "tools": {}
+                },
+                "instructions": "Call oracle_capabilities first to discover tools, the current/max operating level, and connection status. Reads are frictionless; writes/DDL require a gated escalation.",
+                "protocolVersion": "2025-11-25",
+                "serverInfo": {
+                  "description": "Safe-by-default Oracle Database MCP server with PL/SQL intelligence.",
+                  "name": "oraclemcp",
+                  "title": "Oracle MCP server",
+                  "version": "0.3.0"
+                }
+              }
+            }
+          }
+        ],
+        "headers": {
+          "cache-control": "no-cache",
+          "content-type": "text/event-stream",
+          "mcp-session-id": "[SESSION_ID]"
+        },
+        "status": 200
+      }
+    },
+    {
+      "name": "valid bearer scope reaches tool dispatch",
+      "request": {
+        "authorization": "[TOKEN: oracle:read]",
+        "body": {
+          "id": 2,
+          "jsonrpc": "2.0",
+          "method": "tools/call",
+          "params": {
+            "arguments": {
+              "owner": "HR"
+            },
+            "name": "oracle_schema_inspect"
+          }
+        },
+        "headers": [
+          [
+            "host",
+            "127.0.0.1"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "origin",
+            "https://app.example"
+          ],
+          [
+            "mcp-session-id",
+            "[SESSION_ID]"
+          ],
+          [
+            "mcp-protocol-version",
+            "2025-11-25"
+          ]
+        ],
+        "method": "POST",
+        "path": "/mcp"
+      },
+      "response": {
+        "body": [
+          {
+            "data": null,
+            "id": "0/0",
+            "retry": 3000
+          },
+          {
+            "data": {
+              "id": 2,
+              "jsonrpc": "2.0",
+              "result": {
+                "content": [
+                  {
+                    "text": "{\"args\":{\"owner\":\"HR\"},\"ok\":true,\"scopes\":[\"oracle:read\"],\"tool\":\"oracle_schema_inspect\"}",
+                    "type": "text"
+                  }
+                ],
+                "isError": false,
+                "structuredContent": {
+                  "args": {
+                    "owner": "HR"
+                  },
+                  "ok": true,
+                  "scopes": [
+                    "oracle:read"
+                  ],
+                  "tool": "oracle_schema_inspect"
+                }
+              }
+            },
+            "id": "1/0"
+          }
+        ],
+        "headers": {
+          "cache-control": "no-cache",
+          "content-type": "text/event-stream"
+        },
+        "status": 200
+      }
+    },
+    {
+      "name": "forged stateful session id refused",
+      "request": {
+        "authorization": "[TOKEN: oracle:read]",
+        "body": {
+          "id": 2,
+          "jsonrpc": "2.0",
+          "method": "tools/call",
+          "params": {
+            "arguments": {
+              "owner": "HR"
+            },
+            "name": "oracle_schema_inspect"
+          }
+        },
+        "headers": [
+          [
+            "host",
+            "127.0.0.1"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "origin",
+            "https://app.example"
+          ],
+          [
+            "mcp-session-id",
+            "[SESSION_ID]"
+          ],
+          [
+            "mcp-protocol-version",
+            "2025-11-25"
+          ]
+        ],
+        "method": "POST",
+        "path": "/mcp"
+      },
+      "response": {
+        "body": "Unknown mcp-session-id",
+        "headers": {},
+        "status": 404
+      }
+    }
+  ],
+  "transport": "TcpListener -> serve_http_until -> request parser -> MCP dispatcher"
+}
