@@ -25,6 +25,7 @@ Harnesses:
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Initialize | 2 | 0 | 2 | 2 | 0 | 100% |
 | Notifications | 1 | 0 | 1 | 1 | 0 | 100% |
+| Resources | 1 | 0 | 1 | 1 | 0 | 100% |
 | Tools | 3 | 0 | 3 | 3 | 0 | 100% |
 | JSON-RPC errors | 3 | 2 | 5 | 5 | 1 | 100% |
 | Security | 1 | 0 | 1 | 1 | 0 | 100% |
@@ -33,7 +34,7 @@ Harnesses:
 | HTTP sessions | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
 
-Total tracked requirements: 18 MUST, 2 SHOULD, 20 tested.
+Total tracked requirements: 19 MUST, 2 SHOULD, 21 tested.
 
 ## Requirement IDs
 
@@ -44,7 +45,8 @@ Total tracked requirements: 18 MUST, 2 SHOULD, 20 tested.
 | MCP-STDIO-003 | MUST | Tools | `tools/list` returns MCP `inputSchema` objects. |
 | MCP-STDIO-004 | MUST | Tools | `tools/call` returns `content`, `structuredContent`, and `isError`. |
 | MCP-STDIO-005 | MUST | Tools | Unknown tools are MCP tool errors, not transport crashes. |
-| MCP-STDIO-006 | MUST | Initialize | Initialize capabilities advertise only methods the server currently handles. |
+| MCP-STDIO-006 | MUST | Initialize | Initialize capabilities advertise resources only after resource handlers are served. |
+| MCP-STDIO-007 | MUST | Resources | `resources/list`, `resources/templates/list`, and `resources/read` are served with MCP resource content objects. |
 | JSONRPC-STDIO-001 | MUST | JSON-RPC errors | Malformed JSON returns parse error with null id. |
 | JSONRPC-STDIO-002 | MUST | JSON-RPC errors | Unknown methods return method-not-found and echo id. |
 | JSONRPC-STDIO-003 | MUST | JSON-RPC errors | Invalid params return invalid-params and echo id. |

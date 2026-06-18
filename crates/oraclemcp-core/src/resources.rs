@@ -98,6 +98,7 @@ impl ResourceUri {
 
 /// A `resources/list` template entry (the browsable surface).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResourceTemplate {
     /// The URI template (`oracle://object/{owner}/{type}/{name}`).
     pub uri_template: String,
@@ -154,6 +155,7 @@ pub fn resource_templates() -> Vec<ResourceTemplate> {
 
 /// The content of a read resource.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResourceContents {
     /// The resolved URI.
     pub uri: String,

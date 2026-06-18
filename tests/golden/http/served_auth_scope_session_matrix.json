@@ -138,6 +138,10 @@
               "jsonrpc": "2.0",
               "result": {
                 "capabilities": {
+                  "resources": {
+                    "listChanged": false,
+                    "subscribe": false
+                  },
                   "tools": {
                     "listChanged": false
                   }

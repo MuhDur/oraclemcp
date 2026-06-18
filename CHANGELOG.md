@@ -34,6 +34,10 @@ assumptions, the next release is minor rather than patch.
   JSON-vs-streaming responses, stateful sessions, OAuth protected-resource
   metadata, OAuth issuer/resource/scope validation, HS256 secret references,
   and native rustls TLS/mTLS.
+- Native MCP resource handlers for `resources/list`,
+  `resources/templates/list`, and `resources/read`; static capability/tool
+  resources resolve directly, while schema/object resource reads route through
+  the same guarded dispatch path as the read tools.
 
 ### Changed
 

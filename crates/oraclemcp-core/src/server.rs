@@ -17,6 +17,7 @@ use serde_json::{Map, Value, json};
 
 use crate::capabilities::CapabilitiesReport;
 use crate::init_token::StdioAuthPolicy;
+use crate::resources::{ResourceContents, ResourceUri, resource_templates};
 use crate::tools::{ToolDescriptor, ToolRegistry};
 
 /// The `_meta` field carrying the stdio init token on the `initialize` request.
@@ -33,6 +34,7 @@ const JSONRPC_PARSE_ERROR: i64 = -32700;
 const JSONRPC_INVALID_REQUEST: i64 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
+const JSONRPC_SERVER_ERROR: i64 = -32000;
 const SERVER_INSTRUCTIONS: &str = "Call oracle_capabilities first to discover tools, the current/max operating level, and connection status. Reads are frictionless; writes/DDL require a gated escalation.";
 
 /// Boxed tool-dispatch future. This keeps [`ToolDispatch`] object-safe while
@@ -367,6 +369,9 @@ impl OracleMcpServer {
         match method {
             "initialize" => Some(self.handle_initialize(id, object.get("params"), auth)),
             "notifications/initialized" => None,
+            "resources/list" => Some(self.handle_resources_list(id)),
+            "resources/templates/list" => Some(self.handle_resource_templates_list(id)),
+            "resources/read" => Some(self.handle_resource_read(id, object.get("params"), context)),
             "tools/list" => Some(jsonrpc_result(id, self.tools_list_result_json())),
             "tools/call" => Some(self.handle_tool_call(id, object.get("params"), context)),
             _ => Some(jsonrpc_error(
@@ -394,6 +399,177 @@ impl OracleMcpServer {
             }
         }
         jsonrpc_result(id, self.initialize_result_json())
+    }
+
+    fn handle_resources_list(&self, id: Value) -> Value {
+        jsonrpc_result(id, json!({ "resources": served_resources_json() }))
+    }
+
+    fn handle_resource_templates_list(&self, id: Value) -> Value {
+        jsonrpc_result(
+            id,
+            json!({ "resourceTemplates": served_resource_templates_json() }),
+        )
+    }
+
+    fn handle_resource_read(
+        &self,
+        id: Value,
+        params: Option<&Value>,
+        context: DispatchContext<'_>,
+    ) -> Value {
+        let Some(Value::Object(params)) = params else {
+            return jsonrpc_error(
+                id,
+                JSONRPC_INVALID_PARAMS,
+                "resources/read params must be an object",
+            );
+        };
+        let Some(uri) = params.get("uri").and_then(Value::as_str) else {
+            return jsonrpc_error(
+                id,
+                JSONRPC_INVALID_PARAMS,
+                "resources/read uri must be a string",
+            );
+        };
+        let uri = match ResourceUri::parse(uri) {
+            Ok(uri) => uri,
+            Err(envelope) => {
+                return jsonrpc_error_from_envelope(id, JSONRPC_INVALID_PARAMS, &envelope);
+            }
+        };
+        match self.read_resource_contents(uri, context) {
+            Ok(contents) => jsonrpc_result(id, json!({ "contents": [contents] })),
+            Err(envelope) => jsonrpc_error_from_envelope(
+                id,
+                resource_error_code(envelope.error_class),
+                &envelope,
+            ),
+        }
+    }
+
+    fn read_resource_contents(
+        &self,
+        uri: ResourceUri,
+        context: DispatchContext<'_>,
+    ) -> Result<ResourceContents, ErrorEnvelope> {
+        match uri {
+            ResourceUri::Capabilities => Ok(ResourceContents {
+                uri: ResourceUri::Capabilities.to_uri(),
+                mime_type: "application/json".to_owned(),
+                text: serde_json::to_value(&*self.capabilities)
+                    .unwrap_or(Value::Null)
+                    .to_string(),
+            }),
+            ResourceUri::Tools => Ok(ResourceContents {
+                uri: ResourceUri::Tools.to_uri(),
+                mime_type: "application/json".to_owned(),
+                text: self.tools_list_result_json().to_string(),
+            }),
+            ResourceUri::Schema { owner } => {
+                let resource_uri = ResourceUri::Schema {
+                    owner: owner.clone(),
+                };
+                let value = self.dispatch_resource_tool(
+                    context,
+                    "oracle_schema_inspect",
+                    json!({ "owner": owner }),
+                )?;
+                Ok(ResourceContents {
+                    uri: resource_uri.to_uri(),
+                    mime_type: "application/json".to_owned(),
+                    text: value.to_string(),
+                })
+            }
+            ResourceUri::Object {
+                owner,
+                object_type,
+                name,
+            } => {
+                let resource_uri = ResourceUri::Object {
+                    owner: owner.clone(),
+                    object_type: object_type.clone(),
+                    name: name.clone(),
+                };
+                if is_source_resource_type(&object_type) {
+                    let value = self.dispatch_resource_tool(
+                        context,
+                        "oracle_get_source",
+                        json!({
+                            "owner": owner,
+                            "object_type": object_type,
+                            "name": name,
+                        }),
+                    )?;
+                    Ok(ResourceContents {
+                        uri: resource_uri.to_uri(),
+                        mime_type: "text/plain".to_owned(),
+                        text: extract_source_text(&value).unwrap_or_else(|| value.to_string()),
+                    })
+                } else {
+                    let value = self.dispatch_resource_tool(
+                        context,
+                        "oracle_get_ddl",
+                        json!({
+                            "owner": owner,
+                            "object_type": object_type,
+                            "name": name,
+                        }),
+                    )?;
+                    let ddl = value
+                        .get("ddl")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            ErrorEnvelope::new(
+                                ErrorClass::ObjectNotFound,
+                                format!("object resource has no DDL: {}", resource_uri.to_uri()),
+                            )
+                        })?;
+                    Ok(ResourceContents {
+                        uri: resource_uri.to_uri(),
+                        mime_type: "text/plain".to_owned(),
+                        text: ddl,
+                    })
+                }
+            }
+            ResourceUri::Session { lease_id } => Err(ErrorEnvelope::new(
+                ErrorClass::ObjectNotFound,
+                format!(
+                    "session resource {lease_id:?} is not served by the read-only oraclemcp binary"
+                ),
+            )
+            .with_next_step("Use oracle_connection_info for connection state in this release.")),
+        }
+    }
+
+    fn dispatch_resource_tool(
+        &self,
+        context: DispatchContext<'_>,
+        tool_name: &str,
+        args: Value,
+    ) -> Result<Value, ErrorEnvelope> {
+        let result = self.run_tool_blocking_with_context(context, tool_name.to_owned(), args);
+        if result
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return result
+                .get("structuredContent")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+                .ok_or_else(|| {
+                    ErrorEnvelope::new(
+                        ErrorClass::Internal,
+                        format!("{tool_name} failed without a structured error envelope"),
+                    )
+                });
+        }
+        Ok(result
+            .get("structuredContent")
+            .cloned()
+            .unwrap_or(Value::Null))
     }
 
     fn handle_tool_call(
@@ -440,6 +616,78 @@ fn served_capabilities_json() -> Value {
     json!({
         "tools": {
             "listChanged": false,
+        },
+        "resources": {
+            "subscribe": false,
+            "listChanged": false,
+        },
+    })
+}
+
+fn served_resources_json() -> Value {
+    json!([
+        {
+            "uri": "oracle://capabilities",
+            "name": "capabilities",
+            "description": "Server capability report",
+            "mimeType": "application/json",
+        },
+        {
+            "uri": "oracle://tools",
+            "name": "tools",
+            "description": "MCP tool catalog",
+            "mimeType": "application/json",
+        },
+    ])
+}
+
+fn served_resource_templates_json() -> Value {
+    Value::Array(
+        resource_templates()
+            .into_iter()
+            .filter(|template| template.uri_template != "oracle://session/{lease_id}")
+            .map(|template| serde_json::to_value(template).unwrap_or(Value::Null))
+            .collect(),
+    )
+}
+
+fn is_source_resource_type(object_type: &str) -> bool {
+    matches!(
+        object_type
+            .trim()
+            .to_ascii_uppercase()
+            .replace(' ', "_")
+            .as_str(),
+        "PACKAGE" | "PACKAGE_BODY" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "TYPE" | "TYPE_BODY"
+    )
+}
+
+fn extract_source_text(value: &Value) -> Option<String> {
+    let source = value.get("source")?;
+    if let Some(text) = source.as_str() {
+        return Some(text.to_owned());
+    }
+    source
+        .get("source")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn resource_error_code(class: ErrorClass) -> i64 {
+    match class {
+        ErrorClass::InvalidArguments | ErrorClass::ObjectNotFound => JSONRPC_INVALID_PARAMS,
+        _ => JSONRPC_SERVER_ERROR,
+    }
+}
+
+fn jsonrpc_error_from_envelope(id: Value, code: i64, envelope: &ErrorEnvelope) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": code,
+            "message": envelope.message.clone(),
+            "data": envelope.to_json(),
         },
     })
 }

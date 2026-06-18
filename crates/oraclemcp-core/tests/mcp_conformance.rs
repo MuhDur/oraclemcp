@@ -71,7 +71,13 @@ const REQUIREMENTS: &[Requirement] = &[
         id: "MCP-STDIO-006",
         section: "Initialize",
         level: RequirementLevel::Must,
-        description: "initialize capabilities advertise only methods the server currently handles",
+        description: "initialize capabilities advertise resources only after resource handlers are served",
+    },
+    Requirement {
+        id: "MCP-STDIO-007",
+        section: "Resources",
+        level: RequirementLevel::Must,
+        description: "resources/list, resources/templates/list, and resources/read are served with MCP resource content objects",
     },
     Requirement {
         id: "JSONRPC-STDIO-001",
@@ -121,17 +127,33 @@ impl ToolDispatch for EchoDispatch {
         args: Value,
     ) -> DispatchFuture<'a> {
         Box::pin(async move {
-            if name == "oracle_schema_inspect" {
-                return Ok(json!({
+            match name {
+                "oracle_schema_inspect" => Ok(json!({
                     "tool": name,
                     "ok": true,
                     "args": args,
-                }));
+                })),
+                "oracle_get_source" => Ok(json!({
+                    "source": {
+                        "owner": args["owner"],
+                        "name": args["name"],
+                        "object_type": args["object_type"],
+                        "source": "PACKAGE emp_api AS END emp_api;\n",
+                        "line_count": 1,
+                        "char_count": 31,
+                        "truncated": false,
+                    }
+                })),
+                "oracle_get_ddl" => Ok(json!({
+                    "owner": args["owner"],
+                    "name": args["name"],
+                    "ddl": "CREATE TABLE employees (id NUMBER)"
+                })),
+                _ => Err(ErrorEnvelope::new(
+                    ErrorClass::InvalidArguments,
+                    format!("unknown tool: {name:?}"),
+                )),
             }
-            Err(ErrorEnvelope::new(
-                ErrorClass::InvalidArguments,
-                format!("unknown tool: {name:?}"),
-            ))
         })
     }
 }
@@ -153,6 +175,16 @@ fn conformance_server() -> OracleMcpServer {
             "additionalProperties": false
         })),
     );
+    registry.register(ToolDescriptor::new(
+        "oracle_get_source",
+        ToolTier::FoundationLiveDb,
+        "fetch object source",
+    ));
+    registry.register(ToolDescriptor::new(
+        "oracle_get_ddl",
+        ToolTier::FoundationLiveDb,
+        "fetch object DDL",
+    ));
     let report = CapabilitiesReport::new(
         "0.3.0",
         registry.tools.clone(),
@@ -220,7 +252,7 @@ fn run_script(requests: Vec<Value>) -> Vec<Value> {
 
 #[test]
 fn conformance_requirement_matrix_is_accounted_for() {
-    assert_eq!(REQUIREMENTS.len(), 12);
+    assert_eq!(REQUIREMENTS.len(), 13);
     let must = REQUIREMENTS
         .iter()
         .filter(|requirement| requirement.level == RequirementLevel::Must)
@@ -229,7 +261,7 @@ fn conformance_requirement_matrix_is_accounted_for() {
         .iter()
         .filter(|requirement| requirement.level == RequirementLevel::Should)
         .count();
-    assert_eq!(must, 10);
+    assert_eq!(must, 11);
     assert_eq!(should, 2);
     let mut ids = REQUIREMENTS
         .iter()
@@ -257,10 +289,18 @@ fn initialize_returns_mcp_2025_11_25_server_info_and_tools_capability() {
     assert_eq!(result["serverInfo"]["version"], json!("0.3.0"));
     assert!(result["capabilities"]["tools"].is_object());
     assert_eq!(result["capabilities"]["tools"]["listChanged"], json!(false));
+    assert_eq!(
+        result["capabilities"]["resources"]["subscribe"],
+        json!(false)
+    );
+    assert_eq!(
+        result["capabilities"]["resources"]["listChanged"],
+        json!(false)
+    );
 }
 
 #[test]
-fn initialize_capabilities_do_not_advertise_unserved_protocol_arms() {
+fn resources_are_advertised_and_served_without_advertising_unserved_arms() {
     let replies = run_script(vec![
         json!({
             "jsonrpc": "2.0",
@@ -272,6 +312,29 @@ fn initialize_capabilities_do_not_advertise_unserved_protocol_arms() {
             "id": "resources-read",
             "method": "resources/read",
             "params": { "uri": "oracle://capabilities" }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": "resources-read-tools",
+            "method": "resources/read",
+            "params": { "uri": "oracle://tools" }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": "resources-templates",
+            "method": "resources/templates/list"
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": "resources-read-schema",
+            "method": "resources/read",
+            "params": { "uri": "oracle://schema/HR" }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": "resources-read-object",
+            "method": "resources/read",
+            "params": { "uri": "oracle://object/HR/PACKAGE/EMP_API" }
         }),
         json!({
             "jsonrpc": "2.0",
@@ -291,16 +354,97 @@ fn initialize_capabilities_do_not_advertise_unserved_protocol_arms() {
         .expect("initialize reply");
     let capabilities = &initialize["result"]["capabilities"];
     assert!(capabilities["tools"].is_object());
-    assert!(capabilities.get("resources").is_none());
+    assert_eq!(capabilities["resources"]["subscribe"], json!(false));
+    assert_eq!(capabilities["resources"]["listChanged"], json!(false));
     assert!(capabilities.get("prompts").is_none());
     assert!(capabilities.get("completion").is_none());
 
-    for id in [
-        "resources-list",
-        "resources-read",
-        "prompts-list",
-        "completion-complete",
-    ] {
+    let resource_list = replies
+        .iter()
+        .find(|reply| reply["id"] == json!("resources-list"))
+        .expect("resources/list reply");
+    assert_eq!(
+        resource_list["result"]["resources"][0]["uri"],
+        json!("oracle://capabilities")
+    );
+    assert_eq!(
+        resource_list["result"]["resources"][0]["mimeType"],
+        json!("application/json")
+    );
+
+    let templates = replies
+        .iter()
+        .find(|reply| reply["id"] == json!("resources-templates"))
+        .expect("resources/templates/list reply");
+    let templates = templates["result"]["resourceTemplates"]
+        .as_array()
+        .expect("resource templates are an array");
+    assert!(templates.iter().any(|template| {
+        template["uriTemplate"] == json!("oracle://object/{owner}/{type}/{name}")
+    }));
+    assert!(
+        templates
+            .iter()
+            .all(|template| template["uriTemplate"] != json!("oracle://session/{lease_id}")),
+        "session resources stay unadvertised until a lease-backed handler exists"
+    );
+
+    let read_capabilities = replies
+        .iter()
+        .find(|reply| reply["id"] == json!("resources-read"))
+        .expect("resources/read capabilities reply");
+    assert_eq!(
+        read_capabilities["result"]["contents"][0]["mimeType"],
+        json!("application/json")
+    );
+    let capability_doc: Value = serde_json::from_str(
+        read_capabilities["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .expect("capability resource text is JSON");
+    assert_eq!(capability_doc["server_name"], json!("oraclemcp"));
+
+    let read_tools = replies
+        .iter()
+        .find(|reply| reply["id"] == json!("resources-read-tools"))
+        .expect("resources/read tools reply");
+    let tools_doc: Value = serde_json::from_str(
+        read_tools["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .expect("tools resource text is JSON");
+    assert!(tools_doc["tools"].is_array());
+
+    let read_schema = replies
+        .iter()
+        .find(|reply| reply["id"] == json!("resources-read-schema"))
+        .expect("resources/read schema reply");
+    let schema_doc: Value = serde_json::from_str(
+        read_schema["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .expect("schema resource text is JSON");
+    assert_eq!(schema_doc["args"]["owner"], json!("HR"));
+
+    let read_object = replies
+        .iter()
+        .find(|reply| reply["id"] == json!("resources-read-object"))
+        .expect("resources/read object reply");
+    assert_eq!(
+        read_object["result"]["contents"][0]["mimeType"],
+        json!("text/plain")
+    );
+    assert!(
+        read_object["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("PACKAGE emp_api")
+    );
+
+    for id in ["prompts-list", "completion-complete"] {
         let reply = replies
             .iter()
             .find(|reply| reply["id"] == json!(id))
