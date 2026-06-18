@@ -191,9 +191,7 @@ impl OracleMcpServer {
     pub fn initialize_result_json(&self) -> Value {
         json!({
             "protocolVersion": "2025-11-25",
-            "capabilities": {
-                "tools": {},
-            },
+            "capabilities": served_capabilities_json(),
             "serverInfo": {
                 "name": "oraclemcp",
                 "version": self.version,
@@ -432,6 +430,18 @@ impl OracleMcpServer {
         let result = self.run_tool_blocking_with_context(context, name.to_owned(), args);
         jsonrpc_result(id, result)
     }
+}
+
+fn served_capabilities_json() -> Value {
+    // Keep this in lockstep with `handle_jsonrpc_request_with_context`.
+    // Resources, prompts, and completion are deliberately omitted until their
+    // JSON-RPC arms are actually served; advertising an unserved method causes
+    // strict MCP clients to make calls that return method-not-found.
+    json!({
+        "tools": {
+            "listChanged": false,
+        },
+    })
 }
 
 /// A permissive `{"type":"object"}` input schema.

@@ -68,6 +68,12 @@ const REQUIREMENTS: &[Requirement] = &[
         description: "unknown tools are represented as MCP tool errors, not transport crashes",
     },
     Requirement {
+        id: "MCP-STDIO-006",
+        section: "Initialize",
+        level: RequirementLevel::Must,
+        description: "initialize capabilities advertise only methods the server currently handles",
+    },
+    Requirement {
         id: "JSONRPC-STDIO-001",
         section: "JSON-RPC errors",
         level: RequirementLevel::Must,
@@ -214,7 +220,7 @@ fn run_script(requests: Vec<Value>) -> Vec<Value> {
 
 #[test]
 fn conformance_requirement_matrix_is_accounted_for() {
-    assert_eq!(REQUIREMENTS.len(), 11);
+    assert_eq!(REQUIREMENTS.len(), 12);
     let must = REQUIREMENTS
         .iter()
         .filter(|requirement| requirement.level == RequirementLevel::Must)
@@ -223,7 +229,7 @@ fn conformance_requirement_matrix_is_accounted_for() {
         .iter()
         .filter(|requirement| requirement.level == RequirementLevel::Should)
         .count();
-    assert_eq!(must, 9);
+    assert_eq!(must, 10);
     assert_eq!(should, 2);
     let mut ids = REQUIREMENTS
         .iter()
@@ -250,6 +256,61 @@ fn initialize_returns_mcp_2025_11_25_server_info_and_tools_capability() {
     assert_eq!(result["serverInfo"]["name"], json!("oraclemcp"));
     assert_eq!(result["serverInfo"]["version"], json!("0.3.0"));
     assert!(result["capabilities"]["tools"].is_object());
+    assert_eq!(result["capabilities"]["tools"]["listChanged"], json!(false));
+}
+
+#[test]
+fn initialize_capabilities_do_not_advertise_unserved_protocol_arms() {
+    let replies = run_script(vec![
+        json!({
+            "jsonrpc": "2.0",
+            "id": "resources-list",
+            "method": "resources/list"
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": "resources-read",
+            "method": "resources/read",
+            "params": { "uri": "oracle://capabilities" }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": "prompts-list",
+            "method": "prompts/list"
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": "completion-complete",
+            "method": "completion/complete",
+            "params": {}
+        }),
+    ]);
+    let initialize = replies
+        .iter()
+        .find(|reply| reply["id"] == json!(1))
+        .expect("initialize reply");
+    let capabilities = &initialize["result"]["capabilities"];
+    assert!(capabilities["tools"].is_object());
+    assert!(capabilities.get("resources").is_none());
+    assert!(capabilities.get("prompts").is_none());
+    assert!(capabilities.get("completion").is_none());
+
+    for id in [
+        "resources-list",
+        "resources-read",
+        "prompts-list",
+        "completion-complete",
+    ] {
+        let reply = replies
+            .iter()
+            .find(|reply| reply["id"] == json!(id))
+            .expect("method-not-found reply");
+        assert_eq!(
+            reply["error"]["code"],
+            json!(JSONRPC_METHOD_NOT_FOUND),
+            "{id} must stay unadvertised until the handler is served"
+        );
+    }
 }
 
 #[test]
