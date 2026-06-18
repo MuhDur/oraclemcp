@@ -22,7 +22,8 @@
 - **Agent-first UX.** Every tool ships a real JSON Schema. Errors are structured [`ErrorEnvelope`](crates/oraclemcp-error)s with machine-stable classes, fuzzy suggestions, and next-step hints, not bare strings. A zero-arg `oracle_capabilities` tool lets an agent discover the surface, and an offline build degrades to a `RuntimeStateRequired` contract instead of crashing.
 - **Pure Rust, no `unsafe`.** Every crate is `#![forbid(unsafe_code)]`; the fail-closed classifier carries a differential cargo-fuzz target.
 - **Two transports.** stdio (default) and Streamable HTTP (`--listen`) with
-  fail-closed auth defaults and optional OAuth bearer enforcement.
+  fail-closed auth defaults, optional OAuth bearer enforcement, and native
+  rustls TLS/mTLS.
 
 ## Quick start
 
@@ -101,7 +102,7 @@ Or run it directly:
 
 ```sh
 oraclemcp serve                      # stdio (default); --allow-no-auth for local dev
-oraclemcp serve --listen 127.0.0.1:7070   # Streamable HTTP (bind loopback only)
+oraclemcp serve --listen 127.0.0.1:7070 --allow-no-auth   # local HTTP dev only
 oraclemcp --json setup --profile db_ro    # generic onboarding templates
 oraclemcp capabilities               # the advertised tool surface + feature tiers (JSON)
 oraclemcp --json profiles            # configured profile names and non-secret metadata
@@ -167,6 +168,12 @@ allowed_issuers = ["https://issuer.example.com"]
 authorization_servers = ["https://issuer.example.com"]
 required_scopes = ["oracle:read"]
 hs256_secret_ref = "env:ORACLEMCP_OAUTH_HS256_SECRET"
+
+# Optional native HTTPS / mTLS listener.
+# [http.tls]
+# cert_chain_path = "/path/to/server-chain.pem"
+# private_key_path = "/path/to/server-key.pem"
+# client_ca_path = "/path/to/client-ca.pem"  # require mTLS client certs
 
 [[profiles]]
 name = "dev_ro"

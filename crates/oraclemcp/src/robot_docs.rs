@@ -265,7 +265,7 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
             "custom_tools": "~/.config/oraclemcp/tools.d/*.toml or ORACLEMCP_TOOLS_DIR",
             "custom_tool_signing": "protected profiles and profiles with require_signed_tools=true require ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY plus per-tool signatures from oraclemcp sign-tool",
             "secret_refs": "prefer credential_ref and wallet_password_ref over literal passwords",
-            "http_transport": "use top-level http config or serve --oauth-* / --http-* flags for Streamable HTTP; native TLS material is parsed but rejected in v0.3.0 until the rustls listener is wired",
+            "http_transport": "use top-level http config or serve --oauth-* / --http-* / --tls-* flags for Streamable HTTP; native rustls TLS and optional mTLS are served directly, while server-only TLS still needs OAuth or explicit --allow-no-auth",
             "proxy_auth": "use profiles.proxy_auth for thin proxy auth; credential_ref belongs to proxy_user and target_schema is the CONNECT THROUGH client",
             "network_routing": "use top-level sdu and profiles.drcp for validated thin SDU and DRCP server routing instead of raw connect_string query parameters",
             "local_pool": "profiles.pool enables hybrid_pool: stateless catalog/metadata reads can use the bounded local pool, while user SQL, LOB/sample reads, transactions, DBMS_OUTPUT, login setup, and session identity remain on the pinned main session; statement_cache_size reaches the thin driver",
@@ -342,7 +342,7 @@ Client setup
 - Generate generic setup templates with: oraclemcp --json setup --profile <profile>
 - Local stdio command: oraclemcp serve --profile <profile> --allow-no-auth
 - Secure stdio command: ORACLEMCP_STDIO_TOKEN=<token> oraclemcp serve --profile <profile>
-- Streamable HTTP starts only with configured OAuth or explicit --allow-no-auth; use --oauth-* / --http-* flags or top-level [http] config, and put a TLS proxy in front for remote clients.
+- Streamable HTTP starts only with configured OAuth, mTLS client-certificate verification, or explicit --allow-no-auth; use --oauth-* / --http-* / --tls-* flags or top-level [http] config, and keep non-loopback binds behind ORACLEMCP_HTTP_ALLOW_REMOTE=1.
 - The thin driver does not need Oracle Instant Client, ODPI-C, libclntsh, or a C toolchain.
 - If Oracle Net files need TNS_ADMIN, point every MCP client at the same small wrapper script.
 - After replacing the binary or wrapper, restart or reconnect each MCP client so it imports the fresh tool schema.

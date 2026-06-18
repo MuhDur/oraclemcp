@@ -42,7 +42,7 @@ query text.
 | OAuth metadata | `/.well-known/oauth-protected-resource` remains public when OAuth is enabled. | `crates/oraclemcp-core/src/http.rs` |
 | HTTP guards | `--listen` starts only with OAuth, mTLS client-certificate verification, or explicit `--allow-no-auth`; remote bind requires explicit opt-in; Host and Origin guards protect loopback usage; missing auth returns WWW-Authenticate when OAuth is enabled. Native TLS/mTLS is served by the rustls listener when `[http.tls]` or `--tls-*` material is configured. | `crates/oraclemcp/src/main.rs`, `crates/oraclemcp-auth/src/http_guard.rs`, `crates/oraclemcp-core/src/http.rs` |
 | HTTP OAuth scope enforcement | HTTP validates bearer scopes and carries `ScopeGrant` into `ToolDispatch`; dispatch applies monotone-down scope ceilings so narrow tokens cannot reach higher-level tools, broad tokens cannot exceed profile `max_level`, and protected profiles remain `READ_ONLY`. | `crates/oraclemcp-core/src/http.rs`, `crates/oraclemcp-core/src/server.rs`, `crates/oraclemcp/src/dispatch/mod.rs`, `crates/oraclemcp/src/dispatch/tests.rs` |
-| Golden baseline | Golden protocol tests cover stdio/HTTP happy paths, auth regressions, protected-resource metadata, host/origin guards, and stateful Streamable HTTP behavior. | `crates/oraclemcp-core/tests/golden_behavior.rs`, `tests/golden/http`, `tests/golden/stdio` |
+| Golden baseline | Golden protocol tests cover stdio/HTTP happy paths, served HTTP auth/scope/session behavior, protected-resource metadata, host/origin guards, and stateful Streamable HTTP behavior. | `crates/oraclemcp-core/tests/golden_behavior.rs`, `tests/golden/http`, `tests/golden/stdio`, `tests/conformance/COVERAGE.md` |
 
 ## Tool Registry
 

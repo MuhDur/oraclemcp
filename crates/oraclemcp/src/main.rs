@@ -83,7 +83,8 @@ enum Command {
     Serve {
         /// Bind a Streamable HTTP listener at <ADDR> (e.g. 127.0.0.1:7070)
         /// instead of stdio. HTTP starts only with configured OAuth enforcement
-        /// or explicit --allow-no-auth; bind loopback or front it with TLS.
+        /// or explicit --allow-no-auth; use native TLS/mTLS or a terminating
+        /// proxy for off-box clients.
         #[arg(long)]
         listen: Option<String>,
         /// Run stdio without an init token (development only). Without this and
@@ -181,13 +182,13 @@ struct HttpServeArgs {
     /// Metadata URL advertised in WWW-Authenticate.
     #[arg(long = "oauth-metadata-url")]
     oauth_metadata_url: Option<String>,
-    /// Server certificate-chain PEM path. Not served natively in v0.3.0.
+    /// Server certificate-chain PEM path for native rustls HTTPS.
     #[arg(long = "tls-cert")]
     tls_cert: Option<PathBuf>,
-    /// Server private-key PEM path. Not served natively in v0.3.0.
+    /// Server private-key PEM path for native rustls HTTPS.
     #[arg(long = "tls-key")]
     tls_key: Option<PathBuf>,
-    /// Client CA PEM path for mTLS. Not served natively in v0.3.0.
+    /// Client CA PEM path for native mTLS client-certificate verification.
     #[arg(long = "mtls-client-ca")]
     mtls_client_ca: Option<PathBuf>,
 }

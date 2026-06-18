@@ -32,7 +32,8 @@ assumptions, the next release is minor rather than patch.
   inline as `dbms_output.lines` without writing operator files.
 - Binary-level Streamable HTTP configuration for Host/Origin allowlists,
   JSON-vs-streaming responses, stateful sessions, OAuth protected-resource
-  metadata, OAuth issuer/resource/scope validation, and HS256 secret references.
+  metadata, OAuth issuer/resource/scope validation, HS256 secret references,
+  and native rustls TLS/mTLS.
 
 ### Changed
 
@@ -60,9 +61,10 @@ assumptions, the next release is minor rather than patch.
 - HTTP OAuth scope validation is enforced at dispatch so bearer-token scopes can
   only lower effective authority and never raise profile/session ceilings.
 - `oraclemcp serve --listen` now starts only with configured OAuth enforcement
-  or explicit `--allow-no-auth`; native TLS/mTLS listener material is parsed but
-  rejected until the rustls listener is wired, so remote deployments must still
-  use a TLS-terminating proxy.
+  or explicit `--allow-no-auth`; native rustls TLS/mTLS is served when
+  `[http.tls]` or `--tls-*` material is configured. Server-only TLS encrypts
+  the transport but does not replace OAuth or mTLS client-certificate
+  authentication.
 
 ## [0.2.1] — 2026-06-15
 
