@@ -643,3 +643,12 @@ the binary safe to install, inspect, and test anywhere, CI included.
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
+
+
+---
+
+### Work with me
+
+I bring **AI into production in the enterprise** — Oracle change-impact audits, systems modernization, and AI on your data, vendor-neutral (cloud or self-hosted). Building something hard in Oracle / Rust / AI? Reach out.
+
+→ **[durakovic.ai](https://durakovic.ai)** · hello@durakovic.ai
