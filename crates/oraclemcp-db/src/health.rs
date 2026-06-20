@@ -62,6 +62,24 @@ impl HealthSubcheck {
         }
     }
 
+    /// The dictionary views this subcheck probes, as a `(dba_view, all_view)`
+    /// pair. When a subcheck has no `ALL_*` analogue (the DBA-only metrics view
+    /// `DBA_TABLESPACE_USAGE_METRICS`, or a `V$` view), `all_view` is `None` and
+    /// degradation is "DBA/V$ available or skip" rather than "DBA→ALL→skip".
+    /// Reused by both [`run_subcheck`] and the C9 preflight so the tier-probe
+    /// targets stay defined in exactly one place.
+    #[must_use]
+    pub fn probe_views(self) -> (&'static str, Option<&'static str>) {
+        match self {
+            HealthSubcheck::InvalidObjects => ("DBA_OBJECTS", Some("ALL_OBJECTS")),
+            HealthSubcheck::UnusableIndexes => ("DBA_INDEXES", Some("ALL_INDEXES")),
+            HealthSubcheck::TablespaceUndo => ("DBA_TABLESPACE_USAGE_METRICS", None),
+            HealthSubcheck::SequenceCeiling => ("DBA_SEQUENCES", Some("ALL_SEQUENCES")),
+            HealthSubcheck::DisabledConstraints => ("DBA_CONSTRAINTS", Some("ALL_CONSTRAINTS")),
+            HealthSubcheck::BufferCacheHitRatio => ("V$SYSSTAT", None),
+        }
+    }
+
     /// Parse a single subcheck token. Accepts the canonical name plus a few
     /// obvious aliases; whitespace-trimmed and case-insensitive. `None` for an
     /// unknown token — the caller decides how to surface it.
@@ -205,7 +223,8 @@ impl Finding {
 
 /// Which dictionary tier a subcheck resolved to. `Dba` is preferred; `All` is
 /// the session-scoped degradation; `None` means neither was accessible.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ViewTier {
     /// The privileged `DBA_*` view.
     Dba,
@@ -218,8 +237,11 @@ pub enum ViewTier {
 /// "ORA-00942 / no SELECT privilege" case) falls back to probing the `ALL_*`
 /// view; if that also errors, returns `None` so the subcheck degrades to a
 /// structured skip. Mirrors `awr.rs`'s `detect_*` fail-closed pattern — never
-/// surfaces a raw `ORA-` and never panics.
-fn detect_view_tier(
+/// surfaces a raw `ORA-` and never panics. Each probe is a `WHERE 1=0` read
+/// that returns no rows but still trips the privilege check, so it costs
+/// nothing and never runs the actual diagnostic query.
+#[must_use]
+pub fn detect_view_tier(
     conn: &dyn OracleConnection,
     dba_view: &str,
     all_view: &str,
@@ -238,6 +260,131 @@ fn detect_view_tier(
 /// visible to the session. Pure read.
 fn probe_sql(view: &str) -> String {
     format!("SELECT 1 FROM {view} WHERE 1 = 0")
+}
+
+// ---------------------------------------------------------------------------
+// C9 — DBA-suite privilege/feature preflight (report-only).
+//
+// Given a connection, report — per [`HealthSubcheck`] and for `oracle_top_queries`
+// — which dictionary tier / diagnostics feature is actually available, so an
+// operator can see what `oracle_db_health` / `oracle_top_queries` will be able
+// to run BEFORE running them. It runs ONLY the cheap `WHERE 1=0` tier probes and
+// the fail-closed `detect_*` feature probes (all reused from `health.rs` /
+// `awr.rs`); it NEVER runs a diagnostic query and NEVER touches a paid-pack
+// object — `resolve_top_sql_source` only ever probes a `DBA_HIST_*` object after
+// `detect_diagnostics_pack` has confirmed the license. The report informs; it
+// never fails anything.
+// ---------------------------------------------------------------------------
+
+/// The preflight resolution for one [`HealthSubcheck`]: which dictionary tier it
+/// would use, or that it would `skip`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct SubcheckPreflight {
+    /// The subcheck this row describes.
+    pub subcheck: HealthSubcheck,
+    /// The tier the subcheck would run against (`Dba`/`All`), or `None` when
+    /// neither tier is readable and the subcheck would degrade to a skip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<ViewTier>,
+    /// The view the subcheck would read at the resolved tier (or, on a skip,
+    /// the privileged view it tried first).
+    pub view: String,
+    /// A short operator-facing line: which view/tier is available, or "skip".
+    pub status: String,
+}
+
+/// The full C9 preflight report: a per-subcheck tier/feature resolution plus the
+/// resolved `oracle_top_queries` diagnostics source for both the default (live)
+/// and historical modes. Report-only — `oracle_db_health` / `oracle_top_queries`
+/// behavior is unchanged; this just tells the operator what they will be able to
+/// run.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct PreflightReport {
+    /// One row per [`HealthSubcheck`], in canonical [`HealthSubcheck::all`] order.
+    pub subchecks: Vec<SubcheckPreflight>,
+    /// The source `oracle_top_queries` resolves to in its default (live) mode —
+    /// always [`DiagnosticsSource::LiveCursor`] (free, no pack).
+    pub top_queries_default: crate::awr::DiagnosticsSource,
+    /// The source `oracle_top_queries` resolves to with `historical=true`:
+    /// `AwrAsh` only when the Diagnostics Pack is licensed, else `Statspack` if
+    /// installed, else `Unavailable`.
+    pub top_queries_historical: crate::awr::DiagnosticsSource,
+    /// Whether a licensed Diagnostics Pack was detected (fail-closed).
+    pub diagnostics_pack_licensed: bool,
+    /// Whether a free Statspack install was detected.
+    pub statspack_installed: bool,
+}
+
+impl PreflightReport {
+    /// How many subchecks would actually run (resolve to a readable tier) vs.
+    /// degrade to a skip, as `(runnable, skipped)`.
+    #[must_use]
+    pub fn runnable_skipped(&self) -> (usize, usize) {
+        let runnable = self.subchecks.iter().filter(|s| s.tier.is_some()).count();
+        (runnable, self.subchecks.len() - runnable)
+    }
+}
+
+/// Run the C9 report-only preflight against `conn`. Reuses [`detect_view_tier`]
+/// for the dictionary tier of each subcheck and [`crate::awr::detect_diagnostics_pack`] /
+/// [`crate::awr::detect_statspack`] / [`crate::awr::resolve_top_sql_source`] for
+/// the top-queries diagnostics posture — no detection logic is duplicated. Runs
+/// only the cheap tier/feature probes; never a diagnostic query and never a
+/// paid-pack object (the historical resolution only touches `DBA_HIST_*` after
+/// the license is confirmed). It cannot fail: an inaccessible view is reported
+/// as a `skip`, not an error.
+#[must_use]
+pub fn preflight(conn: &dyn OracleConnection) -> PreflightReport {
+    let subchecks = HealthSubcheck::all()
+        .iter()
+        .map(|&subcheck| {
+            let (dba_view, all_view) = subcheck.probe_views();
+            // No ALL_* analogue (DBA-only metrics view or a V$ view): the only
+            // tier that can satisfy it is the privileged one. Probe it directly
+            // rather than inventing an ALL_* fallback that does not exist.
+            let tier = match all_view {
+                Some(all_view) => detect_view_tier(conn, dba_view, all_view),
+                None => conn
+                    .query_rows(&probe_sql(dba_view), &[])
+                    .is_ok()
+                    .then_some(ViewTier::Dba),
+            };
+            let (view, status) = match tier {
+                Some(ViewTier::Dba) => (dba_view.to_owned(), format!("available via {dba_view}")),
+                Some(ViewTier::All) => {
+                    let all = all_view.unwrap_or(dba_view);
+                    (
+                        all.to_owned(),
+                        format!("degraded to {all} (no DBA_* access)"),
+                    )
+                }
+                None => (
+                    dba_view.to_owned(),
+                    "skip: no readable dictionary/V$ view".to_owned(),
+                ),
+            };
+            SubcheckPreflight {
+                subcheck,
+                tier,
+                view,
+                status,
+            }
+        })
+        .collect();
+
+    let diagnostics_pack_licensed = crate::awr::detect_diagnostics_pack(conn);
+    let statspack_installed = crate::awr::detect_statspack(conn);
+    PreflightReport {
+        subchecks,
+        // Reuse the same resolver the live tool uses so the preflight can never
+        // drift from real behavior. The default (non-historical) mode is always
+        // the free live cursor cache; historical re-derives from the detected
+        // pack/Statspack posture (and never probes a pack object unless licensed).
+        top_queries_default: crate::awr::resolve_top_sql_source(conn, false),
+        top_queries_historical: crate::awr::resolve_top_sql_source(conn, true),
+        diagnostics_pack_licensed,
+        statspack_installed,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -373,26 +520,29 @@ const TABLESPACE_WARN_PCT: f64 = 85.0;
 const TABLESPACE_CRITICAL_PCT: f64 = 95.0;
 
 fn run_subcheck(conn: &dyn OracleConnection, subcheck: HealthSubcheck) -> Finding {
+    // The (dba_view, all_view) targets come from `HealthSubcheck::probe_views`,
+    // the single source of truth the C9 preflight also reads.
+    let (dba_view, all_view) = subcheck.probe_views();
     match subcheck {
         HealthSubcheck::InvalidObjects => degrading_count_subcheck(
             conn,
             subcheck,
-            "DBA_OBJECTS",
-            "ALL_OBJECTS",
+            dba_view,
+            all_view.unwrap_or(dba_view),
             invalid_objects_sql,
         ),
         HealthSubcheck::UnusableIndexes => {
-            degrading_index_subcheck(conn, subcheck, "DBA_INDEXES", "ALL_INDEXES")
+            degrading_index_subcheck(conn, subcheck, dba_view, all_view.unwrap_or(dba_view))
         }
         HealthSubcheck::TablespaceUndo => tablespace_subcheck(conn, subcheck),
         HealthSubcheck::SequenceCeiling => {
-            degrading_sequence_subcheck(conn, subcheck, "DBA_SEQUENCES", "ALL_SEQUENCES")
+            degrading_sequence_subcheck(conn, subcheck, dba_view, all_view.unwrap_or(dba_view))
         }
         HealthSubcheck::DisabledConstraints => degrading_count_subcheck(
             conn,
             subcheck,
-            "DBA_CONSTRAINTS",
-            "ALL_CONSTRAINTS",
+            dba_view,
+            all_view.unwrap_or(dba_view),
             disabled_constraints_sql,
         ),
         HealthSubcheck::BufferCacheHitRatio => buffer_cache_subcheck(conn, subcheck),
@@ -775,6 +925,215 @@ mod tests {
         assert!(Severity::Ok < Severity::Info);
         assert!(Severity::Info < Severity::Warning);
         assert!(Severity::Warning < Severity::Critical);
+    }
+
+    // -----------------------------------------------------------------------
+    // C10 — consolidated DBA-suite coverage (privilege degradation + C9
+    // preflight). This module, plus `awr.rs`'s unit tests and the dispatch
+    // `db_health`/`top_queries` tests, plus the `live-xe` suite in
+    // `tests/live_oracle.rs`, is the full coverage for WP-C: every subcheck,
+    // top_queries Statspack-fallback, and DBA_*→ALL_*→skip degradation. The
+    // live AC is "CI-green-with-Oracle = all of the above pass against 23ai".
+    // The mocks below are small and local to this test module per AGENTS.md.
+    // -----------------------------------------------------------------------
+
+    use crate::error::DbError;
+    use crate::types::{OracleBackend, OracleConnectionInfo};
+
+    /// A mock whose `query_rows` outcome is decided by a predicate over the SQL
+    /// text: `Err` (a privilege miss) for any view named in `deny`, `Ok` (one
+    /// empty row) otherwise. Lets a single type drive every degradation path.
+    struct TierMock {
+        /// Lowercased substrings that must fail with ORA-00942 (denied view).
+        deny: &'static [&'static str],
+    }
+
+    impl OracleConnection for TierMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+        fn query_rows(
+            &self,
+            sql: &str,
+            _binds: &[crate::types::OracleBind],
+        ) -> Result<Vec<crate::types::OracleRow>, DbError> {
+            let lower = sql.to_ascii_lowercase();
+            if self.deny.iter().any(|needle| lower.contains(needle)) {
+                return Err(DbError::Query(
+                    "ORA-00942: table or view does not exist".to_owned(),
+                ));
+            }
+            Ok(vec![crate::types::OracleRow { columns: vec![] }])
+        }
+        fn execute(&self, _sql: &str, _binds: &[crate::types::OracleBind]) -> Result<u64, DbError> {
+            Ok(0)
+        }
+        fn commit(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        fn rollback(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    /// DBA_*→ALL_* degradation: when the `DBA_*` probe errors but the `ALL_*`
+    /// probe succeeds, the subcheck must run against the `ALL_*` tier (never a
+    /// hard failure, never a skip).
+    #[test]
+    fn degrades_from_dba_to_all_when_dba_is_denied() {
+        // Deny only the DBA_* dictionary views; ALL_* stays readable.
+        let conn = TierMock { deny: &["dba_"] };
+        assert_eq!(
+            detect_view_tier(&conn, "DBA_OBJECTS", "ALL_OBJECTS"),
+            Some(ViewTier::All),
+            "DBA_* denied but ALL_* readable -> ALL tier"
+        );
+        // End to end: the invalid-objects subcheck reads ALL_OBJECTS and is OK.
+        let finding = run_subcheck(&conn, HealthSubcheck::InvalidObjects);
+        assert_eq!(finding.source_view, "ALL_OBJECTS");
+        assert_eq!(finding.detail["status"], json!("ok"));
+    }
+
+    /// DBA_*→ALL_*→skip degradation: when BOTH tiers are denied, the subcheck
+    /// yields a structured `skipped` finding (Info severity, names the views it
+    /// tried) — never a raw ORA- and never a hard failure.
+    #[test]
+    fn degrades_to_structured_skip_when_dba_and_all_denied() {
+        // Deny every dictionary tier; only a V$ view would survive (irrelevant
+        // for a DBA/ALL subcheck).
+        let conn = TierMock {
+            deny: &["dba_", "all_"],
+        };
+        assert_eq!(detect_view_tier(&conn, "DBA_OBJECTS", "ALL_OBJECTS"), None);
+        let finding = run_subcheck(&conn, HealthSubcheck::InvalidObjects);
+        assert_eq!(finding.detail["status"], json!("skipped"));
+        assert_eq!(finding.severity, Severity::Info);
+        assert_eq!(
+            finding.detail["attempted_views"],
+            json!(["DBA_OBJECTS", "ALL_OBJECTS"])
+        );
+        assert!(
+            !finding.summary.contains("ORA-"),
+            "a skip never surfaces a raw ORA- error"
+        );
+    }
+
+    /// C9 preflight (report-only, offline mock): with full access every subcheck
+    /// resolves to its DBA tier and top_queries resolves to the free live cursor
+    /// by default; the report carries the historical diagnostics posture too.
+    #[test]
+    fn preflight_reports_full_access_posture() {
+        // Nothing denied -> every probe + feature check succeeds.
+        let conn = TierMock { deny: &[] };
+        let report = preflight(&conn);
+        assert_eq!(report.subchecks.len(), HealthSubcheck::all().len());
+        for row in &report.subchecks {
+            assert_eq!(row.tier, Some(ViewTier::Dba), "{:?}", row.subcheck);
+            assert!(row.status.contains("available"));
+        }
+        // Default top-queries is always the free live cursor (no pack probe).
+        assert_eq!(
+            report.top_queries_default,
+            crate::awr::DiagnosticsSource::LiveCursor
+        );
+        // v$parameter answers (an empty row), so detect_diagnostics_pack is
+        // false (no DIAGNOSTIC value) but perfstat.stats$snapshot is readable,
+        // so historical resolves to Statspack.
+        assert!(!report.diagnostics_pack_licensed);
+        assert!(report.statspack_installed);
+        assert_eq!(
+            report.top_queries_historical,
+            crate::awr::DiagnosticsSource::Statspack
+        );
+        assert_eq!(report.runnable_skipped(), (HealthSubcheck::all().len(), 0));
+    }
+
+    /// C9 preflight under a least-privilege account: DBA_* + ALL_* denied means
+    /// every DBA/ALL subcheck reports a `skip`, V$/DBA-only subchecks likewise,
+    /// and historical top-queries degrades to Unavailable — all report-only,
+    /// no panic, no error.
+    #[test]
+    fn preflight_reports_degraded_posture_as_skips() {
+        // Deny all dictionary tiers, V$, and the Statspack table -> everything
+        // degrades; nothing is a hard error.
+        let conn = TierMock {
+            deny: &["dba_", "all_", "v$", "perfstat"],
+        };
+        let report = preflight(&conn);
+        for row in &report.subchecks {
+            assert_eq!(row.tier, None, "{:?} should be a skip", row.subcheck);
+            assert!(row.status.starts_with("skip"));
+        }
+        let (runnable, skipped) = report.runnable_skipped();
+        assert_eq!(runnable, 0);
+        assert_eq!(skipped, HealthSubcheck::all().len());
+        // No pack, no Statspack -> historical top-queries is Unavailable (a
+        // clear structured posture, never a silent empty success).
+        assert!(!report.diagnostics_pack_licensed);
+        assert!(!report.statspack_installed);
+        assert_eq!(
+            report.top_queries_historical,
+            crate::awr::DiagnosticsSource::Unavailable
+        );
+        // The default live source is unaffected by missing privileges.
+        assert_eq!(
+            report.top_queries_default,
+            crate::awr::DiagnosticsSource::LiveCursor
+        );
+    }
+
+    /// top_queries Statspack-fallback (C8): when the Diagnostics Pack is NOT
+    /// licensed but Statspack IS installed, historical resolves to Statspack;
+    /// when both are absent it resolves to Unavailable; the non-historical
+    /// default is always the free live cursor regardless.
+    #[test]
+    fn top_queries_statspack_fallback_through_preflight() {
+        // Pack absent (v$parameter has no DIAGNOSTIC value), Statspack present.
+        let with_statspack = TierMock { deny: &[] };
+        assert!(!crate::awr::detect_diagnostics_pack(&with_statspack));
+        assert!(crate::awr::detect_statspack(&with_statspack));
+        assert_eq!(
+            crate::awr::resolve_top_sql_source(&with_statspack, true),
+            crate::awr::DiagnosticsSource::Statspack,
+            "no pack + Statspack installed -> Statspack"
+        );
+        assert_eq!(
+            crate::awr::resolve_top_sql_source(&with_statspack, false),
+            crate::awr::DiagnosticsSource::LiveCursor,
+            "default mode is unaffected by the historical fallback"
+        );
+
+        // Pack absent AND Statspack absent -> historical is Unavailable.
+        let without_statspack = TierMock {
+            deny: &["perfstat"],
+        };
+        assert!(!crate::awr::detect_statspack(&without_statspack));
+        assert_eq!(
+            crate::awr::resolve_top_sql_source(&without_statspack, true),
+            crate::awr::DiagnosticsSource::Unavailable
+        );
+        assert_eq!(
+            crate::awr::resolve_top_sql_source(&without_statspack, false),
+            crate::awr::DiagnosticsSource::LiveCursor
+        );
+    }
+
+    /// The preflight serializes to a stable, report-only JSON shape (so a doctor
+    /// check can embed it without bespoke formatting).
+    #[test]
+    fn preflight_serializes_to_stable_json() {
+        let conn = TierMock { deny: &[] };
+        let value = serde_json::to_value(preflight(&conn)).expect("preflight serializes");
+        assert!(value["subchecks"].is_array());
+        assert_eq!(value["top_queries_default"], json!("live_cursor"));
+        assert!(value["diagnostics_pack_licensed"].is_boolean());
+        assert!(value["statspack_installed"].is_boolean());
     }
 
     /// Lightweight read-only assertion used by the SQL-shape tests: a SELECT

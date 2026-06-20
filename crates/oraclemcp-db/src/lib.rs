@@ -43,9 +43,10 @@ pub use doctor::{OracleDriverPosture, detect_oracle_driver, oracle_driver_compil
 pub use drcp::{DrcpConfig, SessionPurity};
 pub use error::DbError;
 pub use health::{
-    Finding, HealthSubcheck, ParsedHealthRequest, Severity, ViewTier, buffer_cache_hit_ratio_sql,
-    disabled_constraints_sql, invalid_objects_sql, parse_health_request, run_health,
-    sequence_ceiling_sql, tablespace_usage_sql, unusable_indexes_sql,
+    Finding, HealthSubcheck, ParsedHealthRequest, PreflightReport, Severity, SubcheckPreflight,
+    ViewTier, buffer_cache_hit_ratio_sql, detect_view_tier, disabled_constraints_sql,
+    invalid_objects_sql, parse_health_request, preflight, run_health, sequence_ceiling_sql,
+    tablespace_usage_sql, unusable_indexes_sql,
 };
 pub use intelligence::{
     IndexDescription, LobText, SourceText, TriggerDescription, ViewDescription, compile_errors,

@@ -14,8 +14,8 @@
 //! can call it); `doctor` is the CLI mode.
 
 use oraclemcp_db::{
-    OracleConnection, canonical_nls_statements, detect_oracle_driver, detect_standby,
-    probe_privileges,
+    DiagnosticsSource, OracleConnection, canonical_nls_statements, detect_oracle_driver,
+    detect_standby, preflight, probe_privileges,
 };
 use oraclemcp_error::{ErrorClass, classify_ora_code, parse_ora_code};
 use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel};
@@ -50,7 +50,7 @@ impl CheckStatus {
 /// One diagnostic check result.
 #[derive(Clone, Debug, Serialize)]
 pub struct CheckResult {
-    /// Stable check number (1..=9).
+    /// Stable check number (1..=10).
     pub id: u8,
     /// Short check name.
     pub name: String,
@@ -209,6 +209,7 @@ pub fn run_doctor(ctx: &DoctorContext) -> DoctorReport {
         check_snapshot_freshness(),
         check_classifier_selftest(),
         check_virtual_tools(),
+        check_dba_suite_preflight(ctx),
     ];
     DoctorReport { checks }
 }
@@ -550,6 +551,67 @@ fn check_virtual_tools() -> CheckResult {
     )
 }
 
+/// Check 10 — DBA-suite privilege/feature preflight (bead C9, **report-only**).
+///
+/// Reports, for the read-only DBA diagnostic suite, which dictionary tier /
+/// diagnostics feature is actually available so an operator knows what
+/// `oracle_db_health` / `oracle_top_queries` will be able to run. It reuses
+/// `oraclemcp_db::preflight` (and through it the fail-closed `detect_view_tier`
+/// / `detect_diagnostics_pack` / `detect_statspack` probes), runs only the cheap
+/// `WHERE 1=0` tier probes plus the feature probes, and NEVER runs a diagnostic
+/// query or touches a paid-pack object unless the Diagnostics Pack license was
+/// confirmed first. It is informational: it reports `Pass` (full tier coverage),
+/// `Warn` (some subchecks would degrade/skip, or historical perf history is
+/// unavailable), or `Skip` (offline) — never `Fail`.
+fn check_dba_suite_preflight(ctx: &DoctorContext) -> CheckResult {
+    const ID: u8 = 10;
+    const NAME: &str = "DBA suite preflight";
+
+    if ctx.connection_error.is_some() {
+        return CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Skip,
+            "skipped because connectivity failed",
+        );
+    }
+    let Some(conn) = ctx.conn else {
+        return CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Skip,
+            "offline — supply a profile/connection to preflight the read-only DBA diagnostic suite",
+        );
+    };
+
+    let report = preflight(conn);
+    let (runnable, skipped) = report.runnable_skipped();
+    let total = runnable + skipped;
+    let history = match report.top_queries_historical {
+        DiagnosticsSource::AwrAsh => "AWR/ASH (Diagnostics Pack licensed)",
+        DiagnosticsSource::Statspack => "Statspack (free fallback)",
+        DiagnosticsSource::Unavailable => "none (no Diagnostics Pack, no Statspack)",
+        // The default top-queries source is always the live cursor; historical
+        // never resolves to it, but report it honestly if it ever does.
+        DiagnosticsSource::LiveCursor => "live cursor only",
+    };
+    let detail = format!(
+        "oracle_db_health: {runnable}/{total} subchecks runnable, {skipped} would skip; \
+         oracle_top_queries default=live cursor (free), historical={history}"
+    );
+
+    // Report-only: a degraded posture is a Warn (informational), never a Fail.
+    let history_unavailable = report.top_queries_historical == DiagnosticsSource::Unavailable;
+    if skipped == 0 && !history_unavailable {
+        CheckResult::new(ID, NAME, CheckStatus::Pass, detail)
+    } else {
+        CheckResult::new(ID, NAME, CheckStatus::Warn, detail).with_fix(
+            "report-only: grant SELECT on the missing DBA_*/V$ views for full coverage, \
+             or install Statspack (free) / license the Diagnostics Pack for historical top-SQL",
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,9 +644,9 @@ mod tests {
     }
 
     #[test]
-    fn report_has_nine_checks_and_classifier_self_test_passes() {
+    fn report_has_ten_checks_and_classifier_self_test_passes() {
         let report = run_doctor(&DoctorContext::default());
-        assert_eq!(report.checks.len(), 9);
+        assert_eq!(report.checks.len(), 10);
         let selftest = report.checks.iter().find(|c| c.id == 8).unwrap();
         assert_eq!(selftest.status, CheckStatus::Pass, "{}", selftest.detail);
     }
@@ -592,8 +654,9 @@ mod tests {
     #[test]
     fn offline_skips_live_checks_and_does_not_fail() {
         let report = run_doctor(&DoctorContext::default());
-        // Connectivity, role/standby, privilege-tier, and snapshot skip offline.
-        for id in [3u8, 4, 6, 7] {
+        // Connectivity, role/standby, privilege-tier, snapshot, and the DBA-suite
+        // preflight (10) all skip offline.
+        for id in [3u8, 4, 6, 7, 10] {
             let c = report.checks.iter().find(|c| c.id == id).unwrap();
             assert_eq!(
                 c.status,
@@ -779,8 +842,53 @@ mod tests {
         assert!(text.contains("oraclemcp doctor"));
         assert!(text.contains("Classifier self-test"));
         let j = report.to_json();
-        assert_eq!(j["checks"].as_array().unwrap().len(), 9);
+        assert_eq!(j["checks"].as_array().unwrap().len(), 10);
         assert_eq!(j["exit_code"], json!(0));
+    }
+
+    /// C9 — the DBA-suite preflight is report-only: with a live connection it
+    /// reports the resolved tier/feature posture and never `Fail`s the suite,
+    /// even when a subcheck would skip or historical perf history is missing.
+    #[test]
+    fn dba_suite_preflight_is_report_only_and_never_fails() {
+        // LiveMock answers every probe with one empty row: every tier probe
+        // succeeds (Dba), detect_statspack succeeds, but detect_diagnostics_pack
+        // is false (no DIAGNOSTIC value) -> historical resolves to Statspack, so
+        // the preflight passes and, regardless, never fails.
+        let conn = LiveMock;
+        let ctx = DoctorContext {
+            conn: Some(&conn),
+            ..DoctorContext::default()
+        };
+        let report = run_doctor(&ctx);
+        let preflight_check = report.checks.iter().find(|c| c.id == 10).unwrap();
+        assert_ne!(
+            preflight_check.status,
+            CheckStatus::Fail,
+            "the preflight is report-only and must never fail the suite"
+        );
+        assert!(
+            preflight_check.detail.contains("oracle_db_health")
+                && preflight_check.detail.contains("oracle_top_queries"),
+            "reports what each DBA tool will be able to run: {}",
+            preflight_check.detail
+        );
+        assert_eq!(report.exit_code(), 0, "report-only never exits non-zero");
+    }
+
+    /// When connectivity fails, the preflight (10) skips rather than running any
+    /// probe against a dead connection.
+    #[test]
+    fn dba_suite_preflight_skips_when_connectivity_failed() {
+        let ctx = DoctorContext {
+            connection_error: Some("could not open connection".to_owned()),
+            ..DoctorContext::default()
+        };
+        let report = run_doctor(&ctx);
+        assert_eq!(
+            report.checks.iter().find(|c| c.id == 10).unwrap().status,
+            CheckStatus::Skip
+        );
     }
 
     #[test]

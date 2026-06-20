@@ -614,7 +614,7 @@ fn live_query_materializes_lob_locators_with_caps() {
     };
     let response = pool
         .read_query(
-            &format!("SELECT c, b FROM {table} WHERE id = :1"),
+            format!("SELECT c, b FROM {table} WHERE id = :1"),
             vec![OracleBind::from(1i32)],
             caps,
             0,
@@ -1035,5 +1035,125 @@ fn live_db_health_suite_runs_all_subchecks_without_hard_failure() {
     match conn.query_rows(&invalid_sql, &[]) {
         Ok(_) => {}
         Err(e) => eprintln!("[live-xe] ALL_OBJECTS invalid-objects query degraded ({e})"),
+    }
+}
+
+// C10 consolidated live coverage (bead oraclemcp-040-epic-wp-c-17t.10): the
+// full DBA suite + `oracle_top_queries` (incl. the Statspack-fallback path) +
+// the C9 preflight, all run against a real 23ai. Together with the `health.rs`
+// / `awr.rs` unit tests, the dispatch `db_health`/`top_queries` tests, and the
+// `live_db_health_suite_runs_all_subchecks_without_hard_failure` test above,
+// this is the consolidated WP-C coverage. The acceptance criterion is
+// "CI-green-with-Oracle = every subcheck (C2–C7) + top_queries Statspack
+// fallback (C8) + privilege-degradation (DBA_*→ALL_*) all pass against live
+// 23ai". Without a reachable Oracle each test prints a SKIP banner and returns.
+
+/// C9 live: the report-only preflight resolves a tier/feature posture for every
+/// subcheck and for top_queries (default + historical) against a real DB. It
+/// must never fail and must report a runnable-or-skip resolution per subcheck;
+/// the resolved tiers must be consistent with what `run_health` actually used.
+#[test]
+fn live_dba_suite_preflight_reports_runnable_posture() {
+    let Some(conn) = connect_or_skip(
+        "live_dba_suite_preflight_reports_runnable_posture",
+        test_opts(),
+    ) else {
+        return;
+    };
+    conn.ping().expect("preflight ping");
+
+    let report = oraclemcp_db::preflight(&conn);
+    assert_eq!(
+        report.subchecks.len(),
+        oraclemcp_db::HealthSubcheck::all().len(),
+        "one preflight row per subcheck"
+    );
+    let (runnable, skipped) = report.runnable_skipped();
+    assert_eq!(runnable + skipped, report.subchecks.len());
+    eprintln!(
+        "[live-xe] preflight: {runnable} runnable, {skipped} skip; default={:?} historical={:?} pack={} statspack={}",
+        report.top_queries_default,
+        report.top_queries_historical,
+        report.diagnostics_pack_licensed,
+        report.statspack_installed,
+    );
+    // Default top-queries is always the free live cursor (no pack required).
+    assert_eq!(
+        report.top_queries_default,
+        oraclemcp_db::DiagnosticsSource::LiveCursor,
+        "the default top-SQL source is the free live cursor cache"
+    );
+    // The preflight's per-subcheck tier must match what run_health would use:
+    // a subcheck the preflight marks runnable must NOT degrade to a skip.
+    let findings = oraclemcp_db::run_health(&conn, oraclemcp_db::HealthSubcheck::all());
+    for row in &report.subchecks {
+        let finding = findings
+            .iter()
+            .find(|f| f.subcheck == row.subcheck)
+            .expect("a finding per subcheck");
+        let actually_skipped =
+            finding.detail.get("status").and_then(|v| v.as_str()) == Some("skipped");
+        assert_eq!(
+            row.tier.is_none(),
+            actually_skipped,
+            "preflight tier for {:?} must agree with run_health's skip decision",
+            row.subcheck
+        );
+    }
+}
+
+/// C8/C10 live: `oracle_top_queries` resolves to a working source and the
+/// resolved source's query runs as a pure read. The default (live cursor) path
+/// always works; the historical path resolves to AWR (only if the Diagnostics
+/// Pack is licensed) → Statspack (the free fallback) → a structured Unavailable
+/// error — never a silent empty success. Whichever source is resolved, its SQL
+/// is exercised against the live dictionary (the Statspack-fallback path is
+/// covered whenever PERFSTAT is installed but the pack is not licensed).
+#[test]
+fn live_top_queries_resolves_source_and_runs_including_statspack_fallback() {
+    let Some(conn) = connect_or_skip(
+        "live_top_queries_resolves_source_and_runs_including_statspack_fallback",
+        test_opts(),
+    ) else {
+        return;
+    };
+    conn.ping().expect("top_queries ping");
+
+    // Default mode: always the free live cursor cache, query must run.
+    let default_source = oraclemcp_db::resolve_top_sql_source(&conn, false);
+    assert_eq!(default_source, oraclemcp_db::DiagnosticsSource::LiveCursor);
+    let live_sql =
+        oraclemcp_db::top_sql_query(default_source, oraclemcp_db::TopSqlMetric::Elapsed, 5, None)
+            .expect("live cursor query builds");
+    conn.query_rows(&live_sql, &[])
+        .expect("live top-SQL runs as a pure read");
+
+    // Historical mode: resolve the real posture and exercise the resolved path.
+    let historical = oraclemcp_db::resolve_top_sql_source(&conn, true);
+    eprintln!("[live-xe] top_queries historical source resolved to {historical:?}");
+    match oraclemcp_db::top_sql_query(historical, oraclemcp_db::TopSqlMetric::Elapsed, 5, None) {
+        Ok(sql) => {
+            // AWR or Statspack: the SQL is valid against the live dictionary.
+            // (A privilege miss is acceptable; a success proves the path works.)
+            match conn.query_rows(&sql, &[]) {
+                Ok(_) => eprintln!("[live-xe] historical top-SQL ran against {historical:?}"),
+                Err(e) => eprintln!(
+                    "[live-xe] historical top-SQL ({historical:?}) degraded on a privilege/feature miss ({e})"
+                ),
+            }
+        }
+        Err(envelope) => {
+            // Unavailable: a clear structured error that offers Statspack —
+            // never an empty success.
+            assert_eq!(historical, oraclemcp_db::DiagnosticsSource::Unavailable);
+            assert!(envelope.is_error);
+            assert!(
+                envelope
+                    .next_steps
+                    .iter()
+                    .any(|s| s.to_lowercase().contains("statspack")),
+                "the unavailable error offers the free Statspack fallback"
+            );
+        }
     }
 }
