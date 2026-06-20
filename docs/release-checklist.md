@@ -101,6 +101,19 @@ Required gates green on the RC commit:
 - [ ] release-metadata (release_preflight.sh)
 ```
 
-See also: [`TOOLCHAIN.md`](TOOLCHAIN.md) for re-pinning the toolchain,
-[`operations.md`](operations.md) for the deployment runbook, and
-[`hardening.md`](hardening.md) for the security checklist.
+> **This checklist proves the gates are _green_; it does not by itself qualify
+> the release.** The certifying gate is the severity policy +
+> exact-SHA qualification in [`severity-policy.md`](severity-policy.md) (D9): no
+> open P0/P1, every P2 fixed-or-signed, two consecutive clean fresh-eyes
+> bug-hunt passes, certified against the exact frozen RC SHA. Copy *both* the
+> block above and the D9 sign-off block into the release evidence. The
+> supply-chain artifacts (SBOM + provenance + signatures, D3) are produced by
+> [`release.yml`](../.github/workflows/release.yml); operators verify them with
+> the commands in
+> [`operations.md` §6](operations.md#6-verifying-release-artifacts-sbom-provenance-signatures).
+
+See also: [`severity-policy.md`](severity-policy.md) for the certifying gate
+(D9), [`TOOLCHAIN.md`](TOOLCHAIN.md) for re-pinning the toolchain,
+[`operations.md`](operations.md) for the deployment runbook and release-artifact
+verification (§6), and [`hardening.md`](hardening.md) for the security
+checklist.

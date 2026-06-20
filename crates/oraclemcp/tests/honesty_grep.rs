@@ -30,10 +30,15 @@ fn workspace_root() -> PathBuf {
 
 fn is_scanned(p: &Path) -> bool {
     let s = p.to_string_lossy();
-    let ext_ok = matches!(
-        p.extension().and_then(|e| e.to_str()),
-        Some("md" | "rs" | "toml")
-    );
+    let is_dockerfile = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "Dockerfile" || n.ends_with(".Dockerfile"));
+    let ext_ok = is_dockerfile
+        || matches!(
+            p.extension().and_then(|e| e.to_str()),
+            Some("md" | "rs" | "toml")
+        );
     let excluded = s.contains("/tests/")
         || s.ends_with("tests.rs")
         || s.contains("/fuzz/")
@@ -62,7 +67,7 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
 #[test]
 fn no_overclaiming_framing_in_release_visible_text() {
     let root = workspace_root();
-    let mut files = vec![root.join("README.md")];
+    let mut files = vec![root.join("README.md"), root.join("Dockerfile")];
     for sub in ["docs", "crates"] {
         collect(&root.join(sub), &mut files);
     }

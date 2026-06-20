@@ -20,8 +20,8 @@ PATTERN='safe[- ]by[- ]default|read-only binary|fully audited'
 # Release-visible surfaces. Test/fuzz sources and the planning doc are excluded
 # (not shipped / discuss the framing on purpose).
 mapfile -t FILES < <(
-  git ls-files README.md docs crates \
-    | grep -E '\.(md|rs|toml)$' \
+  git ls-files README.md docs crates Dockerfile '*Dockerfile' \
+    | grep -E '\.(md|rs|toml)$|(^|/)Dockerfile$' \
     | grep -vE '/tests?/|tests\.rs$|/fuzz/'
 )
 

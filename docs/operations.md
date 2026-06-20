@@ -82,7 +82,9 @@ docker run -i --rm ghcr.io/muhdur/oraclemcp:0.4.0 --json doctor
 ```
 
 Pin to an immutable tag (`:0.4.0`), not `:latest`, in any non-interactive
-deployment, and verify the image digest against the release.
+deployment, and verify the image digest against the release. The exact
+verification commands — SBOM, provenance, and signatures for both the binaries
+and the image — are in [§6](#6-verifying-release-artifacts-sbom-provenance-signatures).
 
 ### Kubernetes (sketch)
 
@@ -410,3 +412,114 @@ security record, and verify it after incident review.
 - **Audit signing key:** add the new key under `[audit].key_ref` with a new
   `key_id`, restart, and keep the old `key_id` available to `audit verify` so
   historical records still verify.
+
+---
+
+## 6. Verifying release artifacts (SBOM, provenance, signatures)
+
+Every tagged release is built by [`.github/workflows/release.yml`](../.github/workflows/release.yml)
+and carries supply-chain evidence so a third party can prove *what* an artifact
+is and *where it came from* before trusting it. The release produces, for each
+platform archive (`.tar.gz` / `.zip`):
+
+- a SHA-256 checksum (`*.sha256`),
+- a keyless [cosign](https://docs.sigstore.dev/) signature + certificate
+  (`*.sig` / `*.crt`), bound to the release workflow's OIDC identity, and
+- a [SLSA-style build provenance attestation](https://slsa.dev/) recorded in the
+  repository's attestation store.
+
+A CycloneDX 1.5 SBOM for the binary crate
+(`oraclemcp-<version>.cdx.json`, plus its own `.sig`/`.crt`) is attached to the
+release. The GHCR image is built with SLSA `provenance: mode=max` and an
+embedded SBOM, signed with cosign by digest, and carries a pushed provenance
+attestation.
+
+Set these once; every command below uses them:
+
+```sh
+VERSION=0.4.0                                   # the release you are verifying
+IDENTITY="https://github.com/MuhDur/oraclemcp/.github/workflows/release.yml@refs/tags/v${VERSION}"
+OIDC_ISSUER="https://token.actions.githubusercontent.com"
+```
+
+`IDENTITY` is the exact release workflow ref that signed the artifacts; cosign
+refuses a signature minted by any other identity. (For images rebuilt via the
+manual [`docker.yml`](../.github/workflows/docker.yml) path, the identity ends
+in `docker.yml@refs/heads/main` instead — match it to the workflow that built
+what you hold.)
+
+### 6.1 Checksum (integrity only — not authenticity)
+
+```sh
+sha256sum -c "oraclemcp-x86_64-unknown-linux-gnu.tar.gz.sha256"
+```
+
+A checksum proves the bytes are intact, not who produced them. The signature
+below is what proves authenticity.
+
+### 6.2 Verify a binary archive signature (cosign keyless)
+
+```sh
+cosign verify-blob \
+  --certificate "oraclemcp-x86_64-unknown-linux-gnu.tar.gz.crt" \
+  --signature   "oraclemcp-x86_64-unknown-linux-gnu.tar.gz.sig" \
+  --certificate-identity "$IDENTITY" \
+  --certificate-oidc-issuer "$OIDC_ISSUER" \
+  "oraclemcp-x86_64-unknown-linux-gnu.tar.gz"
+```
+
+`Verified OK` means the archive was signed by the oraclemcp release workflow at
+that tag and has not changed since. The same command verifies the SBOM
+(`oraclemcp-${VERSION}.cdx.json` with its `.sig`/`.crt`).
+
+### 6.3 Verify binary build provenance (GitHub attestation)
+
+```sh
+gh attestation verify "oraclemcp-x86_64-unknown-linux-gnu.tar.gz" \
+  --repo MuhDur/oraclemcp
+```
+
+This checks the SLSA provenance predicate that records the source repo, commit,
+and workflow that built the archive. It works offline against a downloaded
+bundle with `--bundle <file>` once you have fetched it.
+
+### 6.4 Verify the container image (signature + provenance)
+
+```sh
+IMAGE="ghcr.io/muhdur/oraclemcp:${VERSION}"
+
+# Keyless signature, bound to the release workflow identity.
+cosign verify "$IMAGE" \
+  --certificate-identity "$IDENTITY" \
+  --certificate-oidc-issuer "$OIDC_ISSUER"
+
+# SLSA build provenance attestation for the image.
+gh attestation verify "oci://${IMAGE}" --repo MuhDur/oraclemcp
+```
+
+Then resolve and pin the digest you just verified, and run that digest (not the
+mutable tag) in production:
+
+```sh
+docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest.Digest}}'
+```
+
+### 6.5 Inspect the SBOM
+
+The attached CycloneDX SBOM enumerates every crate (and version) compiled into
+the binary, so you can cross-check it against your own advisory feed:
+
+```sh
+jq -r '.components[] | "\(.name) \(.version)"' "oraclemcp-${VERSION}.cdx.json"
+```
+
+The image additionally carries an SBOM attestation you can pull directly:
+
+```sh
+cosign download sbom "ghcr.io/muhdur/oraclemcp:${VERSION}"
+```
+
+> A release is "verifiable" only when 6.2–6.4 succeed against the **release**
+> OIDC identity above. A signature that verifies under any other identity, or a
+> provenance that names a different repo/workflow, is not this project's release
+> — treat it as untrusted.

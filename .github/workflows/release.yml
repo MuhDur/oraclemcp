@@ -160,9 +160,18 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # SBOM + provenance: actions/attest-build-provenance and cosign keyless
+      # both mint a short-lived OIDC token to bind the signature/attestation to
+      # this workflow's identity. attestations:write records the predicate in the
+      # repository's attestation store.
+      id-token: write
+      attestations: write
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -170,15 +179,70 @@ jobs:
       - name: Resolve version
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-      - name: Publish release with checksums
+
+      # ---- Supply-chain integrity (bead D3) ----
+      # Generate a CycloneDX SBOM for the workspace so operators (and a third
+      # party) can enumerate exactly what each release artifact was built from.
+      - name: Install CycloneDX SBOM generator
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-cyclonedx@0.5.9
+      - name: Generate CycloneDX SBOM
+        run: |
+          # Emit one CycloneDX 1.5 JSON SBOM per workspace crate (each adjacent
+          # to its Cargo.toml as bom.json), enumerating all transitive deps.
+          cargo cyclonedx --all --format json --spec-version 1.5 \
+            --override-filename bom
+          mkdir -p artifacts
+          # The oraclemcp binary crate's SBOM is what operators verify against
+          # the released binaries; publish it under a release-stable name.
+          cp crates/oraclemcp/bom.json \
+            "artifacts/oraclemcp-${{ steps.version.outputs.version }}.cdx.json"
+
+      # Attach an SLSA-style build provenance attestation to every release
+      # artifact and to the SBOM. The attestation is recorded in the repo's
+      # attestation store and is verifiable with `gh attestation verify`.
+      - name: Attest build provenance for release artifacts
+        uses: actions/attest-build-provenance@v3.2.0
+        with:
+          subject-path: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/oraclemcp-${{ steps.version.outputs.version }}.cdx.json
+
+      # Keyless (Fulcio/Rekor) signatures over each archive. cosign binds the
+      # signature to this workflow's OIDC identity; the .sig/.crt pair is what
+      # `cosign verify-blob` checks against that identity at verification time.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.10.1
+      - name: Sign release archives (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          shopt -s nullglob
+          for f in artifacts/*.tar.gz artifacts/*.zip artifacts/*.cdx.json; do
+            cosign sign-blob \
+              --output-signature "$f.sig" \
+              --output-certificate "$f.crt" \
+              "$f"
+          done
+
+      - name: Publish release with checksums, SBOM, and signatures
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_name }}
           files: |
             artifacts/*.tar.gz
             artifacts/*.tar.gz.sha256
+            artifacts/*.tar.gz.sig
+            artifacts/*.tar.gz.crt
             artifacts/*.zip
             artifacts/*.zip.sha256
+            artifacts/*.zip.sig
+            artifacts/*.zip.crt
+            artifacts/*.cdx.json
+            artifacts/*.cdx.json.sig
+            artifacts/*.cdx.json.crt
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
 
@@ -219,6 +283,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Image provenance + keyless signing need the OIDC token; attestations
+      # are recorded against this workflow identity.
+      id-token: write
+      attestations: write
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
@@ -245,12 +313,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
           push: true
           tags: ${{ steps.tags.outputs.tags }}
-          provenance: false
+          # SLSA provenance baked into the image manifest by BuildKit. `mode=max`
+          # records the full build graph (base images, build steps).
+          provenance: mode=max
+          sbom: true
+      # GitHub-native build provenance attestation for the pushed image, keyed
+      # by its immutable digest. Verifiable with `gh attestation verify oci://...`.
+      - name: Attest image build provenance
+        uses: actions/attest-build-provenance@v3.2.0
+        with:
+          subject-name: ghcr.io/muhdur/oraclemcp
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      # Keyless cosign signature over the image digest (not a mutable tag).
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.10.1
+      - name: Sign image (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: cosign sign --recursive "ghcr.io/muhdur/oraclemcp@${{ steps.build.outputs.digest }}"
       - name: Verify pushed image
         run: docker buildx imagetools inspect "ghcr.io/muhdur/oraclemcp:${GITHUB_REF_NAME#v}"
       - name: Smoke pushed image
