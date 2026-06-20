@@ -1,0 +1,412 @@
+# Operating oraclemcp
+
+Operator-facing deployment and hardening guide for the `oraclemcp` server. It
+covers containerized deployment, a least-privilege read-only Oracle account, the
+network posture, and a start/stop/drain runbook.
+
+`oraclemcp` is **governed and least-privilege**: a fail-closed SQL classifier in
+front of an explicit operating-level ladder
+`READ_ONLY < READ_WRITE < DDL < ADMIN`. It is **read-only by default**, but it
+is *escalation-capable* up to `ADMIN` through a confirmation-token step-up that
+is TTL-bounded and capped by each profile's `max_level`. Every privileged action
+lands in a hash-chained, HMAC-signed audit log. Plan your deployment around that
+model: the guarantees below come from how you configure the profile ceiling and
+the database account, not from the binary being incapable of writing.
+
+> See also: [`hardening.md`](hardening.md) for the security-checklist view of
+> the same controls, and the project [`README.md`](../README.md) for the full
+> tool surface and profile schema.
+
+---
+
+## 1. The pinned nightly toolchain is build-time-only
+
+`oraclemcp` builds on a pinned Rust toolchain (`nightly-2026-05-11`, recorded in
+`rust-toolchain.toml`). The thin-native line has no stable MSRV because the
+Asupersync/`oracledb` stack uses nightly-only language features.
+
+**This is invisible at runtime.** Once compiled, `oraclemcp` is an ordinary
+native binary. The toolchain pin matters only when you build the binary or image
+yourself; it does **not** affect operators who run the shipped binary or the
+published container image:
+
+- You do **not** install a Rust toolchain to *run* `oraclemcp`.
+- The shipped binary has no dependency on `rustc`, `cargo`, or any nightly
+  feature flag; nightly features are a compile-time concern that the optimizer
+  has already resolved.
+- The published image at `ghcr.io/muhdur/oraclemcp` ships only the compiled
+  binary in its runtime stage — no Rust toolchain, no build tools.
+- `cargo install oraclemcp` is the one path where the toolchain pin reaches an
+  operator, because that path compiles from source. Use the pinned toolchain for
+  it (`cargo +nightly-2026-05-11 install oraclemcp`). Prefer the released binary
+  or container image to avoid building at all.
+
+In short: nightly is a property of *building* oraclemcp, not of *running* it.
+
+---
+
+## 2. Containerized deployment
+
+### Docker
+
+The published image is `ghcr.io/muhdur/oraclemcp`. It is a two-stage build: an
+`oraclelinux:9` builder compiles the binary with the pinned nightly toolchain,
+and the runtime stage is a clean `oraclelinux:9` carrying only
+`/usr/local/bin/oraclemcp`. The pure-Rust thin `oracledb` driver is compiled in,
+so the image does **not** redistribute or require Oracle Instant Client, ODPI-C,
+`libclntsh`, or a C toolchain at runtime.
+
+The default entrypoint serves MCP over stdio:
+
+```sh
+# Tool surface only — no database. Safe to inspect anywhere.
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.4.0
+
+# Against a configured profile. Mount a read-only profiles config and pass the
+# credential the profile's credential_ref expects.
+docker run -i --rm \
+  -v "$HOME/.config/oraclemcp:/root/.config/oraclemcp:ro" \
+  -e ORACLE_APP_PASSWORD \
+  ghcr.io/muhdur/oraclemcp:0.4.0
+```
+
+`--allow-no-auth` is baked into the default `CMD` because, over stdio, the
+trusted peer is the parent process that launched the container. Do **not** carry
+that assumption over to the HTTP transport (see §4).
+
+To verify what you are about to run before wiring it into a client:
+
+```sh
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.4.0 info       # version, tools, transports
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.4.0 --json doctor
+```
+
+Pin to an immutable tag (`:0.4.0`), not `:latest`, in any non-interactive
+deployment, and verify the image digest against the release.
+
+### Kubernetes (sketch)
+
+The HTTP transport (`serve --listen`) is what you deploy under Kubernetes. A
+minimal Deployment, with credentials and the profiles config supplied as a
+Secret and a ConfigMap:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oraclemcp
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: oraclemcp }
+  template:
+    metadata:
+      labels: { app: oraclemcp }
+    spec:
+      terminationGracePeriodSeconds: 45   # allow the drain in §5 to complete
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+        - name: oraclemcp
+          image: ghcr.io/muhdur/oraclemcp:0.4.0
+          args:
+            - serve
+            - --listen
+            - 0.0.0.0:7070
+            # OAuth flags or an [http.oauth] block in the mounted config make
+            # this fail-closed listener start; otherwise it refuses to bind.
+            - --oauth-resource
+            - https://oraclemcp.internal/mcp
+            - --oauth-issuer
+            - https://issuer.example.com
+            - --oauth-required-scope
+            - oracle:read
+            - --oauth-hs256-secret-ref
+            - env:ORACLEMCP_OAUTH_HS256_SECRET
+            - --http-allowed-host
+            - oraclemcp.internal
+          env:
+            # A non-loopback bind (0.0.0.0) requires this opt-in.
+            - { name: ORACLEMCP_HTTP_ALLOW_REMOTE, value: "1" }
+            - name: ORACLE_APP_PASSWORD
+              valueFrom: { secretKeyRef: { name: oraclemcp-db, key: password } }
+            - name: ORACLEMCP_OAUTH_HS256_SECRET
+              valueFrom: { secretKeyRef: { name: oraclemcp-oauth, key: hs256 } }
+            - name: ORACLEMCP_AUDIT_KEY
+              valueFrom: { secretKeyRef: { name: oraclemcp-audit, key: hmac } }
+          ports:
+            - { name: mcp, containerPort: 7070 }
+          volumeMounts:
+            - name: config
+              mountPath: /home/nonroot/.config/oraclemcp
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          # readiness/liveness probes target /readyz and /healthz. The health
+          # STATE and report shape ship today in oraclemcp-telemetry; mounting
+          # them as HTTP endpoints on the listener is bead D1
+          # (oraclemcp-040-epic-wp-d-1il.4) and may be PLANNED in your build —
+          # confirm `curl http://127.0.0.1:7070/healthz` returns 200 before
+          # relying on these probes.
+          readinessProbe:
+            httpGet: { path: /readyz, port: mcp }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: mcp }
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap: { name: oraclemcp-profiles }
+```
+
+Probe semantics, once the endpoints are mounted:
+
+- `/healthz` (**liveness**) is 200 while the process is up, 503 only when the
+  process is down. A failed Oracle round trip does **not** flip liveness — that
+  would cause needless restarts on transient DB blips.
+- `/readyz` (**readiness**) is 200 only when a pool connection pings *and* the
+  server is not shutting down. On `SIGTERM` it flips to 503 immediately so the
+  load balancer drains in-flight traffic before the pod exits.
+
+---
+
+## 3. A least-privilege read-only Oracle account
+
+The classifier and the per-profile operating-level ceiling are the *enforced*
+control. Pair them with a database account that simply **cannot** write — that
+is defense in depth, not redundancy. A fresh operator can stand up the read-only
+user from this section alone.
+
+### 3.1 Create the account and grant only what the read tools need
+
+Connect as a DBA (or a user with the needed admin rights) and run:
+
+```sql
+-- 1. The read-only login.
+CREATE USER mcp_ro IDENTIFIED BY "<choose-a-strong-secret>";
+
+-- 2. Connect only. No CREATE TABLE / RESOURCE / unlimited tablespace.
+GRANT CREATE SESSION TO mcp_ro;
+
+-- 3. Read the data dictionary the introspection tools rely on. This powers
+--    oracle_schema_inspect / oracle_get_ddl / oracle_describe* / search_source.
+GRANT SELECT ANY DICTIONARY TO mcp_ro;
+
+-- 4. Read ONLY the specific application objects the agent should see. Grant
+--    object-level SELECT, never a write-implying ANY privilege.
+GRANT SELECT ON app.customers TO mcp_ro;
+GRANT SELECT ON app.orders    TO mcp_ro;
+-- ...one GRANT SELECT per object (or use a read-only role, §3.3).
+```
+
+Grant **no** write-implying system privileges. Specifically avoid:
+`CREATE TABLE`, `CREATE ANY TABLE`, `INSERT/UPDATE/DELETE ANY TABLE`,
+`CREATE/ALTER ANY PROCEDURE`, `CREATE/DROP ANY ...`, `ALTER SYSTEM`,
+`ALTER DATABASE`, `UNLIMITED TABLESPACE`, and the `DBA`/`RESOURCE` roles.
+
+### 3.2 Prefer proxy authentication (preserves identity in the audit trail)
+
+A proxy user lets several agents share one connecting account while each agent's
+individual identity is preserved end to end. Connect as a low-privilege proxy
+that authenticates, then proxies through to the read-only target:
+
+```sql
+CREATE USER mcp_proxy IDENTIFIED BY "<proxy-secret>";
+GRANT CREATE SESSION TO mcp_proxy;
+
+-- Let the proxy connect AS the read-only target, but only via proxy auth.
+ALTER USER mcp_ro GRANT CONNECT THROUGH mcp_proxy;
+```
+
+Then in the profile, set `[profiles.proxy_auth]` with `proxy_user = "mcp_proxy"`
+and `target_schema = "mcp_ro"` (see the README profile schema). The
+`credential_ref` then belongs to the proxy.
+
+### 3.3 Optional: a reusable read-only role
+
+If you read many objects, bundle the object grants into a role instead of
+listing each grant on the user:
+
+```sql
+CREATE ROLE mcp_read_only;
+GRANT SELECT ON app.customers TO mcp_read_only;
+GRANT SELECT ON app.orders    TO mcp_read_only;
+-- ...
+GRANT mcp_read_only TO mcp_ro;
+```
+
+Keep the role free of any write-implying privilege; it should contain only
+`SELECT` object grants (and optionally `SELECT ANY DICTIONARY` if you centralize
+dictionary access there). Roles are not active under some `SET ROLE`/definer's
+rights paths, so `SELECT ANY DICTIONARY` is often cleaner as a direct grant.
+
+### 3.4 Pin the profile to the account's true capability
+
+In `~/.config/oraclemcp/profiles.toml`, the profile for this account should
+keep both the ceiling and the starting level at `READ_ONLY`:
+
+```toml
+[[profiles]]
+name = "db_ro"
+description = "Read-only production database"
+connect_string = "db.internal:1521/APPPDB"
+username = "MCP_RO"
+credential_ref = "env:ORACLE_APP_PASSWORD"
+max_level = "READ_ONLY"       # immutable ceiling — escalation can never exceed this
+default_level = "READ_ONLY"   # starting session level
+require_signed_tools = true   # operator-defined custom tools must be HMAC-signed
+```
+
+With `max_level = "READ_ONLY"`, `oracle_set_session_level`/`enable_writes` can
+never elevate this profile, and write/DDL/admin work stays blocked regardless of
+any client request or OAuth scope. Mark a physical standby with
+`read_only_standby = true` to pin it the same way regardless of `max_level`.
+
+### 3.5 Verify the posture from the database's own view
+
+```sh
+oraclemcp --json doctor --profile db_ro
+```
+
+Doctor's **Write posture** check (check 11) reads the session's own
+`SESSION_PRIVS` over a live connection and reports a read-only posture when the
+principal holds no write-implying system privilege — or **warns**, naming the
+offending privileges, if the account can in fact write. Treat any warning here
+as a finding: tighten the grants until doctor reports a clean read-only posture.
+Doctor output is redaction-safe (it omits connect strings, usernames,
+credential refs, passwords, wallet paths, and server DNs) and safe to paste into
+an agent session.
+
+---
+
+## 4. Network posture
+
+The stdio transport talks to a single trusted parent process and has no network
+surface. Everything below concerns the HTTP transport (`serve --listen`).
+
+- **Fail-closed start.** The HTTP listener starts **only** when OAuth bearer
+  enforcement is configured or `--allow-no-auth` is explicitly supplied. With
+  neither, it refuses to bind. `--allow-no-auth` is for local development only.
+- **Loopback by default.** A non-loopback bind (anything other than
+  `127.0.0.1`/`::1`) is refused unless `ORACLEMCP_HTTP_ALLOW_REMOTE=1` is set.
+  This is a deliberate guard against accidentally exposing the server; set it
+  consciously, behind a network boundary.
+- **Host / Origin allowlists.** `--http-allowed-host` and
+  `--http-allowed-origin` (or `[http] allowed_hosts`/`allowed_origins`) gate the
+  `Host` authority and browser `Origin`. Loopback authorities are allowed
+  implicitly; everything else must be listed.
+- **OAuth 2.1 bearer.** When OAuth is enabled,
+  `/.well-known/oauth-protected-resource` stays public, `/mcp` requires a valid
+  bearer token, and granted `oracle:*` scopes can only **lower** the effective
+  operating ceiling: `oracle:read` caps the request at `READ_ONLY`,
+  `oracle:write`/`oracle:execute` at `READ_WRITE`, `oracle:ddl` at `DDL`,
+  `oracle:admin` at `ADMIN`. No scope can raise a profile above its `max_level`,
+  and protected profiles stay `READ_ONLY`.
+- **TLS / mTLS.** Native rustls TLS is enabled with `[http.tls]` or
+  `--tls-cert`/`--tls-key`. Adding `[http.tls.client_ca_path]` or
+  `--mtls-client-ca` requires client certificates (mTLS) verified against that
+  CA. Server-only TLS encrypts the transport but is **not** application
+  authentication — `/mcp` still needs OAuth or an explicit `--allow-no-auth`
+  dev opt-in, and a non-loopback bind still needs `ORACLEMCP_HTTP_ALLOW_REMOTE=1`
+  even with TLS.
+
+Recommended production posture: bind behind a reverse proxy or service mesh,
+require OAuth with the narrowest scope each client needs (`oracle:read` for
+read-only agents), enable mTLS for service-to-service callers, and keep
+`max_level` pinned at the lowest level the workload requires.
+
+---
+
+## 5. Runbook
+
+### 5.1 Preflight (before serving)
+
+```sh
+# Offline checks: thin driver, TNS/wallet resolution, classifier, NLS.
+oraclemcp --json doctor
+
+# Add live connectivity, auth, role/open-mode, standby, and the write-posture
+# check (§3.5) for the profile you will serve.
+oraclemcp --json doctor --profile db_ro
+```
+
+Both emit a single JSON object on stdout (`--json` is the alias for
+`--robot-json`) and are redaction-safe to paste into an agent session. Do not
+start serving until doctor is clean for the target profile.
+
+### 5.2 Start
+
+```sh
+export ORACLE_APP_PASSWORD='...'          # the profile's credential_ref source
+# stdio (an MCP client launches this; --allow-no-auth because the peer is trusted)
+oraclemcp serve --profile db_ro --allow-no-auth
+
+# HTTP (fail-closed; needs OAuth or --allow-no-auth, plus remote opt-in if non-loopback)
+export ORACLEMCP_OAUTH_HS256_SECRET='...'
+export ORACLEMCP_HTTP_ALLOW_REMOTE=1      # only for a non-loopback bind
+oraclemcp serve --profile db_ro --listen 0.0.0.0:7070 \
+  --oauth-resource https://oraclemcp.internal/mcp \
+  --oauth-issuer https://issuer.example.com \
+  --oauth-required-scope oracle:read \
+  --oauth-hs256-secret-ref env:ORACLEMCP_OAUTH_HS256_SECRET \
+  --http-allowed-host oraclemcp.internal
+```
+
+Logs go to **stderr** (stdout stays pure JSON-RPC over stdio). Startup keeps the
+tool surface and discovery available even when the live connection cannot open;
+live tool calls then return structured error envelopes instead of crashing the
+server.
+
+### 5.3 Drain and stop (SIGTERM)
+
+`oraclemcp` shuts down gracefully on `SIGTERM`. The coordinator
+(`oraclemcp-core` shutdown path):
+
+1. Flips `/readyz` to 503 immediately so load balancers stop sending new work
+   (in-flight requests continue).
+2. Stops accepting new work.
+3. Rolls back in-flight transactions.
+4. Revokes outstanding session leases.
+5. Drains the connection pool and flushes telemetry/audit exporters.
+6. Exits.
+
+Send `SIGTERM` (Kubernetes does this on pod termination) and allow the drain to
+finish. Give it headroom: set `terminationGracePeriodSeconds` (≈45s in the §2
+sketch) longer than your slowest in-flight tool call so the rollback/lease-revoke
+sequence completes before `SIGKILL`. `/healthz` stays 200 while draining; the
+process stays live until step 6.
+
+### 5.4 Verify the audit trail
+
+Privileged actions are written to a hash-chained, HMAC-SHA256-signed audit log
+(out-of-band of the Oracle session). Verify the chain offline at any time:
+
+```sh
+oraclemcp audit verify /path/to/audit.jsonl
+# Override the key id to verify against a rotated key:
+oraclemcp audit verify /path/to/audit.jsonl --key_id 2026-q2
+```
+
+`verify` re-walks the file, recomputes every hash link, and re-checks the keyed
+MAC with the configured key(s); it exits non-zero on a broken link or a
+recompute-without-key forgery. Configure the log under `[audit]` in your config
+(`path`, `key_ref` as a secret-ref like `env:ORACLEMCP_AUDIT_KEY`, and `key_id`
+to label the active key for rotation; the default key id is `default`). When
+`[audit].path` is unset, the binary writes to
+`~/.config/oraclemcp/audit.jsonl`. Back up and rotate this log like any other
+security record, and verify it after incident review.
+
+### 5.5 Rotate credentials and keys
+
+- **DB credential:** update the secret behind `credential_ref` and restart (or
+  re-point the env var and restart). For proxy auth, rotate the *proxy*
+  credential.
+- **OAuth HS256 secret:** rotate the value behind `--oauth-hs256-secret-ref` and
+  restart; tokens signed with the old secret stop verifying.
+- **Audit signing key:** add the new key under `[audit].key_ref` with a new
+  `key_id`, restart, and keep the old `key_id` available to `audit verify` so
+  historical records still verify.
