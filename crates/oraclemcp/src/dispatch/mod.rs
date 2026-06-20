@@ -3730,6 +3730,39 @@ impl OracleDispatcher {
                     }))
                 });
             }
+            "oracle_db_health" => {
+                let a: DbHealthArgs = parse_args(name, args)?;
+                let request =
+                    oraclemcp_db::parse_health_request(a.health_type.as_deref().unwrap_or("all"));
+                // Read-only DBA health suite: each requested subcheck runs a pure
+                // V$/DBA_*/ALL_* read with DBA_*->ALL_* privilege degradation, and
+                // any per-subcheck failure becomes a structured `skipped` finding
+                // rather than failing the whole call. Unknown subcheck names are
+                // reported, never fatal.
+                return with_call_timeout(cx, conn, a.timeout_seconds, || {
+                    let findings = oraclemcp_db::run_health(conn, &request.subchecks);
+                    let checks_run: Vec<&str> = findings
+                        .iter()
+                        .filter(|f| {
+                            f.detail.get("status").and_then(Value::as_str) != Some("skipped")
+                        })
+                        .map(|f| f.subcheck.name())
+                        .collect();
+                    let checks_skipped: Vec<&str> = findings
+                        .iter()
+                        .filter(|f| {
+                            f.detail.get("status").and_then(Value::as_str) == Some("skipped")
+                        })
+                        .map(|f| f.subcheck.name())
+                        .collect();
+                    Ok(json!({
+                        "findings": serde_json::to_value(&findings).unwrap_or(Value::Null),
+                        "checks_run": checks_run,
+                        "checks_skipped": checks_skipped,
+                        "unknown_checks": request.unknown,
+                    }))
+                });
+            }
             "oracle_read_clob" => {
                 let a: ReadClobArgs = parse_args(name, args)?;
                 let max_chars = a.max_chars.unwrap_or(DEFAULT_LOB_MAX_CHARS);

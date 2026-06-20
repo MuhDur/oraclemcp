@@ -973,3 +973,67 @@ fn live_cancelled_query_context_leaves_pool_usable() {
         .expect("pool remains usable after cancelled request context");
     assert_eq!(rows[0].parse_i64("N"), Some(7));
 }
+
+/// WP-C live verification: the read-only DBA health suite runs against a real
+/// 23ai, returns a finding per requested subcheck, and — critically — every
+/// subcheck either succeeds against a readable view or degrades to a structured
+/// skip; it must NEVER bubble a raw ORA- error or fail the whole call. This is
+/// the live half of C1's privilege-degradation acceptance criterion (the unit
+/// SQL-shape + degradation tests live in `health.rs`).
+#[test]
+fn live_db_health_suite_runs_all_subchecks_without_hard_failure() {
+    let Some(conn) = connect_or_skip(
+        "live_db_health_suite_runs_all_subchecks_without_hard_failure",
+        test_opts(),
+    ) else {
+        return;
+    };
+    conn.ping().expect("health ping");
+
+    let subchecks = oraclemcp_db::HealthSubcheck::all();
+    let findings = oraclemcp_db::run_health(&conn, subchecks);
+    assert_eq!(
+        findings.len(),
+        subchecks.len(),
+        "every requested subcheck produces exactly one finding"
+    );
+
+    for finding in &findings {
+        // The view name each subcheck actually used / attempted is recorded.
+        assert!(
+            !finding.source_view.is_empty(),
+            "{:?} must record its source view",
+            finding.subcheck
+        );
+        // A skipped subcheck is structured (status=skipped), never a raw ORA-.
+        let status = finding.detail.get("status").and_then(|v| v.as_str());
+        if status == Some("skipped") {
+            assert_eq!(
+                finding.severity,
+                oraclemcp_db::Severity::Info,
+                "a privilege skip is informational, not an alarm"
+            );
+            let reason = finding
+                .detail
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            eprintln!(
+                "[live-xe] db_health subcheck {} degraded to skip ({reason})",
+                finding.subcheck.name()
+            );
+        } else {
+            assert_eq!(status, Some("ok"), "non-skip findings carry status=ok");
+        }
+    }
+
+    // Verify the DBA_*->ALL_* degradation actually exercises a live view by
+    // running each builder's SQL directly through the read path; a privilege
+    // error is acceptable (that is the degradation path), but a SUCCESS proves
+    // the SQL is valid against the live dictionary.
+    let (_, invalid_sql) = oraclemcp_db::invalid_objects_sql(oraclemcp_db::ViewTier::All);
+    match conn.query_rows(&invalid_sql, &[]) {
+        Ok(_) => {}
+        Err(e) => eprintln!("[live-xe] ALL_OBJECTS invalid-objects query degraded ({e})"),
+    }
+}

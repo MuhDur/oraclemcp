@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 50] = [
+pub const TOOL_NAMES: [&str; 51] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -41,6 +41,7 @@ pub const TOOL_NAMES: [&str; 50] = [
     "oracle_plscope_inspect",
     "oracle_explain_plan",
     "oracle_top_queries",
+    "oracle_db_health",
     // Compatibility aliases for agents migrating from shorter Oracle MCP tool
     // names. These route to the prefixed tools in dispatch and share the same
     // guardrails.
@@ -679,6 +680,23 @@ pub fn tool_registry() -> ToolRegistry {
                     "top_n": { "type": "integer", "minimum": 1, "maximum": 100, "description": "How many statements to return (1-100, default 20)." },
                     "historical": { "type": "boolean", "description": "If true, use historical AWR (requires a licensed Diagnostics Pack) or Statspack instead of the live cursor cache. Defaults false (the free live source)." },
                     "min_pct_of_total": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Live source only: keep only statements consuming at least this percent of the total selected metric (e.g. 5 for the 5%-of-total view)." }
+                }),
+                &[timeout_seconds_prop()],
+            ),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_db_health",
+            ToolTier::FoundationLiveDb,
+            "Read-only DBA health-check suite. health_type='all' (default) or a comma list of subchecks (invalid_objects, unusable_indexes, tablespace_undo, sequence_ceiling, disabled_constraints, buffer_cache_hit_ratio). Pure V$/DBA_*/ALL_* reads; each subcheck degrades DBA_*->ALL_* and yields a structured skip on insufficient privilege rather than failing the suite.",
+        )
+        .with_input_schema(object_schema(
+            props_with(
+                json!({
+                    "health_type": { "type": "string", "description": "Either 'all' (default) or a comma-separated list of subcheck names: invalid_objects, unusable_indexes, tablespace_undo, sequence_ceiling, disabled_constraints, buffer_cache_hit_ratio. Unknown names are reported, not fatal." }
                 }),
                 &[timeout_seconds_prop()],
             ),

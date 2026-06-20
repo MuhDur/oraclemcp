@@ -572,6 +572,7 @@ fn args_for(name: &str) -> Value {
             json!({ "sql": "SELECT 1 FROM dual", "allow_plan_table_write": true })
         }
         "oracle_top_queries" => json!({ "metric": "elapsed", "top_n": 5 }),
+        "oracle_db_health" => json!({ "health_type": "all" }),
         "oracle_preview_sql" => json!({ "sql": "SELECT 1 FROM dual" }),
         "oracle_execute" => {
             json!({ "sql": "UPDATE employees SET name = name WHERE employee_id = 100" })
@@ -3231,5 +3232,149 @@ mod top_queries {
             .expect("5%-of-total dispatches");
         assert_eq!(out["source"], json!("live_cursor"));
         assert!(out["rows"].is_array());
+    }
+}
+
+/// C1–C7: the read-only `oracle_db_health` suite. The framework dispatches the
+/// requested subchecks, aggregates findings tagged with severity + source view,
+/// and — per C1's load-bearing AC — never lets a missing privilege become a raw
+/// ORA-/hard failure: it degrades DBA_*→ALL_*, then yields a structured skip.
+mod db_health {
+    use super::*;
+    use std::sync::Arc;
+
+    /// A mock that fails every query (no DBA_* and no ALL_* access) so every
+    /// subcheck must degrade to a structured skip.
+    struct NoPrivilegeMock;
+    impl OracleConnection for NoPrivilegeMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo {
+                current_schema: Some("APP".to_owned()),
+                ..Default::default()
+            })
+        }
+        fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+            Err(DbError::Query(
+                "ORA-00942: table or view does not exist".to_owned(),
+            ))
+        }
+        fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+            Ok(0)
+        }
+        fn commit(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        fn rollback(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    fn dispatcher_with(conn: impl OracleConnection + 'static) -> OracleDispatcher {
+        OracleDispatcher::new_switchable(
+            Box::new(conn),
+            Some("dev".to_owned()),
+            read_write_level(),
+            Arc::new(|_| Ok(Box::new(OneRowMock))),
+        )
+    }
+
+    #[test]
+    fn all_runs_every_subcheck_and_returns_findings() {
+        // OneRowMock answers any query, so every probe + subcheck succeeds.
+        let out = dispatcher_with(OneRowMock)
+            .dispatch("oracle_db_health", json!({ "health_type": "all" }))
+            .expect("db_health dispatches");
+        let findings = out["findings"].as_array().expect("findings array");
+        assert_eq!(findings.len(), 6, "all six subchecks produce a finding");
+        // Every finding carries a subcheck, severity, and source_view.
+        for f in findings {
+            assert!(f["subcheck"].is_string());
+            assert!(f["severity"].is_string());
+            assert!(f["source_view"].is_string());
+        }
+        assert_eq!(
+            out["checks_run"].as_array().expect("checks_run").len(),
+            6,
+            "nothing skipped when the views are readable"
+        );
+        assert!(
+            out["checks_skipped"]
+                .as_array()
+                .expect("checks_skipped")
+                .is_empty()
+        );
+        assert!(
+            out["unknown_checks"]
+                .as_array()
+                .expect("unknown")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn comma_list_runs_only_the_requested_subchecks() {
+        let out = dispatcher_with(OneRowMock)
+            .dispatch(
+                "oracle_db_health",
+                json!({ "health_type": "invalid_objects, sequence_ceiling" }),
+            )
+            .expect("db_health dispatches");
+        let run: Vec<&str> = out["checks_run"]
+            .as_array()
+            .expect("checks_run")
+            .iter()
+            .map(|v| v.as_str().expect("name"))
+            .collect();
+        assert_eq!(run, vec!["invalid_objects", "sequence_ceiling"]);
+    }
+
+    #[test]
+    fn unknown_subcheck_is_reported_not_fatal() {
+        let out = dispatcher_with(OneRowMock)
+            .dispatch(
+                "oracle_db_health",
+                json!({ "health_type": "invalid_objects, not_a_real_check" }),
+            )
+            .expect("db_health tolerates an unknown subcheck");
+        assert_eq!(out["checks_run"], json!(["invalid_objects"]));
+        assert_eq!(out["unknown_checks"], json!(["not_a_real_check"]));
+    }
+
+    #[test]
+    fn missing_privilege_yields_a_structured_skip_never_an_error() {
+        // No DBA_* and no ALL_* access: the whole suite must still succeed,
+        // every subcheck reported as a structured skip (never a raw ORA-).
+        let out = dispatcher_with(NoPrivilegeMock)
+            .dispatch("oracle_db_health", json!({ "health_type": "all" }))
+            .expect("db_health never hard-fails on privilege");
+        assert!(
+            out["checks_run"].as_array().expect("checks_run").is_empty(),
+            "no subcheck could read its view"
+        );
+        assert_eq!(
+            out["checks_skipped"]
+                .as_array()
+                .expect("checks_skipped")
+                .len(),
+            6,
+            "every subcheck degraded to a skip"
+        );
+        let findings = out["findings"].as_array().expect("findings");
+        for f in findings {
+            assert_eq!(f["detail"]["status"], json!("skipped"));
+            assert_eq!(f["severity"], json!("info"));
+            // Structured skip carries the views it tried, not a raw ORA- bubble.
+            assert!(f["detail"]["attempted_views"].is_array());
+            assert!(
+                !f["summary"].as_str().unwrap_or("").contains("ORA-"),
+                "skip summary must not surface a raw ORA- error"
+            );
+        }
     }
 }

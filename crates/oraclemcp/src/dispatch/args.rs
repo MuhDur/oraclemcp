@@ -272,6 +272,17 @@ pub(super) struct TopQueriesArgs {
 }
 
 #[derive(Deserialize)]
+pub(super) struct DbHealthArgs {
+    /// `"all"` (default) or a comma-separated list of subcheck names
+    /// (`invalid_objects`, `unusable_indexes`, `tablespace_undo`,
+    /// `sequence_ceiling`, `disabled_constraints`, `buffer_cache_hit_ratio`).
+    #[serde(default, alias = "checks", alias = "check")]
+    pub(super) health_type: Option<String>,
+    #[serde(default)]
+    pub(super) timeout_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct ReadClobArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
