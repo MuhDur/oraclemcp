@@ -1,0 +1,183 @@
+pub mod oraclemcp_error
+pub mod oraclemcp_error::fuzzy
+pub fn oraclemcp_error::fuzzy::enrich_oracle_error(&str, core::option::Option<&str>, &[&str]) -> oraclemcp_error::ErrorEnvelope
+pub fn oraclemcp_error::fuzzy::fuzzy_suggest(&str, &[&str], usize) -> alloc::vec::Vec<alloc::string::String>
+pub fn oraclemcp_error::fuzzy::levenshtein(&str, &str) -> usize
+#[non_exhaustive] pub enum oraclemcp_error::ErrorClass
+pub oraclemcp_error::ErrorClass::Busy
+pub oraclemcp_error::ErrorClass::ChallengeRequired
+pub oraclemcp_error::ErrorClass::ConnectionFailed
+pub oraclemcp_error::ErrorClass::ForbiddenStatement
+pub oraclemcp_error::ErrorClass::InsufficientPrivilege
+pub oraclemcp_error::ErrorClass::Internal
+pub oraclemcp_error::ErrorClass::InvalidArguments
+pub oraclemcp_error::ErrorClass::LeaseRequired
+pub oraclemcp_error::ErrorClass::ObjectNotFound
+pub oraclemcp_error::ErrorClass::OperatingLevelTooLow
+pub oraclemcp_error::ErrorClass::PolicyDenied
+pub oraclemcp_error::ErrorClass::RuntimeStateRequired
+pub oraclemcp_error::ErrorClass::SyntaxError
+pub oraclemcp_error::ErrorClass::Timeout
+pub oraclemcp_error::ErrorClass::Transient
+impl oraclemcp_error::ErrorClass
+pub fn oraclemcp_error::ErrorClass::default_suggested_tool(self) -> core::option::Option<&'static str>
+pub fn oraclemcp_error::ErrorClass::is_retryable(self) -> bool
+impl core::clone::Clone for oraclemcp_error::ErrorClass
+pub fn oraclemcp_error::ErrorClass::clone(&self) -> oraclemcp_error::ErrorClass
+impl core::cmp::Eq for oraclemcp_error::ErrorClass
+impl core::cmp::PartialEq for oraclemcp_error::ErrorClass
+pub fn oraclemcp_error::ErrorClass::eq(&self, &oraclemcp_error::ErrorClass) -> bool
+impl core::fmt::Debug for oraclemcp_error::ErrorClass
+pub fn oraclemcp_error::ErrorClass::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_error::ErrorClass
+pub fn oraclemcp_error::ErrorClass::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for oraclemcp_error::ErrorClass
+impl core::marker::StructuralPartialEq for oraclemcp_error::ErrorClass
+impl serde_core::ser::Serialize for oraclemcp_error::ErrorClass
+pub fn oraclemcp_error::ErrorClass::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_error::ErrorClass
+pub fn oraclemcp_error::ErrorClass::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_error::ErrorClass
+impl core::marker::Send for oraclemcp_error::ErrorClass
+impl core::marker::Sync for oraclemcp_error::ErrorClass
+impl core::marker::Unpin for oraclemcp_error::ErrorClass
+impl core::marker::UnsafeUnpin for oraclemcp_error::ErrorClass
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_error::ErrorClass
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_error::ErrorClass
+impl<T, U> core::convert::Into<U> for oraclemcp_error::ErrorClass where U: core::convert::From<T>
+pub fn oraclemcp_error::ErrorClass::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_error::ErrorClass where U: core::convert::Into<T>
+pub type oraclemcp_error::ErrorClass::Error = core::convert::Infallible
+pub fn oraclemcp_error::ErrorClass::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_error::ErrorClass where U: core::convert::TryFrom<T>
+pub type oraclemcp_error::ErrorClass::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_error::ErrorClass::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_error::ErrorClass where T: core::clone::Clone
+pub type oraclemcp_error::ErrorClass::Owned = T
+pub fn oraclemcp_error::ErrorClass::clone_into(&self, &mut T)
+pub fn oraclemcp_error::ErrorClass::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_error::ErrorClass where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_error::ErrorClass::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_error::ErrorClass where T: ?core::marker::Sized
+pub fn oraclemcp_error::ErrorClass::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_error::ErrorClass where T: ?core::marker::Sized
+pub fn oraclemcp_error::ErrorClass::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_error::ErrorClass where T: core::clone::Clone
+pub unsafe fn oraclemcp_error::ErrorClass::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_error::ErrorClass
+pub fn oraclemcp_error::ErrorClass::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_error::ErrorClass where T: for<'de> serde_core::de::Deserialize<'de>
+#[non_exhaustive] pub enum oraclemcp_error::OracleMcpError
+pub oraclemcp_error::OracleMcpError::Busy
+pub oraclemcp_error::OracleMcpError::Busy::retry_after_ms: u64
+pub oraclemcp_error::OracleMcpError::ChallengeRequired(alloc::string::String)
+pub oraclemcp_error::OracleMcpError::ForbiddenStatement(alloc::string::String)
+pub oraclemcp_error::OracleMcpError::InsufficientPrivilege(alloc::string::String)
+pub oraclemcp_error::OracleMcpError::Internal(alloc::string::String)
+pub oraclemcp_error::OracleMcpError::InvalidArguments(alloc::string::String)
+pub oraclemcp_error::OracleMcpError::LeaseRequired(alloc::string::String)
+pub oraclemcp_error::OracleMcpError::ObjectNotFound
+pub oraclemcp_error::OracleMcpError::ObjectNotFound::fuzzy_matches: alloc::vec::Vec<alloc::string::String>
+pub oraclemcp_error::OracleMcpError::ObjectNotFound::name: alloc::string::String
+pub oraclemcp_error::OracleMcpError::OperatingLevelTooLow(alloc::string::String)
+pub oraclemcp_error::OracleMcpError::Oracle(alloc::string::String)
+pub oraclemcp_error::OracleMcpError::PolicyDenied(alloc::string::String)
+pub oraclemcp_error::OracleMcpError::RuntimeStateRequired(alloc::string::String)
+impl oraclemcp_error::OracleMcpError
+pub fn oraclemcp_error::OracleMcpError::into_envelope(self) -> oraclemcp_error::ErrorEnvelope
+impl core::error::Error for oraclemcp_error::OracleMcpError
+impl core::fmt::Debug for oraclemcp_error::OracleMcpError
+pub fn oraclemcp_error::OracleMcpError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_error::OracleMcpError
+pub fn oraclemcp_error::OracleMcpError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for oraclemcp_error::OracleMcpError
+impl core::marker::Send for oraclemcp_error::OracleMcpError
+impl core::marker::Sync for oraclemcp_error::OracleMcpError
+impl core::marker::Unpin for oraclemcp_error::OracleMcpError
+impl core::marker::UnsafeUnpin for oraclemcp_error::OracleMcpError
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_error::OracleMcpError
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_error::OracleMcpError
+impl<T, U> core::convert::Into<U> for oraclemcp_error::OracleMcpError where U: core::convert::From<T>
+pub fn oraclemcp_error::OracleMcpError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_error::OracleMcpError where U: core::convert::Into<T>
+pub type oraclemcp_error::OracleMcpError::Error = core::convert::Infallible
+pub fn oraclemcp_error::OracleMcpError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_error::OracleMcpError where U: core::convert::TryFrom<T>
+pub type oraclemcp_error::OracleMcpError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_error::OracleMcpError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for oraclemcp_error::OracleMcpError where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_error::OracleMcpError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for oraclemcp_error::OracleMcpError where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_error::OracleMcpError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_error::OracleMcpError where T: ?core::marker::Sized
+pub fn oraclemcp_error::OracleMcpError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_error::OracleMcpError where T: ?core::marker::Sized
+pub fn oraclemcp_error::OracleMcpError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for oraclemcp_error::OracleMcpError
+pub fn oraclemcp_error::OracleMcpError::from(T) -> T
+pub struct oraclemcp_error::ErrorEnvelope
+pub oraclemcp_error::ErrorEnvelope::error_class: oraclemcp_error::ErrorClass
+pub oraclemcp_error::ErrorEnvelope::fuzzy_matches: alloc::vec::Vec<alloc::string::String>
+pub oraclemcp_error::ErrorEnvelope::is_error: bool
+pub oraclemcp_error::ErrorEnvelope::message: alloc::string::String
+pub oraclemcp_error::ErrorEnvelope::next_steps: alloc::vec::Vec<alloc::string::String>
+pub oraclemcp_error::ErrorEnvelope::ora_code: core::option::Option<i32>
+pub oraclemcp_error::ErrorEnvelope::retry_after_ms: core::option::Option<u64>
+pub oraclemcp_error::ErrorEnvelope::suggested_tool: core::option::Option<alloc::string::String>
+impl oraclemcp_error::ErrorEnvelope
+pub fn oraclemcp_error::ErrorEnvelope::new(oraclemcp_error::ErrorClass, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oraclemcp_error::ErrorEnvelope::to_json(&self) -> serde_json::value::Value
+pub fn oraclemcp_error::ErrorEnvelope::with_fuzzy_matches(self, alloc::vec::Vec<alloc::string::String>) -> Self
+pub fn oraclemcp_error::ErrorEnvelope::with_next_step(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oraclemcp_error::ErrorEnvelope::with_ora_code(self, i32) -> Self
+pub fn oraclemcp_error::ErrorEnvelope::with_retry_after_ms(self, u64) -> Self
+pub fn oraclemcp_error::ErrorEnvelope::with_suggested_tool(self, impl core::convert::Into<alloc::string::String>) -> Self
+impl core::clone::Clone for oraclemcp_error::ErrorEnvelope
+pub fn oraclemcp_error::ErrorEnvelope::clone(&self) -> oraclemcp_error::ErrorEnvelope
+impl core::cmp::Eq for oraclemcp_error::ErrorEnvelope
+impl core::cmp::PartialEq for oraclemcp_error::ErrorEnvelope
+pub fn oraclemcp_error::ErrorEnvelope::eq(&self, &oraclemcp_error::ErrorEnvelope) -> bool
+impl core::fmt::Debug for oraclemcp_error::ErrorEnvelope
+pub fn oraclemcp_error::ErrorEnvelope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_error::ErrorEnvelope
+impl serde_core::ser::Serialize for oraclemcp_error::ErrorEnvelope
+pub fn oraclemcp_error::ErrorEnvelope::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_error::ErrorEnvelope
+pub fn oraclemcp_error::ErrorEnvelope::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_error::ErrorEnvelope
+impl core::marker::Send for oraclemcp_error::ErrorEnvelope
+impl core::marker::Sync for oraclemcp_error::ErrorEnvelope
+impl core::marker::Unpin for oraclemcp_error::ErrorEnvelope
+impl core::marker::UnsafeUnpin for oraclemcp_error::ErrorEnvelope
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_error::ErrorEnvelope
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_error::ErrorEnvelope
+impl<T, U> core::convert::Into<U> for oraclemcp_error::ErrorEnvelope where U: core::convert::From<T>
+pub fn oraclemcp_error::ErrorEnvelope::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_error::ErrorEnvelope where U: core::convert::Into<T>
+pub type oraclemcp_error::ErrorEnvelope::Error = core::convert::Infallible
+pub fn oraclemcp_error::ErrorEnvelope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_error::ErrorEnvelope where U: core::convert::TryFrom<T>
+pub type oraclemcp_error::ErrorEnvelope::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_error::ErrorEnvelope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_error::ErrorEnvelope where T: core::clone::Clone
+pub type oraclemcp_error::ErrorEnvelope::Owned = T
+pub fn oraclemcp_error::ErrorEnvelope::clone_into(&self, &mut T)
+pub fn oraclemcp_error::ErrorEnvelope::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_error::ErrorEnvelope where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_error::ErrorEnvelope::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_error::ErrorEnvelope where T: ?core::marker::Sized
+pub fn oraclemcp_error::ErrorEnvelope::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_error::ErrorEnvelope where T: ?core::marker::Sized
+pub fn oraclemcp_error::ErrorEnvelope::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_error::ErrorEnvelope where T: core::clone::Clone
+pub unsafe fn oraclemcp_error::ErrorEnvelope::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_error::ErrorEnvelope
+pub fn oraclemcp_error::ErrorEnvelope::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_error::ErrorEnvelope where T: for<'de> serde_core::de::Deserialize<'de>
+pub fn oraclemcp_error::classify_ora_code(i32) -> oraclemcp_error::ErrorClass
+pub fn oraclemcp_error::enrich_oracle_error(&str, core::option::Option<&str>, &[&str]) -> oraclemcp_error::ErrorEnvelope
+pub fn oraclemcp_error::envelope_from_oracle_message(&str) -> oraclemcp_error::ErrorEnvelope
+pub fn oraclemcp_error::fuzzy_suggest(&str, &[&str], usize) -> alloc::vec::Vec<alloc::string::String>
+pub fn oraclemcp_error::levenshtein(&str, &str) -> usize
+pub fn oraclemcp_error::parse_ora_code(&str) -> core::option::Option<i32>
+pub type oraclemcp_error::Result<T> = core::result::Result<T, oraclemcp_error::OracleMcpError>

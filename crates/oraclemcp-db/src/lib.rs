@@ -1,17 +1,60 @@
 #![forbid(unsafe_code)]
+// The canonical shared foundation (ADR-0006) is a product API: every public
+// item carries rustdoc, enforced here so the surface never silently grows an
+// undocumented item.
+#![deny(missing_docs)]
 
 //! Oracle connectivity for the `oraclemcp` server (plan §4.3, §5.1, §5.2; bead
-//! P0-3).
+//! P0-3) — and the **canonical shared Oracle foundation** for the two-binary
+//! family (ADR-0006).
 //!
-//! Layers:
-//! - [`OracleConnection`] — the backend-independent sync connection trait, with
-//!   the thin [`oracledb`]-backed [`RustOracleConnection`].
+//! # Canonical foundation (ADR-0006)
+//!
+//! `oraclemcp-db` is the single, deliberately-governed home for the
+//! correctness-critical Oracle layer that both `oraclemcp` and the sibling
+//! PL/SQL-intelligence superset (`plsql-mcp`) build on: thin connectivity, the
+//! NLS-stable serializer with NUMBER→string fidelity, dictionary operations,
+//! session leases, and the connection pool. `plsql-mcp` converges onto this
+//! crate (and the other engine-free spine crates `oraclemcp-error` /
+//! `oraclemcp-guard`) rather than carrying its own copies; its added value
+//! (offline PL/SQL parse/analyze, lineage, SAST) layers *on top*. Because this
+//! surface has two consumers, the public API below is treated as a product: it
+//! is snapshot-locked in CI (`cargo public-api` baseline +
+//! `cargo semver-checks`, see ADR-0002) so an unintended breaking change is
+//! caught before it reaches `plsql-mcp`.
+//!
+//! The crate imports **no** PL/SQL analysis engine — the one-way engine-free
+//! dependency boundary CI enforces (`scripts/oraclemcp_boundary_lint.sh`).
+//!
+//! # Layers
+//!
+//! - [`OracleConnection`] — the backend-independent connection trait, with the
+//!   thin [`oracledb`]-backed [`RustOracleConnection`]. The trait is
+//!   synchronous because today's [`oracledb`] surface is blocking; cancellation
+//!   and deadline boundaries are explicit `&asupersync::Cx` checkpoints
+//!   (the `*_cx` methods). Every real [`oracledb`] driver call is confined to
+//!   the adapter seam (`connection.rs`, ADR-0002), so no driver type leaks into
+//!   this public surface — callers depend only on the `oraclemcp-db` types
+//!   below.
 //! - [`OraclePool`] — a bounded pure-Rust thin session pool.
 //! - [`detect_oracle_driver`] — thin-driver posture data for `doctor`; thin
 //!   mode never requires Instant Client.
 //!
 //! The session-lease primitive (P0-4) and the deterministic NUMBER→string /
 //! ISO-8601 / NLS serializer (P0-5) build on these.
+//!
+//! # Stability
+//!
+//! The crate follows SemVer once published. The accepted published-spine
+//! dependency on `oraclemcp-error` is part of the locked surface, not pretended
+//! away: it is re-exported as [`error_envelope`] and its [`ErrorEnvelope`]
+//! type appears in return positions (e.g. [`DbError::into_envelope`]), so a
+//! breaking bump to it is a deliberate, snapshot-visible change. The
+//! `oraclemcp-guard` dependency is internal (the pool consumes its validators)
+//! and intentionally does **not** appear in this public surface. See
+//! `README.md` for the API-stability note and the baseline-refresh procedure.
+//!
+//! [`ErrorEnvelope`]: oraclemcp_error::ErrorEnvelope
 
 mod auth_adapter;
 mod awr;

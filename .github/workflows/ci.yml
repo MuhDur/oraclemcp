@@ -146,6 +146,40 @@ jobs:
       - run: bash scripts/oraclemcp_driver_seam_lint.sh
       - run: bash scripts/oraclemcp_honesty_grep.sh
 
+  # Public-API lock (B5; ADR-0002 mirror). oraclemcp-db is the canonical shared
+  # foundation (ADR-0006) and oraclemcp-error / oraclemcp-guard are the
+  # engine-free spine plsql-mcp converges onto, so their public API is a product
+  # with two consumers. Two complementary gates keep it from drifting:
+  #   * cargo public-api — exact-surface diff against the committed baselines in
+  #     crates/<crate>/api/<crate>.txt (deterministic, offline). Refresh the
+  #     baseline in the same PR for an INTENTIONAL change (see the script header
+  #     and crates/oraclemcp-db/README.md).
+  #   * cargo semver-checks — the SemVer contract: compares the working tree
+  #     against the last published release and fails when the diff is not allowed
+  #     by the version bump.
+  # Both tools render rustdoc JSON, so they run on the pinned nightly. The tools
+  # are not workspace dependencies (installed as standalone binaries), so they do
+  # not enter the dependency graph or affect cargo deny.
+  api-lock:
+    name: public-API lock (cargo public-api + semver-checks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-public-api,cargo-semver-checks
+      # Exact public-API surface lock against the committed baselines.
+      - run: bash scripts/oraclemcp_api_lock.sh
+      # SemVer contract for each locked crate (working tree vs last published
+      # release). Skipped automatically for a crate with no published baseline.
+      - run: cargo semver-checks check-release -p oraclemcp-error -p oraclemcp-guard -p oraclemcp-db
+
   release-metadata:
     name: release metadata sync
     runs-on: ubuntu-latest

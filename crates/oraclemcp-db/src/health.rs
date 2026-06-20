@@ -66,7 +66,7 @@ impl HealthSubcheck {
     /// pair. When a subcheck has no `ALL_*` analogue (the DBA-only metrics view
     /// `DBA_TABLESPACE_USAGE_METRICS`, or a `V$` view), `all_view` is `None` and
     /// degradation is "DBA/V$ available or skip" rather than "DBA→ALL→skip".
-    /// Reused by both [`run_subcheck`] and the C9 preflight so the tier-probe
+    /// Reused by both `run_subcheck` and the C9 preflight so the tier-probe
     /// targets stay defined in exactly one place.
     #[must_use]
     pub fn probe_views(self) -> (&'static str, Option<&'static str>) {
@@ -303,7 +303,8 @@ pub struct PreflightReport {
     /// One row per [`HealthSubcheck`], in canonical [`HealthSubcheck::all`] order.
     pub subchecks: Vec<SubcheckPreflight>,
     /// The source `oracle_top_queries` resolves to in its default (live) mode —
-    /// always [`DiagnosticsSource::LiveCursor`] (free, no pack).
+    /// always [`DiagnosticsSource::LiveCursor`](crate::DiagnosticsSource::LiveCursor)
+    /// (free, no pack).
     pub top_queries_default: crate::awr::DiagnosticsSource,
     /// The source `oracle_top_queries` resolves to with `historical=true`:
     /// `AwrAsh` only when the Diagnostics Pack is licensed, else `Statspack` if

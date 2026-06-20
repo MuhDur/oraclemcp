@@ -68,9 +68,13 @@ fn db_checkpointed<T>(
 /// Bounded `DBMS_OUTPUT` lines captured from a single Oracle session.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DbmsOutput {
+    /// The captured `DBMS_OUTPUT` lines, in emission order.
     pub lines: Vec<String>,
+    /// Number of lines captured (`lines.len()`).
     pub line_count: usize,
+    /// Total character count across all captured lines.
     pub char_count: usize,
+    /// Whether the line or character cap stopped the drain before exhaustion.
     pub truncated: bool,
 }
 

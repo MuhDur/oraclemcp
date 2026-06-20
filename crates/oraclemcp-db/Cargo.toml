@@ -2,6 +2,7 @@
 name = "oraclemcp-db"
 version = "0.3.0"
 description = "Oracle connectivity, pooling, session leases and the type/NLS serializer for oraclemcp."
+readme = "README.md"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
