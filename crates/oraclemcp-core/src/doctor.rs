@@ -64,6 +64,10 @@ pub struct CheckResult {
     /// Machine-stable failure class for agent triage.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_class: Option<ErrorClass>,
+    /// Precise auth/transport classification for a connectivity failure (A5):
+    /// driver-unsupported auth vs bad-creds vs TLS vs listener.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_mode: Option<AuthModeClass>,
     /// Parsed Oracle error code, when a check failed because Oracle returned ORA-NNNNN.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ora_code: Option<i32>,
@@ -78,6 +82,7 @@ impl CheckResult {
             detail: detail.into(),
             fix: None,
             failure_class: None,
+            auth_mode: None,
             ora_code: None,
         }
     }
@@ -87,6 +92,10 @@ impl CheckResult {
     }
     fn with_failure_class(mut self, class: ErrorClass) -> Self {
         self.failure_class = Some(class);
+        self
+    }
+    fn with_auth_mode(mut self, class: AuthModeClass) -> Self {
+        self.auth_mode = Some(class);
         self
     }
     fn with_oracle_error(mut self, message: &str) -> Self {
@@ -280,6 +289,89 @@ fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
     }
 }
 
+/// Why a connection attempt's *authentication / transport* step failed, as a
+/// precise typed classification (A5). The fail-closed posture distinguishes a
+/// driver-unsupported auth mode (Kerberos / RADIUS / passwordless external
+/// wallet — features the pinned thin driver cannot satisfy at all) from a
+/// recoverable bad-credential, TLS/wallet, or listener/network failure. This is
+/// the load-bearing distinction: a driver-unsupported mode will NEVER succeed
+/// by retrying with different inputs, whereas the other three are operator-
+/// fixable. IAM token auth is NOT driver-unsupported (the pinned driver wires
+/// it via `with_access_token`); a token over a plaintext transport is a `Tls`
+/// failure (it requires TCPS), not a driver-capability gap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthModeClass {
+    /// An enterprise auth mode the published thin driver cannot satisfy:
+    /// Kerberos, RADIUS/native MFA, or passwordless external-wallet auth.
+    /// Retrying with different credentials cannot help; the operator must use a
+    /// supported mode (username/password, proxy, wallet+password, or IAM token).
+    DriverUnsupported,
+    /// The driver supports this auth mode but the supplied credentials were
+    /// rejected (ORA-01017 / invalid username-password).
+    BadCredentials,
+    /// A TLS/TCPS transport failure: wallet load, handshake, server-cert / DN
+    /// mismatch, or an access token offered over a non-TLS transport.
+    Tls,
+    /// A listener / network / TNS-resolution failure: the request never reached
+    /// an authenticating database service (ORA-12154 / 12514 / 12541, refused).
+    Listener,
+    /// A connectivity failure that is not specifically an auth/transport class
+    /// above (kept honest rather than forced into a category).
+    Other,
+}
+
+/// Classify the authentication / transport posture of a connection failure into
+/// a precise [`AuthModeClass`] (A5). Driver-unsupported enterprise auth modes
+/// are detected by the typed adapter messages the DB layer emits; the
+/// credential / TLS / listener cases are detected by ORA- code and message.
+#[must_use]
+pub fn classify_auth_mode(error: &str) -> AuthModeClass {
+    let lower = error.to_ascii_lowercase();
+
+    // Driver-unsupported enterprise auth modes. These come from the DB-layer
+    // adapter as precise typed `UnsupportedAuth` messages and will never succeed
+    // by changing credentials — they are a driver-capability gap.
+    let driver_unsupported = lower.contains("kerberos")
+        || lower.contains("radius/native mfa")
+        || lower.contains("radius")
+        || lower.contains("external/wallet auth without username and password");
+    if driver_unsupported {
+        return AuthModeClass::DriverUnsupported;
+    }
+
+    // Bad credentials: ORA-01017 / invalid username-password.
+    if lower.contains("ora-01017") || lower.contains("invalid username/password") {
+        return AuthModeClass::BadCredentials;
+    }
+
+    // TLS / TCPS transport failures, including an access token offered over a
+    // non-TLS transport (IAM requires TCPS — a transport failure, not a missing
+    // driver capability).
+    let tls = lower.contains("dpy-3001")
+        || lower.contains("requires a tls")
+        || lower.contains("requires a tls (tcps)")
+        || lower.contains("tcps")
+        || lower.contains("tls")
+        || (lower.contains("wallet") && !lower.contains("password"));
+    if tls {
+        return AuthModeClass::Tls;
+    }
+
+    // Listener / network / TNS resolution: never reached an auth step.
+    let listener = lower.contains("ora-12154")
+        || lower.contains("ora-12514")
+        || lower.contains("ora-12541")
+        || lower.contains("listener")
+        || lower.contains("could not resolve")
+        || lower.contains("tns");
+    if listener {
+        return AuthModeClass::Listener;
+    }
+
+    AuthModeClass::Other
+}
+
 fn connectivity_fix(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
     if lower.contains("proxy_auth") {
@@ -346,6 +438,7 @@ fn check_connectivity(ctx: &DoctorContext) -> CheckResult {
         return CheckResult::new(3, "Connectivity", CheckStatus::Fail, detail)
             .with_fix(fix)
             .with_failure_class(connectivity_failure_class(error))
+            .with_auth_mode(classify_auth_mode(error))
             .with_oracle_error(error);
     }
     match ctx.conn {
@@ -371,6 +464,7 @@ fn check_connectivity(ctx: &DoctorContext) -> CheckResult {
             )
             .with_fix(connectivity_fix(&e.to_string()))
             .with_failure_class(connectivity_failure_class(&e.to_string()))
+            .with_auth_mode(classify_auth_mode(&e.to_string()))
             .with_oracle_error(&e.to_string()),
         },
     }
@@ -1064,6 +1158,94 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("username plus credential_ref")
+        );
+    }
+
+    /// A5 (R4 acceptance) — the doctor distinguishes driver-unsupported auth
+    /// (Kerberos / RADIUS / passwordless external wallet) from bad-creds, TLS,
+    /// and listener failures, each with a precise typed [`AuthModeClass`]. This
+    /// is the load-bearing distinction: a driver-unsupported mode never succeeds
+    /// by retrying, whereas the other three are operator-fixable.
+    #[test]
+    fn doctor_classifies_auth_failure_modes_precisely() {
+        let cases = [
+            // Driver-unsupported enterprise auth (typed UnsupportedAuth from the
+            // DB adapter) — distinct from a credential / TLS / listener failure.
+            (
+                "Kerberos authentication is not supported by the published thin driver yet",
+                AuthModeClass::DriverUnsupported,
+            ),
+            (
+                "RADIUS/native MFA authentication is not supported by the published thin driver yet",
+                AuthModeClass::DriverUnsupported,
+            ),
+            (
+                "external/wallet auth without username and password is not supported by the published thin driver yet",
+                AuthModeClass::DriverUnsupported,
+            ),
+            // Bad credentials — the driver supports the mode, the secret was wrong.
+            (
+                "ORA-01017: invalid username/password; logon denied",
+                AuthModeClass::BadCredentials,
+            ),
+            // TLS / TCPS transport failures, including an IAM token offered over
+            // a non-TLS transport (requires TCPS — a transport failure, NOT a
+            // driver-capability gap).
+            (
+                "DPY-3001: access token authentication requires a TLS (TCPS) connection",
+                AuthModeClass::Tls,
+            ),
+            (
+                "TLS/TCPS error: wallet handshake failed",
+                AuthModeClass::Tls,
+            ),
+            // Listener / network / TNS resolution — never reached an auth step.
+            ("ORA-12541: TNS:no listener", AuthModeClass::Listener),
+            (
+                "ORA-12154: TNS:could not resolve the connect identifier specified",
+                AuthModeClass::Listener,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(
+                classify_auth_mode(error),
+                expected,
+                "auth-mode classification for {error:?}"
+            );
+        }
+
+        // And every category is mutually distinct (a driver-unsupported mode is
+        // never collapsed into bad-creds / TLS / listener).
+        use std::collections::HashSet;
+        let distinct: HashSet<_> = cases.iter().map(|(_, class)| *class).collect();
+        assert_eq!(
+            distinct.len(),
+            4,
+            "all four auth-mode classes must be represented and distinct"
+        );
+
+        // The classification is surfaced on the connectivity check itself.
+        let ctx = DoctorContext {
+            connection_error: Some(
+                "Kerberos authentication is not supported by the published thin driver yet"
+                    .to_owned(),
+            ),
+            ..DoctorContext::default()
+        };
+        let report = run_doctor(&ctx);
+        let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
+        assert_eq!(connectivity.status, CheckStatus::Fail);
+        assert_eq!(
+            connectivity.auth_mode,
+            Some(AuthModeClass::DriverUnsupported)
+        );
+        // Driver-unsupported auth carries no ORA- code (it never reached Oracle).
+        assert_eq!(connectivity.ora_code, None);
+        // It serializes into the machine-readable report for agent triage.
+        let serialized = serde_json::to_string(&report.to_json()).expect("json");
+        assert!(
+            serialized.contains("\"auth_mode\":\"driver_unsupported\""),
+            "{serialized}"
         );
     }
 

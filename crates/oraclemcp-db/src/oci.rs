@@ -1,8 +1,11 @@
 //! OCI / Oracle Cloud (Autonomous DB) connectivity hardening (plan §9.1; bead
-//! P1-11 / oracle-qmwz.2.11). This is **hop-2** (Oracle Net), independent of the
-//! MCP transport. Thin mode handles TCPS/wallet location directly where the
-//! published driver supports it; IAM database-token auth remains an explicit
-//! unsupported-auth path until the driver exposes the required connect hook.
+//! P1-11 / oracle-qmwz.2.11; A5). This is **hop-2** (Oracle Net), independent of
+//! the MCP transport. Thin mode handles TCPS/wallet location directly where the
+//! published driver supports it. OCI IAM database-token auth **is** supported by
+//! the pinned driver (`ConnectOptions::with_access_token`): once a token is
+//! fetched here it is wired through the adapter and sent as `AUTH_TOKEN`, always
+//! over TCPS (fail-closed on a plaintext transport). Fetching the token from OCI
+//! IAM stays an injected edge call ([`IamTokenSource`] / [`ensure_fresh_token`]).
 //! This layer hardens the cloud edge:
 //!
 //! - **Wallet discovery** — validate a downloaded ADB wallet directory has the
@@ -12,7 +15,10 @@
 //!   descriptors, and bare wallet aliases; **reject plaintext `tcp`** for ADB
 //!   (cloud requires TLS/mTLS).
 //! - **IAM token refresh** — a database-token (OCI IAM) refresh seam on a
-//!   monotonic-skew expiry check; the actual OCI SDK call is injected at the edge.
+//!   monotonic-skew expiry check; the actual OCI SDK call is injected at the
+//!   edge ([`IamTokenSource`]). The refreshed token is then carried in
+//!   [`OracleConnectOptions::iam_token`](crate::OracleConnectOptions) and wired
+//!   to the driver's `with_access_token` (TCPS-enforced) by the B2 adapter.
 //! - **Cloud status** — a summary `oracle_capabilities` can surface.
 //!
 //! The parsing/validation/refresh logic is pure (FS-free) so it is fully

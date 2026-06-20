@@ -215,6 +215,14 @@ fn profile_to_options_for_level(
         ssl_server_cert_dn: oci.as_ref().and_then(|o| o.ssl_server_cert_dn.clone()),
         use_sni: oci.as_ref().and_then(|o| o.use_sni),
         use_iam_token: oci.as_ref().is_some_and(|o| o.use_iam_token),
+        // The B2 adapter (oraclemcp_db) now wires an IAM database token through
+        // `with_access_token` (TCPS-enforced) whenever this field is `Some`. The
+        // token itself is fetched at the edge from OCI IAM via
+        // `oraclemcp_db::IamTokenSource` / `ensure_fresh_token` and injected here
+        // by the caller that owns the token lifecycle (proactive skew-based
+        // refresh); profile bootstrap never embeds a token. With `use_iam_token`
+        // set but no token yet injected, the adapter returns a precise setup
+        // error rather than attempting a password connect.
         iam_token: None,
         session_identity: profile
             .session_identity

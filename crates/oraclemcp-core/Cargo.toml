@@ -29,6 +29,12 @@ wait-timeout = "0.2"
 
 [dev-dependencies]
 rcgen = "0.13"
+# Compile-fail fixtures for the A9 capability-narrowing release gate. trybuild
+# is MIT OR Apache-2.0 (both already on the deny.toml allowlist). asupersync's
+# test-only `for_testing` constructor (gated behind `test-internals`) lets the
+# fixtures build a full-authority Cx to narrow from.
+trybuild = "1.0"
+asupersync = { workspace = true, features = ["test-internals"] }
 
 [lints]
 workspace = true

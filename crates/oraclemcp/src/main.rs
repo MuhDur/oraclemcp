@@ -2126,6 +2126,7 @@ mod tests {
                 detail: "failed".to_owned(),
                 fix: None,
                 failure_class: None,
+                auth_mode: None,
                 ora_code: None,
             }],
         };

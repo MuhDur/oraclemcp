@@ -13,7 +13,11 @@ use crate::error::DbError;
 use crate::serialize::{PageColumnCache, SerializeOptions, json_byte_len};
 use crate::types::OracleBind;
 
-fn query_checkpoint(cx: Option<&Cx>, phase: &'static str) -> Result<(), DbError> {
+/// Cancellation checkpoint that works for ANY capability row. Cancellation /
+/// budget state lives on `Cx` independent of the effect capabilities, so a
+/// read handler running under a narrowed `Cx<ReadPathCaps>` (A9) checkpoints
+/// exactly like one under the full row — no `SPAWN`/`REMOTE`/`RANDOM` needed.
+fn query_checkpoint<Caps>(cx: Option<&Cx<Caps>>, phase: &'static str) -> Result<(), DbError> {
     let Some(cx) = cx else {
         return Ok(());
     };
@@ -91,12 +95,21 @@ pub fn read_query(
     let fetch = caps.max_rows.saturating_add(1).max(1);
     let wrapped = paginated_sql(sql, offset, fetch);
     let rows = conn.query_rows_with_serialize_options(&wrapped, binds, serialize_opts)?;
-    query_response_from_rows_checked(None, rows, caps, offset, serialize_opts)
+    query_response_from_rows_checked(None::<&Cx>, rows, caps, offset, serialize_opts)
 }
 
-/// Cancellation-aware variant of [`read_query`].
-pub fn read_query_cx(
-    cx: &Cx,
+/// Cancellation-aware variant of [`read_query`], generic over the context's
+/// capability row (A9).
+///
+/// The read path is driven by `Cx::checkpoint_with` (cancellation/budget), which
+/// is available for every `Cx<Caps>`, and by the `dyn`-safe non-`_cx` connection
+/// methods — so this accepts a context narrowed to the read-path capability row
+/// (`oraclemcp_core::ReadPathCaps`: TIME + IO, no SPAWN/REMOTE/RANDOM) exactly as
+/// it accepts a full-authority one. The narrowing is the caller's structural
+/// guarantee; this function never needs spawn/remote/random and so does not
+/// require them in its bound.
+pub fn read_query_cx<Caps>(
+    cx: &Cx<Caps>,
     conn: &dyn OracleConnection,
     sql: &str,
     binds: &[OracleBind],
@@ -106,7 +119,9 @@ pub fn read_query_cx(
 ) -> Result<QueryResponse, DbError> {
     let fetch = caps.max_rows.saturating_add(1).max(1);
     let wrapped = paginated_sql(sql, offset, fetch);
-    let rows = conn.query_rows_with_serialize_options_cx(cx, &wrapped, binds, serialize_opts)?;
+    query_checkpoint(Some(cx), "oracle_db.query_rows.before")?;
+    let rows = conn.query_rows_with_serialize_options(&wrapped, binds, serialize_opts)?;
+    query_checkpoint(Some(cx), "oracle_db.query_rows.after")?;
     query_response_from_rows_checked(Some(cx), rows, caps, offset, serialize_opts)
 }
 
@@ -124,12 +139,13 @@ pub fn read_query_named(
     let fetch = caps.max_rows.saturating_add(1).max(1);
     let wrapped = paginated_sql(sql, offset, fetch);
     let rows = conn.query_rows_named_with_serialize_options(&wrapped, binds, serialize_opts)?;
-    query_response_from_rows_checked(None, rows, caps, offset, serialize_opts)
+    query_response_from_rows_checked(None::<&Cx>, rows, caps, offset, serialize_opts)
 }
 
-/// Cancellation-aware variant of [`read_query_named`].
-pub fn read_query_named_cx(
-    cx: &Cx,
+/// Cancellation-aware variant of [`read_query_named`], generic over the
+/// context's capability row (A9) — see [`read_query_cx`].
+pub fn read_query_named_cx<Caps>(
+    cx: &Cx<Caps>,
     conn: &dyn OracleConnection,
     sql: &str,
     binds: &[(String, OracleBind)],
@@ -139,8 +155,9 @@ pub fn read_query_named_cx(
 ) -> Result<QueryResponse, DbError> {
     let fetch = caps.max_rows.saturating_add(1).max(1);
     let wrapped = paginated_sql(sql, offset, fetch);
-    let rows =
-        conn.query_rows_named_with_serialize_options_cx(cx, &wrapped, binds, serialize_opts)?;
+    query_checkpoint(Some(cx), "oracle_db.query_rows_named.before")?;
+    let rows = conn.query_rows_named_with_serialize_options(&wrapped, binds, serialize_opts)?;
+    query_checkpoint(Some(cx), "oracle_db.query_rows_named.after")?;
     query_response_from_rows_checked(Some(cx), rows, caps, offset, serialize_opts)
 }
 
@@ -151,12 +168,12 @@ fn query_response_from_rows(
     offset: usize,
     serialize_opts: &SerializeOptions,
 ) -> QueryResponse {
-    query_response_from_rows_checked(None, rows, caps, offset, serialize_opts)
+    query_response_from_rows_checked(None::<&Cx>, rows, caps, offset, serialize_opts)
         .expect("non-cancellable query response construction cannot be cancelled")
 }
 
-fn query_response_from_rows_checked(
-    cx: Option<&Cx>,
+fn query_response_from_rows_checked<Caps>(
+    cx: Option<&Cx<Caps>>,
     rows: Vec<crate::types::OracleRow>,
     caps: QueryCaps,
     offset: usize,

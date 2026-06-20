@@ -414,12 +414,36 @@ mod driver {
         })
     }
 
+    /// Whether this profile's transport is TLS/TCPS, as far as we can tell
+    /// *before* opening the socket. An OCI IAM database token must only ever
+    /// travel over TCPS (it would otherwise be exposed in clear text), so we
+    /// fail closed here rather than relying solely on the driver's own
+    /// [`oracledb::Error::AccessTokenRequiresTcps`] check at connect time. A
+    /// connect string is treated as TLS when it uses the `tcps://` scheme, a
+    /// `PROTOCOL=TCPS` descriptor, or a wallet / explicit server-cert DN is
+    /// configured (all of which imply mTLS/TLS for the Oracle Net transport).
+    fn transport_is_tcps(opts: &OracleConnectOptions) -> bool {
+        let compact: String = opts
+            .connect_string
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        compact.starts_with("tcps://")
+            || compact.contains("protocol=tcps")
+            || opts.wallet_location.is_some()
+            || opts.ssl_server_cert_dn.is_some()
+    }
+
     pub(super) fn to_connect_options(
         opts: &OracleConnectOptions,
     ) -> Result<oracledb::ConnectOptions, DbError> {
         opts.auth_adapter
             .validate()
             .map_err(|err| DbError::UnsupportedAuth(err.to_string()))?;
+        // Enterprise auth modes the published thin driver cannot satisfy. These
+        // are DRIVER-UNSUPPORTED, distinct from a bad credential, a TLS/wallet
+        // failure, or a listener error — the doctor classifies them apart.
         match &opts.auth_adapter {
             AuthAdapter::Kerberos { .. } => {
                 return Err(DbError::UnsupportedAuth(
@@ -441,27 +465,59 @@ mod driver {
             }
             AuthAdapter::Password | AuthAdapter::Proxy { .. } => {}
         }
-        if opts.use_iam_token || opts.iam_token.is_some() {
-            return Err(DbError::UnsupportedAuth(
-                "OCI IAM database-token auth is not supported by the published thin driver yet"
-                    .to_owned(),
-            ));
-        }
         if opts.external_auth {
             return Err(DbError::UnsupportedAuth(
                 "external/wallet auth without username and password is not supported by the published thin driver yet"
                     .to_owned(),
             ));
         }
+        // OCI IAM database-token auth. The pinned driver DOES support it via
+        // `ConnectOptions::with_access_token` (the token is sent as `AUTH_TOKEN`
+        // with no password verifier). It is only wireable once a token has been
+        // fetched from OCI IAM; `use_iam_token` without a token means the
+        // token-source seam (oraclemcp_db::IamTokenSource / ensure_fresh_token)
+        // has not run yet — a setup error, not a driver-unsupported one.
+        let iam_token = match (opts.use_iam_token, opts.iam_token.as_deref()) {
+            (_, Some(token)) => Some(token),
+            (true, None) => {
+                return Err(DbError::UnsupportedAuth(
+                    "OCI IAM database-token auth is configured (use_iam_token) but no token was \
+                     fetched; obtain one via the IAM token source before connecting"
+                        .to_owned(),
+                ));
+            }
+            (false, None) => None,
+        };
+        // A database access token must never travel in clear text. Fail closed
+        // on a non-TCPS transport BEFORE we hand the token to the driver (the
+        // driver also rejects this, but defense-in-depth keeps the token off a
+        // plaintext socket and gives a precise typed error).
+        if iam_token.is_some() && !transport_is_tcps(opts) {
+            return Err(DbError::UnsupportedAuth(
+                "OCI IAM database-token auth requires a TLS (TCPS) transport; use a tcps:// \
+                 connect string or a wallet-backed TLS descriptor"
+                    .to_owned(),
+            ));
+        }
         let user = opts.username.as_deref().ok_or_else(|| {
             DbError::UnsupportedAuth("thin mode currently requires an explicit username".to_owned())
         })?;
-        let password = opts.password.as_deref().ok_or_else(|| {
-            DbError::UnsupportedAuth("thin mode currently requires an explicit password".to_owned())
-        })?;
+        // Token auth carries the credential in the token itself, so no password
+        // is required (or used) when an IAM token is present.
+        let password = match iam_token {
+            Some(_) => "",
+            None => opts.password.as_deref().ok_or_else(|| {
+                DbError::UnsupportedAuth(
+                    "thin mode currently requires an explicit password".to_owned(),
+                )
+            })?,
+        };
         let identity = client_identity(opts.session_identity.as_ref())?;
         let mut connect_options =
             oracledb::ConnectOptions::new(&opts.connect_string, user, password, identity);
+        if let Some(token) = iam_token {
+            connect_options = connect_options.with_access_token(token.to_owned());
+        }
         // session_identity.edition must be sent during authentication so no user
         // SQL runs under the default edition before the requested edition applies.
         if let Some(edition) = opts
@@ -2105,6 +2161,82 @@ mod tests {
         let err = driver::to_connect_options(&opts).expect_err("unsupported");
         assert!(matches!(err, DbError::UnsupportedAuth(_)));
         assert!(err.to_string().contains("RADIUS/native MFA"));
+    }
+
+    #[test]
+    fn iam_token_over_tcps_is_wired_through_with_access_token() {
+        // A5: the pinned driver supports OCI IAM database-token auth. With a
+        // fetched token and a TCPS transport, to_connect_options succeeds and
+        // sets the driver's access token (no password is required or used).
+        let opts = OracleConnectOptions {
+            connect_string: "tcps://adb.eu.oraclecloud.com:1522/svc_high".to_owned(),
+            username: Some("APP_USER".to_owned()),
+            password: None,
+            use_iam_token: true,
+            iam_token: Some("iam.jwt.token".to_owned()),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("iam token connect options");
+        assert!(
+            connect.access_token.is_some(),
+            "the IAM token must be wired through with_access_token"
+        );
+        // The token must never leak through Debug.
+        let rendered = format!("{:?}", connect.access_token);
+        assert!(!rendered.contains("iam.jwt.token"), "{rendered}");
+    }
+
+    #[test]
+    fn iam_token_over_non_tcps_is_refused_fail_closed() {
+        // A5: an IAM token must never travel over a plaintext transport. We fail
+        // closed BEFORE handing the token to the driver.
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1".to_owned(),
+            username: Some("APP_USER".to_owned()),
+            use_iam_token: true,
+            iam_token: Some("iam.jwt.token".to_owned()),
+            ..Default::default()
+        };
+
+        let err = driver::to_connect_options(&opts).expect_err("non-tcps token refused");
+        assert!(matches!(err, DbError::UnsupportedAuth(_)));
+        assert!(err.to_string().contains("TLS (TCPS)"), "{err}");
+        // The refusal must not echo the token.
+        assert!(!err.to_string().contains("iam.jwt.token"), "{err}");
+    }
+
+    #[test]
+    fn iam_token_wired_via_wallet_backed_tls_descriptor() {
+        // A wallet-backed connection is TLS, so an IAM token is allowed even
+        // without an explicit tcps:// scheme.
+        let opts = OracleConnectOptions {
+            connect_string: "adb_high".to_owned(),
+            username: Some("APP_USER".to_owned()),
+            wallet_location: Some("/wallets/adb".into()),
+            iam_token: Some("iam.jwt.token".to_owned()),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("wallet-backed token options");
+        assert!(connect.access_token.is_some());
+    }
+
+    #[test]
+    fn use_iam_token_without_a_fetched_token_is_a_setup_error() {
+        // use_iam_token set but no token fetched yet: a setup error pointing at
+        // the IAM token-source seam, NOT a driver-unsupported error.
+        let opts = OracleConnectOptions {
+            connect_string: "tcps://adb.eu.oraclecloud.com:1522/svc_high".to_owned(),
+            username: Some("APP_USER".to_owned()),
+            use_iam_token: true,
+            iam_token: None,
+            ..Default::default()
+        };
+
+        let err = driver::to_connect_options(&opts).expect_err("no token fetched");
+        assert!(matches!(err, DbError::UnsupportedAuth(_)));
+        assert!(err.to_string().contains("no token was fetched"), "{err}");
     }
 
     #[test]

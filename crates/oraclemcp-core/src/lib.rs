@@ -18,6 +18,7 @@
 pub mod admin_auth;
 pub mod admission;
 pub mod capabilities;
+pub mod capability;
 pub mod connect;
 pub mod custom_tools;
 pub mod doctor;
@@ -49,6 +50,9 @@ pub use admission::{AdmissionController, AdmissionPermit};
 pub use capabilities::{
     CapabilitiesReport, ConnectionStatus, FeatureTiers, OperatingLevelReport, PROTOCOL_VERSION,
 };
+pub use capability::{
+    PrivilegedEffect, ReadPathCaps, narrow_to_read_path, requires_privileged_effect,
+};
 pub use connect::{SessionContext, build_session_context, profile_to_options, session_level_state};
 pub use custom_tools::{
     CustomToolCatalog, CustomToolDef, CustomToolExecutor, LoadError, LoadedTool, OutputMode,
@@ -56,7 +60,10 @@ pub use custom_tools::{
     enforce_signature, execute_custom_tool, load_tools, load_tools_for_profile, parse_tools_file,
     register_custom_tools, sign, verify_signature,
 };
-pub use doctor::{CheckResult, CheckStatus, DoctorContext, DoctorReport, run_doctor};
+pub use doctor::{
+    AuthModeClass, CheckResult, CheckStatus, DoctorContext, DoctorReport, classify_auth_mode,
+    run_doctor,
+};
 pub use http::{
     HttpRequest, HttpResponse, HttpTransportConfig, MCP_PATH, OAuthEnforcement,
     PROTECTED_RESOURCE_METADATA_PATH, ScopeGrant, handle_http_request, serve_http, serve_https,

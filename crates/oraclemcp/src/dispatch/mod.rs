@@ -20,7 +20,7 @@ use oraclemcp_auth::apply_oauth_scopes;
 use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::{
     CustomToolCatalog, CustomToolExecutor, DispatchContext, DispatchFuture, ToolBody, ToolDispatch,
-    execute_custom_tool,
+    execute_custom_tool, narrow_to_read_path,
 };
 use oraclemcp_db::{
     DbError, DbmsOutput, OracleBind, OracleConnection, OracleConnectionInfo, QueryCaps,
@@ -3089,8 +3089,10 @@ impl CustomToolExecutor for ReadOnlyCustomToolExecutor<'_> {
         };
         ensure_read_only(&sql)?;
         match self.cx {
+            // A9: operator-defined read tools also run under the narrowed
+            // read-path capability row (see the oracle_query arm).
             Some(cx) => read_query_named_cx(
-                cx,
+                &narrow_to_read_path(cx),
                 self.conn,
                 &sql,
                 binds,
@@ -3522,8 +3524,14 @@ impl OracleDispatcher {
                         .collect::<Result<Vec<_>, _>>()?;
                     let offset = oraclemcp_db::cursor_to_offset(a.cursor.as_deref());
                     match cx {
+                        // A9: the read path runs under a Cx narrowed to the
+                        // read-path capability row (TIME + IO; no SPAWN / REMOTE
+                        // / RANDOM). `read_query_cx` is generic over the row and
+                        // needs none of the dropped effects, so this is a
+                        // zero-cost structural narrowing layered ABOVE the
+                        // fail-closed classifier + level gate.
                         Some(cx) => read_query_cx(
-                            cx,
+                            &narrow_to_read_path(cx),
                             conn,
                             &executed_sql,
                             &binds,
