@@ -13,6 +13,15 @@ categories.workspace = true
 name = "oraclemcp"
 path = "src/main.rs"
 
+[features]
+default = []
+# A7 (oraclemcp-040-epic-wp-a-ia1.7): the consolidated trust/safety suite's
+# LIVE assertions need a reachable Oracle. This forwards to the canonical
+# `oraclemcp-db/live-xe` gate so `cargo test -p oraclemcp --features live-xe`
+# turns on the same DB-backed coverage; without it the live tests are compiled
+# out and the deterministic coverage still runs green offline.
+live-xe = ["oraclemcp-db/live-xe"]
+
 [dependencies]
 oraclemcp-core = { path = "../oraclemcp-core", version = "0.3.0" }
 oraclemcp-db = { path = "../oraclemcp-db", version = "0.3.0" }

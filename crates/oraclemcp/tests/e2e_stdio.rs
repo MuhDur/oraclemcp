@@ -84,7 +84,13 @@ impl OracleConnection for SuccessfulQueryMock {
             )],
         }])
     }
-    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, sql: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        // A1: the read path lazily issues `SET TRANSACTION READ ONLY` as a
+        // defense-in-depth backstop. Accept exactly that statement; ANY other
+        // execute on the read path is still an error (a read must not write).
+        if sql == oraclemcp_guard::SET_TRANSACTION_READ_ONLY {
+            return Ok(0);
+        }
         Err(DbError::Execute("unexpected execute".to_owned()))
     }
     async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {

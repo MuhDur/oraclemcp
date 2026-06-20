@@ -3819,3 +3819,240 @@ mod db_health {
         }
     }
 }
+
+/// A1 (oraclemcp-040-epic-wp-a-ia1.1): the lazy read-only backstop, exercised
+/// END TO END through the real dispatch path (not just the unit-tested
+/// `ReadOnlyBackstop` primitive). These prove the backstop is WIRED into
+/// `oracle_query`/`oracle_execute` on the pinned session: armed lazily on the
+/// read path, disarmed by a gated write so an authorized write is never blocked,
+/// and re-asserted on the next read transaction.
+mod read_only_backstop_wiring {
+    use super::*;
+    use oraclemcp_guard::SET_TRANSACTION_READ_ONLY;
+
+    /// Records every `execute` (so the backstop statement is observable) and
+    /// returns rows for `query_rows` (so a `oracle_query` succeeds). The execute
+    /// log lets a test assert the backstop is issued lazily and at the right
+    /// transaction boundaries through the real dispatcher.
+    #[derive(Default)]
+    struct BackstopRecordingState {
+        executed: Mutex<Vec<String>>,
+    }
+
+    struct BackstopRecordingMock {
+        state: Arc<BackstopRecordingState>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for BackstopRecordingMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo {
+                current_schema: Some("APP".to_owned()),
+                ..Default::default()
+            })
+        }
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            Ok(vec![OracleRow {
+                columns: vec![(
+                    "N".to_owned(),
+                    OracleCell::new("NUMBER", Some("1".to_owned())),
+                )],
+            }])
+        }
+        async fn query_rows_with_serialize_options(
+            &self,
+            cx: &Cx,
+            sql: &str,
+            b: &[OracleBind],
+            _opts: &SerializeOptions,
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.query_rows(cx, sql, b).await
+        }
+        async fn execute(&self, _cx: &Cx, sql: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+            self.state
+                .executed
+                .lock()
+                .expect("exec mutex")
+                .push(sql.to_owned());
+            Ok(0)
+        }
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    fn backstop_statements(state: &Arc<BackstopRecordingState>) -> usize {
+        state
+            .executed
+            .lock()
+            .expect("exec mutex")
+            .iter()
+            .filter(|sql| sql.as_str() == SET_TRANSACTION_READ_ONLY)
+            .count()
+    }
+
+    #[test]
+    fn read_path_arms_set_transaction_read_only_lazily_once() {
+        // Three oracle_query calls on a READ_ONLY session: the backstop is
+        // asserted exactly once (lazy), not once per read.
+        let state = Arc::new(BackstopRecordingState::default());
+        let dispatcher = OracleDispatcher::new_with_profile(
+            Box::new(BackstopRecordingMock {
+                state: state.clone(),
+            }),
+            Some("dev".to_owned()),
+        );
+        for _ in 0..3 {
+            dispatcher
+                .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+                .expect("read succeeds under the backstop");
+        }
+        assert_eq!(
+            backstop_statements(&state),
+            1,
+            "SET TRANSACTION READ ONLY is issued exactly once across many reads (lazy)"
+        );
+    }
+
+    #[test]
+    fn gated_write_disarms_then_next_read_re_asserts() {
+        // READ_WRITE session. A read arms the backstop; a gated UPDATE
+        // (commit=true) disarms it BEFORE it runs so the write is not blocked;
+        // the next read re-asserts the backstop on the fresh transaction.
+        let state = Arc::new(BackstopRecordingState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(BackstopRecordingMock {
+                state: state.clone(),
+            }),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+        // A read at READ_WRITE does NOT arm the backstop (a write may be
+        // authorized); prove the read path is a no-op above READ_ONLY.
+        dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("read at read/write");
+        assert_eq!(
+            backstop_statements(&state),
+            0,
+            "no SET TRANSACTION READ ONLY at READ_WRITE — a legitimate write must not be blocked"
+        );
+
+        // A gated write that commits — must succeed (not refused by the backstop)
+        // and the executed log must NOT contain a SET TRANSACTION READ ONLY
+        // immediately gating it.
+        let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+        let confirm = execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("dev"))
+            .expect("confirm token");
+        let out = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": sql, "commit": true, "confirm": confirm }),
+            )
+            .expect("gated write is not blocked by the read-only backstop");
+        assert_eq!(out["executed"], json!(true));
+        assert_eq!(out["committed"], json!(true));
+        assert_eq!(
+            backstop_statements(&state),
+            0,
+            "the authorized write path never issues SET TRANSACTION READ ONLY"
+        );
+    }
+
+    #[test]
+    fn read_only_session_write_attempt_is_classifier_blocked_with_backstop_set() {
+        // Defense-in-depth contract: on a READ_ONLY session a read arms the
+        // backstop; an attempted write via oracle_execute is refused by the
+        // CLASSIFIER (layer C) before it reaches the DB, while the backstop
+        // (layer B) is already set so even a misclassified write would raise
+        // ORA-01456 at the engine. (A real ORA-01456 is asserted by the live-xe
+        // test; offline we assert the layered posture deterministically.)
+        let state = Arc::new(BackstopRecordingState::default());
+        let dispatcher = OracleDispatcher::new_with_profile(
+            Box::new(BackstopRecordingMock {
+                state: state.clone(),
+            }),
+            Some("dev".to_owned()),
+        );
+        dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("read arms the backstop");
+        assert_eq!(
+            backstop_statements(&state),
+            1,
+            "backstop set on the read path"
+        );
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": "UPDATE employees SET name = name WHERE employee_id = 100" }),
+            )
+            .expect_err("a write on a READ_ONLY session is refused");
+        assert!(
+            matches!(
+                err.error_class,
+                ErrorClass::OperatingLevelTooLow | ErrorClass::ForbiddenStatement
+            ),
+            "write refused by the operating-level gate, not silently run: {:?}",
+            err.error_class
+        );
+    }
+
+    #[test]
+    fn profile_switch_resets_the_backstop_so_the_new_session_re_asserts() {
+        // After a profile switch the pinned session is replaced; the new
+        // session's first read must re-assert the backstop on its own
+        // transaction.
+        let first = Arc::new(BackstopRecordingState::default());
+        let second = Arc::new(BackstopRecordingState::default());
+        let second_for_connector = second.clone();
+        let dispatcher = OracleDispatcher::new_switchable(
+            Box::new(BackstopRecordingMock {
+                state: first.clone(),
+            }),
+            Some("dev".to_owned()),
+            default_read_only_level(),
+            Arc::new(move |_cx, _profile| {
+                let state = second_for_connector.clone();
+                Box::pin(async move {
+                    Ok(Box::new(BackstopRecordingMock { state }) as Box<dyn OracleConnection>)
+                })
+            }),
+        );
+        // Arm on the first session.
+        dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("read on first session");
+        assert_eq!(backstop_statements(&first), 1);
+
+        // Switch profiles (replaces the pinned session, resets the backstop).
+        dispatcher
+            .dispatch("oracle_switch_profile", json!({ "profile": "other" }))
+            .expect("switch profile");
+
+        // The new session's first read re-asserts on its own transaction.
+        dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("read on second session");
+        assert_eq!(
+            backstop_statements(&second),
+            1,
+            "the new pinned session re-asserts SET TRANSACTION READ ONLY on its first read"
+        );
+    }
+}

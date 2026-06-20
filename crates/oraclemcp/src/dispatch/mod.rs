@@ -183,6 +183,11 @@ struct DispatcherState {
     custom_catalog: CustomToolCatalog,
     execute_approved_tokens: HashMap<String, ExecuteApprovedGrant>,
     patch_previews: HashMap<String, PatchPreviewEntry>,
+    /// A1: lazy read-only transaction backstop for the pinned/primary session.
+    /// Scoped to `conn` only (the stateless metadata pool relies on the
+    /// least-privilege DB user, A2). Re-asserted at the start of every read
+    /// transaction; disarmed by a gated write and reset on a profile switch.
+    read_only_backstop: ReadOnlyBackstop,
 }
 
 struct ExecuteApprovedGrant {
@@ -265,6 +270,7 @@ impl OracleDispatcher {
                 custom_catalog: CustomToolCatalog::default(),
                 execute_approved_tokens: HashMap::new(),
                 patch_previews: HashMap::new(),
+                read_only_backstop: ReadOnlyBackstop::new(),
             }),
             connector: None,
             stateless_connector: None,
@@ -333,6 +339,7 @@ impl OracleDispatcher {
                 custom_catalog,
                 execute_approved_tokens: HashMap::new(),
                 patch_previews: HashMap::new(),
+                read_only_backstop: ReadOnlyBackstop::new(),
             }),
             connector: Some(connector),
             stateless_connector: stateless.connector,
@@ -801,6 +808,9 @@ use args::*;
 
 mod audit_marker;
 use audit_marker::with_audit_marker;
+
+mod read_only_backstop;
+use read_only_backstop::ReadOnlyBackstop;
 
 /// Map a JSON value to an [`OracleBind`]. Agent argument values are always
 /// bound, never interpolated. Unsupported JSON (arrays/objects) is an
@@ -3752,6 +3762,9 @@ impl OracleDispatcher {
             state.custom_catalog = new_custom_catalog;
             state.execute_approved_tokens.clear();
             state.patch_previews.clear();
+            // A1: the pinned session was replaced; the new session's transaction
+            // is fresh, so re-assert the read-only backstop on its first read.
+            state.read_only_backstop.reset();
             if let Value::Object(map) = &mut response {
                 map.insert(
                     "custom_tool_count".to_owned(),
@@ -3824,6 +3837,11 @@ impl OracleDispatcher {
             let execute_args = execute_approved_args(&mut state, &scoped_level, a)?;
             let active_profile = state.active_profile.clone();
             let agent_identity = audit_agent_identity(active_profile.as_deref());
+            // A1: a gated write commits/rolls back the pinned session's
+            // transaction, so disarm the read-only backstop before it runs (the
+            // authorized write must never be refused with ORA-01456) and let the
+            // next read re-assert it on the fresh transaction.
+            state.read_only_backstop.disarm();
             let conn: &dyn OracleConnection = state.conn.as_ref();
             return execute_sql(
                 cx,
@@ -3840,6 +3858,8 @@ impl OracleDispatcher {
             let a: DeployDdlArgs = parse_args(name, args)?;
             let active_profile = state.active_profile.clone();
             let agent_identity = audit_agent_identity(active_profile.as_deref());
+            // A1: see execute_approved — disarm before a gated write/DDL.
+            state.read_only_backstop.disarm();
             let conn: &dyn OracleConnection = state.conn.as_ref();
             return deploy_ddl(
                 cx,
@@ -3855,6 +3875,59 @@ impl OracleDispatcher {
         if tool == "read_patch_preview" {
             let a: ReadPatchPreviewArgs = parse_args(name, args)?;
             return read_patch_preview(&state, name, a);
+        }
+        // A1: the remaining write-class tools (oracle_execute and the DDL/source
+        // mutators) run a gated write on the pinned session that commits or rolls
+        // back, ending the read-only transaction. Disarm the backstop BEFORE the
+        // immutable `conn` borrow below so the authorized write is not refused
+        // with ORA-01456 and the next read re-asserts the backstop afresh. Pure
+        // read/dictionary tools leave the backstop untouched (the read arm arms
+        // it lazily). This is the only place the pinned session is mutated, so it
+        // is the precise transaction boundary.
+        if matches!(
+            tool,
+            "oracle_execute"
+                | "oracle_compile_object"
+                | "oracle_create_or_replace"
+                | "oracle_patch_source"
+        ) {
+            state.read_only_backstop.disarm();
+        }
+        // A1: read path. For oracle_query (a SELECT/WITH on the pinned session),
+        // lazily ensure SET TRANSACTION READ ONLY is in force so a MISCLASSIFIED
+        // write would still hit ORA-01456 from the engine. `ensure_armed` is a
+        // no-op when the effective level is above READ_ONLY (a write may be
+        // authorized) or when already armed (no per-read round trip), and it
+        // fails closed if the statement cannot apply.
+        //
+        // Guard-before-I/O: we run the read-only classifier on the (marked) SQL
+        // here FIRST and only arm the backstop when it passes. A refused
+        // statement therefore never issues the backstop round trip (or any DB
+        // I/O) — the arm below re-derives the identical structured refusal. This
+        // is done before the immutable `conn` borrow, via a disjoint split of the
+        // guard's fields. The marking/gate are pure (no DB I/O); the arm re-runs
+        // them on the same text so the read still classifies == executes.
+        if tool == "oracle_query"
+            && let Ok(peek) = parse_args::<QueryArgs>(name, args.clone())
+        {
+            let marked =
+                with_audit_marker(&peek.sql, state.active_profile.as_deref(), "oracle_query");
+            // Only arm when the statement is a provable read; otherwise leave the
+            // backstop untouched so the refusal arm does no DB I/O.
+            if ensure_read_only(&marked).is_ok() {
+                let DispatcherState {
+                    conn,
+                    read_only_backstop,
+                    ..
+                } = &mut *state;
+                // Consult the effective level that governs THIS request
+                // (scoped_level folds in any OAuth scope, which can only LOWER
+                // the level — so this arms at least as often as the unscoped
+                // level, never less).
+                read_only_backstop
+                    .ensure_armed(cx, conn.as_ref(), &scoped_level)
+                    .await?;
+            }
         }
         let conn: &dyn OracleConnection = state.conn.as_ref();
         let metadata_conn: &dyn OracleConnection = state
