@@ -16,7 +16,7 @@ use std::sync::Mutex;
 
 use thiserror::Error;
 
-use crate::record::{AuditEntryDraft, AuditRecord, GENESIS_HASH};
+use crate::record::{AuditEntryDraft, AuditRecord, GENESIS_HASH, SigningKey};
 
 /// Audit sink errors.
 #[derive(Debug, Error)]
@@ -136,18 +136,25 @@ struct ChainState {
 }
 
 /// The audit orchestrator: assigns monotonic sequence numbers, maintains the
-/// hash chain, and enforces fsync-before-execute for durable records.
+/// hash chain, signs each record with a keyed MAC, and enforces
+/// fsync-before-execute for durable records.
 pub struct Auditor {
     sink: Box<dyn AuditSink>,
+    /// The keyed MAC identity. Always present — a signed chain is the point of
+    /// the auditor; construction is the place to fail closed if no key is
+    /// configured (the binary does this before any operating level above
+    /// ReadOnly is reachable).
+    key: SigningKey,
     state: Mutex<ChainState>,
 }
 
 impl Auditor {
-    /// A new auditor over the given sink.
+    /// A new signing auditor over the given sink and keyed MAC identity.
     #[must_use]
-    pub fn new(sink: Box<dyn AuditSink>) -> Self {
+    pub fn new(sink: Box<dyn AuditSink>, key: SigningKey) -> Self {
         Auditor {
             sink,
+            key,
             state: Mutex::new(ChainState {
                 seq: 0,
                 last_hash: GENESIS_HASH.to_owned(),
@@ -175,7 +182,8 @@ impl Auditor {
             return Err(AuditError::Poisoned);
         }
         let seq = state.seq + 1;
-        let record = AuditRecord::chained(draft, seq, &state.last_hash, timestamp);
+        let record =
+            AuditRecord::chained_signed(draft, seq, &state.last_hash, timestamp, &self.key);
         self.sink.append(&record)?;
         if durable {
             // The seq=N line is now in the byte stream but not yet durable. If
@@ -205,6 +213,10 @@ mod tests {
     use crate::record::{AuditDecision, AuditOutcome};
     use std::sync::Arc;
 
+    fn test_key() -> SigningKey {
+        SigningKey::new("test", b"sink-test-key".to_vec())
+    }
+
     fn draft(sql: &str, danger: &str) -> AuditEntryDraft {
         AuditEntryDraft {
             agent_identity: "agent".to_owned(),
@@ -223,7 +235,7 @@ mod tests {
         // flushed (fsynced) before append() returns, so a kill between this and
         // the (separate) execute leaves the log written and the DB untouched.
         let sink = Arc::new(MemoryAuditSink::new());
-        let auditor = Auditor::new(Box::new(SharedSink(sink.clone())));
+        let auditor = Auditor::new(Box::new(SharedSink(sink.clone())), test_key());
         auditor
             .append(
                 &draft("DELETE FROM t WHERE id=1", "GUARDED"),
@@ -238,7 +250,7 @@ mod tests {
     #[test]
     fn read_append_is_not_fsynced_per_call() {
         let sink = Arc::new(MemoryAuditSink::new());
-        let auditor = Auditor::new(Box::new(SharedSink(sink.clone())));
+        let auditor = Auditor::new(Box::new(SharedSink(sink.clone())), test_key());
         auditor
             .append(&draft("SELECT 1 FROM dual", "SAFE"), "t0".to_owned(), false)
             .expect("append");
@@ -253,7 +265,7 @@ mod tests {
     #[test]
     fn chain_links_and_increments_seq() {
         let sink = Arc::new(MemoryAuditSink::new());
-        let auditor = Auditor::new(Box::new(SharedSink(sink.clone())));
+        let auditor = Auditor::new(Box::new(SharedSink(sink.clone())), test_key());
         let r1 = auditor
             .append(&draft("SELECT 1 FROM dual", "SAFE"), "t0".to_owned(), false)
             .unwrap();
@@ -276,7 +288,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("audit.jsonl");
         {
-            let auditor = Auditor::new(Box::new(FileAuditSink::open(&path).expect("open")));
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open")),
+                test_key(),
+            );
             auditor
                 .append(&draft("SELECT 1 FROM dual", "SAFE"), "t0".to_owned(), true)
                 .unwrap();
@@ -306,7 +321,7 @@ mod tests {
         // poison instead: the failing call Errs, and every subsequent append
         // fails closed (no record with a duplicate seq is ever appended).
         let sink = Arc::new(FlushFailsOnceSink::default());
-        let auditor = Auditor::new(Box::new(SharedFlakySink(sink.clone())));
+        let auditor = Auditor::new(Box::new(SharedFlakySink(sink.clone())), test_key());
 
         // First durable append: the record is written, then flush() fails.
         let first = auditor.append(

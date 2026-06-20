@@ -3071,3 +3071,119 @@ fn cancellation_after_mutating_execute_rolls_back_dirty_session() {
         "cancelled dirty session must not commit"
     );
 }
+
+/// A8: the hash-chained, keyed-MAC auditor is wired into the SERVED dispatch
+/// path (not just the standalone `oracle_query_execute` helper). These prove the
+/// wiring end to end: writes/DDL and escalations are chained; pure reads are not.
+mod audit_wiring {
+    use super::*;
+    use oraclemcp_audit::{
+        AuditError, AuditOutcome, AuditRecord, AuditSink, MemoryAuditSink, SigningKey,
+    };
+    use std::sync::Arc;
+
+    /// Share one `MemoryAuditSink` between the `Auditor` (which owns a
+    /// `Box<dyn AuditSink>`) and the test (which inspects the records).
+    struct SharedSink(Arc<MemoryAuditSink>);
+    impl AuditSink for SharedSink {
+        fn append(&self, r: &AuditRecord) -> Result<(), AuditError> {
+            self.0.append(r)
+        }
+        fn flush(&self) -> Result<(), AuditError> {
+            self.0.flush()
+        }
+    }
+
+    fn auditor_with_sink() -> (Arc<Auditor>, Arc<MemoryAuditSink>) {
+        let sink = Arc::new(MemoryAuditSink::new());
+        let key = SigningKey::new("test-key", b"0123456789abcdef0123456789abcdef".to_vec());
+        let auditor = Arc::new(Auditor::new(Box::new(SharedSink(sink.clone())), key));
+        (auditor, sink)
+    }
+
+    /// Ceiling permits DDL but the session starts read-only, so a level increase
+    /// is gated by step-up (the path that A8 must audit).
+    fn escalatable_read_only() -> SessionLevelState {
+        SessionLevelState::new(OperatingLevel::Ddl, false)
+    }
+
+    fn dispatcher_with(level: SessionLevelState, auditor: Arc<Auditor>) -> OracleDispatcher {
+        OracleDispatcher::new_switchable(
+            Box::new(OneRowMock),
+            Some("dev".to_owned()),
+            level,
+            Arc::new(|_| Ok(Box::new(OneRowMock))),
+        )
+        .with_auditor(auditor)
+    }
+
+    #[test]
+    fn served_write_appends_pending_then_signed_outcome() {
+        let (auditor, sink) = auditor_with_sink();
+        let dispatcher = dispatcher_with(ddl_level(), auditor);
+        let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+        let confirm = execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("dev"))
+            .expect("confirm token");
+        let out = dispatcher
+            .dispatch("execute_approved", json!({ "sql": sql, "token": confirm }))
+            .expect("write dispatches");
+        assert!(out.is_object());
+
+        let recs = sink.records();
+        assert_eq!(
+            recs.len(),
+            2,
+            "a served write logs Pending then its outcome"
+        );
+        assert_eq!(recs[0].outcome, AuditOutcome::Pending);
+        assert_eq!(recs[1].outcome, AuditOutcome::Succeeded);
+        // Hash chain links pre -> post.
+        assert_eq!(recs[1].prev_hash, recs[0].entry_hash);
+        // Every served record is signed by the keyed MAC (not forgeable by a
+        // bare recompute-from-genesis).
+        assert!(recs[0].signature.is_some(), "pre record is signed");
+        assert!(recs[1].signature.is_some(), "post record is signed");
+        assert_eq!(recs[1].key_id.as_deref(), Some("test-key"));
+        // The SQL bytes are never stored verbatim — only the digest + preview.
+        assert!(recs[1].sql_sha256.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn served_read_is_not_audited() {
+        let (auditor, sink) = auditor_with_sink();
+        let dispatcher = dispatcher_with(ddl_level(), auditor);
+        let _ = dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("read dispatches");
+        assert!(
+            sink.records().is_empty(),
+            "pure reads must not touch the audit chain"
+        );
+    }
+
+    #[test]
+    fn session_level_escalation_is_audited() {
+        let (auditor, sink) = auditor_with_sink();
+        let dispatcher = dispatcher_with(escalatable_read_only(), auditor);
+        // A preview mints the confirmation token; apply (execute=true) escalates.
+        let confirm = session_level_confirmation_token(Some("dev"), OperatingLevel::ReadWrite, 60);
+        let out = dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({
+                    "level": "READ_WRITE",
+                    "ttl_seconds": 60,
+                    "execute": true,
+                    "confirm": confirm,
+                }),
+            )
+            .expect("escalation dispatches");
+        assert_eq!(out["changed"], json!(true), "escalation applied");
+
+        let recs = sink.records();
+        assert_eq!(recs.len(), 1, "a level increase logs exactly one record");
+        assert_eq!(recs[0].tool, "oracle_set_session_level");
+        assert_eq!(recs[0].outcome, AuditOutcome::Succeeded);
+        assert!(recs[0].signature.is_some(), "escalation record is signed");
+    }
+}

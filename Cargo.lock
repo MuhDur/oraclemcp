@@ -1401,6 +1401,7 @@ dependencies = [
  "asupersync",
  "clap",
  "getrandom 0.2.17",
+ "oraclemcp-audit",
  "oraclemcp-auth",
  "oraclemcp-config",
  "oraclemcp-core",

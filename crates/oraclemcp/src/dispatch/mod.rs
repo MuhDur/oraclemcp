@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use asupersync::Cx;
+use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, Auditor};
 use oraclemcp_auth::apply_oauth_scopes;
 use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::{
@@ -183,6 +184,12 @@ pub struct OracleDispatcher {
     connector: Option<Arc<ProfileConnector>>,
     stateless_connector: Option<Arc<ProfileStatelessConnector>>,
     custom_loader: Option<Arc<CustomToolLoader>>,
+    /// Out-of-band, hash-chained, keyed-MAC auditor. Constructed once in server
+    /// wiring; `None` only when no operating level above ReadOnly is reachable
+    /// (so no write/escalation can ever occur). Every Guarded/Destructive write
+    /// (`oracle_execute`/`execute_approved`) and every `oracle_set_session_level`
+    /// escalation appends a record here.
+    auditor: Option<Arc<Auditor>>,
 }
 
 impl OracleDispatcher {
@@ -218,6 +225,7 @@ impl OracleDispatcher {
             connector: None,
             stateless_connector: None,
             custom_loader: None,
+            auditor: None,
         }
     }
 
@@ -282,7 +290,18 @@ impl OracleDispatcher {
             connector: Some(connector),
             stateless_connector: stateless.connector,
             custom_loader,
+            auditor: None,
         }
+    }
+
+    /// Attach the out-of-band auditor (builder; consumes and returns `self`).
+    /// The server wiring constructs the auditor once and attaches it here so
+    /// every served write/escalation is recorded on the hash-chained, signed
+    /// log.
+    #[must_use]
+    pub fn with_auditor(mut self, auditor: Arc<Auditor>) -> Self {
+        self.auditor = Some(auditor);
+        self
     }
 }
 
@@ -1524,15 +1543,71 @@ fn execute_approved_args(
     })
 }
 
+/// An RFC-3339-ish UTC timestamp for audit records (display/forensics only; the
+/// monotonic seq is the chain's order key, so a coarse clock string suffices and
+/// we avoid a date-formatting dependency).
+fn audit_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("unix:{secs}")
+}
+
+/// Map an `oraclemcp-audit` error to an agent-facing envelope. A failed audit
+/// append is fail-closed: the served call errors and the statement does NOT run.
+fn audit_error_to_envelope(e: oraclemcp_audit::AuditError) -> ErrorEnvelope {
+    ErrorEnvelope::new(ErrorClass::Internal, format!("audit append failed: {e}"))
+}
+
+/// The server-controlled principal recorded as the audit `agent_identity`: the
+/// active profile name (a low-cardinality, server-controlled value), or the
+/// binary name when no profile is bound.
+fn audit_agent_identity(active_profile: Option<&str>) -> String {
+    active_profile
+        .map(|p| format!("profile:{p}"))
+        .unwrap_or_else(|| "oraclemcp".to_owned())
+}
+
+/// Build an audit draft for an execute call at a known danger level.
+fn execute_audit_draft(
+    agent_identity: &str,
+    sql: &str,
+    danger_level: &str,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+) -> AuditEntryDraft {
+    AuditEntryDraft {
+        agent_identity: agent_identity.to_owned(),
+        tool: "oracle_execute".to_owned(),
+        sql: sql.to_owned(),
+        danger_level: danger_level.to_owned(),
+        decision: AuditDecision::Allowed,
+        rows_affected,
+        outcome,
+    }
+}
+
 fn execute_sql(
     cx: Option<&Cx>,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
+    auditor: Option<&Auditor>,
+    agent_identity: &str,
     args: ExecuteArgs,
 ) -> Result<Value, ErrorEnvelope> {
     with_call_timeout(cx, conn, args.timeout_seconds, || {
-        execute_sql_inner(cx, conn, active_profile, session, args)
+        execute_sql_inner(
+            cx,
+            conn,
+            active_profile,
+            session,
+            auditor,
+            agent_identity,
+            args,
+        )
     })
 }
 
@@ -1541,6 +1616,8 @@ fn execute_sql_inner(
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
+    auditor: Option<&Auditor>,
+    agent_identity: &str,
     args: ExecuteArgs,
 ) -> Result<Value, ErrorEnvelope> {
     let decision = Classifier::new(ClassifierConfig::new()).classify(&args.sql);
@@ -1586,6 +1663,30 @@ fn execute_sql_inner(
         .iter()
         .map(json_to_bind)
         .collect::<Result<Vec<_>, _>>()?;
+
+    // The audited danger tier (SAFE/GUARDED/DESTRUCTIVE) as a string; reads were
+    // rejected above, so this is always a Guarded/Destructive write/DDL/Admin.
+    let danger_str = serde_json::to_value(decision.danger)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "UNKNOWN".to_owned());
+
+    // fsync-before-execute (§5.13): durably log the approved statement BEFORE it
+    // runs so a crash between here and the execute leaves the log written and the
+    // database untouched. A failed durable append fails the call closed.
+    if let Some(auditor) = auditor {
+        let pre = execute_audit_draft(
+            agent_identity,
+            &args.sql,
+            &danger_str,
+            None,
+            AuditOutcome::Pending,
+        );
+        auditor
+            .append(&pre, audit_timestamp(), true)
+            .map_err(audit_error_to_envelope)?;
+    }
+
     let dbms_output_limits = if args.capture_dbms_output {
         let (max_lines, max_chars, buffer_bytes) = dbms_output_limits(&args);
         enable_dbms_output_conn(cx, conn, Some(buffer_bytes)).map_err(DbError::into_envelope)?;
@@ -1597,16 +1698,55 @@ fn execute_sql_inner(
         Ok(rows) => rows,
         Err(e) => {
             let _ = conn.rollback();
+            // Durably log the failed outcome before propagating.
+            if let Some(auditor) = auditor {
+                let post = execute_audit_draft(
+                    agent_identity,
+                    &args.sql,
+                    &danger_str,
+                    None,
+                    AuditOutcome::Failed,
+                );
+                auditor
+                    .append(&post, audit_timestamp(), true)
+                    .map_err(audit_error_to_envelope)?;
+            }
             return Err(DbError::into_envelope(e));
         }
     };
     if args.commit {
         if let Err(e) = commit_conn(cx, conn) {
             let _ = conn.rollback();
+            if let Some(auditor) = auditor {
+                let post = execute_audit_draft(
+                    agent_identity,
+                    &args.sql,
+                    &danger_str,
+                    Some(rows_affected),
+                    AuditOutcome::Failed,
+                );
+                auditor
+                    .append(&post, audit_timestamp(), true)
+                    .map_err(audit_error_to_envelope)?;
+            }
             return Err(DbError::into_envelope(e));
         }
     } else {
         conn.rollback().map_err(DbError::into_envelope)?;
+    }
+
+    // Durably log the successful (committed or rolled-back-preview) outcome.
+    if let Some(auditor) = auditor {
+        let post = execute_audit_draft(
+            agent_identity,
+            &args.sql,
+            &danger_str,
+            Some(rows_affected),
+            AuditOutcome::Succeeded,
+        );
+        auditor
+            .append(&post, audit_timestamp(), true)
+            .map_err(audit_error_to_envelope)?;
     }
     let dbms_output = match dbms_output_limits {
         Some((max_lines, max_chars)) => Some(
@@ -2627,24 +2767,42 @@ fn patch_source_inner(
     ))
 }
 
+// Audit context (auditor + agent_identity) is threaded through the DDL path so
+// every CREATE OR REPLACE is hash-chained (A8). TODO(simplify): bundle the audit
+// context into an `AuditCtx` to drop back under the arg-count lint.
+#[allow(clippy::too_many_arguments)]
 fn create_or_replace(
     cx: Option<&Cx>,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
+    auditor: Option<&Auditor>,
+    agent_identity: &str,
     tool_name: &str,
     args: CreateOrReplaceArgs,
 ) -> Result<Value, ErrorEnvelope> {
     with_call_timeout(cx, conn, args.timeout_seconds, || {
-        create_or_replace_inner(cx, conn, active_profile, session, tool_name, args)
+        create_or_replace_inner(
+            cx,
+            conn,
+            active_profile,
+            session,
+            auditor,
+            agent_identity,
+            tool_name,
+            args,
+        )
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_or_replace_inner(
     cx: Option<&Cx>,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
+    auditor: Option<&Auditor>,
+    agent_identity: &str,
     tool_name: &str,
     args: CreateOrReplaceArgs,
 ) -> Result<Value, ErrorEnvelope> {
@@ -2696,6 +2854,8 @@ fn create_or_replace_inner(
         conn,
         active_profile,
         session,
+        auditor,
+        agent_identity,
         ExecuteArgs {
             sql: source.clone(),
             binds: Vec::new(),
@@ -2747,10 +2907,20 @@ fn deploy_ddl(
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
+    auditor: Option<&Auditor>,
+    agent_identity: &str,
     args: DeployDdlArgs,
 ) -> Result<Value, ErrorEnvelope> {
     with_call_timeout(cx, conn, args.timeout_seconds, || {
-        deploy_ddl_inner(cx, conn, active_profile, session, args)
+        deploy_ddl_inner(
+            cx,
+            conn,
+            active_profile,
+            session,
+            auditor,
+            agent_identity,
+            args,
+        )
     })
 }
 
@@ -2759,6 +2929,8 @@ fn deploy_ddl_inner(
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
+    auditor: Option<&Auditor>,
+    agent_identity: &str,
     args: DeployDdlArgs,
 ) -> Result<Value, ErrorEnvelope> {
     let ddl = required_non_empty_arg("deploy_ddl", "ddl", args.ddl)?;
@@ -2774,6 +2946,8 @@ fn deploy_ddl_inner(
             conn,
             active_profile,
             session,
+            auditor,
+            agent_identity,
             "deploy_ddl",
             CreateOrReplaceArgs {
                 source_code: Some(ddl),
@@ -2842,6 +3016,8 @@ fn deploy_ddl_inner(
         conn,
         active_profile,
         session,
+        auditor,
+        agent_identity,
         ExecuteArgs {
             sql: ddl,
             binds: Vec::new(),
@@ -3156,7 +3332,8 @@ impl OracleDispatcher {
         if tool == "oracle_set_session_level" {
             let a: SetSessionLevelArgs = parse_args(name, args)?;
             let active_profile = state.active_profile.clone();
-            return set_session_level_with_scope(
+            let before = state.level.effective_level();
+            let result = set_session_level_with_scope(
                 &mut state.level,
                 &scoped_level,
                 active_profile.as_deref(),
@@ -3164,6 +3341,28 @@ impl OracleDispatcher {
                 a,
                 scoped,
             );
+            // Audit a successful level INCREASE (step-up approval). De-escalation
+            // and status reads are not escalations and are not chained.
+            if let (Ok(value), Some(auditor)) = (&result, self.auditor.as_deref()) {
+                let after = state.level.effective_level();
+                let changed = value.get("changed").and_then(Value::as_bool) == Some(true);
+                if changed && after > before {
+                    let agent_identity = audit_agent_identity(active_profile.as_deref());
+                    let draft = AuditEntryDraft {
+                        agent_identity,
+                        tool: "oracle_set_session_level".to_owned(),
+                        sql: format!("ESCALATE {} -> {}", before.as_str(), after.as_str()),
+                        danger_level: after.as_str().to_owned(),
+                        decision: AuditDecision::StepUpRequired,
+                        rows_affected: None,
+                        outcome: AuditOutcome::Succeeded,
+                    };
+                    auditor
+                        .append(&draft, audit_timestamp(), true)
+                        .map_err(audit_error_to_envelope)?;
+                }
+            }
+            return result;
         }
         if tool == "oracle_preview_sql" {
             let a: PreviewSqlArgs = parse_args(name, args)?;
@@ -3175,20 +3374,32 @@ impl OracleDispatcher {
             let a: ExecuteApprovedArgs = parse_args(name, args)?;
             let execute_args = execute_approved_args(&mut state, &scoped_level, a)?;
             let active_profile = state.active_profile.clone();
+            let agent_identity = audit_agent_identity(active_profile.as_deref());
             let conn: &dyn OracleConnection = state.conn.as_ref();
             return execute_sql(
                 cx,
                 conn,
                 active_profile.as_deref(),
                 &scoped_level,
+                self.auditor.as_deref(),
+                &agent_identity,
                 execute_args,
             );
         }
         if tool == "deploy_ddl" {
             let a: DeployDdlArgs = parse_args(name, args)?;
             let active_profile = state.active_profile.clone();
+            let agent_identity = audit_agent_identity(active_profile.as_deref());
             let conn: &dyn OracleConnection = state.conn.as_ref();
-            return deploy_ddl(cx, conn, active_profile.as_deref(), &scoped_level, a);
+            return deploy_ddl(
+                cx,
+                conn,
+                active_profile.as_deref(),
+                &scoped_level,
+                self.auditor.as_deref(),
+                &agent_identity,
+                a,
+            );
         }
         if tool == "read_patch_preview" {
             let a: ReadPatchPreviewArgs = parse_args(name, args)?;
@@ -3203,7 +3414,16 @@ impl OracleDispatcher {
         let result: Result<Value, DbError> = match tool {
             "oracle_execute" => {
                 let a: ExecuteArgs = parse_args(name, args)?;
-                return execute_sql(cx, conn, state.active_profile.as_deref(), &scoped_level, a);
+                let agent_identity = audit_agent_identity(state.active_profile.as_deref());
+                return execute_sql(
+                    cx,
+                    conn,
+                    state.active_profile.as_deref(),
+                    &scoped_level,
+                    self.auditor.as_deref(),
+                    &agent_identity,
+                    a,
+                );
             }
             "oracle_compile_object" => {
                 let a: CompileObjectArgs = parse_args(name, args)?;
@@ -3218,11 +3438,14 @@ impl OracleDispatcher {
             }
             "oracle_create_or_replace" => {
                 let a: CreateOrReplaceArgs = parse_args(name, args)?;
+                let agent_identity = audit_agent_identity(state.active_profile.as_deref());
                 return create_or_replace(
                     cx,
                     conn,
                     state.active_profile.as_deref(),
                     &scoped_level,
+                    self.auditor.as_deref(),
+                    &agent_identity,
                     name,
                     a,
                 );

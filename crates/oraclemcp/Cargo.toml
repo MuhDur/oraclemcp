@@ -19,6 +19,7 @@ oraclemcp-db = { path = "../oraclemcp-db", version = "0.3.0" }
 oraclemcp-config = { path = "../oraclemcp-config", version = "0.3.0" }
 oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.3.0" }
 oraclemcp-auth = { path = "../oraclemcp-auth", version = "0.3.0" }
+oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.3.0" }
 oraclemcp-error = { path = "../oraclemcp-error", version = "0.3.0" }
 asupersync.workspace = true
 clap = { version = "4", features = ["derive"] }

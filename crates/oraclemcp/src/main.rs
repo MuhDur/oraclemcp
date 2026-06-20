@@ -32,8 +32,9 @@ use std::sync::Arc;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use oraclemcp::dispatch::{OracleDispatcher, StatelessReadStrategy};
 use oraclemcp::registry;
+use oraclemcp_audit::{Auditor, FileAuditSink, SigningKey};
 use oraclemcp_auth::{Hs256Verifier, ResourceServerConfig, SecretError, resolve_secret};
-use oraclemcp_config::{HttpConfig, HttpTlsConfig, OracleMcpConfig};
+use oraclemcp_config::{AuditConfig, HttpConfig, HttpTlsConfig, OracleMcpConfig};
 use oraclemcp_core::{
     CapabilitiesReport, CustomToolCatalog, CustomToolDef, DoctorContext, FeatureTiers,
     HttpTransportConfig, MCP_PATH, OAuthEnforcement, OracleMcpServer,
@@ -51,6 +52,9 @@ use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel, SessionLevel
 const LIVE_DB: bool = true;
 const CUSTOM_TOOLS_DIR_ENV: &str = "ORACLEMCP_TOOLS_DIR";
 const CUSTOM_TOOLS_HMAC_KEY_ENV: &str = "ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY";
+/// Fallback environment variable for the audit signing key when the config's
+/// `[audit].key_ref` is not set.
+const AUDIT_KEY_ENV: &str = "ORACLEMCP_AUDIT_KEY";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -147,6 +151,26 @@ enum Command {
         /// Sign only this tool name from the file.
         #[arg(long)]
         tool: Option<String>,
+    },
+    /// Operate on the out-of-band audit log (verify the signed hash chain).
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AuditCommand {
+    /// Re-walk an audit log file, recompute every hash link, and re-check the
+    /// keyed MAC with the configured key(s). Exits non-zero on a broken link or
+    /// a recompute-without-key forgery.
+    Verify {
+        /// Path to the append-only JSONL audit log.
+        file: PathBuf,
+        /// Override the signing key id to verify against (defaults to the
+        /// configured [audit].key_id or "default").
+        #[arg(long)]
+        key_id: Option<String>,
     },
 }
 
@@ -251,6 +275,11 @@ fn main() -> ExitCode {
             &tools_dir,
         ),
         Command::SignTool { path, tool } => run_sign_tool(robot_json, &path, tool.as_deref()),
+        Command::Audit { command } => match command {
+            AuditCommand::Verify { file, key_id } => {
+                run_audit_verify(robot_json, &file, key_id.as_deref())
+            }
+        },
     }
 }
 
@@ -619,6 +648,102 @@ fn load_custom_catalog_for_profile(
     Ok(CustomToolCatalog::new(loaded))
 }
 
+/// The safe default audit-log path under the config home, used when
+/// `[audit].path` is not configured but an auditor is required.
+fn default_audit_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".config/oraclemcp/audit.jsonl"))
+        .unwrap_or_else(|| PathBuf::from("oraclemcp-audit.jsonl"))
+}
+
+/// Resolve the audit signing key: prefer the config `[audit].key_ref` secret,
+/// fall back to the `ORACLEMCP_AUDIT_KEY` env var. Returns `None` when neither
+/// is set (the caller fails closed if a write level is reachable).
+fn resolve_audit_signing_key(
+    audit: &AuditConfig,
+    protected: bool,
+) -> Result<Option<SigningKey>, (&'static str, String)> {
+    let key_id = audit.key_id_or_default().to_owned();
+    if let Some(key_ref) = audit.key_ref.as_deref() {
+        let secret =
+            resolve_secret(key_ref, protected, |name| std::env::var(name).ok()).map_err(|e| {
+                (
+                    "ORACLEMCP_AUDIT_KEY_INVALID",
+                    format!(
+                        "failed to resolve [audit].key_ref: {}",
+                        secret_error_summary(&e)
+                    ),
+                )
+            })?;
+        return Ok(Some(SigningKey::new(
+            key_id,
+            secret.expose().as_bytes().to_vec(),
+        )));
+    }
+    if let Ok(raw) = std::env::var(AUDIT_KEY_ENV)
+        && !raw.is_empty()
+    {
+        return Ok(Some(SigningKey::new(key_id, raw.into_bytes())));
+    }
+    Ok(None)
+}
+
+/// Build the out-of-band auditor for the server.
+///
+/// Fail-closed policy (bead A8): if any operating level **above ReadOnly** is
+/// reachable (the profile ceiling permits a write/DDL/escalation), a signing
+/// key is **required** — without one we refuse to start rather than run writes
+/// unaudited. When only ReadOnly is reachable, the auditor is optional: a
+/// configured key still builds one (so escalation previews/log stay available),
+/// otherwise `None` (pure reads never touch the chain).
+fn build_auditor(
+    audit: &AuditConfig,
+    level: &SessionLevelState,
+) -> Result<Option<Arc<Auditor>>, (&'static str, String)> {
+    let write_reachable = level.max_level() > OperatingLevel::ReadOnly;
+    let key = resolve_audit_signing_key(audit, level.is_protected())?;
+
+    let Some(key) = key else {
+        if write_reachable {
+            return Err((
+                "ORACLEMCP_AUDIT_KEY_REQUIRED",
+                format!(
+                    "this profile can reach operating level {} (above READ_ONLY) but no audit \
+                     signing key is configured; set [audit].key_ref or {AUDIT_KEY_ENV} so every \
+                     write/escalation is recorded on the signed audit chain",
+                    level.max_level().as_str()
+                ),
+            ));
+        }
+        // Read-only only: no writes/escalations can occur, so no auditor needed.
+        return Ok(None);
+    };
+
+    let path = audit.path.clone().unwrap_or_else(default_audit_path);
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|e| {
+            (
+                "ORACLEMCP_AUDIT_PATH_INVALID",
+                format!(
+                    "failed to create audit log directory {}: {e}",
+                    parent.display()
+                ),
+            )
+        })?;
+    }
+    let sink = FileAuditSink::open(&path).map_err(|e| {
+        (
+            "ORACLEMCP_AUDIT_PATH_INVALID",
+            format!("failed to open audit log {}: {e}", path.display()),
+        )
+    })?;
+    tracing::info!(path = %path.display(), key_id = %audit.key_id_or_default(), "audit log armed");
+    Ok(Some(Arc::new(Auditor::new(Box::new(sink), key))))
+}
+
 /// Build the server from the registry + capabilities + dispatcher over `conn`.
 fn build_server(
     conn: Box<dyn OracleConnection>,
@@ -627,6 +752,7 @@ fn build_server(
     level: SessionLevelState,
     http: bool,
     custom_catalog: CustomToolCatalog,
+    auditor: Option<Arc<Auditor>>,
 ) -> OracleMcpServer {
     let version = env!("CARGO_PKG_VERSION");
     let mut registry = registry::tool_registry();
@@ -641,7 +767,7 @@ fn build_server(
             http_transport: http,
         },
     );
-    let dispatcher = OracleDispatcher::new_switchable_with_custom_tools_and_stateless(
+    let mut dispatcher = OracleDispatcher::new_switchable_with_custom_tools_and_stateless(
         conn,
         active_profile,
         level,
@@ -650,6 +776,9 @@ fn build_server(
         custom_catalog,
         Some(Arc::new(load_custom_catalog_for_profile)),
     );
+    if let Some(auditor) = auditor {
+        dispatcher = dispatcher.with_auditor(auditor);
+    }
     OracleMcpServer::new(version, registry, caps, Arc::new(dispatcher))
 }
 
@@ -923,6 +1052,27 @@ fn run_serve(
         .map(|tool| tool.name.clone())
         .collect();
 
+    // Arm the out-of-band audit chain. Fails closed if a write level is
+    // reachable without a configured signing key (bead A8).
+    let audit_config = match OracleMcpConfig::load(None) {
+        Ok(cfg) => cfg.audit,
+        Err(e) => {
+            emit_status_error(
+                robot_json,
+                "ORACLEMCP_CONFIG_INVALID",
+                &format!("failed to load audit config: {e}"),
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let auditor = match build_auditor(&audit_config, &level) {
+        Ok(auditor) => auditor,
+        Err((code, message)) => {
+            emit_status_error(robot_json, code, &message);
+            return ExitCode::from(2);
+        }
+    };
+
     match listen {
         // ── stdio transport (default) ──────────────────────────────────────
         None => {
@@ -943,6 +1093,7 @@ fn run_serve(
                 level,
                 false,
                 custom_catalog,
+                auditor,
             );
             emit_serve_status(robot_json, "stdio", None, &advertised_tools);
             match server.serve_stdio(&auth) {
@@ -1015,6 +1166,7 @@ fn run_serve(
                 level,
                 true,
                 custom_catalog,
+                auditor,
             );
             let ResolvedHttpTransportConfig { transport, tls, .. } = resolved_http;
             emit_serve_status(
@@ -1326,6 +1478,114 @@ fn run_sign_tool(robot_json: bool, path: &Path, only_tool: Option<&str>) -> Exit
         }
         Err(e) => {
             emit_status_error(robot_json, "ORACLEMCP_SIGN_TOOL_FAILED", &e.message);
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Resolve the verification key set from config + env. The verify path resolves
+/// the same secret the server signs with; if `--key-id` is given it overrides
+/// the label so a rotated key (whose bytes are supplied via the same secret-ref
+/// or env) can be checked.
+fn audit_verification_keys(key_id_override: Option<&str>) -> Result<Vec<SigningKey>, String> {
+    let audit = OracleMcpConfig::load(None)
+        .map(|cfg| cfg.audit)
+        .map_err(|e| format!("failed to load audit config: {e}"))?;
+    let key_id = key_id_override
+        .map(str::to_owned)
+        .unwrap_or_else(|| audit.key_id_or_default().to_owned());
+
+    if let Some(key_ref) = audit.key_ref.as_deref() {
+        // `protected=false`: verification is an operator action that may run
+        // off-box against a copied log, where a dev `literal:` key is legitimate.
+        let secret =
+            resolve_secret(key_ref, false, |name| std::env::var(name).ok()).map_err(|e| {
+                format!(
+                    "failed to resolve [audit].key_ref: {}",
+                    secret_error_summary(&e)
+                )
+            })?;
+        return Ok(vec![SigningKey::new(
+            key_id,
+            secret.expose().as_bytes().to_vec(),
+        )]);
+    }
+    match std::env::var(AUDIT_KEY_ENV) {
+        Ok(raw) if !raw.is_empty() => Ok(vec![SigningKey::new(key_id, raw.into_bytes())]),
+        _ => Err(format!(
+            "no audit signing key configured; set [audit].key_ref or {AUDIT_KEY_ENV} to verify the chain"
+        )),
+    }
+}
+
+fn run_audit_verify(robot_json: bool, file: &Path, key_id_override: Option<&str>) -> ExitCode {
+    use oraclemcp_audit::{VerifyOutcome, parse_jsonl, verify_records};
+
+    let keys = match audit_verification_keys(key_id_override) {
+        Ok(keys) => keys,
+        Err(message) => {
+            emit_status_error(robot_json, "ORACLEMCP_AUDIT_KEY_REQUIRED", &message);
+            return ExitCode::from(2);
+        }
+    };
+
+    let body = match fs::read_to_string(file) {
+        Ok(body) => body,
+        Err(e) => {
+            emit_status_error(
+                robot_json,
+                "ORACLEMCP_AUDIT_READ_FAILED",
+                &format!("failed to read audit log {}: {e}", file.display()),
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let records = match parse_jsonl(&body) {
+        Ok(records) => records,
+        Err(e) => {
+            emit_status_error(robot_json, "ORACLEMCP_AUDIT_MALFORMED", &e.to_string());
+            return ExitCode::from(2);
+        }
+    };
+
+    match verify_records(&records, &keys) {
+        VerifyOutcome::Ok { records } => {
+            let payload = serde_json::json!({
+                "ok": true,
+                "file": file.display().to_string(),
+                "records": records,
+            });
+            let output = if robot_json {
+                serde_json::to_string(&payload).unwrap()
+            } else {
+                format!("OK: audit chain verified ({records} records)")
+            };
+            stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
+        }
+        VerifyOutcome::Broken { seq, index, reason } => {
+            let payload = serde_json::json!({
+                "ok": false,
+                "file": file.display().to_string(),
+                "broken_at_seq": seq,
+                "broken_at_index": index,
+                "reason": reason.to_string(),
+            });
+            if robot_json {
+                let _ = write_stdout_line(&serde_json::to_string(&payload).unwrap());
+            } else {
+                let _ = write_stdout_line(&format!(
+                    "BROKEN: audit chain failed at seq {seq} (record #{index}): {reason}"
+                ));
+            }
+            ExitCode::from(2)
+        }
+        // `VerifyOutcome` is #[non_exhaustive]; fail closed on any future variant.
+        _ => {
+            emit_status_error(
+                robot_json,
+                "ORACLEMCP_AUDIT_UNVERIFIABLE",
+                "unrecognized verification outcome",
+            );
             ExitCode::from(2)
         }
     }
@@ -2315,6 +2575,7 @@ mod tests {
             default_read_only_level(),
             false,
             CustomToolCatalog::default(),
+            None,
         );
         // The capabilities report carries the registry's tools.
         let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), LIVE_DB, false);

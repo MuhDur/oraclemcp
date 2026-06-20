@@ -39,6 +39,7 @@ pub const ENV_PREFIX: &str = "ORACLEMCP_";
 pub const CONFIG_PATH_ENV: &str = "ORACLEMCP_CONFIG";
 
 const IGNORED_ENV_KEYS: &[&str] = &[
+    "audit_key",
     "config",
     "custom_tools_hmac_key",
     "log",
@@ -67,6 +68,9 @@ pub struct OracleMcpConfig {
     /// Native Streamable HTTP transport configuration.
     #[serde(default)]
     pub http: HttpConfig,
+    /// Out-of-band, hash-chained, keyed-MAC audit log configuration.
+    #[serde(default)]
+    pub audit: AuditConfig,
     /// Named connection profiles.
     #[serde(default)]
     pub profiles: Vec<ConnectionProfile>,
@@ -78,8 +82,39 @@ impl Default for OracleMcpConfig {
             schema_version: SUPPORTED_SCHEMA_VERSION,
             default_profile: None,
             http: HttpConfig::default(),
+            audit: AuditConfig::default(),
             profiles: Vec::new(),
         }
+    }
+}
+
+/// Out-of-band durable audit configuration (plan §5.13, §6.4; bead A8).
+///
+/// The audit log is an append-only, hash-chained, HMAC-SHA256-signed JSONL file
+/// written out-of-band of the Oracle session. `path` is where it lives;
+/// `key_ref` is a secret-ref (mirrors `wallet_password_ref`: `env:VAR`,
+/// `vault:...`, or dev-only `literal:`) for the keyed MAC; `key_id` labels the
+/// active key for rotation. When unset, the binary picks a safe default path
+/// and fails closed at startup if an operating level above ReadOnly is
+/// reachable without a configured key.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuditConfig {
+    /// Append-only audit log file path. When `None`, the binary chooses a safe
+    /// default under the config home.
+    pub path: Option<PathBuf>,
+    /// Secret reference for the HMAC signing key (`env:`/`vault:`/`literal:`).
+    pub key_ref: Option<String>,
+    /// Identifier of the active signing key, recorded in each record so the key
+    /// can be rotated while old records keep verifying. Defaults to `default`.
+    pub key_id: Option<String>,
+}
+
+impl AuditConfig {
+    /// The configured key id, or the `"default"` label.
+    #[must_use]
+    pub fn key_id_or_default(&self) -> &str {
+        self.key_id.as_deref().unwrap_or("default")
     }
 }
 
@@ -731,6 +766,45 @@ mod tests {
             assert!(cfg.profiles.is_empty());
             Ok(())
         });
+    }
+
+    #[test]
+    fn audit_config_loads_and_defaults_empty() {
+        let cfg = OracleMcpConfig::from_toml_str("").expect("empty loads");
+        assert_eq!(cfg.audit, AuditConfig::default());
+        assert!(cfg.audit.path.is_none());
+        assert_eq!(cfg.audit.key_id_or_default(), "default");
+
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [audit]
+            path = "/var/log/oraclemcp/audit.jsonl"
+            key_ref = "env:ORACLEMCP_AUDIT_KEY"
+            key_id = "2026-q2"
+            "#,
+        )
+        .expect("audit config loads");
+        assert_eq!(
+            cfg.audit.path.as_deref(),
+            Some(Path::new("/var/log/oraclemcp/audit.jsonl"))
+        );
+        assert_eq!(
+            cfg.audit.key_ref.as_deref(),
+            Some("env:ORACLEMCP_AUDIT_KEY")
+        );
+        assert_eq!(cfg.audit.key_id_or_default(), "2026-q2");
+    }
+
+    #[test]
+    fn unknown_audit_key_is_rejected() {
+        let err = OracleMcpConfig::from_toml_str(
+            r#"
+            [audit]
+            secret = "oops"
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::Figment(_)), "got {err:?}");
     }
 
     #[test]

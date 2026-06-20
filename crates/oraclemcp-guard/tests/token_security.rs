@@ -147,7 +147,8 @@ fn approval_token_never_appears_in_the_audit_record() {
         rows_affected: Some(1),
         outcome: AuditOutcome::Succeeded,
     };
-    let record = AuditRecord::chained(&draft, 1, GENESIS_HASH, "2026-06-01T00:00:00Z".to_owned());
+    let record =
+        AuditRecord::chained_unsigned(&draft, 1, GENESIS_HASH, "2026-06-01T00:00:00Z".to_owned());
     let json = serde_json::to_string(&record).expect("serialize");
     assert!(
         !json.contains(&token),
