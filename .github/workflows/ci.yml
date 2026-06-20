@@ -93,8 +93,13 @@ jobs:
   # The one-way engine-free boundary: no oraclemcp-* crate may import a plsql-*
   # engine crate. Trivially satisfied in this repo (there are no plsql-* crates),
   # but kept as a standing guard against an accidental re-introduction.
+  #
+  # The driver-adapter seam (B2): every real `oracledb::` driver call stays
+  # behind the single adapter file so the eventual oracledb 0.3.0 cut-over
+  # touches exactly one file. Mirrored by the `driver_seam` test in
+  # crates/oraclemcp-db so `cargo test` catches a leak too.
   boundary:
-    name: engine-free boundary lint
+    name: engine-free boundary + driver-seam lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -104,6 +109,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - run: bash scripts/oraclemcp_boundary_lint.sh
+      - run: bash scripts/oraclemcp_driver_seam_lint.sh
 
   release-metadata:
     name: release metadata sync

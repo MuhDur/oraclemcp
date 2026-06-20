@@ -24,7 +24,12 @@ categories = ["database", "development-tools"]
 
 [workspace.dependencies]
 asupersync = { version = "0.3.4", default-features = false }
-oracledb = { version = "0.2.2", default-features = false }
+# Pinned EXACTLY today (B2; plan §8). The whole oracledb surface is isolated
+# behind one adapter (crates/oraclemcp-db/src/connection.rs), so the 0.3.0
+# cut-over is a deliberate, single-file change driven by oracledb's
+# MIGRATING-0.3.md — never an accidental float into 0.3.x. Relax to "^0.3"
+# only as part of that cut-over.
+oracledb = { version = "=0.2.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
