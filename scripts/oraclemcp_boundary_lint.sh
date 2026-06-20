@@ -143,6 +143,33 @@ show_all_target_dependency_graph() {
   done
 }
 
+# Early-warning feature inspection (bead D4 / WP-D). opentelemetry-sdk is NOT a
+# forbidden package — the telemetry crate may legitimately grow an OTLP exporter
+# — but its `rt-tokio`/`rt-tokio-current-thread` runtime features pull Tokio in.
+# If an upstream opentelemetry-sdk release ever flips one of those on by default,
+# the Tokio gate above WILL fail; this check fires first and names the cause, so
+# the Tokio failure is diagnosed as "opentelemetry-sdk dragged in a runtime"
+# rather than chased blind. It complements the `-i tokio` / `-i reqwest` gates.
+# Advisory: it explains, it does not itself fail the build (the Tokio gate does).
+inspect_opentelemetry_runtime() {
+  local package="opentelemetry-sdk"
+  local tree
+
+  if tree="$(tree_package_present "opentelemetry runtime" "$package" -e normal --target all)"; then
+    echo "NOTE[otel]: '$package' is present in the production graph. Confirm no" \
+      "rt-tokio* feature is enabled (that would pull Tokio and fail the gate above):"
+    indent_text <<<"$tree"
+    # Surface the resolved features so an rt-tokio flip is visible in the log.
+    cargo tree --locked --workspace -e features --target all -i "$package" 2>/dev/null \
+      | grep -iE 'rt-tokio|tokio' | indent_text || true
+  else
+    case "$?" in
+      1) echo "OK[otel]: $package absent from the production graph (no rt-tokio runtime risk)." ;;
+      2) violations=$((violations + 1)) ;;
+    esac
+  fi
+}
+
 check_compat_markers() {
   local hits
 
@@ -159,6 +186,7 @@ check_compat_markers() {
 
 check_production_dependency_graph
 show_all_target_dependency_graph
+inspect_opentelemetry_runtime
 check_compat_markers
 
 if [ "$violations" -ne 0 ]; then

@@ -115,7 +115,8 @@ misconfigured.
 - [ ] Build (or pull) with the pinned toolchain. The pinned **nightly** is
       **build-time-only** and invisible at runtime — running the shipped binary
       or image needs no Rust toolchain. See
-      [`operations.md` §1](operations.md#1-the-pinned-nightly-toolchain-is-build-time-only).
+      [`operations.md` §1](operations.md#1-the-pinned-nightly-toolchain-is-build-time-only),
+      and [`TOOLCHAIN.md`](TOOLCHAIN.md) for the re-pin runbook.
 - [ ] Every crate is `#![forbid(unsafe_code)]` and the workspace builds with
       `panic = "abort"`; the fail-closed classifier carries a differential
       cargo-fuzz target. Keep `cargo deny check` green on the pinned toolchain.

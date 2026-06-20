@@ -42,3 +42,7 @@ pinned toolchain.
 Revisit when **`oracledb` ships a 1.0 release** *and* the language features
 Asupersync/`oracledb` rely on are available on a stable Rust release. At that
 point, evaluate adopting a stable MSRV and dropping the nightly pin.
+
+The concrete procedure for bumping the pin in the meantime — when, the exact
+files to edit, how to validate, and how to roll back — lives in
+[`docs/TOOLCHAIN.md`](../TOOLCHAIN.md).
