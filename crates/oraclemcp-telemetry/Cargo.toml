@@ -11,10 +11,18 @@ categories.workspace = true
 
 [dependencies]
 oraclemcp-error = { path = "../oraclemcp-error", version = "0.3.0" }
+# D1 observability: the asupersync `metrics` feature unlocks the Tokio-free
+# OTLP exporters (OtlpHttpExporter / OtlpLogsHttpExporter) and the
+# LogsSnapshot::to_otlp_protobuf logs path. Egress goes ONLY through these
+# (never reqwest/hyper). See the workspace dep comment for the rt-tokio trap.
+asupersync.workspace = true
+# Hand-rolled OTLP metrics/trace protobuf encoders (the asupersync ones are
+# cfg(fuzz)/test-gated). prost is pure-codec, no async runtime.
+prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter", "fmt", "registry"] }
 
 [lints]
 workspace = true

@@ -65,8 +65,10 @@ pub use doctor::{
     run_doctor,
 };
 pub use http::{
-    HttpRequest, HttpResponse, HttpTransportConfig, MCP_PATH, OAuthEnforcement,
-    PROTECTED_RESOURCE_METADATA_PATH, ScopeGrant, handle_http_request, serve_http, serve_https,
+    HEALTHZ_PATH, HttpRequest, HttpResponse, HttpTransportConfig, MCP_PATH, METRICS_PATH,
+    OAuthEnforcement, ObservabilityState, PROTECTED_RESOURCE_METADATA_PATH, READYZ_PATH,
+    ReadinessProbe, ScopeGrant, handle_http_request, serve_http, serve_http_until, serve_https,
+    serve_https_until,
 };
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
 pub use plugin::{

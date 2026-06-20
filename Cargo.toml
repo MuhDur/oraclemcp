@@ -23,7 +23,14 @@ keywords = ["oracle", "mcp", "database", "sql"]
 categories = ["database", "development-tools"]
 
 [workspace.dependencies]
-asupersync = { version = "0.3.4", default-features = false }
+# D1 (WP-D observability): the `metrics` feature unlocks asupersync's
+# Tokio-free OTLP exporters (OtlpHttpExporter / OtlpLogsHttpExporter +
+# LogsSnapshot::to_otlp_protobuf, all over asupersync's own HTTP/1 client).
+# TRAP (bead oraclemcp-040-epic-wp-d-1il.1): enable ONLY `metrics` here;
+# NEVER opentelemetry-proto gen-tonic-messages or an SDK rt-tokio feature —
+# either pulls tonic -> tokio and fails the boundary lint. The `-i tokio` /
+# `-i reqwest` gates in scripts/oraclemcp_boundary_lint.sh keep this honest.
+asupersync = { version = "0.3.4", default-features = false, features = ["metrics"] }
 # Dyn-compatibility shim for the async `OracleConnection` trait (B1): boxes the
 # returned futures so `&dyn`/`Box<dyn OracleConnection>` stay object-safe. Used
 # in `?Send` mode (the dispatch runtime is current-thread and never spawns the
@@ -38,6 +45,16 @@ async-trait = "0.1"
 oracledb = { version = "=0.2.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# D1 observability: hand-rolled OTLP metrics/trace protobuf encoders
+# (ExportMetricsServiceRequest / ExportTraceServiceRequest). asupersync's
+# own metrics/trace proto encoders are cfg(fuzz)/test-gated and pull
+# opentelemetry-proto, so they are NOT reachable from a prod build — we
+# mirror the wire shape with our own `#[derive(prost::Message)]` structs.
+# prost is already in the production graph transitively (asupersync's logs
+# exporter uses it); pinning the same major keeps a single resolved version.
+# Apache-2.0 — covered by deny.toml's permissive allow-list. Brings NO async
+# runtime (prost is pure encode/decode), so the engine-free boundary holds.
+prost = { version = "0.14", default-features = false, features = ["derive", "std"] }
 sha2 = "0.11"
 thiserror = "2"
 tracing = "0.1"

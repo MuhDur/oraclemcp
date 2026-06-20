@@ -152,22 +152,32 @@ show_all_target_dependency_graph() {
 # rather than chased blind. It complements the `-i tokio` / `-i reqwest` gates.
 # Advisory: it explains, it does not itself fail the build (the Tokio gate does).
 inspect_opentelemetry_runtime() {
-  local package="opentelemetry-sdk"
+  # The crate resolves under the underscore spelling (`opentelemetry_sdk`); the
+  # hyphen form never matches `cargo tree -i`. Check the underscore name (and the
+  # hyphen as a belt-and-braces fallback) so the early-warning actually fires for
+  # the crate the asupersync `metrics` feature pulls in (bead D1/.1: catch an
+  # upstream rt-tokio default flip before the Tokio gate above fails blind).
+  local package
   local tree
-
-  if tree="$(tree_package_present "opentelemetry runtime" "$package" -e normal --target all)"; then
-    echo "NOTE[otel]: '$package' is present in the production graph. Confirm no" \
-      "rt-tokio* feature is enabled (that would pull Tokio and fail the gate above):"
-    indent_text <<<"$tree"
-    # Surface the resolved features so an rt-tokio flip is visible in the log.
-    cargo tree --locked --workspace -e features --target all -i "$package" 2>/dev/null \
-      | grep -iE 'rt-tokio|tokio' | indent_text || true
-  else
+  for package in opentelemetry_sdk opentelemetry-sdk; do
+    if tree="$(tree_package_present "opentelemetry runtime" "$package" -e normal --target all)"; then
+      echo "NOTE[otel]: '$package' is present in the production graph. Confirm no" \
+        "rt-tokio* feature is enabled (that would pull Tokio and fail the gate above):"
+      indent_text <<<"$tree"
+      # Surface the resolved features so an rt-tokio flip is visible in the log.
+      cargo tree --locked --workspace -e features --target all -i "$package" 2>/dev/null \
+        | grep -iE 'rt-tokio|tokio' | indent_text || true
+      return
+    fi
     case "$?" in
-      1) echo "OK[otel]: $package absent from the production graph (no rt-tokio runtime risk)." ;;
-      2) violations=$((violations + 1)) ;;
+      2)
+        violations=$((violations + 1))
+        return
+        ;;
+      *) ;;
     esac
-  fi
+  done
+  echo "OK[otel]: opentelemetry_sdk absent from the production graph (no rt-tokio runtime risk)."
 }
 
 check_compat_markers() {

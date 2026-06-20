@@ -19,6 +19,7 @@ use oraclemcp_auth::{
     HttpGuardError, HttpGuardPolicy, ResourceServerConfig, SignatureVerifier, TokenError,
     extract_bearer,
 };
+use oraclemcp_telemetry::{HealthState, Metrics};
 use rustls::{ServerConnection, StreamOwned};
 use serde_json::{Value, json};
 
@@ -29,6 +30,50 @@ use crate::tls::TlsServerConfig;
 pub const MCP_PATH: &str = "/mcp";
 /// The RFC 9728 protected-resource-metadata well-known path.
 pub const PROTECTED_RESOURCE_METADATA_PATH: &str = "/.well-known/oauth-protected-resource";
+/// Kubernetes-style liveness probe path (D1-health). Process-up only.
+pub const HEALTHZ_PATH: &str = "/healthz";
+/// Kubernetes-style readiness probe path (D1-health). DB-reachable + not draining.
+pub const READYZ_PATH: &str = "/readyz";
+/// Prometheus metrics-scrape path (D1-health / D1-metrics).
+pub const METRICS_PATH: &str = "/metrics";
+
+/// A cheap, synchronous DB-reachability check for the `/readyz` probe.
+///
+/// The served HTTP path is synchronous, so the readiness handler cannot itself
+/// `await` an Oracle `ping`. An implementation therefore reads a cached result
+/// maintained out of band (a background pinger that holds its own connection +
+/// `Cx`, calls `OracleConnection::ping`, and updates an atomic). `/readyz`
+/// returns 200 only when this is `true` AND the server is not shutting down.
+pub trait ReadinessProbe: Send + Sync {
+    /// `true` if the database is currently reachable (last probe succeeded).
+    fn is_db_reachable(&self) -> bool;
+}
+
+/// Observability surface mounted on the HTTP transport (D1; off by default).
+///
+/// All fields are optional: when `None`, the corresponding endpoint returns 404
+/// (the route is not advertised). `HealthState` drives `/healthz` + `/readyz`,
+/// `Metrics` backs `/metrics` (Prometheus text), and `readiness_probe` is the
+/// DB-reachability gate for `/readyz`.
+#[derive(Clone, Default)]
+pub struct ObservabilityState {
+    /// Liveness/readiness state (shared with the shutdown coordinator).
+    pub health: Option<HealthState>,
+    /// In-process metrics registry exposed at `/metrics`.
+    pub metrics: Option<Arc<Metrics>>,
+    /// DB-reachability gate for `/readyz`.
+    pub readiness_probe: Option<Arc<dyn ReadinessProbe>>,
+}
+
+impl std::fmt::Debug for ObservabilityState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ObservabilityState")
+            .field("health", &self.health.is_some())
+            .field("metrics", &self.metrics.is_some())
+            .field("readiness_probe", &self.readiness_probe.is_some())
+            .finish()
+    }
+}
 
 /// Operator configuration for the HTTP transport.
 #[derive(Clone, Debug, Default)]
@@ -53,6 +98,9 @@ pub struct HttpTransportConfig {
     /// Issued stateful Streamable HTTP session ids. Listener wrappers install a
     /// store automatically when `stateful` is true.
     pub session_store: Option<Arc<HttpSessionStore>>,
+    /// Health/metrics observability endpoints (D1; off by default — `None`
+    /// fields make the corresponding route return 404 / not be advertised).
+    pub observability: ObservabilityState,
 }
 
 /// OAuth 2.1 resource-server enforcement wiring for the HTTP transport (P1-9b).
@@ -200,6 +248,152 @@ mod tests {
 
     fn response_json(response: &HttpResponse) -> Value {
         serde_json::from_slice(&response.body).expect("response body is JSON")
+    }
+
+    // ---- D1-health: /healthz, /readyz, /metrics ----------------------------
+
+    struct StaticProbe(std::sync::atomic::AtomicBool);
+    impl ReadinessProbe for StaticProbe {
+        fn is_db_reachable(&self) -> bool {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn obs_config(
+        health: HealthState,
+        metrics: Option<Arc<Metrics>>,
+        probe: Option<Arc<dyn ReadinessProbe>>,
+    ) -> HttpTransportConfig {
+        HttpTransportConfig {
+            observability: ObservabilityState {
+                health: Some(health),
+                metrics,
+                readiness_probe: probe,
+            },
+            ..Default::default()
+        }
+    }
+
+    fn get(path: &str) -> HttpRequest {
+        HttpRequest::new("GET", path, [("host", "127.0.0.1")], Vec::new())
+    }
+
+    #[test]
+    fn healthz_is_ok_even_while_db_is_down() {
+        // Liveness is process-up only: a never-reachable DB probe + not-ready
+        // health must NOT take /healthz down.
+        let health = HealthState::new("0.1.0");
+        let probe: Arc<dyn ReadinessProbe> =
+            Arc::new(StaticProbe(std::sync::atomic::AtomicBool::new(false)));
+        let cfg = obs_config(health, None, Some(probe));
+        let resp = handle_http_request(&test_server(), &cfg, get(HEALTHZ_PATH));
+        assert_eq!(resp.status, 200, "healthz is OK while DB is unreachable");
+        assert_eq!(response_json(&resp)["live"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn readyz_is_503_when_db_unreachable_and_200_when_reachable() {
+        let health = HealthState::new("0.1.0");
+        health.set_ready(true); // pool established
+        let flag = Arc::new(StaticProbe(std::sync::atomic::AtomicBool::new(false)));
+        let probe: Arc<dyn ReadinessProbe> = flag.clone();
+        let cfg = obs_config(health.clone(), None, Some(probe));
+
+        // DB unreachable -> 503 even though the process is live + health ready.
+        let down = handle_http_request(&test_server(), &cfg, get(READYZ_PATH));
+        assert_eq!(down.status, 503, "readyz 503 when DB unreachable");
+        assert_eq!(
+            response_json(&down)["db_reachable"],
+            serde_json::json!(false)
+        );
+
+        // DB becomes reachable -> 200.
+        flag.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        let up = handle_http_request(&test_server(), &cfg, get(READYZ_PATH));
+        assert_eq!(up.status, 200, "readyz 200 when DB reachable + ready");
+        assert_eq!(response_json(&up)["ready"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn readyz_is_503_on_shutdown_even_if_db_reachable() {
+        let health = HealthState::new("0.1.0");
+        health.set_ready(true);
+        let probe: Arc<dyn ReadinessProbe> =
+            Arc::new(StaticProbe(std::sync::atomic::AtomicBool::new(true)));
+        let cfg = obs_config(health.clone(), None, Some(probe));
+        assert_eq!(
+            handle_http_request(&test_server(), &cfg, get(READYZ_PATH)).status,
+            200
+        );
+        // Begin draining: readyz must flip to 503 even though the DB is up.
+        health.begin_shutdown();
+        let draining = handle_http_request(&test_server(), &cfg, get(READYZ_PATH));
+        assert_eq!(draining.status, 503, "readyz drains on shutdown");
+        assert_eq!(
+            response_json(&draining)["draining"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
+    fn readyz_without_probe_tracks_health_only() {
+        // No DB probe configured: readiness == health readiness.
+        let health = HealthState::new("0.1.0");
+        let cfg = obs_config(health.clone(), None, None);
+        assert_eq!(
+            handle_http_request(&test_server(), &cfg, get(READYZ_PATH)).status,
+            503,
+            "not ready until pool up"
+        );
+        health.set_ready(true);
+        assert_eq!(
+            handle_http_request(&test_server(), &cfg, get(READYZ_PATH)).status,
+            200
+        );
+    }
+
+    #[test]
+    fn metrics_endpoint_serves_prometheus_text() {
+        let metrics = Arc::new(Metrics::new());
+        metrics.record_request("oracle_query", "ok");
+        metrics.set_pool_active(2);
+        let cfg = obs_config(HealthState::new("0.1.0"), Some(metrics), None);
+        let resp = handle_http_request(&test_server(), &cfg, get(METRICS_PATH));
+        assert_eq!(resp.status, 200);
+        assert_eq!(
+            resp.header("content-type"),
+            Some("text/plain; version=0.0.4; charset=utf-8")
+        );
+        let body = String::from_utf8(resp.body).expect("utf-8");
+        assert!(body.contains("mcp_requests_total{tool=\"oracle_query\",status=\"ok\"} 1"));
+        assert!(body.contains("db_pool_active_connections 2"));
+    }
+
+    #[test]
+    fn observability_routes_are_404_when_unconfigured() {
+        // Default config has no observability state -> routes fall through to
+        // the normal 404 (not advertised). This also proves the routes don't
+        // collide with /mcp routing when off.
+        let cfg = HttpTransportConfig::default();
+        for path in [HEALTHZ_PATH, READYZ_PATH, METRICS_PATH] {
+            assert_eq!(
+                handle_http_request(&test_server(), &cfg, get(path)).status,
+                404,
+                "{path} is 404 when observability is off"
+            );
+        }
+    }
+
+    #[test]
+    fn health_routes_bypass_oauth_and_host_guard() {
+        // /healthz must answer even when OAuth enforcement is configured (infra
+        // probes carry no bearer) and regardless of Host/Origin allowlists.
+        let health = HealthState::new("0.1.0");
+        let mut cfg = obs_config(health, None, None);
+        cfg.oauth = Some(oauth_enforcement());
+        cfg.allowed_origins = vec!["https://only-this.example".to_owned()];
+        let resp = handle_http_request(&test_server(), &cfg, get(HEALTHZ_PATH));
+        assert_eq!(resp.status, 200, "healthz bypasses OAuth + guards");
     }
 
     fn oauth_enforcement() -> Arc<OAuthEnforcement> {
@@ -1039,6 +1233,13 @@ pub fn handle_http_request(
             None => empty_response(404),
         };
     }
+    // D1-health: liveness / readiness / metrics probes. Served before OAuth and
+    // the Host/Origin guard — these are infra endpoints for load balancers and
+    // Prometheus, not the MCP surface, and must answer even while the DB is down
+    // or the bearer config is absent. They carry no secrets and no DB data.
+    if let Some(response) = handle_observability_route(&config.observability, &request) {
+        return response;
+    }
     if request.path != MCP_PATH {
         return empty_response(404);
     }
@@ -1060,6 +1261,72 @@ pub fn handle_http_request(
         "POST" => handle_mcp_post(server, config, &request, scope_grant.as_ref()),
         "GET" => empty_response(405).with_header("allow", "POST, DELETE"),
         _ => empty_response(405).with_header("allow", "GET, POST, DELETE"),
+    }
+}
+
+/// Route the D1 observability endpoints. Returns `None` when the path is not an
+/// observability path (so normal MCP routing proceeds), or a response otherwise.
+///
+/// - `/healthz` (liveness): 200 while the process is up — **even if the DB is
+///   down**. Reflects only [`HealthState::is_live`].
+/// - `/readyz` (readiness): 200 only when the DB-reachability probe succeeds AND
+///   the server is not draining; **503 when the DB is unreachable or on
+///   shutdown** (the R4 acceptance criterion).
+/// - `/metrics`: Prometheus text exposition (no labels carry secrets/binds).
+fn handle_observability_route(
+    obs: &ObservabilityState,
+    request: &HttpRequest,
+) -> Option<HttpResponse> {
+    match request.path.as_str() {
+        HEALTHZ_PATH => {
+            let health = obs.health.as_ref()?;
+            if request.method != "GET" {
+                return Some(empty_response(405).with_header("allow", "GET"));
+            }
+            let (status, report) = health.liveness();
+            Some(json_response(
+                status,
+                &serde_json::to_value(&report).unwrap_or(Value::Null),
+            ))
+        }
+        READYZ_PATH => {
+            let health = obs.health.as_ref()?;
+            if request.method != "GET" {
+                return Some(empty_response(405).with_header("allow", "GET"));
+            }
+            // Readiness gates on BOTH the HealthState (drains on shutdown) AND a
+            // live DB-reachability probe. The DB gate makes /readyz 503 when the
+            // database is unreachable even though the process is still live.
+            let health_ready = health.is_ready();
+            let db_reachable = obs
+                .readiness_probe
+                .as_ref()
+                .is_none_or(|probe| probe.is_db_reachable());
+            let ready = health_ready && db_reachable;
+            let status = if ready { 200 } else { 503 };
+            let body = json!({
+                "status": if ready { "ok" } else { "unavailable" },
+                "ready": ready,
+                "db_reachable": db_reachable,
+                "draining": !health_ready,
+            });
+            Some(json_response(status, &body))
+        }
+        METRICS_PATH => {
+            let metrics = obs.metrics.as_ref()?;
+            if request.method != "GET" {
+                return Some(empty_response(405).with_header("allow", "GET"));
+            }
+            Some(HttpResponse {
+                status: 200,
+                headers: vec![(
+                    "content-type".to_owned(),
+                    "text/plain; version=0.0.4; charset=utf-8".to_owned(),
+                )],
+                body: metrics.prometheus_text().into_bytes(),
+            })
+        }
+        _ => None,
     }
 }
 

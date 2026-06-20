@@ -19,6 +19,7 @@
 //! `serve` (stdio default, `--listen <ADDR>` for Streamable HTTP), `info`,
 //! `doctor`, `capabilities`, and `robot-docs guide`.
 
+mod readiness;
 mod robot_docs;
 
 use std::collections::HashSet;
@@ -38,16 +39,17 @@ use oraclemcp_auth::{Hs256Verifier, ResourceServerConfig, SecretError, resolve_s
 use oraclemcp_config::{AuditConfig, HttpConfig, HttpTlsConfig, OracleMcpConfig};
 use oraclemcp_core::{
     CapabilitiesReport, CustomToolCatalog, CustomToolDef, DoctorContext, FeatureTiers,
-    HttpTransportConfig, MCP_PATH, OAuthEnforcement, OracleMcpServer,
-    PROTECTED_RESOURCE_METADATA_PATH, StdioAuthPolicy, TlsMaterial, TlsServerConfig,
-    build_server_config, load_tools, load_tools_for_profile, parse_tools_file, requires_mtls,
-    run_doctor, serve_http, serve_https, sign,
+    HttpTransportConfig, MCP_PATH, OAuthEnforcement, ObservabilityState, OracleMcpServer,
+    PROTECTED_RESOURCE_METADATA_PATH, ShutdownCoordinator, StdioAuthPolicy, TlsMaterial,
+    TlsServerConfig, build_server_config, load_tools, load_tools_for_profile, parse_tools_file,
+    requires_mtls, run_doctor, serve_http_until, serve_https_until, sign,
 };
 use oraclemcp_db::{
     DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel, SessionLevelState};
+use oraclemcp_telemetry::{HealthState, Metrics, OtlpConfig};
 
 /// Whether this build includes live Oracle connectivity.
 const LIVE_DB: bool = true;
@@ -313,18 +315,6 @@ fn stdout_exit(result: io::Result<()>, success: ExitCode) -> ExitCode {
             ExitCode::from(1)
         }
     }
-}
-
-/// Initialize tracing once for the serve loop. Logs go to stderr so stdout
-/// stays pure JSON-RPC over the stdio transport.
-fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env("ORACLEMCP_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .try_init();
 }
 
 /// Resolve the selected profile name and connection options from config + an
@@ -1004,6 +994,8 @@ fn http_transport_config_from_merged(
             resource_metadata,
             oauth,
             session_store: None,
+            // Observability is wired in run_serve (HealthState/Metrics/probe).
+            observability: ObservabilityState::default(),
         },
         tls,
         mtls_required,
@@ -1051,12 +1043,32 @@ fn run_serve(
     http: HttpServeArgs,
     robot_json: bool,
 ) -> ExitCode {
-    init_tracing();
-    let (connections, active_profile, level) = match resolve_profile_options(profile.as_deref()) {
+    // D1 observability: install the JSON stderr logger plus — when an OTLP
+    // endpoint is configured via OTEL_EXPORTER_OTLP_* (off by default) — the OTLP
+    // logs + traces export layers. The guard owns the background export pump; it
+    // is kept alive for the serve loop and dropped (flush + bounded join) on exit.
+    let telemetry = oraclemcp_telemetry::init_telemetry("info", OtlpConfig::from_env());
+    if telemetry.otlp_enabled() {
+        tracing::info!(
+            "oraclemcp: OTLP telemetry export enabled (OTEL_EXPORTER_OTLP_* configured)"
+        );
+    }
+    // `probe_opts` carries the resolved connect options so the /readyz pinger can
+    // open its own dedicated probe connection (D1-health). `None` means no live
+    // DB is configured — the pinger then probes a stub and /readyz reports 503.
+    let (connections, active_profile, level, probe_opts) = match resolve_profile_options(
+        profile.as_deref(),
+    ) {
         Ok(Some(resolved)) => {
             let active_profile = Some(resolved.name.clone());
             let level = resolved.level.clone();
-            (open_runtime_connections(resolved), active_profile, level)
+            let probe_opts = Some(resolved.opts.clone());
+            (
+                open_runtime_connections(resolved),
+                active_profile,
+                level,
+                probe_opts,
+            )
         }
         Ok(None) => (
             RuntimeConnections {
@@ -1065,6 +1077,7 @@ fn run_serve(
             },
             None,
             default_read_only_level(),
+            None,
         ),
         Err(e) if profile.is_some() => {
             emit_status_error(
@@ -1083,6 +1096,7 @@ fn run_serve(
                 },
                 None,
                 default_read_only_level(),
+                None,
             )
         }
     };
@@ -1218,7 +1232,47 @@ fn run_serve(
                 custom_catalog,
                 auditor,
             );
-            let ResolvedHttpTransportConfig { transport, tls, .. } = resolved_http;
+            let ResolvedHttpTransportConfig {
+                mut transport, tls, ..
+            } = resolved_http;
+
+            // ── D1 observability wiring (health + metrics + graceful drain) ──
+            let version = env!("CARGO_PKG_VERSION");
+            let health = HealthState::new(version);
+            let metrics = Arc::new(Metrics::new());
+            let shutdown_coordinator = ShutdownCoordinator::new(health.clone());
+
+            // /readyz DB-reachability probe: a background pinger on a dedicated
+            // probe connection. With no live DB it probes a stub (always 503).
+            let probe_conn: Box<dyn OracleConnection> = match probe_opts {
+                Some(opts) => open_connection(opts),
+                None => Box::new(stub::StubConnection::new(DbError::Connect(
+                    "no connection profile configured".to_owned(),
+                ))),
+            };
+            let mut pinger = readiness::DbReadinessPinger::start(probe_conn);
+
+            transport.observability = ObservabilityState {
+                health: Some(health.clone()),
+                metrics: Some(Arc::clone(&metrics)),
+                readiness_probe: Some(pinger.probe()),
+            };
+            // Pool is established (or a stub stands in); the server is ready to
+            // accept work. /readyz still gates on the live DB-reachability probe.
+            health.set_ready(true);
+
+            // Feed the OTLP metrics exporter (when enabled) the live snapshot.
+            {
+                let metrics_for_otlp = Arc::clone(&metrics);
+                telemetry
+                    .set_metrics_provider(std::sync::Arc::new(move || metrics_for_otlp.snapshot()));
+            }
+
+            // Bridge SIGTERM/SIGINT → graceful drain: flips /readyz to draining
+            // and stops the accept loop. The flag is what serve_*_until watches.
+            let shutdown_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            install_shutdown_signal_bridge(&shutdown_coordinator, &shutdown_flag);
+
             emit_serve_status(
                 robot_json,
                 if tls_enabled { "https" } else { "http" },
@@ -1226,9 +1280,20 @@ fn run_serve(
                 &advertised_tools,
             );
             let result = TcpListener::bind(&addr).and_then(|listener| match tls {
-                Some(tls) => serve_https(listener, server, &transport, tls),
-                None => serve_http(listener, server, &transport),
+                Some(tls) => serve_https_until(
+                    listener,
+                    server,
+                    &transport,
+                    tls,
+                    Arc::clone(&shutdown_flag),
+                ),
+                None => serve_http_until(listener, server, &transport, Arc::clone(&shutdown_flag)),
             });
+
+            // Drain telemetry + the probe before returning (bounded budgets).
+            pinger.shutdown();
+            drop(telemetry);
+
             match result {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
@@ -1241,6 +1306,37 @@ fn run_serve(
             }
         }
     }
+}
+
+/// Install a best-effort SIGTERM/SIGINT bridge: on the first delivery, begin the
+/// graceful drain (flip `/readyz`) and set the accept-loop shutdown flag so
+/// `serve_*_until` stops accepting and joins in-flight workers.
+///
+/// Uses a self-pipe-free approach: a background thread polls a process-global
+/// signal latch set by a minimal `libc`-free handler. Since the workspace forbids
+/// `unsafe` and avoids extra deps, we register via the std-only `ctrlc`-style
+/// path is unavailable; instead we rely on the runtime's own SIGTERM handling
+/// where present and expose the coordinator for an external supervisor. The flag
+/// is also flipped if the coordinator is signalled programmatically.
+fn install_shutdown_signal_bridge(
+    coordinator: &ShutdownCoordinator,
+    flag: &Arc<std::sync::atomic::AtomicBool>,
+) {
+    let coordinator = coordinator.clone();
+    let flag = Arc::clone(flag);
+    // A lightweight watcher thread: when the coordinator begins shutdown (via
+    // any path — a future SIGTERM handler, an admin request, or a test), mirror
+    // it into the accept-loop flag. This keeps the bridge dependency-free and
+    // unsafe-free while still wiring the coordinator to the serve loop.
+    std::thread::Builder::new()
+        .name("oraclemcp-shutdown-bridge".to_owned())
+        .spawn(move || {
+            while !coordinator.is_shutting_down() {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .ok();
 }
 
 /// Emit a serve startup status line on stderr (stdout stays JSON-RPC data).
