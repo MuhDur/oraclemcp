@@ -22,9 +22,11 @@ pub mod capability;
 pub mod connect;
 pub mod custom_tools;
 pub mod doctor;
+pub mod export;
 pub mod fence;
 pub mod http;
 pub mod init_token;
+pub mod pagination;
 pub mod plugin;
 pub mod query_execute;
 pub mod resilience;
@@ -33,6 +35,7 @@ pub mod server;
 pub mod session_tool;
 pub mod shutdown;
 pub mod subscriptions;
+pub mod tamper_token;
 pub mod tls;
 pub mod tools;
 pub mod trace;
@@ -64,6 +67,9 @@ pub use doctor::{
     AuthModeClass, CheckResult, CheckStatus, DoctorContext, DoctorReport, classify_auth_mode,
     run_doctor,
 };
+pub use export::{
+    ExportAccess, ExportContents, ExportFormat, ExportHandle, ExportRegistry, export_uri,
+};
 pub use http::{
     HEALTHZ_PATH, HttpRequest, HttpResponse, HttpTransportConfig, MCP_PATH, METRICS_PATH,
     OAuthEnforcement, ObservabilityState, PROTECTED_RESOURCE_METADATA_PATH, READYZ_PATH,
@@ -81,7 +87,8 @@ pub use resources::{
     ResourceUri, prompt_catalog, read_resource, render_prompt, resource_templates,
 };
 pub use session_tool::{LeaseAcquirer, SessionAction, SessionDeps, oracle_session};
-pub use subscriptions::SubscriptionRegistry;
+pub use subscriptions::{PollingSource, SubscribeSource, SubscriptionHub, SubscriptionRegistry};
+pub use tamper_token::{sign_token, verify_token};
 pub use tls::{TlsError, TlsMaterial, TlsServerConfig, build_server_config, requires_mtls};
 pub use tools::{ToolDescriptor, ToolRegistry, ToolTier};
 pub use trace::TraceContext;

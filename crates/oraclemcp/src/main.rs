@@ -819,7 +819,12 @@ fn build_server(
     if let Some(auditor) = auditor {
         dispatcher = dispatcher.with_auditor(auditor);
     }
-    OracleMcpServer::new(version, registry, caps, Arc::new(dispatcher))
+    // E3/E3b: the dispatcher (which mints exports for oversized oracle_query
+    // results) and the server (which serves them over resources/read) share the
+    // SAME export registry.
+    let exports = Arc::new(oraclemcp_core::ExportRegistry::new());
+    dispatcher = dispatcher.with_exports(Arc::clone(&exports));
+    OracleMcpServer::with_exports(version, registry, caps, Arc::new(dispatcher), exports)
 }
 
 fn apply_http_cli_overrides(mut config: HttpConfig, cli: &HttpServeArgs) -> HttpConfig {

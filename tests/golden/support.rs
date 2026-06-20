@@ -66,6 +66,18 @@ fn scrub_value(value: &Value) -> Value {
                     || key.eq_ignore_ascii_case("session-id")
                 {
                     out.insert(key.clone(), Value::String("[SESSION_ID]".to_owned()));
+                } else if (key.eq_ignore_ascii_case("next_cursor")
+                    || key.eq_ignore_ascii_case("nextCursor"))
+                    && value.is_string()
+                {
+                    // E2: opaque tamper-evident cursors carry a per-process MAC
+                    // tag (non-deterministic). Normalize the `.<16-hex>` tag to a
+                    // stable token, keeping the opaque body so the golden still
+                    // proves a cursor was issued without freezing the secret tag.
+                    out.insert(
+                        key.clone(),
+                        Value::String(scrub_cursor_token(value.as_str().unwrap())),
+                    );
                 } else {
                     out.insert(key.clone(), scrub_value(value));
                 }
@@ -73,9 +85,80 @@ fn scrub_value(value: &Value) -> Value {
             Value::Object(out)
         }
         Value::Array(values) => Value::Array(values.iter().map(scrub_value).collect()),
-        Value::String(text) => Value::String(scrub_text(text)),
+        Value::String(text) => Value::String(scrub_export_uri(&scrub_text(text))),
         other => other.clone(),
     }
+}
+
+/// Normalize an opaque `<body>.<16-hex MAC>` cursor token to `<body>.[MAC]` so
+/// goldens stay stable across processes while still proving the cursor shape.
+fn scrub_cursor_token(token: &str) -> String {
+    if let Some((body, tag)) = token.rsplit_once('.')
+        && tag.len() == 16
+        && tag.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return format!("{body}.[MAC]");
+    }
+    token.to_owned()
+}
+
+/// Within a flat JSON text payload, normalize the MAC tag of any
+/// `"next_cursor":"<body>.<16-hex>"` value. Operates on the serialized text
+/// channel (the structured channel is scrubbed at the value level).
+fn scrub_embedded_cursor_tokens(text: &str) -> String {
+    const NEEDLE: &str = "\"next_cursor\":\"";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find(NEEDLE) {
+        let value_start = pos + NEEDLE.len();
+        out.push_str(&rest[..value_start]);
+        let after = &rest[value_start..];
+        // The JSON string value ends at the next unescaped quote.
+        if let Some(end) = after.find('"') {
+            out.push_str(&scrub_cursor_token(&after[..end]));
+            rest = &after[end..];
+        } else {
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Normalize the per-process MAC tag inside an `oracle-export://exp-N.<16-hex>`
+/// URI (or a bare export id) to `oracle-export://exp-N.[MAC]`, keeping the
+/// deterministic body so the golden still proves the export shape.
+fn scrub_export_uri(value: &str) -> String {
+    const SCHEME: &str = "oracle-export://";
+    if let Some(id) = value.strip_prefix(SCHEME) {
+        return format!("{SCHEME}{}", scrub_cursor_token(id));
+    }
+    // A bare export id (`exp-N.<16-hex>`).
+    if value.starts_with("exp-") {
+        return scrub_cursor_token(value);
+    }
+    value.to_owned()
+}
+
+/// Within a flat JSON text payload, normalize the MAC tag of every
+/// `oracle-export://exp-N.<16-hex>` URI occurrence.
+fn scrub_embedded_export_uris(text: &str) -> String {
+    const NEEDLE: &str = "oracle-export://";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find(NEEDLE) {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + NEEDLE.len()..];
+        // The id runs until a JSON string boundary (`"`, `\`) or whitespace.
+        let end = after
+            .find(|c: char| c == '"' || c == '\\' || c.is_whitespace())
+            .unwrap_or(after.len());
+        out.push_str(NEEDLE);
+        out.push_str(&scrub_cursor_token(&after[..end]));
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn scrub_text(text: &str) -> String {
@@ -84,6 +167,13 @@ fn scrub_text(text: &str) -> String {
     // scrubbing. This keeps goldens deterministic while still proving the fence
     // (preamble + open/close delimiters) is present in agent-facing text.
     let text = scrub_fence_tags(text);
+    // E2: the fenced text channel embeds the structured JSON verbatim, including
+    // the opaque `"next_cursor":"<body>.<16-hex MAC>"`. Normalize the MAC tag
+    // there too so the golden is stable across processes.
+    let text = scrub_embedded_cursor_tokens(&text);
+    // E3: likewise normalize the MAC tag inside any embedded
+    // `oracle-export://exp-N.<16-hex>` URI in the text channel.
+    let text = scrub_embedded_export_uris(&text);
     let mut out = String::with_capacity(text.len());
     let mut index = 0;
     while index < text.len() {

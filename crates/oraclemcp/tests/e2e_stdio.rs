@@ -298,10 +298,22 @@ fn tools_list_advertises_registry_tools_plus_capabilities() {
             .get("outputSchema")
             .unwrap_or_else(|| panic!("{name} must advertise outputSchema"));
         assert_eq!(output_schema["type"], json!("object"));
-        assert_eq!(
-            output_schema["required"],
-            json!(["columns", "rows", "row_count", "truncated", "total_bytes"])
-        );
+        // E3: the inline-page and export arms share one output schema; only
+        // columns + row_count are always required, while rows/truncated/
+        // total_bytes (inline) and export/resource_link (export) are optional.
+        assert_eq!(output_schema["required"], json!(["columns", "row_count"]));
+        for field in [
+            "rows",
+            "truncated",
+            "total_bytes",
+            "export",
+            "resource_link",
+        ] {
+            assert!(
+                output_schema["properties"].get(field).is_some(),
+                "{name} outputSchema must document the {field} field"
+            );
+        }
         assert_eq!(
             output_schema["properties"]["rows"]["items"]["additionalProperties"]["oneOf"][0]["type"],
             json!("string"),

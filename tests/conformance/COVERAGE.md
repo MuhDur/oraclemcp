@@ -10,7 +10,15 @@ Spec sources:
 Harnesses:
 
 - Rust integration test: `crates/oraclemcp-core/tests/mcp_conformance.rs`
-- Golden behavior test: `crates/oraclemcp-core/tests/golden_behavior.rs`
+- Golden behavior test: `crates/oraclemcp-core/tests/golden_behavior.rs`,
+  `crates/oraclemcp/tests/golden_behavior.rs`
+  (`tests/golden/stdio/query_opaque_cursor_pagination.json` freezes the E2
+  opaque-cursor round-trip + forged/cross-statement rejection;
+  `tests/golden/stdio/query_export_resource_and_resource_link.json` freezes the
+  E3/E3b export `resource_link` + `resources/read` CSV escaping + forged-id
+  rejection;
+  `tests/golden/stdio/resource_subscribe_and_updated.json` freezes the E1
+  subscribe-capability gate + polling-fallback `resources/updated` notification)
 - Binary transport test: `crates/oraclemcp/tests/e2e_http_oauth.rs`
 - Native listener TLS tests: `crates/oraclemcp-core/src/http.rs`
 - Transports under test:
@@ -25,9 +33,11 @@ Harnesses:
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Initialize | 2 | 0 | 2 | 2 | 0 | 100% |
 | Notifications | 1 | 0 | 1 | 1 | 0 | 100% |
-| Resources | 1 | 0 | 1 | 1 | 0 | 100% |
+| Resources | 3 | 0 | 3 | 3 | 0 | 100% |
+| Subscriptions | 2 | 0 | 2 | 2 | 0 | 100% |
 | Prompts | 1 | 0 | 1 | 1 | 0 | 100% |
 | Tools | 5 | 0 | 5 | 5 | 0 | 100% |
+| Pagination | 2 | 0 | 2 | 2 | 0 | 100% |
 | JSON-RPC errors | 3 | 2 | 5 | 5 | 1 | 100% |
 | Security | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTP OAuth | 4 | 0 | 4 | 4 | 0 | 100% |
@@ -35,7 +45,7 @@ Harnesses:
 | HTTP sessions | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
 
-Total tracked requirements: 22 MUST, 2 SHOULD, 24 tested.
+Total tracked requirements: 28 MUST, 2 SHOULD, 30 tested.
 
 ## Requirement IDs
 
@@ -57,6 +67,12 @@ Total tracked requirements: 22 MUST, 2 SHOULD, 24 tested.
 | JSONRPC-STDIO-004 | SHOULD | JSON-RPC errors | Oversized frames fail closed before parsing. |
 | JSONRPC-STDIO-005 | SHOULD | JSON-RPC errors | Batch arrays are explicitly rejected for stdio. |
 | SEC-STDIO-001 | MUST | Security | Token mismatch errors do not echo the presented token. |
+| MCP-STDIO-011 | MUST | Pagination | `tools/list`, `resources/list`, and `resources/templates/list` emit an opaque, tamper-evident `nextCursor` that round-trips to cover every item exactly once within a bounded page size. |
+| MCP-STDIO-012 | MUST | Pagination | A forged, edited, or cross-endpoint pagination cursor (and a tampered `oracle_query` page cursor) is rejected with invalid-params / a structured error envelope, never silently followed. |
+| MCP-STDIO-013 | MUST | Resources | A large `oracle_query` result is materialized as an `oracle-export://{id}` resource (E3) and returned as a `resource_link` (E3b); `resources/read` serves it with its MIME type and proper CSV escaping; a forged or expired export id fails closed (`OBJECT_NOT_FOUND`). |
+| MCP-STDIO-014 | MUST | Resources | An export is access-controlled identically to the originating query: the export id is bound (HMAC) to the request's OAuth scope-grant fingerprint, so a `resources/read` under a different scope grant is refused. |
+| MCP-STDIO-015 | MUST | Subscriptions | `resources.subscribe` is advertised, and `resources/subscribe` accepted, ONLY when a change source is confirmed (the `SubscriptionHub` polling fallback). With no source the capability stays `false` and `resources/subscribe` is refused (method-not-found). The thin-line binary ships with no source, so it does not advertise subscribe. |
+| MCP-STDIO-016 | MUST | Subscriptions | A subscribed resource whose polled fingerprint changes (the DBMS_CHANGE_NOTIFICATION-vs-polling fallback path) emits a `notifications/resources/updated` for that uri on the next transport flush; the first observation only seeds the baseline. |
 | HTTP-AUTH-001 | MUST | HTTP OAuth | OAuth-protected `/mcp` refuses anonymous requests with `WWW-Authenticate`. |
 | HTTP-AUTH-002 | MUST | HTTP OAuth | A valid bearer token admits a served HTTP request and forwards the validated OAuth scope grant to tool dispatch. |
 | HTTP-AUTH-003 | MUST | HTTP OAuth | A valid bearer token without the configured required scope returns `403` with `error="insufficient_scope"`. |

@@ -26,6 +26,15 @@ pub(super) struct QueryArgs {
     pub(super) numbers_as_float: Option<bool>,
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
+    /// E3/E3b: when true, materialize the (bounded) full result as an
+    /// `oracle-export://{id}` resource and return a `resource_link` instead of
+    /// inlining rows. Default false preserves the inline, paginated behavior.
+    #[serde(default, alias = "export_to_resource")]
+    pub(super) export: bool,
+    /// Export serialization format: `csv` (default) or `json`. Only meaningful
+    /// with `export=true`.
+    #[serde(default, alias = "format")]
+    pub(super) export_format: Option<String>,
 }
 
 #[derive(Deserialize)]

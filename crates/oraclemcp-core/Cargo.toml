@@ -19,6 +19,7 @@ oraclemcp-auth = { path = "../oraclemcp-auth", version = "0.3.0" }
 oraclemcp-telemetry = { path = "../oraclemcp-telemetry", version = "0.3.0" }
 asupersync.workspace = true
 async-trait.workspace = true
+getrandom = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde.workspace = true
 serde_json.workspace = true

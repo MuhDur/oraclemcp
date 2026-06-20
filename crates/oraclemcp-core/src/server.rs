@@ -96,16 +96,46 @@ pub struct OracleMcpServer {
     capabilities: Arc<CapabilitiesReport>,
     dispatcher: Arc<dyn ToolDispatch>,
     dispatch_runtime: Arc<Runtime>,
+    /// In-process store of materialized large-result exports (E3). Shared with
+    /// the dispatcher so `oracle_query`'s oversized arm (E3b) can register an
+    /// export the server then serves over `resources/read`.
+    exports: Arc<crate::export::ExportRegistry>,
+    /// Resource-subscription hub (E1). Owns the subscriber registry, the
+    /// confirmed change source (the capability gate), and the pending
+    /// `resources/updated` queue. Defaults to unsupported (capability off).
+    subscriptions: Arc<crate::subscriptions::SubscriptionHub>,
 }
 
 impl OracleMcpServer {
     /// Build a server over a tool registry, capability report, and dispatcher.
+    /// The server owns a fresh export registry (E3).
     #[must_use]
     pub fn new(
         version: impl Into<String>,
         registry: ToolRegistry,
         capabilities: CapabilitiesReport,
         dispatcher: Arc<dyn ToolDispatch>,
+    ) -> Self {
+        Self::with_exports(
+            version,
+            registry,
+            capabilities,
+            dispatcher,
+            Arc::new(crate::export::ExportRegistry::new()),
+        )
+    }
+
+    /// Build a server sharing a caller-provided export registry. The wiring uses
+    /// this so the dispatcher (which mints exports for oversized `oracle_query`
+    /// results, E3b) and the server (which serves them over `resources/read`,
+    /// E3) share the SAME registry.
+    #[must_use]
+    pub fn with_exports(
+        version: impl Into<String>,
+        registry: ToolRegistry,
+        capabilities: CapabilitiesReport,
+        dispatcher: Arc<dyn ToolDispatch>,
+        exports: Arc<crate::export::ExportRegistry>,
     ) -> Self {
         let dispatch_runtime = RuntimeBuilder::current_thread()
             .build()
@@ -119,7 +149,36 @@ impl OracleMcpServer {
             capabilities: Arc::new(capabilities),
             dispatcher,
             dispatch_runtime: Arc::new(dispatch_runtime),
+            exports,
+            subscriptions: Arc::new(crate::subscriptions::SubscriptionHub::unsupported()),
         }
+    }
+
+    /// The shared export registry (E3). Exposed so the binary wiring can hand
+    /// the same registry to the dispatcher.
+    #[must_use]
+    pub fn exports(&self) -> Arc<crate::export::ExportRegistry> {
+        Arc::clone(&self.exports)
+    }
+
+    /// Attach a resource-subscription hub (E1; builder). When the hub has a
+    /// confirmed change source, the `resources.subscribe` capability is
+    /// advertised and `resources/subscribe` is served; otherwise it stays
+    /// unsupported.
+    #[must_use]
+    pub fn with_subscriptions(
+        mut self,
+        subscriptions: Arc<crate::subscriptions::SubscriptionHub>,
+    ) -> Self {
+        self.subscriptions = subscriptions;
+        self
+    }
+
+    /// The subscription hub (E1). Exposed so the operator side can drive the
+    /// polling source / mark changes.
+    #[must_use]
+    pub fn subscriptions(&self) -> Arc<crate::subscriptions::SubscriptionHub> {
+        Arc::clone(&self.subscriptions)
     }
 
     /// Map the registry descriptors to native MCP JSON tool descriptors.
@@ -192,6 +251,14 @@ impl OracleMcpServer {
             if let Some(response) = response {
                 write_jsonrpc_response(&mut writer, &response)?;
             }
+            // E1: after handling a request, flush any queued
+            // `notifications/resources/updated` for subscribed, changed
+            // resources. The polling source is driven out-of-band (the operator
+            // side calls `subscriptions().poll_for_changes()`); here we only
+            // drain what is already pending so updates ride the same stdout.
+            for notification in self.drain_resource_updated_notifications() {
+                write_jsonrpc_response(&mut writer, &notification)?;
+            }
         }
         Ok(())
     }
@@ -201,7 +268,7 @@ impl OracleMcpServer {
     pub fn initialize_result_json(&self) -> Value {
         json!({
             "protocolVersion": "2025-11-25",
-            "capabilities": served_capabilities_json(),
+            "capabilities": served_capabilities_json(self.subscriptions.supports_subscriptions()),
             "serverInfo": {
                 "name": "oraclemcp",
                 "version": self.version,
@@ -377,12 +444,18 @@ impl OracleMcpServer {
         match method {
             "initialize" => Some(self.handle_initialize(id, object.get("params"), auth)),
             "notifications/initialized" => None,
-            "resources/list" => Some(self.handle_resources_list(id)),
-            "resources/templates/list" => Some(self.handle_resource_templates_list(id)),
+            "resources/list" => Some(self.handle_resources_list(id, object.get("params"))),
+            "resources/templates/list" => {
+                Some(self.handle_resource_templates_list(id, object.get("params")))
+            }
             "resources/read" => Some(self.handle_resource_read(id, object.get("params"), context)),
+            "resources/subscribe" => Some(self.handle_resource_subscribe(id, object.get("params"))),
+            "resources/unsubscribe" => {
+                Some(self.handle_resource_unsubscribe(id, object.get("params")))
+            }
             "prompts/list" => Some(self.handle_prompts_list(id)),
             "prompts/get" => Some(self.handle_prompt_get(id, object.get("params"))),
-            "tools/list" => Some(jsonrpc_result(id, self.tools_list_result_json())),
+            "tools/list" => Some(self.handle_tools_list(id, object.get("params"))),
             "tools/call" => Some(self.handle_tool_call(id, object.get("params"), context)),
             _ => Some(jsonrpc_error(
                 id,
@@ -457,15 +530,54 @@ impl OracleMcpServer {
         }
     }
 
-    fn handle_resources_list(&self, id: Value) -> Value {
-        jsonrpc_result(id, json!({ "resources": served_resources_json() }))
+    fn handle_tools_list(&self, id: Value, params: Option<&Value>) -> Value {
+        self.paginated_list_result(id, params, "tools", "tools", &self.tools_json())
     }
 
-    fn handle_resource_templates_list(&self, id: Value) -> Value {
-        jsonrpc_result(
+    fn handle_resources_list(&self, id: Value, params: Option<&Value>) -> Value {
+        self.paginated_list_result(
             id,
-            json!({ "resourceTemplates": served_resource_templates_json() }),
+            params,
+            "resources",
+            "resources",
+            &served_resources_json(),
         )
+    }
+
+    fn handle_resource_templates_list(&self, id: Value, params: Option<&Value>) -> Value {
+        self.paginated_list_result(
+            id,
+            params,
+            "resource_templates",
+            "resourceTemplates",
+            &served_resource_templates_json(),
+        )
+    }
+
+    /// Slice a static list endpoint into an opaque, tamper-evident page (E2).
+    /// `kind` scopes the cursor; `result_key` is the wire field the items go
+    /// under. A present-but-invalid cursor (forged/edited/cross-endpoint) is a
+    /// JSON-RPC invalid-params error, never a silent reset.
+    fn paginated_list_result(
+        &self,
+        id: Value,
+        params: Option<&Value>,
+        kind: &str,
+        result_key: &str,
+        items: &[Value],
+    ) -> Value {
+        let cursor = cursor_from_params(params);
+        match crate::pagination::paginate(kind, items, cursor.as_deref()) {
+            Ok(page) => {
+                let mut result = Map::new();
+                result.insert(result_key.to_owned(), Value::Array(page.items));
+                if let Some(next) = page.next_cursor {
+                    result.insert("nextCursor".to_owned(), Value::String(next));
+                }
+                jsonrpc_result(id, Value::Object(result))
+            }
+            Err(envelope) => jsonrpc_error_from_envelope(id, JSONRPC_INVALID_PARAMS, &envelope),
+        }
     }
 
     fn handle_resource_read(
@@ -502,6 +614,62 @@ impl OracleMcpServer {
                 &envelope,
             ),
         }
+    }
+
+    /// Serve `resources/subscribe` (E1). Refused (method-not-found) when no
+    /// change source is confirmed — we never accept a subscription the server
+    /// cannot honor, matching the unadvertised capability.
+    fn handle_resource_subscribe(&self, id: Value, params: Option<&Value>) -> Value {
+        if !self.subscriptions.supports_subscriptions() {
+            return jsonrpc_error(
+                id,
+                JSONRPC_METHOD_NOT_FOUND,
+                "resources/subscribe is not supported: no resource change source is configured",
+            );
+        }
+        let (uri, client) = match subscribe_params(params) {
+            Ok(parsed) => parsed,
+            Err(message) => return jsonrpc_error(id, JSONRPC_INVALID_PARAMS, message),
+        };
+        if self.subscriptions.subscribe(&client, &uri) {
+            tracing::info!(uri = %uri, client = %client, "resources/subscribe");
+            jsonrpc_result(id, json!({}))
+        } else {
+            jsonrpc_error(
+                id,
+                JSONRPC_METHOD_NOT_FOUND,
+                "resources/subscribe is not supported: no resource change source is configured",
+            )
+        }
+    }
+
+    /// Serve `resources/unsubscribe` (E1). Idempotent; succeeds even when the
+    /// subscription was never present.
+    fn handle_resource_unsubscribe(&self, id: Value, params: Option<&Value>) -> Value {
+        let (uri, client) = match subscribe_params(params) {
+            Ok(parsed) => parsed,
+            Err(message) => return jsonrpc_error(id, JSONRPC_INVALID_PARAMS, message),
+        };
+        self.subscriptions.unsubscribe(&client, &uri);
+        tracing::info!(uri = %uri, client = %client, "resources/unsubscribe");
+        jsonrpc_result(id, json!({}))
+    }
+
+    /// Drain queued `resources/updated` notifications (E1) as JSON-RPC
+    /// notification objects, to be written to the transport after a request.
+    #[must_use]
+    pub fn drain_resource_updated_notifications(&self) -> Vec<Value> {
+        self.subscriptions
+            .drain_pending()
+            .into_iter()
+            .map(|uri| {
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/resources/updated",
+                    "params": { "uri": uri },
+                })
+            })
+            .collect()
     }
 
     fn read_resource_contents(
@@ -589,6 +757,22 @@ impl OracleMcpServer {
                     })
                 }
             }
+            ResourceUri::Export { id } => {
+                // E3: serve the materialized export iff the read presents the
+                // same access context the export was minted under. The context
+                // is derived from the request's OAuth scope grant (profile is
+                // not on the read transport, so it is bound as "" here and the
+                // export must have been minted with the same; the dispatcher
+                // mints with the active profile + scope fingerprint).
+                let access = export_access_from_context(context);
+                self.exports
+                    .read(&id, &access)
+                    .map(|contents| ResourceContents {
+                        uri: contents.uri,
+                        mime_type: contents.mime_type,
+                        text: contents.text,
+                    })
+            }
             ResourceUri::Session { lease_id } => Err(ErrorEnvelope::new(
                 ErrorClass::ObjectNotFound,
                 format!(
@@ -664,17 +848,64 @@ impl OracleMcpServer {
     }
 }
 
-fn served_capabilities_json() -> Value {
+/// Derive the export access context (E3) from a request's authorization
+/// context. The binding is the OAuth scope-grant fingerprint (the same boundary
+/// the originating `oracle_query` enforced); profile is not on the read
+/// transport so it stays advisory/`None` here.
+fn export_access_from_context(context: DispatchContext<'_>) -> crate::export::ExportAccess {
+    let scopes = context.scope_grant().map(|grant| grant.0.as_slice());
+    crate::export::ExportAccess::new(None, scopes)
+}
+
+/// Parse `resources/(un)subscribe` params into `(uri, client_id)`. MCP carries
+/// the watched `uri` in params; the subscriber identity is per-connection and
+/// not on the stdio wire, so an optional `params.clientId` (or `_meta.clientId`)
+/// selects it, defaulting to a single per-connection `"client"` subscriber.
+fn subscribe_params(params: Option<&Value>) -> Result<(String, String), &'static str> {
+    let Some(Value::Object(params)) = params else {
+        return Err("resources/subscribe params must be an object with a uri");
+    };
+    let uri = params
+        .get("uri")
+        .and_then(Value::as_str)
+        .ok_or("resources/subscribe uri must be a string")?;
+    let client = params
+        .get("clientId")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            params
+                .get("_meta")
+                .and_then(|meta| meta.get("clientId"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("client");
+    Ok((uri.to_owned(), client.to_owned()))
+}
+
+/// Extract the optional opaque `params.cursor` from a list request. MCP places
+/// the pagination cursor at `params.cursor`; absent/null is the first page.
+fn cursor_from_params(params: Option<&Value>) -> Option<String> {
+    params
+        .and_then(|params| params.get("cursor"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn served_capabilities_json(subscribe_supported: bool) -> Value {
     // Keep this in lockstep with `handle_jsonrpc_request_with_context`.
     // Resources, prompts, and completion are deliberately omitted until their
     // JSON-RPC arms are actually served; advertising an unserved method causes
     // strict MCP clients to make calls that return method-not-found.
+    //
+    // E1: `resources.subscribe` is advertised ONLY when a working change source
+    // is confirmed (the subscription hub reports supported). With no source the
+    // server keeps `subscribe: false` and refuses `resources/subscribe`.
     json!({
         "tools": {
             "listChanged": false,
         },
         "resources": {
-            "subscribe": false,
+            "subscribe": subscribe_supported,
             "listChanged": false,
         },
         "prompts": {
@@ -683,31 +914,29 @@ fn served_capabilities_json() -> Value {
     })
 }
 
-fn served_resources_json() -> Value {
-    json!([
-        {
+fn served_resources_json() -> Vec<Value> {
+    vec![
+        json!({
             "uri": "oracle://capabilities",
             "name": "capabilities",
             "description": "Server capability report",
             "mimeType": "application/json",
-        },
-        {
+        }),
+        json!({
             "uri": "oracle://tools",
             "name": "tools",
             "description": "MCP tool catalog",
             "mimeType": "application/json",
-        },
-    ])
+        }),
+    ]
 }
 
-fn served_resource_templates_json() -> Value {
-    Value::Array(
-        resource_templates()
-            .into_iter()
-            .filter(|template| template.uri_template != "oracle://session/{lease_id}")
-            .map(|template| serde_json::to_value(template).unwrap_or(Value::Null))
-            .collect(),
-    )
+fn served_resource_templates_json() -> Vec<Value> {
+    resource_templates()
+        .into_iter()
+        .filter(|template| template.uri_template != "oracle://session/{lease_id}")
+        .map(|template| serde_json::to_value(template).unwrap_or(Value::Null))
+        .collect()
 }
 
 fn is_source_resource_type(object_type: &str) -> bool {

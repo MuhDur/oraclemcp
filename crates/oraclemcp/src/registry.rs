@@ -171,11 +171,23 @@ fn query_output_schema() -> Value {
             },
             "row_count": { "type": "integer", "minimum": 0 },
             "truncated": { "type": "boolean" },
-            "next_cursor": { "type": "string" },
-            "total_bytes": { "type": "integer", "minimum": 0 }
+            "next_cursor": { "type": ["string", "null"] },
+            "total_bytes": { "type": "integer", "minimum": 0 },
+            "inlined": { "type": "boolean", "description": "False when the result was materialized as an export resource (export=true) rather than inlined." },
+            "export": {
+                "type": "object",
+                "description": "Present when export=true: metadata for the materialized oracle-export://{id} resource.",
+                "additionalProperties": true
+            },
+            "resource_link": {
+                "type": "object",
+                "description": "Present when export=true: an MCP resource_link to the export, to fetch via resources/read.",
+                "additionalProperties": true
+            },
+            "next_step": { "type": "string" }
         },
-        "required": ["columns", "rows", "row_count", "truncated", "total_bytes"],
-        "additionalProperties": false
+        "required": ["columns", "row_count"],
+        "additionalProperties": true
     })
 }
 
@@ -782,7 +794,9 @@ pub fn tool_registry() -> ToolRegistry {
                     "max_col_width": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Compatibility text cap for ordinary text/raw columns." },
                     "max_lob_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum CLOB characters to inline per cell." },
                     "max_blob_bytes": { "type": "integer", "minimum": 1, "maximum": 5242880, "description": "Maximum BLOB bytes to inline per cell as base64." },
-                    "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible." }
+                    "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible." },
+                    "export": { "type": "boolean", "description": "When true, materialize the bounded full result as an oracle-export://{id} resource and return a resource_link instead of inlining rows." },
+                    "export_format": { "type": "string", "enum": ["csv", "json"], "description": "Export serialization when export=true: csv (default) or json." }
                 }),
                 &[timeout_seconds_prop()],
             ),
@@ -1314,11 +1328,27 @@ mod tests {
                 .as_ref()
                 .unwrap_or_else(|| panic!("{name} declares output_schema"));
             assert_eq!(schema["type"], json!("object"), "{name}");
+            // The inline page and the E3 export arm share one output schema:
+            // columns + row_count are always present; rows/truncated/total_bytes
+            // are the inline-page fields, and export/resource_link/inlined are
+            // the export-arm fields (additionalProperties=true admits both).
             assert_eq!(
                 schema["required"],
-                json!(["columns", "rows", "row_count", "truncated", "total_bytes"]),
+                json!(["columns", "row_count"]),
                 "{name}"
             );
+            for field in [
+                "rows",
+                "truncated",
+                "total_bytes",
+                "export",
+                "resource_link",
+            ] {
+                assert!(
+                    schema["properties"].get(field).is_some(),
+                    "{name} documents the {field} output field"
+                );
+            }
             assert_eq!(
                 schema["properties"]["rows"]["items"]["additionalProperties"]["oneOf"][0]["type"],
                 json!("string"),

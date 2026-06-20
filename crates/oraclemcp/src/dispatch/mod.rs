@@ -68,6 +68,10 @@ const DEFAULT_LOB_MAX_CHARS: usize = 1_000_000;
 const MAX_QUERY_MAX_ROWS: usize = 5_000;
 /// Hard cap on serialized bytes per `oracle_query` page.
 const MAX_QUERY_RESULT_BYTES: usize = 25 * 1024 * 1024;
+/// Hard cap on rows materialized into a single `oracle_query` export resource
+/// (E3/E3b). Bounds the work + memory of one export independent of the inline
+/// page cap; rows beyond this are dropped and the export is marked truncated.
+const MAX_QUERY_EXPORT_ROWS: usize = 100_000;
 /// Hard cap on text/CLOB characters materialized by a single query cell.
 const MAX_QUERY_TEXT_CHARS: usize = 1_000_000;
 /// Hard cap on BLOB bytes materialized by a single query cell.
@@ -209,6 +213,11 @@ pub struct OracleDispatcher {
     /// (`oracle_execute`/`execute_approved`) and every `oracle_set_session_level`
     /// escalation appends a record here.
     auditor: Option<Arc<Auditor>>,
+    /// Shared store for materialized large-result exports (E3). When set,
+    /// oversized `oracle_query` results are exported to `oracle-export://{id}`
+    /// and a `resource_link` is returned instead of inlining (E3b). `None`
+    /// disables the export arm (results are inlined / row-capped as before).
+    exports: Option<Arc<oraclemcp_core::ExportRegistry>>,
 }
 
 impl OracleDispatcher {
@@ -245,6 +254,7 @@ impl OracleDispatcher {
             stateless_connector: None,
             custom_loader: None,
             auditor: None,
+            exports: None,
         }
     }
 
@@ -310,6 +320,7 @@ impl OracleDispatcher {
             stateless_connector: stateless.connector,
             custom_loader,
             auditor: None,
+            exports: None,
         }
     }
 
@@ -320,6 +331,15 @@ impl OracleDispatcher {
     #[must_use]
     pub fn with_auditor(mut self, auditor: Arc<Auditor>) -> Self {
         self.auditor = Some(auditor);
+        self
+    }
+
+    /// Attach the shared export registry (E3/E3b; builder). When set, oversized
+    /// `oracle_query` results are materialized as an `oracle-export://{id}`
+    /// resource and returned as a `resource_link` instead of being inlined.
+    #[must_use]
+    pub fn with_exports(mut self, exports: Arc<oraclemcp_core::ExportRegistry>) -> Self {
+        self.exports = Some(exports);
         self
     }
 }
@@ -368,6 +388,207 @@ fn query_serialize_options_from_args(args: &QueryArgs) -> SerializeOptions {
             .clamp(1, MAX_QUERY_BLOB_BYTES),
         ..defaults
     }
+}
+
+/// Tamper-token scope for `oracle_query` pagination cursors (E2).
+const QUERY_CURSOR_SCOPE: &str = "cursor:query";
+
+/// Stable per-query binding for an `oracle_query` pagination cursor: the SHA-256
+/// of the EXACT executed SQL plus the active profile. A cursor minted for one
+/// statement/profile must not let a client page a *different* statement, so the
+/// offset is signed against this context (E2). The bind values are deliberately
+/// NOT part of the binding — a cursor is bound to the statement shape, and the
+/// caller resupplies binds with the next page exactly as MCP cursor pagination
+/// expects.
+fn query_cursor_binding(sql: &str, active_profile: Option<&str>) -> String {
+    let sql_hash = oraclemcp_audit::sha256_hex(sql.as_bytes());
+    format!("{sql_hash}|{}", active_profile.unwrap_or(""))
+}
+
+/// Decode a client-supplied opaque `oracle_query` cursor to a raw offset for
+/// this exact statement/profile. Absent cursor starts at offset 0; a present
+/// cursor that is forged, edited, or minted for a different statement/profile
+/// is a hard `InvalidArguments` error (fail closed), never a silent reset.
+fn decode_query_cursor(
+    cursor: Option<&str>,
+    sql: &str,
+    active_profile: Option<&str>,
+) -> Result<usize, ErrorEnvelope> {
+    let Some(cursor) = non_empty_arg(cursor.map(str::to_owned)) else {
+        return Ok(0);
+    };
+    let binding = query_cursor_binding(sql, active_profile);
+    let payload = oraclemcp_core::verify_token(QUERY_CURSOR_SCOPE, &cursor, &[&binding])
+        .ok_or_else(|| {
+            invalid_args(
+                "invalid or tampered oracle_query pagination cursor (it does not match this statement)",
+            )
+            .with_next_step("re-run oracle_query without a cursor to restart from the first page")
+        })?;
+    payload
+        .parse::<usize>()
+        .map_err(|_| invalid_args("invalid oracle_query pagination cursor payload"))
+}
+
+/// Re-sign a raw next-page offset from [`read_query`] as an opaque,
+/// tamper-evident cursor bound to this statement/profile. Replaces the raw
+/// `next_cursor` offset in the serialized response (E2).
+fn reseal_query_cursor(mut response: Value, sql: &str, active_profile: Option<&str>) -> Value {
+    let Some(offset) = response
+        .get("next_cursor")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return response;
+    };
+    let binding = query_cursor_binding(sql, active_profile);
+    let sealed = oraclemcp_core::sign_token(QUERY_CURSOR_SCOPE, &offset, &[&binding]);
+    if let Value::Object(map) = &mut response {
+        map.insert("next_cursor".to_owned(), Value::String(sealed));
+    }
+    response
+}
+
+/// Stringify one serialized query cell for an export. NUMBER/text cells are
+/// already strings; everything else (booleans, the truncated-LOB object, nested
+/// arrays) renders to its compact JSON so the export is lossless and unambiguous.
+fn export_cell_string(cell: &Value) -> String {
+    match cell {
+        Value::Null => String::new(),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Convert a [`oraclemcp_db::QueryResponse`]-shaped JSON value into
+/// `(columns, string-cell rows)` for export materialization. Rows are objects
+/// keyed by column name; cells are pulled in `columns` order.
+fn query_value_to_export_rows(response: &Value) -> (Vec<String>, Vec<Vec<String>>) {
+    let columns: Vec<String> = response
+        .get("columns")
+        .and_then(Value::as_array)
+        .map(|cols| {
+            cols.iter()
+                .filter_map(|c| c.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let rows: Vec<Vec<String>> = response
+        .get("rows")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    columns
+                        .iter()
+                        .map(|col| row.get(col).map(export_cell_string).unwrap_or_default())
+                        .collect()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (columns, rows)
+}
+
+/// E3/E3b: materialize the bounded full result of a read query as an
+/// `oracle-export://{id}` resource and return a `resource_link` result (no
+/// inlined rows). Fetches up to [`MAX_QUERY_EXPORT_ROWS`] at `offset`; rows
+/// beyond that are dropped and the export is flagged truncated with a next hint.
+#[allow(clippy::too_many_arguments)]
+async fn export_query_to_resource(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    executed_sql: &str,
+    a: &QueryArgs,
+    binds: &[OracleBind],
+    offset: usize,
+    active_profile: Option<&str>,
+    export_scopes: Option<&[String]>,
+    exports: Option<&oraclemcp_core::ExportRegistry>,
+) -> Result<Value, ErrorEnvelope> {
+    let format = oraclemcp_core::ExportFormat::parse(a.export_format.as_deref())
+        .ok_or_else(|| invalid_args("export_format must be \"csv\" or \"json\""))?;
+    let Some(exports) = exports else {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::RuntimeStateRequired,
+            "result export is not enabled in this server instance",
+        )
+        .with_next_step("retry without export=true to page the result inline"));
+    };
+
+    // Fetch up to the export ceiling in one window. The byte cap is raised to
+    // the export ceiling so the row cap (not the inline byte cap) governs.
+    let caps = QueryCaps {
+        max_rows: MAX_QUERY_EXPORT_ROWS,
+        max_result_bytes: oraclemcp_core::export::MAX_EXPORT_BYTES,
+    };
+    let response = read_query(
+        cx,
+        conn,
+        executed_sql,
+        binds,
+        caps,
+        offset,
+        &query_serialize_options_from_args(a),
+    )
+    .await
+    .map_err(DbError::into_envelope)?;
+    let response_value = serde_json::to_value(&response).unwrap_or(Value::Null);
+    let more_rows = response.truncated;
+    let next_cursor = response.next_cursor.as_deref().map(|offset| {
+        let binding = query_cursor_binding(&a.sql, active_profile);
+        oraclemcp_core::sign_token(QUERY_CURSOR_SCOPE, offset, &[&binding])
+    });
+
+    let (columns, rows) = query_value_to_export_rows(&response_value);
+    let access = oraclemcp_core::ExportAccess::new(active_profile, export_scopes);
+    let handle = exports.create(
+        &columns,
+        &rows,
+        format,
+        access,
+        oraclemcp_core::export::DEFAULT_EXPORT_TTL,
+    );
+
+    tracing::info!(
+        export_uri = %handle.uri,
+        format = ?handle.format,
+        rows = handle.row_count,
+        bytes = handle.byte_size,
+        truncated = handle.truncated || more_rows,
+        profile = active_profile.unwrap_or(""),
+        "oracle_query materialized a large result as an export resource"
+    );
+
+    Ok(json!({
+        "export": {
+            "uri": handle.uri,
+            "mime_type": handle.mime_type,
+            "format": match handle.format {
+                oraclemcp_core::ExportFormat::Csv => "csv",
+                oraclemcp_core::ExportFormat::Json => "json",
+            },
+            "byte_size": handle.byte_size,
+            "row_count": handle.row_count,
+            "truncated": handle.truncated || more_rows,
+        },
+        "resource_link": {
+            "type": "resource_link",
+            "uri": handle.uri,
+            "name": "oracle_query export",
+            "mimeType": handle.mime_type,
+            "description": "Materialized query result. Fetch with resources/read; access-controlled to this session and expires.",
+        },
+        "columns": columns,
+        "row_count": handle.row_count,
+        "inlined": false,
+        "next_cursor": next_cursor,
+        "next_step": if handle.truncated || more_rows {
+            "The export was capped; re-run with the returned next_cursor to export the next window."
+        } else {
+            "Fetch the full result via resources/read on the export uri."
+        },
+    }))
 }
 
 fn call_timeout_duration(seconds: Option<u64>) -> Result<Option<Duration>, ErrorEnvelope> {
@@ -3600,6 +3821,10 @@ impl OracleDispatcher {
                 // bare SELECT, and the text classified is the text executed.
                 let active_profile = state.active_profile.clone();
                 let timeout_seconds = a.timeout_seconds;
+                // E3/E3b: resolve the export access context (scope fingerprint)
+                // and the shared registry before entering the read closure.
+                let export_scopes = context.scope_grant().map(|grant| grant.0.clone());
+                let exports = self.exports.clone();
                 // A9: narrowing the handler context to the read-path capability
                 // row (TIME + IO; no SPAWN / REMOTE / RANDOM) is still applied as
                 // the structural guarantee, even though the DB round trip itself
@@ -3614,7 +3839,31 @@ impl OracleDispatcher {
                         .iter()
                         .map(json_to_bind)
                         .collect::<Result<Vec<_>, _>>()?;
-                    let offset = oraclemcp_db::cursor_to_offset(a.cursor.as_deref());
+                    // E2: the page cursor is an opaque, tamper-evident token
+                    // bound to THIS statement + active profile, decoded to a raw
+                    // offset here (a forged/cross-statement cursor fails closed).
+                    let offset = decode_query_cursor(
+                        a.cursor.as_deref(),
+                        &a.sql,
+                        active_profile.as_deref(),
+                    )?;
+                    // E3b: when the caller opts into export, materialize the
+                    // bounded full result as an oracle-export://{id} resource and
+                    // return a resource_link instead of inlining the rows.
+                    if a.export {
+                        return export_query_to_resource(
+                            cx,
+                            conn,
+                            &executed_sql,
+                            &a,
+                            &binds,
+                            offset,
+                            active_profile.as_deref(),
+                            export_scopes.as_deref(),
+                            exports.as_deref(),
+                        )
+                        .await;
+                    }
                     read_query(
                         cx,
                         conn,
@@ -3626,6 +3875,7 @@ impl OracleDispatcher {
                     )
                     .await
                     .map(|resp| serde_json::to_value(resp).unwrap_or(Value::Null))
+                    .map(|resp| reseal_query_cursor(resp, &a.sql, active_profile.as_deref()))
                     .map_err(DbError::into_envelope)
                 })
                 .await;
