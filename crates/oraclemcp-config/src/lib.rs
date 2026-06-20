@@ -108,6 +108,10 @@ pub struct AuditConfig {
     /// Identifier of the active signing key, recorded in each record so the key
     /// can be rotated while old records keep verifying. Defaults to `default`.
     pub key_id: Option<String>,
+    /// Optional shipping of the signed audit chain to an external WORM/SIEM
+    /// destination (bead D2). **Off by default** — when `None`, nothing is
+    /// forwarded and the auditor uses the local file sink alone.
+    pub shipping: Option<AuditShippingConfig>,
 }
 
 impl AuditConfig {
@@ -115,6 +119,79 @@ impl AuditConfig {
     #[must_use]
     pub fn key_id_or_default(&self) -> &str {
         self.key_id.as_deref().unwrap_or("default")
+    }
+}
+
+/// Audit-log shipping configuration (bead D2): mirror each signed, durable
+/// record to an external write-once-read-many (WORM) store and/or a SIEM
+/// endpoint. The local signed chain stays authoritative; shipping is a
+/// fail-safe mirror (a forwarding failure never loses the local record).
+///
+/// At least one destination (`worm_path` or `siem_endpoint`) must be set for the
+/// shipping decorator to be installed; an empty config is rejected so a typo'd
+/// `[audit.shipping]` table is not silently a no-op.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuditShippingConfig {
+    /// Append-only WORM mirror file path. Point it at a WORM-mounted volume or
+    /// an object-lock bucket's sync directory. The mirror is byte-identical
+    /// JSONL, so `oraclemcp audit verify <worm_path>` verifies it under the
+    /// signing key.
+    pub worm_path: Option<PathBuf>,
+    /// SIEM HTTP(S) endpoint that receives one signed record per POST.
+    pub siem_endpoint: Option<String>,
+    /// SIEM wire format: `json` (default), `cef`, or `syslog`.
+    pub siem_format: Option<String>,
+    /// Secret reference for an outbound SIEM auth header value
+    /// (`env:`/`vault:`/`literal:`), e.g. a Splunk HEC token.
+    pub siem_auth_header_ref: Option<String>,
+    /// Header name for the SIEM auth value. Defaults to `Authorization`.
+    pub siem_auth_header_name: Option<String>,
+}
+
+impl AuditShippingConfig {
+    /// The configured SIEM format string, or the `"json"` default.
+    #[must_use]
+    pub fn siem_format_or_default(&self) -> &str {
+        self.siem_format.as_deref().unwrap_or("json")
+    }
+
+    /// The SIEM auth header name, or the `Authorization` default.
+    #[must_use]
+    pub fn siem_auth_header_name_or_default(&self) -> &str {
+        self.siem_auth_header_name
+            .as_deref()
+            .unwrap_or("Authorization")
+    }
+
+    /// Whether any destination is configured (a WORM path or a SIEM endpoint).
+    #[must_use]
+    pub fn has_destination(&self) -> bool {
+        self.worm_path.is_some() || self.siem_endpoint.is_some()
+    }
+
+    /// Validate the shipping config: at least one destination, and SIEM auth
+    /// only alongside a SIEM endpoint.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::InvalidAuditShipping`] when no destination is set
+    /// or a SIEM auth ref is given without an endpoint.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !self.has_destination() {
+            return Err(ConfigError::InvalidAuditShipping {
+                reason: "set at least one of audit.shipping.worm_path or \
+                         audit.shipping.siem_endpoint",
+            });
+        }
+        if self.siem_endpoint.is_none()
+            && (self.siem_auth_header_ref.is_some() || self.siem_format.is_some())
+        {
+            return Err(ConfigError::InvalidAuditShipping {
+                reason: "audit.shipping.siem_format / siem_auth_header_ref require \
+                         audit.shipping.siem_endpoint",
+            });
+        }
+        Ok(())
     }
 }
 
@@ -315,6 +392,9 @@ impl OracleMcpConfig {
             });
         }
         self.http.validate()?;
+        if let Some(shipping) = self.audit.shipping.as_ref() {
+            shipping.validate()?;
+        }
         resolve_inheritance(&mut self.profiles)?;
         if let Some(default_profile) = self.default_profile.as_deref()
             && !self.profiles.iter().any(|p| p.name == default_profile)
@@ -538,6 +618,12 @@ pub enum ConfigError {
     InvalidHttp {
         /// Field name.
         field: &'static str,
+        /// Validation failure.
+        reason: &'static str,
+    },
+    /// Audit-log shipping configuration is malformed (bead D2).
+    #[error("invalid audit.shipping: {reason}")]
+    InvalidAuditShipping {
         /// Validation failure.
         reason: &'static str,
     },
@@ -847,6 +933,77 @@ mod tests {
             Some("env:ORACLEMCP_AUDIT_KEY")
         );
         assert_eq!(cfg.audit.key_id_or_default(), "2026-q2");
+    }
+
+    #[test]
+    fn audit_shipping_is_off_by_default() {
+        let cfg = OracleMcpConfig::from_toml_str("").expect("empty loads");
+        assert!(
+            cfg.audit.shipping.is_none(),
+            "audit shipping is off by default (no [audit.shipping] table)"
+        );
+    }
+
+    #[test]
+    fn audit_shipping_worm_and_siem_load() {
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [audit]
+            key_ref = "env:ORACLEMCP_AUDIT_KEY"
+
+            [audit.shipping]
+            worm_path = "/mnt/worm/oraclemcp-audit.jsonl"
+            siem_endpoint = "https://siem.example.com/services/collector/raw"
+            siem_format = "cef"
+            siem_auth_header_ref = "env:SIEM_TOKEN"
+            "#,
+        )
+        .expect("shipping config loads");
+        let shipping = cfg.audit.shipping.expect("shipping present");
+        assert_eq!(
+            shipping.worm_path.as_deref(),
+            Some(Path::new("/mnt/worm/oraclemcp-audit.jsonl"))
+        );
+        assert_eq!(
+            shipping.siem_endpoint.as_deref(),
+            Some("https://siem.example.com/services/collector/raw")
+        );
+        assert_eq!(shipping.siem_format_or_default(), "cef");
+        assert_eq!(shipping.siem_auth_header_name_or_default(), "Authorization");
+        assert!(shipping.has_destination());
+        shipping.validate().expect("valid shipping config");
+    }
+
+    #[test]
+    fn audit_shipping_requires_a_destination() {
+        // An empty [audit.shipping] table is a likely typo (a no-op mirror), so
+        // it is rejected rather than silently forwarding nothing.
+        let err = OracleMcpConfig::from_toml_str(
+            r#"
+            [audit.shipping]
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidAuditShipping { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn audit_shipping_siem_auth_requires_endpoint() {
+        let err = OracleMcpConfig::from_toml_str(
+            r#"
+            [audit.shipping]
+            worm_path = "/mnt/worm/a.jsonl"
+            siem_auth_header_ref = "env:SIEM_TOKEN"
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidAuditShipping { .. }),
+            "SIEM auth without a SIEM endpoint is rejected, got {err:?}"
+        );
     }
 
     #[test]

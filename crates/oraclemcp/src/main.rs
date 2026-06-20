@@ -34,15 +34,19 @@ use asupersync::Cx;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use oraclemcp::dispatch::{OracleDispatcher, StatelessReadStrategy};
 use oraclemcp::registry;
-use oraclemcp_audit::{Auditor, FileAuditSink, SigningKey};
+use oraclemcp_audit::{
+    AuditSink, Auditor, FileAuditSink, ShippingAuditSink, ShippingForwarder, SigningKey,
+    WormFileForwarder,
+};
 use oraclemcp_auth::{Hs256Verifier, ResourceServerConfig, SecretError, resolve_secret};
 use oraclemcp_config::{AuditConfig, HttpConfig, HttpTlsConfig, OracleMcpConfig};
 use oraclemcp_core::{
     CapabilitiesReport, CustomToolCatalog, CustomToolDef, DoctorContext, FeatureTiers,
     HttpTransportConfig, MCP_PATH, OAuthEnforcement, ObservabilityState, OracleMcpServer,
-    PROTECTED_RESOURCE_METADATA_PATH, ShutdownCoordinator, StdioAuthPolicy, TlsMaterial,
-    TlsServerConfig, build_server_config, load_tools, load_tools_for_profile, parse_tools_file,
-    requires_mtls, run_doctor, serve_http_until, serve_https_until, sign,
+    PROTECTED_RESOURCE_METADATA_PATH, ShutdownCoordinator, SiemFormat, SiemHttpForwarder,
+    StdioAuthPolicy, TlsMaterial, TlsServerConfig, build_server_config, load_tools,
+    load_tools_for_profile, parse_tools_file, requires_mtls, run_doctor, serve_http_until,
+    serve_https_until, sign,
 };
 use oraclemcp_db::{
     DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
@@ -781,7 +785,138 @@ fn build_auditor(
         )
     })?;
     tracing::info!(path = %path.display(), key_id = %audit.key_id_or_default(), "audit log armed");
-    Ok(Some(Arc::new(Auditor::new(Box::new(sink), key))))
+
+    // D2: optional WORM/SIEM shipping. Off by default — only when
+    // `[audit.shipping]` configures a destination do we wrap the durable local
+    // sink in the fail-safe ShippingAuditSink decorator. A forward failure never
+    // loses the local record (the decorator logs + counts it).
+    let local: Box<dyn AuditSink> = Box::new(sink);
+    let local = match audit.shipping.as_ref() {
+        Some(shipping) => build_shipping_sink(local, shipping, level.is_protected())?,
+        None => local,
+    };
+    Ok(Some(Arc::new(Auditor::new(local, key))))
+}
+
+/// Wrap the durable local audit sink in the D2 shipping decorator from
+/// `[audit.shipping]`. Builds a WORM file forwarder and/or a SIEM HTTP forwarder
+/// (asupersync HTTP client, no tokio/reqwest), composing both into a single
+/// forwarder when both are configured. Shipping never weakens the local chain.
+fn build_shipping_sink(
+    local: Box<dyn AuditSink>,
+    shipping: &oraclemcp_config::AuditShippingConfig,
+    protected: bool,
+) -> Result<Box<dyn AuditSink>, (&'static str, String)> {
+    let mut forwarders: Vec<Box<dyn ShippingForwarder>> = Vec::new();
+
+    if let Some(worm_path) = shipping.worm_path.as_deref() {
+        if let Some(parent) = worm_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|e| {
+                (
+                    "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                    format!(
+                        "failed to create WORM mirror directory {}: {e}",
+                        parent.display()
+                    ),
+                )
+            })?;
+        }
+        let worm = WormFileForwarder::open(worm_path).map_err(|e| {
+            (
+                "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                format!("failed to open WORM mirror {}: {e}", worm_path.display()),
+            )
+        })?;
+        tracing::info!(worm_path = %worm_path.display(), "audit WORM mirror armed");
+        forwarders.push(Box::new(worm));
+    }
+
+    if let Some(endpoint) = shipping.siem_endpoint.as_deref() {
+        let format = SiemFormat::parse(shipping.siem_format_or_default()).ok_or((
+            "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+            format!(
+                "unknown audit.shipping.siem_format {:?} (expected json|cef|syslog)",
+                shipping.siem_format_or_default()
+            ),
+        ))?;
+        let mut forwarder = SiemHttpForwarder::new(endpoint.to_owned(), format);
+        if let Some(auth_ref) = shipping.siem_auth_header_ref.as_deref() {
+            let secret = resolve_secret(auth_ref, protected, |name| std::env::var(name).ok())
+                .map_err(|e| {
+                    (
+                        "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                        format!(
+                            "failed to resolve audit.shipping.siem_auth_header_ref: {}",
+                            secret_error_summary(&e)
+                        ),
+                    )
+                })?;
+            forwarder = forwarder.with_header(
+                shipping.siem_auth_header_name_or_default().to_owned(),
+                secret.expose().to_owned(),
+            );
+        }
+        tracing::info!(siem_endpoint = %endpoint, format = ?format, "audit SIEM forwarder armed");
+        forwarders.push(Box::new(forwarder));
+    }
+
+    let forwarder: Box<dyn ShippingForwarder> = match forwarders.len() {
+        0 => return Ok(local), // validate() guarantees ≥1, but stay total.
+        1 => forwarders.into_iter().next().expect("len==1"),
+        _ => Box::new(TeeForwarder::new(forwarders)),
+    };
+    Ok(Box::new(ShippingAuditSink::new(local, forwarder)))
+}
+
+/// A forwarder that fans one record out to several forwarders (WORM + SIEM).
+/// Order-preserving; each forward error is independent (one destination being
+/// down does not stop the others). The first error is returned so the
+/// decorator counts a failure, but every destination is still attempted.
+struct TeeForwarder {
+    forwarders: Vec<Box<dyn ShippingForwarder>>,
+}
+
+impl TeeForwarder {
+    fn new(forwarders: Vec<Box<dyn ShippingForwarder>>) -> Self {
+        Self { forwarders }
+    }
+}
+
+impl ShippingForwarder for TeeForwarder {
+    fn forward(
+        &self,
+        record: &oraclemcp_audit::AuditRecord,
+    ) -> Result<(), oraclemcp_audit::ShippingError> {
+        let mut first_err = None;
+        for f in &self.forwarders {
+            if let Err(e) = f.forward(record)
+                && first_err.is_none()
+            {
+                first_err = Some(e);
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    fn flush(&self) -> Result<(), oraclemcp_audit::ShippingError> {
+        let mut first_err = None;
+        for f in &self.forwarders {
+            if let Err(e) = f.flush()
+                && first_err.is_none()
+            {
+                first_err = Some(e);
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Build the server from the registry + capabilities + dispatcher over `conn`.

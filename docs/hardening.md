@@ -24,6 +24,11 @@ statement the classifier cannot prove safe is treated as dangerous, never the
 reverse. The remaining controls below reduce blast radius if any single layer is
 misconfigured.
 
+The full asset/threat/mitigation model — with the committed test suite that
+holds each mitigation honest — is in [`threat-model.md`](threat-model.md); the
+vulnerability-reporting policy and supported versions are in the repo-root
+[`SECURITY.md`](../SECURITY.md).
+
 ---
 
 ## Checklist
@@ -92,6 +97,11 @@ misconfigured.
       — it recomputes every hash link and re-checks the keyed MAC, exiting
       non-zero on tampering. See
       [`operations.md` §5.4](operations.md#54-verify-the-audit-trail).
+- [ ] For defense in depth, ship the signed log to an external WORM store / SIEM
+      via `[audit.shipping]` (off by default). The mirror is tamper-evident end
+      to end — `audit verify` accepts the forwarded JSONL — and a forwarding
+      failure never loses the local durable record. See
+      [`operations.md` §5.6](operations.md#56-ship-the-audit-log-to-a-worm-store--siem).
 
 ### Container / runtime
 

@@ -13,6 +13,7 @@
 
 mod hmac;
 mod record;
+mod shipping;
 mod sink;
 mod unified;
 mod verify;
@@ -20,6 +21,9 @@ mod verify;
 pub use hmac::{ct_eq, hmac_sha256, hmac_sha256_hex};
 pub use record::{
     AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord, GENESIS_HASH, SigningKey, sha256_hex,
+};
+pub use shipping::{
+    ShippingAuditSink, ShippingError, ShippingForwarder, WormFileForwarder, cef_line, syslog_line,
 };
 pub use sink::{AuditError, AuditSink, Auditor, FileAuditSink, MemoryAuditSink};
 pub use unified::{UnifiedAuditError, UnifiedAuditPolicy, is_simple_identifier};

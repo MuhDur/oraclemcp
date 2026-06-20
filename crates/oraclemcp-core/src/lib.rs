@@ -17,6 +17,7 @@
 
 pub mod admin_auth;
 pub mod admission;
+pub mod audit_shipping;
 pub mod capabilities;
 pub mod capability;
 pub mod connect;
@@ -55,6 +56,7 @@ pub use shutdown::{CancelOutcome, ShutdownCoordinator, install_panic_hook};
 
 pub use admin_auth::{AdminAssertionVerifier, AdminAuthError, AdminAuthPolicy};
 pub use admission::{AdmissionController, AdmissionPermit};
+pub use audit_shipping::{SiemFormat, SiemHttpForwarder};
 pub use capabilities::{
     CapabilitiesReport, ConnectionStatus, FeatureTiers, OperatingLevelReport, PROTOCOL_VERSION,
 };

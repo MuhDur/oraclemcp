@@ -15,6 +15,9 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+# D2 audit shipping: a forward failure is logged + dropped (fail-safe) rather
+# than failing the local durable chain; tracing is the warn/debug channel.
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

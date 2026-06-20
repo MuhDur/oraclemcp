@@ -450,6 +450,70 @@ security record, and verify it after incident review.
   `key_id`, restart, and keep the old `key_id` available to `audit verify` so
   historical records still verify.
 
+### 5.6 Ship the audit log to a WORM store / SIEM
+
+The signed local audit log (§5.4) is the authoritative security record. For
+defense in depth — so a tamper attempt at the *local* file is also detectable at
+an independent destination — you can mirror every signed record to an external
+**write-once-read-many (WORM)** store and/or a SIEM. Shipping is **off by
+default**: nothing is forwarded unless you configure `[audit.shipping]` with at
+least one destination.
+
+```toml
+[audit]
+key_ref = "env:ORACLEMCP_AUDIT_KEY"
+key_id  = "2026-q2"
+
+[audit.shipping]
+# A WORM mirror: a byte-identical JSONL copy, written O_APPEND. Point it at a
+# WORM-mounted volume or an object-lock bucket's sync directory.
+worm_path = "/mnt/worm/oraclemcp-audit.jsonl"
+
+# And/or a SIEM HTTP(S) endpoint that receives one signed record per POST.
+siem_endpoint        = "https://siem.example.com/services/collector/raw"
+siem_format          = "json"            # json (default) | cef | syslog
+siem_auth_header_ref = "env:SIEM_TOKEN"  # secret-ref for the auth header value
+siem_auth_header_name = "Authorization"  # defaults to Authorization
+```
+
+How it behaves — the load-bearing properties:
+
+- **Fail-safe ordering.** Each record is written and **fsynced to the local log
+  first**; only then is it mirrored to the WORM file / SIEM. A forwarding
+  failure (an unreachable SIEM, a full WORM volume) is logged and counted, never
+  fatal — the audited call still succeeds and the local signed chain stays
+  complete. The local log is the record of record; shipping is a mirror.
+- **Tamper-evidence end to end.** The forwarded stream is the *same* signed
+  records, in `seq` order. The `json` format and the WORM mirror are
+  byte-identical JSONL, so you verify the destination copy with the same tool:
+  `oraclemcp audit verify /mnt/worm/oraclemcp-audit.jsonl`. The keyed MAC means a
+  forger who lacks the signing key cannot mint a record `verify` will accept,
+  even with write access to the destination.
+- **SIEM-native formats.** `cef` emits ArcSight CEF v0 and `syslog` emits
+  RFC-5424, each carrying the chain-integrity fields (`seq`, `prevHash`,
+  `entryHash`, `keyId`, `signature`) in the extension / structured-data element
+  so a SIEM rule can alert on a gap or a re-signed record. Records never carry
+  bind values or secrets (only the SQL SHA-256 + a truncated preview), so
+  nothing sensitive crosses the wire.
+- **No new network stack.** The SIEM forwarder POSTs over the same Tokio-free
+  asupersync HTTP/1 client the OTLP exporter uses; there is no reqwest/hyper/tokio
+  in the production graph.
+
+Operator setup for the destination:
+
+- **WORM bucket / volume.** Enable object-lock / WORM retention on the bucket or
+  mount (e.g. S3 Object Lock in compliance mode, or an append-only filesystem).
+  oraclemcp writes `O_APPEND` and never seeks or truncates; the write-once
+  guarantee is enforced by the destination. Size retention to your compliance
+  window and back the volume up like any security record.
+- **SIEM endpoint.** Use a raw/HEC-style ingest endpoint that accepts a POST body
+  per event. Provision the ingest token as the secret behind
+  `siem_auth_header_ref` (an `env:`/`vault:` ref — `literal:` is rejected on
+  `protected` profiles). Set a retention policy on the SIEM index to match the
+  WORM window.
+- **Verify the mirror after incident review**, exactly as for the local log
+  (§5.4): a `BROKEN` result names the first divergent `seq`.
+
 ---
 
 ## 6. Verifying release artifacts (SBOM, provenance, signatures)

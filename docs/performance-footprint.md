@@ -50,6 +50,13 @@ Thirty warm local runs, output redirected to `/dev/null`.
 
 ## Synthetic Read Workflow
 
+These are **offline, non-live** signals — local CPU work measured against a
+connection mock, NOT Oracle round-trip latency. They are the in-process cost the
+server adds *around* a query and are deliberately distinct from the live DB
+latency captured by the `live-xe` harness in
+[Live measurements](#live-measurements-b3--d7) below; do not read them as
+end-to-end query times.
+
 Criterion benchmark:
 `cargo bench -p oraclemcp-db --bench page_serialization -- --sample-size 20`.
 This measures local `read_query` page construction and serialization after rows
@@ -148,27 +155,59 @@ ORACLEMCP_LIVE_XE=1 ORACLEMCP_LIVE_DSN=... ORACLEMCP_LIVE_USER=... \
   cargo test -p oraclemcp-db --test load_soak -- --ignored --nocapture
 ```
 
-The live test skips with a clear message when `ORACLEMCP_LIVE_XE` is unset.
+The live test skips with a clear message when `ORACLEMCP_LIVE_XE` is unset. The
+env-var names above are the exact ones the harness reads
+(`crates/oraclemcp-db/tests/load_soak.rs`): `ORACLEMCP_LIVE_XE` (the on switch),
+`ORACLEMCP_LIVE_DSN`, `ORACLEMCP_LIVE_USER`, `ORACLEMCP_LIVE_PASSWORD`.
+
+### Latency pass thresholds (judged against the live run)
+
+The numbers below are **acceptance thresholds**, not measurements — they let a
+reviewer judge a live run pass/fail without re-deriving expectations. They are
+deliberately generous (a per-iteration acquire → op → release cycle against a
+local XE on a non-tuned host), and exist so a regression that, say, doubles p95
+is caught. They apply to the `oracle_query`-class read op in the 70/20/10 mix.
+
+| Metric | Threshold (pass if ≤) | Rationale |
+|---|---:|---|
+| `oracle_query` p50 | 25 ms | Round-trip + small fetch on a co-located XE. |
+| `oracle_query` p95 | 75 ms | Tail under N-client contention at the per-DB ceiling. |
+| `oracle_query` p99 | 150 ms | Worst-case under GC/pool checkout jitter. |
+| Leaked sessions | 0 (hard) | Same invariant the offline harness asserts. |
+| Pool accounting balanced (`PoolMetrics::is_balanced`) | yes (hard) | Live analogue of the offline ledger balance. |
+| Clean drain on shutdown | yes (hard) | Force-rollback + readiness→draining. |
+
+The latency rows are *soft* environment-scoped budgets (record the host
+alongside the numbers); the leak / balance / drain rows are **hard** — a live
+run that fails any of them fails the gate regardless of latency. A live run that
+exceeds a latency budget on a slow/shared host is annotated, not silently
+passed.
 
 ### Live measurements (B3 / D7)
 
-> **Populated by a live run.** The figures below are intentionally left as
-> placeholders. They are filled in by the `live-xe` load/soak run against a real
-> Oracle database (coordinated with D7, which lands the numbers), the same way
-> the exact-SHA release qualification is filled in from a real build+run. Do NOT
-> hand-edit estimates into this table — the honesty-grep gate and the release
-> review reject invented performance numbers.
+> **Populated by a live run.** This is a D7 / `live-xe` **artifact**, not an
+> offline-computable table: the figures below are intentionally left as
+> placeholders and are filled in only by running the `live-xe` load/soak against
+> a real Oracle 23ai database (the command above), exactly as the exact-SHA
+> release qualification is filled in from a real build+run. The numbers are the
+> harness's own output — do NOT hand-edit estimates into this table. The
+> honesty-grep gate and the release review reject invented performance numbers.
+>
+> To land the numbers: run the live command on a host with a real 23ai, copy the
+> harness's printed p50/p95/p99 + pool snapshot into this table, judge them
+> against the thresholds above, and record the run id + host + database edition.
 
 | Metric | Value | Captured by |
 |---|---|---|
 | Run id | _pending live run_ | `live-xe` |
-| Database | _pending live run_ (Oracle XE / ADB / RAC) | `live-xe` |
+| Host | _pending live run_ (record CPU / OS / tuning) | `live-xe` |
+| Database | _pending live run_ (Oracle 23ai XE / ADB / RAC) | `live-xe` |
 | Clients (N) | _pending live run_ | `live-xe` |
 | Soak duration | _pending live run_ | `live-xe` |
 | Total operations | _pending live run_ | `live-xe` |
-| `oracle_query` p50 | _pending live run_ | `live-xe` |
-| `oracle_query` p95 | _pending live run_ | `live-xe` |
-| `oracle_query` p99 | _pending live run_ | `live-xe` |
+| `oracle_query` p50 | _pending live run_ (threshold ≤ 25 ms) | `live-xe` |
+| `oracle_query` p95 | _pending live run_ (threshold ≤ 75 ms) | `live-xe` |
+| `oracle_query` p99 | _pending live run_ (threshold ≤ 150 ms) | `live-xe` |
 | Leaked sessions | _pending live run_ (expected: 0) | `live-xe` |
 | Pool accounting balanced | _pending live run_ (expected: yes) | `live-xe` |
 | Clean drain | _pending live run_ (expected: yes) | `live-xe` |
