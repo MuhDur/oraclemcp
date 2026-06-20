@@ -39,13 +39,24 @@ deliberate step.
 
 ## The safety invariant (do not weaken)
 
-The whole point of this server is the **fail-closed SQL guard**. `oracle_query`
-and `oracle_explain_plan` classify every statement through `oraclemcp-guard` and
-admit only what is provably `READ_ONLY`; everything else is refused before it
-reaches Oracle. The binary pins each session to `OperatingLevel::ReadOnly` with
-step-up disabled. Never relax this to "allow by default." The guarded-write
-machinery (`oraclemcp-guard`/`-audit`/`-auth`, exec grants, step-up, audit
-hash-chain) is built but deliberately not surfaced by this binary.
+The core invariant is the **fail-closed SQL guard** — NOT "read-only forever".
+`oracle_query`, the inner SQL of `oracle_explain_plan`, and the dictionary tools
+admit only what is provably `READ_ONLY`; everything else is refused before it reaches
+Oracle. But this server is **guarded, not read-only-only**: it exposes an
+operating-level ladder `READ_ONLY < READ_WRITE < DDL < ADMIN`, surfaced through
+`oracle_execute`, `oracle_compile_object`, `oracle_create_or_replace`,
+`oracle_patch_source`, and `oracle_set_session_level` (alias `enable_writes`).
+Read-only is the **default** (`default_level`) and the cap for unconfigured or
+`protected` profiles, but a profile's `max_level` may permit escalation up to
+`ADMIN`. Every escalation is guarded: a preview → confirmation-token step-up, a
+temporary TTL-bounded elevation window, the classifier still gating every statement
+at the *current* level, DML rolling back by default, `protected` profiles pinned at
+`READ_ONLY` with an immutable ceiling, and OAuth scopes that can only *lower* the
+effective level. The audit hash-chain (`oraclemcp-audit`) records every privileged
+action. **Do not weaken** means: never bypass the classifier, never let elevation
+exceed a profile's `max_level`, never make a `protected` profile writable, never
+auto-commit DML, and never admit a statement the classifier cannot prove safe for the
+active level.
 
 ## Code editing discipline
 
