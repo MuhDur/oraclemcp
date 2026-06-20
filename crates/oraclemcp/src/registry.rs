@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 49] = [
+pub const TOOL_NAMES: [&str; 50] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -40,6 +40,7 @@ pub const TOOL_NAMES: [&str; 49] = [
     "oracle_search_source",
     "oracle_plscope_inspect",
     "oracle_explain_plan",
+    "oracle_top_queries",
     // Compatibility aliases for agents migrating from shorter Oracle MCP tool
     // names. These route to the prefixed tools in dispatch and share the same
     // guardrails.
@@ -663,6 +664,26 @@ pub fn tool_registry() -> ToolRegistry {
         ))
         .with_output_schema(explain_plan_output_schema())
         .destructive(),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_top_queries",
+            ToolTier::FoundationLiveDb,
+            "Read-only top-SQL ranked by elapsed/CPU/buffer-gets/disk-reads over the free live cursor cache (V$SQLSTATS). Opt into historical AWR only when a Diagnostics Pack is licensed, else Statspack, else a structured-unavailable error — never invokes a paid pack unlicensed.",
+        )
+        .with_input_schema(object_schema(
+            props_with(
+                json!({
+                    "metric": { "type": "string", "enum": ["elapsed", "cpu", "buffer_gets", "disk_reads"], "description": "Ranking metric. Defaults to elapsed." },
+                    "top_n": { "type": "integer", "minimum": 1, "maximum": 100, "description": "How many statements to return (1-100, default 20)." },
+                    "historical": { "type": "boolean", "description": "If true, use historical AWR (requires a licensed Diagnostics Pack) or Statspack instead of the live cursor cache. Defaults false (the free live source)." },
+                    "min_pct_of_total": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Live source only: keep only statements consuming at least this percent of the total selected metric (e.g. 5 for the 5%-of-total view)." }
+                }),
+                &[timeout_seconds_prop()],
+            ),
+            &[],
+        )),
     );
 
     registry.register(

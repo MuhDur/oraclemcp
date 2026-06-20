@@ -253,6 +253,25 @@ pub(super) struct SampleRowsArgs {
 }
 
 #[derive(Deserialize)]
+pub(super) struct TopQueriesArgs {
+    /// Ranking metric (`elapsed`/`cpu`/`buffer_gets`/`disk_reads`); defaults to elapsed.
+    #[serde(default)]
+    pub(super) metric: Option<String>,
+    /// How many statements to return (clamped 1..=100 in awr.rs).
+    #[serde(default)]
+    pub(super) top_n: Option<u32>,
+    /// Opt into historical AWR/Statspack instead of the free live cursor cache.
+    #[serde(default)]
+    pub(super) historical: bool,
+    /// Live source only: keep only statements at or above this percent of the
+    /// total selected metric (the "5%-of-total" view).
+    #[serde(default)]
+    pub(super) min_pct_of_total: Option<u8>,
+    #[serde(default)]
+    pub(super) timeout_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct ReadClobArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,

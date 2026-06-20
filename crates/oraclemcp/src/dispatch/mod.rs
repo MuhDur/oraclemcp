@@ -3701,6 +3701,35 @@ impl OracleDispatcher {
                     Ok(json!({ "owner": owner, "table": table, "rows": rows_to_json(&rows), "row_count": rows.len() }))
                 })
             }
+            "oracle_top_queries" => {
+                let a: TopQueriesArgs = parse_args(name, args)?;
+                let metric = match a.metric.as_deref() {
+                    None => oraclemcp_db::TopSqlMetric::Elapsed,
+                    Some(raw) => oraclemcp_db::TopSqlMetric::parse(raw).ok_or_else(|| {
+                        invalid_args(format!(
+                            "unknown metric '{raw}': use elapsed, cpu, buffer_gets, or disk_reads"
+                        ))
+                    })?,
+                };
+                let top_n = a.top_n.unwrap_or(20);
+                let min_pct = a.min_pct_of_total;
+                let historical = a.historical;
+                // Read-only diagnostic: resolve the source (free live cursor cache
+                // by default; AWR only when the Diagnostics Pack is licensed, else
+                // Statspack, else a structured-unavailable error), build the ranked
+                // SQL, and run it as a bounded read.
+                return with_call_timeout(cx, conn, a.timeout_seconds, || {
+                    let source = oraclemcp_db::resolve_top_sql_source(conn, historical);
+                    let sql = oraclemcp_db::top_sql_query(source, metric, top_n, min_pct)?;
+                    let rows = conn.query_rows(&sql, &[]).map_err(DbError::into_envelope)?;
+                    Ok(json!({
+                        "source": serde_json::to_value(source).unwrap_or(Value::Null),
+                        "metric": serde_json::to_value(metric).unwrap_or(Value::Null),
+                        "rows": rows_to_json(&rows),
+                        "row_count": rows.len(),
+                    }))
+                });
+            }
             "oracle_read_clob" => {
                 let a: ReadClobArgs = parse_args(name, args)?;
                 let max_chars = a.max_chars.unwrap_or(DEFAULT_LOB_MAX_CHARS);

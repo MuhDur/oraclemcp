@@ -571,6 +571,7 @@ fn args_for(name: &str) -> Value {
         "oracle_explain_plan" => {
             json!({ "sql": "SELECT 1 FROM dual", "allow_plan_table_write": true })
         }
+        "oracle_top_queries" => json!({ "metric": "elapsed", "top_n": 5 }),
         "oracle_preview_sql" => json!({ "sql": "SELECT 1 FROM dual" }),
         "oracle_execute" => {
             json!({ "sql": "UPDATE employees SET name = name WHERE employee_id = 100" })
@@ -3185,5 +3186,50 @@ mod audit_wiring {
         assert_eq!(recs[0].tool, "oracle_set_session_level");
         assert_eq!(recs[0].outcome, AuditOutcome::Succeeded);
         assert!(recs[0].signature.is_some(), "escalation record is signed");
+    }
+}
+
+/// C8: `oracle_top_queries` surfaces the existing awr.rs builder as a served,
+/// read-only tool. The free live cursor cache (V$SQLSTATS) is the default; the
+/// licensed AWR path is opt-in and gated (proven in awr.rs unit tests).
+mod top_queries {
+    use super::*;
+    use std::sync::Arc;
+
+    fn dispatcher() -> OracleDispatcher {
+        OracleDispatcher::new_switchable(
+            Box::new(OneRowMock),
+            Some("dev".to_owned()),
+            read_write_level(),
+            Arc::new(|_| Ok(Box::new(OneRowMock))),
+        )
+    }
+
+    #[test]
+    fn live_source_is_the_default_and_returns_ranked_rows() {
+        let out = dispatcher()
+            .dispatch("oracle_top_queries", json!({ "metric": "cpu", "top_n": 3 }))
+            .expect("top_queries dispatches");
+        // Free live cursor cache, no Diagnostics Pack needed.
+        assert_eq!(out["source"], json!("live_cursor"));
+        assert_eq!(out["metric"], json!("cpu"));
+        assert!(out["rows"].is_array(), "returns ranked rows");
+    }
+
+    #[test]
+    fn unknown_metric_is_rejected_with_a_clear_error() {
+        let err = dispatcher()
+            .dispatch("oracle_top_queries", json!({ "metric": "bogus" }))
+            .expect_err("unknown metric is rejected");
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+    }
+
+    #[test]
+    fn five_pct_of_total_mode_is_accepted_on_the_live_source() {
+        let out = dispatcher()
+            .dispatch("oracle_top_queries", json!({ "min_pct_of_total": 5 }))
+            .expect("5%-of-total dispatches");
+        assert_eq!(out["source"], json!("live_cursor"));
+        assert!(out["rows"].is_array());
     }
 }
