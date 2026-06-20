@@ -600,6 +600,7 @@ fn args_for(name: &str) -> Value {
         "oracle_query" => json!({ "sql": "SELECT 1 FROM dual" }),
         "oracle_list_schemas" => json!({ "name_like": "APP%", "limit": 10 }),
         "oracle_schema_inspect" => json!({ "owner": "HR" }),
+        "oracle_search_objects" => json!({ "owner": "HR", "detail_level": "names" }),
         "oracle_describe" => json!({ "owner": "HR", "table": "EMPLOYEES" }),
         "oracle_describe_index" => json!({ "owner": "HR", "name": "EMP_NAME_IX" }),
         "oracle_describe_trigger" => json!({ "owner": "HR", "name": "EMP_BIU" }),
@@ -913,7 +914,7 @@ fn profile_response_omits_connection_and_secret_material() {
     )
     .expect("valid config");
 
-    let out = profiles_response(&cfg);
+    let out = profiles_response(&cfg, &McpExposurePolicy::AllowAll);
     assert_eq!(out["profiles"][0]["name"], json!("prod"));
     assert_eq!(out["profiles"][0]["is_default"], json!(true));
 
@@ -1017,6 +1018,164 @@ fn profile_switch_reports_metadata_errors_after_switching() {
     assert_eq!(current["connected"], json!(false));
 }
 
+/// E5 connection-scope isolation: a switchable dispatcher with an explicit
+/// allow-list containing only `agent_ro` (NOT `prod_admin`). Used by the
+/// adversarial isolation tests below.
+fn exposed_only_dispatcher() -> OracleDispatcher {
+    OracleDispatcher::new_switchable(
+        Box::new(OneRowMock),
+        Some("agent_ro".to_owned()),
+        default_read_only_level(),
+        // The connector would happily connect to anything; the E5 gate must
+        // refuse the non-exposed name BEFORE the connector is ever reached.
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+        }),
+    )
+    .with_mcp_exposure(McpExposurePolicy::AllowList(
+        ["agent_ro".to_owned()].into_iter().collect(),
+    ))
+}
+
+#[test]
+fn e5_switch_to_an_exposed_profile_is_allowed() {
+    let dispatcher = exposed_only_dispatcher();
+    let out = dispatcher
+        .dispatch("oracle_switch_profile", json!({ "profile": "agent_ro" }))
+        .expect("switching to an mcp_exposed profile is permitted");
+    assert_eq!(out["active_profile"], json!("agent_ro"));
+}
+
+#[test]
+fn e5_adversarial_guessed_non_exposed_profile_is_rejected_by_switch() {
+    // The load-bearing E5 adversarial test: an agent that GUESSES the name of a
+    // profile the operator did not expose (`prod_admin`) must be refused by
+    // oracle_switch_profile, and the refusal must not reveal that the name
+    // happened to match a real-but-hidden profile (same envelope as a wholly
+    // unknown name).
+    let dispatcher = exposed_only_dispatcher();
+
+    let hidden = dispatcher
+        .dispatch("oracle_switch_profile", json!({ "profile": "prod_admin" }))
+        .expect_err("a guessed non-exposed profile is refused by switch");
+    let unknown = dispatcher
+        .dispatch(
+            "oracle_switch_profile",
+            json!({ "profile": "totally_made_up" }),
+        )
+        .expect_err("a wholly unknown profile is refused by switch");
+
+    assert_eq!(hidden.error_class, ErrorClass::InvalidArguments);
+    assert_eq!(unknown.error_class, ErrorClass::InvalidArguments);
+    // Indistinguishable: a hidden profile and an unknown one yield the identical
+    // class and (modulo the echoed name) message, so the agent learns nothing.
+    assert_eq!(
+        hidden.message.replace("prod_admin", "X"),
+        unknown.message.replace("totally_made_up", "X"),
+        "a hidden profile must be indistinguishable from an unknown one"
+    );
+    assert_eq!(
+        hidden.suggested_tool.as_deref(),
+        Some("oracle_list_profiles")
+    );
+
+    // And the active connection is untouched — the failed switch never reached
+    // the connector.
+    let current = dispatcher
+        .dispatch("oracle_connection_info", json!({}))
+        .expect("current connection still usable");
+    assert_eq!(current["active_profile"], json!("agent_ro"));
+
+    // The `switch_database`/`db` compatibility alias is gated identically.
+    let alias = dispatcher
+        .dispatch("switch_database", json!({ "db": "prod_admin" }))
+        .expect_err("the db alias is gated by E5 too");
+    assert_eq!(alias.error_class, ErrorClass::InvalidArguments);
+}
+
+#[test]
+fn e5_list_profiles_omits_non_exposed_profiles() {
+    // The served oracle_list_profiles must filter to the exposure allow-list, so
+    // a hidden profile never appears (and so can never be guessed FROM the list).
+    let cfg = OracleMcpConfig::from_toml_str(
+        r#"
+            [[profiles]]
+            name = "agent_ro"
+            connect_string = "ro:1521/svc"
+            mcp_exposed = true
+
+            [[profiles]]
+            name = "prod_admin"
+            connect_string = "prod:1521/svc"
+            "#,
+    )
+    .expect("valid config");
+
+    let exposed = McpExposurePolicy::AllowList(["agent_ro".to_owned()].into_iter().collect());
+    let out = profiles_response(&cfg, &exposed);
+    let names: Vec<&str> = out["profiles"]
+        .as_array()
+        .expect("profiles array")
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["agent_ro"],
+        "only the exposed profile is listed"
+    );
+    let serialized = serde_json::to_string(&out).expect("json");
+    assert!(
+        !serialized.contains("prod_admin"),
+        "a non-exposed profile name must never be surfaced"
+    );
+}
+
+#[test]
+fn e5_from_config_is_opt_in_zero_config_exposes_all() {
+    // Opt-in segmentation: a zero-config / single-profile setup (no mcp_exposed
+    // anywhere) must remain usable — from_config yields AllowAll so every profile
+    // is reachable. (Regression guard against an empty allow-list hiding the only
+    // profile and making the server unusable out of the box.)
+    let zero = OracleMcpConfig::from_toml_str(
+        r#"
+            [[profiles]]
+            name = "only"
+            connect_string = "db:1521/svc"
+            "#,
+    )
+    .expect("valid config");
+    let policy = McpExposurePolicy::from_config(&zero);
+    assert!(
+        matches!(policy, McpExposurePolicy::AllowAll),
+        "no profile opted in -> expose all (usable out of the box)"
+    );
+    assert!(policy.is_exposed("only"));
+
+    // Once a profile opts in, segmentation activates and the unflagged profile
+    // is hidden (fail-closed allow-list).
+    let segmented = OracleMcpConfig::from_toml_str(
+        r#"
+            [[profiles]]
+            name = "agent_ro"
+            connect_string = "ro:1521/svc"
+            mcp_exposed = true
+
+            [[profiles]]
+            name = "prod_admin"
+            connect_string = "prod:1521/svc"
+            "#,
+    )
+    .expect("valid config");
+    let policy = McpExposurePolicy::from_config(&segmented);
+    assert!(matches!(policy, McpExposurePolicy::AllowList(_)));
+    assert!(policy.is_exposed("agent_ro"));
+    assert!(
+        !policy.is_exposed("prod_admin"),
+        "unflagged profile hidden once segmentation is active"
+    );
+}
+
 #[test]
 fn compile_errors_can_default_to_current_schema() {
     let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
@@ -1035,6 +1194,182 @@ fn schema_inspect_can_default_to_current_schema() {
     assert_eq!(out["owner"], json!("APP"));
     assert_eq!(out["max_rows"], json!(DEFAULT_SCHEMA_INSPECT_MAX_ROWS));
     assert!(out["objects"].is_array());
+}
+
+/// E4: a scripted mock that drives `oracle_search_objects` through dispatch,
+/// returning SQL-shape-dependent rows so the detail levels and the
+/// ALL_TABLES.NUM_ROWS path are exercised end-to-end.
+struct SearchObjectsDispatchMock;
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for SearchObjectsDispatchMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let row = |pairs: &[(&str, &str)]| OracleRow {
+            columns: pairs
+                .iter()
+                .map(|(n, v)| {
+                    (
+                        (*n).to_owned(),
+                        OracleCell::new("VARCHAR2", Some((*v).to_owned())),
+                    )
+                })
+                .collect(),
+        };
+        if sql.contains("FROM all_objects") {
+            return Ok(vec![row(&[
+                ("OWNER", "APP"),
+                ("OBJECT_NAME", "EMPLOYEES"),
+                ("OBJECT_TYPE", "TABLE"),
+                ("STATUS", "VALID"),
+            ])]);
+        }
+        if sql.contains("all_col_comments") {
+            return Ok(vec![row(&[
+                ("COLUMN_NAME", "ID"),
+                ("DATA_TYPE", "NUMBER"),
+                ("NULLABLE", "N"),
+            ])]);
+        }
+        if sql.contains("FROM all_indexes") {
+            return Ok(vec![row(&[
+                ("INDEX_NAME", "EMP_PK"),
+                ("UNIQUENESS", "UNIQUE"),
+            ])]);
+        }
+        if sql.contains("all_ind_columns") {
+            return Ok(vec![row(&[("COLUMN_NAME", "ID")])]);
+        }
+        Ok(Vec::new())
+    }
+    async fn query_optional_row(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Option<OracleRow>, DbError> {
+        let row = |pairs: &[(&str, &str)]| {
+            Some(OracleRow {
+                columns: pairs
+                    .iter()
+                    .map(|(n, v)| {
+                        (
+                            (*n).to_owned(),
+                            OracleCell::new("VARCHAR2", Some((*v).to_owned())),
+                        )
+                    })
+                    .collect(),
+            })
+        };
+        if sql.contains("FROM all_tables") {
+            return Ok(row(&[
+                ("NUM_ROWS", "999"),
+                ("LAST_ANALYZED", "2026-06-01T00:00:00"),
+            ]));
+        }
+        if sql.contains("COUNT(*) AS column_count") {
+            return Ok(row(&[("COLUMN_COUNT", "1")]));
+        }
+        if sql.contains("all_tab_comments") {
+            return Ok(row(&[("COMMENTS", "emp table")]));
+        }
+        Ok(None)
+    }
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        // A read-only dictionary tool must never call execute(): an execute here
+        // would be a bug, so make it loud.
+        panic!("oracle_search_objects must be read-only and never call execute()");
+    }
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        panic!("oracle_search_objects must be read-only and never commit()");
+    }
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn search_objects_detail_levels_and_truncation_through_dispatch() {
+    let dispatcher = OracleDispatcher::new(Box::new(SearchObjectsDispatchMock));
+
+    // names: identifiers only.
+    let names = dispatcher
+        .dispatch(
+            "oracle_search_objects",
+            json!({ "owner": "APP", "detail_level": "names" }),
+        )
+        .expect("names search");
+    assert_eq!(names["detail_level"], json!("names"));
+    assert_eq!(names["count"], json!(1));
+    assert_eq!(names["results"][0]["object_name"], json!("EMPLOYEES"));
+    assert!(names["results"][0].get("num_rows").is_none());
+    assert!(names["results"][0].get("columns").is_none());
+
+    // summary: ALL_TABLES.NUM_ROWS estimate + column count + comment, no columns.
+    let summary = dispatcher
+        .dispatch(
+            "oracle_search_objects",
+            json!({ "owner": "APP", "detail": "summary" }),
+        )
+        .expect("summary search");
+    assert_eq!(summary["detail_level"], json!("summary"));
+    assert_eq!(summary["results"][0]["num_rows"], json!(999));
+    assert_eq!(summary["results"][0]["row_count_is_estimate"], json!(true));
+    assert_eq!(summary["results"][0]["column_count"], json!(1));
+    assert_eq!(summary["results"][0]["comment"], json!("emp table"));
+    assert!(summary["results"][0].get("columns").is_none());
+
+    // standard (default): + columns.
+    let standard = dispatcher
+        .dispatch("oracle_search_objects", json!({ "owner": "APP" }))
+        .expect("standard search");
+    assert_eq!(standard["detail_level"], json!("standard"));
+    assert_eq!(standard["results"][0]["columns"][0]["name"], json!("ID"));
+    assert!(standard["results"][0].get("indexes").is_none());
+
+    // full: + indexes.
+    let full = dispatcher
+        .dispatch(
+            "oracle_search_objects",
+            json!({ "owner": "APP", "detail_level": "full" }),
+        )
+        .expect("full search");
+    assert_eq!(full["results"][0]["indexes"][0]["name"], json!("EMP_PK"));
+
+    // truncation: max_rows=1 with one returned row flags truncated=true.
+    let capped = dispatcher
+        .dispatch(
+            "oracle_search_objects",
+            json!({ "owner": "APP", "detail_level": "names", "max_rows": 1 }),
+        )
+        .expect("capped search");
+    assert_eq!(capped["max_rows"], json!(1));
+    assert_eq!(capped["truncated"], json!(true));
+
+    // an unknown detail level is a structured invalid-arguments error.
+    let bad = dispatcher
+        .dispatch(
+            "oracle_search_objects",
+            json!({ "owner": "APP", "detail_level": "everything" }),
+        )
+        .expect_err("unknown detail level rejected");
+    assert_eq!(bad.error_class, ErrorClass::InvalidArguments);
 }
 
 #[test]

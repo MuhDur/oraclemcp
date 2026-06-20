@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 51] = [
+pub const TOOL_NAMES: [&str; 52] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -28,6 +28,7 @@ pub const TOOL_NAMES: [&str; 51] = [
     "oracle_patch_source",
     "oracle_list_schemas",
     "oracle_schema_inspect",
+    "oracle_search_objects",
     "oracle_describe",
     "oracle_describe_index",
     "oracle_describe_trigger",
@@ -463,6 +464,26 @@ pub fn tool_registry() -> ToolRegistry {
                 "object_type": { "type": "string", "description": "Optional object type filter, e.g. TABLE, VIEW, PACKAGE." },
                 "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for object_name, e.g. EMP%." },
                 "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum objects to return (default 500, hard cap 5000)." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." }
+            }),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_search_objects",
+            ToolTier::FoundationLiveDb,
+            "Unified read-only object search/inspection with a detail_level. names=identifiers only; summary=+column count, comments, and the optimizer ALL_TABLES.NUM_ROWS row-count ESTIMATE (gathered statistics, never COUNT(*) — may be stale, reported via stats_stale/last_analyzed); standard (default)=+columns; full=+indexes. Returns {count, results, truncated}. Owner/type/name filters are bound; quoted/case-sensitive identifiers are matched verbatim.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive for ordinary identifiers; quoted identifiers match verbatim). Omit or use * for all accessible schemas." },
+                "object_type": { "type": "string", "description": "Optional object type filter, e.g. TABLE, VIEW, PACKAGE." },
+                "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for object_name, e.g. EMP%." },
+                "detail_level": { "type": "string", "enum": ["names", "summary", "standard", "full"], "description": "Enrichment level. names=identifiers only; summary=+column count + comments + the optimizer ALL_TABLES.NUM_ROWS estimate (NOT COUNT(*)); standard (default)=+columns; full=+indexes." },
+                "detail": { "type": "string", "description": "Alias for detail_level." },
+                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum objects to return (default 100, hard cap 5000)." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." }
             }),
             &[],

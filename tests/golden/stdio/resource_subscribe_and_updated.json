@@ -10,6 +10,7 @@
       "jsonrpc": "2.0",
       "result": {
         "capabilities": {
+          "completions": {},
           "prompts": {
             "listChanged": false
           },
@@ -18,7 +19,7 @@
             "subscribe": true
           },
           "tools": {
-            "listChanged": false
+            "listChanged": true
           }
         },
         "instructions": "Call oracle_capabilities first to discover tools, the current/max operating level, and connection status. Reads are frictionless; writes/DDL require a gated escalation.",
@@ -723,6 +724,62 @@
             },
             "name": "oracle_schema_inspect",
             "title": "Oracle Schema Inspect"
+          },
+          {
+            "annotations": {
+              "destructiveHint": false,
+              "idempotentHint": true,
+              "openWorldHint": false,
+              "readOnlyHint": true
+            },
+            "description": "Unified read-only object search/inspection with a detail_level. names=identifiers only; summary=+column count, comments, and the optimizer ALL_TABLES.NUM_ROWS row-count ESTIMATE (gathered statistics, never COUNT(*) — may be stale, reported via stats_stale/last_analyzed); standard (default)=+columns; full=+indexes. Returns {count, results, truncated}. Owner/type/name filters are bound; quoted/case-sensitive identifiers are matched verbatim.",
+            "inputSchema": {
+              "additionalProperties": false,
+              "properties": {
+                "detail": {
+                  "description": "Alias for detail_level.",
+                  "type": "string"
+                },
+                "detail_level": {
+                  "description": "Enrichment level. names=identifiers only; summary=+column count + comments + the optimizer ALL_TABLES.NUM_ROWS estimate (NOT COUNT(*)); standard (default)=+columns; full=+indexes.",
+                  "enum": [
+                    "names",
+                    "summary",
+                    "standard",
+                    "full"
+                  ],
+                  "type": "string"
+                },
+                "limit": {
+                  "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows.",
+                  "maximum": 5000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_rows": {
+                  "description": "Maximum objects to return (default 100, hard cap 5000).",
+                  "maximum": 5000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "name_like": {
+                  "description": "Optional SQL LIKE pattern for object_name, e.g. EMP%.",
+                  "type": "string"
+                },
+                "object_type": {
+                  "description": "Optional object type filter, e.g. TABLE, VIEW, PACKAGE.",
+                  "type": "string"
+                },
+                "owner": {
+                  "description": "Optional schema owner (case-insensitive for ordinary identifiers; quoted identifiers match verbatim). Omit or use * for all accessible schemas.",
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "type": "object"
+            },
+            "name": "oracle_search_objects",
+            "title": "Oracle Search Objects"
           },
           {
             "annotations": {

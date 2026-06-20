@@ -92,10 +92,11 @@ pub use health::{
     tablespace_usage_sql, unusable_indexes_sql,
 };
 pub use intelligence::{
-    IndexDescription, LobText, SourceText, TriggerDescription, ViewDescription, compile_errors,
-    describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
-    explain_plan, get_ddl, get_source, get_sources_by_name, is_ddl_object_type, list_objects,
-    list_schemas, list_source_types, normalize_source_object_type, read_lob, sample_rows,
+    IndexDescription, LobText, SearchColumn, SearchDetailLevel, SearchIndex, SearchObject,
+    SourceText, TriggerDescription, ViewDescription, compile_errors, describe_columns,
+    describe_constraints, describe_index, describe_trigger, describe_view, explain_plan, get_ddl,
+    get_source, get_sources_by_name, is_ddl_object_type, list_objects, list_schemas,
+    list_source_types, normalize_source_object_type, read_lob, sample_rows, search_objects,
     search_source,
 };
 pub use lease::{LeaseId, LeaseInfo, LeaseManager, PreviewImpact, require_lease_id};

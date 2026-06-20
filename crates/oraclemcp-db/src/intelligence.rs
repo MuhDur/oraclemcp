@@ -136,6 +136,393 @@ pub fn normalize_source_object_type(t: &str) -> Option<&'static str> {
         .find_map(|(input, normalized)| (*input == ty).then_some(*normalized))
 }
 
+/// The detail level for [`search_objects`] (E4). Higher levels add bounded,
+/// read-only dictionary detail per object. `summary` deliberately uses the
+/// optimizer's `ALL_TABLES.NUM_ROWS` estimate (NOT `COUNT(*)`) so the tool never
+/// triggers a full table scan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchDetailLevel {
+    /// Identifier + object metadata only (owner, name, type, status). The
+    /// cheapest level: one `ALL_OBJECTS` query.
+    Names,
+    /// `names` plus, for tables, the optimizer row-count estimate
+    /// (`ALL_TABLES.NUM_ROWS`), column count, last-analyzed/staleness, and the
+    /// table/column comments (`ALL_TAB_COMMENTS`). No `COUNT(*)`.
+    Summary,
+    /// `summary` plus the column list (name/type/nullable) for tables and views.
+    Standard,
+    /// `standard` plus the object's indexes (name/uniqueness/columns).
+    Full,
+}
+
+impl SearchDetailLevel {
+    /// Parse a caller-supplied detail level, case-insensitively. `None`/empty
+    /// defaults to [`SearchDetailLevel::Standard`].
+    #[must_use]
+    pub fn parse(raw: Option<&str>) -> Option<Self> {
+        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            None | Some("") | Some("standard") => Some(SearchDetailLevel::Standard),
+            Some("names") => Some(SearchDetailLevel::Names),
+            Some("summary") => Some(SearchDetailLevel::Summary),
+            Some("full") => Some(SearchDetailLevel::Full),
+            Some(_) => None,
+        }
+    }
+
+    /// The wire/string form.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SearchDetailLevel::Names => "names",
+            SearchDetailLevel::Summary => "summary",
+            SearchDetailLevel::Standard => "standard",
+            SearchDetailLevel::Full => "full",
+        }
+    }
+
+    fn at_least_summary(self) -> bool {
+        !matches!(self, SearchDetailLevel::Names)
+    }
+
+    fn at_least_standard(self) -> bool {
+        matches!(self, SearchDetailLevel::Standard | SearchDetailLevel::Full)
+    }
+
+    fn is_full(self) -> bool {
+        matches!(self, SearchDetailLevel::Full)
+    }
+}
+
+/// One object returned by [`search_objects`] (E4). The optional fields are
+/// populated according to the requested [`SearchDetailLevel`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchObject {
+    /// Schema owner (always upper-cased by the dictionary).
+    pub owner: String,
+    /// Object name, exactly as stored — quoted/case-sensitive identifiers are
+    /// preserved verbatim (the dictionary stores the unquoted upper-case name
+    /// for ordinary identifiers and the exact case for quoted ones).
+    pub object_name: String,
+    /// `ALL_OBJECTS.OBJECT_TYPE` (e.g. `TABLE`, `VIEW`, `PACKAGE`).
+    pub object_type: String,
+    /// `ALL_OBJECTS.STATUS` (`VALID`/`INVALID`).
+    pub status: Option<String>,
+    /// Summary+ : the optimizer row-count estimate from `ALL_TABLES.NUM_ROWS`.
+    /// This is the gathered-statistics estimate, **not** a live `COUNT(*)`, so
+    /// it may be stale or `None` (no stats gathered / not a table). See
+    /// `row_count_is_estimate` and `stats_stale`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_rows: Option<i64>,
+    /// Summary+ : always `true` when `num_rows` is present — the row count is the
+    /// optimizer estimate, never an exact live count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_count_is_estimate: Option<bool>,
+    /// Summary+ : `ALL_TABLES.LAST_ANALYZED`, when stats were last gathered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_analyzed: Option<String>,
+    /// Summary+ : `true` when the optimizer marks the table's stats stale
+    /// (`ALL_TAB_STATISTICS.STALE_STATS = 'YES'`), so `num_rows` should not be
+    /// trusted as current.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats_stale: Option<bool>,
+    /// Summary+ : number of columns (`COUNT(*)` over `ALL_TAB_COLUMNS`, a cheap
+    /// dictionary count — NOT a data scan).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_count: Option<i64>,
+    /// Summary+ : the object comment from `ALL_TAB_COMMENTS`, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// Standard+ : columns (name/type/nullable/comment) for tables and views.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<SearchColumn>>,
+    /// Full : indexes on the object.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexes: Option<Vec<SearchIndex>>,
+}
+
+/// One column in a [`SearchObject`] (standard+ detail).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchColumn {
+    /// Column name.
+    pub name: String,
+    /// Oracle data type.
+    pub data_type: Option<String>,
+    /// `Y`/`N` nullable flag.
+    pub nullable: Option<String>,
+    /// The column comment from `ALL_COL_COMMENTS`, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// One index in a [`SearchObject`] (full detail).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchIndex {
+    /// Index name.
+    pub name: String,
+    /// `UNIQUE`/`NONUNIQUE`.
+    pub uniqueness: Option<String>,
+    /// Indexed columns in position order.
+    pub columns: Vec<String>,
+}
+
+/// E4 unified object search/inspection. Returns objects matching the
+/// owner/type/name filters, enriched per `detail` level:
+///
+/// - **names**: one `ALL_OBJECTS` query, identifiers + metadata only.
+/// - **summary**: + the optimizer `ALL_TABLES.NUM_ROWS` estimate (never
+///   `COUNT(*)`), column count, last-analyzed + stale-stats, and comments.
+/// - **standard**: + the column list.
+/// - **full**: + the indexes.
+///
+/// Owner/type/name filters are all bound. `owner = None` searches every visible
+/// schema; a `name_like` is a SQL `LIKE` pattern. Identifier inputs are bound,
+/// never interpolated; the per-object enrichment queries also bind owner/name,
+/// so quoted/case-sensitive identifiers (which the dictionary stores verbatim)
+/// are matched exactly.
+pub async fn search_objects(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: Option<&str>,
+    object_type: Option<&str>,
+    name_like: Option<&str>,
+    detail: SearchDetailLevel,
+    max_rows: usize,
+) -> Result<Vec<SearchObject>, DbError> {
+    // The base listing is the same cheap ALL_OBJECTS query schema_inspect uses
+    // (owner/type/name bound, row-capped). Quoted identifiers are stored
+    // verbatim in the dictionary, so binding the exact owner/name matches them.
+    let base = list_objects(cx, conn, owner, object_type, name_like, max_rows).await?;
+
+    let mut results = Vec::with_capacity(base.len());
+    for row in &base {
+        let owner = row.text("OWNER").unwrap_or_default().to_owned();
+        let object_name = row.text("OBJECT_NAME").unwrap_or_default().to_owned();
+        let object_type = row.text("OBJECT_TYPE").unwrap_or_default().to_owned();
+        let status = row.text("STATUS").map(str::to_owned);
+
+        let mut object = SearchObject {
+            owner: owner.clone(),
+            object_name: object_name.clone(),
+            object_type: object_type.clone(),
+            status,
+            num_rows: None,
+            row_count_is_estimate: None,
+            last_analyzed: None,
+            stats_stale: None,
+            column_count: None,
+            comment: None,
+            columns: None,
+            indexes: None,
+        };
+
+        let is_relation = matches!(object_type.as_str(), "TABLE" | "VIEW");
+
+        if detail.at_least_summary() {
+            // The object comment (cheap dictionary read for any object type).
+            object.comment = object_comment(cx, conn, &owner, &object_name).await?;
+            if is_relation {
+                // Column count is a dictionary COUNT over ALL_TAB_COLUMNS — a
+                // metadata count, never a data scan.
+                object.column_count = Some(column_count(cx, conn, &owner, &object_name).await?);
+            }
+            if object_type == "TABLE" {
+                // The row count is the OPTIMIZER estimate from ALL_TABLES.NUM_ROWS
+                // (gathered statistics), NOT COUNT(*). It may be NULL (no stats)
+                // or stale; we surface both so the estimate is never mistaken for
+                // a live count.
+                if let Some(stats) = table_stats(cx, conn, &owner, &object_name).await? {
+                    object.num_rows = stats.num_rows;
+                    object.row_count_is_estimate = stats.num_rows.map(|_| true);
+                    object.last_analyzed = stats.last_analyzed;
+                }
+                object.stats_stale = Some(table_stats_stale(cx, conn, &owner, &object_name).await?);
+            }
+        }
+
+        if detail.at_least_standard() && is_relation {
+            object.columns = Some(search_columns(cx, conn, &owner, &object_name).await?);
+        }
+
+        if detail.is_full() && is_relation {
+            object.indexes = Some(search_indexes(cx, conn, &owner, &object_name).await?);
+        }
+
+        results.push(object);
+    }
+
+    Ok(results)
+}
+
+/// The optimizer table statistics for one table (E4 summary). Pulls
+/// `ALL_TABLES.NUM_ROWS` (the gathered estimate, NOT a live count) and
+/// `LAST_ANALYZED`. Returns `None` when the name is not a table in `ALL_TABLES`.
+struct TableStats {
+    num_rows: Option<i64>,
+    last_analyzed: Option<String>,
+}
+
+async fn table_stats(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: &str,
+    table: &str,
+) -> Result<Option<TableStats>, DbError> {
+    // NUM_ROWS is the optimizer's gathered-statistics estimate. We deliberately
+    // read it from ALL_TABLES instead of running COUNT(*) so a search never
+    // triggers a full table scan on a large table.
+    let row = conn
+        .query_optional_row(
+            cx,
+            "SELECT num_rows, TO_CHAR(last_analyzed, 'YYYY-MM-DD\"T\"HH24:MI:SS') AS last_analyzed \
+             FROM all_tables WHERE owner = :1 AND table_name = :2",
+            &[OracleBind::from(owner), OracleBind::from(table)],
+        )
+        .await?;
+    Ok(row.map(|row| TableStats {
+        num_rows: row.parse_i64("NUM_ROWS"),
+        last_analyzed: row.text("LAST_ANALYZED").map(str::to_owned),
+    }))
+}
+
+/// Whether the optimizer marks this table's statistics stale (E4 summary). Reads
+/// `ALL_TAB_STATISTICS.STALE_STATS`; absent/unknown is treated as not stale.
+async fn table_stats_stale(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: &str,
+    table: &str,
+) -> Result<bool, DbError> {
+    let row = conn
+        .query_optional_row(
+            cx,
+            "SELECT stale_stats FROM all_tab_statistics \
+             WHERE owner = :1 AND table_name = :2 AND object_type = 'TABLE' \
+               AND partition_name IS NULL",
+            &[OracleBind::from(owner), OracleBind::from(table)],
+        )
+        .await?;
+    Ok(row
+        .and_then(|row| {
+            row.text("STALE_STATS")
+                .map(|s| s.eq_ignore_ascii_case("YES"))
+        })
+        .unwrap_or(false))
+}
+
+/// Cheap dictionary column count (`COUNT(*)` over `ALL_TAB_COLUMNS`). This is a
+/// metadata count over the dictionary, not a scan of the table's data.
+async fn column_count(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: &str,
+    table: &str,
+) -> Result<i64, DbError> {
+    let row = conn
+        .query_optional_row(
+            cx,
+            "SELECT COUNT(*) AS column_count FROM all_tab_columns \
+             WHERE owner = :1 AND table_name = :2",
+            &[OracleBind::from(owner), OracleBind::from(table)],
+        )
+        .await?;
+    Ok(row
+        .and_then(|row| row.parse_i64("COLUMN_COUNT"))
+        .unwrap_or(0))
+}
+
+/// The object comment from `ALL_TAB_COMMENTS` (tables/views), when present.
+async fn object_comment(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: &str,
+    object_name: &str,
+) -> Result<Option<String>, DbError> {
+    let row = conn
+        .query_optional_row(
+            cx,
+            "SELECT comments FROM all_tab_comments \
+             WHERE owner = :1 AND table_name = :2",
+            &[OracleBind::from(owner), OracleBind::from(object_name)],
+        )
+        .await?;
+    Ok(row.and_then(|row| row.text("COMMENTS").map(str::to_owned)))
+}
+
+/// Columns with comments for E4 standard+ detail (`ALL_TAB_COLUMNS` left-joined
+/// to `ALL_COL_COMMENTS`).
+async fn search_columns(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: &str,
+    table: &str,
+) -> Result<Vec<SearchColumn>, DbError> {
+    let rows = conn
+        .query_rows(
+            cx,
+            "SELECT c.column_name, c.data_type, c.nullable, cc.comments \
+             FROM all_tab_columns c \
+             LEFT JOIN all_col_comments cc \
+               ON cc.owner = c.owner AND cc.table_name = c.table_name \
+              AND cc.column_name = c.column_name \
+             WHERE c.owner = :1 AND c.table_name = :2 \
+             ORDER BY c.column_id",
+            &[OracleBind::from(owner), OracleBind::from(table)],
+        )
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|row| SearchColumn {
+            name: row.text("COLUMN_NAME").unwrap_or_default().to_owned(),
+            data_type: row.text("DATA_TYPE").map(str::to_owned),
+            nullable: row.text("NULLABLE").map(str::to_owned),
+            comment: row.text("COMMENTS").map(str::to_owned),
+        })
+        .collect())
+}
+
+/// Indexes on the object for E4 full detail (`ALL_INDEXES` + `ALL_IND_COLUMNS`).
+async fn search_indexes(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: &str,
+    table: &str,
+) -> Result<Vec<SearchIndex>, DbError> {
+    let index_rows = conn
+        .query_rows(
+            cx,
+            "SELECT index_name, uniqueness FROM all_indexes \
+             WHERE table_owner = :1 AND table_name = :2 \
+             ORDER BY index_name",
+            &[OracleBind::from(owner), OracleBind::from(table)],
+        )
+        .await?;
+    let mut indexes = Vec::with_capacity(index_rows.len());
+    for row in &index_rows {
+        let name = row.text("INDEX_NAME").unwrap_or_default().to_owned();
+        let uniqueness = row.text("UNIQUENESS").map(str::to_owned);
+        let column_rows = conn
+            .query_rows(
+                cx,
+                "SELECT column_name FROM all_ind_columns \
+                 WHERE index_owner = :1 AND index_name = :2 \
+                 ORDER BY column_position",
+                &[OracleBind::from(owner), OracleBind::from(name.as_str())],
+            )
+            .await?;
+        let columns = column_rows
+            .iter()
+            .filter_map(|row| row.text("COLUMN_NAME").map(str::to_owned))
+            .collect();
+        indexes.push(SearchIndex {
+            name,
+            uniqueness,
+            columns,
+        });
+    }
+    Ok(indexes)
+}
+
 /// `schema_inspect`: objects in one schema or all accessible schemas, with
 /// optional type/name filters. Owner, type, and name pattern are all bound; a
 /// NULL owner means "all accessible schemas".
@@ -1227,4 +1614,304 @@ mod tests {
 
     // The query-builder shapes are exercised by the live tests; the validation
     // above is the injection-safety gate for the few interpolated positions.
+
+    /// A scripted mock for [`search_objects`] (E4): returns SQL-shape-dependent
+    /// rows and records every SQL it sees, so the test can prove the summary
+    /// uses ALL_TABLES.NUM_ROWS and never COUNT(*) over the table's data.
+    struct SearchObjectsMock {
+        seen_sql: std::sync::Mutex<Vec<String>>,
+        /// Optional STALE_STATS value returned by all_tab_statistics.
+        stale: Option<&'static str>,
+    }
+
+    impl SearchObjectsMock {
+        fn new(stale: Option<&'static str>) -> Self {
+            Self {
+                seen_sql: std::sync::Mutex::new(Vec::new()),
+                stale,
+            }
+        }
+    }
+
+    fn cell_row(pairs: &[(&str, &str)]) -> OracleRow {
+        OracleRow {
+            columns: pairs
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        (*name).to_owned(),
+                        OracleCell::new("VARCHAR2", Some((*value).to_owned())),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for SearchObjectsMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.seen_sql.lock().unwrap().push(sql.to_owned());
+            if sql.contains("FROM all_objects") {
+                // Two objects: a table and a view. (Quoted-identifier case: the
+                // dictionary stores the exact case, so "MixedCase" round-trips.)
+                return Ok(vec![
+                    cell_row(&[
+                        ("OWNER", "HR"),
+                        ("OBJECT_NAME", "EMPLOYEES"),
+                        ("OBJECT_TYPE", "TABLE"),
+                        ("STATUS", "VALID"),
+                    ]),
+                    cell_row(&[
+                        ("OWNER", "HR"),
+                        ("OBJECT_NAME", "MixedCase"),
+                        ("OBJECT_TYPE", "VIEW"),
+                        ("STATUS", "VALID"),
+                    ]),
+                ]);
+            }
+            if sql.contains("all_col_comments") {
+                return Ok(vec![cell_row(&[
+                    ("COLUMN_NAME", "ID"),
+                    ("DATA_TYPE", "NUMBER"),
+                    ("NULLABLE", "N"),
+                    ("COMMENTS", "primary key"),
+                ])]);
+            }
+            if sql.contains("FROM all_tab_columns") {
+                // Column count query.
+                return Ok(vec![cell_row(&[("COLUMN_COUNT", "3")])]);
+            }
+            if sql.contains("all_tab_comments") {
+                return Ok(vec![cell_row(&[("COMMENTS", "the employees table")])]);
+            }
+            if sql.contains("all_ind_columns") {
+                return Ok(vec![cell_row(&[("COLUMN_NAME", "ID")])]);
+            }
+            if sql.contains("FROM all_indexes") {
+                return Ok(vec![cell_row(&[
+                    ("INDEX_NAME", "EMP_PK"),
+                    ("UNIQUENESS", "UNIQUE"),
+                ])]);
+            }
+            Ok(Vec::new())
+        }
+        async fn query_optional_row(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Option<OracleRow>, DbError> {
+            self.seen_sql.lock().unwrap().push(sql.to_owned());
+            if sql.contains("FROM all_tables") {
+                return Ok(Some(cell_row(&[
+                    ("NUM_ROWS", "1234"),
+                    ("LAST_ANALYZED", "2026-01-01T00:00:00"),
+                ])));
+            }
+            if sql.contains("all_tab_statistics") {
+                return Ok(self.stale.map(|value| cell_row(&[("STALE_STATS", value)])));
+            }
+            if sql.contains("all_tab_comments") {
+                return Ok(Some(cell_row(&[("COMMENTS", "the employees table")])));
+            }
+            if sql.contains("COUNT(*) AS column_count") {
+                return Ok(Some(cell_row(&[("COLUMN_COUNT", "3")])));
+            }
+            Ok(None)
+        }
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn search_detail_level_parses_and_defaults_to_standard() {
+        assert_eq!(
+            SearchDetailLevel::parse(None),
+            Some(SearchDetailLevel::Standard)
+        );
+        assert_eq!(
+            SearchDetailLevel::parse(Some("")),
+            Some(SearchDetailLevel::Standard)
+        );
+        assert_eq!(
+            SearchDetailLevel::parse(Some("Summary")),
+            Some(SearchDetailLevel::Summary)
+        );
+        assert_eq!(
+            SearchDetailLevel::parse(Some(" NAMES ")),
+            Some(SearchDetailLevel::Names)
+        );
+        assert_eq!(
+            SearchDetailLevel::parse(Some("full")),
+            Some(SearchDetailLevel::Full)
+        );
+        assert_eq!(SearchDetailLevel::parse(Some("bogus")), None);
+    }
+
+    #[test]
+    fn search_objects_summary_uses_all_tables_num_rows_not_count_star() {
+        let mock = SearchObjectsMock::new(None);
+        let m = &mock;
+        let results = run_with_cx(|cx| async move {
+            search_objects(
+                &cx,
+                m,
+                Some("HR"),
+                None,
+                None,
+                SearchDetailLevel::Summary,
+                100,
+            )
+            .await
+            .unwrap()
+        });
+
+        // Two objects (table + view). The TABLE carries the optimizer estimate;
+        // the VIEW does not (no ALL_TABLES row).
+        assert_eq!(results.len(), 2);
+        let table = &results[0];
+        assert_eq!(table.object_name, "EMPLOYEES");
+        assert_eq!(table.num_rows, Some(1234));
+        assert_eq!(table.row_count_is_estimate, Some(true));
+        assert_eq!(table.last_analyzed.as_deref(), Some("2026-01-01T00:00:00"));
+        assert_eq!(table.column_count, Some(3));
+        assert_eq!(table.comment.as_deref(), Some("the employees table"));
+        // Summary stops before the column list / indexes.
+        assert!(table.columns.is_none());
+        assert!(table.indexes.is_none());
+
+        // Quoted/case-sensitive identifier is preserved verbatim.
+        assert_eq!(results[1].object_name, "MixedCase");
+
+        // The load-bearing AC: the row count came from ALL_TABLES.NUM_ROWS, and
+        // we NEVER issued a COUNT(*) over the table's data.
+        let seen = mock.seen_sql.lock().unwrap();
+        assert!(
+            seen.iter()
+                .any(|sql| sql.contains("num_rows") && sql.contains("all_tables")),
+            "summary must read ALL_TABLES.NUM_ROWS: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|sql| {
+                let lower = sql.to_ascii_lowercase();
+                lower.contains("count(*) from hr")
+                    || lower.contains("count(*) from \"hr\"")
+                    || (lower.contains("count(*)") && lower.contains("employees"))
+            }),
+            "summary must NOT COUNT(*) the table's data: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn search_objects_summary_flags_stale_stats() {
+        // Stale-stats case: ALL_TAB_STATISTICS.STALE_STATS = 'YES' so the
+        // optimizer estimate must be flagged untrustworthy.
+        let mock = SearchObjectsMock::new(Some("YES"));
+        let m = &mock;
+        let results = run_with_cx(|cx| async move {
+            search_objects(
+                &cx,
+                m,
+                Some("HR"),
+                Some("TABLE"),
+                None,
+                SearchDetailLevel::Summary,
+                100,
+            )
+            .await
+            .unwrap()
+        });
+        let table = results.iter().find(|o| o.object_type == "TABLE").unwrap();
+        assert_eq!(table.num_rows, Some(1234));
+        assert_eq!(
+            table.stats_stale,
+            Some(true),
+            "STALE_STATS=YES must surface stats_stale=true so the estimate is not trusted"
+        );
+    }
+
+    #[test]
+    fn search_objects_names_level_is_identifiers_only() {
+        let mock = SearchObjectsMock::new(None);
+        let m = &mock;
+        let results = run_with_cx(|cx| async move {
+            search_objects(
+                &cx,
+                m,
+                Some("HR"),
+                None,
+                None,
+                SearchDetailLevel::Names,
+                100,
+            )
+            .await
+            .unwrap()
+        });
+        assert_eq!(results.len(), 2);
+        let table = &results[0];
+        assert!(table.num_rows.is_none());
+        assert!(table.column_count.is_none());
+        assert!(table.comment.is_none());
+        assert!(table.columns.is_none());
+        assert!(table.indexes.is_none());
+        // Names level only touches ALL_OBJECTS — no ALL_TABLES read at all.
+        let seen = mock.seen_sql.lock().unwrap();
+        assert!(
+            !seen.iter().any(|sql| sql.contains("all_tables")),
+            "names level must not read optimizer stats: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn search_objects_full_level_adds_columns_and_indexes() {
+        let mock = SearchObjectsMock::new(None);
+        let m = &mock;
+        let results = run_with_cx(|cx| async move {
+            search_objects(
+                &cx,
+                m,
+                Some("HR"),
+                Some("TABLE"),
+                None,
+                SearchDetailLevel::Full,
+                100,
+            )
+            .await
+            .unwrap()
+        });
+        let table = results.iter().find(|o| o.object_type == "TABLE").unwrap();
+        let columns = table.columns.as_ref().expect("full includes columns");
+        assert_eq!(columns[0].name, "ID");
+        assert_eq!(columns[0].comment.as_deref(), Some("primary key"));
+        let indexes = table.indexes.as_ref().expect("full includes indexes");
+        assert_eq!(indexes[0].name, "EMP_PK");
+        assert_eq!(indexes[0].uniqueness.as_deref(), Some("UNIQUE"));
+        assert_eq!(indexes[0].columns, vec!["ID".to_owned()]);
+    }
 }

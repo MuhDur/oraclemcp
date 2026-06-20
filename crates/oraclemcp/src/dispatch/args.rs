@@ -191,6 +191,20 @@ pub(super) struct SchemaInspectArgs {
 }
 
 #[derive(Deserialize)]
+pub(super) struct SearchObjectsArgs {
+    #[serde(default)]
+    pub(super) owner: Option<String>,
+    #[serde(default)]
+    pub(super) object_type: Option<String>,
+    #[serde(default)]
+    pub(super) name_like: Option<String>,
+    #[serde(default, alias = "detail")]
+    pub(super) detail_level: Option<String>,
+    #[serde(default, alias = "limit")]
+    pub(super) max_rows: Option<usize>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct ListSchemasArgs {
     #[serde(default)]
     pub(super) name_like: Option<String>,

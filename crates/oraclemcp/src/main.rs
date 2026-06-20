@@ -816,6 +816,16 @@ fn build_server(
         custom_catalog,
         Some(Arc::new(load_custom_catalog_for_profile)),
     );
+    // E5 connection-scope isolation: snapshot the `mcp_exposed` allow-list from
+    // config so the served surface (switch/list/search/complete) can only reach
+    // profiles the operator opted in. A config load failure fails closed (an
+    // empty allow-list: nothing is exposed to the agent) rather than defaulting
+    // open.
+    let exposure = match OracleMcpConfig::load(None) {
+        Ok(cfg) => oraclemcp::dispatch::McpExposurePolicy::from_config(&cfg),
+        Err(_) => oraclemcp::dispatch::McpExposurePolicy::AllowList(HashSet::new()),
+    };
+    dispatcher = dispatcher.with_mcp_exposure(exposure);
     if let Some(auditor) = auditor {
         dispatcher = dispatcher.with_auditor(auditor);
     }
@@ -824,7 +834,13 @@ fn build_server(
     // SAME export registry.
     let exports = Arc::new(oraclemcp_core::ExportRegistry::new());
     dispatcher = dispatcher.with_exports(Arc::clone(&exports));
+    // E6: the dispatcher (which enqueues tools/list_changed on a profile switch)
+    // and the server (which brackets long tool calls with progress and flushes
+    // the queue) share the SAME notification hub.
+    let notifications = Arc::new(oraclemcp_core::NotificationHub::new());
+    dispatcher = dispatcher.with_notifications(Arc::clone(&notifications));
     OracleMcpServer::with_exports(version, registry, caps, Arc::new(dispatcher), exports)
+        .with_notifications(notifications)
 }
 
 fn apply_http_cli_overrides(mut config: HttpConfig, cli: &HttpServeArgs) -> HttpConfig {

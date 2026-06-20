@@ -104,6 +104,11 @@ pub struct OracleMcpServer {
     /// confirmed change source (the capability gate), and the pending
     /// `resources/updated` queue. Defaults to unsupported (capability off).
     subscriptions: Arc<crate::subscriptions::SubscriptionHub>,
+    /// Server-initiated notification hub (E6): the pending queue for
+    /// `notifications/progress` and `notifications/tools/list_changed`. Shared
+    /// with the dispatcher so a long tool call can enqueue progress and a
+    /// profile switch can signal the tool set changed.
+    notifications: Arc<crate::notifications::NotificationHub>,
 }
 
 impl OracleMcpServer {
@@ -151,6 +156,7 @@ impl OracleMcpServer {
             dispatch_runtime: Arc::new(dispatch_runtime),
             exports,
             subscriptions: Arc::new(crate::subscriptions::SubscriptionHub::unsupported()),
+            notifications: Arc::new(crate::notifications::NotificationHub::new()),
         }
     }
 
@@ -179,6 +185,34 @@ impl OracleMcpServer {
     #[must_use]
     pub fn subscriptions(&self) -> Arc<crate::subscriptions::SubscriptionHub> {
         Arc::clone(&self.subscriptions)
+    }
+
+    /// Attach a server-initiated notification hub (E6; builder). The wiring
+    /// shares this with the dispatcher so a long tool call can enqueue
+    /// `notifications/progress` and a profile switch can enqueue
+    /// `notifications/tools/list_changed`; the transport drains it on each flush.
+    #[must_use]
+    pub fn with_notifications(
+        mut self,
+        notifications: Arc<crate::notifications::NotificationHub>,
+    ) -> Self {
+        self.notifications = notifications;
+        self
+    }
+
+    /// The notification hub (E6). Exposed so the operator/engine side can enqueue
+    /// progress and tool-set-changed notifications and tests can drain them.
+    #[must_use]
+    pub fn notifications(&self) -> Arc<crate::notifications::NotificationHub> {
+        Arc::clone(&self.notifications)
+    }
+
+    /// Drain queued server-initiated notifications (E6) — `notifications/progress`
+    /// and `notifications/tools/list_changed` — as JSON-RPC notification objects,
+    /// to be written to the transport after a request.
+    #[must_use]
+    pub fn drain_server_notifications(&self) -> Vec<Value> {
+        self.notifications.drain()
     }
 
     /// Map the registry descriptors to native MCP JSON tool descriptors.
@@ -257,6 +291,13 @@ impl OracleMcpServer {
             // side calls `subscriptions().poll_for_changes()`); here we only
             // drain what is already pending so updates ride the same stdout.
             for notification in self.drain_resource_updated_notifications() {
+                write_jsonrpc_response(&mut writer, &notification)?;
+            }
+            // E6: flush queued server-initiated notifications —
+            // `notifications/progress` enqueued by a long tool call and
+            // `notifications/tools/list_changed` enqueued when a profile switch
+            // changed the served tool set — on the same stdout.
+            for notification in self.drain_server_notifications() {
                 write_jsonrpc_response(&mut writer, &notification)?;
             }
         }
@@ -457,6 +498,9 @@ impl OracleMcpServer {
             "prompts/get" => Some(self.handle_prompt_get(id, object.get("params"))),
             "tools/list" => Some(self.handle_tools_list(id, object.get("params"))),
             "tools/call" => Some(self.handle_tool_call(id, object.get("params"), context)),
+            "completion/complete" => {
+                Some(self.handle_completion_complete(id, object.get("params"), context))
+            }
             _ => Some(jsonrpc_error(
                 id,
                 JSONRPC_METHOD_NOT_FOUND,
@@ -843,8 +887,220 @@ impl OracleMcpServer {
                 );
             }
         };
+        // E6: when the client supplied a `progressToken` (params._meta), bracket
+        // the (potentially long) tool call with progress notifications — a 0/1
+        // "started" before dispatch and a 1/1 "completed" after. The dispatch
+        // itself is an atomic blocking round trip, so honest progress is the
+        // start/finish bracket; the notifications flush after this response.
+        let progress_token =
+            crate::notifications::progress_token_from_params(Some(&Value::Object(params.clone())));
+        if let Some(token) = &progress_token {
+            self.notifications.enqueue_progress(
+                token,
+                0.0,
+                Some(1.0),
+                Some(&format!("{name} started")),
+            );
+        }
         let result = self.run_tool_blocking_with_context(context, name.to_owned(), args);
+        if let Some(token) = &progress_token {
+            self.notifications.enqueue_progress(
+                token,
+                1.0,
+                Some(1.0),
+                Some(&format!("{name} completed")),
+            );
+        }
         jsonrpc_result(id, result)
+    }
+
+    /// Serve `completion/complete` (E7): owner→type→object autocomplete for the
+    /// dictionary tools' arguments and the `oracle://object/{owner}/{type}/{name}`
+    /// resource template.
+    ///
+    /// The candidate source for each argument is a read-only dictionary tool,
+    /// dispatched through the SAME authz/lease/level read path as a normal read
+    /// (the spec warns of completion-based disclosure), so completion can never
+    /// surface an object the caller could not otherwise read:
+    ///
+    /// - `owner`/`schema` → `oracle_list_schemas` filtered by the typed prefix.
+    /// - `type`/`object_type` → the static dictionary object-type list.
+    /// - `name`/`object`/`object_name`/`table` → `oracle_search_objects` (names
+    ///   detail) scoped to the already-chosen `context.arguments.owner`/`type`.
+    /// - `profile`/`db` → `oracle_list_profiles`, which the dispatcher already
+    ///   filters to the E5 `mcp_exposed` allow-list, so a non-exposed profile is
+    ///   NEVER offered as a completion.
+    ///
+    /// Capped at [`COMPLETION_MAX_VALUES`] with `hasMore`/`total`, per the spec.
+    fn handle_completion_complete(
+        &self,
+        id: Value,
+        params: Option<&Value>,
+        context: DispatchContext<'_>,
+    ) -> Value {
+        let Some(Value::Object(params)) = params else {
+            return jsonrpc_error(
+                id,
+                JSONRPC_INVALID_PARAMS,
+                "completion/complete params must be an object",
+            );
+        };
+        // The argument being completed: { name, value }.
+        let Some(argument) = params.get("argument").and_then(Value::as_object) else {
+            return jsonrpc_error(
+                id,
+                JSONRPC_INVALID_PARAMS,
+                "completion/complete requires an argument object with a name",
+            );
+        };
+        let Some(arg_name) = argument.get("name").and_then(Value::as_str) else {
+            return jsonrpc_error(
+                id,
+                JSONRPC_INVALID_PARAMS,
+                "completion/complete argument.name must be a string",
+            );
+        };
+        let typed = argument
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        // Already-resolved sibling arguments scope the completion (e.g. the
+        // chosen owner/type when completing a name).
+        let resolved = params
+            .get("context")
+            .and_then(|ctx| ctx.get("arguments"))
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let resolved_arg = |keys: &[&str]| -> Option<String> {
+            keys.iter().find_map(|key| {
+                resolved
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .filter(|value| !value.trim().is_empty())
+            })
+        };
+
+        let values = match completion_kind(arg_name) {
+            CompletionKind::Owner => self.complete_owners(context, &typed),
+            CompletionKind::ObjectType => Ok(complete_object_types(&typed)),
+            CompletionKind::ObjectName => {
+                let owner = resolved_arg(&["owner", "schema"]);
+                let object_type = resolved_arg(&["type", "object_type"]);
+                self.complete_object_names(
+                    context,
+                    owner.as_deref(),
+                    object_type.as_deref(),
+                    &typed,
+                )
+            }
+            CompletionKind::Profile => self.complete_profiles(context, &typed),
+            CompletionKind::Unknown => Ok(Vec::new()),
+        };
+
+        match values {
+            Ok(values) => jsonrpc_result(id, completion_result_json(values)),
+            // A completion source failure (e.g. no live connection) is not a
+            // protocol error: return an empty, well-formed completion rather than
+            // surfacing a tool error to the client's autocomplete.
+            Err(_) => jsonrpc_result(id, completion_result_json(Vec::new())),
+        }
+    }
+
+    /// Complete schema/owner names via `oracle_list_schemas` (E7). Routed through
+    /// the read path; honors whatever the active connection can see.
+    fn complete_owners(
+        &self,
+        context: DispatchContext<'_>,
+        prefix: &str,
+    ) -> Result<Vec<String>, ErrorEnvelope> {
+        let value = self.dispatch_resource_tool(
+            context,
+            "oracle_list_schemas",
+            json!({ "name_like": like_prefix(prefix), "max_rows": COMPLETION_QUERY_ROWS }),
+        )?;
+        let names = value
+            .get("schemas")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        row.get("SCHEMA_NAME")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(filter_and_sort(names, prefix))
+    }
+
+    /// Complete object names via `oracle_search_objects` (names detail), scoped
+    /// to the already-chosen owner/type (E7). Routed through the read path, so a
+    /// completion never reveals an object the caller could not read.
+    fn complete_object_names(
+        &self,
+        context: DispatchContext<'_>,
+        owner: Option<&str>,
+        object_type: Option<&str>,
+        prefix: &str,
+    ) -> Result<Vec<String>, ErrorEnvelope> {
+        let mut args = json!({
+            "detail_level": "names",
+            "name_like": like_prefix(prefix),
+            "max_rows": COMPLETION_QUERY_ROWS,
+        });
+        if let Value::Object(map) = &mut args {
+            // Default to all visible schemas when no owner is chosen yet.
+            map.insert(
+                "owner".to_owned(),
+                Value::String(owner.unwrap_or("*").to_owned()),
+            );
+            if let Some(object_type) = object_type {
+                map.insert(
+                    "object_type".to_owned(),
+                    Value::String(object_type.to_owned()),
+                );
+            }
+        }
+        let value = self.dispatch_resource_tool(context, "oracle_search_objects", args)?;
+        let names = value
+            .get("results")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        row.get("object_name")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(filter_and_sort(names, prefix))
+    }
+
+    /// Complete profile names via `oracle_list_profiles` (E7). The dispatcher
+    /// already filters that tool to the E5 `mcp_exposed` allow-list, so a
+    /// non-exposed profile name can NEVER be offered as a completion.
+    fn complete_profiles(
+        &self,
+        context: DispatchContext<'_>,
+        prefix: &str,
+    ) -> Result<Vec<String>, ErrorEnvelope> {
+        let value = self.dispatch_resource_tool(context, "oracle_list_profiles", json!({}))?;
+        let names = value
+            .get("profiles")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.get("name").and_then(Value::as_str).map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(filter_and_sort(names, prefix))
     }
 }
 
@@ -855,6 +1111,109 @@ impl OracleMcpServer {
 fn export_access_from_context(context: DispatchContext<'_>) -> crate::export::ExportAccess {
     let scopes = context.scope_grant().map(|grant| grant.0.as_slice());
     crate::export::ExportAccess::new(None, scopes)
+}
+
+/// Max completion values returned in one `completion/complete` response (E7),
+/// per the MCP spec's 100-value cap.
+const COMPLETION_MAX_VALUES: usize = 100;
+/// How many candidate rows to fetch from the dictionary before client-side
+/// prefix filtering + the 100-value cap. A modest over-fetch so a prefix that
+/// matches more than 100 still reports `hasMore` truthfully.
+const COMPLETION_QUERY_ROWS: usize = 500;
+
+/// The dictionary object types offered for `type`/`object_type` completion (E7).
+const COMPLETION_OBJECT_TYPES: &[&str] = &[
+    "TABLE",
+    "VIEW",
+    "PACKAGE",
+    "PACKAGE BODY",
+    "PROCEDURE",
+    "FUNCTION",
+    "TRIGGER",
+    "TYPE",
+    "TYPE BODY",
+    "SEQUENCE",
+    "INDEX",
+    "SYNONYM",
+    "MATERIALIZED VIEW",
+];
+
+/// Which dictionary dimension an argument name completes (E7).
+enum CompletionKind {
+    Owner,
+    ObjectType,
+    ObjectName,
+    Profile,
+    Unknown,
+}
+
+/// Map a completed argument name to its dictionary dimension (E7). Covers the
+/// dictionary tools' argument spellings and the resource-template placeholders
+/// (`owner`/`type`/`name`).
+fn completion_kind(arg_name: &str) -> CompletionKind {
+    match arg_name.trim().to_ascii_lowercase().as_str() {
+        "owner" | "schema" => CompletionKind::Owner,
+        "type" | "object_type" => CompletionKind::ObjectType,
+        "name" | "object" | "object_name" | "table" | "table_name" | "view_name" | "index_name"
+        | "trigger_name" => CompletionKind::ObjectName,
+        "profile" | "db" => CompletionKind::Profile,
+        _ => CompletionKind::Unknown,
+    }
+}
+
+/// Static object-type completion filtered by the typed prefix (E7).
+fn complete_object_types(prefix: &str) -> Vec<String> {
+    let types = COMPLETION_OBJECT_TYPES
+        .iter()
+        .map(|t| (*t).to_owned())
+        .collect();
+    filter_and_sort(types, prefix)
+}
+
+/// Turn a typed completion prefix into a SQL `LIKE` pattern (`PREFIX%`), or `%`
+/// (match all) when empty. Upper-cased because the dictionary stores ordinary
+/// identifiers upper-case.
+fn like_prefix(prefix: &str) -> String {
+    let trimmed = prefix.trim();
+    if trimmed.is_empty() {
+        "%".to_owned()
+    } else {
+        format!("{}%", trimmed.to_ascii_uppercase())
+    }
+}
+
+/// Case-insensitive prefix-filter, de-dup, and sort completion candidates (E7).
+/// A final defense-in-depth filter on top of the dictionary's `LIKE`, so a
+/// candidate that does not actually start with the typed prefix is dropped.
+fn filter_and_sort(values: Vec<String>, prefix: &str) -> Vec<String> {
+    let needle = prefix.trim().to_ascii_uppercase();
+    let mut out: Vec<String> = values
+        .into_iter()
+        .filter(|value| value.to_ascii_uppercase().starts_with(&needle))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Build the MCP `completion/complete` result (E7): the bounded `values`,
+/// `total` (count after filtering), and `hasMore` (true when more than the cap
+/// matched), per the spec.
+fn completion_result_json(values: Vec<String>) -> Value {
+    let total = values.len();
+    let has_more = total > COMPLETION_MAX_VALUES;
+    let capped: Vec<Value> = values
+        .into_iter()
+        .take(COMPLETION_MAX_VALUES)
+        .map(Value::String)
+        .collect();
+    json!({
+        "completion": {
+            "values": capped,
+            "total": total,
+            "hasMore": has_more,
+        }
+    })
 }
 
 /// Parse `resources/(un)subscribe` params into `(uri, client_id)`. MCP carries
@@ -893,16 +1252,22 @@ fn cursor_from_params(params: Option<&Value>) -> Option<String> {
 
 fn served_capabilities_json(subscribe_supported: bool) -> Value {
     // Keep this in lockstep with `handle_jsonrpc_request_with_context`.
-    // Resources, prompts, and completion are deliberately omitted until their
-    // JSON-RPC arms are actually served; advertising an unserved method causes
-    // strict MCP clients to make calls that return method-not-found.
+    // Resource/prompt listChanged stays false (those catalogs are static), but
+    // the served arms below ARE all wired now.
     //
     // E1: `resources.subscribe` is advertised ONLY when a working change source
     // is confirmed (the subscription hub reports supported). With no source the
     // server keeps `subscribe: false` and refuses `resources/subscribe`.
+    //
+    // E6: `tools.listChanged: true` — the server emits
+    // `notifications/tools/list_changed` when a profile switch changes the
+    // served tool set, so the client re-fetches `tools/list`.
+    //
+    // E7: `completions: {}` — `completion/complete` is served (owner→type→object
+    // autocomplete for the dictionary tools), so it is now advertised.
     json!({
         "tools": {
-            "listChanged": false,
+            "listChanged": true,
         },
         "resources": {
             "subscribe": subscribe_supported,
@@ -911,6 +1276,7 @@ fn served_capabilities_json(subscribe_supported: bool) -> Value {
         "prompts": {
             "listChanged": false,
         },
+        "completions": {},
     })
 }
 

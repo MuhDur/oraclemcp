@@ -824,3 +824,273 @@ fn golden_stdio_structured_error_envelope() {
     });
     golden_support::assert_golden("stdio/structured_error_envelope", &actual);
 }
+
+/// A scripted mock for the E4 search-objects golden and the E7 completion
+/// golden: returns SQL-shape-dependent rows so the served replies are rich
+/// (a table with the optimizer NUM_ROWS estimate, columns, and indexes) and
+/// the completion sources (schemas, object names) resolve.
+struct SearchMock;
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for SearchMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            current_schema: Some("HR".to_owned()),
+            ..Default::default()
+        })
+    }
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let row = |pairs: &[(&str, &str)]| OracleRow {
+            columns: pairs
+                .iter()
+                .map(|(n, v)| {
+                    (
+                        (*n).to_owned(),
+                        OracleCell::new("VARCHAR2", Some((*v).to_owned())),
+                    )
+                })
+                .collect(),
+        };
+        if sql.contains("schema_name") {
+            return Ok(vec![row(&[("SCHEMA_NAME", "HR"), ("OBJECT_COUNT", "12")])]);
+        }
+        if sql.contains("FROM all_objects") {
+            return Ok(vec![row(&[
+                ("OWNER", "HR"),
+                ("OBJECT_NAME", "EMPLOYEES"),
+                ("OBJECT_TYPE", "TABLE"),
+                ("STATUS", "VALID"),
+            ])]);
+        }
+        if sql.contains("all_col_comments") {
+            return Ok(vec![
+                row(&[
+                    ("COLUMN_NAME", "EMPLOYEE_ID"),
+                    ("DATA_TYPE", "NUMBER"),
+                    ("NULLABLE", "N"),
+                    ("COMMENTS", "primary key"),
+                ]),
+                row(&[
+                    ("COLUMN_NAME", "LAST_NAME"),
+                    ("DATA_TYPE", "VARCHAR2"),
+                    ("NULLABLE", "N"),
+                ]),
+            ]);
+        }
+        if sql.contains("FROM all_indexes") {
+            return Ok(vec![row(&[
+                ("INDEX_NAME", "EMP_PK"),
+                ("UNIQUENESS", "UNIQUE"),
+            ])]);
+        }
+        if sql.contains("all_ind_columns") {
+            return Ok(vec![row(&[("COLUMN_NAME", "EMPLOYEE_ID")])]);
+        }
+        Ok(Vec::new())
+    }
+    async fn query_optional_row(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _binds: &[OracleBind],
+    ) -> Result<Option<OracleRow>, DbError> {
+        let row = |pairs: &[(&str, &str)]| {
+            Some(OracleRow {
+                columns: pairs
+                    .iter()
+                    .map(|(n, v)| {
+                        (
+                            (*n).to_owned(),
+                            OracleCell::new("VARCHAR2", Some((*v).to_owned())),
+                        )
+                    })
+                    .collect(),
+            })
+        };
+        if sql.contains("FROM all_tables") {
+            return Ok(row(&[
+                ("NUM_ROWS", "1234"),
+                ("LAST_ANALYZED", "2026-06-01T08:00:00"),
+            ]));
+        }
+        if sql.contains("all_tab_statistics") {
+            return Ok(row(&[("STALE_STATS", "YES")]));
+        }
+        if sql.contains("COUNT(*) AS column_count") {
+            return Ok(row(&[("COLUMN_COUNT", "2")]));
+        }
+        if sql.contains("all_tab_comments") {
+            return Ok(row(&[("COMMENTS", "company employees")]));
+        }
+        Ok(None)
+    }
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        Ok(0)
+    }
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+/// Drive a single request through a fresh stdio session and return ALL emitted
+/// lines (responses AND any flushed notifications), in order. Unlike
+/// `one_request` this does not filter to the matching id, so notification
+/// goldens can capture the post-response flush.
+fn all_lines_for(server: &OracleMcpServer, request: Value) -> Vec<Value> {
+    let mut input = Vec::new();
+    input.extend(frame(&initialize(1, Some("expected-init-token"))));
+    input.extend(frame(&json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+    })));
+    input.extend(frame(&request));
+    let mut output = Vec::new();
+    server
+        .serve_stdio_with_io(Cursor::new(input), &mut output, &required_auth())
+        .expect("stdio session completes");
+    String::from_utf8(output)
+        .expect("stdio replies are UTF-8")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("reply is JSON"))
+        .collect()
+}
+
+#[test]
+fn golden_stdio_search_objects_detail_levels() {
+    // E4: the unified oracle_search_objects served tool at each detail level.
+    // The summary row count is the optimizer ALL_TABLES.NUM_ROWS estimate (with
+    // stats_stale), never COUNT(*).
+    let build = || {
+        OracleMcpServer::new(
+            "0.3.0",
+            tool_registry(),
+            capabilities("0.3.0", true, false),
+            Arc::new(OracleDispatcher::new(Box::new(SearchMock))),
+        )
+    };
+    let call = |id: i64, detail: &str| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "name": "oracle_search_objects",
+                "arguments": { "owner": "HR", "detail_level": detail }
+            }
+        })
+    };
+    let names = one_request(&build(), call(2, "names"));
+    let summary = one_request(&build(), call(3, "summary"));
+    let standard = one_request(&build(), call(4, "standard"));
+    let full = one_request(&build(), call(5, "full"));
+
+    let actual = json!({
+        "case": "E4 oracle_search_objects detail levels; summary row count is the ALL_TABLES.NUM_ROWS optimizer estimate (not COUNT(*)) with stats_stale",
+        "names": names,
+        "summary": summary,
+        "standard": standard,
+        "full": full,
+    });
+    golden_support::assert_golden("stdio/search_objects_detail_levels", &actual);
+}
+
+#[test]
+fn golden_stdio_completion_complete_owner_type_object() {
+    // E7: completion/complete for owner/type/object, scoped by context.arguments.
+    let build = || {
+        OracleMcpServer::new(
+            "0.3.0",
+            tool_registry(),
+            capabilities("0.3.0", true, false),
+            Arc::new(OracleDispatcher::new(Box::new(SearchMock))),
+        )
+    };
+    let complete = |id: i64, name: &str, value: &str, context: Value| {
+        let mut params = json!({
+            "ref": { "type": "ref/resource", "uri": "oracle://object/{owner}/{type}/{name}" },
+            "argument": { "name": name, "value": value }
+        });
+        if !context.is_null() {
+            params["context"] = context;
+        }
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "completion/complete",
+            "params": params
+        })
+    };
+    let owner = one_request(&build(), complete(2, "owner", "H", Value::Null));
+    let object_type = one_request(&build(), complete(3, "type", "TA", Value::Null));
+    let name = one_request(
+        &build(),
+        complete(
+            4,
+            "name",
+            "EMP",
+            json!({ "arguments": { "owner": "HR", "type": "TABLE" } }),
+        ),
+    );
+
+    let actual = json!({
+        "case": "E7 completion/complete owner→type→object autocomplete, capped {values,total,hasMore}, scoped by context.arguments",
+        "owner_completion": owner,
+        "type_completion": object_type,
+        "object_name_completion": name,
+    });
+    golden_support::assert_golden("stdio/completion_complete", &actual);
+}
+
+#[test]
+fn golden_stdio_progress_and_tools_list_changed_notifications() {
+    // E6: a tools/call with a progressToken is bracketed by notifications/progress;
+    // a profile-switch-style change emits notifications/tools/list_changed. Here
+    // we capture the progress bracket end-to-end over stdio.
+    let server = || {
+        OracleMcpServer::new(
+            "0.3.0",
+            tool_registry(),
+            capabilities("0.3.0", true, false),
+            Arc::new(OracleDispatcher::new(Box::new(SearchMock))),
+        )
+    };
+
+    // tools/call with a progressToken: the response plus a 0/1 and 1/1 progress.
+    let with_progress = all_lines_for(
+        &server(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "oracle_search_objects",
+                "arguments": { "owner": "HR", "detail_level": "names" },
+                "_meta": { "progressToken": "search-op" }
+            }
+        }),
+    );
+
+    // The advertised capability gate.
+    let init = one_request_init(&server());
+
+    let actual = json!({
+        "case": "E6 notifications/progress brackets a tools/call with a progressToken; tools.listChanged advertised",
+        "capabilities": init["result"]["capabilities"],
+        "progress_bracketed_call": with_progress,
+    });
+    golden_support::assert_golden("stdio/progress_and_list_changed", &actual);
+}

@@ -1,0 +1,42 @@
+{
+  "case": "E7 completion/complete owner→type→object autocomplete, capped {values,total,hasMore}, scoped by context.arguments",
+  "object_name_completion": {
+    "id": 4,
+    "jsonrpc": "2.0",
+    "result": {
+      "completion": {
+        "hasMore": false,
+        "total": 1,
+        "values": [
+          "EMPLOYEES"
+        ]
+      }
+    }
+  },
+  "owner_completion": {
+    "id": 2,
+    "jsonrpc": "2.0",
+    "result": {
+      "completion": {
+        "hasMore": false,
+        "total": 1,
+        "values": [
+          "HR"
+        ]
+      }
+    }
+  },
+  "type_completion": {
+    "id": 3,
+    "jsonrpc": "2.0",
+    "result": {
+      "completion": {
+        "hasMore": false,
+        "total": 1,
+        "values": [
+          "TABLE"
+        ]
+      }
+    }
+  }
+}

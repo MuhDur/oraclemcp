@@ -169,6 +169,24 @@ const REQUIREMENTS: &[Requirement] = &[
         level: RequirementLevel::Must,
         description: "a subscribed resource that changes (polling fallback) emits a notifications/resources/updated for that uri",
     },
+    Requirement {
+        id: "MCP-STDIO-017",
+        section: "Completion",
+        level: RequirementLevel::Must,
+        description: "completion/complete is advertised and served (owner/type/object autocomplete) with a capped {values,total,hasMore} envelope",
+    },
+    Requirement {
+        id: "MCP-STDIO-018",
+        section: "Notifications",
+        level: RequirementLevel::Must,
+        description: "notifications/progress is emitted for a tools/call carrying a progressToken and is a true notification (no id)",
+    },
+    Requirement {
+        id: "MCP-STDIO-019",
+        section: "Notifications",
+        level: RequirementLevel::Must,
+        description: "notifications/tools/list_changed is advertised (tools.listChanged) and emitted when the served tool set changes",
+    },
 ];
 
 struct EchoDispatch;
@@ -202,6 +220,28 @@ impl ToolDispatch for EchoDispatch {
                     "owner": args["owner"],
                     "name": args["name"],
                     "ddl": "CREATE TABLE employees (id NUMBER)"
+                })),
+                // E7 completion sources: list_schemas → owners, search_objects →
+                // object names, list_profiles → the E5-filtered exposed profiles.
+                "oracle_list_schemas" => Ok(json!({
+                    "schemas": [
+                        { "SCHEMA_NAME": "HR", "OBJECT_COUNT": "10" },
+                        { "SCHEMA_NAME": "HIDDEN_OWNER", "OBJECT_COUNT": "1" },
+                    ],
+                })),
+                "oracle_search_objects" => Ok(json!({
+                    "detail_level": "names",
+                    "count": 2,
+                    "results": [
+                        { "owner": args["owner"], "object_name": "EMPLOYEES", "object_type": "TABLE" },
+                        { "owner": args["owner"], "object_name": "EMP_AUDIT", "object_type": "TABLE" },
+                    ],
+                })),
+                // The dispatcher already E5-filters this to exposed profiles; the
+                // echo returns only an exposed profile so the completion test can
+                // assert a hidden profile never appears.
+                "oracle_list_profiles" => Ok(json!({
+                    "profiles": [ { "name": "agent_ro" } ],
                 })),
                 _ => Err(ErrorEnvelope::new(
                     ErrorClass::InvalidArguments,
@@ -323,7 +363,7 @@ fn run_script(requests: Vec<Value>) -> Vec<Value> {
 
 #[test]
 fn conformance_requirement_matrix_is_accounted_for() {
-    assert_eq!(REQUIREMENTS.len(), 22);
+    assert_eq!(REQUIREMENTS.len(), 25);
     let must = REQUIREMENTS
         .iter()
         .filter(|requirement| requirement.level == RequirementLevel::Must)
@@ -332,7 +372,7 @@ fn conformance_requirement_matrix_is_accounted_for() {
         .iter()
         .filter(|requirement| requirement.level == RequirementLevel::Should)
         .count();
-    assert_eq!(must, 20);
+    assert_eq!(must, 23);
     assert_eq!(should, 2);
     let mut ids = REQUIREMENTS
         .iter()
@@ -359,7 +399,11 @@ fn initialize_returns_mcp_2025_11_25_server_info_and_tools_capability() {
     assert_eq!(result["serverInfo"]["name"], json!("oraclemcp"));
     assert_eq!(result["serverInfo"]["version"], json!("0.3.0"));
     assert!(result["capabilities"]["tools"].is_object());
-    assert_eq!(result["capabilities"]["tools"]["listChanged"], json!(false));
+    // E6: the server emits notifications/tools/list_changed (e.g. after a
+    // profile switch alters the served tool set), so it advertises the capability.
+    assert_eq!(result["capabilities"]["tools"]["listChanged"], json!(true));
+    // E7: completion/complete is served, so completions is advertised.
+    assert!(result["capabilities"]["completions"].is_object());
     assert_eq!(
         result["capabilities"]["resources"]["subscribe"],
         json!(false)
@@ -438,7 +482,10 @@ fn resources_and_prompts_are_advertised_and_served_without_unserved_arms() {
             "jsonrpc": "2.0",
             "id": "completion-complete",
             "method": "completion/complete",
-            "params": {}
+            "params": {
+                "ref": { "type": "ref/resource", "uri": "oracle://object/{owner}/{type}/{name}" },
+                "argument": { "name": "type", "value": "TA" }
+            }
         }),
     ]);
     let initialize = replies
@@ -450,7 +497,8 @@ fn resources_and_prompts_are_advertised_and_served_without_unserved_arms() {
     assert_eq!(capabilities["resources"]["subscribe"], json!(false));
     assert_eq!(capabilities["resources"]["listChanged"], json!(false));
     assert_eq!(capabilities["prompts"]["listChanged"], json!(false));
-    assert!(capabilities.get("completion").is_none());
+    // E7: completion/complete is served, so completions IS advertised.
+    assert!(capabilities["completions"].is_object());
 
     let resource_list = replies
         .iter()
@@ -575,15 +623,24 @@ fn resources_and_prompts_are_advertised_and_served_without_unserved_arms() {
         json!("INVALID_ARGUMENTS")
     );
 
+    // E7: completion/complete is served. `type` completion is answered from the
+    // static dictionary object-type list (no DB), so "TA" completes to "TABLE"
+    // with a well-formed {values, total, hasMore} envelope.
     let reply = replies
         .iter()
         .find(|reply| reply["id"] == json!("completion-complete"))
-        .expect("method-not-found reply");
-    assert_eq!(
-        reply["error"]["code"],
-        json!(JSONRPC_METHOD_NOT_FOUND),
-        "completion must stay unadvertised until the handler is served"
+        .expect("completion/complete reply");
+    let completion = &reply["result"]["completion"];
+    assert!(
+        completion["values"]
+            .as_array()
+            .expect("values array")
+            .iter()
+            .any(|v| v == &json!("TABLE")),
+        "type completion offers TABLE for prefix TA: {reply}"
     );
+    assert_eq!(completion["hasMore"], json!(false));
+    assert!(completion["total"].is_number());
 }
 
 #[test]
@@ -1123,6 +1180,240 @@ fn subscribe_is_advertised_and_a_polled_change_emits_resources_updated() {
     assert!(
         notifications[0].get("id").is_none(),
         "resources/updated is a notification (no id)"
+    );
+}
+
+#[test]
+fn completion_complete_is_served_and_capped_for_owner_type_object() {
+    // MCP-STDIO-017 (E7): owner→type→object autocomplete. `type` is the static
+    // dictionary list; `owner` comes from oracle_list_schemas; `name` from
+    // oracle_search_objects scoped by context.arguments.
+    let replies = run_script(vec![
+        // type completion (static, no DB) — prefix "VI" → "VIEW".
+        json!({
+            "jsonrpc": "2.0",
+            "id": "complete-type",
+            "method": "completion/complete",
+            "params": {
+                "ref": { "type": "ref/resource", "uri": "oracle://object/{owner}/{type}/{name}" },
+                "argument": { "name": "type", "value": "VI" }
+            }
+        }),
+        // owner completion via oracle_list_schemas — prefix "H".
+        json!({
+            "jsonrpc": "2.0",
+            "id": "complete-owner",
+            "method": "completion/complete",
+            "params": {
+                "ref": { "type": "ref/resource", "uri": "oracle://object/{owner}/{type}/{name}" },
+                "argument": { "name": "owner", "value": "H" }
+            }
+        }),
+        // object-name completion scoped to the chosen owner/type via context.
+        json!({
+            "jsonrpc": "2.0",
+            "id": "complete-name",
+            "method": "completion/complete",
+            "params": {
+                "ref": { "type": "ref/resource", "uri": "oracle://object/{owner}/{type}/{name}" },
+                "argument": { "name": "name", "value": "EMP" },
+                "context": { "arguments": { "owner": "HR", "type": "TABLE" } }
+            }
+        }),
+        // a missing argument object is invalid-params (well-formed protocol error).
+        json!({
+            "jsonrpc": "2.0",
+            "id": "complete-bad",
+            "method": "completion/complete",
+            "params": { "ref": { "type": "ref/resource", "uri": "oracle://tools" } }
+        }),
+    ]);
+
+    let by_id = |id: &str| {
+        replies
+            .iter()
+            .find(|reply| reply["id"] == json!(id))
+            .unwrap_or_else(|| panic!("{id} reply"))
+            .clone()
+    };
+
+    let type_reply = by_id("complete-type");
+    let type_values = type_reply["result"]["completion"]["values"]
+        .as_array()
+        .expect("type values");
+    assert!(type_values.iter().any(|v| v == &json!("VIEW")));
+    // The cap envelope is present and well-formed.
+    assert_eq!(type_reply["result"]["completion"]["hasMore"], json!(false));
+    assert!(type_reply["result"]["completion"]["total"].is_number());
+
+    let owner_reply = by_id("complete-owner");
+    let owner_values = owner_reply["result"]["completion"]["values"]
+        .as_array()
+        .expect("owner values");
+    assert!(owner_values.iter().any(|v| v == &json!("HR")));
+    // The prefix "H" also prefix-matches HIDDEN_OWNER, which is fine (a schema,
+    // not a profile); the point of E5 isolation is profile invisibility (below).
+
+    let name_reply = by_id("complete-name");
+    let name_values = name_reply["result"]["completion"]["values"]
+        .as_array()
+        .expect("name values");
+    assert!(name_values.iter().any(|v| v == &json!("EMPLOYEES")));
+    assert!(name_values.iter().any(|v| v == &json!("EMP_AUDIT")));
+
+    let bad = by_id("complete-bad");
+    assert_eq!(
+        bad["error"]["code"],
+        json!(JSONRPC_INVALID_PARAMS),
+        "a completion request without an argument is invalid-params"
+    );
+}
+
+#[test]
+fn completion_complete_for_profile_honors_e5_exposure() {
+    // MCP-STDIO-017 + E5: completing a `profile` argument routes through
+    // oracle_list_profiles, which the dispatcher filters to the mcp_exposed
+    // allow-list — so only the exposed profile is offered and a hidden one is
+    // never surfaced as a completion.
+    let replies = run_script(vec![json!({
+        "jsonrpc": "2.0",
+        "id": "complete-profile",
+        "method": "completion/complete",
+        "params": {
+            "ref": { "type": "ref/prompt", "name": "oracle_switch_profile" },
+            "argument": { "name": "profile", "value": "" }
+        }
+    })]);
+    let reply = replies
+        .iter()
+        .find(|reply| reply["id"] == json!("complete-profile"))
+        .expect("profile completion reply");
+    let values = reply["result"]["completion"]["values"]
+        .as_array()
+        .expect("profile values");
+    assert!(
+        values.iter().any(|v| v == &json!("agent_ro")),
+        "the exposed profile is offered"
+    );
+    let serialized = serde_json::to_string(reply).expect("json");
+    assert!(
+        !serialized.contains("prod_admin") && !serialized.contains("hidden"),
+        "a non-exposed profile must never be completed: {serialized}"
+    );
+}
+
+#[test]
+fn progress_notification_is_emitted_for_a_tools_call_with_a_progress_token() {
+    // MCP-STDIO-018 (E6): a tools/call carrying params._meta.progressToken is
+    // bracketed by notifications/progress, which ride the stdout after the
+    // response and carry no id (true notifications).
+    let replies = run_script(vec![json!({
+        "jsonrpc": "2.0",
+        "id": "call-with-progress",
+        "method": "tools/call",
+        "params": {
+            "name": "oracle_schema_inspect",
+            "arguments": { "owner": "HR" },
+            "_meta": { "progressToken": "op-42" }
+        }
+    })]);
+
+    // The tool result.
+    assert!(
+        replies
+            .iter()
+            .any(|reply| reply["id"] == json!("call-with-progress")
+                && reply["result"]["isError"] == json!(false)),
+        "the tool call still returns its result"
+    );
+
+    // The progress notifications (no id; method+token), at least a start and end.
+    let progress: Vec<&Value> = replies
+        .iter()
+        .filter(|reply| reply["method"] == json!("notifications/progress"))
+        .collect();
+    assert!(
+        progress.len() >= 2,
+        "a started + completed progress bracket is emitted: {replies:?}"
+    );
+    for note in &progress {
+        assert!(
+            note.get("id").is_none(),
+            "progress is a notification (no id)"
+        );
+        assert_eq!(note["params"]["progressToken"], json!("op-42"));
+        assert!(note["params"]["progress"].is_number());
+    }
+
+    // Without a progressToken, no progress is emitted (opt-in per the spec).
+    let no_token = run_script(vec![json!({
+        "jsonrpc": "2.0",
+        "id": "call-no-progress",
+        "method": "tools/call",
+        "params": { "name": "oracle_schema_inspect", "arguments": { "owner": "HR" } }
+    })]);
+    assert!(
+        no_token
+            .iter()
+            .all(|reply| reply["method"] != json!("notifications/progress")),
+        "no progressToken => no progress notifications"
+    );
+}
+
+#[test]
+fn tools_list_changed_is_advertised_and_emitted_when_the_tool_set_changes() {
+    use oraclemcp_core::NotificationHub;
+
+    // MCP-STDIO-019 (E6): the capability is advertised, and a change to the
+    // served tool set (modeled here by enqueuing on the shared hub, exactly as a
+    // profile switch does) emits a paramless, id-less list_changed notification.
+    let hub = Arc::new(NotificationHub::new());
+    let server = {
+        let mut registry = ToolRegistry::new();
+        registry.register(ToolDescriptor::new(
+            "oracle_schema_inspect",
+            ToolTier::FoundationLiveDb,
+            "inspect a schema",
+        ));
+        let report = CapabilitiesReport::new(
+            "0.3.0",
+            registry.tools.clone(),
+            OperatingLevel::ReadOnly,
+            FeatureTiers {
+                live_db: true,
+                engine: false,
+                http_transport: false,
+            },
+        );
+        OracleMcpServer::new("0.3.0", registry, report, Arc::new(EchoDispatch))
+            .with_notifications(Arc::clone(&hub))
+    };
+
+    let init = server
+        .handle_jsonrpc_request(initialize(None), Some(&StdioAuthPolicy::Disabled))
+        .expect("initialize reply");
+    assert_eq!(
+        init["result"]["capabilities"]["tools"]["listChanged"],
+        json!(true),
+        "tools.listChanged is advertised"
+    );
+
+    // Nothing queued yet.
+    assert!(server.drain_server_notifications().is_empty());
+
+    // A change to the served tool set (what oracle_switch_profile enqueues).
+    hub.enqueue_tools_list_changed();
+
+    let notes = server.drain_server_notifications();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(
+        notes[0]["method"],
+        json!("notifications/tools/list_changed")
+    );
+    assert!(notes[0].get("id").is_none(), "list_changed has no id");
+    assert!(
+        notes[0].get("params").is_none(),
+        "list_changed has no params"
     );
 }
 

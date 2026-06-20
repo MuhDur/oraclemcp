@@ -25,13 +25,14 @@ use oraclemcp_core::{
     CustomToolCatalog, CustomToolExecutor, DispatchContext, DispatchFuture, ToolBody, ToolDispatch,
     execute_custom_tool, narrow_to_read_path,
 };
+use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
     DbError, DbmsOutput, OracleBind, OracleConnection, OracleConnectionInfo, QueryCaps,
     SerializeOptions, compile_errors, compile_object_statements, describe_columns,
     describe_constraints, describe_index, describe_trigger, describe_view, execute_immediate_audit,
     explain_plan, find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects,
     list_schemas, plscope_identifiers, plscope_statements, read_lob, read_query, read_query_named,
-    sample_rows, search_source, serialize_row,
+    sample_rows, search_objects, search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
@@ -54,6 +55,11 @@ const DEFAULT_PATCH_PREVIEW_CHARS: usize = 1_000;
 const DEFAULT_SCHEMA_INSPECT_MAX_ROWS: usize = 500;
 /// Hard cap on `oracle_schema_inspect` for a single call.
 const MAX_SCHEMA_INSPECT_MAX_ROWS: usize = 5_000;
+/// Default cap on `oracle_search_objects` result rows when the caller omits it.
+/// Lower than schema_inspect because each result is enriched per detail level.
+const DEFAULT_SEARCH_OBJECTS_MAX_ROWS: usize = 100;
+/// Hard cap on `oracle_search_objects` for a single call.
+const MAX_SEARCH_OBJECTS_MAX_ROWS: usize = 5_000;
 /// Default cap on `oracle_list_schemas` result rows when the caller omits it.
 const DEFAULT_SCHEMA_LIST_MAX_ROWS: usize = 200;
 /// Hard cap on `oracle_list_schemas` for a single call.
@@ -218,6 +224,16 @@ pub struct OracleDispatcher {
     /// and a `resource_link` is returned instead of inlining (E3b). `None`
     /// disables the export arm (results are inlined / row-capped as before).
     exports: Option<Arc<oraclemcp_core::ExportRegistry>>,
+    /// E5 connection-scope isolation: which profiles the served surface may
+    /// reach (switch/list/search/complete). Defaults to [`McpExposurePolicy::AllowAll`];
+    /// the served binary installs an explicit allow-list snapshotted from the
+    /// `mcp_exposed` config flags.
+    mcp_exposure: McpExposurePolicy,
+    /// E6 server-initiated notifications hub, shared with the server. When set,
+    /// a successful `oracle_switch_profile` enqueues `notifications/tools/list_changed`
+    /// because the switch may change the profile-scoped custom-tool catalog (and
+    /// thus the served tool set). `None` disables that signal (focused tests).
+    notifications: Option<Arc<oraclemcp_core::NotificationHub>>,
 }
 
 impl OracleDispatcher {
@@ -255,6 +271,8 @@ impl OracleDispatcher {
             custom_loader: None,
             auditor: None,
             exports: None,
+            mcp_exposure: McpExposurePolicy::default(),
+            notifications: None,
         }
     }
 
@@ -321,7 +339,32 @@ impl OracleDispatcher {
             custom_loader,
             auditor: None,
             exports: None,
+            mcp_exposure: McpExposurePolicy::default(),
+            notifications: None,
         }
+    }
+
+    /// Attach the shared E6 notification hub (builder). The server wiring shares
+    /// the same hub it gave `OracleMcpServer::with_notifications`, so a profile
+    /// switch here enqueues `notifications/tools/list_changed` that the transport
+    /// flushes.
+    #[must_use]
+    pub fn with_notifications(
+        mut self,
+        notifications: Arc<oraclemcp_core::NotificationHub>,
+    ) -> Self {
+        self.notifications = Some(notifications);
+        self
+    }
+
+    /// Install the E5 connection-scope isolation policy (builder). The served
+    /// binary calls this with the allow-list snapshotted from the `mcp_exposed`
+    /// config flags so a non-exposed profile is never switchable, listable,
+    /// searchable, or completable by the agent.
+    #[must_use]
+    pub fn with_mcp_exposure(mut self, exposure: McpExposurePolicy) -> Self {
+        self.mcp_exposure = exposure;
+        self
     }
 
     /// Attach the out-of-band auditor (builder; consumes and returns `self`).
@@ -350,8 +393,80 @@ fn rows_to_json(rows: &[oraclemcp_db::OracleRow]) -> Value {
     Value::Array(rows.iter().map(|r| serialize_row(r, &opts)).collect())
 }
 
-fn profiles_response(cfg: &OracleMcpConfig) -> Value {
-    json!({ "profiles": cfg.list_profiles() })
+/// The agent-facing `oracle_list_profiles` response (E5). Only profiles the
+/// dispatcher's [`McpExposurePolicy`] admits are surfaced — a non-exposed
+/// profile is omitted entirely (not redacted), so an agent never learns it
+/// exists. The CLI/operator path uses `cfg.list_profiles()` directly and still
+/// sees every profile.
+fn profiles_response(cfg: &OracleMcpConfig, exposure: &McpExposurePolicy) -> Value {
+    let profiles: Vec<_> = cfg
+        .list_profiles()
+        .into_iter()
+        .filter(|metadata| exposure.is_exposed(&metadata.name))
+        .collect();
+    json!({ "profiles": profiles })
+}
+
+/// Fail-closed envelope (E5) for a profile that is not exposed to the MCP
+/// surface. Deliberately indistinguishable from an unknown profile so a guessed
+/// non-exposed name leaks nothing: same class, same message, no acknowledgement
+/// that the name happens to match a hidden profile.
+fn profile_not_available(profile: &str) -> ErrorEnvelope {
+    invalid_args(format!(
+        "connection profile `{profile}` is not available on this MCP server"
+    ))
+    .with_suggested_tool("oracle_list_profiles")
+    .with_next_step("call oracle_list_profiles to see the profiles this server exposes")
+}
+
+/// The E5 connection-scope isolation policy: which profiles the *served*
+/// surface may switch to / list / search / complete. The operator's startup
+/// `--profile` choice is authoritative and out of scope here; this governs only
+/// what the agent can reach at runtime.
+#[derive(Clone, Debug, Default)]
+pub enum McpExposurePolicy {
+    /// No isolation configured: every profile in the config is reachable. This
+    /// is the default for focused dispatcher construction and tests; the served
+    /// binary always installs an explicit [`Self::AllowList`].
+    #[default]
+    AllowAll,
+    /// Only these profile names (the `mcp_exposed = true` set, snapshotted from
+    /// config at server-wiring time) are reachable by the agent. Fail-closed:
+    /// any name not in this set is invisible and non-switchable.
+    AllowList(std::collections::HashSet<String>),
+}
+
+impl McpExposurePolicy {
+    /// Build the exposure policy from config (E5), opt-in segmentation. The
+    /// served binary calls this once with the loaded config.
+    ///
+    /// If NO profile opts into the `mcp_exposed` flag (the zero-config /
+    /// single-profile common case), isolation is inactive and every profile is
+    /// reachable ([`Self::AllowAll`]) so the server is usable out of the box.
+    /// Once *any* profile sets `mcp_exposed`, the operator has opted into
+    /// segmentation and only the `mcp_exposed = true` set is reachable (a
+    /// fail-closed [`Self::AllowList`]).
+    #[must_use]
+    pub fn from_config(cfg: &OracleMcpConfig) -> Self {
+        if !cfg.mcp_isolation_active() {
+            return McpExposurePolicy::AllowAll;
+        }
+        McpExposurePolicy::AllowList(
+            cfg.list_mcp_profiles()
+                .into_iter()
+                .map(|metadata| metadata.name)
+                .collect(),
+        )
+    }
+
+    /// Whether `profile` is reachable by the served surface under this policy.
+    #[must_use]
+    pub fn is_exposed(&self, profile: &str) -> bool {
+        match self {
+            McpExposurePolicy::AllowAll => true,
+            McpExposurePolicy::AllowList(names) => names.contains(profile),
+        }
+    }
 }
 
 fn optional_row_to_json(row: Option<&oraclemcp_db::OracleRow>) -> Value {
@@ -3585,6 +3700,14 @@ impl OracleDispatcher {
         if tool == "oracle_switch_profile" {
             let a: SwitchProfileArgs = parse_args(name, args)?;
             let profile = required_switch_profile_arg(name, a.profile)?;
+            // E5 connection-scope isolation: the served surface may only switch
+            // to a profile the operator flagged `mcp_exposed`. A non-exposed or
+            // unknown name is rejected here, BEFORE the connector ever resolves
+            // the profile's credentials/DSN, with an envelope that does not
+            // reveal whether the guessed name matched a hidden profile.
+            if !self.mcp_exposure.is_exposed(&profile) {
+                return Err(profile_not_available(&profile));
+            }
             let Some(connector) = &self.connector else {
                 return Err(ErrorEnvelope::new(
                     ErrorClass::RuntimeStateRequired,
@@ -3634,6 +3757,14 @@ impl OracleDispatcher {
                     "custom_tool_count".to_owned(),
                     json!(state.custom_catalog.len()),
                 );
+            }
+            drop(state);
+            // E6: the switch may have changed the profile-scoped custom-tool
+            // catalog (and thus the served tool set), so signal the client to
+            // re-fetch `tools/list`. Enqueued on the shared hub; flushed by the
+            // transport after this response.
+            if let Some(notifications) = &self.notifications {
+                notifications.enqueue_tools_list_changed();
             }
             return Ok(response);
         }
@@ -3792,7 +3923,7 @@ impl OracleDispatcher {
             "oracle_list_profiles" => {
                 ensure_no_args(name, args)?;
                 OracleMcpConfig::load(None)
-                    .map(|cfg| profiles_response(&cfg))
+                    .map(|cfg| profiles_response(&cfg, &self.mcp_exposure))
                     .map_err(|e| {
                         DbError::UnsupportedAuth(format!("config load failed: {e}")).into_envelope()
                     })
@@ -3927,6 +4058,67 @@ impl OracleDispatcher {
                     "name_like": name_like,
                     "max_rows": max_rows,
                     "truncated": rows.len() == max_rows,
+                }))
+            }
+            "oracle_search_objects" => {
+                // E4: unified read-only object search/inspection. Read-only
+                // dictionary surface (ALL_OBJECTS/ALL_TABLES/ALL_TAB_COLUMNS/…),
+                // so it takes the read-path narrowed capability row like the
+                // other dictionary tools and never executes caller SQL.
+                let a: SearchObjectsArgs = parse_args(name, args)?;
+                let detail =
+                    SearchDetailLevel::parse(a.detail_level.as_deref()).ok_or_else(|| {
+                        invalid_args("detail_level must be one of: names, summary, standard, full")
+                    })?;
+                let owner_arg = non_empty_arg(a.owner);
+                let object_type = non_empty_arg(a.object_type);
+                let name_like = non_empty_arg(a.name_like);
+                let max_rows = a
+                    .max_rows
+                    .unwrap_or(DEFAULT_SEARCH_OBJECTS_MAX_ROWS)
+                    .clamp(1, MAX_SEARCH_OBJECTS_MAX_ROWS);
+                let owner_filter: Option<String> = match owner_arg.as_deref() {
+                    Some("*") => None,
+                    Some(owner) => Some(owner.to_owned()),
+                    None => {
+                        let info = describe_conn(cx, metadata_conn)
+                            .await
+                            .map_err(DbError::into_envelope)?;
+                        Some(
+                            info.current_schema
+                                .ok_or_else(|| {
+                                    DbError::Query(
+                                        "owner is required because current_schema could not be detected"
+                                            .to_owned(),
+                                    )
+                                })
+                                .map_err(DbError::into_envelope)?,
+                        )
+                    }
+                };
+                let _read_cx = narrow_to_read_path(cx);
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.search_objects.before")?;
+                let results = search_objects(
+                    cx,
+                    metadata_conn,
+                    owner_filter.as_deref(),
+                    object_type.as_deref(),
+                    name_like.as_deref(),
+                    detail,
+                    max_rows,
+                )
+                .await
+                .map_err(DbError::into_envelope)?;
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.search_objects.after")?;
+                Ok(json!({
+                    "owner": owner_filter.as_deref().unwrap_or("*"),
+                    "object_type": object_type,
+                    "name_like": name_like,
+                    "detail_level": detail.as_str(),
+                    "count": results.len(),
+                    "results": results,
+                    "max_rows": max_rows,
+                    "truncated": results.len() == max_rows,
                 }))
             }
             "oracle_list_schemas" => {

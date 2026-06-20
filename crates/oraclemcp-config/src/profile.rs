@@ -501,6 +501,16 @@ pub struct ConnectionProfile {
     /// Force `READ_ONLY` regardless of profile (Active Data Guard standby).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only_standby: Option<bool>,
+    /// Whether this profile is exposed to the MCP **served** surface (E5
+    /// connection-scope isolation). When `false` (the fail-closed default), the
+    /// profile is invisible to every agent-facing path — `oracle_list_profiles`,
+    /// `oracle_switch_profile`, `oracle_search_objects`, and
+    /// `completion/complete` all behave as if it does not exist. The CLI and the
+    /// operator (`oraclemcp profiles`, `doctor`, `--profile`) still see and use
+    /// every profile. Defaults to `false`: a profile is hidden from agents
+    /// unless an operator opts it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_exposed: Option<bool>,
     /// Optional per-connection Oracle session identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_identity: Option<SessionIdentityConfig>,
@@ -589,6 +599,15 @@ impl ConnectionProfile {
         self.read_only_standby.unwrap_or(false)
     }
 
+    /// Whether this profile is exposed to the MCP served (agent-facing) surface
+    /// (E5). Fail-closed: defaults to `false`, so an unflagged profile is hidden
+    /// from `oracle_list_profiles`/`oracle_switch_profile`/search/completion. The
+    /// CLI/operator still sees every profile regardless of this flag.
+    #[must_use]
+    pub fn mcp_exposed(&self) -> bool {
+        self.mcp_exposed.unwrap_or(false)
+    }
+
     /// The effective pool settings (defaults applied).
     #[must_use]
     pub fn pool(&self) -> PoolConfig {
@@ -618,6 +637,7 @@ impl ConnectionProfile {
             protected,
             require_signed_tools,
             read_only_standby,
+            mcp_exposed,
             session_identity,
             pool,
             oci,
@@ -644,6 +664,7 @@ impl ConnectionProfile {
             protected: self.protected(),
             require_signed_tools: self.require_signed_tools(),
             read_only_standby: self.read_only_standby(),
+            mcp_exposed: self.mcp_exposed(),
         }
     }
 
@@ -720,6 +741,10 @@ pub struct ProfileMetadata {
     pub require_signed_tools: bool,
     /// Whether the profile is a read-only standby.
     pub read_only_standby: bool,
+    /// Whether the profile is exposed to the MCP served (agent-facing) surface
+    /// (E5). The CLI shows this for every profile; the served `oracle_list_profiles`
+    /// only ever returns profiles where this is `true`.
+    pub mcp_exposed: bool,
 }
 
 /// Resolve `base` inheritance across all profiles, in place. Detects unknown
@@ -790,6 +815,7 @@ mod tests {
             protected: None,
             require_signed_tools: None,
             read_only_standby: None,
+            mcp_exposed: None,
             session_identity: None,
             pool: None,
             oci: None,

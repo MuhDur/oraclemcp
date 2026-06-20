@@ -362,14 +362,41 @@ impl OracleMcpConfig {
         Ok(self)
     }
 
-    /// Look up a profile by name.
+    /// Look up a profile by name. This is the **operator/CLI** lookup: it sees
+    /// every configured profile regardless of MCP exposure. The agent-facing
+    /// served surface must use [`Self::mcp_profile`] instead, which fails closed
+    /// on non-`mcp_exposed` profiles (E5).
     #[must_use]
     pub fn profile(&self, name: &str) -> Option<&ConnectionProfile> {
         self.profiles.iter().find(|p| p.name == name)
     }
 
-    /// Non-secret metadata for every profile (`list_profiles`). No secret
-    /// reference is ever included (plan §8.4).
+    /// Look up a profile by name for the MCP **served** surface (E5
+    /// connection-scope isolation). Returns `None` — exactly as if the profile
+    /// did not exist — for any profile that is not flagged `mcp_exposed`. This
+    /// is the single fail-closed gate the agent-facing dispatch
+    /// (`oracle_switch_profile`, `oracle_search_objects`, `completion/complete`)
+    /// routes profile lookups through, so a guessed non-exposed name is never
+    /// switchable, searchable, or completable.
+    #[must_use]
+    pub fn mcp_profile(&self, name: &str) -> Option<&ConnectionProfile> {
+        self.profiles
+            .iter()
+            .find(|p| p.name == name && p.mcp_exposed())
+    }
+
+    /// Whether `name` is a configured profile that is exposed to the MCP served
+    /// surface (E5). A non-exposed or unknown name is indistinguishable: both
+    /// return `false`.
+    #[must_use]
+    pub fn is_mcp_exposed(&self, name: &str) -> bool {
+        self.mcp_profile(name).is_some()
+    }
+
+    /// Non-secret metadata for every profile (`profiles` CLI / operator view).
+    /// No secret reference is ever included (plan §8.4). This includes
+    /// non-`mcp_exposed` profiles, since the operator is allowed to see the full
+    /// topology; the agent-facing surface uses [`Self::list_mcp_profiles`].
     #[must_use]
     pub fn list_profiles(&self) -> Vec<ProfileMetadata> {
         self.profiles
@@ -381,6 +408,33 @@ impl OracleMcpConfig {
                 metadata
             })
             .collect()
+    }
+
+    /// Non-secret metadata for only the MCP-exposed profiles (E5). This is what
+    /// the served `oracle_list_profiles` tool returns, so an agent can never see
+    /// a profile the operator did not opt into the MCP surface. A non-exposed
+    /// profile is omitted entirely (not redacted): it is invisible.
+    #[must_use]
+    pub fn list_mcp_profiles(&self) -> Vec<ProfileMetadata> {
+        self.list_profiles()
+            .into_iter()
+            .filter(|metadata| metadata.mcp_exposed)
+            .collect()
+    }
+
+    /// Whether MCP connection-scope isolation (E5) is ACTIVE — i.e. at least one
+    /// profile (or one of its bases) explicitly set `mcp_exposed`.
+    ///
+    /// This drives an **opt-in** segmentation model: when isolation is *inactive*
+    /// (no profile sets the flag — the zero-config / single-profile common case),
+    /// the served surface exposes ALL profiles so the server is usable out of the
+    /// box. Once *any* profile sets `mcp_exposed`, the operator has opted into
+    /// segmentation and only `mcp_exposed = true` profiles are served (a
+    /// fail-closed allow-list). Usable by default, explicit + secure once you
+    /// start segmenting.
+    #[must_use]
+    pub fn mcp_isolation_active(&self) -> bool {
+        self.profiles.iter().any(|p| p.mcp_exposed.is_some())
     }
 }
 
@@ -827,5 +881,118 @@ mod tests {
         assert!(!json.contains("prod:1521/svc"));
         assert!(!json.contains("connect_string"));
         assert!(json.contains("\"is_default\":true"));
+    }
+
+    #[test]
+    fn mcp_exposure_defaults_closed_and_hides_unflagged_profiles() {
+        // E5: an unflagged profile is NOT exposed to the served surface, and an
+        // explicitly exposed one is. The operator-facing list_profiles still
+        // sees both.
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "hidden_default"
+            connect_string = "internal:1521/svc"
+
+            [[profiles]]
+            name = "agent_ro"
+            connect_string = "ro:1521/svc"
+            mcp_exposed = true
+            "#,
+        )
+        .expect("loads");
+
+        // Fail-closed default: the unflagged profile is invisible to the served
+        // surface, the flagged one is visible.
+        assert!(!cfg.profile("hidden_default").unwrap().mcp_exposed());
+        assert!(cfg.profile("agent_ro").unwrap().mcp_exposed());
+        assert!(cfg.mcp_profile("hidden_default").is_none());
+        assert!(cfg.mcp_profile("agent_ro").is_some());
+        assert!(!cfg.is_mcp_exposed("hidden_default"));
+        assert!(cfg.is_mcp_exposed("agent_ro"));
+
+        // A guessed/unknown name is indistinguishable from a hidden one.
+        assert!(cfg.mcp_profile("does_not_exist").is_none());
+        assert!(!cfg.is_mcp_exposed("does_not_exist"));
+
+        // The served list shows only the exposed profile; the operator/CLI list
+        // shows both.
+        let served: Vec<String> = cfg
+            .list_mcp_profiles()
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        assert_eq!(served, vec!["agent_ro".to_owned()]);
+        let all: Vec<String> = cfg.list_profiles().iter().map(|p| p.name.clone()).collect();
+        assert_eq!(
+            all,
+            vec!["hidden_default".to_owned(), "agent_ro".to_owned()]
+        );
+        // Isolation is ACTIVE here (a profile opted in), so the allow-list applies.
+        assert!(cfg.mcp_isolation_active());
+    }
+
+    #[test]
+    fn mcp_isolation_is_inactive_when_no_profile_opts_in() {
+        // Opt-in model: zero-config / single-profile setups (no `mcp_exposed`
+        // anywhere) keep isolation INACTIVE so the server is usable out of the box.
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "only"
+            connect_string = "db:1521/svc"
+
+            [[profiles]]
+            name = "second"
+            connect_string = "db2:1521/svc"
+            "#,
+        )
+        .expect("loads");
+        assert!(
+            !cfg.mcp_isolation_active(),
+            "no profile set mcp_exposed -> isolation inactive (expose all)"
+        );
+        // The moment ANY profile opts in, isolation activates.
+        let segmented = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "only"
+            connect_string = "db:1521/svc"
+            mcp_exposed = false
+
+            [[profiles]]
+            name = "second"
+            connect_string = "db2:1521/svc"
+            mcp_exposed = true
+            "#,
+        )
+        .expect("loads");
+        assert!(
+            segmented.mcp_isolation_active(),
+            "an explicit mcp_exposed (even =false) activates segmentation"
+        );
+    }
+
+    #[test]
+    fn mcp_exposed_inherits_through_base() {
+        // E5: the exposure flag participates in base inheritance like other
+        // scalar fields.
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "shared_exposed"
+            connect_string = "host:1521/svc"
+            mcp_exposed = true
+
+            [[profiles]]
+            name = "child"
+            base = "shared_exposed"
+            "#,
+        )
+        .expect("loads");
+        assert!(
+            cfg.mcp_profile("child").is_some(),
+            "child inherits exposure"
+        );
     }
 }

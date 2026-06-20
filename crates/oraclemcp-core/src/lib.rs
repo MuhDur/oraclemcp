@@ -26,6 +26,7 @@ pub mod export;
 pub mod fence;
 pub mod http;
 pub mod init_token;
+pub mod notifications;
 pub mod pagination;
 pub mod plugin;
 pub mod query_execute;
@@ -77,6 +78,7 @@ pub use http::{
     serve_https_until,
 };
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
+pub use notifications::{NotificationHub, progress_token_from_params};
 pub use plugin::{
     PluginCapability, PluginError, PluginManifest, PluginRequest, PluginResponse, SubprocessPlugin,
     check_capability,

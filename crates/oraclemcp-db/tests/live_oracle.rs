@@ -28,7 +28,8 @@ use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
     AuthAdapter, DbError, DrcpConfig, OracleBind, OracleConnectOptions, OracleConnection,
-    OracleSessionIdentity, QueryCaps, RustOracleConnection, SessionPurity,
+    OracleSessionIdentity, QueryCaps, RustOracleConnection, SearchDetailLevel, SessionPurity,
+    search_objects,
 };
 use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use serde_json::json;
@@ -1359,5 +1360,209 @@ fn live_top_queries_resolves_source_and_runs_including_statspack_fallback() {
                 );
             }
         }
+    });
+}
+
+/// E4 (live): the `oracle_search_objects` summary row count is the optimizer's
+/// `ALL_TABLES.NUM_ROWS` ESTIMATE from gathered statistics, NOT a live
+/// `COUNT(*)`. We prove it by gathering stats at one cardinality, then inserting
+/// many more rows WITHOUT re-gathering: a COUNT(*) would jump, but the summary's
+/// `num_rows` must stay at the stale gathered estimate (the stale-stats case).
+#[test]
+fn live_search_objects_summary_uses_optimizer_num_rows_not_count_star() {
+    run_with_cx(|cx| async move {
+        let test_name = "live_search_objects_summary_uses_optimizer_num_rows_not_count_star";
+        let Some(conn) = connect_or_skip(&cx, test_name, test_opts()).await else {
+            return;
+        };
+        // Fail fast instead of hanging: a blocked DDL/stats round trip on an
+        // unprovisioned instance should surface as an error (then a SKIP),
+        // never an indefinite hang.
+        conn.set_call_timeout(Some(Duration::from_secs(30))).ok();
+
+        let table = "ORACLEMCP_E4_STATS_T";
+        // Best-effort clean slate.
+        let _ = conn
+            .execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
+            .await;
+        // If basic DDL is not possible on this instance (privileges / locked /
+        // read-only), skip rather than fail — the offline tests cover the logic.
+        if let Err(e) = conn
+            .execute(
+                &cx,
+                &format!("CREATE TABLE {table} (id NUMBER, note VARCHAR2(40))"),
+                &[],
+            )
+            .await
+        {
+            eprintln!("[live-xe] SKIP {test_name}: cannot create fixture table ({e})");
+            return;
+        }
+        conn.execute(
+            &cx,
+            &format!("COMMENT ON TABLE {table} IS 'oraclemcp E4 stats fixture'"),
+            &[],
+        )
+        .await
+        .ok();
+
+        // Seed exactly 10 rows and commit.
+        for i in 1..=10 {
+            conn.execute(
+                &cx,
+                &format!("INSERT INTO {table} VALUES ({i}, 'seed')"),
+                &[],
+            )
+            .await
+            .expect("insert seed");
+        }
+        conn.commit(&cx).await.expect("commit seed");
+
+        // Resolve the current schema to scope the search.
+        let owner = conn
+            .describe(&cx)
+            .await
+            .ok()
+            .and_then(|info| info.current_schema)
+            .or_else(|| std::env::var("ORACLEMCP_TEST_USER").ok())
+            .unwrap_or_else(|| "SYSTEM".to_owned())
+            .to_ascii_uppercase();
+
+        // Gather stats so the optimizer estimate is exactly 10. A privilege or
+        // resource block here degrades to a SKIP rather than a hang/failure.
+        if let Err(e) = conn
+            .execute(
+                &cx,
+                &format!("BEGIN DBMS_STATS.GATHER_TABLE_STATS(USER, '{table}'); END;"),
+                &[],
+            )
+            .await
+        {
+            eprintln!("[live-xe] SKIP {test_name}: cannot gather table stats ({e})");
+            let _ = conn
+                .execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
+                .await;
+            return;
+        }
+
+        let after_gather = search_objects(
+            &cx,
+            &conn,
+            Some(&owner),
+            Some("TABLE"),
+            Some(table),
+            SearchDetailLevel::Summary,
+            50,
+        )
+        .await
+        .expect("search after gather");
+        let row = after_gather
+            .iter()
+            .find(|o| o.object_name == table)
+            .expect("the fixture table is found");
+        assert_eq!(
+            row.num_rows,
+            Some(10),
+            "summary num_rows is the gathered ALL_TABLES.NUM_ROWS estimate"
+        );
+        assert_eq!(row.row_count_is_estimate, Some(true));
+        assert!(
+            row.last_analyzed.is_some(),
+            "gathered stats record a last_analyzed timestamp"
+        );
+        assert_eq!(
+            row.comment.as_deref(),
+            Some("oraclemcp E4 stats fixture"),
+            "ALL_TAB_COMMENTS surfaces the table comment"
+        );
+        assert_eq!(
+            row.column_count,
+            Some(2),
+            "two columns via dictionary count"
+        );
+
+        // Insert 90 more rows WITHOUT re-gathering. A live COUNT(*) would now be
+        // 100; the optimizer estimate must remain the stale gathered value (10).
+        for i in 11..=100 {
+            conn.execute(
+                &cx,
+                &format!("INSERT INTO {table} VALUES ({i}, 'extra')"),
+                &[],
+            )
+            .await
+            .expect("insert extra");
+        }
+        conn.commit(&cx).await.expect("commit extra");
+
+        // Ground truth: a real COUNT(*) is 100 now.
+        let live = conn
+            .query_rows(&cx, &format!("SELECT COUNT(*) AS n FROM {table}"), &[])
+            .await
+            .expect("count");
+        assert_eq!(live[0].parse_i64("N"), Some(100), "live data really grew");
+
+        let after_insert = search_objects(
+            &cx,
+            &conn,
+            Some(&owner),
+            Some("TABLE"),
+            Some(table),
+            SearchDetailLevel::Summary,
+            50,
+        )
+        .await
+        .expect("search after insert");
+        let row = after_insert
+            .iter()
+            .find(|o| o.object_name == table)
+            .expect("the fixture table is found");
+        assert_eq!(
+            row.num_rows,
+            Some(10),
+            "the STALE optimizer estimate (10) is reported, NOT the live COUNT(*) of 100 — \
+             proving summary reads ALL_TABLES.NUM_ROWS and never scans the data"
+        );
+
+        // Flush monitoring info so the optimizer can mark the stats stale, then
+        // confirm the staleness signal surfaces (best-effort: STALE_STATS lags
+        // behind monitoring on some configs, so we only assert it is observable).
+        conn.execute(
+            &cx,
+            "BEGIN DBMS_STATS.FLUSH_DATABASE_MONITORING_INFO; END;",
+            &[],
+        )
+        .await
+        .ok();
+        let stale_view = search_objects(
+            &cx,
+            &conn,
+            Some(&owner),
+            Some("TABLE"),
+            Some(table),
+            SearchDetailLevel::Summary,
+            50,
+        )
+        .await
+        .expect("search for staleness");
+        let row = stale_view
+            .iter()
+            .find(|o| o.object_name == table)
+            .expect("found");
+        // num_rows is still the stale estimate; stats_stale is present (true once
+        // the optimizer flags it, false until monitoring catches up).
+        assert_eq!(row.num_rows, Some(10));
+        assert!(
+            row.stats_stale.is_some(),
+            "the summary always reports whether the optimizer considers stats stale"
+        );
+        eprintln!(
+            "[live-xe] E4 stale-stats: num_rows={:?} (estimate) vs live COUNT(*)=100, stats_stale={:?}",
+            row.num_rows, row.stats_stale
+        );
+
+        conn.execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
+            .await
+            .ok();
+        conn.commit(&cx).await.ok();
     });
 }

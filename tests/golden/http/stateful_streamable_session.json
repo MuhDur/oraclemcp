@@ -47,6 +47,7 @@
               "jsonrpc": "2.0",
               "result": {
                 "capabilities": {
+                  "completions": {},
                   "prompts": {
                     "listChanged": false
                   },
@@ -55,7 +56,7 @@
                     "subscribe": false
                   },
                   "tools": {
-                    "listChanged": false
+                    "listChanged": true
                   }
                 },
                 "instructions": "Call oracle_capabilities first to discover tools, the current/max operating level, and connection status. Reads are frictionless; writes/DDL require a gated escalation.",

@@ -18,7 +18,21 @@ Harnesses:
   E3/E3b export `resource_link` + `resources/read` CSV escaping + forged-id
   rejection;
   `tests/golden/stdio/resource_subscribe_and_updated.json` freezes the E1
-  subscribe-capability gate + polling-fallback `resources/updated` notification)
+  subscribe-capability gate + polling-fallback `resources/updated` notification;
+  `tests/golden/stdio/search_objects_detail_levels.json` freezes the E4
+  `oracle_search_objects` detail levels with the optimizer `ALL_TABLES.NUM_ROWS`
+  estimate + `stats_stale` (never `COUNT(*)`);
+  `tests/golden/stdio/completion_complete.json` freezes the E7
+  `completion/complete` owner→type→object autocomplete with the capped
+  `{values,total,hasMore}` envelope; `tests/golden/stdio/progress_and_list_changed.json`
+  freezes the E6 `notifications/progress` bracket and the `tools.listChanged`
+  capability)
+- E5 connection-scope isolation is covered by unit + dispatch tests (the
+  `mcp_exposed` flag fail-closed default, the served `oracle_list_profiles`
+  filter, and the adversarial guessed-non-exposed-profile rejection by
+  `oracle_switch_profile`): `crates/oraclemcp-config/src/lib.rs::tests`,
+  `crates/oraclemcp/src/dispatch/tests.rs::e5_*`,
+  `crates/oraclemcp-core/tests/mcp_conformance.rs::completion_complete_for_profile_honors_e5_exposure`
 - Binary transport test: `crates/oraclemcp/tests/e2e_http_oauth.rs`
 - Native listener TLS tests: `crates/oraclemcp-core/src/http.rs`
 - Transports under test:
@@ -32,11 +46,12 @@ Harnesses:
 | Section | MUST Clauses | SHOULD Clauses | Tested | Passing | Divergent | Score |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Initialize | 2 | 0 | 2 | 2 | 0 | 100% |
-| Notifications | 1 | 0 | 1 | 1 | 0 | 100% |
+| Notifications | 3 | 0 | 3 | 3 | 0 | 100% |
 | Resources | 3 | 0 | 3 | 3 | 0 | 100% |
 | Subscriptions | 2 | 0 | 2 | 2 | 0 | 100% |
 | Prompts | 1 | 0 | 1 | 1 | 0 | 100% |
 | Tools | 5 | 0 | 5 | 5 | 0 | 100% |
+| Completion | 1 | 0 | 1 | 1 | 0 | 100% |
 | Pagination | 2 | 0 | 2 | 2 | 0 | 100% |
 | JSON-RPC errors | 3 | 2 | 5 | 5 | 1 | 100% |
 | Security | 1 | 0 | 1 | 1 | 0 | 100% |
@@ -45,7 +60,7 @@ Harnesses:
 | HTTP sessions | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
 
-Total tracked requirements: 28 MUST, 2 SHOULD, 30 tested.
+Total tracked requirements: 31 MUST, 2 SHOULD, 33 tested.
 
 ## Requirement IDs
 
@@ -73,6 +88,9 @@ Total tracked requirements: 28 MUST, 2 SHOULD, 30 tested.
 | MCP-STDIO-014 | MUST | Resources | An export is access-controlled identically to the originating query: the export id is bound (HMAC) to the request's OAuth scope-grant fingerprint, so a `resources/read` under a different scope grant is refused. |
 | MCP-STDIO-015 | MUST | Subscriptions | `resources.subscribe` is advertised, and `resources/subscribe` accepted, ONLY when a change source is confirmed (the `SubscriptionHub` polling fallback). With no source the capability stays `false` and `resources/subscribe` is refused (method-not-found). The thin-line binary ships with no source, so it does not advertise subscribe. |
 | MCP-STDIO-016 | MUST | Subscriptions | A subscribed resource whose polled fingerprint changes (the DBMS_CHANGE_NOTIFICATION-vs-polling fallback path) emits a `notifications/resources/updated` for that uri on the next transport flush; the first observation only seeds the baseline. |
+| MCP-STDIO-017 | MUST | Completion | `completion/complete` is advertised (`capabilities.completions`) and served as owner→type→object autocomplete for the dictionary tools' arguments and the `oracle://object/{owner}/{type}/{name}` template, scoped by `context.arguments`, routed through the read path, capped at 100 values with `{values,total,hasMore}`. A `profile`/`db` argument completes only the E5 `mcp_exposed` profiles (a non-exposed profile is never offered). |
+| MCP-STDIO-018 | MUST | Notifications | A `tools/call` carrying `params._meta.progressToken` is bracketed by `notifications/progress` (a started 0/1 and a completed 1/1) that ride the transport after the response and are true notifications (no id); without a token no progress is emitted. |
+| MCP-STDIO-019 | MUST | Notifications | `notifications/tools/list_changed` is advertised (`tools.listChanged: true`) and emitted when the served tool set changes (e.g. an `oracle_switch_profile` that alters the profile-scoped custom-tool catalog); it is a paramless, id-less notification. |
 | HTTP-AUTH-001 | MUST | HTTP OAuth | OAuth-protected `/mcp` refuses anonymous requests with `WWW-Authenticate`. |
 | HTTP-AUTH-002 | MUST | HTTP OAuth | A valid bearer token admits a served HTTP request and forwards the validated OAuth scope grant to tool dispatch. |
 | HTTP-AUTH-003 | MUST | HTTP OAuth | A valid bearer token without the configured required scope returns `403` with `error="insufficient_scope"`. |
