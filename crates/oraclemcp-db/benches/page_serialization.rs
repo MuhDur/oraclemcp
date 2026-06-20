@@ -3,6 +3,8 @@
 
 use std::hint::black_box;
 
+use asupersync::Cx;
+use asupersync::runtime::{Runtime, RuntimeBuilder};
 use criterion::{Criterion, criterion_group, criterion_main};
 use oraclemcp_db::{
     DbError, OracleBackend, OracleBind, OracleCell, OracleConnection, OracleConnectionInfo,
@@ -13,33 +15,40 @@ struct PageMock {
     rows: Vec<OracleRow>,
 }
 
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for PageMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo::default())
     }
-    fn query_rows(&self, _sql: &str, _binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         Ok(self.rows.clone())
     }
-    fn query_rows_named(
+    async fn query_rows_named(
         &self,
+        _cx: &Cx,
         _sql: &str,
         _binds: &[(String, OracleBind)],
     ) -> Result<Vec<OracleRow>, DbError> {
         Ok(self.rows.clone())
     }
-    fn execute(&self, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
         Ok(0)
     }
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 }
@@ -82,6 +91,9 @@ fn wide_rows(n: usize) -> Vec<OracleRow> {
 
 fn bench_page(c: &mut Criterion) {
     let opts = SerializeOptions::default();
+    let runtime: Runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("current-thread runtime");
     let mut group = c.benchmark_group("page_serialization");
     for &n in &[10usize, 200, 1000] {
         let mock = PageMock { rows: wide_rows(n) };
@@ -91,16 +103,21 @@ fn bench_page(c: &mut Criterion) {
         };
         group.bench_function(format!("read_query_{n}_rows"), |b| {
             b.iter(|| {
-                let resp = read_query(
-                    black_box(&mock),
-                    black_box("SELECT * FROM t"),
-                    black_box(&[]),
-                    black_box(caps),
-                    black_box(0),
-                    black_box(&opts),
-                )
-                .expect("page");
-                black_box(resp.total_bytes)
+                runtime.block_on(async {
+                    let cx = Cx::current().expect("block_on installs a current Cx");
+                    let resp = read_query(
+                        black_box(&cx),
+                        black_box(&mock),
+                        black_box("SELECT * FROM t"),
+                        black_box(&[]),
+                        black_box(caps),
+                        black_box(0),
+                        black_box(&opts),
+                    )
+                    .await
+                    .expect("page");
+                    black_box(resp.total_bytes)
+                })
             });
         });
     }

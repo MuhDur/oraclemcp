@@ -44,25 +44,20 @@ use crate::types::{
     OracleBackend, OracleBind, OracleConnectOptions, OracleConnectionInfo, OracleRow,
 };
 use asupersync::Cx;
+use asupersync::sync::Mutex as AsyncMutex;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::Mutex;
 use std::time::Duration;
 
+/// Map an asupersync cancellation/budget checkpoint failure to the
+/// timeout-class [`DbError::Cancelled`]. Used as the explicit before/after
+/// cancellation boundary around every native-async driver round trip; the
+/// driver itself also checkpoints `cx` internally, so a cancelled call is
+/// observed either here or inside the driver and never silently completes.
 fn db_checkpoint(cx: &Cx, phase: &'static str) -> Result<(), DbError> {
     cx.checkpoint_with(phase)
         .map_err(|err| DbError::Cancelled(format!("{phase}: {err}")))
-}
-
-fn db_checkpointed<T>(
-    cx: &Cx,
-    before: &'static str,
-    after: &'static str,
-    f: impl FnOnce() -> Result<T, DbError>,
-) -> Result<T, DbError> {
-    db_checkpoint(cx, before)?;
-    let value = f()?;
-    db_checkpoint(cx, after)?;
-    Ok(value)
 }
 
 /// Bounded `DBMS_OUTPUT` lines captured from a single Oracle session.
@@ -78,139 +73,80 @@ pub struct DbmsOutput {
     pub truncated: bool,
 }
 
-/// A synchronous Oracle connection.
-pub trait OracleConnection: Send {
+/// An async, `Cx`-first Oracle connection (B1).
+///
+/// Every method is `async` and takes an explicit `&Cx` so cancellation and the
+/// deadline/budget travel with the call: the native-async `oracledb` driver
+/// checkpoints `cx` on every round trip, and this trait adds explicit
+/// before/after `db_checkpoint` boundaries so a cancelled call is mapped to
+/// the timeout-class [`DbError::Cancelled`] and never silently completes.
+///
+/// The trait is made object-safe with `async_trait` in `?Send` mode: the
+/// MCP dispatch runtime is a single current-thread Asupersync runtime
+/// (`oraclemcp-core/src/server.rs`) and no dispatch future is ever spawned
+/// across OS threads, so the boxed method futures do not need to be `Send`.
+/// This keeps `&dyn OracleConnection` / `Box<dyn OracleConnection>` usable
+/// everywhere while letting an implementation hold an Asupersync `Mutex` guard
+/// (which is `!Send`) across an `.await`.
+#[async_trait(?Send)]
+pub trait OracleConnection: Send + Sync {
     /// The backend in use.
     fn backend(&self) -> OracleBackend;
     /// Round-trip the server to confirm liveness (`SELECT 1 FROM dual`).
-    fn ping(&self) -> Result<(), DbError>;
-    /// Cancellation-aware liveness check.
-    fn ping_cx(&self, cx: &Cx) -> Result<(), DbError> {
-        db_checkpointed(cx, "oracle_db.ping.before", "oracle_db.ping.after", || {
-            self.ping()
-        })
-    }
+    async fn ping(&self, cx: &Cx) -> Result<(), DbError>;
     /// Best-effort connection metadata (version, role/open-mode, schema).
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError>;
-    /// Cancellation-aware connection metadata.
-    fn describe_cx(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
-        db_checkpointed(
-            cx,
-            "oracle_db.describe.before",
-            "oracle_db.describe.after",
-            || self.describe(),
-        )
-    }
+    async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError>;
     /// Run a query, binding `binds` positionally (`:1`, `:2`, …). Values are
     /// always bound, never interpolated.
-    fn query_rows(&self, sql: &str, binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError>;
+    async fn query_rows(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError>;
     /// Run a query with serialization caps available to the backend. Backends
     /// that materialize driver-side locators should use these caps; backends
     /// without locator values can fall back to [`OracleConnection::query_rows`].
-    fn query_rows_with_serialize_options(
+    async fn query_rows_with_serialize_options(
         &self,
+        cx: &Cx,
         sql: &str,
         binds: &[OracleBind],
         serialize_opts: &SerializeOptions,
     ) -> Result<Vec<OracleRow>, DbError> {
         let _ = serialize_opts;
-        self.query_rows(sql, binds)
-    }
-    /// Cancellation-aware positional query.
-    fn query_rows_cx(
-        &self,
-        cx: &Cx,
-        sql: &str,
-        binds: &[OracleBind],
-    ) -> Result<Vec<OracleRow>, DbError> {
-        db_checkpointed(
-            cx,
-            "oracle_db.query_rows.before",
-            "oracle_db.query_rows.after",
-            || self.query_rows(sql, binds),
-        )
-    }
-    /// Cancellation-aware positional query with serialization caps.
-    fn query_rows_with_serialize_options_cx(
-        &self,
-        cx: &Cx,
-        sql: &str,
-        binds: &[OracleBind],
-        serialize_opts: &SerializeOptions,
-    ) -> Result<Vec<OracleRow>, DbError> {
-        db_checkpointed(
-            cx,
-            "oracle_db.query_rows.before",
-            "oracle_db.query_rows.after",
-            || self.query_rows_with_serialize_options(sql, binds, serialize_opts),
-        )
+        self.query_rows(cx, sql, binds).await
     }
     /// Run a query, binding `binds` by name (`:name`). Values are always bound,
     /// never interpolated. Backends that cannot bind by name should fail
     /// explicitly instead of trying to rewrite SQL.
-    fn query_rows_named(
+    async fn query_rows_named(
         &self,
+        cx: &Cx,
         sql: &str,
         binds: &[(String, OracleBind)],
     ) -> Result<Vec<OracleRow>, DbError> {
-        let _ = (sql, binds);
+        let _ = (cx, sql, binds);
         Err(DbError::Query(
             "named binds are not supported by this Oracle backend".to_owned(),
         ))
     }
     /// Run a named-bind query with serialization caps available to the backend.
-    fn query_rows_named_with_serialize_options(
+    async fn query_rows_named_with_serialize_options(
         &self,
+        cx: &Cx,
         sql: &str,
         binds: &[(String, OracleBind)],
         serialize_opts: &SerializeOptions,
     ) -> Result<Vec<OracleRow>, DbError> {
         let _ = serialize_opts;
-        self.query_rows_named(sql, binds)
-    }
-    /// Cancellation-aware named-bind query.
-    fn query_rows_named_cx(
-        &self,
-        cx: &Cx,
-        sql: &str,
-        binds: &[(String, OracleBind)],
-    ) -> Result<Vec<OracleRow>, DbError> {
-        db_checkpointed(
-            cx,
-            "oracle_db.query_rows_named.before",
-            "oracle_db.query_rows_named.after",
-            || self.query_rows_named(sql, binds),
-        )
-    }
-    /// Cancellation-aware named-bind query with serialization caps.
-    fn query_rows_named_with_serialize_options_cx(
-        &self,
-        cx: &Cx,
-        sql: &str,
-        binds: &[(String, OracleBind)],
-        serialize_opts: &SerializeOptions,
-    ) -> Result<Vec<OracleRow>, DbError> {
-        db_checkpointed(
-            cx,
-            "oracle_db.query_rows_named.before",
-            "oracle_db.query_rows_named.after",
-            || self.query_rows_named_with_serialize_options(sql, binds, serialize_opts),
-        )
+        self.query_rows_named(cx, sql, binds).await
     }
     /// Run a DML/DDL statement; returns rows affected (`SQL%ROWCOUNT`).
-    fn execute(&self, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError>;
-    /// Cancellation-aware DML/DDL execution.
     ///
     /// If this observes cancellation after Oracle has returned success, callers
     /// must treat the session as dirty and run cleanup rollback/discard logic.
-    fn execute_cx(&self, cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
-        db_checkpointed(
-            cx,
-            "oracle_db.execute.before",
-            "oracle_db.execute.after",
-            || self.execute(sql, binds),
-        )
-    }
+    async fn execute(&self, cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError>;
 
     /// Current Oracle per-round-trip call timeout, when supported by the backend.
     fn call_timeout(&self) -> Result<Option<Duration>, DbError> {
@@ -225,105 +161,92 @@ pub trait OracleConnection: Send {
 
     /// Enable `DBMS_OUTPUT` for this session. `buffer_bytes` is passed through
     /// to Oracle; callers should keep it bounded.
-    fn enable_dbms_output(&self, buffer_bytes: Option<u32>) -> Result<(), DbError> {
+    async fn enable_dbms_output(&self, cx: &Cx, buffer_bytes: Option<u32>) -> Result<(), DbError> {
         match buffer_bytes {
             Some(bytes) => self
                 .execute(
+                    cx,
                     "BEGIN DBMS_OUTPUT.ENABLE(:1); END;",
                     &[OracleBind::I64(i64::from(bytes))],
                 )
+                .await
                 .map(|_| ()),
             None => self
-                .execute("BEGIN DBMS_OUTPUT.ENABLE(NULL); END;", &[])
+                .execute(cx, "BEGIN DBMS_OUTPUT.ENABLE(NULL); END;", &[])
+                .await
                 .map(|_| ()),
         }
-    }
-    /// Cancellation-aware `DBMS_OUTPUT.ENABLE`.
-    fn enable_dbms_output_cx(&self, cx: &Cx, buffer_bytes: Option<u32>) -> Result<(), DbError> {
-        db_checkpointed(
-            cx,
-            "oracle_db.enable_dbms_output.before",
-            "oracle_db.enable_dbms_output.after",
-            || self.enable_dbms_output(buffer_bytes),
-        )
     }
 
     /// Drain `DBMS_OUTPUT` from this session, bounded by line and character
     /// limits. Backends without output-bind support must fail explicitly.
-    fn read_dbms_output(&self, max_lines: usize, max_chars: usize) -> Result<DbmsOutput, DbError> {
-        let _ = (max_lines, max_chars);
-        Err(DbError::Execute(
-            "DBMS_OUTPUT capture is not supported by this Oracle backend".to_owned(),
-        ))
-    }
-    /// Cancellation-aware `DBMS_OUTPUT` drain.
-    fn read_dbms_output_cx(
+    async fn read_dbms_output(
         &self,
         cx: &Cx,
         max_lines: usize,
         max_chars: usize,
     ) -> Result<DbmsOutput, DbError> {
-        db_checkpointed(
-            cx,
-            "oracle_db.read_dbms_output.before",
-            "oracle_db.read_dbms_output.after",
-            || self.read_dbms_output(max_lines, max_chars),
-        )
+        let _ = (cx, max_lines, max_chars);
+        Err(DbError::Execute(
+            "DBMS_OUTPUT capture is not supported by this Oracle backend".to_owned(),
+        ))
     }
 
-    /// Commit the current transaction on this session.
-    fn commit(&self) -> Result<(), DbError>;
-    /// Cancellation-aware commit. There is intentionally no post-commit
-    /// checkpoint: once Oracle commits, cancellation cannot undo it.
-    fn commit_cx(&self, cx: &Cx) -> Result<(), DbError> {
-        db_checkpoint(cx, "oracle_db.commit.before")?;
-        self.commit()
-    }
+    /// Commit the current transaction on this session. There is intentionally
+    /// no post-commit checkpoint: once Oracle commits, cancellation cannot
+    /// undo it.
+    async fn commit(&self, cx: &Cx) -> Result<(), DbError>;
 
     /// Roll back the current transaction on this session.
-    fn rollback(&self) -> Result<(), DbError>;
-    /// Cancellation-aware user-requested rollback.
-    fn rollback_cx(&self, cx: &Cx) -> Result<(), DbError> {
-        db_checkpoint(cx, "oracle_db.rollback.before")?;
-        self.rollback()
-    }
+    async fn rollback(&self, cx: &Cx) -> Result<(), DbError>;
 
     /// Run a query expecting at most one row.
-    fn query_optional_row(
-        &self,
-        sql: &str,
-        binds: &[OracleBind],
-    ) -> Result<Option<OracleRow>, DbError> {
-        Ok(self.query_rows(sql, binds)?.into_iter().next())
-    }
-    /// Cancellation-aware query expecting at most one row.
-    fn query_optional_row_cx(
+    async fn query_optional_row(
         &self,
         cx: &Cx,
         sql: &str,
         binds: &[OracleBind],
     ) -> Result<Option<OracleRow>, DbError> {
-        Ok(self.query_rows_cx(cx, sql, binds)?.into_iter().next())
+        Ok(self.query_rows(cx, sql, binds).await?.into_iter().next())
     }
 }
 
-/// Thin pure-Rust Oracle connection wrapper.
+/// Thin pure-Rust Oracle connection wrapper over the native-async
+/// [`oracledb::Connection`] (B1).
+///
+/// The driver connection lives behind an Asupersync [`AsyncMutex`] so its
+/// `&mut self` round trips can be driven by `&self` trait methods while
+/// staying cancellation-safe: the guard is async-aware and may be held across
+/// an `.await` (unlike `std::sync::Mutex`, which would be a deadlock/cancel
+/// hazard). The connection is single-owner per lease and the server is
+/// OS-thread-per-connection, so the mutex never actually contends — it is the
+/// interior-mutability primitive, not a concurrency throttle. The
+/// `BlockingConnection` facade (and its per-call `build_io_runtime` +
+/// `block_on`) is gone: every round trip runs on the one ambient Asupersync
+/// runtime.
 pub struct RustOracleConnection {
     opts: OracleConnectOptions,
-    inner: Mutex<oracledb::Connection>,
+    inner: AsyncMutex<oracledb::Connection>,
+    /// Per-round-trip call timeout. A plain `std::sync::Mutex` is fine here: it
+    /// is only ever locked-and-dropped synchronously (never held across an
+    /// `.await`), so it cannot deadlock the cooperative scheduler.
     call_timeout: Mutex<Option<Duration>>,
 }
 
 impl RustOracleConnection {
     /// Open a thin-mode connection per `opts`.
-    pub fn connect(opts: OracleConnectOptions) -> Result<Self, DbError> {
-        driver::connect(opts)
+    pub async fn connect(cx: &Cx, opts: OracleConnectOptions) -> Result<Self, DbError> {
+        driver::connect(cx, opts).await
     }
 
-    fn lock_inner(&self) -> Result<MutexGuard<'_, oracledb::Connection>, DbError> {
+    async fn lock_inner(
+        &self,
+        cx: &Cx,
+    ) -> Result<asupersync::sync::MutexGuard<'_, oracledb::Connection>, DbError> {
         self.inner
-            .lock()
-            .map_err(|err| DbError::Internal(format!("thin connection lock poisoned: {err}")))
+            .lock(cx)
+            .await
+            .map_err(|err| DbError::Internal(format!("thin connection lock failed: {err}")))
     }
 
     fn timeout_ms(&self) -> Result<Option<u32>, DbError> {
@@ -339,8 +262,9 @@ impl RustOracleConnection {
         &self.opts
     }
 
-    fn query_first_row(&self, sql: &str) -> Option<OracleRow> {
-        self.query_rows(sql, &[])
+    async fn query_first_row(&self, cx: &Cx, sql: &str) -> Option<OracleRow> {
+        self.query_rows(cx, sql, &[])
+            .await
             .ok()
             .and_then(|rows| rows.into_iter().next())
     }
@@ -360,6 +284,8 @@ mod driver {
         OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleNestedResult,
         OracleRow, OracleSessionIdentity,
     };
+    use asupersync::Cx;
+    use asupersync::sync::Mutex as AsyncMutex;
     use oracledb::protocol::thin::{CursorValue, LobValue};
     use oracledb::protocol::{
         ClientIdentity,
@@ -376,7 +302,7 @@ mod driver {
         },
     };
     use std::fmt::Display;
-    use std::sync::Mutex;
+    use std::sync::Mutex as SyncMutex;
 
     const FETCH_BATCH_ROWS: u32 = 512;
 
@@ -400,21 +326,25 @@ mod driver {
         data: Option<Vec<u8>>,
     }
 
-    pub(super) fn connect(opts: OracleConnectOptions) -> Result<RustOracleConnection, DbError> {
-        let mut inner = oracledb::BlockingConnection::connect(to_connect_options(&opts)?)
+    pub(super) async fn connect(
+        cx: &Cx,
+        opts: OracleConnectOptions,
+    ) -> Result<RustOracleConnection, DbError> {
+        let mut inner = oracledb::Connection::connect(cx, to_connect_options(&opts)?)
+            .await
             .map_err(|err| DbError::Connect(sanitize_driver_error(err, &opts)))?;
-        apply_session_identity(&mut inner, opts.session_identity.as_ref(), &opts)?;
+        apply_session_identity(cx, &mut inner, opts.session_identity.as_ref(), &opts).await?;
         for stmt in crate::serialize::canonical_nls_statements() {
-            execute_raw(&mut inner, stmt, &[], &opts, "connect")?;
+            execute_raw(cx, &mut inner, stmt, &[], &opts, "connect").await?;
         }
         for stmt in &opts.session_statements {
-            execute_raw(&mut inner, stmt, &[], &opts, "session setup")?;
+            execute_raw(cx, &mut inner, stmt, &[], &opts, "session setup").await?;
         }
         let call_timeout = opts.call_timeout;
         Ok(RustOracleConnection {
             opts,
-            inner: Mutex::new(inner),
-            call_timeout: Mutex::new(call_timeout),
+            inner: AsyncMutex::new(inner),
+            call_timeout: SyncMutex::new(call_timeout),
         })
     }
 
@@ -590,7 +520,8 @@ mod driver {
             .map_err(|err| DbError::Connect(err.to_string()))
     }
 
-    fn apply_session_identity(
+    async fn apply_session_identity(
+        cx: &Cx,
         inner: &mut oracledb::Connection,
         identity: Option<&OracleSessionIdentity>,
         opts: &OracleConnectOptions,
@@ -601,6 +532,7 @@ mod driver {
         if let Some(module) = identity.module.as_deref() {
             let action = identity.action.as_deref().unwrap_or("");
             execute_raw(
+                cx,
                 inner,
                 "BEGIN DBMS_APPLICATION_INFO.SET_MODULE(:1, :2); END;",
                 &[
@@ -609,33 +541,40 @@ mod driver {
                 ],
                 opts,
                 "session identity",
-            )?;
+            )
+            .await?;
         } else if let Some(action) = identity.action.as_deref() {
             execute_raw(
+                cx,
                 inner,
                 "BEGIN DBMS_APPLICATION_INFO.SET_ACTION(:1); END;",
                 &[BindValue::Text(action.to_owned())],
                 opts,
                 "session identity",
-            )?;
+            )
+            .await?;
         }
         if let Some(client_identifier) = identity.client_identifier.as_deref() {
             execute_raw(
+                cx,
                 inner,
                 "BEGIN DBMS_SESSION.SET_IDENTIFIER(:1); END;",
                 &[BindValue::Text(client_identifier.to_owned())],
                 opts,
                 "session identity",
-            )?;
+            )
+            .await?;
         }
         if let Some(client_info) = identity.client_info.as_deref() {
             execute_raw(
+                cx,
                 inner,
                 "BEGIN DBMS_APPLICATION_INFO.SET_CLIENT_INFO(:1); END;",
                 &[BindValue::Text(client_info.to_owned())],
                 opts,
                 "session identity",
-            )?;
+            )
+            .await?;
         }
         Ok(())
     }
@@ -650,19 +589,25 @@ mod driver {
         }
     }
 
-    fn execute_raw(
+    async fn execute_raw(
+        cx: &Cx,
         inner: &mut oracledb::Connection,
         sql: &str,
         binds: &[BindValue],
         opts: &OracleConnectOptions,
         context: &'static str,
     ) -> Result<QueryResult, DbError> {
-        oracledb::BlockingConnection::execute_query_with_binds(inner, sql, 0, binds).map_err(
-            |err| DbError::Execute(format!("{context}: {}", sanitize_driver_error(err, opts))),
-        )
+        inner
+            .execute_query_with_binds(cx, sql, 0, binds)
+            .await
+            .map_err(|err| {
+                DbError::Execute(format!("{context}: {}", sanitize_driver_error(err, opts)))
+            })
     }
 
-    fn execute_with_timeout(
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_with_timeout(
+        cx: &Cx,
         inner: &mut oracledb::Connection,
         sql: &str,
         prefetch_rows: u32,
@@ -671,14 +616,12 @@ mod driver {
         opts: &OracleConnectOptions,
         context: &'static str,
     ) -> Result<QueryResult, DbError> {
-        oracledb::BlockingConnection::execute_query_with_binds_and_timeout(
-            inner,
-            sql,
-            prefetch_rows,
-            binds,
-            timeout_ms,
-        )
-        .map_err(|err| DbError::Query(format!("{context}: {}", sanitize_driver_error(err, opts))))
+        inner
+            .execute_query_with_binds_and_timeout(cx, sql, prefetch_rows, binds, timeout_ms)
+            .await
+            .map_err(|err| {
+                DbError::Query(format!("{context}: {}", sanitize_driver_error(err, opts)))
+            })
     }
 
     pub(super) fn prefetch_rows_for_statement(sql: &str) -> u32 {
@@ -789,7 +732,8 @@ mod driver {
         seen
     }
 
-    fn collect_all_rows(
+    async fn collect_all_rows(
+        cx: &Cx,
         inner: &mut oracledb::Connection,
         mut result: QueryResult,
         opts: &OracleConnectOptions,
@@ -807,14 +751,10 @@ mod driver {
             && cursor_id != 0
             && columns_require_define(&columns)
         {
-            let fetched = oracledb::BlockingConnection::define_and_fetch_rows_with_columns(
-                inner,
-                cursor_id,
-                FETCH_BATCH_ROWS,
-                &columns,
-                None,
-            )
-            .map_err(|err| DbError::Query(sanitize_driver_error(err, opts)))?;
+            let fetched = inner
+                .define_and_fetch_rows_with_columns(cx, cursor_id, FETCH_BATCH_ROWS, &columns, None)
+                .await
+                .map_err(|err| DbError::Query(sanitize_driver_error(err, opts)))?;
             if !fetched.columns.is_empty() {
                 columns = fetched.columns.clone();
             }
@@ -824,21 +764,25 @@ mod driver {
         }
         while has_parent_result && result.more_rows && cursor_id != 0 {
             let fetched = if columns_require_define(&columns) {
-                oracledb::BlockingConnection::define_and_fetch_rows_with_columns(
-                    inner,
-                    cursor_id,
-                    FETCH_BATCH_ROWS,
-                    &columns,
-                    previous_row.as_deref(),
-                )
+                inner
+                    .define_and_fetch_rows_with_columns(
+                        cx,
+                        cursor_id,
+                        FETCH_BATCH_ROWS,
+                        &columns,
+                        previous_row.as_deref(),
+                    )
+                    .await
             } else {
-                oracledb::BlockingConnection::fetch_rows_with_columns(
-                    inner,
-                    cursor_id,
-                    FETCH_BATCH_ROWS,
-                    &columns,
-                    previous_row.as_deref(),
-                )
+                inner
+                    .fetch_rows_with_columns(
+                        cx,
+                        cursor_id,
+                        FETCH_BATCH_ROWS,
+                        &columns,
+                        previous_row.as_deref(),
+                    )
+                    .await
             }
             .map_err(|err| DbError::Query(sanitize_driver_error(err, opts)))?;
             if !fetched.columns.is_empty() {
@@ -848,16 +792,27 @@ mod driver {
             rows.extend(fetched.rows);
             result.more_rows = fetched.more_rows;
         }
-        let mut converted =
-            rows_to_oracle_rows(inner, &columns, rows, opts, serialize_opts, timeout_ms, 0)?;
+        let mut converted = rows_to_oracle_rows(
+            cx,
+            inner,
+            &columns,
+            rows,
+            opts,
+            serialize_opts,
+            timeout_ms,
+            0,
+        )
+        .await?;
         if let Some(implicit_resultsets) = implicit_resultsets
             && let Some(row) = implicit_resultsets_to_row(
+                cx,
                 inner,
                 implicit_resultsets,
                 opts,
                 serialize_opts,
                 timeout_ms,
-            )?
+            )
+            .await?
         {
             converted.push(row);
         }
@@ -876,225 +831,278 @@ mod driver {
         })
     }
 
-    fn rows_to_oracle_rows(
-        inner: &mut oracledb::Connection,
-        columns: &[ColumnMetadata],
+    // Async recursion (cursor cells nest result sets) is boxed to keep the
+    // future `Sized`.
+    #[allow(clippy::too_many_arguments)]
+    fn rows_to_oracle_rows<'a>(
+        cx: &'a Cx,
+        inner: &'a mut oracledb::Connection,
+        columns: &'a [ColumnMetadata],
         rows: Vec<Vec<Option<QueryValue>>>,
-        opts: &OracleConnectOptions,
-        serialize_opts: &SerializeOptions,
+        opts: &'a OracleConnectOptions,
+        serialize_opts: &'a SerializeOptions,
         timeout_ms: Option<u32>,
         depth: usize,
-    ) -> Result<Vec<OracleRow>, DbError> {
-        let mut out = Vec::with_capacity(rows.len());
-        for row in rows {
-            let mut cells = Vec::with_capacity(columns.len());
-            for (idx, meta) in columns.iter().enumerate() {
-                let value = row.get(idx).cloned().flatten();
-                cells.push((
-                    meta.name.clone(),
-                    value_to_cell(inner, meta, value, opts, serialize_opts, timeout_ms, depth)?,
-                ));
-            }
-            out.push(OracleRow { columns: cells });
-        }
-        Ok(out)
-    }
-
-    fn value_to_cell(
-        inner: &mut oracledb::Connection,
-        meta: &ColumnMetadata,
-        value: Option<QueryValue>,
-        opts: &OracleConnectOptions,
-        serialize_opts: &SerializeOptions,
-        timeout_ms: Option<u32>,
-        depth: usize,
-    ) -> Result<OracleCell, DbError> {
-        let oracle_type = oracle_type_name(meta);
-        let cell = match value {
-            None => OracleCell::new(oracle_type, None),
-            Some(
-                QueryValue::Text(value)
-                | QueryValue::Rowid(value)
-                | QueryValue::BinaryDouble(value),
-            ) => OracleCell::new(oracle_type, Some(value)),
-            Some(QueryValue::TextRaw { bytes, .. } | QueryValue::Raw(bytes)) => {
-                OracleCell::binary(oracle_type, bytes)
-            }
-            Some(QueryValue::Number(value)) => {
-                OracleCell::new(oracle_type, Some(value.to_canonical_string()))
-            }
-            Some(QueryValue::Boolean(value)) => OracleCell::new(
-                oracle_type,
-                Some(if value { "true" } else { "false" }.to_owned()),
-            ),
-            Some(QueryValue::DateTime {
-                year,
-                month,
-                day,
-                hour,
-                minute,
-                second,
-                nanosecond,
-            }) => OracleCell::new(
-                oracle_type,
-                Some(format_datetime(
-                    year, month, day, hour, minute, second, nanosecond,
-                )),
-            ),
-            Some(QueryValue::IntervalDS {
-                days,
-                hours,
-                minutes,
-                seconds,
-                fseconds,
-            }) => OracleCell::new(
-                oracle_type,
-                Some(format!(
-                    "{days} {hours:02}:{minutes:02}:{seconds:02}.{fseconds:09}"
-                )),
-            ),
-            Some(QueryValue::IntervalYM { years, months }) => {
-                OracleCell::new(oracle_type, Some(format!("{years}-{months}")))
-            }
-            Some(QueryValue::Cursor(cursor)) => {
-                return materialize_cursor_cell(
-                    inner,
-                    oracle_type,
-                    &cursor,
-                    opts,
-                    serialize_opts,
-                    timeout_ms,
-                    depth,
-                );
-            }
-            Some(QueryValue::Object(value)) => OracleCell::binary(oracle_type, value.packed_data),
-            Some(QueryValue::Lob(value)) => {
-                let limits = LobReadLimits::from(serialize_opts);
-                let mut read_lob =
-                    |locator: &[u8], offset: u64, amount: u64| -> Result<LobReadData, DbError> {
-                        oracledb::BlockingConnection::read_lob_with_timeout(
-                            inner, locator, offset, amount, timeout_ms,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<OracleRow>, DbError>> + 'a>>
+    {
+        Box::pin(async move {
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                let mut cells = Vec::with_capacity(columns.len());
+                for (idx, meta) in columns.iter().enumerate() {
+                    let value = row.get(idx).cloned().flatten();
+                    cells.push((
+                        meta.name.clone(),
+                        value_to_cell(
+                            cx,
+                            inner,
+                            meta,
+                            value,
+                            opts,
+                            serialize_opts,
+                            timeout_ms,
+                            depth,
                         )
-                        .map(|result| LobReadData { data: result.data })
-                        .map_err(|err| {
-                            DbError::Query(format!(
-                                "LOB locator read failed: {}",
-                                sanitize_driver_error(err, opts)
-                            ))
-                        })
-                    };
-                return materialize_lob_cell(oracle_type, &value, limits, &mut read_lob);
+                        .await?,
+                    ));
+                }
+                out.push(OracleRow { columns: cells });
             }
-            Some(QueryValue::Vector(value)) => {
-                OracleCell::new(oracle_type, Some(format!("{value:?}")))
-            }
-            Some(QueryValue::Json(value)) => {
-                OracleCell::new(oracle_type, Some(format!("{value:?}")))
-            }
-            Some(QueryValue::Array(values)) => OracleCell::new(
-                oracle_type,
-                Some(format!("<unsupported ARRAY len={}>", values.len())),
-            ),
-        };
-        Ok(cell)
+            Ok(out)
+        })
     }
 
-    fn implicit_resultsets_to_row(
-        inner: &mut oracledb::Connection,
-        values: Vec<QueryValue>,
-        opts: &OracleConnectOptions,
-        serialize_opts: &SerializeOptions,
+    #[allow(clippy::too_many_arguments)]
+    fn value_to_cell<'a>(
+        cx: &'a Cx,
+        inner: &'a mut oracledb::Connection,
+        meta: &'a ColumnMetadata,
+        value: Option<QueryValue>,
+        opts: &'a OracleConnectOptions,
+        serialize_opts: &'a SerializeOptions,
         timeout_ms: Option<u32>,
-    ) -> Result<Option<OracleRow>, DbError> {
-        let mut columns = Vec::with_capacity(values.len());
-        for (idx, value) in values.into_iter().enumerate() {
-            let name = format!("IMPLICIT_RESULT_{}", idx + 1);
+        depth: usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<OracleCell, DbError>> + 'a>>
+    {
+        Box::pin(async move {
+            let oracle_type = oracle_type_name(meta);
             let cell = match value {
-                QueryValue::Cursor(cursor) => materialize_cursor_cell(
-                    inner,
-                    "REF CURSOR".to_owned(),
-                    &cursor,
-                    opts,
-                    serialize_opts,
-                    timeout_ms,
-                    0,
-                )?,
-                other => OracleCell::new(
-                    "VARCHAR2",
-                    Some(format!(
-                        "<unsupported implicit resultset value {}: {other:?}>",
-                        idx + 1
+                None => OracleCell::new(oracle_type, None),
+                Some(
+                    QueryValue::Text(value)
+                    | QueryValue::Rowid(value)
+                    | QueryValue::BinaryDouble(value),
+                ) => OracleCell::new(oracle_type, Some(value)),
+                Some(QueryValue::TextRaw { bytes, .. } | QueryValue::Raw(bytes)) => {
+                    OracleCell::binary(oracle_type, bytes)
+                }
+                Some(QueryValue::Number(value)) => {
+                    OracleCell::new(oracle_type, Some(value.to_canonical_string()))
+                }
+                Some(QueryValue::Boolean(value)) => OracleCell::new(
+                    oracle_type,
+                    Some(if value { "true" } else { "false" }.to_owned()),
+                ),
+                Some(QueryValue::DateTime {
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    nanosecond,
+                }) => OracleCell::new(
+                    oracle_type,
+                    Some(format_datetime(
+                        year, month, day, hour, minute, second, nanosecond,
                     )),
                 ),
+                Some(QueryValue::IntervalDS {
+                    days,
+                    hours,
+                    minutes,
+                    seconds,
+                    fseconds,
+                }) => OracleCell::new(
+                    oracle_type,
+                    Some(format!(
+                        "{days} {hours:02}:{minutes:02}:{seconds:02}.{fseconds:09}"
+                    )),
+                ),
+                Some(QueryValue::IntervalYM { years, months }) => {
+                    OracleCell::new(oracle_type, Some(format!("{years}-{months}")))
+                }
+                Some(QueryValue::Cursor(cursor)) => {
+                    return materialize_cursor_cell(
+                        cx,
+                        inner,
+                        oracle_type,
+                        &cursor,
+                        opts,
+                        serialize_opts,
+                        timeout_ms,
+                        depth,
+                    )
+                    .await;
+                }
+                Some(QueryValue::Object(value)) => {
+                    OracleCell::binary(oracle_type, value.packed_data)
+                }
+                Some(QueryValue::Lob(value)) => {
+                    let limits = LobReadLimits::from(serialize_opts);
+                    // The native-async LOB read happens HERE, before the pure
+                    // `materialize_lob_cell` runs: `read_lob_plan` computes the one
+                    // `(offset, amount)` the materializer would have requested, we
+                    // read it on the async driver once, and hand the materializer a
+                    // sync closure that just replays the captured bytes. This keeps
+                    // `materialize_lob_cell` (and its unit tests) callback-shaped
+                    // and pure while the actual round trip is `.await`-ed.
+                    let prefetched = match read_lob_plan(&value, limits) {
+                        Some((offset, amount)) => inner
+                            .read_lob_with_timeout(cx, &value.locator, offset, amount, timeout_ms)
+                            .await
+                            .map(|result| result.data.unwrap_or_default())
+                            .map_err(|err| {
+                                DbError::Query(format!(
+                                    "LOB locator read failed: {}",
+                                    sanitize_driver_error(err, opts)
+                                ))
+                            })?,
+                        None => Vec::new(),
+                    };
+                    let mut read_lob = |_locator: &[u8], _offset: u64, _amount: u64| {
+                        Ok(LobReadData {
+                            data: Some(prefetched.clone()),
+                        })
+                    };
+                    return materialize_lob_cell(oracle_type, &value, limits, &mut read_lob);
+                }
+                Some(QueryValue::Vector(value)) => {
+                    OracleCell::new(oracle_type, Some(format!("{value:?}")))
+                }
+                Some(QueryValue::Json(value)) => {
+                    OracleCell::new(oracle_type, Some(format!("{value:?}")))
+                }
+                Some(QueryValue::Array(values)) => OracleCell::new(
+                    oracle_type,
+                    Some(format!("<unsupported ARRAY len={}>", values.len())),
+                ),
             };
-            columns.push((name, cell));
-        }
-        if columns.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(OracleRow { columns }))
-        }
+            Ok(cell)
+        })
     }
 
-    fn materialize_cursor_cell(
-        inner: &mut oracledb::Connection,
+    fn implicit_resultsets_to_row<'a>(
+        cx: &'a Cx,
+        inner: &'a mut oracledb::Connection,
+        values: Vec<QueryValue>,
+        opts: &'a OracleConnectOptions,
+        serialize_opts: &'a SerializeOptions,
+        timeout_ms: Option<u32>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<OracleRow>, DbError>> + 'a>>
+    {
+        Box::pin(async move {
+            let mut columns = Vec::with_capacity(values.len());
+            for (idx, value) in values.into_iter().enumerate() {
+                let name = format!("IMPLICIT_RESULT_{}", idx + 1);
+                let cell = match value {
+                    QueryValue::Cursor(cursor) => {
+                        materialize_cursor_cell(
+                            cx,
+                            inner,
+                            "REF CURSOR".to_owned(),
+                            &cursor,
+                            opts,
+                            serialize_opts,
+                            timeout_ms,
+                            0,
+                        )
+                        .await?
+                    }
+                    other => OracleCell::new(
+                        "VARCHAR2",
+                        Some(format!(
+                            "<unsupported implicit resultset value {}: {other:?}>",
+                            idx + 1
+                        )),
+                    ),
+                };
+                columns.push((name, cell));
+            }
+            if columns.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(OracleRow { columns }))
+            }
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_cursor_cell<'a>(
+        cx: &'a Cx,
+        inner: &'a mut oracledb::Connection,
         oracle_type: String,
-        cursor: &CursorValue,
-        opts: &OracleConnectOptions,
-        serialize_opts: &SerializeOptions,
+        cursor: &'a CursorValue,
+        opts: &'a OracleConnectOptions,
+        serialize_opts: &'a SerializeOptions,
         timeout_ms: Option<u32>,
         depth: usize,
-    ) -> Result<OracleCell, DbError> {
-        if depth >= serialize_opts.max_nested_cursor_depth {
-            inner.release_cursor(cursor.cursor_id);
-            return Ok(OracleCell::nested_result(
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<OracleCell, DbError>> + 'a>>
+    {
+        Box::pin(async move {
+            if depth >= serialize_opts.max_nested_cursor_depth {
+                inner.release_cursor(cursor.cursor_id);
+                return Ok(OracleCell::nested_result(
+                    oracle_type,
+                    OracleNestedResult {
+                        columns: cursor_column_names(&cursor.columns),
+                        truncated: true,
+                        ..Default::default()
+                    },
+                ));
+            }
+            let (row_cap, fetch_limit, cell_limited) = cursor_caps(cursor, serialize_opts);
+            let result = match inner.fetch_cursor(cx, cursor, fetch_limit).await {
+                Ok(result) => result,
+                Err(err) => {
+                    inner.release_cursor(cursor.cursor_id);
+                    return Err(DbError::Query(format!(
+                        "REF CURSOR fetch failed: {}",
+                        sanitize_driver_error(err, opts)
+                    )));
+                }
+            };
+            let mut rows = result.rows;
+            let fetched_count = rows.len().min(row_cap);
+            let row_limited = rows.len() > row_cap;
+            rows.truncate(row_cap);
+            let columns = if result.columns.is_empty() {
+                cursor.columns.clone()
+            } else {
+                result.columns
+            };
+            let nested_rows = rows_to_oracle_rows(
+                cx,
+                inner,
+                &columns,
+                rows,
+                opts,
+                serialize_opts,
+                timeout_ms,
+                depth + 1,
+            )
+            .await?;
+            Ok(OracleCell::nested_result(
                 oracle_type,
                 OracleNestedResult {
-                    columns: cursor_column_names(&cursor.columns),
-                    truncated: true,
-                    ..Default::default()
+                    columns: cursor_column_names(&columns),
+                    row_count: nested_rows.len(),
+                    fetched_count,
+                    rows: nested_rows,
+                    truncated: row_limited || cell_limited,
                 },
-            ));
-        }
-        let (row_cap, fetch_limit, cell_limited) = cursor_caps(cursor, serialize_opts);
-        let result = match oracledb::BlockingConnection::fetch_cursor(inner, cursor, fetch_limit) {
-            Ok(result) => result,
-            Err(err) => {
-                inner.release_cursor(cursor.cursor_id);
-                return Err(DbError::Query(format!(
-                    "REF CURSOR fetch failed: {}",
-                    sanitize_driver_error(err, opts)
-                )));
-            }
-        };
-        let mut rows = result.rows;
-        let fetched_count = rows.len().min(row_cap);
-        let row_limited = rows.len() > row_cap;
-        rows.truncate(row_cap);
-        let columns = if result.columns.is_empty() {
-            cursor.columns.clone()
-        } else {
-            result.columns
-        };
-        let nested_rows = rows_to_oracle_rows(
-            inner,
-            &columns,
-            rows,
-            opts,
-            serialize_opts,
-            timeout_ms,
-            depth + 1,
-        )?;
-        Ok(OracleCell::nested_result(
-            oracle_type,
-            OracleNestedResult {
-                columns: cursor_column_names(&columns),
-                row_count: nested_rows.len(),
-                fetched_count,
-                rows: nested_rows,
-                truncated: row_limited || cell_limited,
-            },
-        ))
+            ))
+        })
     }
 
     fn cursor_caps(cursor: &CursorValue, opts: &SerializeOptions) -> (usize, usize, bool) {
@@ -1180,6 +1188,22 @@ mod driver {
             return Ok(Vec::new());
         }
         Ok(read_lob(&lob.locator, 1, amount)?.data.unwrap_or_default())
+    }
+
+    /// The single `(offset, amount)` the `materialize_lob_cell` family would
+    /// request for `lob` under `limits`, or `None` when no read is needed
+    /// (amount `0` — an empty LOB). Mirrors the amount logic of
+    /// `materialize_text_lob` (CLOB) and `materialize_binary_lob` (BLOB/BFILE)
+    /// so the native-async read can be hoisted ahead of the pure materializer.
+    fn read_lob_plan(lob: &LobValue, limits: LobReadLimits) -> Option<(u64, u64)> {
+        let amount = match lob.ora_type_num {
+            ORA_TYPE_NUM_CLOB => known_lob_read_amount(lob.size, limits.max_lob_chars),
+            ORA_TYPE_NUM_BLOB => known_lob_read_amount(lob.size, limits.max_blob_bytes),
+            ORA_TYPE_NUM_BFILE => unknown_lob_read_amount(limits.max_blob_bytes),
+            // Unsupported subtypes never read; `materialize_lob_cell` errors.
+            _ => 0,
+        };
+        (amount != 0).then_some((1, amount))
     }
 
     fn known_lob_read_amount(size: u64, cap: usize) -> u64 {
@@ -1269,53 +1293,63 @@ mod driver {
         #[cfg(feature = "live-xe")]
         #[test]
         fn cursor_fetch_failure_leaves_connection_usable() {
+            use asupersync::runtime::RuntimeBuilder;
             let Some(opts) = live_opts_from_env() else {
                 eprintln!(
                     "[live-xe] SKIP cursor_fetch_failure_leaves_connection_usable: set ORACLEMCP_TEST_*"
                 );
                 return;
             };
-            let mut inner = match oracledb::BlockingConnection::connect(
-                to_connect_options(&opts).expect("connect options"),
-            ) {
-                Ok(conn) => conn,
-                Err(err) => {
-                    eprintln!(
-                        "[live-xe] SKIP cursor_fetch_failure_leaves_connection_usable: no reachable Oracle ({})",
-                        sanitize_driver_error(err, &opts)
-                    );
-                    return;
-                }
-            };
-            let mut invalid_cursor = cursor(1);
-            invalid_cursor.cursor_id = u32::MAX;
+            let runtime = RuntimeBuilder::current_thread()
+                .build()
+                .expect("current-thread runtime");
+            runtime.block_on(async {
+                let cx = asupersync::Cx::current().expect("block_on installs a current Cx");
+                let mut inner = match oracledb::Connection::connect(
+                    &cx,
+                    to_connect_options(&opts).expect("connect options"),
+                )
+                .await
+                {
+                    Ok(conn) => conn,
+                    Err(err) => {
+                        eprintln!(
+                            "[live-xe] SKIP cursor_fetch_failure_leaves_connection_usable: no reachable Oracle ({})",
+                            sanitize_driver_error(err, &opts)
+                        );
+                        return;
+                    }
+                };
+                let mut invalid_cursor = cursor(1);
+                invalid_cursor.cursor_id = u32::MAX;
 
-            let err = materialize_cursor_cell(
-                &mut inner,
-                "REF CURSOR".to_owned(),
-                &invalid_cursor,
-                &opts,
-                &SerializeOptions::default(),
-                None,
-                0,
-            )
-            .expect_err("invalid cursor id should fail");
+                let err = materialize_cursor_cell(
+                    &cx,
+                    &mut inner,
+                    "REF CURSOR".to_owned(),
+                    &invalid_cursor,
+                    &opts,
+                    &SerializeOptions::default(),
+                    None,
+                    0,
+                )
+                .await
+                .expect_err("invalid cursor id should fail");
 
-            assert!(
-                err.to_string().contains("REF CURSOR fetch failed"),
-                "unexpected error: {err}"
-            );
-            let probe = oracledb::BlockingConnection::execute_query(
-                &mut inner,
-                "SELECT 1 AS n FROM dual",
-                1,
-            )
-            .expect("connection remains usable after cursor fetch failure");
-            let n = probe.rows[0][0]
-                .as_ref()
-                .and_then(QueryValue::as_i64)
-                .expect("numeric probe cell");
-            assert_eq!(n, 1);
+                assert!(
+                    err.to_string().contains("REF CURSOR fetch failed"),
+                    "unexpected error: {err}"
+                );
+                let probe = inner
+                    .execute_query(&cx, "SELECT 1 AS n FROM dual", 1)
+                    .await
+                    .expect("connection remains usable after cursor fetch failure");
+                let n = probe.rows[0][0]
+                    .as_ref()
+                    .and_then(QueryValue::as_i64)
+                    .expect("numeric probe cell");
+                assert_eq!(n, 1);
+            });
         }
 
         #[test]
@@ -1604,41 +1638,53 @@ mod driver {
         message
     }
 
+    #[async_trait::async_trait(?Send)]
     impl super::OracleConnection for RustOracleConnection {
         fn backend(&self) -> crate::types::OracleBackend {
             crate::types::OracleBackend::RustOracle
         }
 
-        fn ping(&self) -> Result<(), DbError> {
+        async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
+            super::db_checkpoint(cx, "oracle_db.ping.before")?;
             let timeout = self.timeout_ms()?;
-            let mut inner = self.lock_inner()?;
-            match timeout {
-                Some(timeout) => {
-                    oracledb::BlockingConnection::ping_with_timeout(&mut inner, timeout)
-                }
-                None => oracledb::BlockingConnection::ping(&mut inner),
+            let mut inner = self.lock_inner(cx).await?;
+            let result = match timeout {
+                Some(timeout) => inner.ping_with_timeout(cx, timeout).await,
+                None => inner.ping(cx).await,
             }
-            .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))
+            .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)));
+            drop(inner);
+            super::db_checkpoint(cx, "oracle_db.ping.after")?;
+            result
         }
 
-        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            super::db_checkpoint(cx, "oracle_db.describe.before")?;
             let mut info = OracleConnectionInfo {
                 backend: Some(crate::types::OracleBackend::RustOracle),
                 connection_strategy: Some("single_session".to_owned()),
                 ..Default::default()
             };
-            if let Some(r) = self.query_first_row(
-                "SELECT version_full FROM product_component_version WHERE rownum = 1",
-            ) {
+            if let Some(r) = self
+                .query_first_row(
+                    cx,
+                    "SELECT version_full FROM product_component_version WHERE rownum = 1",
+                )
+                .await
+            {
                 info.server_version = r.text("VERSION_FULL").map(str::to_owned);
             }
-            if let Some(r) = self.query_first_row("SELECT database_role, open_mode FROM v$database")
+            if let Some(r) = self
+                .query_first_row(cx, "SELECT database_role, open_mode FROM v$database")
+                .await
             {
                 info.database_role = r.text("DATABASE_ROLE").map(str::to_owned);
                 info.open_mode = r.text("OPEN_MODE").map(str::to_owned);
             }
-            if let Some(r) = self.query_first_row(
-                "SELECT \
+            if let Some(r) = self
+                .query_first_row(
+                    cx,
+                    "SELECT \
                     SYS_CONTEXT('USERENV','CURRENT_SCHEMA') AS current_schema, \
                     SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME') AS current_edition, \
                     SYS_CONTEXT('USERENV','SESSION_USER') AS session_user, \
@@ -1651,7 +1697,9 @@ mod driver {
                     SYS_CONTEXT('USERENV','HOST') AS host, \
                     SYS_CONTEXT('USERENV','TERMINAL') AS terminal \
                  FROM dual",
-            ) {
+                )
+                .await
+            {
                 info.current_schema = r.text("CURRENT_SCHEMA").map(str::to_owned);
                 info.current_edition = r.text("CURRENT_EDITION").map(str::to_owned);
                 info.session_user = r.text("SESSION_USER").map(str::to_owned);
@@ -1664,12 +1712,16 @@ mod driver {
                 info.host = r.text("HOST").map(str::to_owned);
                 info.terminal = r.text("TERMINAL").map(str::to_owned);
             }
-            if let Some(r) = self.query_first_row(
-                "SELECT osuser, machine, terminal, program \
+            if let Some(r) = self
+                .query_first_row(
+                    cx,
+                    "SELECT osuser, machine, terminal, program \
                  FROM v$session \
                  WHERE sid = TO_NUMBER(SYS_CONTEXT('USERENV','SID')) \
                  FETCH FIRST 1 ROWS ONLY",
-            ) {
+                )
+                .await
+            {
                 info.os_user = r
                     .text("OSUSER")
                     .map(str::to_owned)
@@ -1681,40 +1733,52 @@ mod driver {
                     .or_else(|| info.terminal.take());
                 info.program = r.text("PROGRAM").map(str::to_owned);
             }
-            if let Some(r) = self.query_first_row(
-                "SELECT client_driver \
+            if let Some(r) = self
+                .query_first_row(
+                    cx,
+                    "SELECT client_driver \
                  FROM v$session_connect_info \
                  WHERE sid = TO_NUMBER(SYS_CONTEXT('USERENV','SID')) \
                    AND client_driver IS NOT NULL \
                  FETCH FIRST 1 ROWS ONLY",
-            ) {
+                )
+                .await
+            {
                 info.client_driver = r.text("CLIENT_DRIVER").map(str::to_owned);
             }
+            super::db_checkpoint(cx, "oracle_db.describe.after")?;
             Ok(info.with_read_only_status())
         }
 
-        fn query_rows(&self, sql: &str, binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
-            self.query_rows_with_serialize_options(sql, binds, &SerializeOptions::default())
+        async fn query_rows(
+            &self,
+            cx: &Cx,
+            sql: &str,
+            binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.query_rows_with_serialize_options(cx, sql, binds, &SerializeOptions::default())
+                .await
         }
 
-        fn query_rows_with_serialize_options(
+        async fn query_rows_with_serialize_options(
             &self,
+            cx: &Cx,
             sql: &str,
             binds: &[OracleBind],
             serialize_opts: &SerializeOptions,
         ) -> Result<Vec<OracleRow>, DbError> {
+            super::db_checkpoint(cx, "oracle_db.query_rows.before")?;
             let binds: Vec<BindValue> = binds.iter().map(to_bind).collect();
             let timeout = self.timeout_ms()?;
-            let mut inner = self.lock_inner()?;
+            let mut inner = self.lock_inner(cx).await?;
             let result = if binds.is_empty() && timeout.is_none() {
-                oracledb::BlockingConnection::execute_query(
-                    &mut inner,
-                    sql,
-                    prefetch_rows_for_statement(sql),
-                )
-                .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?
+                inner
+                    .execute_query(cx, sql, prefetch_rows_for_statement(sql))
+                    .await
+                    .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?
             } else {
                 execute_with_timeout(
+                    cx,
                     &mut inner,
                     sql,
                     prefetch_rows_for_statement(sql),
@@ -1722,41 +1786,55 @@ mod driver {
                     timeout,
                     &self.opts,
                     "query",
-                )?
+                )
+                .await?
             };
-            collect_all_rows(&mut inner, result, &self.opts, serialize_opts, timeout)
+            let rows =
+                collect_all_rows(cx, &mut inner, result, &self.opts, serialize_opts, timeout)
+                    .await?;
+            drop(inner);
+            super::db_checkpoint(cx, "oracle_db.query_rows.after")?;
+            Ok(rows)
         }
 
-        fn query_rows_named(
+        async fn query_rows_named(
             &self,
+            cx: &Cx,
             sql: &str,
             binds: &[(String, OracleBind)],
         ) -> Result<Vec<OracleRow>, DbError> {
-            self.query_rows_named_with_serialize_options(sql, binds, &SerializeOptions::default())
+            self.query_rows_named_with_serialize_options(
+                cx,
+                sql,
+                binds,
+                &SerializeOptions::default(),
+            )
+            .await
         }
 
-        fn query_rows_named_with_serialize_options(
+        async fn query_rows_named_with_serialize_options(
             &self,
+            cx: &Cx,
             sql: &str,
             binds: &[(String, OracleBind)],
             serialize_opts: &SerializeOptions,
         ) -> Result<Vec<OracleRow>, DbError> {
+            super::db_checkpoint(cx, "oracle_db.query_rows_named.before")?;
             let binds: Vec<(String, BindValue)> = binds
                 .iter()
                 .map(|(name, bind)| (name.clone(), to_bind(bind)))
                 .collect();
             let timeout = self.timeout_ms()?;
-            let mut inner = self.lock_inner()?;
+            let mut inner = self.lock_inner(cx).await?;
             let result = if binds.is_empty() {
                 if timeout.is_none() {
-                    oracledb::BlockingConnection::execute_query(
-                        &mut inner,
-                        sql,
-                        prefetch_rows_for_statement(sql),
-                    )
-                    .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?
+                    inner
+                        .execute_query(cx, sql, prefetch_rows_for_statement(sql))
+                        .await
+                        .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?
                 } else {
                     execute_with_timeout(
+                        cx,
                         &mut inner,
                         sql,
                         prefetch_rows_for_statement(sql),
@@ -1764,11 +1842,13 @@ mod driver {
                         timeout,
                         &self.opts,
                         "query named",
-                    )?
+                    )
+                    .await?
                 }
             } else {
                 let ordered_binds = order_named_binds_for_driver(sql, binds);
                 execute_with_timeout(
+                    cx,
                     &mut inner,
                     sql,
                     prefetch_rows_for_statement(sql),
@@ -1776,21 +1856,32 @@ mod driver {
                     timeout,
                     &self.opts,
                     "query named",
-                )?
+                )
+                .await?
             };
-            collect_all_rows(&mut inner, result, &self.opts, serialize_opts, timeout)
+            let rows =
+                collect_all_rows(cx, &mut inner, result, &self.opts, serialize_opts, timeout)
+                    .await?;
+            drop(inner);
+            super::db_checkpoint(cx, "oracle_db.query_rows_named.after")?;
+            Ok(rows)
         }
 
-        fn execute(&self, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
+        async fn execute(&self, cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
+            super::db_checkpoint(cx, "oracle_db.execute.before")?;
             let binds: Vec<BindValue> = binds.iter().map(to_bind).collect();
             let timeout = self.timeout_ms()?;
-            let mut inner = self.lock_inner()?;
-            let result =
-                execute_with_timeout(&mut inner, sql, 0, &binds, timeout, &self.opts, "execute")
-                    .map_err(|err| match err {
-                        DbError::Query(msg) => DbError::Execute(msg),
-                        other => other,
-                    })?;
+            let mut inner = self.lock_inner(cx).await?;
+            let result = execute_with_timeout(
+                cx, &mut inner, sql, 0, &binds, timeout, &self.opts, "execute",
+            )
+            .await
+            .map_err(|err| match err {
+                DbError::Query(msg) => DbError::Execute(msg),
+                other => other,
+            })?;
+            drop(inner);
+            super::db_checkpoint(cx, "oracle_db.execute.after")?;
             Ok(result.row_count)
         }
 
@@ -1810,36 +1901,40 @@ mod driver {
             Ok(())
         }
 
-        fn read_dbms_output(
+        async fn read_dbms_output(
             &self,
+            cx: &Cx,
             max_lines: usize,
             max_chars: usize,
         ) -> Result<DbmsOutput, DbError> {
+            super::db_checkpoint(cx, "oracle_db.read_dbms_output.before")?;
             let timeout = self.timeout_ms()?;
             let mut lines = Vec::new();
             let mut char_count = 0usize;
             let mut truncated = false;
-            let mut inner = self.lock_inner()?;
+            let mut inner = self.lock_inner(cx).await?;
             for _ in 0..max_lines {
-                let result = oracledb::BlockingConnection::execute_query_with_binds_and_timeout(
-                    &mut inner,
-                    "BEGIN DBMS_OUTPUT.GET_LINE(:1, :2); END;",
-                    0,
-                    &[
-                        BindValue::Output {
-                            ora_type_num: ORA_TYPE_NUM_VARCHAR,
-                            csfrm: CS_FORM_IMPLICIT,
-                            buffer_size: 32_767,
-                        },
-                        BindValue::Output {
-                            ora_type_num: ORA_TYPE_NUM_NUMBER,
-                            csfrm: CS_FORM_IMPLICIT,
-                            buffer_size: 22,
-                        },
-                    ],
-                    timeout,
-                )
-                .map_err(|err| DbError::Execute(sanitize_driver_error(err, &self.opts)))?;
+                let result = inner
+                    .execute_query_with_binds_and_timeout(
+                        cx,
+                        "BEGIN DBMS_OUTPUT.GET_LINE(:1, :2); END;",
+                        0,
+                        &[
+                            BindValue::Output {
+                                ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                                csfrm: CS_FORM_IMPLICIT,
+                                buffer_size: 32_767,
+                            },
+                            BindValue::Output {
+                                ora_type_num: ORA_TYPE_NUM_NUMBER,
+                                csfrm: CS_FORM_IMPLICIT,
+                                buffer_size: 22,
+                            },
+                        ],
+                        timeout,
+                    )
+                    .await
+                    .map_err(|err| DbError::Execute(sanitize_driver_error(err, &self.opts)))?;
                 let status = output_value(&result, 1)
                     .and_then(QueryValue::as_i64)
                     .ok_or_else(|| {
@@ -1867,6 +1962,8 @@ mod driver {
             if lines.len() == max_lines {
                 truncated = true;
             }
+            drop(inner);
+            super::db_checkpoint(cx, "oracle_db.read_dbms_output.after")?;
             Ok(DbmsOutput {
                 line_count: lines.len(),
                 lines,
@@ -1875,15 +1972,23 @@ mod driver {
             })
         }
 
-        fn commit(&self) -> Result<(), DbError> {
-            let mut inner = self.lock_inner()?;
-            oracledb::BlockingConnection::commit(&mut inner)
+        async fn commit(&self, cx: &Cx) -> Result<(), DbError> {
+            // No post-commit checkpoint: once Oracle commits, cancellation
+            // cannot undo it.
+            super::db_checkpoint(cx, "oracle_db.commit.before")?;
+            let mut inner = self.lock_inner(cx).await?;
+            inner
+                .commit(cx)
+                .await
                 .map_err(|err| DbError::Execute(sanitize_driver_error(err, &self.opts)))
         }
 
-        fn rollback(&self) -> Result<(), DbError> {
-            let mut inner = self.lock_inner()?;
-            oracledb::BlockingConnection::rollback(&mut inner)
+        async fn rollback(&self, cx: &Cx) -> Result<(), DbError> {
+            super::db_checkpoint(cx, "oracle_db.rollback.before")?;
+            let mut inner = self.lock_inner(cx).await?;
+            inner
+                .rollback(cx)
+                .await
                 .map_err(|err| DbError::Execute(sanitize_driver_error(err, &self.opts)))
         }
     }
@@ -1897,12 +2002,19 @@ mod tests {
 
     #[test]
     fn thin_mode_rejects_external_auth_before_connecting() {
+        use asupersync::runtime::RuntimeBuilder;
         let opts = crate::types::OracleConnectOptions {
             connect_string: "localhost:1521/FREEPDB1".to_owned(),
             external_auth: true,
             ..Default::default()
         };
-        let result = RustOracleConnection::connect(opts);
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let result = runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            RustOracleConnection::connect(&cx, opts).await
+        });
         assert!(matches!(result, Err(DbError::UnsupportedAuth(_))));
     }
 
@@ -2443,5 +2555,111 @@ mod driver_seam {
         assert!(!names_driver_path(
             r#""driver": "pure-Rust oracledb thin driver""#
         ));
+    }
+
+    /// True iff `line` is a real `block_on(` CALL (not a doc-comment mention).
+    fn names_block_on_call(line: &str) -> bool {
+        let trimmed = line.trim_start();
+        // Skip doc/line comments — they may legitimately mention `block_on`.
+        if trimmed.starts_with("//") {
+            return false;
+        }
+        line.contains("block_on(")
+    }
+
+    /// B1 cancel-correctness invariant: NO `block_on` anywhere in the per-call
+    /// DB path. The async migration removed the per-call `block_on` (the old
+    /// `BlockingConnection` facade); every DB round trip now runs on the one
+    /// ambient Asupersync runtime via `.await`. The only legitimate `block_on`s
+    /// in these sources are inside `#[cfg(test)]` modules (test harness bridges
+    /// that drive an async body on a one-shot runtime). This test fails if a
+    /// `block_on(` call appears in PRODUCTION code under the DB-path source
+    /// trees, so a regression can never silently reintroduce the per-call
+    /// blocking bridge.
+    #[test]
+    fn no_block_on_in_db_path() {
+        let root = workspace_root();
+        // The per-call DB path: the canonical DB crate and the dispatcher (which
+        // threads `cx` into every DB round trip). Connection ESTABLISHMENT lives
+        // in `crates/oraclemcp/src/main.rs` (a one-shot startup `block_on`,
+        // explicitly NOT the per-call path) and is intentionally not scanned.
+        let db_path_dirs = [
+            root.join("crates/oraclemcp-db/src"),
+            root.join("crates/oraclemcp/src/dispatch"),
+        ];
+        let mut files = Vec::new();
+        for dir in &db_path_dirs {
+            collect_rs_files(dir, &mut files);
+        }
+        files.sort();
+        assert!(!files.is_empty(), "no DB-path sources found");
+
+        let mut violations: Vec<String> = Vec::new();
+        for file in &files {
+            let rel = file
+                .strip_prefix(&root)
+                .expect("file under workspace root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            // Whole `*/tests.rs` files (and `*/tests/*.rs`) are `#[cfg(test)]`
+            // modules wired in by `mod tests;` — test-only by construction.
+            if rel.ends_with("/tests.rs") || rel.contains("/tests/") {
+                continue;
+            }
+            let contents = std::fs::read_to_string(file)
+                .unwrap_or_else(|err| panic!("read {}: {err}", file.display()));
+
+            // Track whether the current line is inside a `#[cfg(test)]` module by
+            // brace depth: when a `mod ... {` follows a `#[cfg(test)]` attribute,
+            // everything until its matching close brace is test-only.
+            let mut depth: i32 = 0;
+            let mut test_mod_depth: Option<i32> = None;
+            let mut pending_cfg_test = false;
+            for (n, line) in contents.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("#[cfg(test)]") {
+                    pending_cfg_test = true;
+                }
+                let opens = line.matches('{').count() as i32;
+                let closes = line.matches('}').count() as i32;
+                // A `mod NAME {` opening right after a `#[cfg(test)]` attribute
+                // starts the test region at the depth just before this brace.
+                if pending_cfg_test && trimmed.starts_with("mod ") && opens > 0 {
+                    test_mod_depth = Some(depth);
+                    pending_cfg_test = false;
+                } else if !trimmed.is_empty() && !trimmed.starts_with("#[") {
+                    // Any other non-attribute line clears a dangling cfg(test).
+                    pending_cfg_test = false;
+                }
+                let in_test = test_mod_depth.is_some_and(|d| depth > d);
+                // A `// block-on-boundary:` marker (on the line or within the few
+                // lines above, e.g. above the `RuntimeBuilder` chain) exempts the
+                // sync→async dispatch ENTRY shims (driven on a one-shot runtime
+                // once per tool call for non-server/test callers) — these are NOT
+                // the per-call DB round-trip path the invariant targets.
+                let all_lines: Vec<&str> = contents.lines().collect();
+                let lookback_start = n.saturating_sub(8);
+                let boundary_marker = all_lines[lookback_start..=n]
+                    .iter()
+                    .any(|l| l.contains("block-on-boundary:"));
+                if !in_test && !boundary_marker && names_block_on_call(line) {
+                    violations.push(format!("{rel}:{}: {}", n + 1, line.trim()));
+                }
+                depth += opens - closes;
+                if let Some(d) = test_mod_depth
+                    && depth <= d
+                {
+                    test_mod_depth = None;
+                }
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "B1: `block_on` found in the production DB path — the async migration \
+             removed the per-call blocking bridge; every DB round trip must run \
+             on the ambient runtime via `.await`. Offending sites:\n{}",
+            violations.join("\n"),
+        );
     }
 }

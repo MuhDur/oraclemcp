@@ -6,6 +6,7 @@
 //! `READ_ONLY` (independently of the profile ceiling) and routes plan analysis
 //! to `DBMS_XPLAN.DISPLAY_CURSOR`. `oracle_capabilities` reports the status.
 
+use asupersync::Cx;
 use serde::{Deserialize, Serialize};
 
 use crate::connection::OracleConnection;
@@ -35,8 +36,11 @@ impl StandbyStatus {
 /// `V$DATABASE`). Best-effort: if the role/open-mode are not readable (a
 /// least-privilege account), `read_only_standby` is `false` and the operator's
 /// `read_only_standby` profile flag (or `protected`) remains the control.
-pub fn detect_standby(conn: &dyn OracleConnection) -> Result<StandbyStatus, DbError> {
-    let info = conn.describe()?;
+pub async fn detect_standby(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+) -> Result<StandbyStatus, DbError> {
+    let info = conn.describe(cx).await?;
     Ok(StandbyStatus {
         read_only_standby: info.is_read_only_standby(),
         database_role: info.database_role,
@@ -49,27 +53,49 @@ mod tests {
     use super::*;
     use crate::types::{OracleBackend, OracleBind, OracleConnectionInfo, OracleRow};
 
+    use asupersync::runtime::RuntimeBuilder;
+
+    fn run_with_cx<F, Fut, T>(body: F) -> T
+    where
+        F: FnOnce(Cx) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            body(cx).await
+        })
+    }
+
     struct InfoMock(OracleConnectionInfo);
+    #[async_trait::async_trait(?Send)]
     impl OracleConnection for InfoMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
         }
-        fn ping(&self) -> Result<(), DbError> {
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
             Ok(self.0.clone())
         }
-        fn query_rows(&self, _s: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _s: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
             Ok(vec![])
         }
-        fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
             Ok(0)
         }
-        fn commit(&self) -> Result<(), DbError> {
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn rollback(&self) -> Result<(), DbError> {
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
     }
@@ -80,7 +106,7 @@ mod tests {
             open_mode: mode.map(str::to_owned),
             ..Default::default()
         };
-        detect_standby(&InfoMock(info)).expect("detect")
+        run_with_cx(|cx| async move { detect_standby(&cx, &InfoMock(info)).await.expect("detect") })
     }
 
     #[test]

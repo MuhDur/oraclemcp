@@ -82,12 +82,16 @@ pub fn select_diagnostics_source(
 
 /// Detect whether Statspack is installed (the `PERFSTAT.STATS$SNAPSHOT` table is
 /// readable). Best-effort: any error means "not available".
-#[must_use]
-pub fn detect_statspack(conn: &dyn crate::connection::OracleConnection) -> bool {
+pub async fn detect_statspack(
+    cx: &asupersync::Cx,
+    conn: &dyn crate::connection::OracleConnection,
+) -> bool {
     conn.query_rows(
+        cx,
         "SELECT 1 FROM perfstat.stats$snapshot WHERE rownum = 1",
         &[],
     )
+    .await
     .is_ok()
 }
 
@@ -95,12 +99,16 @@ pub fn detect_statspack(conn: &dyn crate::connection::OracleConnection) -> bool 
 /// `DIAGNOSTIC`. Best-effort and **fail closed** — any error (including the
 /// common "no SELECT on V$PARAMETER") means "not licensed", so we never touch
 /// `DBA_HIST_*` on an unlicensed instance.
-#[must_use]
-pub fn detect_diagnostics_pack(conn: &dyn crate::connection::OracleConnection) -> bool {
+pub async fn detect_diagnostics_pack(
+    cx: &asupersync::Cx,
+    conn: &dyn crate::connection::OracleConnection,
+) -> bool {
     conn.query_rows(
+        cx,
         "SELECT value FROM v$parameter WHERE name = 'control_management_pack_access'",
         &[],
     )
+    .await
     .ok()
     .and_then(|rows| {
         rows.first()
@@ -113,15 +121,18 @@ pub fn detect_diagnostics_pack(conn: &dyn crate::connection::OracleConnection) -
 /// the default; `historical` opts into AWR (only when the Diagnostics Pack is
 /// licensed) → Statspack → structured-unavailable. We **never** probe or query a
 /// licensed pack object unless `detect_diagnostics_pack` confirmed the license.
-#[must_use]
-pub fn resolve_top_sql_source(
+pub async fn resolve_top_sql_source(
+    cx: &asupersync::Cx,
     conn: &dyn crate::connection::OracleConnection,
     historical: bool,
 ) -> DiagnosticsSource {
     if !historical {
         return DiagnosticsSource::LiveCursor;
     }
-    select_diagnostics_source(detect_diagnostics_pack(conn), detect_statspack(conn))
+    select_diagnostics_source(
+        detect_diagnostics_pack(cx, conn).await,
+        detect_statspack(cx, conn).await,
+    )
 }
 
 /// The top-SQL query for a source, ranked by `metric`. `top_n` is clamped to a

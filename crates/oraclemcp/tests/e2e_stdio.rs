@@ -14,6 +14,7 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
+use asupersync::Cx;
 use oraclemcp::dispatch::OracleDispatcher;
 use oraclemcp::registry::{TOOL_NAMES, capabilities, tool_registry};
 use oraclemcp_core::{CAPABILITIES_TOOL, OracleMcpServer, StdioAuthPolicy};
@@ -26,44 +27,56 @@ use serde_json::{Value, json};
 /// A driver-free mock whose every query fails with a classifiable ORA- error,
 /// so a live tool call exercises the DbError -> ErrorEnvelope path offline.
 struct FailingMock;
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for FailingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo::default())
     }
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         Err(DbError::Query(
             "ORA-00942: table or view does not exist".to_owned(),
         ))
     }
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         Err(DbError::Execute("ORA-00942".to_owned()))
     }
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 }
 
 struct SuccessfulQueryMock;
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for SuccessfulQueryMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo::default())
     }
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         Ok(vec![OracleRow {
             columns: vec![(
                 "OBJECT_COUNT".to_owned(),
@@ -71,13 +84,13 @@ impl OracleConnection for SuccessfulQueryMock {
             )],
         }])
     }
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         Err(DbError::Execute("unexpected execute".to_owned()))
     }
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 }

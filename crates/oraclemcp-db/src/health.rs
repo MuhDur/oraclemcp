@@ -13,6 +13,8 @@
 //! pure read against `V$`/`DBA_*`/`ALL_*` and is routed through the normal
 //! read path, so it is safe at any operating level.
 
+use asupersync::Cx;
+
 use crate::connection::OracleConnection;
 use serde_json::{Value, json};
 
@@ -240,16 +242,16 @@ pub enum ViewTier {
 /// surfaces a raw `ORA-` and never panics. Each probe is a `WHERE 1=0` read
 /// that returns no rows but still trips the privilege check, so it costs
 /// nothing and never runs the actual diagnostic query.
-#[must_use]
-pub fn detect_view_tier(
+pub async fn detect_view_tier(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     dba_view: &str,
     all_view: &str,
 ) -> Option<ViewTier> {
-    if conn.query_rows(&probe_sql(dba_view), &[]).is_ok() {
+    if conn.query_rows(cx, &probe_sql(dba_view), &[]).await.is_ok() {
         return Some(ViewTier::Dba);
     }
-    if conn.query_rows(&probe_sql(all_view), &[]).is_ok() {
+    if conn.query_rows(cx, &probe_sql(all_view), &[]).await.is_ok() {
         return Some(ViewTier::All);
     }
     None
@@ -334,55 +336,53 @@ impl PreflightReport {
 /// paid-pack object (the historical resolution only touches `DBA_HIST_*` after
 /// the license is confirmed). It cannot fail: an inaccessible view is reported
 /// as a `skip`, not an error.
-#[must_use]
-pub fn preflight(conn: &dyn OracleConnection) -> PreflightReport {
-    let subchecks = HealthSubcheck::all()
-        .iter()
-        .map(|&subcheck| {
-            let (dba_view, all_view) = subcheck.probe_views();
-            // No ALL_* analogue (DBA-only metrics view or a V$ view): the only
-            // tier that can satisfy it is the privileged one. Probe it directly
-            // rather than inventing an ALL_* fallback that does not exist.
-            let tier = match all_view {
-                Some(all_view) => detect_view_tier(conn, dba_view, all_view),
-                None => conn
-                    .query_rows(&probe_sql(dba_view), &[])
-                    .is_ok()
-                    .then_some(ViewTier::Dba),
-            };
-            let (view, status) = match tier {
-                Some(ViewTier::Dba) => (dba_view.to_owned(), format!("available via {dba_view}")),
-                Some(ViewTier::All) => {
-                    let all = all_view.unwrap_or(dba_view);
-                    (
-                        all.to_owned(),
-                        format!("degraded to {all} (no DBA_* access)"),
-                    )
-                }
-                None => (
-                    dba_view.to_owned(),
-                    "skip: no readable dictionary/V$ view".to_owned(),
-                ),
-            };
-            SubcheckPreflight {
-                subcheck,
-                tier,
-                view,
-                status,
+pub async fn preflight(cx: &Cx, conn: &dyn OracleConnection) -> PreflightReport {
+    let mut subchecks = Vec::new();
+    for &subcheck in HealthSubcheck::all() {
+        let (dba_view, all_view) = subcheck.probe_views();
+        // No ALL_* analogue (DBA-only metrics view or a V$ view): the only
+        // tier that can satisfy it is the privileged one. Probe it directly
+        // rather than inventing an ALL_* fallback that does not exist.
+        let tier = match all_view {
+            Some(all_view) => detect_view_tier(cx, conn, dba_view, all_view).await,
+            None => conn
+                .query_rows(cx, &probe_sql(dba_view), &[])
+                .await
+                .is_ok()
+                .then_some(ViewTier::Dba),
+        };
+        let (view, status) = match tier {
+            Some(ViewTier::Dba) => (dba_view.to_owned(), format!("available via {dba_view}")),
+            Some(ViewTier::All) => {
+                let all = all_view.unwrap_or(dba_view);
+                (
+                    all.to_owned(),
+                    format!("degraded to {all} (no DBA_* access)"),
+                )
             }
-        })
-        .collect();
+            None => (
+                dba_view.to_owned(),
+                "skip: no readable dictionary/V$ view".to_owned(),
+            ),
+        };
+        subchecks.push(SubcheckPreflight {
+            subcheck,
+            tier,
+            view,
+            status,
+        });
+    }
 
-    let diagnostics_pack_licensed = crate::awr::detect_diagnostics_pack(conn);
-    let statspack_installed = crate::awr::detect_statspack(conn);
+    let diagnostics_pack_licensed = crate::awr::detect_diagnostics_pack(cx, conn).await;
+    let statspack_installed = crate::awr::detect_statspack(cx, conn).await;
     PreflightReport {
         subchecks,
         // Reuse the same resolver the live tool uses so the preflight can never
         // drift from real behavior. The default (non-historical) mode is always
         // the free live cursor cache; historical re-derives from the detected
         // pack/Statspack posture (and never probes a pack object unless licensed).
-        top_queries_default: crate::awr::resolve_top_sql_source(conn, false),
-        top_queries_historical: crate::awr::resolve_top_sql_source(conn, true),
+        top_queries_default: crate::awr::resolve_top_sql_source(cx, conn, false).await,
+        top_queries_historical: crate::awr::resolve_top_sql_source(cx, conn, true).await,
         diagnostics_pack_licensed,
         statspack_installed,
     }
@@ -506,12 +506,16 @@ pub fn buffer_cache_hit_ratio_sql() -> (&'static str, String) {
 /// driver/query failure) is caught and converted into a `skipped` finding so a
 /// single failing check never fails the whole suite. Returns the findings in
 /// request order. Pure orchestration — all SQL is read-only.
-#[must_use]
-pub fn run_health(conn: &dyn OracleConnection, subchecks: &[HealthSubcheck]) -> Vec<Finding> {
-    subchecks
-        .iter()
-        .map(|&sub| run_subcheck(conn, sub))
-        .collect()
+pub async fn run_health(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    subchecks: &[HealthSubcheck],
+) -> Vec<Finding> {
+    let mut findings = Vec::with_capacity(subchecks.len());
+    for &sub in subchecks {
+        findings.push(run_subcheck(cx, conn, sub).await);
+    }
+    findings
 }
 
 /// Default fraction (percent) at which a sequence is flagged as near-ceiling.
@@ -520,33 +524,43 @@ const SEQUENCE_CEILING_PCT: u8 = 90;
 const TABLESPACE_WARN_PCT: f64 = 85.0;
 const TABLESPACE_CRITICAL_PCT: f64 = 95.0;
 
-fn run_subcheck(conn: &dyn OracleConnection, subcheck: HealthSubcheck) -> Finding {
+async fn run_subcheck(cx: &Cx, conn: &dyn OracleConnection, subcheck: HealthSubcheck) -> Finding {
     // The (dba_view, all_view) targets come from `HealthSubcheck::probe_views`,
     // the single source of truth the C9 preflight also reads.
     let (dba_view, all_view) = subcheck.probe_views();
     match subcheck {
-        HealthSubcheck::InvalidObjects => degrading_count_subcheck(
-            conn,
-            subcheck,
-            dba_view,
-            all_view.unwrap_or(dba_view),
-            invalid_objects_sql,
-        ),
+        HealthSubcheck::InvalidObjects => {
+            degrading_count_subcheck(
+                cx,
+                conn,
+                subcheck,
+                dba_view,
+                all_view.unwrap_or(dba_view),
+                invalid_objects_sql,
+            )
+            .await
+        }
         HealthSubcheck::UnusableIndexes => {
-            degrading_index_subcheck(conn, subcheck, dba_view, all_view.unwrap_or(dba_view))
+            degrading_index_subcheck(cx, conn, subcheck, dba_view, all_view.unwrap_or(dba_view))
+                .await
         }
-        HealthSubcheck::TablespaceUndo => tablespace_subcheck(conn, subcheck),
+        HealthSubcheck::TablespaceUndo => tablespace_subcheck(cx, conn, subcheck).await,
         HealthSubcheck::SequenceCeiling => {
-            degrading_sequence_subcheck(conn, subcheck, dba_view, all_view.unwrap_or(dba_view))
+            degrading_sequence_subcheck(cx, conn, subcheck, dba_view, all_view.unwrap_or(dba_view))
+                .await
         }
-        HealthSubcheck::DisabledConstraints => degrading_count_subcheck(
-            conn,
-            subcheck,
-            dba_view,
-            all_view.unwrap_or(dba_view),
-            disabled_constraints_sql,
-        ),
-        HealthSubcheck::BufferCacheHitRatio => buffer_cache_subcheck(conn, subcheck),
+        HealthSubcheck::DisabledConstraints => {
+            degrading_count_subcheck(
+                cx,
+                conn,
+                subcheck,
+                dba_view,
+                all_view.unwrap_or(dba_view),
+                disabled_constraints_sql,
+            )
+            .await
+        }
+        HealthSubcheck::BufferCacheHitRatio => buffer_cache_subcheck(cx, conn, subcheck).await,
     }
 }
 
@@ -572,14 +586,15 @@ fn rows_to_json(rows: &[crate::types::OracleRow]) -> Vec<Value> {
 
 /// A subcheck that simply runs one query (with DBA→ALL degradation) and reports
 /// the rows; severity is `Warning` when any row came back, else `Ok`.
-fn degrading_count_subcheck(
+async fn degrading_count_subcheck(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     subcheck: HealthSubcheck,
     dba_view: &str,
     all_view: &str,
     build: impl Fn(ViewTier) -> (&'static str, String),
 ) -> Finding {
-    let tier = match detect_view_tier(conn, dba_view, all_view) {
+    let tier = match detect_view_tier(cx, conn, dba_view, all_view).await {
         Some(tier) => tier,
         None => {
             return Finding::skipped(
@@ -590,7 +605,7 @@ fn degrading_count_subcheck(
         }
     };
     let (view, sql) = build(tier);
-    match conn.query_rows(&sql, &[]) {
+    match conn.query_rows(cx, &sql, &[]).await {
         Ok(rows) => {
             let count = rows.len();
             Finding {
@@ -611,13 +626,14 @@ fn degrading_count_subcheck(
 
 /// C3 specialization: unusable indexes plus the index-monitoring caveat for
 /// unused indexes.
-fn degrading_index_subcheck(
+async fn degrading_index_subcheck(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     subcheck: HealthSubcheck,
     dba_view: &str,
     all_view: &str,
 ) -> Finding {
-    let tier = match detect_view_tier(conn, dba_view, all_view) {
+    let tier = match detect_view_tier(cx, conn, dba_view, all_view).await {
         Some(tier) => tier,
         None => {
             return Finding::skipped(
@@ -628,7 +644,7 @@ fn degrading_index_subcheck(
         }
     };
     let (view, sql) = unusable_indexes_sql(tier);
-    match conn.query_rows(&sql, &[]) {
+    match conn.query_rows(cx, &sql, &[]).await {
         Ok(rows) => {
             let count = rows.len();
             Finding {
@@ -656,13 +672,14 @@ fn degrading_index_subcheck(
 
 /// C5 specialization: near-ceiling non-CYCLE sequences are a real outage risk,
 /// so a hit is `Critical`.
-fn degrading_sequence_subcheck(
+async fn degrading_sequence_subcheck(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     subcheck: HealthSubcheck,
     dba_view: &str,
     all_view: &str,
 ) -> Finding {
-    let tier = match detect_view_tier(conn, dba_view, all_view) {
+    let tier = match detect_view_tier(cx, conn, dba_view, all_view).await {
         Some(tier) => tier,
         None => {
             return Finding::skipped(
@@ -673,7 +690,7 @@ fn degrading_sequence_subcheck(
         }
     };
     let (view, sql) = sequence_ceiling_sql(tier, SEQUENCE_CEILING_PCT);
-    match conn.query_rows(&sql, &[]) {
+    match conn.query_rows(cx, &sql, &[]).await {
         Ok(rows) => {
             let count = rows.len();
             Finding {
@@ -700,9 +717,13 @@ fn degrading_sequence_subcheck(
 }
 
 /// C4: tablespace + UNDO headroom. DBA-only metrics view; degrades to skip.
-fn tablespace_subcheck(conn: &dyn OracleConnection, subcheck: HealthSubcheck) -> Finding {
+async fn tablespace_subcheck(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    subcheck: HealthSubcheck,
+) -> Finding {
     let (view, sql) = tablespace_usage_sql();
-    let rows = match conn.query_rows(&sql, &[]) {
+    let rows = match conn.query_rows(cx, &sql, &[]).await {
         Ok(rows) => rows,
         Err(err) => return Finding::skipped(subcheck, &[view], err.to_string()),
     };
@@ -740,9 +761,13 @@ fn tablespace_subcheck(conn: &dyn OracleConnection, subcheck: HealthSubcheck) ->
 }
 
 /// C7: buffer cache hit ratio computed from V$SYSSTAT cumulative counters.
-fn buffer_cache_subcheck(conn: &dyn OracleConnection, subcheck: HealthSubcheck) -> Finding {
+async fn buffer_cache_subcheck(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    subcheck: HealthSubcheck,
+) -> Finding {
     let (view, sql) = buffer_cache_hit_ratio_sql();
-    let rows = match conn.query_rows(&sql, &[]) {
+    let rows = match conn.query_rows(cx, &sql, &[]).await {
         Ok(rows) => rows,
         Err(err) => return Finding::skipped(subcheck, &[view], err.to_string()),
     };
@@ -940,6 +965,21 @@ mod tests {
 
     use crate::error::DbError;
     use crate::types::{OracleBackend, OracleConnectionInfo};
+    use asupersync::runtime::RuntimeBuilder;
+
+    fn run_with_cx<F, Fut, T>(body: F) -> T
+    where
+        F: FnOnce(Cx) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            body(cx).await
+        })
+    }
 
     /// A mock whose `query_rows` outcome is decided by a predicate over the SQL
     /// text: `Err` (a privilege miss) for any view named in `deny`, `Ok` (one
@@ -949,18 +989,20 @@ mod tests {
         deny: &'static [&'static str],
     }
 
+    #[async_trait::async_trait(?Send)]
     impl OracleConnection for TierMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
         }
-        fn ping(&self) -> Result<(), DbError> {
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
             Ok(OracleConnectionInfo::default())
         }
-        fn query_rows(
+        async fn query_rows(
             &self,
+            _cx: &Cx,
             sql: &str,
             _binds: &[crate::types::OracleBind],
         ) -> Result<Vec<crate::types::OracleRow>, DbError> {
@@ -972,13 +1014,18 @@ mod tests {
             }
             Ok(vec![crate::types::OracleRow { columns: vec![] }])
         }
-        fn execute(&self, _sql: &str, _binds: &[crate::types::OracleBind]) -> Result<u64, DbError> {
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[crate::types::OracleBind],
+        ) -> Result<u64, DbError> {
             Ok(0)
         }
-        fn commit(&self) -> Result<(), DbError> {
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn rollback(&self) -> Result<(), DbError> {
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
     }
@@ -990,15 +1037,17 @@ mod tests {
     fn degrades_from_dba_to_all_when_dba_is_denied() {
         // Deny only the DBA_* dictionary views; ALL_* stays readable.
         let conn = TierMock { deny: &["dba_"] };
-        assert_eq!(
-            detect_view_tier(&conn, "DBA_OBJECTS", "ALL_OBJECTS"),
-            Some(ViewTier::All),
-            "DBA_* denied but ALL_* readable -> ALL tier"
-        );
-        // End to end: the invalid-objects subcheck reads ALL_OBJECTS and is OK.
-        let finding = run_subcheck(&conn, HealthSubcheck::InvalidObjects);
-        assert_eq!(finding.source_view, "ALL_OBJECTS");
-        assert_eq!(finding.detail["status"], json!("ok"));
+        run_with_cx(|cx| async move {
+            assert_eq!(
+                detect_view_tier(&cx, &conn, "DBA_OBJECTS", "ALL_OBJECTS").await,
+                Some(ViewTier::All),
+                "DBA_* denied but ALL_* readable -> ALL tier"
+            );
+            // End to end: the invalid-objects subcheck reads ALL_OBJECTS and is OK.
+            let finding = run_subcheck(&cx, &conn, HealthSubcheck::InvalidObjects).await;
+            assert_eq!(finding.source_view, "ALL_OBJECTS");
+            assert_eq!(finding.detail["status"], json!("ok"));
+        });
     }
 
     /// DBA_*→ALL_*→skip degradation: when BOTH tiers are denied, the subcheck
@@ -1011,18 +1060,23 @@ mod tests {
         let conn = TierMock {
             deny: &["dba_", "all_"],
         };
-        assert_eq!(detect_view_tier(&conn, "DBA_OBJECTS", "ALL_OBJECTS"), None);
-        let finding = run_subcheck(&conn, HealthSubcheck::InvalidObjects);
-        assert_eq!(finding.detail["status"], json!("skipped"));
-        assert_eq!(finding.severity, Severity::Info);
-        assert_eq!(
-            finding.detail["attempted_views"],
-            json!(["DBA_OBJECTS", "ALL_OBJECTS"])
-        );
-        assert!(
-            !finding.summary.contains("ORA-"),
-            "a skip never surfaces a raw ORA- error"
-        );
+        run_with_cx(|cx| async move {
+            assert_eq!(
+                detect_view_tier(&cx, &conn, "DBA_OBJECTS", "ALL_OBJECTS").await,
+                None
+            );
+            let finding = run_subcheck(&cx, &conn, HealthSubcheck::InvalidObjects).await;
+            assert_eq!(finding.detail["status"], json!("skipped"));
+            assert_eq!(finding.severity, Severity::Info);
+            assert_eq!(
+                finding.detail["attempted_views"],
+                json!(["DBA_OBJECTS", "ALL_OBJECTS"])
+            );
+            assert!(
+                !finding.summary.contains("ORA-"),
+                "a skip never surfaces a raw ORA- error"
+            );
+        });
     }
 
     /// C9 preflight (report-only, offline mock): with full access every subcheck
@@ -1032,7 +1086,7 @@ mod tests {
     fn preflight_reports_full_access_posture() {
         // Nothing denied -> every probe + feature check succeeds.
         let conn = TierMock { deny: &[] };
-        let report = preflight(&conn);
+        let report = run_with_cx(|cx| async move { preflight(&cx, &conn).await });
         assert_eq!(report.subchecks.len(), HealthSubcheck::all().len());
         for row in &report.subchecks {
             assert_eq!(row.tier, Some(ViewTier::Dba), "{:?}", row.subcheck);
@@ -1066,7 +1120,7 @@ mod tests {
         let conn = TierMock {
             deny: &["dba_", "all_", "v$", "perfstat"],
         };
-        let report = preflight(&conn);
+        let report = run_with_cx(|cx| async move { preflight(&cx, &conn).await });
         for row in &report.subchecks {
             assert_eq!(row.tier, None, "{:?} should be a skip", row.subcheck);
             assert!(row.status.starts_with("skip"));
@@ -1095,34 +1149,36 @@ mod tests {
     /// default is always the free live cursor regardless.
     #[test]
     fn top_queries_statspack_fallback_through_preflight() {
-        // Pack absent (v$parameter has no DIAGNOSTIC value), Statspack present.
-        let with_statspack = TierMock { deny: &[] };
-        assert!(!crate::awr::detect_diagnostics_pack(&with_statspack));
-        assert!(crate::awr::detect_statspack(&with_statspack));
-        assert_eq!(
-            crate::awr::resolve_top_sql_source(&with_statspack, true),
-            crate::awr::DiagnosticsSource::Statspack,
-            "no pack + Statspack installed -> Statspack"
-        );
-        assert_eq!(
-            crate::awr::resolve_top_sql_source(&with_statspack, false),
-            crate::awr::DiagnosticsSource::LiveCursor,
-            "default mode is unaffected by the historical fallback"
-        );
+        run_with_cx(|cx| async move {
+            // Pack absent (v$parameter has no DIAGNOSTIC value), Statspack present.
+            let with_statspack = TierMock { deny: &[] };
+            assert!(!crate::awr::detect_diagnostics_pack(&cx, &with_statspack).await);
+            assert!(crate::awr::detect_statspack(&cx, &with_statspack).await);
+            assert_eq!(
+                crate::awr::resolve_top_sql_source(&cx, &with_statspack, true).await,
+                crate::awr::DiagnosticsSource::Statspack,
+                "no pack + Statspack installed -> Statspack"
+            );
+            assert_eq!(
+                crate::awr::resolve_top_sql_source(&cx, &with_statspack, false).await,
+                crate::awr::DiagnosticsSource::LiveCursor,
+                "default mode is unaffected by the historical fallback"
+            );
 
-        // Pack absent AND Statspack absent -> historical is Unavailable.
-        let without_statspack = TierMock {
-            deny: &["perfstat"],
-        };
-        assert!(!crate::awr::detect_statspack(&without_statspack));
-        assert_eq!(
-            crate::awr::resolve_top_sql_source(&without_statspack, true),
-            crate::awr::DiagnosticsSource::Unavailable
-        );
-        assert_eq!(
-            crate::awr::resolve_top_sql_source(&without_statspack, false),
-            crate::awr::DiagnosticsSource::LiveCursor
-        );
+            // Pack absent AND Statspack absent -> historical is Unavailable.
+            let without_statspack = TierMock {
+                deny: &["perfstat"],
+            };
+            assert!(!crate::awr::detect_statspack(&cx, &without_statspack).await);
+            assert_eq!(
+                crate::awr::resolve_top_sql_source(&cx, &without_statspack, true).await,
+                crate::awr::DiagnosticsSource::Unavailable
+            );
+            assert_eq!(
+                crate::awr::resolve_top_sql_source(&cx, &without_statspack, false).await,
+                crate::awr::DiagnosticsSource::LiveCursor
+            );
+        });
     }
 
     /// The preflight serializes to a stable, report-only JSON shape (so a doctor
@@ -1130,7 +1186,8 @@ mod tests {
     #[test]
     fn preflight_serializes_to_stable_json() {
         let conn = TierMock { deny: &[] };
-        let value = serde_json::to_value(preflight(&conn)).expect("preflight serializes");
+        let report = run_with_cx(|cx| async move { preflight(&cx, &conn).await });
+        let value = serde_json::to_value(report).expect("preflight serializes");
         assert!(value["subchecks"].is_array());
         assert_eq!(value["top_queries_default"], json!("live_cursor"));
         assert!(value["diagnostics_pack_licensed"].is_boolean());

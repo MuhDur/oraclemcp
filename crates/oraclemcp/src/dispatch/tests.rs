@@ -4,10 +4,12 @@
 
 use super::*;
 use crate::registry::TOOL_NAMES;
+use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_core::{DispatchContext, ScopeGrant};
 use oraclemcp_db::{OracleBackend, OracleCell, OracleRow};
 use std::sync::Barrier;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn run_with_current_cx(f: impl FnOnce(&Cx)) {
@@ -43,14 +45,15 @@ fn scope_grant(scope: &str) -> ScopeGrant {
 /// A driver-free mock that returns one synthetic row for any query — mirrors
 /// `oraclemcp_db::query`'s `NRowMock` so the dispatch arms exercise offline.
 struct OneRowMock;
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for OneRowMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
             connection_strategy: Some("single_session".to_owned()),
@@ -76,7 +79,12 @@ impl OracleConnection for OneRowMock {
             client_driver: Some("oraclemcp-driver".to_owned()),
         })
     }
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         Ok(vec![OracleRow {
                 columns: vec![
                     (
@@ -112,8 +120,9 @@ impl OracleConnection for OneRowMock {
                 ],
             }])
     }
-    fn query_rows_named(
+    async fn query_rows_named(
         &self,
+        cx: &Cx,
         sql: &str,
         b: &[(String, OracleBind)],
     ) -> Result<Vec<OracleRow>, DbError> {
@@ -122,15 +131,15 @@ impl OracleConnection for OneRowMock {
             "custom SQL should preserve named bind references: {sql}"
         );
         assert_eq!(b, &[("id".to_owned(), OracleBind::I64(7))]);
-        self.query_rows(sql, &[])
+        self.query_rows(cx, sql, &[]).await
     }
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         Ok(0)
     }
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 }
@@ -151,17 +160,18 @@ impl LabeledMock {
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for LabeledMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
 
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         self.counts.ping.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         self.counts.describe.fetch_add(1, Ordering::SeqCst);
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
@@ -172,7 +182,12 @@ impl OracleConnection for LabeledMock {
         })
     }
 
-    fn query_rows(&self, sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         self.counts.query.fetch_add(1, Ordering::SeqCst);
         let column = if sql.to_ascii_lowercase().contains("all_objects") {
             "SCHEMA_NAME"
@@ -187,38 +202,44 @@ impl OracleConnection for LabeledMock {
         }])
     }
 
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         self.counts.execute.fetch_add(1, Ordering::SeqCst);
         Ok(1)
     }
 
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         self.counts.commit.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         self.counts.rollback.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
 
 struct SourceLookupMock;
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for SourceLookupMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
             current_schema: Some("APP".to_owned()),
             ..Default::default()
         })
     }
-    fn query_rows(&self, sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         if sql.contains("SELECT type") {
             return Ok(vec![
                 OracleRow {
@@ -249,13 +270,13 @@ impl OracleConnection for SourceLookupMock {
             )],
         }])
     }
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         Ok(0)
     }
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 }
@@ -263,65 +284,77 @@ impl OracleConnection for SourceLookupMock {
 /// A mock whose every query fails with a classifiable ORA- error, so we can
 /// assert DbError -> ErrorEnvelope mapping end to end.
 struct FailingMock;
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for FailingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo::default())
     }
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         Err(DbError::Query(
             "ORA-00942: table or view does not exist".to_owned(),
         ))
     }
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         Err(DbError::Execute(
             "ORA-00942: table or view does not exist".to_owned(),
         ))
     }
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 }
 
 struct DescribeFailingMock;
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for DescribeFailingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Err(DbError::BackendNotCompiled {
             backend: OracleBackend::RustOracle,
         })
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Err(DbError::BackendNotCompiled {
             backend: OracleBackend::RustOracle,
         })
     }
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         Err(DbError::BackendNotCompiled {
             backend: OracleBackend::RustOracle,
         })
     }
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         Err(DbError::BackendNotCompiled {
             backend: OracleBackend::RustOracle,
         })
     }
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Err(DbError::BackendNotCompiled {
             backend: OracleBackend::RustOracle,
         })
     }
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Err(DbError::BackendNotCompiled {
             backend: OracleBackend::RustOracle,
         })
@@ -350,16 +383,17 @@ struct CancelAfterExecuteMock {
     state: Arc<ExecState>,
 }
 
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for CancelAfterExecuteMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
 
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
             current_schema: Some("APP".to_owned()),
@@ -367,33 +401,33 @@ impl OracleConnection for CancelAfterExecuteMock {
         })
     }
 
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         Ok(Vec::new())
     }
 
-    fn execute(&self, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, cx: &Cx, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
         self.state
             .executed
             .lock()
             .expect("exec mutex")
             .push((sql.to_owned(), b.to_vec()));
-        Ok(1)
-    }
-
-    fn execute_cx(&self, cx: &Cx, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
-        let _ = self.execute(sql, b)?;
         cx.set_cancel_requested(true);
         Err(DbError::Cancelled(
             "test cancellation after execute".to_owned(),
         ))
     }
 
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         self.state.commits.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         self.state.rollbacks.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -408,16 +442,17 @@ impl ExecRecordingMock {
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for ExecRecordingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
 
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
             current_schema: Some("APP".to_owned()),
@@ -425,7 +460,12 @@ impl OracleConnection for ExecRecordingMock {
         })
     }
 
-    fn query_rows(&self, sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         let sql_lc = sql.to_ascii_lowercase();
         if sql_lc.contains("from all_errors") {
             return Ok(self
@@ -452,7 +492,7 @@ impl OracleConnection for ExecRecordingMock {
         Ok(Vec::new())
     }
 
-    fn execute(&self, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
         self.state
             .executed
             .lock()
@@ -483,14 +523,23 @@ impl OracleConnection for ExecRecordingMock {
         Ok(())
     }
 
-    fn enable_dbms_output(&self, _buffer_bytes: Option<u32>) -> Result<(), DbError> {
+    async fn enable_dbms_output(
+        &self,
+        _cx: &Cx,
+        _buffer_bytes: Option<u32>,
+    ) -> Result<(), DbError> {
         self.state
             .dbms_output_enabled
             .fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    fn read_dbms_output(&self, max_lines: usize, max_chars: usize) -> Result<DbmsOutput, DbError> {
+    async fn read_dbms_output(
+        &self,
+        _cx: &Cx,
+        max_lines: usize,
+        max_chars: usize,
+    ) -> Result<DbmsOutput, DbError> {
         self.state
             .dbms_output_limits
             .lock()
@@ -499,12 +548,12 @@ impl OracleConnection for ExecRecordingMock {
         Ok(self.state.dbms_output.lock().expect("output mutex").clone())
     }
 
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         self.state.commits.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         self.state.rollbacks.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -641,7 +690,9 @@ fn every_registry_tool_routes_and_deserializes_offline() {
             Box::new(OneRowMock),
             Some("dev".to_owned()),
             ddl_level(),
-            Arc::new(|_| Ok(Box::new(OneRowMock))),
+            Arc::new(|_cx, _profile| {
+                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+            }),
         );
         let out = dispatcher
             .dispatch(name, args_for(name))
@@ -656,7 +707,9 @@ fn compatibility_aliases_route_to_prefixed_tools() {
         Box::new(OneRowMock),
         Some("dev".to_owned()),
         default_read_only_level(),
-        Arc::new(|_| Ok(Box::new(OneRowMock))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+        }),
     );
     for name in [
         "current_database",
@@ -717,7 +770,9 @@ fn connection_info_reports_stateless_read_strategy_when_configured() {
         )),
         Some("dev".to_owned()),
         default_read_only_level(),
-        Arc::new(|_| Err(DbError::Connect("unused".to_owned()))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Err(DbError::Connect("unused".to_owned())) })
+        }),
         StatelessReadStrategy::new(
             Some(Box::new(LabeledMock::new(
                 "pool",
@@ -762,7 +817,9 @@ fn stateless_pool_is_used_only_for_metadata_tools() {
         )),
         Some("dev".to_owned()),
         default_read_only_level(),
-        Arc::new(|_| Err(DbError::Connect("unused".to_owned()))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Err(DbError::Connect("unused".to_owned())) })
+        }),
         StatelessReadStrategy::new(
             Some(Box::new(LabeledMock::new(
                 "pool",
@@ -885,7 +942,9 @@ fn failed_profile_switch_does_not_replace_the_current_connection() {
         Box::new(OneRowMock),
         Some("dev".to_owned()),
         default_read_only_level(),
-        Arc::new(|_| Err(DbError::Connect("connect failed".to_owned()))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Err(DbError::Connect("connect failed".to_owned())) })
+        }),
     );
 
     let err = dispatcher
@@ -930,7 +989,9 @@ fn profile_switch_reports_metadata_errors_after_switching() {
         Box::new(OneRowMock),
         Some("dev".to_owned()),
         default_read_only_level(),
-        Arc::new(|_| Ok(Box::new(DescribeFailingMock))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(DescribeFailingMock) as Box<dyn OracleConnection>) })
+        }),
     );
 
     let out = dispatcher
@@ -1143,7 +1204,9 @@ fn patch_source_preview_requires_unique_match_and_returns_confirmation() {
         Box::new(SourceLookupMock),
         Some("dev".to_owned()),
         ddl_level(),
-        Arc::new(|_| Ok(Box::new(SourceLookupMock))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(SourceLookupMock) as Box<dyn OracleConnection>) })
+        }),
     );
     let out = dispatcher
         .dispatch(
@@ -1210,7 +1273,9 @@ fn patch_source_execute_refetches_and_uses_create_or_replace_gate() {
         Box::new(ExecRecordingMock::new(state.clone())),
         Some("dev".to_owned()),
         ddl_level(),
-        Arc::new(|_| Ok(Box::new(OneRowMock))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+        }),
     );
     let preview_args = json!({
         "owner": "APP",
@@ -1252,7 +1317,9 @@ fn patch_view_alias_defaults_to_view_ddl() {
         Box::new(OneRowMock),
         Some("dev".to_owned()),
         ddl_level(),
-        Arc::new(|_| Ok(Box::new(OneRowMock))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+        }),
     );
     let out = dispatcher
         .dispatch("patch_view", args_for("patch_view"))
@@ -1269,7 +1336,9 @@ fn read_patch_preview_lists_and_reads_last_preview() {
         Box::new(SourceLookupMock),
         Some("dev".to_owned()),
         ddl_level(),
-        Arc::new(|_| Ok(Box::new(SourceLookupMock))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(SourceLookupMock) as Box<dyn OracleConnection>) })
+        }),
     );
 
     let empty = dispatcher
@@ -1363,7 +1432,9 @@ fn custom_read_only_tool_dispatches_with_named_binds() {
         Box::new(OneRowMock),
         Some("dev".to_owned()),
         default_read_only_level(),
-        Arc::new(|_| Ok(Box::new(OneRowMock))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+        }),
         CustomToolCatalog::new(loaded),
         None,
     );
@@ -1398,13 +1469,17 @@ fn null_args_behave_like_empty_object_args() {
             Box::new(OneRowMock),
             Some("dev".to_owned()),
             ddl_level(),
-            Arc::new(|_| Ok(Box::new(OneRowMock))),
+            Arc::new(|_cx, _profile| {
+                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+            }),
         );
         let d_null = OracleDispatcher::new_switchable(
             Box::new(OneRowMock),
             Some("dev".to_owned()),
             ddl_level(),
-            Arc::new(|_| Ok(Box::new(OneRowMock))),
+            Arc::new(|_cx, _profile| {
+                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+            }),
         );
         let empty = d_empty.dispatch(name, json!({}));
         let null = d_null.dispatch(name, Value::Null);
@@ -1500,26 +1575,32 @@ fn invalid_bind_type_is_invalid_arguments() {
 /// A connection that MUST never be touched: any query/execute panics. Proves
 /// the read-only gate refuses a statement *before* it can reach Oracle.
 struct NoExecMock;
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for NoExecMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo::default())
     }
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         panic!("a refused statement must never reach the database (query_rows)")
     }
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         panic!("a refused statement must never reach the database (execute)")
     }
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 }
@@ -1549,37 +1630,43 @@ struct TouchCountingMock {
     counts: Arc<TouchCounts>,
 }
 
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for TouchCountingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
 
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         self.counts.ping.fetch_add(1, Ordering::SeqCst);
         panic!("guard-before-I/O test must not ping the database")
     }
 
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         self.counts.describe.fetch_add(1, Ordering::SeqCst);
         panic!("guard-before-I/O test must not describe the database")
     }
 
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         self.counts.query.fetch_add(1, Ordering::SeqCst);
         panic!("guard-before-I/O test must not query the database")
     }
 
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         self.counts.execute.fetch_add(1, Ordering::SeqCst);
         panic!("guard-before-I/O test must not execute against the database")
     }
 
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         self.counts.commit.fetch_add(1, Ordering::SeqCst);
         panic!("guard-before-I/O test must not commit")
     }
 
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         self.counts.rollback.fetch_add(1, Ordering::SeqCst);
         panic!("guard-before-I/O test must not roll back")
     }
@@ -3121,7 +3208,9 @@ mod audit_wiring {
             Box::new(OneRowMock),
             Some("dev".to_owned()),
             level,
-            Arc::new(|_| Ok(Box::new(OneRowMock))),
+            Arc::new(|_cx, _profile| {
+                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+            }),
         )
         .with_auditor(auditor)
     }
@@ -3209,7 +3298,9 @@ mod top_queries {
             Box::new(OneRowMock),
             Some("dev".to_owned()),
             read_write_level(),
-            Arc::new(|_| Ok(Box::new(OneRowMock))),
+            Arc::new(|_cx, _profile| {
+                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+            }),
         )
     }
 
@@ -3253,31 +3344,37 @@ mod db_health {
     /// A mock that fails every query (no DBA_* and no ALL_* access) so every
     /// subcheck must degrade to a structured skip.
     struct NoPrivilegeMock;
+    #[async_trait::async_trait(?Send)]
     impl OracleConnection for NoPrivilegeMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
         }
-        fn ping(&self) -> Result<(), DbError> {
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
             Ok(OracleConnectionInfo {
                 current_schema: Some("APP".to_owned()),
                 ..Default::default()
             })
         }
-        fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
             Err(DbError::Query(
                 "ORA-00942: table or view does not exist".to_owned(),
             ))
         }
-        fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
             Ok(0)
         }
-        fn commit(&self) -> Result<(), DbError> {
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn rollback(&self) -> Result<(), DbError> {
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
     }
@@ -3287,7 +3384,9 @@ mod db_health {
             Box::new(conn),
             Some("dev".to_owned()),
             read_write_level(),
-            Arc::new(|_| Ok(Box::new(OneRowMock))),
+            Arc::new(|_cx, _profile| {
+                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+            }),
         )
     }
 

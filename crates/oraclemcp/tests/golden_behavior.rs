@@ -7,6 +7,7 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
+use asupersync::Cx;
 use oraclemcp::dispatch::OracleDispatcher;
 use oraclemcp::registry::{capabilities, tool_registry};
 use oraclemcp_core::init_token::StdioAuthPolicy;
@@ -22,16 +23,17 @@ use serde_json::{Value, json};
 mod golden_support;
 
 struct OneRowMock;
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for OneRowMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
 
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
             connection_strategy: Some("single_session".to_owned()),
@@ -58,7 +60,12 @@ impl OracleConnection for OneRowMock {
         })
     }
 
-    fn query_rows(&self, _sql: &str, _binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         Ok(vec![OracleRow {
             columns: vec![
                 (
@@ -77,48 +84,54 @@ impl OracleConnection for OneRowMock {
         }])
     }
 
-    fn execute(&self, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
         Ok(0)
     }
 
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 }
 
 struct FailingMock;
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for FailingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
 
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo::default())
     }
 
-    fn query_rows(&self, _sql: &str, _binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         Err(DbError::Query(
             "ORA-00942: table or view does not exist".to_owned(),
         ))
     }
 
-    fn execute(&self, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
         Err(DbError::Execute("ORA-00942".to_owned()))
     }
 
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 }

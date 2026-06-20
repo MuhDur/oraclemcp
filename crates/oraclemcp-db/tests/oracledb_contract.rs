@@ -42,6 +42,8 @@
 //! adapter contract until a future seam extension adds it (at which point a
 //! `execute_many` case is added here and to the shared oracledb copy).
 
+use asupersync::Cx;
+use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
     DbError, OracleBackend, OracleBind, OracleCell, OracleConnection, OracleConnectionInfo,
     OracleRow, SerializeOptions, serialize_cell, serialize_row,
@@ -50,6 +52,30 @@ use oraclemcp_error::{
     ErrorClass, classify_ora_code, envelope_from_oracle_message, parse_ora_code,
 };
 use serde_json::{Value, json};
+
+/// Run an async test body on a fresh current-thread runtime, handing it the
+/// installed request `Cx`.
+fn run_with_cx<F, Fut, T>(body: F) -> T
+where
+    F: FnOnce(Cx) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("current-thread runtime");
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("block_on installs a current Cx");
+        body(cx).await
+    })
+}
+
+/// The cancellation-checkpoint the real adapter applies at each DB boundary,
+/// mirrored in the scripted backend so the `Cx`-first cancellation contract can
+/// be asserted without a live server.
+fn contract_checkpoint(cx: &Cx) -> Result<(), DbError> {
+    cx.checkpoint()
+        .map_err(|err| DbError::Cancelled(err.to_string()))
+}
 
 // ---------------------------------------------------------------------------
 // Shared scripted backend
@@ -107,50 +133,63 @@ impl ScriptedConn {
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for ScriptedConn {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), DbError> {
-        Ok(())
+    async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
+        contract_checkpoint(cx)
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        contract_checkpoint(cx)?;
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
             server_version: Some("23.0.0.0.0".to_owned()),
             ..Default::default()
         })
     }
-    fn query_rows(&self, sql: &str, binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        contract_checkpoint(cx)?;
         self.record(Call::Query {
             sql: sql.to_owned(),
             binds: binds.to_vec(),
         });
         Ok(self.rows.clone())
     }
-    fn query_rows_named(
+    async fn query_rows_named(
         &self,
+        cx: &Cx,
         sql: &str,
         binds: &[(String, OracleBind)],
     ) -> Result<Vec<OracleRow>, DbError> {
+        contract_checkpoint(cx)?;
         self.record(Call::QueryNamed {
             sql: sql.to_owned(),
             binds: binds.to_vec(),
         });
         Ok(self.rows.clone())
     }
-    fn execute(&self, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
+        contract_checkpoint(cx)?;
         self.record(Call::Execute {
             sql: sql.to_owned(),
             binds: binds.to_vec(),
         });
         Ok(self.rowcount)
     }
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, cx: &Cx) -> Result<(), DbError> {
+        contract_checkpoint(cx)?;
         self.record(Call::Commit);
         Ok(())
     }
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, cx: &Cx) -> Result<(), DbError> {
+        contract_checkpoint(cx)?;
         self.record(Call::Rollback);
         Ok(())
     }
@@ -421,12 +460,16 @@ fn contract_query_returns_rows_with_typed_values() {
         ])],
         0,
     );
-    let rows = conn
-        .query_rows(
+    let c = &conn;
+    let rows = run_with_cx(|cx| async move {
+        c.query_rows(
+            &cx,
             "SELECT id, name FROM emp WHERE id = :1",
             &[OracleBind::from(1i64)],
         )
-        .expect("query");
+        .await
+        .expect("query")
+    });
     assert_eq!(rows.len(), 1);
     // NUMBER fidelity at the row boundary: the full 19-digit value survives.
     assert_eq!(rows[0].text("ID"), Some("1234567890123456789"));
@@ -456,8 +499,13 @@ fn contract_bind_variants_are_forwarded_as_typed_binds() {
         OracleBind::F64(2.5),
         OracleBind::Bool(true),
     ];
-    conn.query_rows("SELECT :1,:2,:3,:4,:5 FROM dual", &binds)
-        .expect("query");
+    let c = &conn;
+    let b = &binds;
+    run_with_cx(|cx| async move {
+        c.query_rows(&cx, "SELECT :1,:2,:3,:4,:5 FROM dual", b)
+            .await
+            .expect("query");
+    });
     assert_eq!(
         conn.calls(),
         vec![Call::Query {
@@ -476,9 +524,13 @@ fn contract_named_binds_are_forwarded_by_name() {
         ("p_id".to_owned(), OracleBind::I64(9)),
         ("p_name".to_owned(), OracleBind::String("x".to_owned())),
     ];
-    let rows = conn
-        .query_rows_named("SELECT :p_name AS v FROM emp WHERE id = :p_id", &binds)
-        .expect("named query");
+    let c = &conn;
+    let b = &binds;
+    let rows = run_with_cx(|cx| async move {
+        c.query_rows_named(&cx, "SELECT :p_name AS v FROM emp WHERE id = :p_id", b)
+            .await
+            .expect("named query")
+    });
     assert_eq!(rows[0].text("V"), Some("x"));
     assert_eq!(
         conn.calls(),
@@ -494,12 +546,16 @@ fn contract_execute_returns_rowcount() {
     // execute: a DML statement returns SQL%ROWCOUNT. The single-execute path is
     // the supported write surface (see the module note on execute_many).
     let conn = ScriptedConn::new(vec![], 3);
-    let affected = conn
-        .execute(
+    let c = &conn;
+    let affected = run_with_cx(|cx| async move {
+        c.execute(
+            &cx,
             "UPDATE emp SET sal = sal * 1.1 WHERE deptno = :1",
             &[OracleBind::from(10i64)],
         )
-        .expect("execute");
+        .await
+        .expect("execute")
+    });
     assert_eq!(
         affected, 3,
         "rowcount is the SQL%ROWCOUNT the driver returned"
@@ -519,55 +575,71 @@ fn contract_named_binds_default_rejects_explicitly_not_silently() {
     // silently rewrite SQL — pinned via the trait's default method on a backend
     // that does not override it.
     struct NoNamedBinds;
+    #[async_trait::async_trait(?Send)]
     impl OracleConnection for NoNamedBinds {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
         }
-        fn ping(&self) -> Result<(), DbError> {
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
             Ok(OracleConnectionInfo::default())
         }
-        fn query_rows(&self, _: &str, _: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _: &str,
+            _: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
             Ok(vec![])
         }
-        fn execute(&self, _: &str, _: &[OracleBind]) -> Result<u64, DbError> {
+        async fn execute(&self, _cx: &Cx, _: &str, _: &[OracleBind]) -> Result<u64, DbError> {
             Ok(0)
         }
-        fn commit(&self) -> Result<(), DbError> {
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn rollback(&self) -> Result<(), DbError> {
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
     }
     let conn = NoNamedBinds;
-    let err = conn
-        .query_rows_named(
-            "SELECT :x FROM dual",
-            &[("x".to_owned(), OracleBind::I64(1))],
-        )
-        .expect_err("default named-bind path must reject");
-    assert!(matches!(err, DbError::Query(_)), "{err:?}");
+    run_with_cx(|cx| async move {
+        let err = conn
+            .query_rows_named(
+                &cx,
+                "SELECT :x FROM dual",
+                &[("x".to_owned(), OracleBind::I64(1))],
+            )
+            .await
+            .expect_err("default named-bind path must reject");
+        assert!(matches!(err, DbError::Query(_)), "{err:?}");
 
-    // DBMS_OUTPUT capture is likewise an explicit-rejection default.
-    let err = conn
-        .read_dbms_output(10, 100)
-        .expect_err("default dbms_output rejects");
-    assert!(matches!(err, DbError::Execute(_)), "{err:?}");
+        // DBMS_OUTPUT capture is likewise an explicit-rejection default.
+        let err = conn
+            .read_dbms_output(&cx, 10, 100)
+            .await
+            .expect_err("default dbms_output rejects");
+        assert!(matches!(err, DbError::Execute(_)), "{err:?}");
+    });
 }
 
 #[test]
 fn contract_commit_and_rollback_flow_through_trait() {
     // commit / rollback are forwarded to the backend in call order.
     let conn = ScriptedConn::new(vec![], 1);
-    conn.execute("INSERT INTO t VALUES (1)", &[])
-        .expect("insert");
-    conn.commit().expect("commit");
-    conn.execute("INSERT INTO t VALUES (2)", &[])
-        .expect("insert");
-    conn.rollback().expect("rollback");
+    let c = &conn;
+    run_with_cx(|cx| async move {
+        c.execute(&cx, "INSERT INTO t VALUES (1)", &[])
+            .await
+            .expect("insert");
+        c.commit(&cx).await.expect("commit");
+        c.execute(&cx, "INSERT INTO t VALUES (2)", &[])
+            .await
+            .expect("insert");
+        c.rollback(&cx).await.expect("rollback");
+    });
     let calls = conn.calls();
     assert_eq!(calls.len(), 4);
     assert_eq!(calls[1], Call::Commit);
@@ -576,26 +648,25 @@ fn contract_commit_and_rollback_flow_through_trait() {
 
 #[test]
 fn contract_cancellation_checkpoint_maps_to_cancelled_error() {
-    // The `*_cx` cancellation contract: when the request context is already
+    // The `Cx`-first cancellation contract: when the request context is already
     // cancelled, the adapter's checkpoint aborts the DB boundary with
     // DbError::Cancelled BEFORE the underlying call runs — proven here with a
-    // scripted backend so no live server is needed.
-    use asupersync::runtime::RuntimeBuilder;
+    // scripted backend (which mirrors the real adapter's boundary checkpoint) so
+    // no live server is needed.
     let conn = ScriptedConn::new(vec![row(&[("N", "NUMBER", Some("1"))])], 0);
-    let runtime = RuntimeBuilder::current_thread()
-        .build()
-        .expect("asupersync runtime builds");
-    runtime.block_on(async {
-        let cx = asupersync::Cx::current().expect("block_on installs a request Cx");
+    let c = &conn;
+    run_with_cx(|cx| async move {
         cx.set_cancel_requested(true);
 
-        let err = conn
-            .query_rows_cx(&cx, "SELECT 1 FROM dual", &[])
+        let err = c
+            .query_rows(&cx, "SELECT 1 FROM dual", &[])
+            .await
             .expect_err("cancelled context aborts the query boundary");
         assert!(matches!(err, DbError::Cancelled(_)), "{err:?}");
 
-        let err = conn
-            .execute_cx(&cx, "UPDATE t SET x = 1", &[])
+        let err = c
+            .execute(&cx, "UPDATE t SET x = 1", &[])
+            .await
             .expect_err("cancelled context aborts the execute boundary");
         assert!(matches!(err, DbError::Cancelled(_)), "{err:?}");
     });
@@ -636,8 +707,8 @@ mod live {
         }
     }
 
-    fn connect_or_skip(test_name: &str) -> Option<RustOracleConnection> {
-        match RustOracleConnection::connect(live_opts()) {
+    async fn connect_or_skip(cx: &Cx, test_name: &str) -> Option<RustOracleConnection> {
+        match RustOracleConnection::connect(cx, live_opts()).await {
             Ok(conn) => Some(conn),
             Err(e) => {
                 eprintln!(
@@ -651,83 +722,114 @@ mod live {
 
     #[test]
     fn live_contract_query_binds_typed_values() {
-        let Some(conn) = connect_or_skip("live_contract_query_binds_typed_values") else {
-            return;
-        };
-        // Scalar query.
-        let rows = conn
-            .query_rows("SELECT 1 AS one FROM dual", &[])
-            .expect("scalar");
-        assert_eq!(rows[0].text("ONE"), Some("1"));
+        run_with_cx(|cx| async move {
+            let Some(conn) = connect_or_skip(&cx, "live_contract_query_binds_typed_values").await
+            else {
+                return;
+            };
+            // Scalar query.
+            let rows = conn
+                .query_rows(&cx, "SELECT 1 AS one FROM dual", &[])
+                .await
+                .expect("scalar");
+            assert_eq!(rows[0].text("ONE"), Some("1"));
 
-        // Positional bind, bound not interpolated.
-        let rows = conn
-            .query_rows("SELECT :1 AS v FROM dual", &[OracleBind::from("hello")])
-            .expect("string bind");
-        assert_eq!(rows[0].text("V"), Some("hello"));
+            // Positional bind, bound not interpolated.
+            let rows = conn
+                .query_rows(
+                    &cx,
+                    "SELECT :1 AS v FROM dual",
+                    &[OracleBind::from("hello")],
+                )
+                .await
+                .expect("string bind");
+            assert_eq!(rows[0].text("V"), Some("hello"));
 
-        // NUMBER->string fidelity against a live server: a 38-digit literal must
-        // survive as an exact string (no f64 truncation).
-        let big = "99999999999999999999999999999999999999";
-        let rows = conn
-            .query_rows(&format!("SELECT TO_NUMBER('{big}') AS n FROM dual"), &[])
-            .expect("big number");
-        assert_eq!(rows[0].text("N"), Some(big));
+            // NUMBER->string fidelity against a live server: a 38-digit literal
+            // must survive as an exact string (no f64 truncation).
+            let big = "99999999999999999999999999999999999999";
+            let rows = conn
+                .query_rows(
+                    &cx,
+                    &format!("SELECT TO_NUMBER('{big}') AS n FROM dual"),
+                    &[],
+                )
+                .await
+                .expect("big number");
+            assert_eq!(rows[0].text("N"), Some(big));
+        });
     }
 
     #[test]
     fn live_contract_execute_rowcount_and_rollback() {
-        let Some(conn) = connect_or_skip("live_contract_execute_rowcount_and_rollback") else {
-            return;
-        };
-        // Use a private temp table so the test is self-contained and leaves no
-        // trace (rollback discards the rows; the table is session-scoped).
-        if let Err(e) = conn.execute(
-            "CREATE PRIVATE TEMPORARY TABLE ora$ptt_b7_contract (id NUMBER) \
+        run_with_cx(|cx| async move {
+            let Some(conn) =
+                connect_or_skip(&cx, "live_contract_execute_rowcount_and_rollback").await
+            else {
+                return;
+            };
+            // Use a private temp table so the test is self-contained and leaves no
+            // trace (rollback discards the rows; the table is session-scoped).
+            if let Err(e) = conn
+                .execute(
+                    &cx,
+                    "CREATE PRIVATE TEMPORARY TABLE ora$ptt_b7_contract (id NUMBER) \
              ON COMMIT PRESERVE DEFINITION",
-            &[],
-        ) {
-            eprintln!("[live-xe] SKIP execute rowcount: cannot create PTT ({e})");
-            return;
-        }
-        let affected = conn
-            .execute(
-                "INSERT INTO ora$ptt_b7_contract (id) SELECT level FROM dual CONNECT BY level <= :1",
-                &[OracleBind::from(3i64)],
-            )
-            .expect("insert rows");
-        assert_eq!(affected, 3, "INSERT...CONNECT BY level<=3 affects 3 rows");
+                    &[],
+                )
+                .await
+            {
+                eprintln!("[live-xe] SKIP execute rowcount: cannot create PTT ({e})");
+                return;
+            }
+            let affected = conn
+                .execute(
+                    &cx,
+                    "INSERT INTO ora$ptt_b7_contract (id) SELECT level FROM dual CONNECT BY level <= :1",
+                    &[OracleBind::from(3i64)],
+                )
+                .await
+                .expect("insert rows");
+            assert_eq!(affected, 3, "INSERT...CONNECT BY level<=3 affects 3 rows");
 
-        let rows = conn
-            .query_rows("SELECT COUNT(*) AS c FROM ora$ptt_b7_contract", &[])
-            .expect("count");
-        assert_eq!(rows[0].parse_i64("C"), Some(3));
+            let rows = conn
+                .query_rows(&cx, "SELECT COUNT(*) AS c FROM ora$ptt_b7_contract", &[])
+                .await
+                .expect("count");
+            assert_eq!(rows[0].parse_i64("C"), Some(3));
 
-        // Rollback discards the uncommitted rows.
-        conn.rollback().expect("rollback");
-        let rows = conn
-            .query_rows("SELECT COUNT(*) AS c FROM ora$ptt_b7_contract", &[])
-            .expect("count after rollback");
-        assert_eq!(
-            rows[0].parse_i64("C"),
-            Some(0),
-            "rollback discarded the rows"
-        );
+            // Rollback discards the uncommitted rows.
+            conn.rollback(&cx).await.expect("rollback");
+            let rows = conn
+                .query_rows(&cx, "SELECT COUNT(*) AS c FROM ora$ptt_b7_contract", &[])
+                .await
+                .expect("count after rollback");
+            assert_eq!(
+                rows[0].parse_i64("C"),
+                Some(0),
+                "rollback discarded the rows"
+            );
+        });
     }
 
     #[test]
     fn live_contract_error_mapping_object_not_found() {
-        let Some(conn) = connect_or_skip("live_contract_error_mapping_object_not_found") else {
-            return;
-        };
-        // A real ORA-00942 from the server must classify to ObjectNotFound with
-        // the numeric code preserved through the adapter's error path.
-        let err = conn
-            .query_rows("SELECT * FROM a_table_that_does_not_exist_b7", &[])
-            .expect_err("missing table must error");
-        let env = err.into_envelope();
-        assert_eq!(env.ora_code, Some(942), "envelope: {env:?}");
-        assert_eq!(env.error_class, ErrorClass::ObjectNotFound);
-        assert!(!env.error_class.is_retryable());
+        run_with_cx(|cx| async move {
+            let Some(conn) =
+                connect_or_skip(&cx, "live_contract_error_mapping_object_not_found").await
+            else {
+                return;
+            };
+            // A real ORA-00942 from the server must classify to ObjectNotFound
+            // with the numeric code preserved through the adapter's error path.
+            let err = conn
+                .query_rows(&cx, "SELECT * FROM a_table_that_does_not_exist_b7", &[])
+                .await
+                .expect_err("missing table must error");
+            let env = err.into_envelope();
+            assert_eq!(env.ora_code, Some(942), "envelope: {env:?}");
+            assert_eq!(env.error_class, ErrorClass::ObjectNotFound);
+            assert!(!env.error_class.is_retryable());
+        });
     }
 }

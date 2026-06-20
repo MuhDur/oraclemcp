@@ -563,9 +563,11 @@ fn coerce_bind(p: &ParamDef, v: &Value) -> Option<OracleBind> {
 /// Runs a custom tool's body with bound params at the granted level (engine/DB
 /// side). Injected so this module stays engine-free and unit-testable; the
 /// implementation reuses the Phase-1 read/exec path + type/NLS serializer.
+#[async_trait::async_trait(?Send)]
 pub trait CustomToolExecutor {
     /// Execute `body` at `level` with the bound params; return structured JSON.
-    fn run(
+    /// `Cx`-first and `async` (B1): the body runs a real DB round trip.
+    async fn run(
         &self,
         body: ToolBody<'_>,
         level: OperatingLevel,
@@ -576,7 +578,7 @@ pub trait CustomToolExecutor {
 /// Execute a loaded custom tool: bind the agent args (bind-only) and run the
 /// body at its classify-derived level. PL/SQL blocks are ≥ Guarded, so the
 /// caller's level gate / step-up applies before the executor runs them.
-pub fn execute_custom_tool(
+pub async fn execute_custom_tool(
     loaded: &LoadedTool,
     args: &Value,
     executor: &dyn CustomToolExecutor,
@@ -588,7 +590,7 @@ pub fn execute_custom_tool(
             format!("invalid tool body: {e}"),
         )
     })?;
-    executor.run(body, loaded.required_level, &binds)
+    executor.run(body, loaded.required_level, &binds).await
 }
 
 // ── Catalog: first-class vs meta-dispatch registration (P1-13f / 2.12.6) ──────
@@ -671,7 +673,7 @@ impl CustomToolCatalog {
 
     /// Meta-dispatch: run the named tool with `params`. `args` is the
     /// `oracle_run_named` payload `{ "name": "...", "params": { … } }`.
-    pub fn run_named(
+    pub async fn run_named(
         &self,
         args: &Value,
         executor: &dyn CustomToolExecutor,
@@ -689,7 +691,7 @@ impl CustomToolCatalog {
             )
         })?;
         let params = args.get("params").cloned().unwrap_or(Value::Null);
-        execute_custom_tool(loaded, &params, executor)
+        execute_custom_tool(loaded, &params, executor).await
     }
 
     /// The catalog document for `oracle_capabilities` and the `oracle://tools`
@@ -1171,9 +1173,24 @@ mod tests {
         assert_eq!(binds[0], ("a".to_owned(), OracleBind::Null));
     }
 
+    fn run_with_cx<F, Fut, T>(body: F) -> T
+    where
+        F: FnOnce(asupersync::Cx) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async move {
+            let cx = asupersync::Cx::current().expect("block_on installs a current Cx");
+            body(cx).await
+        })
+    }
+
     struct EchoExecutor;
+    #[async_trait::async_trait(?Send)]
     impl CustomToolExecutor for EchoExecutor {
-        fn run(
+        async fn run(
             &self,
             body: ToolBody<'_>,
             level: OperatingLevel,
@@ -1201,7 +1218,11 @@ mod tests {
             vec![p("id", ParamType::Integer, true)],
         );
         let loaded = classify_at_load(&d, &c, OperatingLevel::ReadOnly).expect("loads");
-        let out = execute_custom_tool(&loaded, &json!({"id": 7}), &EchoExecutor).expect("runs");
+        let out = run_with_cx(|_cx| async {
+            execute_custom_tool(&loaded, &json!({"id": 7}), &EchoExecutor)
+                .await
+                .expect("runs")
+        });
         assert_eq!(out["level"], json!("READ_ONLY"));
         assert_eq!(out["bind_count"], json!(1));
         assert_eq!(out["body"], json!("SELECT * FROM t WHERE id = :id"));
@@ -1307,21 +1328,26 @@ mod tests {
     #[test]
     fn run_named_dispatches_and_rejects_unknown() {
         let cat = catalog();
-        let out = cat
-            .run_named(
-                &json!({"name": "lookup", "params": {"k": "x"}}),
-                &EchoExecutor,
-            )
-            .expect("dispatches");
-        assert_eq!(out["bind_count"], json!(1));
-        let err = cat
-            .run_named(&json!({"name": "nope", "params": {}}), &EchoExecutor)
-            .unwrap_err();
-        assert_eq!(err.error_class, ErrorClass::ObjectNotFound);
-        let err = cat
-            .run_named(&json!({"params": {}}), &EchoExecutor)
-            .unwrap_err();
-        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+        run_with_cx(|_cx| async {
+            let out = cat
+                .run_named(
+                    &json!({"name": "lookup", "params": {"k": "x"}}),
+                    &EchoExecutor,
+                )
+                .await
+                .expect("dispatches");
+            assert_eq!(out["bind_count"], json!(1));
+            let err = cat
+                .run_named(&json!({"name": "nope", "params": {}}), &EchoExecutor)
+                .await
+                .unwrap_err();
+            assert_eq!(err.error_class, ErrorClass::ObjectNotFound);
+            let err = cat
+                .run_named(&json!({"params": {}}), &EchoExecutor)
+                .await
+                .unwrap_err();
+            assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+        });
     }
 
     #[test]

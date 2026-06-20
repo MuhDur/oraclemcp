@@ -11,10 +11,13 @@
 //! discovery tool is answered by the server itself and never reaches here.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use asupersync::Cx;
+use asupersync::sync::Mutex as AsyncMutex;
 use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, Auditor};
 use oraclemcp_auth::apply_oauth_scopes;
 use oraclemcp_config::OracleMcpConfig;
@@ -27,8 +30,8 @@ use oraclemcp_db::{
     SerializeOptions, compile_errors, compile_object_statements, describe_columns,
     describe_constraints, describe_index, describe_trigger, describe_view, execute_immediate_audit,
     explain_plan, find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects,
-    list_schemas, plscope_identifiers, plscope_statements, read_lob, read_query, read_query_cx,
-    read_query_named, read_query_named_cx, sample_rows, search_source, serialize_row,
+    list_schemas, plscope_identifiers, plscope_statements, read_lob, read_query, read_query_named,
+    sample_rows, search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
@@ -92,14 +95,28 @@ const MAX_PATCH_PREVIEWS: usize = 128;
 /// Hard cap on per-call Oracle round-trip timeout overrides.
 const MAX_CALL_TIMEOUT_SECONDS: u64 = 3_600;
 
-/// Reconnect callback used by `oracle_switch_profile`.
-pub type ProfileConnector =
-    dyn Fn(&str) -> Result<Box<dyn OracleConnection>, DbError> + Send + Sync + 'static;
+/// Reconnect callback used by `oracle_switch_profile`. Async + `Cx`-first (B1):
+/// opening a connection is a native-async DB round trip, so the connector
+/// returns a boxed future awaited on the dispatch runtime.
+pub type ProfileConnector = dyn for<'a> Fn(
+        &'a Cx,
+        &'a str,
+    )
+        -> Pin<Box<dyn Future<Output = Result<Box<dyn OracleConnection>, DbError>> + 'a>>
+    + Send
+    + Sync
+    + 'static;
 
 /// Optional stateless metadata-read connector used when a profile configures a
-/// local client-side pool.
-pub type ProfileStatelessConnector =
-    dyn Fn(&str) -> Result<Option<Box<dyn OracleConnection>>, DbError> + Send + Sync + 'static;
+/// local client-side pool. Async + `Cx`-first (B1).
+pub type ProfileStatelessConnector = dyn for<'a> Fn(
+        &'a Cx,
+        &'a str,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Option<Box<dyn OracleConnection>>, DbError>> + 'a>,
+    > + Send
+    + Sync
+    + 'static;
 
 /// Profile-scoped custom-tool loader used by `oracle_switch_profile`.
 pub type CustomToolLoader = dyn Fn(Option<&str>, &SessionLevelState) -> Result<CustomToolCatalog, ErrorEnvelope>
@@ -176,11 +193,13 @@ struct PatchPreviewEntry {
     created_at: Instant,
 }
 
-/// The dispatcher: owns the live connection behind a `std::sync::Mutex` so
-/// dispatch stays sync and the connection is never shared across threads
-/// without serialization.
+/// The dispatcher: owns the live connection behind an Asupersync [`AsyncMutex`]
+/// so the now-async dispatch can hold the guard across a native-async DB round
+/// trip (cancellation-safe; a `std::sync::Mutex` would be a deadlock/cancel
+/// hazard across `.await`). The connection is still single-owner per dispatch
+/// and never shared across threads without serialization.
 pub struct OracleDispatcher {
-    state: Mutex<DispatcherState>,
+    state: AsyncMutex<DispatcherState>,
     connector: Option<Arc<ProfileConnector>>,
     stateless_connector: Option<Arc<ProfileStatelessConnector>>,
     custom_loader: Option<Arc<CustomToolLoader>>,
@@ -213,7 +232,7 @@ impl OracleDispatcher {
         level: SessionLevelState,
     ) -> Self {
         OracleDispatcher {
-            state: Mutex::new(DispatcherState {
+            state: AsyncMutex::new(DispatcherState {
                 conn,
                 stateless_conn: None,
                 active_profile,
@@ -278,7 +297,7 @@ impl OracleDispatcher {
         custom_loader: Option<Arc<CustomToolLoader>>,
     ) -> Self {
         OracleDispatcher {
-            state: Mutex::new(DispatcherState {
+            state: AsyncMutex::new(DispatcherState {
                 conn,
                 stateless_conn: stateless.conn,
                 active_profile,
@@ -365,20 +384,28 @@ fn call_timeout_duration(seconds: Option<u64>) -> Result<Option<Duration>, Error
     )))
 }
 
-fn with_call_timeout<T>(
-    cx: Option<&Cx>,
+/// Apply the per-call Oracle round-trip timeout around an async DB body.
+///
+/// `set_call_timeout` / `call_timeout` are synchronous interior-mutability
+/// accessors (no `.await`), so the timeout is set, the future `f` is awaited,
+/// and the previous value is restored — even on error/cancel.
+async fn with_call_timeout<T, Fut>(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     timeout_seconds: Option<u64>,
-    f: impl FnOnce() -> Result<T, ErrorEnvelope>,
-) -> Result<T, ErrorEnvelope> {
+    f: impl FnOnce() -> Fut,
+) -> Result<T, ErrorEnvelope>
+where
+    Fut: Future<Output = Result<T, ErrorEnvelope>>,
+{
     dispatch_checkpoint(cx, "oraclemcp.dispatch.call_timeout.before")?;
     let Some(timeout) = call_timeout_duration(timeout_seconds)? else {
-        return f();
+        return f().await;
     };
     let previous = conn.call_timeout().map_err(DbError::into_envelope)?;
     conn.set_call_timeout(Some(timeout))
         .map_err(DbError::into_envelope)?;
-    let result = f();
+    let result = f().await;
     let restore = conn
         .set_call_timeout(previous)
         .map_err(DbError::into_envelope);
@@ -390,73 +417,47 @@ fn with_call_timeout<T>(
     }
 }
 
-fn dispatch_checkpoint(cx: Option<&Cx>, phase: &'static str) -> Result<(), ErrorEnvelope> {
-    let Some(cx) = cx else {
-        return Ok(());
-    };
+fn dispatch_checkpoint(cx: &Cx, phase: &'static str) -> Result<(), ErrorEnvelope> {
     cx.checkpoint_with(phase).map_err(|err| {
         ErrorEnvelope::new(ErrorClass::Timeout, format!("tool call cancelled: {err}"))
     })
 }
 
-fn dispatch_checkpoint_db(cx: Option<&Cx>, phase: &'static str) -> Result<(), DbError> {
-    let Some(cx) = cx else {
-        return Ok(());
-    };
-    cx.checkpoint_with(phase)
-        .map_err(|err| DbError::Cancelled(format!("{phase}: {err}")))
-}
-
-fn describe_conn(
-    cx: Option<&Cx>,
+async fn describe_conn(
+    cx: &Cx,
     conn: &dyn OracleConnection,
 ) -> Result<OracleConnectionInfo, DbError> {
-    match cx {
-        Some(cx) => conn.describe_cx(cx),
-        None => conn.describe(),
-    }
+    conn.describe(cx).await
 }
 
-fn execute_conn(
-    cx: Option<&Cx>,
+async fn execute_conn(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     sql: &str,
     binds: &[OracleBind],
 ) -> Result<u64, DbError> {
-    match cx {
-        Some(cx) => conn.execute_cx(cx, sql, binds),
-        None => conn.execute(sql, binds),
-    }
+    conn.execute(cx, sql, binds).await
 }
 
-fn commit_conn(cx: Option<&Cx>, conn: &dyn OracleConnection) -> Result<(), DbError> {
-    match cx {
-        Some(cx) => conn.commit_cx(cx),
-        None => conn.commit(),
-    }
+async fn commit_conn(cx: &Cx, conn: &dyn OracleConnection) -> Result<(), DbError> {
+    conn.commit(cx).await
 }
 
-fn enable_dbms_output_conn(
-    cx: Option<&Cx>,
+async fn enable_dbms_output_conn(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     buffer_bytes: Option<u32>,
 ) -> Result<(), DbError> {
-    match cx {
-        Some(cx) => conn.enable_dbms_output_cx(cx, buffer_bytes),
-        None => conn.enable_dbms_output(buffer_bytes),
-    }
+    conn.enable_dbms_output(cx, buffer_bytes).await
 }
 
-fn read_dbms_output_conn(
-    cx: Option<&Cx>,
+async fn read_dbms_output_conn(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     max_lines: usize,
     max_chars: usize,
 ) -> Result<DbmsOutput, DbError> {
-    match cx {
-        Some(cx) => conn.read_dbms_output_cx(cx, max_lines, max_chars),
-        None => conn.read_dbms_output(max_lines, max_chars),
-    }
+    conn.read_dbms_output(cx, max_lines, max_chars).await
 }
 
 mod args;
@@ -523,14 +524,15 @@ fn non_empty_arg(value: Option<String>) -> Option<String> {
     })
 }
 
-fn owner_or_current_cx(
-    cx: Option<&Cx>,
+async fn owner_or_current_cx(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     owner: Option<String>,
 ) -> Result<String, DbError> {
     match non_empty_arg(owner) {
         Some(owner) => Ok(owner.to_ascii_uppercase()),
-        None => describe_conn(cx, conn).and_then(|info| {
+        None => {
+            let info = describe_conn(cx, conn).await?;
             info.current_schema
                 .map(|owner| owner.to_ascii_uppercase())
                 .ok_or_else(|| {
@@ -538,7 +540,7 @@ fn owner_or_current_cx(
                         "owner is required because current_schema could not be detected".to_owned(),
                     )
                 })
-        }),
+        }
     }
 }
 
@@ -587,8 +589,8 @@ fn split_qualified_name(
     }
 }
 
-fn owner_and_name_arg(
-    cx: Option<&Cx>,
+async fn owner_and_name_arg(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     owner: Option<String>,
     name: String,
@@ -604,7 +606,9 @@ fn owner_and_name_arg(
         }
         (Some(explicit), _) => explicit,
         (None, Some(qualified)) => qualified,
-        (None, None) => owner_or_current_cx(cx, conn, None).map_err(DbError::into_envelope)?,
+        (None, None) => owner_or_current_cx(cx, conn, None)
+            .await
+            .map_err(DbError::into_envelope)?,
     };
     Ok((owner.to_ascii_uppercase(), object_name.to_ascii_uppercase()))
 }
@@ -1592,8 +1596,9 @@ fn execute_audit_draft(
     }
 }
 
-fn execute_sql(
-    cx: Option<&Cx>,
+#[allow(clippy::too_many_arguments)]
+async fn execute_sql(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
@@ -1601,7 +1606,8 @@ fn execute_sql(
     agent_identity: &str,
     args: ExecuteArgs,
 ) -> Result<Value, ErrorEnvelope> {
-    with_call_timeout(cx, conn, args.timeout_seconds, || {
+    let timeout_seconds = args.timeout_seconds;
+    with_call_timeout(cx, conn, timeout_seconds, || {
         execute_sql_inner(
             cx,
             conn,
@@ -1612,10 +1618,12 @@ fn execute_sql(
             args,
         )
     })
+    .await
 }
 
-fn execute_sql_inner(
-    cx: Option<&Cx>,
+#[allow(clippy::too_many_arguments)]
+async fn execute_sql_inner(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
@@ -1708,15 +1716,17 @@ fn execute_sql_inner(
 
     let dbms_output_limits = if args.capture_dbms_output {
         let (max_lines, max_chars, buffer_bytes) = dbms_output_limits(&args);
-        enable_dbms_output_conn(cx, conn, Some(buffer_bytes)).map_err(DbError::into_envelope)?;
+        enable_dbms_output_conn(cx, conn, Some(buffer_bytes))
+            .await
+            .map_err(DbError::into_envelope)?;
         Some((max_lines, max_chars))
     } else {
         None
     };
-    let rows_affected = match execute_conn(cx, conn, &executed_sql, &binds) {
+    let rows_affected = match execute_conn(cx, conn, &executed_sql, &binds).await {
         Ok(rows) => rows,
         Err(e) => {
-            let _ = conn.rollback();
+            let _ = conn.rollback(cx).await;
             // Durably log the failed outcome before propagating.
             if let Some(auditor) = auditor {
                 let post = execute_audit_draft(
@@ -1734,8 +1744,8 @@ fn execute_sql_inner(
         }
     };
     if args.commit {
-        if let Err(e) = commit_conn(cx, conn) {
-            let _ = conn.rollback();
+        if let Err(e) = commit_conn(cx, conn).await {
+            let _ = conn.rollback(cx).await;
             if let Some(auditor) = auditor {
                 let post = execute_audit_draft(
                     agent_identity,
@@ -1751,7 +1761,7 @@ fn execute_sql_inner(
             return Err(DbError::into_envelope(e));
         }
     } else {
-        conn.rollback().map_err(DbError::into_envelope)?;
+        conn.rollback(cx).await.map_err(DbError::into_envelope)?;
     }
 
     // Durably log the successful (committed or rolled-back-preview) outcome.
@@ -1770,6 +1780,7 @@ fn execute_sql_inner(
     let dbms_output = match dbms_output_limits {
         Some((max_lines, max_chars)) => Some(
             read_dbms_output_conn(cx, conn, max_lines, max_chars)
+                .await
                 .map_err(DbError::into_envelope)
                 .map(|out| dbms_output_json(&out, max_lines, max_chars))?,
         ),
@@ -1935,21 +1946,23 @@ fn compile_diagnostic_counts(errors: &[oraclemcp_db::OracleRow]) -> (usize, usiz
     (error_count, warning_count)
 }
 
-fn compile_object(
-    cx: Option<&Cx>,
+async fn compile_object(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
     tool_name: &str,
     args: CompileObjectArgs,
 ) -> Result<Value, ErrorEnvelope> {
-    with_call_timeout(cx, conn, args.timeout_seconds, || {
+    let timeout_seconds = args.timeout_seconds;
+    with_call_timeout(cx, conn, timeout_seconds, || {
         compile_object_inner(cx, conn, active_profile, session, tool_name, args)
     })
+    .await
 }
 
-fn compile_object_inner(
-    cx: Option<&Cx>,
+async fn compile_object_inner(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
@@ -1957,7 +1970,8 @@ fn compile_object_inner(
     args: CompileObjectArgs,
 ) -> Result<Value, ErrorEnvelope> {
     let object_name = required_non_empty_arg(tool_name, "name", args.name)?;
-    let (owner, object_name) = owner_and_name_arg(cx, conn, args.owner, object_name, "name")?;
+    let (owner, object_name) =
+        owner_and_name_arg(cx, conn, args.owner, object_name, "name").await?;
     let object_type = normalize_compile_type_for_wire(&args.object_type);
     let warnings = args.warnings || tool_name == "compile_with_warnings";
     let mut statements =
@@ -2028,11 +2042,16 @@ fn compile_object_inner(
 
     let mut rows_affected = Vec::with_capacity(statements.len());
     for stmt in &statements {
-        rows_affected.push(execute_conn(cx, conn, stmt, &[]).map_err(DbError::into_envelope)?);
+        rows_affected.push(
+            execute_conn(cx, conn, stmt, &[])
+                .await
+                .map_err(DbError::into_envelope)?,
+        );
     }
     dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.before")?;
-    let errors =
-        compile_errors(conn, &owner, Some(&object_name)).map_err(DbError::into_envelope)?;
+    let errors = compile_errors(cx, conn, &owner, Some(&object_name))
+        .await
+        .map_err(DbError::into_envelope)?;
     dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.after")?;
     let (error_count, warning_count) = compile_diagnostic_counts(&errors);
     Ok(json!({
@@ -2093,8 +2112,8 @@ fn clean_source_name_token(raw: &str) -> Option<String> {
     }
 }
 
-fn detect_create_or_replace_object(
-    cx: Option<&Cx>,
+async fn detect_create_or_replace_object(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     source: &str,
 ) -> Option<SourceObjectHint> {
@@ -2135,7 +2154,9 @@ fn detect_create_or_replace_object(
         _ => return None,
     };
     let name = clean_source_name_token(words.get(name_idx)?)?;
-    let (owner, name) = owner_and_name_arg(cx, conn, None, name, "name").ok()?;
+    let (owner, name) = owner_and_name_arg(cx, conn, None, name, "name")
+        .await
+        .ok()?;
     Some(SourceObjectHint {
         owner,
         name,
@@ -2312,8 +2333,8 @@ fn required_patch_new_text(
     })
 }
 
-fn fetch_patch_source_document(
-    cx: Option<&Cx>,
+async fn fetch_patch_source_document(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     owner: &str,
     name: &str,
@@ -2322,7 +2343,8 @@ fn fetch_patch_source_document(
 ) -> Result<PatchSourceDocument, ErrorEnvelope> {
     if object_type == "VIEW" {
         dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.get_ddl.before")?;
-        let ddl = get_ddl(conn, "VIEW", owner, name)
+        let ddl = get_ddl(cx, conn, "VIEW", owner, name)
+            .await
             .map_err(DbError::into_envelope)?
             .ok_or_else(|| {
                 ErrorEnvelope::new(
@@ -2341,8 +2363,9 @@ fn fetch_patch_source_document(
     }
 
     dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.get_source.before")?;
-    let source =
-        get_source(conn, owner, name, object_type, max_chars).map_err(DbError::into_envelope)?;
+    let source = get_source(cx, conn, owner, name, object_type, max_chars)
+        .await
+        .map_err(DbError::into_envelope)?;
     dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.get_source.after")?;
     if source.line_count == 0 {
         return Err(ErrorEnvelope::new(
@@ -2607,21 +2630,23 @@ fn read_patch_preview(
     }))
 }
 
-fn patch_source(
-    cx: Option<&Cx>,
+async fn patch_source(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
     tool_name: &str,
     args: PatchSourceArgs,
 ) -> Result<(Value, Option<PatchPreviewEntry>), ErrorEnvelope> {
-    with_call_timeout(cx, conn, args.timeout_seconds, || {
+    let timeout_seconds = args.timeout_seconds;
+    with_call_timeout(cx, conn, timeout_seconds, || {
         patch_source_inner(cx, conn, active_profile, session, tool_name, args)
     })
+    .await
 }
 
-fn patch_source_inner(
-    cx: Option<&Cx>,
+async fn patch_source_inner(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
@@ -2633,9 +2658,11 @@ fn patch_source_inner(
     let old_text = required_patch_old_text(tool_name, args.old_text)?;
     let new_text = required_patch_new_text(tool_name, args.new_text)?;
     let max_chars = args.max_chars.unwrap_or(DEFAULT_SOURCE_MAX_CHARS).max(1);
-    let (owner, object_name) = owner_and_name_arg(cx, conn, args.owner, object_name, "name")?;
+    let (owner, object_name) =
+        owner_and_name_arg(cx, conn, args.owner, object_name, "name").await?;
     let document =
-        fetch_patch_source_document(cx, conn, &owner, &object_name, &object_type, max_chars)?;
+        fetch_patch_source_document(cx, conn, &owner, &object_name, &object_type, max_chars)
+            .await?;
     let match_idx = find_unique_patch_match(&document.text, &old_text, tool_name)?;
     let mut patched_source = document.text.clone();
     patched_source.replace_range(match_idx..match_idx + old_text.len(), &new_text);
@@ -2740,21 +2767,25 @@ fn patch_source_inner(
         "call the patch tool without execute=true, then pass confirmation.confirm with execute=true",
     )?;
 
-    let rows_affected = match execute_conn(cx, conn, &patched_ddl, &[]) {
+    let rows_affected = match execute_conn(cx, conn, &patched_ddl, &[]).await {
         Ok(rows) => rows,
         Err(e) => {
-            let _ = conn.rollback();
+            let _ = conn.rollback(cx).await;
             return Err(DbError::into_envelope(e));
         }
     };
-    if let Err(e) = commit_conn(cx, conn) {
-        let _ = conn.rollback();
+    if let Err(e) = commit_conn(cx, conn).await {
+        let _ = conn.rollback(cx).await;
         return Err(DbError::into_envelope(e));
     }
     let include_errors = args.include_errors.unwrap_or(true);
     let errors = if include_errors {
         dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.compile_errors.before")?;
-        Some(compile_errors(conn, &owner, Some(&object_name)).map_err(DbError::into_envelope)?)
+        Some(
+            compile_errors(cx, conn, &owner, Some(&object_name))
+                .await
+                .map_err(DbError::into_envelope)?,
+        )
     } else {
         None
     };
@@ -2790,8 +2821,8 @@ fn patch_source_inner(
 // every CREATE OR REPLACE is hash-chained (A8). TODO(simplify): bundle the audit
 // context into an `AuditCtx` to drop back under the arg-count lint.
 #[allow(clippy::too_many_arguments)]
-fn create_or_replace(
-    cx: Option<&Cx>,
+async fn create_or_replace(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
@@ -2800,7 +2831,8 @@ fn create_or_replace(
     tool_name: &str,
     args: CreateOrReplaceArgs,
 ) -> Result<Value, ErrorEnvelope> {
-    with_call_timeout(cx, conn, args.timeout_seconds, || {
+    let timeout_seconds = args.timeout_seconds;
+    with_call_timeout(cx, conn, timeout_seconds, || {
         create_or_replace_inner(
             cx,
             conn,
@@ -2812,11 +2844,12 @@ fn create_or_replace(
             args,
         )
     })
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
-fn create_or_replace_inner(
-    cx: Option<&Cx>,
+async fn create_or_replace_inner(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
@@ -2829,7 +2862,7 @@ fn create_or_replace_inner(
     let decision = Classifier::new(ClassifierConfig::new()).classify(&source);
     let gate = decision.gate(session);
     let (gate_decision, blocked_reason, step_up_target) = gate_decision_json(&gate);
-    let detected = detect_create_or_replace_object(cx, conn, &source);
+    let detected = detect_create_or_replace_object(cx, conn, &source).await;
     let confirm = match (decision.required_level, &gate) {
         (Some(level), LevelDecision::Allow) if level >= OperatingLevel::Ddl => {
             execute_confirmation_token(&source, level, active_profile)
@@ -2885,7 +2918,8 @@ fn create_or_replace_inner(
             dbms_output_max_chars: None,
             timeout_seconds: args.timeout_seconds,
         },
-    )?;
+    )
+    .await?;
     let include_errors = args.include_errors.unwrap_or(true);
     if let Value::Object(map) = &mut executed {
         map.insert("applied".to_owned(), json!(true));
@@ -2900,7 +2934,8 @@ fn create_or_replace_inner(
                     cx,
                     "oraclemcp.dispatch.create_or_replace.compile_errors.before",
                 )?;
-                let errors = compile_errors(conn, &hint.owner, Some(&hint.name))
+                let errors = compile_errors(cx, conn, &hint.owner, Some(&hint.name))
+                    .await
                     .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(
                     cx,
@@ -2921,8 +2956,9 @@ fn create_or_replace_inner(
     Ok(executed)
 }
 
-fn deploy_ddl(
-    cx: Option<&Cx>,
+#[allow(clippy::too_many_arguments)]
+async fn deploy_ddl(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
@@ -2930,7 +2966,8 @@ fn deploy_ddl(
     agent_identity: &str,
     args: DeployDdlArgs,
 ) -> Result<Value, ErrorEnvelope> {
-    with_call_timeout(cx, conn, args.timeout_seconds, || {
+    let timeout_seconds = args.timeout_seconds;
+    with_call_timeout(cx, conn, timeout_seconds, || {
         deploy_ddl_inner(
             cx,
             conn,
@@ -2941,10 +2978,12 @@ fn deploy_ddl(
             args,
         )
     })
+    .await
 }
 
-fn deploy_ddl_inner(
-    cx: Option<&Cx>,
+#[allow(clippy::too_many_arguments)]
+async fn deploy_ddl_inner(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
@@ -2975,7 +3014,8 @@ fn deploy_ddl_inner(
                 include_errors: args.include_errors,
                 timeout_seconds: args.timeout_seconds,
             },
-        )?;
+        )
+        .await?;
         if let Value::Object(map) = &mut out {
             map.insert("deploy_name".to_owned(), json!(deploy_name));
             map.insert("wait_seconds".to_owned(), json!(wait_seconds));
@@ -3047,7 +3087,8 @@ fn deploy_ddl_inner(
             dbms_output_max_chars: None,
             timeout_seconds: args.timeout_seconds,
         },
-    )?;
+    )
+    .await?;
     if let Value::Object(map) = &mut out {
         map.insert("applied".to_owned(), json!(true));
         map.insert("preview".to_owned(), json!(false));
@@ -3059,12 +3100,13 @@ fn deploy_ddl_inner(
 }
 
 struct ReadOnlyCustomToolExecutor<'a> {
-    cx: Option<&'a Cx>,
+    cx: &'a Cx,
     conn: &'a dyn OracleConnection,
 }
 
+#[async_trait::async_trait(?Send)]
 impl CustomToolExecutor for ReadOnlyCustomToolExecutor<'_> {
-    fn run(
+    async fn run(
         &self,
         body: ToolBody<'_>,
         level: OperatingLevel,
@@ -3088,27 +3130,20 @@ impl CustomToolExecutor for ReadOnlyCustomToolExecutor<'_> {
             ToolBody::PackageCall(call) => format!("SELECT {call} AS VALUE FROM dual"),
         };
         ensure_read_only(&sql)?;
-        match self.cx {
-            // A9: operator-defined read tools also run under the narrowed
-            // read-path capability row (see the oracle_query arm).
-            Some(cx) => read_query_named_cx(
-                &narrow_to_read_path(cx),
-                self.conn,
-                &sql,
-                binds,
-                QueryCaps::default(),
-                0,
-                &SerializeOptions::default(),
-            ),
-            None => read_query_named(
-                self.conn,
-                &sql,
-                binds,
-                QueryCaps::default(),
-                0,
-                &SerializeOptions::default(),
-            ),
-        }
+        // A9: operator-defined read tools also narrow the handler context to the
+        // read-path capability row (the DB round trip itself takes the full
+        // `cx`, like the oracle_query arm).
+        let _read_cx = narrow_to_read_path(self.cx);
+        read_query_named(
+            self.cx,
+            self.conn,
+            &sql,
+            binds,
+            QueryCaps::default(),
+            0,
+            &SerializeOptions::default(),
+        )
+        .await
         .map(|resp| serde_json::to_value(resp).unwrap_or(Value::Null))
         .map_err(DbError::into_envelope)
     }
@@ -3200,8 +3235,8 @@ fn connection_info_json(
     }
 }
 
-fn connection_strategy_json(cx: Option<&Cx>, conn: &dyn OracleConnection) -> Value {
-    match describe_conn(cx, conn) {
+async fn connection_strategy_json(cx: &Cx, conn: &dyn OracleConnection) -> Value {
+    match describe_conn(cx, conn).await {
         Ok(info) => json!({
             "connected": true,
             "strategy": info.connection_strategy,
@@ -3249,16 +3284,16 @@ impl ToolDispatch for OracleDispatcher {
         name: &'a str,
         args: Value,
     ) -> DispatchFuture<'a> {
-        Box::pin(async move { self.dispatch_with_optional_cx(Some(cx), context, name, args) })
+        Box::pin(async move { self.dispatch_with_cx_inner(cx, context, name, args).await })
     }
 }
 
 impl OracleDispatcher {
-    /// Synchronous concrete dispatch used by the current DB adapter and focused
-    /// dispatcher tests. The server-facing trait method wraps this behind an
-    /// explicit Asupersync context.
+    /// Synchronous concrete dispatch used by focused dispatcher tests and the
+    /// non-Cx convenience callers. Builds a one-shot current-thread Asupersync
+    /// runtime to drive the now-async dispatch and obtain a request `Cx`.
     pub fn dispatch(&self, name: &str, args: Value) -> Result<Value, ErrorEnvelope> {
-        self.dispatch_with_optional_cx(None, DispatchContext::default(), name, args)
+        self.dispatch_blocking(DispatchContext::default(), name, args)
     }
 
     /// Synchronous concrete dispatch with an explicit Asupersync cancellation
@@ -3270,7 +3305,22 @@ impl OracleDispatcher {
         name: &str,
         args: Value,
     ) -> Result<Value, ErrorEnvelope> {
-        self.dispatch_with_optional_cx(Some(cx), DispatchContext::default(), name, args)
+        // Drive the async body to completion on a one-shot current-thread
+        // runtime, but thread the CALLER's `cx` (clone) through — its
+        // cancellation/budget state is the contract the dispatch must honor (a
+        // fresh runtime's ambient Cx would lose a pre-cancelled request).
+        let caller_cx = cx.clone();
+        // block-on-boundary: sync->async dispatch ENTRY shim (not the per-call
+        // DB round-trip path). The server's real entry is the async
+        // `ToolDispatch::dispatch` which is `.await`-ed on the dispatch runtime;
+        // this sync wrapper exists only for non-server/test callers.
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime")
+            .block_on(async move {
+                self.dispatch_with_cx_inner(&caller_cx, DispatchContext::default(), name, args)
+                    .await
+            })
     }
 
     /// Synchronous concrete dispatch with a transport authorization context.
@@ -3280,12 +3330,31 @@ impl OracleDispatcher {
         args: Value,
         context: DispatchContext<'_>,
     ) -> Result<Value, ErrorEnvelope> {
-        self.dispatch_with_optional_cx(None, context, name, args)
+        self.dispatch_blocking(context, name, args)
     }
 
-    fn dispatch_with_optional_cx(
+    /// Drive the async dispatch to completion on a one-shot current-thread
+    /// runtime, supplying the installed request `Cx`.
+    fn dispatch_blocking(
         &self,
-        cx: Option<&Cx>,
+        context: DispatchContext<'_>,
+        name: &str,
+        args: Value,
+    ) -> Result<Value, ErrorEnvelope> {
+        // block-on-boundary: sync->async dispatch ENTRY shim (not the per-call
+        // DB round-trip path); see `dispatch_with_cx`.
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime")
+            .block_on(async move {
+                let cx = Cx::current().expect("block_on installs a request Cx");
+                self.dispatch_with_cx_inner(&cx, context, name, args).await
+            })
+    }
+
+    async fn dispatch_with_cx_inner(
+        &self,
+        cx: &Cx,
         context: DispatchContext<'_>,
         name: &str,
         args: Value,
@@ -3303,19 +3372,25 @@ impl OracleDispatcher {
                 .with_next_step("restart the server with `oraclemcp serve --profile <name>`"));
             };
 
-            let new_conn = connector(&profile).map_err(DbError::into_envelope)?;
+            let new_conn = connector(cx, &profile)
+                .await
+                .map_err(DbError::into_envelope)?;
             let new_stateless_conn = match &self.stateless_connector {
-                Some(connector) => connector(&profile).map_err(DbError::into_envelope)?,
+                Some(connector) => connector(cx, &profile)
+                    .await
+                    .map_err(DbError::into_envelope)?,
                 None => None,
             };
-            let mut response =
-                connection_info_json(Some(profile.clone()), describe_conn(cx, new_conn.as_ref()));
+            let mut response = connection_info_json(
+                Some(profile.clone()),
+                describe_conn(cx, new_conn.as_ref()).await,
+            );
             if let Value::Object(map) = &mut response
                 && let Some(stateless_conn) = new_stateless_conn.as_ref()
             {
                 map.insert(
                     "stateless_read_connection".to_owned(),
-                    connection_strategy_json(cx, stateless_conn.as_ref()),
+                    connection_strategy_json(cx, stateless_conn.as_ref()).await,
                 );
             }
             let new_level = profile_level(&profile);
@@ -3323,8 +3398,8 @@ impl OracleDispatcher {
                 Some(loader) => loader(Some(&profile), &new_level)?,
                 None => CustomToolCatalog::default(),
             };
-            let mut state = self.state.lock().map_err(|_| {
-                ErrorEnvelope::new(ErrorClass::Internal, "connection mutex poisoned")
+            let mut state = self.state.lock(cx).await.map_err(|_| {
+                ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
             })?;
             state.conn = new_conn;
             state.stateless_conn = new_stateless_conn;
@@ -3342,12 +3417,13 @@ impl OracleDispatcher {
             return Ok(response);
         }
 
-        // A poisoned mutex means a prior dispatch panicked while holding the
-        // connection; surface it as an Internal error rather than re-panicking.
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| ErrorEnvelope::new(ErrorClass::Internal, "connection mutex poisoned"))?;
+        // The async mutex serializes dispatch over the single connection and is
+        // safe to hold across the DB `.await`s below (the dispatch future is
+        // `!Send` and never spawned cross-thread). A lock failure surfaces as an
+        // Internal error rather than a panic.
+        let mut state = self.state.lock(cx).await.map_err(|_| {
+            ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
+        })?;
         let scoped_level = scoped_session_level(&state.level, context);
         let scoped = context.scope_grant().is_some();
         if tool == "oracle_set_session_level" {
@@ -3405,7 +3481,8 @@ impl OracleDispatcher {
                 self.auditor.as_deref(),
                 &agent_identity,
                 execute_args,
-            );
+            )
+            .await;
         }
         if tool == "deploy_ddl" {
             let a: DeployDdlArgs = parse_args(name, args)?;
@@ -3420,7 +3497,8 @@ impl OracleDispatcher {
                 self.auditor.as_deref(),
                 &agent_identity,
                 a,
-            );
+            )
+            .await;
         }
         if tool == "read_patch_preview" {
             let a: ReadPatchPreviewArgs = parse_args(name, args)?;
@@ -3432,7 +3510,7 @@ impl OracleDispatcher {
             .as_deref()
             .unwrap_or_else(|| state.conn.as_ref());
 
-        let result: Result<Value, DbError> = match tool {
+        let result: Result<Value, ErrorEnvelope> = match tool {
             "oracle_execute" => {
                 let a: ExecuteArgs = parse_args(name, args)?;
                 let agent_identity = audit_agent_identity(state.active_profile.as_deref());
@@ -3444,7 +3522,8 @@ impl OracleDispatcher {
                     self.auditor.as_deref(),
                     &agent_identity,
                     a,
-                );
+                )
+                .await;
             }
             "oracle_compile_object" => {
                 let a: CompileObjectArgs = parse_args(name, args)?;
@@ -3455,7 +3534,8 @@ impl OracleDispatcher {
                     &scoped_level,
                     name,
                     a,
-                );
+                )
+                .await;
             }
             "oracle_create_or_replace" => {
                 let a: CreateOrReplaceArgs = parse_args(name, args)?;
@@ -3469,7 +3549,8 @@ impl OracleDispatcher {
                     &agent_identity,
                     name,
                     a,
-                );
+                )
+                .await;
             }
             "oracle_patch_source" => {
                 let a: PatchSourceArgs = parse_args(name, args)?;
@@ -3480,7 +3561,8 @@ impl OracleDispatcher {
                     &scoped_level,
                     name,
                     a,
-                )?;
+                )
+                .await?;
                 if let Some(preview_entry) = preview_entry {
                     remember_patch_preview(&mut state, preview_entry);
                 }
@@ -3490,18 +3572,22 @@ impl OracleDispatcher {
                 ensure_no_args(name, args)?;
                 OracleMcpConfig::load(None)
                     .map(|cfg| profiles_response(&cfg))
-                    .map_err(|e| DbError::UnsupportedAuth(format!("config load failed: {e}")))
+                    .map_err(|e| {
+                        DbError::UnsupportedAuth(format!("config load failed: {e}")).into_envelope()
+                    })
             }
             "oracle_connection_info" => {
                 ensure_no_args(name, args)?;
-                let mut value =
-                    connection_info_json(state.active_profile.clone(), describe_conn(cx, conn));
+                let mut value = connection_info_json(
+                    state.active_profile.clone(),
+                    describe_conn(cx, conn).await,
+                );
                 if let Value::Object(map) = &mut value
                     && let Some(stateless_conn) = state.stateless_conn.as_ref()
                 {
                     map.insert(
                         "stateless_read_connection".to_owned(),
-                        connection_strategy_json(cx, stateless_conn.as_ref()),
+                        connection_strategy_json(cx, stateless_conn.as_ref()).await,
                     );
                 }
                 Ok(value)
@@ -3513,7 +3599,13 @@ impl OracleDispatcher {
                 // so ensure_read_only on the marked text behaves identically to the
                 // bare SELECT, and the text classified is the text executed.
                 let active_profile = state.active_profile.clone();
-                return with_call_timeout(cx, conn, a.timeout_seconds, || {
+                let timeout_seconds = a.timeout_seconds;
+                // A9: narrowing the handler context to the read-path capability
+                // row (TIME + IO; no SPAWN / REMOTE / RANDOM) is still applied as
+                // the structural guarantee, even though the DB round trip itself
+                // takes the full `cx` (the native driver needs `IO`).
+                let _read_cx = narrow_to_read_path(cx);
+                return with_call_timeout(cx, conn, timeout_seconds, || async {
                     let executed_sql =
                         with_audit_marker(&a.sql, active_profile.as_deref(), "oracle_query");
                     ensure_read_only(&executed_sql)?;
@@ -3523,34 +3615,20 @@ impl OracleDispatcher {
                         .map(json_to_bind)
                         .collect::<Result<Vec<_>, _>>()?;
                     let offset = oraclemcp_db::cursor_to_offset(a.cursor.as_deref());
-                    match cx {
-                        // A9: the read path runs under a Cx narrowed to the
-                        // read-path capability row (TIME + IO; no SPAWN / REMOTE
-                        // / RANDOM). `read_query_cx` is generic over the row and
-                        // needs none of the dropped effects, so this is a
-                        // zero-cost structural narrowing layered ABOVE the
-                        // fail-closed classifier + level gate.
-                        Some(cx) => read_query_cx(
-                            &narrow_to_read_path(cx),
-                            conn,
-                            &executed_sql,
-                            &binds,
-                            query_caps_from_args(&a),
-                            offset,
-                            &query_serialize_options_from_args(&a),
-                        ),
-                        None => read_query(
-                            conn,
-                            &executed_sql,
-                            &binds,
-                            query_caps_from_args(&a),
-                            offset,
-                            &query_serialize_options_from_args(&a),
-                        ),
-                    }
+                    read_query(
+                        cx,
+                        conn,
+                        &executed_sql,
+                        &binds,
+                        query_caps_from_args(&a),
+                        offset,
+                        &query_serialize_options_from_args(&a),
+                    )
+                    .await
                     .map(|resp| serde_json::to_value(resp).unwrap_or(Value::Null))
                     .map_err(DbError::into_envelope)
-                });
+                })
+                .await;
             }
             "oracle_schema_inspect" => {
                 let a: SchemaInspectArgs = parse_args(name, args)?;
@@ -3561,39 +3639,45 @@ impl OracleDispatcher {
                     .max_rows
                     .unwrap_or(DEFAULT_SCHEMA_INSPECT_MAX_ROWS)
                     .clamp(1, MAX_SCHEMA_INSPECT_MAX_ROWS);
-                let owner_result: Result<Option<String>, DbError> = match owner_arg.as_deref() {
-                    Some("*") => Ok(None),
-                    Some(owner) => Ok(Some(owner.to_owned())),
-                    None => describe_conn(cx, metadata_conn).and_then(|info| {
-                        info.current_schema.map(Some).ok_or_else(|| {
-                            DbError::Query(
-                                "owner is required because current_schema could not be detected"
-                                    .to_owned(),
-                            )
-                        })
-                    }),
+                let owner_filter: Option<String> = match owner_arg.as_deref() {
+                    Some("*") => None,
+                    Some(owner) => Some(owner.to_owned()),
+                    None => {
+                        let info = describe_conn(cx, metadata_conn)
+                            .await
+                            .map_err(DbError::into_envelope)?;
+                        Some(
+                            info.current_schema
+                                .ok_or_else(|| {
+                                    DbError::Query(
+                                        "owner is required because current_schema could not be detected"
+                                            .to_owned(),
+                                    )
+                                })
+                                .map_err(DbError::into_envelope)?,
+                        )
+                    }
                 };
-                owner_result.and_then(|owner_filter| {
-                    dispatch_checkpoint_db(cx, "oraclemcp.dispatch.schema_inspect.before")?;
-                    list_objects(
-                        metadata_conn,
-                        owner_filter.as_deref(),
-                        object_type.as_deref(),
-                        name_like.as_deref(),
-                        max_rows,
-                    )
-                    .and_then(|rows| {
-                        dispatch_checkpoint_db(cx, "oraclemcp.dispatch.schema_inspect.after")?;
-                        Ok(json!({
-                            "objects": rows_to_json(&rows),
-                            "owner": owner_filter.as_deref().unwrap_or("*"),
-                            "object_type": object_type,
-                            "name_like": name_like,
-                            "max_rows": max_rows,
-                            "truncated": rows.len() == max_rows,
-                        }))
-                    })
-                })
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.schema_inspect.before")?;
+                let rows = list_objects(
+                    cx,
+                    metadata_conn,
+                    owner_filter.as_deref(),
+                    object_type.as_deref(),
+                    name_like.as_deref(),
+                    max_rows,
+                )
+                .await
+                .map_err(DbError::into_envelope)?;
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.schema_inspect.after")?;
+                Ok(json!({
+                    "objects": rows_to_json(&rows),
+                    "owner": owner_filter.as_deref().unwrap_or("*"),
+                    "object_type": object_type,
+                    "name_like": name_like,
+                    "max_rows": max_rows,
+                    "truncated": rows.len() == max_rows,
+                }))
             }
             "oracle_list_schemas" => {
                 let a: ListSchemasArgs = parse_args(name, args)?;
@@ -3603,122 +3687,131 @@ impl OracleDispatcher {
                     .unwrap_or(DEFAULT_SCHEMA_LIST_MAX_ROWS)
                     .clamp(1, MAX_SCHEMA_LIST_MAX_ROWS);
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.list_schemas.before")?;
-                list_schemas(metadata_conn, name_like.as_deref(), max_rows).and_then(|rows| {
-                    dispatch_checkpoint_db(cx, "oraclemcp.dispatch.list_schemas.after")?;
-                    Ok(json!({
-                        "schemas": rows_to_json(&rows),
-                        "name_like": name_like,
-                        "max_rows": max_rows,
-                        "truncated": rows.len() == max_rows,
-                    }))
-                })
+                let rows = list_schemas(cx, metadata_conn, name_like.as_deref(), max_rows)
+                    .await
+                    .map_err(DbError::into_envelope)?;
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.list_schemas.after")?;
+                Ok(json!({
+                    "schemas": rows_to_json(&rows),
+                    "name_like": name_like,
+                    "max_rows": max_rows,
+                    "truncated": rows.len() == max_rows,
+                }))
             }
             "oracle_describe" => {
                 let a: DescribeArgs = parse_args(name, args)?;
                 let table = required_non_empty_arg(name, "table", a.table)?;
                 let (owner, table) =
-                    owner_and_name_arg(cx, metadata_conn, a.owner, table, "table")?;
+                    owner_and_name_arg(cx, metadata_conn, a.owner, table, "table").await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_columns.before")?;
-                describe_columns(metadata_conn, &owner, &table).and_then(|columns| {
-                    dispatch_checkpoint_db(cx, "oraclemcp.dispatch.describe_constraints.before")?;
-                    describe_constraints(metadata_conn, &owner, &table).and_then(|constraints| {
-                        dispatch_checkpoint_db(
-                            cx,
-                            "oraclemcp.dispatch.describe_constraints.after",
-                        )?;
-                        Ok(json!({
-                            "owner": owner,
-                            "table": table,
-                            "columns": rows_to_json(&columns),
-                            "constraints": rows_to_json(&constraints),
-                        }))
-                    })
-                })
+                let columns = describe_columns(cx, metadata_conn, &owner, &table)
+                    .await
+                    .map_err(DbError::into_envelope)?;
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_constraints.before")?;
+                let constraints = describe_constraints(cx, metadata_conn, &owner, &table)
+                    .await
+                    .map_err(DbError::into_envelope)?;
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_constraints.after")?;
+                Ok(json!({
+                    "owner": owner,
+                    "table": table,
+                    "columns": rows_to_json(&columns),
+                    "constraints": rows_to_json(&constraints),
+                }))
             }
             "oracle_describe_index" => {
                 let a: DescribeIndexArgs = parse_args(name, args)?;
                 let (owner, object_name) =
-                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "index")?;
+                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "index").await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_index.before")?;
-                describe_index(metadata_conn, &owner, &object_name).and_then(|desc| {
-                    dispatch_checkpoint_db(cx, "oraclemcp.dispatch.describe_index.after")?;
-                    Ok(json!({
-                        "owner": owner,
-                        "name": object_name,
-                        "index": optional_row_to_json(desc.metadata.as_ref()),
-                        "columns": rows_to_json(&desc.columns),
-                        "expressions": rows_to_json(&desc.expressions),
-                    }))
-                })
+                let desc = describe_index(cx, metadata_conn, &owner, &object_name)
+                    .await
+                    .map_err(DbError::into_envelope)?;
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_index.after")?;
+                Ok(json!({
+                    "owner": owner,
+                    "name": object_name,
+                    "index": optional_row_to_json(desc.metadata.as_ref()),
+                    "columns": rows_to_json(&desc.columns),
+                    "expressions": rows_to_json(&desc.expressions),
+                }))
             }
             "oracle_describe_trigger" => {
                 let a: DescribeTriggerArgs = parse_args(name, args)?;
                 let (owner, object_name) =
-                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "trigger")?;
+                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "trigger").await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_trigger.before")?;
-                describe_trigger(metadata_conn, &owner, &object_name).and_then(|desc| {
-                    dispatch_checkpoint_db(cx, "oraclemcp.dispatch.describe_trigger.after")?;
-                    Ok(json!({
-                        "owner": owner,
-                        "name": object_name,
-                        "trigger": optional_row_to_json(desc.metadata.as_ref()),
-                    }))
-                })
+                let desc = describe_trigger(cx, metadata_conn, &owner, &object_name)
+                    .await
+                    .map_err(DbError::into_envelope)?;
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_trigger.after")?;
+                Ok(json!({
+                    "owner": owner,
+                    "name": object_name,
+                    "trigger": optional_row_to_json(desc.metadata.as_ref()),
+                }))
             }
             "oracle_describe_view" => {
                 let a: DescribeViewArgs = parse_args(name, args)?;
                 let (owner, object_name) =
-                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "view")?;
+                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "view").await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_view.before")?;
-                describe_view(metadata_conn, &owner, &object_name).and_then(|desc| {
-                    dispatch_checkpoint_db(cx, "oraclemcp.dispatch.describe_view.after")?;
-                    Ok(json!({
-                        "owner": owner,
-                        "name": object_name,
-                        "view": optional_row_to_json(desc.metadata.as_ref()),
-                        "columns": rows_to_json(&desc.columns),
-                    }))
-                })
+                let desc = describe_view(cx, metadata_conn, &owner, &object_name)
+                    .await
+                    .map_err(DbError::into_envelope)?;
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_view.after")?;
+                Ok(json!({
+                    "owner": owner,
+                    "name": object_name,
+                    "view": optional_row_to_json(desc.metadata.as_ref()),
+                    "columns": rows_to_json(&desc.columns),
+                }))
             }
             "oracle_get_ddl" => {
                 let a: GetDdlArgs = parse_args(name, args)?;
                 let (owner, object_name) =
-                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "name")?;
+                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "name").await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.get_ddl.before")?;
-                get_ddl(metadata_conn, &a.object_type, &owner, &object_name).and_then(|ddl| {
-                    dispatch_checkpoint_db(cx, "oraclemcp.dispatch.get_ddl.after")?;
-                    Ok(json!({ "owner": owner, "name": object_name, "ddl": ddl }))
-                })
+                let ddl = get_ddl(cx, metadata_conn, &a.object_type, &owner, &object_name)
+                    .await
+                    .map_err(DbError::into_envelope)?;
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.get_ddl.after")?;
+                Ok(json!({ "owner": owner, "name": object_name, "ddl": ddl }))
             }
             "oracle_get_source" => {
                 let a: GetSourceArgs = parse_args(name, args)?;
                 let max_chars = a.max_chars.unwrap_or(DEFAULT_SOURCE_MAX_CHARS);
                 let (owner, object_name) =
-                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "name")?;
+                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "name").await?;
                 match a.object_type.as_deref().filter(|s| !s.trim().is_empty()) {
                     Some(object_type) => {
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.get_source.before")?;
-                        get_source(metadata_conn, &owner, &object_name, object_type, max_chars)
-                            .and_then(|source| {
-                                dispatch_checkpoint_db(cx, "oraclemcp.dispatch.get_source.after")?;
-                                Ok(json!({ "source": source }))
-                            })
+                        let source = get_source(
+                            cx,
+                            metadata_conn,
+                            &owner,
+                            &object_name,
+                            object_type,
+                            max_chars,
+                        )
+                        .await
+                        .map_err(DbError::into_envelope)?;
+                        dispatch_checkpoint(cx, "oraclemcp.dispatch.get_source.after")?;
+                        Ok(json!({ "source": source }))
                     }
                     None => {
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.get_sources_by_name.before")?;
-                        get_sources_by_name(metadata_conn, &owner, &object_name, max_chars)
-                            .and_then(|sources| {
-                                dispatch_checkpoint_db(
-                                    cx,
-                                    "oraclemcp.dispatch.get_sources_by_name.after",
-                                )?;
-                                Ok(json!({
-                                    "owner": owner,
-                                    "name": object_name,
-                                    "source_count": sources.len(),
-                                    "sources": sources,
-                                }))
-                            })
+                        let sources =
+                            get_sources_by_name(cx, metadata_conn, &owner, &object_name, max_chars)
+                                .await
+                                .map_err(DbError::into_envelope)?;
+                        dispatch_checkpoint(cx, "oraclemcp.dispatch.get_sources_by_name.after")?;
+                        Ok(json!({
+                            "owner": owner,
+                            "name": object_name,
+                            "source_count": sources.len(),
+                            "sources": sources,
+                        }))
                     }
                 }
             }
@@ -3728,12 +3821,16 @@ impl OracleDispatcher {
                     .max_rows
                     .unwrap_or(DEFAULT_SAMPLE_MAX_ROWS)
                     .clamp(1, MAX_SAMPLE_MAX_ROWS);
-                let (owner, table) = owner_and_name_arg(cx, conn, a.owner, a.table, "table")?;
+                let (owner, table) =
+                    owner_and_name_arg(cx, conn, a.owner, a.table, "table").await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.sample_rows.before")?;
-                sample_rows(conn, &owner, &table, max_rows).and_then(|rows| {
-                    dispatch_checkpoint_db(cx, "oraclemcp.dispatch.sample_rows.after")?;
-                    Ok(json!({ "owner": owner, "table": table, "rows": rows_to_json(&rows), "row_count": rows.len() }))
-                })
+                let rows = sample_rows(cx, conn, &owner, &table, max_rows)
+                    .await
+                    .map_err(DbError::into_envelope)?;
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.sample_rows.after")?;
+                Ok(
+                    json!({ "owner": owner, "table": table, "rows": rows_to_json(&rows), "row_count": rows.len() }),
+                )
             }
             "oracle_top_queries" => {
                 let a: TopQueriesArgs = parse_args(name, args)?;
@@ -3748,33 +3845,39 @@ impl OracleDispatcher {
                 let top_n = a.top_n.unwrap_or(20);
                 let min_pct = a.min_pct_of_total;
                 let historical = a.historical;
+                let timeout_seconds = a.timeout_seconds;
                 // Read-only diagnostic: resolve the source (free live cursor cache
                 // by default; AWR only when the Diagnostics Pack is licensed, else
                 // Statspack, else a structured-unavailable error), build the ranked
                 // SQL, and run it as a bounded read.
-                return with_call_timeout(cx, conn, a.timeout_seconds, || {
-                    let source = oraclemcp_db::resolve_top_sql_source(conn, historical);
+                return with_call_timeout(cx, conn, timeout_seconds, || async {
+                    let source = oraclemcp_db::resolve_top_sql_source(cx, conn, historical).await;
                     let sql = oraclemcp_db::top_sql_query(source, metric, top_n, min_pct)?;
-                    let rows = conn.query_rows(&sql, &[]).map_err(DbError::into_envelope)?;
+                    let rows = conn
+                        .query_rows(cx, &sql, &[])
+                        .await
+                        .map_err(DbError::into_envelope)?;
                     Ok(json!({
                         "source": serde_json::to_value(source).unwrap_or(Value::Null),
                         "metric": serde_json::to_value(metric).unwrap_or(Value::Null),
                         "rows": rows_to_json(&rows),
                         "row_count": rows.len(),
                     }))
-                });
+                })
+                .await;
             }
             "oracle_db_health" => {
                 let a: DbHealthArgs = parse_args(name, args)?;
                 let request =
                     oraclemcp_db::parse_health_request(a.health_type.as_deref().unwrap_or("all"));
+                let timeout_seconds = a.timeout_seconds;
                 // Read-only DBA health suite: each requested subcheck runs a pure
                 // V$/DBA_*/ALL_* read with DBA_*->ALL_* privilege degradation, and
                 // any per-subcheck failure becomes a structured `skipped` finding
                 // rather than failing the whole call. Unknown subcheck names are
                 // reported, never fatal.
-                return with_call_timeout(cx, conn, a.timeout_seconds, || {
-                    let findings = oraclemcp_db::run_health(conn, &request.subchecks);
+                return with_call_timeout(cx, conn, timeout_seconds, || async {
+                    let findings = oraclemcp_db::run_health(cx, conn, &request.subchecks).await;
                     let checks_run: Vec<&str> = findings
                         .iter()
                         .filter(|f| {
@@ -3795,14 +3898,17 @@ impl OracleDispatcher {
                         "checks_skipped": checks_skipped,
                         "unknown_checks": request.unknown,
                     }))
-                });
+                })
+                .await;
             }
             "oracle_read_clob" => {
                 let a: ReadClobArgs = parse_args(name, args)?;
                 let max_chars = a.max_chars.unwrap_or(DEFAULT_LOB_MAX_CHARS);
-                let (owner, table) = owner_and_name_arg(cx, conn, a.owner, a.table, "table")?;
+                let (owner, table) =
+                    owner_and_name_arg(cx, conn, a.owner, a.table, "table").await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.read_lob.before")?;
-                read_lob(
+                let clob = read_lob(
+                    cx,
                     conn,
                     &owner,
                     &table,
@@ -3811,10 +3917,10 @@ impl OracleDispatcher {
                     &a.pk_value,
                     max_chars,
                 )
-                .and_then(|clob| {
-                    dispatch_checkpoint_db(cx, "oraclemcp.dispatch.read_lob.after")?;
-                    Ok(json!({ "clob": clob }))
-                })
+                .await
+                .map_err(DbError::into_envelope)?;
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.read_lob.after")?;
+                Ok(json!({ "clob": clob }))
             }
             "oracle_compile_errors" => {
                 let a: CompileErrorsArgs = parse_args(name, args)?;
@@ -3822,24 +3928,28 @@ impl OracleDispatcher {
                 match object_name {
                     Some(object_name) => {
                         let (owner, object_name) =
-                            owner_and_name_arg(cx, metadata_conn, a.owner, object_name, "name")?;
+                            owner_and_name_arg(cx, metadata_conn, a.owner, object_name, "name")
+                                .await?;
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.before")?;
-                        compile_errors(metadata_conn, &owner, Some(&object_name))
-                            .and_then(|rows| {
-                                dispatch_checkpoint_db(
-                                    cx,
-                                    "oraclemcp.dispatch.compile_errors.after",
-                                )?;
-                                Ok(json!({ "owner": owner, "name": object_name, "errors": rows_to_json(&rows) }))
-                            })
+                        let rows = compile_errors(cx, metadata_conn, &owner, Some(&object_name))
+                            .await
+                            .map_err(DbError::into_envelope)?;
+                        dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.after")?;
+                        Ok(
+                            json!({ "owner": owner, "name": object_name, "errors": rows_to_json(&rows) }),
+                        )
                     }
-                    None => owner_or_current_cx(cx, metadata_conn, a.owner).and_then(|owner| {
-                        dispatch_checkpoint_db(cx, "oraclemcp.dispatch.compile_errors.before")?;
-                        compile_errors(metadata_conn, &owner, None).and_then(|rows| {
-                            dispatch_checkpoint_db(cx, "oraclemcp.dispatch.compile_errors.after")?;
-                            Ok(json!({ "owner": owner, "errors": rows_to_json(&rows) }))
-                        })
-                    }),
+                    None => {
+                        let owner = owner_or_current_cx(cx, metadata_conn, a.owner)
+                            .await
+                            .map_err(DbError::into_envelope)?;
+                        dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.before")?;
+                        let rows = compile_errors(cx, metadata_conn, &owner, None)
+                            .await
+                            .map_err(DbError::into_envelope)?;
+                        dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.after")?;
+                        Ok(json!({ "owner": owner, "errors": rows_to_json(&rows) }))
+                    }
                 }
             }
             "oracle_search_source" => {
@@ -3854,13 +3964,15 @@ impl OracleDispatcher {
                     Some(owner) => Some(owner.to_ascii_uppercase()),
                     None => Some(
                         owner_or_current_cx(cx, metadata_conn, None)
+                            .await
                             .map_err(DbError::into_envelope)?,
                     ),
                 };
                 let object_type = non_empty_arg(a.object_type);
                 let name_like = non_empty_arg(a.name_like);
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.search_source.before")?;
-                search_source(
+                let rows = search_source(
+                    cx,
                     metadata_conn,
                     owner.as_deref(),
                     &a.needle,
@@ -3868,28 +3980,30 @@ impl OracleDispatcher {
                     name_like.as_deref(),
                     max_rows,
                 )
-                .and_then(|rows| {
-                    dispatch_checkpoint_db(cx, "oraclemcp.dispatch.search_source.after")?;
-                    Ok(json!({
-                        "owner": owner.as_deref().unwrap_or("*"),
-                        "object_type": object_type,
-                        "name_like": name_like,
-                        "max_rows": max_rows,
-                        "matches": rows_to_json(&rows),
-                    }))
-                })
+                .await
+                .map_err(DbError::into_envelope)?;
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.search_source.after")?;
+                Ok(json!({
+                    "owner": owner.as_deref().unwrap_or("*"),
+                    "object_type": object_type,
+                    "name_like": name_like,
+                    "max_rows": max_rows,
+                    "matches": rows_to_json(&rows),
+                }))
             }
             "oracle_plscope_inspect" => {
                 let a: PlscopeInspectArgs = parse_args(name, args)?;
                 let object_name = required_non_empty_arg(name, "name", a.name)?;
                 let (owner, object_name) =
-                    owner_and_name_arg(cx, metadata_conn, a.owner, object_name, "name")?;
+                    owner_and_name_arg(cx, metadata_conn, a.owner, object_name, "name").await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_identifiers.before")?;
-                let identifiers = plscope_identifiers(metadata_conn, &owner, &object_name)
+                let identifiers = plscope_identifiers(cx, metadata_conn, &owner, &object_name)
+                    .await
                     .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_identifiers.after")?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_statements.before")?;
-                let statements = plscope_statements(metadata_conn, &owner, &object_name)
+                let statements = plscope_statements(cx, metadata_conn, &owner, &object_name)
+                    .await
                     .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_statements.after")?;
                 let unused_declarations = find_unused_declarations(&identifiers);
@@ -3910,23 +4024,24 @@ impl OracleDispatcher {
                 ensure_read_only(&a.sql)?;
                 ensure_explain_plan_write_allowed(&a, &scoped_level)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.before")?;
-                explain_plan(conn, &a.sql, a.read_only_standby).and_then(|rows| {
-                    dispatch_checkpoint_db(cx, "oraclemcp.dispatch.explain_plan.after")?;
-                    Ok(json!({
-                        "plan": rows_to_json(&rows),
-                        "diagnostic_write": {
-                            "statement": "EXPLAIN PLAN",
-                            "writes": "PLAN_TABLE",
-                            "required_level": OperatingLevel::ReadWrite,
-                            "explicitly_allowed": a.allow_plan_table_write,
-                        },
-                    }))
-                })
+                let rows = explain_plan(cx, conn, &a.sql, a.read_only_standby)
+                    .await
+                    .map_err(DbError::into_envelope)?;
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.after")?;
+                Ok(json!({
+                    "plan": rows_to_json(&rows),
+                    "diagnostic_write": {
+                        "statement": "EXPLAIN PLAN",
+                        "writes": "PLAN_TABLE",
+                        "required_level": OperatingLevel::ReadWrite,
+                        "explicitly_allowed": a.allow_plan_table_write,
+                    },
+                }))
             }
             other => {
                 if let Some(loaded) = state.custom_catalog.get(other) {
                     let executor = ReadOnlyCustomToolExecutor { cx, conn };
-                    return execute_custom_tool(loaded, &args, &executor);
+                    return execute_custom_tool(loaded, &args, &executor).await;
                 }
                 return Err(invalid_args(format!(
                     "unknown tool: {other:?} (call oracle_capabilities for the tool surface)"
@@ -3934,7 +4049,7 @@ impl OracleDispatcher {
             }
         };
 
-        result.map_err(DbError::into_envelope)
+        result
     }
 }
 

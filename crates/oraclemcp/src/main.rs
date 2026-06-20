@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use asupersync::Cx;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use oraclemcp::dispatch::{OracleDispatcher, StatelessReadStrategy};
 use oraclemcp::registry;
@@ -423,38 +424,66 @@ fn secret_error_summary(error: &SecretError) -> String {
     }
 }
 
-fn connect_profile(profile: &str) -> Result<Box<dyn OracleConnection>, DbError> {
-    let Some(resolved) = resolve_profile_options(Some(profile))? else {
-        return Err(DbError::UnsupportedAuth(format!(
-            "connection profile `{profile}` not found"
-        )));
-    };
-    try_open_connection(resolved.opts)
+/// The `oracle_switch_profile` reconnect connector (B1: async + `Cx`-first).
+///
+/// Matches `oraclemcp::dispatch::ProfileConnector`: opens the session
+/// connection for `profile` as a native-async DB round trip, awaited on the
+/// dispatch runtime that already holds the request `Cx`.
+#[allow(clippy::type_complexity)]
+fn connect_profile<'a>(
+    cx: &'a Cx,
+    profile: &'a str,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Box<dyn OracleConnection>, DbError>> + 'a>,
+> {
+    Box::pin(async move {
+        let Some(resolved) = resolve_profile_options(Some(profile))? else {
+            return Err(DbError::UnsupportedAuth(format!(
+                "connection profile `{profile}` not found"
+            )));
+        };
+        try_open_connection(cx, resolved.opts).await
+    })
 }
 
-fn connect_profile_stateless(profile: &str) -> Result<Option<Box<dyn OracleConnection>>, DbError> {
-    let Some(resolved) = resolve_profile_options(Some(profile))? else {
-        return Err(DbError::UnsupportedAuth(format!(
-            "connection profile `{profile}` not found"
-        )));
-    };
-    try_open_stateless_connection(resolved.opts, resolved.pool_settings)
+/// The `oracle_switch_profile` stateless-pool connector (B1: async + `Cx`-first).
+#[allow(clippy::type_complexity)]
+fn connect_profile_stateless<'a>(
+    cx: &'a Cx,
+    profile: &'a str,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Option<Box<dyn OracleConnection>>, DbError>> + 'a>,
+> {
+    Box::pin(async move {
+        let Some(resolved) = resolve_profile_options(Some(profile))? else {
+            return Err(DbError::UnsupportedAuth(format!(
+                "connection profile `{profile}` not found"
+            )));
+        };
+        try_open_stateless_connection(cx, resolved.opts, resolved.pool_settings).await
+    })
 }
 
-fn try_open_connection(opts: OracleConnectOptions) -> Result<Box<dyn OracleConnection>, DbError> {
-    RustOracleConnection::connect(opts).map(|conn| Box::new(conn) as Box<dyn OracleConnection>)
+async fn try_open_connection(
+    cx: &Cx,
+    opts: OracleConnectOptions,
+) -> Result<Box<dyn OracleConnection>, DbError> {
+    RustOracleConnection::connect(cx, opts)
+        .await
+        .map(|conn| Box::new(conn) as Box<dyn OracleConnection>)
 }
 
-fn try_open_stateless_connection(
+async fn try_open_stateless_connection(
+    cx: &Cx,
     opts: OracleConnectOptions,
     pool_settings: Option<PoolSettings>,
 ) -> Result<Option<Box<dyn OracleConnection>>, DbError> {
-    pool_settings
-        .map(|settings| {
-            OraclePool::connect(opts, settings)
-                .map(|pool| Box::new(pool) as Box<dyn OracleConnection>)
-        })
-        .transpose()
+    match pool_settings {
+        Some(settings) => OraclePool::connect(cx, opts, settings)
+            .await
+            .map(|pool| Some(Box::new(pool) as Box<dyn OracleConnection>)),
+        None => Ok(None),
+    }
 }
 
 struct RuntimeConnections {
@@ -462,10 +491,31 @@ struct RuntimeConnections {
     stateless: Option<Box<dyn OracleConnection>>,
 }
 
-fn try_open_runtime_connections(resolved: ResolvedProfile) -> Result<RuntimeConnections, DbError> {
-    let session = try_open_connection(resolved.opts.clone())?;
-    let stateless = try_open_stateless_connection(resolved.opts, resolved.pool_settings)?;
+async fn try_open_runtime_connections(
+    cx: &Cx,
+    resolved: ResolvedProfile,
+) -> Result<RuntimeConnections, DbError> {
+    let session = try_open_connection(cx, resolved.opts.clone()).await?;
+    let stateless =
+        try_open_stateless_connection(cx, resolved.opts, resolved.pool_settings).await?;
     Ok(RuntimeConnections { session, stateless })
+}
+
+/// Drive a connection-establishment future to completion on a one-shot
+/// current-thread Asupersync runtime. Connection setup is a rare startup-time
+/// operation (NOT the per-call DB path), so a dedicated `block_on` here is safe
+/// and keeps the per-query path `block_on`-free.
+fn block_on_connect<F, T>(f: impl FnOnce(Cx) -> F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("Asupersync current-thread runtime builds for connection setup");
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("block_on installs a current Cx");
+        f(cx).await
+    })
 }
 
 /// Open the live connection, or — when the driver is absent / the connect fails
@@ -473,7 +523,7 @@ fn try_open_runtime_connections(resolved: ResolvedProfile) -> Result<RuntimeConn
 /// way `serve` starts: capabilities/doctor work offline, and live tool calls
 /// return a structured envelope instead of crashing the process.
 fn open_connection(opts: OracleConnectOptions) -> Box<dyn OracleConnection> {
-    match try_open_connection(opts) {
+    match block_on_connect(|cx| async move { try_open_connection(&cx, opts).await }) {
         Ok(conn) => conn,
         Err(e) => {
             tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
@@ -483,7 +533,7 @@ fn open_connection(opts: OracleConnectOptions) -> Box<dyn OracleConnection> {
 }
 
 fn open_runtime_connections(resolved: ResolvedProfile) -> RuntimeConnections {
-    match try_open_runtime_connections(resolved) {
+    match block_on_connect(|cx| async move { try_open_runtime_connections(&cx, resolved).await }) {
         Ok(connections) => connections,
         Err(e) => {
             tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
@@ -1820,7 +1870,9 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
                 }
                 .to_owned(),
             );
-            match try_open_runtime_connections(resolved) {
+            match block_on_connect(
+                |cx| async move { try_open_runtime_connections(&cx, resolved).await },
+            ) {
                 Ok(connections) => DoctorProfileContext {
                     conn: Some(connections.session),
                     connection_error: None,
@@ -1877,7 +1929,7 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>) -> ExitCode {
         proxy_user: profile_ctx.proxy_user,
         sensitive_values: profile_ctx.sensitive_values,
     };
-    let report = run_doctor(&ctx);
+    let report = block_on_connect(|cx| async move { run_doctor(&cx, &ctx).await });
     let exit_code = doctor_process_exit_code(&report);
     if robot_json {
         let output = report
@@ -1897,6 +1949,7 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>) -> ExitCode {
 /// recorded connect error, so serve can start and live tool calls degrade to a
 /// structured envelope instead of a panic.
 mod stub {
+    use asupersync::Cx;
     use oraclemcp_db::{
         DbError, OracleBackend, OracleBind, OracleConnection, OracleConnectionInfo, OracleRow,
     };
@@ -1914,33 +1967,40 @@ mod stub {
         }
     }
 
+    #[async_trait::async_trait(?Send)]
     impl OracleConnection for StubConnection {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
         }
-        fn ping(&self) -> Result<(), DbError> {
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Err(self.err())
         }
-        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
             Err(self.err())
         }
-        fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
-            Err(self.err())
-        }
-        fn query_rows_named(
+        async fn query_rows(
             &self,
+            _cx: &Cx,
+            _sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            Err(self.err())
+        }
+        async fn query_rows_named(
+            &self,
+            _cx: &Cx,
             _sql: &str,
             _b: &[(String, OracleBind)],
         ) -> Result<Vec<OracleRow>, DbError> {
             Err(self.err())
         }
-        fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
             Err(self.err())
         }
-        fn commit(&self) -> Result<(), DbError> {
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             Err(self.err())
         }
-        fn rollback(&self) -> Result<(), DbError> {
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             Err(self.err())
         }
     }
@@ -2099,7 +2159,13 @@ mod tests {
         let stub = stub::StubConnection::new(oraclemcp_db::DbError::Connect(
             "listener refused the connection".to_owned(),
         ));
-        let err = stub.ping().expect_err("stub always errors");
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let err = runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            stub.ping(&cx).await.expect_err("stub always errors")
+        });
         // It maps to a structured envelope (no panic).
         let _ = err.into_envelope();
     }

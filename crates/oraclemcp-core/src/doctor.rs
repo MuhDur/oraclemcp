@@ -13,6 +13,7 @@
 //! In-MCP, the live-state subset is mirrored by `oracle_capabilities` (an agent
 //! can call it); `doctor` is the CLI mode.
 
+use asupersync::Cx;
 use oraclemcp_db::{
     DiagnosticsSource, OracleConnection, canonical_nls_statements, detect_oracle_driver,
     detect_standby, preflight, probe_privileges, probe_write_posture, supported_wallet_modes,
@@ -208,20 +209,24 @@ const ADVERSARIAL_CORPUS: &[&str] = &[
 ];
 
 /// Run all diagnostic checks and assemble the report.
-#[must_use]
-pub fn run_doctor(ctx: &DoctorContext) -> DoctorReport {
+///
+/// `Cx`-first and `async` (B1): the connectivity/role/privilege/preflight/
+/// write-posture checks issue real DB round trips through the now-async
+/// [`OracleConnection`] surface, so they thread `cx` and `.await`. The
+/// non-DB checks remain synchronous.
+pub async fn run_doctor(cx: &Cx, ctx: &DoctorContext<'_>) -> DoctorReport {
     let checks = vec![
         check_oracle_driver(),
         check_tns_admin(ctx),
-        check_connectivity(ctx),
-        check_role_standby(ctx),
+        check_connectivity(cx, ctx).await,
+        check_role_standby(cx, ctx).await,
         check_nls(ctx),
-        check_privilege_tier(ctx),
+        check_privilege_tier(cx, ctx).await,
         check_snapshot_freshness(),
         check_classifier_selftest(),
         check_virtual_tools(),
-        check_dba_suite_preflight(ctx),
-        check_write_posture(ctx),
+        check_dba_suite_preflight(cx, ctx).await,
+        check_write_posture(cx, ctx).await,
     ];
     DoctorReport { checks }
 }
@@ -431,7 +436,7 @@ fn connectivity_failure_class(error: &str) -> ErrorClass {
     }
 }
 
-fn check_connectivity(ctx: &DoctorContext) -> CheckResult {
+async fn check_connectivity(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     if let Some(error) = &ctx.connection_error {
         let detail = sanitized_detail(ctx, format!("connect failed: {error}"));
         let fix = connectivity_fix(&detail);
@@ -448,7 +453,7 @@ fn check_connectivity(ctx: &DoctorContext) -> CheckResult {
             CheckStatus::Skip,
             "offline — supply a profile/connection to test connectivity + auth",
         ),
-        Some(conn) => match conn.ping() {
+        Some(conn) => match conn.ping(cx).await {
             Ok(()) => {
                 let detail = ctx.connection_strategy.as_deref().map_or_else(
                     || "connected + authenticated".to_owned(),
@@ -470,7 +475,7 @@ fn check_connectivity(ctx: &DoctorContext) -> CheckResult {
     }
 }
 
-fn check_role_standby(ctx: &DoctorContext) -> CheckResult {
+async fn check_role_standby(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     if ctx.connection_error.is_some() {
         return CheckResult::new(
             4,
@@ -486,7 +491,7 @@ fn check_role_standby(ctx: &DoctorContext) -> CheckResult {
             CheckStatus::Skip,
             "offline — requires a live connection",
         ),
-        Some(conn) => match detect_standby(conn) {
+        Some(conn) => match detect_standby(cx, conn).await {
             Ok(s) => {
                 let role = s.database_role.unwrap_or_else(|| "unknown".to_owned());
                 let mode = s.open_mode.unwrap_or_else(|| "unknown".to_owned());
@@ -530,7 +535,7 @@ fn check_nls(ctx: &DoctorContext) -> CheckResult {
     )
 }
 
-fn check_privilege_tier(ctx: &DoctorContext) -> CheckResult {
+async fn check_privilege_tier(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     if ctx.connection_error.is_some() {
         return if ctx.protected_profile_writable {
             CheckResult::new(
@@ -569,7 +574,7 @@ fn check_privilege_tier(ctx: &DoctorContext) -> CheckResult {
             }
         }
         Some(conn) => {
-            let p = probe_privileges(conn);
+            let p = probe_privileges(cx, conn).await;
             let detail = format!(
                 "dictionary tier {:?}, diagnostics_pack={}, plscope={}",
                 p.dictionary_tier, p.diagnostics_pack, p.plscope
@@ -660,7 +665,7 @@ fn check_virtual_tools() -> CheckResult {
 /// confirmed first. It is informational: it reports `Pass` (full tier coverage),
 /// `Warn` (some subchecks would degrade/skip, or historical perf history is
 /// unavailable), or `Skip` (offline) — never `Fail`.
-fn check_dba_suite_preflight(ctx: &DoctorContext) -> CheckResult {
+async fn check_dba_suite_preflight(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     const ID: u8 = 10;
     const NAME: &str = "DBA suite preflight";
 
@@ -681,7 +686,7 @@ fn check_dba_suite_preflight(ctx: &DoctorContext) -> CheckResult {
         );
     };
 
-    let report = preflight(conn);
+    let report = preflight(cx, conn).await;
     let (runnable, skipped) = report.runnable_skipped();
     let total = runnable + skipped;
     let history = match report.top_queries_historical {
@@ -730,7 +735,7 @@ fn supported_wallet_modes_note() -> String {
 /// defense in depth). The detail always reports the SUPPORTED wallet modes so an
 /// operator can see unencrypted/SSO/password wallets are not fail-closed. Never
 /// `Fail`s the suite.
-fn check_write_posture(ctx: &DoctorContext) -> CheckResult {
+async fn check_write_posture(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     const ID: u8 = 11;
     const NAME: &str = "Write posture";
     let wallet_note = supported_wallet_modes_note();
@@ -756,7 +761,7 @@ fn check_write_posture(ctx: &DoctorContext) -> CheckResult {
             format!("offline — supply a profile/connection to probe write posture; {wallet_note}"),
         ),
         Some(conn) => {
-            let posture = probe_write_posture(conn, ctx.proxy_user);
+            let posture = probe_write_posture(cx, conn, ctx.proxy_user).await;
             match posture.can_write {
                 Some(false) => CheckResult::new(
                     ID,
@@ -800,30 +805,48 @@ fn check_write_posture(ctx: &DoctorContext) -> CheckResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asupersync::runtime::RuntimeBuilder;
     use oraclemcp_db::{DbError, OracleBackend, OracleBind, OracleConnectionInfo, OracleRow};
 
+    /// Run `run_doctor` on a fresh current-thread runtime with an installed `Cx`.
+    fn doctor(ctx: &DoctorContext<'_>) -> DoctorReport {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            run_doctor(&cx, ctx).await
+        })
+    }
+
     struct LiveMock;
+    #[async_trait::async_trait(?Send)]
     impl OracleConnection for LiveMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
         }
-        fn ping(&self) -> Result<(), DbError> {
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
             Ok(OracleConnectionInfo::default())
         }
-        fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
             // dba_objects/all_identifiers probes succeed -> Dba tier, plscope true.
             Ok(vec![OracleRow { columns: vec![] }])
         }
-        fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
             Ok(0)
         }
-        fn commit(&self) -> Result<(), DbError> {
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn rollback(&self) -> Result<(), DbError> {
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
     }
@@ -831,17 +854,23 @@ mod tests {
     /// A live mock whose `SESSION_PRIVS` includes write-implying privileges
     /// (exercises the A2 write-posture WARN path).
     struct WriteCapableMock;
+    #[async_trait::async_trait(?Send)]
     impl OracleConnection for WriteCapableMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
         }
-        fn ping(&self) -> Result<(), DbError> {
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
             Ok(OracleConnectionInfo::default())
         }
-        fn query_rows(&self, sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
             if sql.to_ascii_lowercase().contains("session_privs") {
                 return Ok(["CREATE SESSION", "CREATE ANY TABLE", "INSERT ANY TABLE"]
                     .iter()
@@ -855,20 +884,20 @@ mod tests {
             }
             Ok(vec![OracleRow { columns: vec![] }])
         }
-        fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
             Ok(0)
         }
-        fn commit(&self) -> Result<(), DbError> {
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn rollback(&self) -> Result<(), DbError> {
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
     }
 
     #[test]
     fn report_has_eleven_checks_and_classifier_self_test_passes() {
-        let report = run_doctor(&DoctorContext::default());
+        let report = doctor(&DoctorContext::default());
         assert_eq!(report.checks.len(), 11);
         let selftest = report.checks.iter().find(|c| c.id == 8).unwrap();
         assert_eq!(selftest.status, CheckStatus::Pass, "{}", selftest.detail);
@@ -876,7 +905,7 @@ mod tests {
 
     #[test]
     fn offline_skips_live_checks_and_does_not_fail() {
-        let report = run_doctor(&DoctorContext::default());
+        let report = doctor(&DoctorContext::default());
         // Connectivity, role/standby, privilege-tier, snapshot, the DBA-suite
         // preflight (10), and write posture (11) all skip offline.
         for id in [3u8, 4, 6, 7, 10, 11] {
@@ -902,7 +931,7 @@ mod tests {
             conn: Some(&conn),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         assert_eq!(
             report.checks.iter().find(|c| c.id == 3).unwrap().status,
             CheckStatus::Pass
@@ -921,7 +950,7 @@ mod tests {
             connection_strategy: Some("hybrid_pool".to_owned()),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
 
         assert_eq!(connectivity.status, CheckStatus::Pass);
@@ -937,7 +966,7 @@ mod tests {
             protected_profile_writable: true,
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let priv_check = report.checks.iter().find(|c| c.id == 6).unwrap();
         assert_eq!(priv_check.status, CheckStatus::Warn);
         assert!(priv_check.fix.is_some());
@@ -951,7 +980,7 @@ mod tests {
             tns_admin: Some("/nonexistent/tns/dir/xyz".to_owned()),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let tns = report.checks.iter().find(|c| c.id == 2).unwrap();
         assert_eq!(tns.status, CheckStatus::Fail);
         assert!(tns.fix.is_some());
@@ -966,7 +995,7 @@ mod tests {
             wallet_location: Some("/home/operator/private-wallet".to_owned()),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let rendered = report.to_json().to_string();
         assert!(!rendered.contains("/home/operator/private-wallet"));
         let tns = report.checks.iter().find(|c| c.id == 2).unwrap();
@@ -990,7 +1019,7 @@ mod tests {
             ],
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let serialized = serde_json::to_string(&report.to_json()).expect("json");
         for forbidden in [
             "APP_USER",
@@ -1029,7 +1058,7 @@ mod tests {
             ),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
         assert_eq!(connectivity.status, CheckStatus::Fail);
         assert!(
@@ -1050,7 +1079,7 @@ mod tests {
             ),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
         assert_eq!(connectivity.status, CheckStatus::Fail);
         let fix = connectivity.fix.as_deref().unwrap();
@@ -1060,7 +1089,7 @@ mod tests {
 
     #[test]
     fn text_and_json_render() {
-        let report = run_doctor(&DoctorContext::default());
+        let report = doctor(&DoctorContext::default());
         let text = report.to_text();
         assert!(text.contains("oraclemcp doctor"));
         assert!(text.contains("Classifier self-test"));
@@ -1083,7 +1112,7 @@ mod tests {
             conn: Some(&conn),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let preflight_check = report.checks.iter().find(|c| c.id == 10).unwrap();
         assert_ne!(
             preflight_check.status,
@@ -1107,7 +1136,7 @@ mod tests {
             connection_error: Some("could not open connection".to_owned()),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         assert_eq!(
             report.checks.iter().find(|c| c.id == 10).unwrap().status,
             CheckStatus::Skip
@@ -1120,7 +1149,7 @@ mod tests {
             connection_error: Some("could not open connection".to_owned()),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         assert_eq!(
             report.checks.iter().find(|c| c.id == 3).unwrap().status,
             CheckStatus::Fail
@@ -1144,7 +1173,7 @@ mod tests {
             ),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
         assert_eq!(connectivity.status, CheckStatus::Fail);
         assert_eq!(
@@ -1232,7 +1261,7 @@ mod tests {
             ),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
         assert_eq!(connectivity.status, CheckStatus::Fail);
         assert_eq!(
@@ -1255,7 +1284,7 @@ mod tests {
             connection_error: Some("connection profile `missing_ro` not found".to_owned()),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
         assert_eq!(connectivity.status, CheckStatus::Fail);
         assert_eq!(
@@ -1271,7 +1300,7 @@ mod tests {
             tns_admin: Some("/nonexistent/tns/dir/xyz".to_owned()),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         assert_eq!(report.exit_code(), 1);
         assert_eq!(report.to_json_with_exit_code(2)["exit_code"], json!(2));
         assert!(
@@ -1291,7 +1320,7 @@ mod tests {
             proxy_user: true,
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let posture = report.checks.iter().find(|c| c.id == 11).unwrap();
         assert_eq!(posture.status, CheckStatus::Pass, "{}", posture.detail);
         assert!(posture.detail.contains("read-only posture"));
@@ -1312,7 +1341,7 @@ mod tests {
             conn: Some(&conn),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let posture = report.checks.iter().find(|c| c.id == 11).unwrap();
         assert_eq!(posture.status, CheckStatus::Warn, "{}", posture.detail);
         assert!(posture.detail.contains("principal CAN write"));
@@ -1331,7 +1360,7 @@ mod tests {
             conn: Some(&conn),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let posture = report.checks.iter().find(|c| c.id == 11).unwrap();
         for needle in ["cwallet.sso", "ewallet.pem", "ewallet.p12"] {
             assert!(

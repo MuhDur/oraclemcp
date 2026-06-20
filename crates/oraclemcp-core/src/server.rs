@@ -41,8 +41,14 @@ const SERVER_INSTRUCTIONS: &str = "Call oracle_capabilities first to discover to
 
 /// Boxed tool-dispatch future. This keeps [`ToolDispatch`] object-safe while
 /// making runtime context explicit at the server boundary.
-pub type DispatchFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Value, ErrorEnvelope>> + Send + 'a>>;
+///
+/// The future is intentionally NOT `Send` (B1): tool dispatch runs on ONE
+/// current-thread Asupersync runtime (`dispatch_runtime`, below) and is only
+/// ever driven by `block_on` on that thread — it is never spawned across OS
+/// threads. Dropping the `Send` bound lets the dispatcher hold an Asupersync
+/// `Mutex` guard (which is `!Send`) across the `.await` of a native-async DB
+/// round trip, which is the whole point of the async migration.
+pub type DispatchFuture<'a> = Pin<Box<dyn Future<Output = Result<Value, ErrorEnvelope>> + 'a>>;
 
 /// Per-request authorization context supplied by transports.
 #[derive(Clone, Copy, Debug, Default)]

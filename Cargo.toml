@@ -24,6 +24,12 @@ categories = ["database", "development-tools"]
 
 [workspace.dependencies]
 asupersync = { version = "0.3.4", default-features = false }
+# Dyn-compatibility shim for the async `OracleConnection` trait (B1): boxes the
+# returned futures so `&dyn`/`Box<dyn OracleConnection>` stay object-safe. Used
+# in `?Send` mode (the dispatch runtime is current-thread and never spawns the
+# dispatch future across OS threads). MIT/Apache-2.0 — covered by deny.toml's
+# permissive license allow-list.
+async-trait = "0.1"
 # Pinned EXACTLY today (B2; plan §8). The whole oracledb surface is isolated
 # behind one adapter (crates/oraclemcp-db/src/connection.rs), so the 0.3.0
 # cut-over is a deliberate, single-file change driven by oracledb's

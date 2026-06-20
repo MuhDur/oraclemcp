@@ -18,30 +18,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use asupersync::Cx;
+use asupersync::sync::Mutex as AsyncMutex;
 use oraclemcp_guard::MonotonicDeadline;
 use serde::{Deserialize, Serialize};
 
 use crate::connection::OracleConnection;
 use crate::error::DbError;
 
-fn lease_checkpoint(cx: Option<&Cx>, phase: &'static str) -> Result<(), DbError> {
-    let Some(cx) = cx else {
-        return Ok(());
-    };
+fn lease_checkpoint(cx: &Cx, phase: &'static str) -> Result<(), DbError> {
     cx.checkpoint_with(phase)
         .map_err(|err| DbError::Cancelled(format!("{phase}: {err}")))
-}
-
-fn lease_execute(
-    cx: Option<&Cx>,
-    conn: &dyn OracleConnection,
-    sql: &str,
-    binds: &[crate::types::OracleBind],
-) -> Result<u64, DbError> {
-    match cx {
-        Some(cx) => conn.execute_cx(cx, sql, binds),
-        None => conn.execute(sql, binds),
-    }
 }
 
 /// Oracle limits: MODULE ≤ 48 chars, ACTION ≤ 32 chars (`DBMS_APPLICATION_INFO`).
@@ -181,21 +167,25 @@ impl Lease {
 
     /// Force-clean on expiry/release: roll back any open transaction. Dropping
     /// the `Lease` afterwards closes the physical session (clearing all session
-    /// state and returning it).
-    fn force_rollback(&mut self) {
+    /// state and returning it). Best-effort: the session is being torn down
+    /// regardless, so a cancelled/failed rollback is swallowed.
+    async fn force_rollback(&mut self, cx: &Cx) {
         if self.in_transaction {
-            // Best-effort: the session is being torn down regardless.
-            let _ = self.conn.rollback();
+            let _ = self.conn.rollback(cx).await;
             self.in_transaction = false;
         }
     }
 }
 
-/// Manages session leases. Cheap to clone-share via `Arc`; all DB work inside a
-/// lease must be dispatched on a blocking worker by the caller (§4.3).
+/// Manages session leases. Cheap to clone-share via `Arc`. Each lease's
+/// physical session is serialized behind its own async [`AsyncMutex`] so a DB
+/// round trip (which is now `.await`-ed) can hold the guard across the await
+/// without the deadlock/cancellation hazard a `std::sync::Mutex` would create.
+/// The lease MAP itself is a plain `std::sync::Mutex`, only ever locked and
+/// dropped synchronously for map operations (never across an `.await`).
 #[derive(Default)]
 pub struct LeaseManager {
-    leases: Mutex<HashMap<String, Arc<Mutex<Lease>>>>,
+    leases: Mutex<HashMap<String, Arc<AsyncMutex<Lease>>>>,
     counter: AtomicU64,
 }
 
@@ -214,8 +204,9 @@ impl LeaseManager {
     /// Acquire a lease over an already-opened connection: apply the profile's
     /// login statements, stamp the agent identity into `DBMS_APPLICATION_INFO`,
     /// and pin the session under a monotonic TTL. Returns the lease handle.
-    pub fn acquire(
+    pub async fn acquire(
         &self,
+        cx: &Cx,
         profile: impl Into<String>,
         agent_identity: impl Into<String>,
         ttl: Duration,
@@ -229,7 +220,7 @@ impl LeaseManager {
         // pinned session (§6.5). Each statement is the operator's responsibility
         // to allowlist; the guard validates them upstream.
         for stmt in login_statements {
-            conn.execute(stmt, &[])?;
+            conn.execute(cx, stmt, &[]).await?;
         }
 
         // A4: clear-and-reset DBMS_APPLICATION_INFO / DBMS_SESSION on every
@@ -239,7 +230,7 @@ impl LeaseManager {
         // leaking into this lease.
         let model = agent_model_label();
         for (sql, binds) in session_tag_statements(&agent_identity, &model) {
-            conn.execute(sql, &binds)?;
+            conn.execute(cx, sql, &binds).await?;
         }
 
         let id = self.next_id();
@@ -254,11 +245,11 @@ impl LeaseManager {
         self.leases
             .lock()
             .expect("lease map mutex poisoned")
-            .insert(id.0.clone(), Arc::new(Mutex::new(lease)));
+            .insert(id.0.clone(), Arc::new(AsyncMutex::new(lease)));
         Ok(id)
     }
 
-    fn get(&self, id: &str) -> Option<Arc<Mutex<Lease>>> {
+    fn get(&self, id: &str) -> Option<Arc<AsyncMutex<Lease>>> {
         self.leases
             .lock()
             .expect("lease map mutex poisoned")
@@ -266,90 +257,100 @@ impl LeaseManager {
             .cloned()
     }
 
-    /// Run `f` against a live (non-expired) lease. An expired lease is
-    /// force-cleaned and removed, and the call fails with `LeaseNotFound`.
-    fn with_lease<R>(
-        &self,
-        id: &str,
-        f: impl FnOnce(&mut Lease) -> Result<R, DbError>,
-    ) -> Result<R, DbError> {
-        let arc = self
-            .get(id)
-            .ok_or_else(|| DbError::LeaseNotFound(id.to_owned()))?;
-        let mut lease = arc.lock().expect("lease mutex poisoned");
-        if lease.deadline.is_expired() {
-            lease.force_rollback();
-            drop(lease);
-            self.remove(id);
-            return Err(DbError::LeaseNotFound(format!("{id} (expired)")));
-        }
-        f(&mut lease)
-    }
-
-    fn remove(&self, id: &str) -> Option<Arc<Mutex<Lease>>> {
+    fn remove(&self, id: &str) -> Option<Arc<AsyncMutex<Lease>>> {
         self.leases
             .lock()
             .expect("lease map mutex poisoned")
             .remove(id)
     }
 
+    /// Resolve a live (non-expired) lease handle. An expired lease is
+    /// force-cleaned and removed, and the call fails with `LeaseNotFound`. The
+    /// returned `Arc` must be `.lock(cx).await`-ed by the caller to operate on
+    /// the pinned session — the per-lease async mutex serializes its round
+    /// trips.
+    async fn live_lease(&self, cx: &Cx, id: &str) -> Result<Arc<AsyncMutex<Lease>>, DbError> {
+        let arc = self
+            .get(id)
+            .ok_or_else(|| DbError::LeaseNotFound(id.to_owned()))?;
+        let expired = {
+            let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+            if lease.deadline.is_expired() {
+                lease.force_rollback(cx).await;
+                true
+            } else {
+                false
+            }
+        };
+        if expired {
+            self.remove(id);
+            return Err(DbError::LeaseNotFound(format!("{id} (expired)")));
+        }
+        Ok(arc)
+    }
+
     /// Renew a lease's TTL (clients renew at ~75% of the TTL). Errors if the
     /// lease is gone/expired.
-    pub fn renew(&self, id: &LeaseId) -> Result<LeaseInfo, DbError> {
-        self.with_lease(&id.0, |lease| {
-            lease.deadline = MonotonicDeadline::after(lease.ttl);
-            Ok(lease.info(&id.0))
-        })
+    pub async fn renew(&self, cx: &Cx, id: &LeaseId) -> Result<LeaseInfo, DbError> {
+        let arc = self.live_lease(cx, &id.0).await?;
+        let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+        lease.deadline = MonotonicDeadline::after(lease.ttl);
+        Ok(lease.info(&id.0))
     }
 
     /// Release a lease: force-rollback any open transaction and drop the
     /// session. Idempotent.
-    pub fn release(&self, id: &LeaseId) {
-        if let Some(arc) = self.remove(&id.0) {
-            arc.lock().expect("lease mutex poisoned").force_rollback();
+    pub async fn release(&self, cx: &Cx, id: &LeaseId) {
+        if let Some(arc) = self.remove(&id.0)
+            && let Ok(mut lease) = arc.lock(cx).await
+        {
+            lease.force_rollback(cx).await;
             // Dropping the Arc/Lease closes the physical session.
         }
     }
 
     /// Begin an explicit transaction on the leased session.
-    pub fn begin_transaction(&self, id: &LeaseId) -> Result<(), DbError> {
-        self.with_lease(&id.0, |lease| {
-            lease.in_transaction = true;
-            Ok(())
-        })
+    pub async fn begin_transaction(&self, cx: &Cx, id: &LeaseId) -> Result<(), DbError> {
+        let arc = self.live_lease(cx, &id.0).await?;
+        let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+        lease.in_transaction = true;
+        Ok(())
     }
 
     /// Commit the leased session's transaction.
-    pub fn commit(&self, id: &LeaseId) -> Result<(), DbError> {
-        self.with_lease(&id.0, |lease| {
-            lease.conn.commit()?;
-            lease.in_transaction = false;
-            Ok(())
-        })
+    pub async fn commit(&self, cx: &Cx, id: &LeaseId) -> Result<(), DbError> {
+        let arc = self.live_lease(cx, &id.0).await?;
+        let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+        lease.conn.commit(cx).await?;
+        lease.in_transaction = false;
+        Ok(())
     }
 
     /// Roll back the leased session's transaction.
-    pub fn rollback(&self, id: &LeaseId) -> Result<(), DbError> {
-        self.with_lease(&id.0, |lease| {
-            lease.conn.rollback()?;
-            lease.in_transaction = false;
-            Ok(())
-        })
+    pub async fn rollback(&self, cx: &Cx, id: &LeaseId) -> Result<(), DbError> {
+        let arc = self.live_lease(cx, &id.0).await?;
+        let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+        lease.conn.rollback(cx).await?;
+        lease.in_transaction = false;
+        Ok(())
     }
 
     /// Create a savepoint on the leased session. `name` must be a simple
     /// unquoted identifier (validated to prevent injection).
-    pub fn savepoint(&self, id: &LeaseId, name: &str) -> Result<(), DbError> {
+    pub async fn savepoint(&self, cx: &Cx, id: &LeaseId, name: &str) -> Result<(), DbError> {
         if !is_simple_identifier(name) {
             return Err(DbError::Execute(format!(
                 "invalid savepoint name: {name:?}"
             )));
         }
-        self.with_lease(&id.0, |lease| {
-            lease.conn.execute(&format!("SAVEPOINT {name}"), &[])?;
-            lease.in_transaction = true;
-            Ok(())
-        })
+        let arc = self.live_lease(cx, &id.0).await?;
+        let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+        lease
+            .conn
+            .execute(cx, &format!("SAVEPOINT {name}"), &[])
+            .await?;
+        lease.in_transaction = true;
+        Ok(())
     }
 
     /// Execute-in-savepoint **preview** (plan §5.4, bead P2-3): inside an
@@ -357,62 +358,34 @@ impl LeaseManager {
     /// `SQL%ROWCOUNT` (ground-truth blast radius — not optimizer cardinality),
     /// then **unconditionally `ROLLBACK TO SAVEPOINT`** so the DB is left
     /// unchanged. The rollback runs even if the statement errored.
-    pub fn preview_dml(
-        &self,
-        id: &LeaseId,
-        sql: &str,
-        binds: &[crate::types::OracleBind],
-    ) -> Result<PreviewImpact, DbError> {
-        self.preview_dml_inner(None, id, sql, binds)
-    }
-
-    /// Cancellation-aware variant of [`Self::preview_dml`].
     ///
     /// Cancellation may be observed before the savepoint or before/after the
     /// preview DML. Once a savepoint exists, rollback-to-savepoint is always
     /// attempted without a cancellation checkpoint. If rollback-to-savepoint
     /// fails, the lease is force-rolled-back and removed so an uncertain session
     /// cannot be reused.
-    pub fn preview_dml_cx(
+    pub async fn preview_dml(
         &self,
         cx: &Cx,
         id: &LeaseId,
         sql: &str,
         binds: &[crate::types::OracleBind],
     ) -> Result<PreviewImpact, DbError> {
-        self.preview_dml_inner(Some(cx), id, sql, binds)
-    }
-
-    fn preview_dml_inner(
-        &self,
-        cx: Option<&Cx>,
-        id: &LeaseId,
-        sql: &str,
-        binds: &[crate::types::OracleBind],
-    ) -> Result<PreviewImpact, DbError> {
         const SP: &str = "oraclemcp_preview";
-        let arc = self
-            .get(&id.0)
-            .ok_or_else(|| DbError::LeaseNotFound(id.0.clone()))?;
+        let arc = self.live_lease(cx, &id.0).await?;
         let mut discard_lease = false;
         let result = {
-            let mut lease = arc.lock().expect("lease mutex poisoned");
-            if lease.deadline.is_expired() {
-                lease.force_rollback();
-                drop(lease);
-                self.remove(&id.0);
-                return Err(DbError::LeaseNotFound(format!("{} (expired)", id.0)));
-            }
+            let mut lease = arc.lock(cx).await.map_err(lock_err)?;
             let savepoint_sql = format!("SAVEPOINT {SP}");
             let rollback_sql = format!("ROLLBACK TO SAVEPOINT {SP}");
             lease_checkpoint(cx, "oracle_lease.preview.savepoint.before")?;
-            lease.conn.execute(&savepoint_sql, &[])?;
+            lease.conn.execute(cx, &savepoint_sql, &[]).await?;
             lease.in_transaction = true;
             let preview_result = match lease_checkpoint(cx, "oracle_lease.preview.execute.before") {
-                Ok(()) => lease_execute(cx, lease.conn.as_ref(), sql, binds),
+                Ok(()) => lease.conn.execute(cx, sql, binds).await,
                 Err(err) => Err(err),
             };
-            let rollback_result = lease.conn.execute(&rollback_sql, &[]);
+            let rollback_result = lease.conn.execute(cx, &rollback_sql, &[]).await;
             match (preview_result, rollback_result) {
                 (Ok(rows_affected), Ok(_)) => {
                     lease_checkpoint(cx, "oracle_lease.preview.rollback.after")?;
@@ -423,7 +396,7 @@ impl LeaseManager {
                 }
                 (Err(err), Ok(_)) => Err(err),
                 (Ok(_), Err(cleanup_err)) | (Err(_), Err(cleanup_err)) => {
-                    lease.force_rollback();
+                    lease.force_rollback(cx).await;
                     discard_lease = true;
                     Err(DbError::Execute(format!(
                         "preview rollback failed; lease discarded: {cleanup_err}"
@@ -439,13 +412,14 @@ impl LeaseManager {
 
     /// Enable `DBMS_OUTPUT` on the leased session (full line capture is the
     /// `oracle_session` tool's job, P1-SESS).
-    pub fn enable_dbms_output(&self, id: &LeaseId) -> Result<(), DbError> {
-        self.with_lease(&id.0, |lease| {
-            lease
-                .conn
-                .execute("BEGIN DBMS_OUTPUT.ENABLE(NULL); END;", &[])?;
-            Ok(())
-        })
+    pub async fn enable_dbms_output(&self, cx: &Cx, id: &LeaseId) -> Result<(), DbError> {
+        let arc = self.live_lease(cx, &id.0).await?;
+        let lease = arc.lock(cx).await.map_err(lock_err)?;
+        lease
+            .conn
+            .execute(cx, "BEGIN DBMS_OUTPUT.ENABLE(NULL); END;", &[])
+            .await?;
+        Ok(())
     }
 
     /// Apply an `ALTER SESSION` statement on the leased session (the
@@ -453,38 +427,52 @@ impl LeaseManager {
     /// have validated `statement` against the guard's allowlist
     /// (`oraclemcp_guard::is_allowed_alter_session`) first — this layer does not
     /// import the guard (one-way boundary) and only enforces the lease binding.
-    pub fn apply_session_statement(&self, id: &LeaseId, statement: &str) -> Result<(), DbError> {
-        self.with_lease(&id.0, |lease| {
-            lease.conn.execute(statement, &[])?;
-            Ok(())
-        })
+    pub async fn apply_session_statement(
+        &self,
+        cx: &Cx,
+        id: &LeaseId,
+        statement: &str,
+    ) -> Result<(), DbError> {
+        let arc = self.live_lease(cx, &id.0).await?;
+        let lease = arc.lock(cx).await.map_err(lock_err)?;
+        lease.conn.execute(cx, statement, &[]).await?;
+        Ok(())
     }
 
     /// A snapshot of a lease's state.
-    pub fn info(&self, id: &LeaseId) -> Result<LeaseInfo, DbError> {
-        self.with_lease(&id.0, |lease| Ok(lease.info(&id.0)))
+    pub async fn info(&self, cx: &Cx, id: &LeaseId) -> Result<LeaseInfo, DbError> {
+        let arc = self.live_lease(cx, &id.0).await?;
+        let lease = arc.lock(cx).await.map_err(lock_err)?;
+        Ok(lease.info(&id.0))
     }
 
     /// Reap every expired lease (force-rollback + drop). Returns the count.
-    pub fn reap_expired(&self) -> usize {
-        let expired: Vec<String> = {
+    pub async fn reap_expired(&self, cx: &Cx) -> usize {
+        // Snapshot every lease handle, then check each one's deadline behind
+        // its own async lock (the map mutex is only held for the snapshot).
+        let candidates: Vec<(String, Arc<AsyncMutex<Lease>>)> = {
             let map = self.leases.lock().expect("lease map mutex poisoned");
-            map.iter()
-                .filter(|(_, arc)| {
-                    arc.lock()
-                        .expect("lease mutex poisoned")
-                        .deadline
-                        .is_expired()
-                })
-                .map(|(k, _)| k.clone())
-                .collect()
+            map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
         };
-        for id in &expired {
-            if let Some(arc) = self.remove(id) {
-                arc.lock().expect("lease mutex poisoned").force_rollback();
+        let mut expired = Vec::new();
+        for (id, arc) in candidates {
+            let Ok(lease) = arc.lock(cx).await else {
+                continue;
+            };
+            if lease.deadline.is_expired() {
+                expired.push(id);
             }
         }
-        expired.len()
+        let mut count = 0;
+        for id in &expired {
+            if let Some(arc) = self.remove(id) {
+                if let Ok(mut lease) = arc.lock(cx).await {
+                    lease.force_rollback(cx).await;
+                }
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Number of active leases.
@@ -495,16 +483,24 @@ impl LeaseManager {
 
     /// Force-roll-back and drop every lease (graceful shutdown / crash cleanup,
     /// §5.7). Returns the number released. Idempotent.
-    pub fn release_all(&self) -> usize {
-        let drained: Vec<Arc<Mutex<Lease>>> = {
+    pub async fn release_all(&self, cx: &Cx) -> usize {
+        let drained: Vec<Arc<AsyncMutex<Lease>>> = {
             let mut map = self.leases.lock().expect("lease map mutex poisoned");
             map.drain().map(|(_, v)| v).collect()
         };
+        let count = drained.len();
         for arc in &drained {
-            arc.lock().expect("lease mutex poisoned").force_rollback();
+            if let Ok(mut lease) = arc.lock(cx).await {
+                lease.force_rollback(cx).await;
+            }
         }
-        drained.len()
+        count
     }
+}
+
+/// Map an async-mutex lock failure to a structured internal error.
+fn lock_err(err: asupersync::sync::LockError) -> DbError {
+    DbError::Internal(format!("lease mutex lock failed: {err}"))
 }
 
 /// Require a `lease_id` for a stateful (transaction/savepoint) operation —
@@ -556,86 +552,110 @@ mod tests {
         log: Arc<Mutex<MockLog>>,
     }
 
+    #[async_trait::async_trait(?Send)]
     impl OracleConnection for MockConn {
         fn backend(&self) -> crate::types::OracleBackend {
             crate::types::OracleBackend::RustOracle
         }
-        fn ping(&self) -> Result<(), DbError> {
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
             Ok(OracleConnectionInfo::default())
         }
-        fn query_rows(&self, sql: &str, _binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
             self.log.lock().unwrap().executed.push(sql.to_owned());
             Ok(vec![])
         }
-        fn execute(&self, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
+        async fn execute(&self, _cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
             let mut log = self.log.lock().unwrap();
             log.executed.push(sql.to_owned());
             log.executed_binds.push((sql.to_owned(), binds.to_vec()));
             Ok(0)
         }
-        fn commit(&self) -> Result<(), DbError> {
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             self.log.lock().unwrap().commits += 1;
             Ok(())
         }
-        fn rollback(&self) -> Result<(), DbError> {
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             self.log.lock().unwrap().rollbacks += 1;
             Ok(())
         }
     }
 
+    #[async_trait::async_trait(?Send)]
     impl OracleConnection for CancelAfterPreviewExecuteConn {
         fn backend(&self) -> crate::types::OracleBackend {
             crate::types::OracleBackend::RustOracle
         }
-        fn ping(&self) -> Result<(), DbError> {
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
             Ok(OracleConnectionInfo::default())
         }
-        fn query_rows(&self, sql: &str, _binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
             self.log.lock().unwrap().executed.push(sql.to_owned());
             Ok(vec![])
         }
-        fn execute(&self, sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        async fn execute(&self, cx: &Cx, sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+            // First call (SAVEPOINT) succeeds; the preview UPDATE then trips a
+            // cancellation request, modelling a cancel observed mid-preview.
             self.log.lock().unwrap().executed.push(sql.to_owned());
+            if sql.starts_with("UPDATE") {
+                cx.set_cancel_requested(true);
+                return Err(DbError::Cancelled(
+                    "test cancellation after preview execute".to_owned(),
+                ));
+            }
             Ok(7)
         }
-        fn execute_cx(&self, cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
-            let _ = self.execute(sql, binds)?;
-            cx.set_cancel_requested(true);
-            Err(DbError::Cancelled(
-                "test cancellation after preview execute".to_owned(),
-            ))
-        }
-        fn commit(&self) -> Result<(), DbError> {
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             self.log.lock().unwrap().commits += 1;
             Ok(())
         }
-        fn rollback(&self) -> Result<(), DbError> {
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             self.log.lock().unwrap().rollbacks += 1;
             Ok(())
         }
     }
 
+    #[async_trait::async_trait(?Send)]
     impl OracleConnection for RollbackToSavepointFailsConn {
         fn backend(&self) -> crate::types::OracleBackend {
             crate::types::OracleBackend::RustOracle
         }
-        fn ping(&self) -> Result<(), DbError> {
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
             Ok(OracleConnectionInfo::default())
         }
-        fn query_rows(&self, sql: &str, _binds: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
             self.log.lock().unwrap().executed.push(sql.to_owned());
             Ok(vec![])
         }
-        fn execute(&self, sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
             self.log.lock().unwrap().executed.push(sql.to_owned());
             if sql.starts_with("ROLLBACK TO SAVEPOINT") {
                 Err(DbError::Execute("rollback to savepoint failed".to_owned()))
@@ -643,11 +663,11 @@ mod tests {
                 Ok(3)
             }
         }
-        fn commit(&self) -> Result<(), DbError> {
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             self.log.lock().unwrap().commits += 1;
             Ok(())
         }
-        fn rollback(&self) -> Result<(), DbError> {
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             self.log.lock().unwrap().rollbacks += 1;
             Ok(())
         }
@@ -658,42 +678,54 @@ mod tests {
         (Box::new(MockConn { log: log.clone() }), log)
     }
 
-    fn run_with_current_cx(f: impl FnOnce(&Cx)) {
+    /// Run an async test body on a fresh current-thread runtime, handing it the
+    /// installed request `Cx`.
+    fn run_with_cx<F, Fut, T>(body: F) -> T
+    where
+        F: FnOnce(Cx) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("asupersync test runtime builds");
-        runtime.block_on(async {
+        runtime.block_on(async move {
             let cx = Cx::current().expect("block_on installs a current Cx");
-            f(&cx);
-        });
+            body(cx).await
+        })
     }
 
     #[test]
     fn acquire_applies_login_and_stamps_identity() {
-        let mgr = LeaseManager::new();
-        let (conn, log) = mock();
-        let id = mgr
-            .acquire(
-                "dev",
-                "agent-claude",
-                Duration::from_secs(900),
-                &["ALTER SESSION SET CURRENT_SCHEMA = HR".to_owned()],
-                conn,
-            )
-            .expect("acquire");
-        let executed = &log.lock().unwrap().executed;
-        assert!(
-            executed.iter().any(|s| s.contains("CURRENT_SCHEMA = HR")),
-            "login script applied"
-        );
-        assert!(
-            executed.iter().any(|s| s.contains("SET_MODULE")),
-            "identity stamped"
-        );
-        assert_eq!(mgr.active_count(), 1);
-        let info = mgr.info(&id).expect("info");
-        assert_eq!(info.agent_identity, "agent-claude");
-        assert!(!info.in_transaction);
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (conn, log) = mock();
+            let id = mgr
+                .acquire(
+                    &cx,
+                    "dev",
+                    "agent-claude",
+                    Duration::from_secs(900),
+                    &["ALTER SESSION SET CURRENT_SCHEMA = HR".to_owned()],
+                    conn,
+                )
+                .await
+                .expect("acquire");
+            {
+                let executed = &log.lock().unwrap().executed;
+                assert!(
+                    executed.iter().any(|s| s.contains("CURRENT_SCHEMA = HR")),
+                    "login script applied"
+                );
+                assert!(
+                    executed.iter().any(|s| s.contains("SET_MODULE")),
+                    "identity stamped"
+                );
+            }
+            assert_eq!(mgr.active_count(), 1);
+            let info = mgr.info(&cx, &id).await.expect("info");
+            assert_eq!(info.agent_identity, "agent-claude");
+            assert!(!info.in_transaction);
+        });
     }
 
     #[test]
@@ -751,33 +783,54 @@ mod tests {
     fn acquire_clears_tags_before_setting_no_cross_request_leak() {
         // A4: on checkout, the clear-and-reset runs BEFORE the live set, so a
         // prior request's CLIENT_IDENTIFIER cannot leak into the next lease.
-        let mgr = LeaseManager::new();
-        let (conn, log) = mock();
-        let _id = mgr
-            .acquire("dev", "agent-claude", Duration::from_secs(900), &[], conn)
-            .expect("acquire");
-        let executed = &log.lock().unwrap().executed;
-        let clear_idx = executed
-            .iter()
-            .position(|s| s.contains("CLEAR_IDENTIFIER"))
-            .expect("clear step present");
-        let set_idx = executed
-            .iter()
-            .position(|s| s.contains("SET_IDENTIFIER"))
-            .expect("set step present");
-        assert!(
-            clear_idx < set_idx,
-            "clear ({clear_idx}) must precede set ({set_idx}): {executed:?}"
-        );
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (conn, log) = mock();
+            let _id = mgr
+                .acquire(
+                    &cx,
+                    "dev",
+                    "agent-claude",
+                    Duration::from_secs(900),
+                    &[],
+                    conn,
+                )
+                .await
+                .expect("acquire");
+            let executed = &log.lock().unwrap().executed;
+            let clear_idx = executed
+                .iter()
+                .position(|s| s.contains("CLEAR_IDENTIFIER"))
+                .expect("clear step present");
+            let set_idx = executed
+                .iter()
+                .position(|s| s.contains("SET_IDENTIFIER"))
+                .expect("set step present");
+            assert!(
+                clear_idx < set_idx,
+                "clear ({clear_idx}) must precede set ({set_idx}): {executed:?}"
+            );
+        });
     }
 
     #[test]
     fn acquire_binds_live_agent_into_module_action_and_client_info() {
-        let mgr = LeaseManager::new();
-        let (conn, log) = mock();
-        let _id = mgr
-            .acquire("dev", "agent-claude", Duration::from_secs(900), &[], conn)
-            .expect("acquire");
+        let (log, _mgr_alive) = run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (conn, log) = mock();
+            let _id = mgr
+                .acquire(
+                    &cx,
+                    "dev",
+                    "agent-claude",
+                    Duration::from_secs(900),
+                    &[],
+                    conn,
+                )
+                .await
+                .expect("acquire");
+            (log, mgr)
+        });
         let binds = log.lock().unwrap().executed_binds.clone();
         // ACTION bind carries the agent identity.
         assert!(
@@ -810,174 +863,190 @@ mod tests {
 
     #[test]
     fn commit_and_rollback_route_to_the_pinned_session() {
-        let mgr = LeaseManager::new();
-        let (conn, log) = mock();
-        let id = mgr
-            .acquire("dev", "a", Duration::from_secs(900), &[], conn)
-            .expect("acquire");
-        mgr.begin_transaction(&id).expect("begin");
-        assert!(mgr.info(&id).unwrap().in_transaction);
-        mgr.commit(&id).expect("commit");
-        assert!(!mgr.info(&id).unwrap().in_transaction);
-        mgr.begin_transaction(&id).expect("begin2");
-        mgr.rollback(&id).expect("rollback");
-        let log = log.lock().unwrap();
-        assert_eq!(log.commits, 1);
-        assert_eq!(log.rollbacks, 1);
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (conn, log) = mock();
+            let id = mgr
+                .acquire(&cx, "dev", "a", Duration::from_secs(900), &[], conn)
+                .await
+                .expect("acquire");
+            mgr.begin_transaction(&cx, &id).await.expect("begin");
+            assert!(mgr.info(&cx, &id).await.unwrap().in_transaction);
+            mgr.commit(&cx, &id).await.expect("commit");
+            assert!(!mgr.info(&cx, &id).await.unwrap().in_transaction);
+            mgr.begin_transaction(&cx, &id).await.expect("begin2");
+            mgr.rollback(&cx, &id).await.expect("rollback");
+            let log = log.lock().unwrap();
+            assert_eq!(log.commits, 1);
+            assert_eq!(log.rollbacks, 1);
+        });
     }
 
     #[test]
     fn expired_lease_forces_rollback_and_is_unusable() {
         // P0-4b: monotonic TTL; on expiry, force rollback + return.
-        let mgr = LeaseManager::new();
-        let (conn, log) = mock();
-        // Zero TTL => already expired on the monotonic clock.
-        let id = mgr
-            .acquire("dev", "a", Duration::from_secs(0), &[], conn)
-            .expect("acquire");
-        // Mark a transaction open via a fresh lease... but it's already expired,
-        // so begin_transaction should reap it.
-        let err = mgr.begin_transaction(&id).unwrap_err();
-        assert!(matches!(err, DbError::LeaseNotFound(_)));
-        assert_eq!(mgr.active_count(), 0, "expired lease was reaped");
-        // The reap rolled back nothing here (no open txn), but the session was
-        // dropped; commits/rollbacks observable via the log show no commit.
-        assert_eq!(log.lock().unwrap().commits, 0);
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (conn, log) = mock();
+            // Zero TTL => already expired on the monotonic clock.
+            let id = mgr
+                .acquire(&cx, "dev", "a", Duration::from_secs(0), &[], conn)
+                .await
+                .expect("acquire");
+            // begin_transaction should reap the already-expired lease.
+            let err = mgr.begin_transaction(&cx, &id).await.unwrap_err();
+            assert!(matches!(err, DbError::LeaseNotFound(_)));
+            assert_eq!(mgr.active_count(), 0, "expired lease was reaped");
+            assert_eq!(log.lock().unwrap().commits, 0);
+        });
     }
 
     #[test]
     fn reap_expired_cleans_open_transactions() {
-        let mgr = LeaseManager::new();
-        let (conn, log) = mock();
-        let id = mgr
-            .acquire("dev", "a", Duration::from_secs(900), &[], conn)
-            .expect("acquire");
-        mgr.begin_transaction(&id).expect("begin");
-        // Force the deadline expired by re-acquiring with zero ttl is awkward;
-        // instead release-by-reap after manually expiring via a 2nd zero-ttl lease.
-        let (conn2, log2) = mock();
-        let id2 = mgr
-            .acquire("dev", "b", Duration::from_secs(0), &[], conn2)
-            .expect("acquire2");
-        let reaped = mgr.reap_expired();
-        assert!(reaped >= 1);
-        // id2 (zero ttl, in a txn? no) reaped; id (900s) survives.
-        assert!(mgr.info(&id).is_ok());
-        assert!(mgr.info(&id2).is_err());
-        let _ = (log, log2);
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (conn, log) = mock();
+            let id = mgr
+                .acquire(&cx, "dev", "a", Duration::from_secs(900), &[], conn)
+                .await
+                .expect("acquire");
+            mgr.begin_transaction(&cx, &id).await.expect("begin");
+            let (conn2, log2) = mock();
+            let id2 = mgr
+                .acquire(&cx, "dev", "b", Duration::from_secs(0), &[], conn2)
+                .await
+                .expect("acquire2");
+            let reaped = mgr.reap_expired(&cx).await;
+            assert!(reaped >= 1);
+            assert!(mgr.info(&cx, &id).await.is_ok());
+            assert!(mgr.info(&cx, &id2).await.is_err());
+            let _ = (log, log2);
+        });
     }
 
     #[test]
     fn savepoint_name_is_validated() {
-        let mgr = LeaseManager::new();
-        let (conn, _log) = mock();
-        let id = mgr
-            .acquire("dev", "a", Duration::from_secs(900), &[], conn)
-            .expect("acquire");
-        assert!(mgr.savepoint(&id, "sp1").is_ok());
-        assert!(mgr.savepoint(&id, "sp1; DROP TABLE t").is_err());
-        assert!(mgr.savepoint(&id, "1bad").is_err());
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (conn, _log) = mock();
+            let id = mgr
+                .acquire(&cx, "dev", "a", Duration::from_secs(900), &[], conn)
+                .await
+                .expect("acquire");
+            assert!(mgr.savepoint(&cx, &id, "sp1").await.is_ok());
+            assert!(mgr.savepoint(&cx, &id, "sp1; DROP TABLE t").await.is_err());
+            assert!(mgr.savepoint(&cx, &id, "1bad").await.is_err());
+        });
     }
 
     #[test]
     fn renew_resets_the_deadline() {
-        let mgr = LeaseManager::new();
-        let (conn, _log) = mock();
-        let id = mgr
-            .acquire("dev", "a", Duration::from_secs(900), &[], conn)
-            .expect("acquire");
-        let before = mgr.info(&id).unwrap().expires_in_ms;
-        let renewed = mgr.renew(&id).expect("renew");
-        assert!(renewed.expires_in_ms > 0);
-        // Roughly the full TTL again.
-        assert!(renewed.expires_in_ms >= before.saturating_sub(1000));
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (conn, _log) = mock();
+            let id = mgr
+                .acquire(&cx, "dev", "a", Duration::from_secs(900), &[], conn)
+                .await
+                .expect("acquire");
+            let before = mgr.info(&cx, &id).await.unwrap().expires_in_ms;
+            let renewed = mgr.renew(&cx, &id).await.expect("renew");
+            assert!(renewed.expires_in_ms > 0);
+            // Roughly the full TTL again.
+            assert!(renewed.expires_in_ms >= before.saturating_sub(1000));
+        });
     }
 
     #[test]
-    fn preview_dml_cx_rolls_back_to_savepoint_after_cancellation() {
-        let mgr = LeaseManager::new();
-        let log = Arc::new(Mutex::new(MockLog::default()));
-        let id = mgr
-            .acquire(
-                "dev",
-                "a",
-                Duration::from_secs(900),
-                &[],
-                Box::new(CancelAfterPreviewExecuteConn { log: log.clone() }),
-            )
-            .expect("acquire");
-        run_with_current_cx(|cx| {
+    fn preview_dml_rolls_back_to_savepoint_after_cancellation() {
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let log = Arc::new(Mutex::new(MockLog::default()));
+            let id = mgr
+                .acquire(
+                    &cx,
+                    "dev",
+                    "a",
+                    Duration::from_secs(900),
+                    &[],
+                    Box::new(CancelAfterPreviewExecuteConn { log: log.clone() }),
+                )
+                .await
+                .expect("acquire");
             let err = mgr
-                .preview_dml_cx(
-                    cx,
+                .preview_dml(
+                    &cx,
                     &id,
                     "UPDATE employees SET name = name WHERE employee_id = :1",
                     &[OracleBind::I64(100)],
                 )
+                .await
                 .expect_err("preview cancellation is surfaced");
             assert!(matches!(err, DbError::Cancelled(_)), "{err:?}");
-        });
 
-        let executed = &log.lock().unwrap().executed;
-        assert!(
-            executed
-                .iter()
-                .any(|sql| sql == "UPDATE employees SET name = name WHERE employee_id = :1"),
-            "preview DML reached the mocked database"
-        );
-        assert!(
-            executed
-                .iter()
-                .any(|sql| sql == "ROLLBACK TO SAVEPOINT oraclemcp_preview"),
-            "rollback-to-savepoint runs even after cancellation"
-        );
-        assert_eq!(
-            mgr.active_count(),
-            1,
-            "successful cleanup keeps the lease usable"
-        );
+            let executed = log.lock().unwrap().executed.clone();
+            assert!(
+                executed
+                    .iter()
+                    .any(|sql| sql == "UPDATE employees SET name = name WHERE employee_id = :1"),
+                "preview DML reached the mocked database"
+            );
+            assert!(
+                executed
+                    .iter()
+                    .any(|sql| sql == "ROLLBACK TO SAVEPOINT oraclemcp_preview"),
+                "rollback-to-savepoint runs even after cancellation"
+            );
+            assert_eq!(
+                mgr.active_count(),
+                1,
+                "successful cleanup keeps the lease usable"
+            );
+        });
     }
 
     #[test]
     fn preview_dml_discards_lease_when_savepoint_cleanup_fails() {
-        let mgr = LeaseManager::new();
-        let log = Arc::new(Mutex::new(MockLog::default()));
-        let id = mgr
-            .acquire(
-                "dev",
-                "a",
-                Duration::from_secs(900),
-                &[],
-                Box::new(RollbackToSavepointFailsConn { log: log.clone() }),
-            )
-            .expect("acquire");
-        run_with_current_cx(|cx| {
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let log = Arc::new(Mutex::new(MockLog::default()));
+            let id = mgr
+                .acquire(
+                    &cx,
+                    "dev",
+                    "a",
+                    Duration::from_secs(900),
+                    &[],
+                    Box::new(RollbackToSavepointFailsConn { log: log.clone() }),
+                )
+                .await
+                .expect("acquire");
             let err = mgr
-                .preview_dml_cx(
-                    cx,
+                .preview_dml(
+                    &cx,
                     &id,
                     "DELETE FROM employees WHERE employee_id = :1",
                     &[OracleBind::I64(100)],
                 )
+                .await
                 .expect_err("cleanup failure is surfaced");
             assert!(
                 matches!(err, DbError::Execute(ref msg) if msg.contains("lease discarded")),
                 "{err:?}"
             );
+            assert_eq!(
+                log.lock().unwrap().rollbacks,
+                1,
+                "cleanup failure falls back to a full rollback before dropping the lease"
+            );
+            assert_eq!(
+                mgr.active_count(),
+                0,
+                "uncertain preview cleanup removes the lease from reuse"
+            );
+            assert!(
+                mgr.info(&cx, &id).await.is_err(),
+                "discarded lease is no longer usable"
+            );
         });
-        assert_eq!(
-            log.lock().unwrap().rollbacks,
-            1,
-            "cleanup failure falls back to a full rollback before dropping the lease"
-        );
-        assert_eq!(
-            mgr.active_count(),
-            0,
-            "uncertain preview cleanup removes the lease from reuse"
-        );
-        assert!(
-            mgr.info(&id).is_err(),
-            "discarded lease is no longer usable"
-        );
     }
 }
