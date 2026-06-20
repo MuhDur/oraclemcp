@@ -606,6 +606,39 @@ synchronously in the generic core.
 in-process patch preview for the active profile, but the applying call must
 still pass the confirmation token from the preview.
 
+### Least-privilege database account
+
+The classifier and the per-DB operating-level ceiling are the *enforced*
+control, but they are strongest when paired with a database account that simply
+**cannot** write — defense in depth. For a read-only profile, connect as a
+least-privilege user (ideally a [proxy
+user](#connection-profiles) so individual identity is preserved in the audit
+trail) granted only:
+
+```sql
+-- Minimum: connect + read the data dictionary the read tools rely on.
+CREATE USER mcp_ro IDENTIFIED BY <secret>;
+GRANT CREATE SESSION TO mcp_ro;
+GRANT SELECT ANY DICTIONARY TO mcp_ro;   -- powers schema_inspect / get_ddl / describe
+-- Then grant SELECT only on the specific objects the agent should read, e.g.:
+GRANT SELECT ON app.customers TO mcp_ro;
+-- For proxy auth (preferred), let the proxy connect as the read-only target:
+ALTER USER mcp_ro GRANT CONNECT THROUGH mcp_proxy;
+```
+
+Grant **no** write-implying system privileges (`CREATE TABLE`, `INSERT/UPDATE/
+DELETE ANY TABLE`, `CREATE/ALTER ANY PROCEDURE`, `ALTER SYSTEM`, …). For a
+read-write profile, grant only the specific object DML/DDL the agent needs, and
+keep the profile `max_level` no higher than that work requires.
+
+`oraclemcp doctor --profile <p>` includes a **Write posture** check (11): with a
+live connection it reads the session's own `SESSION_PRIVS` and reports a
+read-only posture when the principal holds no write-implying system privilege, or
+**warns** (naming the offending privileges) when it can write. The same check
+reports the supported TCPS wallet modes — auto-login `cwallet.sso`, unencrypted
+`ewallet.pem`, and password-protected `ewallet.p12` (via `wallet_password` /
+`wallet_password_ref`) are all supported.
+
 ## Architecture
 
 The engine-free MCP core is a small, one-way dependency DAG; no crate here imports a PL/SQL analysis engine (a boundary the CI enforces):

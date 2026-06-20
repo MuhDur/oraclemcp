@@ -76,6 +76,86 @@ pub fn probe_privileges(conn: &dyn OracleConnection) -> PrivilegeProfile {
     }
 }
 
+/// System privileges that let a principal mutate data or schema. A
+/// least-privilege / read-only proxy account holds NONE of these (it has at most
+/// `CREATE SESSION` plus `SELECT`/`SELECT ANY DICTIONARY`). Their presence is the
+/// signal that the session is NOT a read-only posture under the classifier + A1.
+const WRITE_IMPLYING_PRIVS: &[&str] = &[
+    "INSERT ANY TABLE",
+    "UPDATE ANY TABLE",
+    "DELETE ANY TABLE",
+    "CREATE TABLE",
+    "CREATE ANY TABLE",
+    "DROP ANY TABLE",
+    "ALTER ANY TABLE",
+    "CREATE PROCEDURE",
+    "CREATE ANY PROCEDURE",
+    "ALTER ANY PROCEDURE",
+    "DROP ANY PROCEDURE",
+    "CREATE TRIGGER",
+    "CREATE ANY TRIGGER",
+    "CREATE ANY INDEX",
+    "CREATE VIEW",
+    "CREATE ANY VIEW",
+    "GRANT ANY PRIVILEGE",
+    "GRANT ANY ROLE",
+    "CREATE USER",
+    "DROP USER",
+    "ALTER SYSTEM",
+    "ALTER DATABASE",
+    "SYSDBA",
+    "SYSOPER",
+];
+
+/// The least-privilege / read-only posture of the connected principal (bead A2).
+///
+/// A least-privilege proxy user or a read-only role holds no write-implying
+/// system privileges, so this is the real boundary the operator should confirm:
+/// the classifier + per-DB ceiling are the enforced control, but a principal
+/// that *cannot* write at the database is defense in depth.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritePosture {
+    /// Whether the principal holds any write-implying system privilege.
+    /// `None` means the posture could not be determined (probe failed) — treated
+    /// as a "cannot confirm read-only" warning, never a silent pass.
+    pub can_write: Option<bool>,
+    /// The write-implying privileges that were observed (for the operator note).
+    pub write_privileges: Vec<String>,
+    /// Whether a proxy/least-privilege connect user is in effect.
+    pub proxy_user: bool,
+}
+
+/// Probe the connected principal's write posture from `SESSION_PRIVS` (the
+/// session's own effective privileges — always readable by the session, no DBA
+/// grant needed). Read-only and best-effort: a probe failure yields
+/// `can_write: None` so the doctor warns rather than falsely reporting safe.
+#[must_use]
+pub fn probe_write_posture(conn: &dyn OracleConnection, proxy_user: bool) -> WritePosture {
+    match conn.query_rows("SELECT privilege FROM session_privs", &[]) {
+        Ok(rows) => {
+            let held: Vec<String> = rows
+                .iter()
+                .filter_map(|r| r.text("PRIVILEGE").map(|p| p.trim().to_ascii_uppercase()))
+                .collect();
+            let write_privileges: Vec<String> = WRITE_IMPLYING_PRIVS
+                .iter()
+                .filter(|p| held.iter().any(|h| h == **p))
+                .map(|p| (*p).to_owned())
+                .collect();
+            WritePosture {
+                can_write: Some(!write_privileges.is_empty()),
+                write_privileges,
+                proxy_user,
+            }
+        }
+        Err(_) => WritePosture {
+            can_write: None,
+            write_privileges: Vec::new(),
+            proxy_user,
+        },
+    }
+}
+
 /// One row of the privilege-degradation matrix: a tool, the privilege it needs,
 /// and the documented degraded behavior when it is absent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -205,5 +285,91 @@ mod tests {
             m.iter()
                 .all(|r| !r.tool.is_empty() && !r.degraded.is_empty())
         );
+    }
+
+    /// A mock returning a fixed set of `SESSION_PRIVS.PRIVILEGE` rows (or an
+    /// error) to exercise the A2 write-posture probe.
+    struct SessionPrivsMock {
+        privileges: Option<Vec<&'static str>>,
+    }
+    impl OracleConnection for SessionPrivsMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+        fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+            match &self.privileges {
+                Some(privs) => Ok(privs
+                    .iter()
+                    .map(|p| OracleRow {
+                        columns: vec![(
+                            "PRIVILEGE".to_owned(),
+                            crate::types::OracleCell::new("VARCHAR2", Some((*p).to_owned())),
+                        )],
+                    })
+                    .collect()),
+                None => Err(DbError::Query("ORA-00942".to_owned())),
+            }
+        }
+        fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+            Ok(0)
+        }
+        fn commit(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        fn rollback(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn read_only_principal_reports_cannot_write() {
+        // A least-privilege session holds only CREATE SESSION + SELECT-type privs.
+        let posture = probe_write_posture(
+            &SessionPrivsMock {
+                privileges: Some(vec!["CREATE SESSION", "SELECT ANY DICTIONARY"]),
+            },
+            false,
+        );
+        assert_eq!(posture.can_write, Some(false));
+        assert!(posture.write_privileges.is_empty());
+    }
+
+    #[test]
+    fn write_capable_principal_is_detected_with_evidence() {
+        let posture = probe_write_posture(
+            &SessionPrivsMock {
+                privileges: Some(vec![
+                    "CREATE SESSION",
+                    "CREATE ANY TABLE",
+                    "INSERT ANY TABLE",
+                ]),
+            },
+            true,
+        );
+        assert_eq!(posture.can_write, Some(true));
+        assert!(
+            posture
+                .write_privileges
+                .contains(&"CREATE ANY TABLE".to_owned())
+        );
+        assert!(
+            posture
+                .write_privileges
+                .contains(&"INSERT ANY TABLE".to_owned())
+        );
+        assert!(posture.proxy_user);
+    }
+
+    #[test]
+    fn unprobeable_posture_is_unknown_not_falsely_safe() {
+        let posture = probe_write_posture(&SessionPrivsMock { privileges: None }, false);
+        // Fail-closed: a probe failure must NOT report a safe read-only posture.
+        assert_eq!(posture.can_write, None);
     }
 }

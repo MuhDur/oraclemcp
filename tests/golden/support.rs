@@ -79,6 +79,11 @@ fn scrub_value(value: &Value) -> Value {
 }
 
 fn scrub_text(text: &str) -> String {
+    // A6: the `<untrusted-user-data-<tag>>` fence tag is a per-call content hash
+    // (non-deterministic), so normalize it to a stable token before UUID/session
+    // scrubbing. This keeps goldens deterministic while still proving the fence
+    // (preamble + open/close delimiters) is present in agent-facing text.
+    let text = scrub_fence_tags(text);
     let mut out = String::with_capacity(text.len());
     let mut index = 0;
     while index < text.len() {
@@ -91,6 +96,33 @@ fn scrub_text(text: &str) -> String {
             break;
         }
     }
+    out
+}
+
+/// Replace the 16-hex fence tag in `untrusted-user-data-<tag>` with `[FENCE]`
+/// so the golden is stable across runs.
+fn scrub_fence_tags(text: &str) -> String {
+    const NEEDLE: &str = "untrusted-user-data-";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find(NEEDLE) {
+        out.push_str(&rest[..pos]);
+        out.push_str(NEEDLE);
+        let after = &rest[pos + NEEDLE.len()..];
+        let hex_len = after
+            .bytes()
+            .take_while(u8::is_ascii_hexdigit)
+            .count()
+            .min(16);
+        if hex_len == 16 {
+            out.push_str("[FENCE]");
+            rest = &after[hex_len..];
+        } else {
+            // Not a real fence tag (e.g. the neutralized marker); leave it.
+            rest = after;
+        }
+    }
+    out.push_str(rest);
     out
 }
 

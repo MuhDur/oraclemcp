@@ -1839,7 +1839,14 @@ fn create_or_replace_execute_applies_and_reports_compile_errors() {
     assert_eq!(state.commits.load(Ordering::SeqCst), 1);
     let executed = state.executed.lock().expect("exec mutex");
     assert_eq!(executed.len(), 1);
-    assert_eq!(executed[0].0, source);
+    // A3: the executed text carries the per-statement audit marker (a leading,
+    // verdict-preserving comment) followed by the exact source.
+    assert!(
+        executed[0].0.starts_with("/* oraclemcp llm="),
+        "executed SQL should carry the A3 audit marker: {}",
+        executed[0].0
+    );
+    assert!(executed[0].0.ends_with(source));
 }
 
 #[test]

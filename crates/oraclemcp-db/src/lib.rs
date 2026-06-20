@@ -57,8 +57,9 @@ pub use intelligence::{
 };
 pub use lease::{LeaseId, LeaseInfo, LeaseManager, PreviewImpact, require_lease_id};
 pub use oci::{
-    AdbConnectInfo, CloudStatus, IamToken, IamTokenSource, OciError, WalletContents,
-    classify_wallet, discover_wallet, ensure_fresh_token, validate_adb_connect_string,
+    AdbConnectInfo, CloudStatus, IamToken, IamTokenSource, OciError, WalletContents, WalletMode,
+    classify_wallet, discover_wallet, ensure_fresh_token, supported_wallet_modes,
+    validate_adb_connect_string,
 };
 pub use plscope::{
     PlscopeIdentifier, PlscopeStatement, compile_object_statements, execute_immediate_audit,
@@ -66,7 +67,8 @@ pub use plscope::{
     recompile_with_plscope_statements,
 };
 pub use privileges::{
-    DictionaryTier, PrivilegeProfile, ToolRequirement, probe_privileges, requirement_matrix,
+    DictionaryTier, PrivilegeProfile, ToolRequirement, WritePosture, probe_privileges,
+    probe_write_posture, requirement_matrix,
 };
 pub use query::{
     QueryCaps, QueryResponse, cursor_to_offset, paginated_sql, read_query, read_query_cx,

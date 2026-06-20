@@ -283,6 +283,43 @@ pub fn ensure_fresh_token(
     }
 }
 
+/// A wallet auth mode this thin driver supports, with a one-line note. Reporting
+/// these as SUPPORTED (bead A2, Round 3) corrects an earlier fail-closed posture:
+/// unencrypted `ewallet.pem`, auto-login `cwallet.sso`, and password-protected
+/// `ewallet.p12` (with `wallet_password`) all work in the pinned driver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WalletMode {
+    /// The wallet artifact / mode (e.g. `cwallet.sso`).
+    pub mode: &'static str,
+    /// Whether the pinned thin driver supports it.
+    pub supported: bool,
+    /// A short operator note.
+    pub note: &'static str,
+}
+
+/// The wallet auth modes the pinned thin driver supports. All three TCPS wallet
+/// forms are SUPPORTED — none is fail-closed.
+#[must_use]
+pub fn supported_wallet_modes() -> &'static [WalletMode] {
+    &[
+        WalletMode {
+            mode: "cwallet.sso",
+            supported: true,
+            note: "auto-login SSO wallet (mTLS without a wallet password)",
+        },
+        WalletMode {
+            mode: "ewallet.pem",
+            supported: true,
+            note: "unencrypted PEM wallet (no wallet password required)",
+        },
+        WalletMode {
+            mode: "ewallet.p12 + wallet_password",
+            supported: true,
+            note: "password-protected PKCS#12 wallet via wallet_password/_ref",
+        },
+    ]
+}
+
 /// A non-secret cloud-connectivity summary for `oracle_capabilities`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CloudStatus {
@@ -419,6 +456,28 @@ mod tests {
             validate_adb_connect_string("   "),
             Err(OciError::InvalidAdbConnectString(_))
         ));
+    }
+
+    #[test]
+    fn unencrypted_and_sso_and_password_wallets_are_reported_supported() {
+        // A2 (Round 3): these wallet modes must be reported SUPPORTED, not
+        // fail-closed — they work in the pinned thin driver.
+        let modes = supported_wallet_modes();
+        for needle in [
+            "cwallet.sso",
+            "ewallet.pem",
+            "ewallet.p12 + wallet_password",
+        ] {
+            let mode = modes
+                .iter()
+                .find(|m| m.mode == needle)
+                .unwrap_or_else(|| panic!("{needle} mode reported"));
+            assert!(
+                mode.supported,
+                "{needle} must be SUPPORTED, not fail-closed"
+            );
+        }
+        assert!(modes.iter().all(|m| m.supported));
     }
 
     #[test]

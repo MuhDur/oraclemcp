@@ -15,7 +15,7 @@
 
 use oraclemcp_db::{
     DiagnosticsSource, OracleConnection, canonical_nls_statements, detect_oracle_driver,
-    detect_standby, preflight, probe_privileges,
+    detect_standby, preflight, probe_privileges, probe_write_posture, supported_wallet_modes,
 };
 use oraclemcp_error::{ErrorClass, classify_ora_code, parse_ora_code};
 use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel};
@@ -50,7 +50,7 @@ impl CheckStatus {
 /// One diagnostic check result.
 #[derive(Clone, Debug, Serialize)]
 pub struct CheckResult {
-    /// Stable check number (1..=10).
+    /// Stable check number (1..=11).
     pub id: u8,
     /// Short check name.
     pub name: String,
@@ -115,6 +115,8 @@ pub struct DoctorContext<'a> {
     /// Runtime connection strategy label, such as `single_session` or
     /// `hybrid_pool`. This is non-secret operator-facing metadata.
     pub connection_strategy: Option<String>,
+    /// Whether a proxy / least-privilege connect user is configured (A2).
+    pub proxy_user: bool,
     /// Exact setup values that must never appear in doctor output.
     pub sensitive_values: Vec<String>,
 }
@@ -210,6 +212,7 @@ pub fn run_doctor(ctx: &DoctorContext) -> DoctorReport {
         check_classifier_selftest(),
         check_virtual_tools(),
         check_dba_suite_preflight(ctx),
+        check_write_posture(ctx),
     ];
     DoctorReport { checks }
 }
@@ -612,6 +615,94 @@ fn check_dba_suite_preflight(ctx: &DoctorContext) -> CheckResult {
     }
 }
 
+/// A one-line, honest summary of the wallet auth modes the pinned thin driver
+/// supports (A2, Round 3): unencrypted `ewallet.pem`, auto-login `cwallet.sso`,
+/// and password-protected `ewallet.p12` are all SUPPORTED — never fail-closed.
+fn supported_wallet_modes_note() -> String {
+    let modes: Vec<&str> = supported_wallet_modes()
+        .iter()
+        .filter(|m| m.supported)
+        .map(|m| m.mode)
+        .collect();
+    format!("supported wallet modes: {}", modes.join(", "))
+}
+
+/// Check 11 — read-only proxy-user / role posture (bead A2, **report-only**).
+///
+/// Reports whether the connected principal can write at the database. A
+/// least-privilege proxy user / read-only role holds NO write-implying system
+/// privileges; if it does, the operator is WARNED (the classifier + per-DB
+/// ceiling are still the enforced control, but a write-capable principal is not
+/// defense in depth). The detail always reports the SUPPORTED wallet modes so an
+/// operator can see unencrypted/SSO/password wallets are not fail-closed. Never
+/// `Fail`s the suite.
+fn check_write_posture(ctx: &DoctorContext) -> CheckResult {
+    const ID: u8 = 11;
+    const NAME: &str = "Write posture";
+    let wallet_note = supported_wallet_modes_note();
+
+    if ctx.connection_error.is_some() {
+        return CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Skip,
+            format!("skipped because connectivity failed; {wallet_note}"),
+        );
+    }
+    let proxy = if ctx.proxy_user {
+        "proxy/least-privilege connect user configured"
+    } else {
+        "direct connect user (no proxy)"
+    };
+    match ctx.conn {
+        None => CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Skip,
+            format!("offline — supply a profile/connection to probe write posture; {wallet_note}"),
+        ),
+        Some(conn) => {
+            let posture = probe_write_posture(conn, ctx.proxy_user);
+            match posture.can_write {
+                Some(false) => CheckResult::new(
+                    ID,
+                    NAME,
+                    CheckStatus::Pass,
+                    format!(
+                        "read-only posture: principal holds no write-implying system privileges ({proxy}); {wallet_note}"
+                    ),
+                ),
+                Some(true) => CheckResult::new(
+                    ID,
+                    NAME,
+                    CheckStatus::Warn,
+                    sanitized_detail(
+                        ctx,
+                        format!(
+                            "principal CAN write — holds {} ({proxy}); {wallet_note}",
+                            posture.write_privileges.join(", ")
+                        ),
+                    ),
+                )
+                .with_fix(
+                    "for least-privilege, connect as a read-only proxy user / role with only \
+                     CREATE SESSION + SELECT (or SELECT ANY DICTIONARY); the classifier + per-DB \
+                     ceiling remain the enforced control, but a non-writable principal is defense in depth",
+                ),
+                None => CheckResult::new(
+                    ID,
+                    NAME,
+                    CheckStatus::Warn,
+                    format!(
+                        "could not determine write posture from SESSION_PRIVS ({proxy}); {wallet_note}"
+                    ),
+                )
+                .with_fix("grant the session SELECT on SESSION_PRIVS, or accept reduced posture reporting"),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,10 +734,48 @@ mod tests {
         }
     }
 
+    /// A live mock whose `SESSION_PRIVS` includes write-implying privileges
+    /// (exercises the A2 write-posture WARN path).
+    struct WriteCapableMock;
+    impl OracleConnection for WriteCapableMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+        fn query_rows(&self, sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+            if sql.to_ascii_lowercase().contains("session_privs") {
+                return Ok(["CREATE SESSION", "CREATE ANY TABLE", "INSERT ANY TABLE"]
+                    .iter()
+                    .map(|p| OracleRow {
+                        columns: vec![(
+                            "PRIVILEGE".to_owned(),
+                            oraclemcp_db::OracleCell::new("VARCHAR2", Some((*p).to_owned())),
+                        )],
+                    })
+                    .collect());
+            }
+            Ok(vec![OracleRow { columns: vec![] }])
+        }
+        fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+            Ok(0)
+        }
+        fn commit(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        fn rollback(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
     #[test]
-    fn report_has_ten_checks_and_classifier_self_test_passes() {
+    fn report_has_eleven_checks_and_classifier_self_test_passes() {
         let report = run_doctor(&DoctorContext::default());
-        assert_eq!(report.checks.len(), 10);
+        assert_eq!(report.checks.len(), 11);
         let selftest = report.checks.iter().find(|c| c.id == 8).unwrap();
         assert_eq!(selftest.status, CheckStatus::Pass, "{}", selftest.detail);
     }
@@ -654,9 +783,9 @@ mod tests {
     #[test]
     fn offline_skips_live_checks_and_does_not_fail() {
         let report = run_doctor(&DoctorContext::default());
-        // Connectivity, role/standby, privilege-tier, snapshot, and the DBA-suite
-        // preflight (10) all skip offline.
-        for id in [3u8, 4, 6, 7, 10] {
+        // Connectivity, role/standby, privilege-tier, snapshot, the DBA-suite
+        // preflight (10), and write posture (11) all skip offline.
+        for id in [3u8, 4, 6, 7, 10, 11] {
             let c = report.checks.iter().find(|c| c.id == id).unwrap();
             assert_eq!(
                 c.status,
@@ -842,7 +971,7 @@ mod tests {
         assert!(text.contains("oraclemcp doctor"));
         assert!(text.contains("Classifier self-test"));
         let j = report.to_json();
-        assert_eq!(j["checks"].as_array().unwrap().len(), 10);
+        assert_eq!(j["checks"].as_array().unwrap().len(), 11);
         assert_eq!(j["exit_code"], json!(0));
     }
 
@@ -968,5 +1097,68 @@ mod tests {
                 .to_text_with_exit_code(2)
                 .contains("verdict: FAILED (exit 2)")
         );
+    }
+
+    /// A2 — a read-only (least-privilege) principal: the write-posture check (11)
+    /// passes and reports read-only posture; the suite never fails.
+    #[test]
+    fn read_only_principal_reports_read_only_write_posture() {
+        let conn = LiveMock;
+        let ctx = DoctorContext {
+            conn: Some(&conn),
+            proxy_user: true,
+            ..DoctorContext::default()
+        };
+        let report = run_doctor(&ctx);
+        let posture = report.checks.iter().find(|c| c.id == 11).unwrap();
+        assert_eq!(posture.status, CheckStatus::Pass, "{}", posture.detail);
+        assert!(posture.detail.contains("read-only posture"));
+        assert!(
+            posture
+                .detail
+                .contains("proxy/least-privilege connect user")
+        );
+        assert_eq!(report.exit_code(), 0);
+    }
+
+    /// A2 — a write-capable principal is WARNED (not least-privilege), with the
+    /// offending privileges named; a warning never fails the suite.
+    #[test]
+    fn write_capable_principal_warns_with_evidence() {
+        let conn = WriteCapableMock;
+        let ctx = DoctorContext {
+            conn: Some(&conn),
+            ..DoctorContext::default()
+        };
+        let report = run_doctor(&ctx);
+        let posture = report.checks.iter().find(|c| c.id == 11).unwrap();
+        assert_eq!(posture.status, CheckStatus::Warn, "{}", posture.detail);
+        assert!(posture.detail.contains("principal CAN write"));
+        assert!(posture.detail.contains("CREATE ANY TABLE"));
+        assert!(posture.fix.as_deref().unwrap().contains("read-only proxy"));
+        assert_eq!(report.exit_code(), 0, "a warning is not a failure");
+    }
+
+    /// A2 (Round 3) — the write-posture check always reports the SUPPORTED wallet
+    /// modes: unencrypted ewallet.pem, auto-login cwallet.sso, and password
+    /// ewallet.p12 are SUPPORTED (not fail-closed).
+    #[test]
+    fn doctor_reports_supported_wallet_modes() {
+        let conn = LiveMock;
+        let ctx = DoctorContext {
+            conn: Some(&conn),
+            ..DoctorContext::default()
+        };
+        let report = run_doctor(&ctx);
+        let posture = report.checks.iter().find(|c| c.id == 11).unwrap();
+        for needle in ["cwallet.sso", "ewallet.pem", "ewallet.p12"] {
+            assert!(
+                posture.detail.contains(needle),
+                "wallet mode {needle} should be reported SUPPORTED: {}",
+                posture.detail
+            );
+        }
+        // And the underlying source-of-truth marks every mode SUPPORTED.
+        assert!(supported_wallet_modes().iter().all(|m| m.supported));
     }
 }

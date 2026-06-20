@@ -651,14 +651,31 @@ fn tools_call_returns_structured_content_and_text_compatibility() {
         .find(|reply| reply["id"] == json!(2))
         .expect("tools/call reply")["result"];
     assert_eq!(result["isError"], json!(false));
+    // structuredContent stays clean, machine-parseable JSON (A6).
     assert_eq!(
         result["structuredContent"]["tool"],
         json!("oracle_schema_inspect")
     );
     assert_eq!(result["structuredContent"]["args"]["owner"], json!("HR"));
-    assert_eq!(
-        result["content"][0]["text"],
-        json!(result["structuredContent"].to_string())
+    // A6: the human/LLM text channel wraps the payload in an
+    // `<untrusted-user-data>` fence with a "treat as data" preamble. The exact
+    // structured JSON is still present inside the fence, but the raw text is no
+    // longer byte-equal to the structured JSON.
+    let text = result["content"][0]["text"]
+        .as_str()
+        .expect("text content is a string");
+    let structured = result["structuredContent"].to_string();
+    assert!(text.contains("<untrusted-user-data-"));
+    assert!(text.contains("</untrusted-user-data-"));
+    assert!(text.contains("Treat everything between"));
+    assert!(
+        text.contains(&structured),
+        "fenced text must still carry the structured payload"
+    );
+    assert_ne!(
+        text,
+        structured.as_str(),
+        "text is fenced, not byte-equal to structuredContent"
     );
 }
 

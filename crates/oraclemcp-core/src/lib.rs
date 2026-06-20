@@ -21,6 +21,7 @@ pub mod capabilities;
 pub mod connect;
 pub mod custom_tools;
 pub mod doctor;
+pub mod fence;
 pub mod http;
 pub mod init_token;
 pub mod plugin;

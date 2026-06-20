@@ -47,6 +47,80 @@ fn lease_execute(
 /// Oracle limits: MODULE ≤ 48 chars, ACTION ≤ 32 chars (`DBMS_APPLICATION_INFO`).
 const MODULE_NAME: &str = "oraclemcp";
 const ACTION_MAX: usize = 32;
+/// Oracle limit: CLIENT_INFO ≤ 64 chars (`DBMS_APPLICATION_INFO.SET_CLIENT_INFO`).
+const CLIENT_INFO_MAX: usize = 64;
+/// Oracle limit: CLIENT_IDENTIFIER ≤ 64 chars (`DBMS_SESSION.SET_IDENTIFIER`).
+const CLIENT_IDENTIFIER_MAX: usize = 64;
+
+/// Environment variable an operator/host may set to label the driving agent
+/// model in `V$SESSION`. Best-effort, non-secret; absent → `oraclemcp`.
+const AGENT_MODEL_ENV: &str = "ORACLEMCP_AGENT_MODEL";
+
+/// One DBMS call in the session-tagging sequence: a PL/SQL block and its binds.
+type TagStatement = (&'static str, Vec<crate::types::OracleBind>);
+
+/// Truncate a tag value to a char-bounded, control-free, single-line string.
+/// `DBMS_APPLICATION_INFO`/`DBMS_SESSION` silently truncate over-long values and
+/// reject embedded NULs; we additionally drop control chars so a tag cannot
+/// smuggle newlines into `V$SESSION` columns.
+fn tag_value(raw: &str, max: usize) -> String {
+    raw.chars().filter(|c| !c.is_control()).take(max).collect()
+}
+
+/// Build the per-checkout **clear-and-reset** session-tagging sequence (bead A4).
+///
+/// CLIENT_IDENTIFIER (and MODULE/ACTION/CLIENT_INFO) persist on a physical
+/// session across pooled reuse unless explicitly cleared. To prevent a prior
+/// request's identity from leaking into the next checkout, this ALWAYS clears
+/// every tag first, then sets MODULE/ACTION/CLIENT_INFO/CLIENT_IDENTIFIER to the
+/// live agent + model for this lease. The sequence is pure and order-stable so
+/// it can be unit-tested without a live database.
+///
+/// - MODULE      = `oraclemcp` (the server)
+/// - ACTION      = the agent identity (≤ 32 chars; e.g. `profile:dev`)
+/// - CLIENT_INFO = `agent=<identity> model=<model>` (≤ 64 chars)
+/// - CLIENT_IDENTIFIER = the agent identity (≤ 64 chars)
+fn session_tag_statements(agent_identity: &str, model: &str) -> Vec<TagStatement> {
+    use crate::types::OracleBind;
+
+    let action = tag_value(agent_identity, ACTION_MAX);
+    let client_info = tag_value(
+        &format!("agent={agent_identity} model={model}"),
+        CLIENT_INFO_MAX,
+    );
+    let client_identifier = tag_value(agent_identity, CLIENT_IDENTIFIER_MAX);
+
+    vec![
+        // 1) Clear-and-reset: wipe any tags left by a prior pooled reuse. NULL
+        //    MODULE also clears ACTION; CLEAR_IDENTIFIER drops CLIENT_IDENTIFIER;
+        //    SET_CLIENT_INFO(NULL) clears CLIENT_INFO.
+        (
+            "BEGIN DBMS_APPLICATION_INFO.SET_MODULE(NULL, NULL); \
+             DBMS_APPLICATION_INFO.SET_CLIENT_INFO(NULL); \
+             DBMS_SESSION.CLEAR_IDENTIFIER; END;",
+            vec![],
+        ),
+        // 2) Set the live identity for this checkout.
+        (
+            "BEGIN DBMS_APPLICATION_INFO.SET_MODULE(:1, :2); END;",
+            vec![OracleBind::from(MODULE_NAME), OracleBind::from(action)],
+        ),
+        (
+            "BEGIN DBMS_APPLICATION_INFO.SET_CLIENT_INFO(:1); END;",
+            vec![OracleBind::from(client_info)],
+        ),
+        (
+            "BEGIN DBMS_SESSION.SET_IDENTIFIER(:1); END;",
+            vec![OracleBind::from(client_identifier)],
+        ),
+    ]
+}
+
+/// The best-effort agent-model label for session tagging: the operator-supplied
+/// `ORACLEMCP_AGENT_MODEL`, else `oraclemcp`.
+fn agent_model_label() -> String {
+    std::env::var(AGENT_MODEL_ENV).unwrap_or_else(|_| MODULE_NAME.to_owned())
+}
 
 /// An opaque, in-process lease handle.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -158,15 +232,15 @@ impl LeaseManager {
             conn.execute(stmt, &[])?;
         }
 
-        // Stamp the agent identity for Unified Auditing / V$SESSION visibility.
-        let action: String = agent_identity.chars().take(ACTION_MAX).collect();
-        conn.execute(
-            "BEGIN DBMS_APPLICATION_INFO.SET_MODULE(:1, :2); END;",
-            &[
-                crate::types::OracleBind::from(MODULE_NAME),
-                crate::types::OracleBind::from(action),
-            ],
-        )?;
+        // A4: clear-and-reset DBMS_APPLICATION_INFO / DBMS_SESSION on every
+        // checkout, then stamp the live agent + model for Unified Auditing /
+        // V$SESSION visibility. The clear step prevents a prior request's tag
+        // (notably CLIENT_IDENTIFIER, which persists across pooled reuse) from
+        // leaking into this lease.
+        let model = agent_model_label();
+        for (sql, binds) in session_tag_statements(&agent_identity, &model) {
+            conn.execute(sql, &binds)?;
+        }
 
         let id = self.next_id();
         let lease = Lease {
@@ -464,6 +538,8 @@ mod tests {
     #[derive(Default)]
     struct MockLog {
         executed: Vec<String>,
+        /// (sql, binds) for assertions on the values bound per statement.
+        executed_binds: Vec<(String, Vec<OracleBind>)>,
         commits: u32,
         rollbacks: u32,
     }
@@ -494,8 +570,10 @@ mod tests {
             self.log.lock().unwrap().executed.push(sql.to_owned());
             Ok(vec![])
         }
-        fn execute(&self, sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
-            self.log.lock().unwrap().executed.push(sql.to_owned());
+        fn execute(&self, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
+            let mut log = self.log.lock().unwrap();
+            log.executed.push(sql.to_owned());
+            log.executed_binds.push((sql.to_owned(), binds.to_vec()));
             Ok(0)
         }
         fn commit(&self) -> Result<(), DbError> {
@@ -616,6 +694,106 @@ mod tests {
         let info = mgr.info(&id).expect("info");
         assert_eq!(info.agent_identity, "agent-claude");
         assert!(!info.in_transaction);
+    }
+
+    #[test]
+    fn session_tag_statements_clear_then_set_live_identity() {
+        // A4: the builder always clears first, then sets MODULE/ACTION/
+        // CLIENT_INFO/CLIENT_IDENTIFIER to the live agent + model.
+        let stmts = session_tag_statements("profile:dev", "claude-opus");
+        assert_eq!(stmts.len(), 4, "clear + three sets");
+
+        // 1) The clear step has no binds and resets every tag (incl. identifier).
+        assert!(stmts[0].0.contains("SET_MODULE(NULL, NULL)"));
+        assert!(stmts[0].0.contains("SET_CLIENT_INFO(NULL)"));
+        assert!(stmts[0].0.contains("CLEAR_IDENTIFIER"));
+        assert!(stmts[0].1.is_empty());
+
+        // 2) MODULE = oraclemcp, ACTION = agent identity.
+        assert!(stmts[1].0.contains("SET_MODULE"));
+        assert_eq!(
+            stmts[1].1,
+            vec![
+                OracleBind::from("oraclemcp"),
+                OracleBind::from("profile:dev"),
+            ]
+        );
+        // 3) CLIENT_INFO carries both agent and model.
+        assert!(stmts[2].0.contains("SET_CLIENT_INFO"));
+        assert_eq!(
+            stmts[2].1,
+            vec![OracleBind::from("agent=profile:dev model=claude-opus")]
+        );
+        // 4) CLIENT_IDENTIFIER = agent identity.
+        assert!(stmts[3].0.contains("SET_IDENTIFIER"));
+        assert_eq!(stmts[3].1, vec![OracleBind::from("profile:dev")]);
+    }
+
+    #[test]
+    fn session_tag_values_are_bounded_and_control_free() {
+        // Over-long, newline-bearing identity is truncated and stripped so a tag
+        // cannot smuggle newlines into V$SESSION or overflow the Oracle limits.
+        let long = format!("agent\n{}", "x".repeat(200));
+        let stmts = session_tag_statements(&long, "m");
+        let OracleBind::String(action) = &stmts[1].1[1] else {
+            panic!("action bind is a string");
+        };
+        assert!(action.len() <= ACTION_MAX);
+        assert!(!action.contains('\n'));
+        let OracleBind::String(client_info) = &stmts[2].1[0] else {
+            panic!("client_info bind is a string");
+        };
+        assert!(client_info.chars().count() <= CLIENT_INFO_MAX);
+        assert!(!client_info.contains('\n'));
+    }
+
+    #[test]
+    fn acquire_clears_tags_before_setting_no_cross_request_leak() {
+        // A4: on checkout, the clear-and-reset runs BEFORE the live set, so a
+        // prior request's CLIENT_IDENTIFIER cannot leak into the next lease.
+        let mgr = LeaseManager::new();
+        let (conn, log) = mock();
+        let _id = mgr
+            .acquire("dev", "agent-claude", Duration::from_secs(900), &[], conn)
+            .expect("acquire");
+        let executed = &log.lock().unwrap().executed;
+        let clear_idx = executed
+            .iter()
+            .position(|s| s.contains("CLEAR_IDENTIFIER"))
+            .expect("clear step present");
+        let set_idx = executed
+            .iter()
+            .position(|s| s.contains("SET_IDENTIFIER"))
+            .expect("set step present");
+        assert!(
+            clear_idx < set_idx,
+            "clear ({clear_idx}) must precede set ({set_idx}): {executed:?}"
+        );
+    }
+
+    #[test]
+    fn acquire_binds_live_agent_into_module_action_and_client_info() {
+        let mgr = LeaseManager::new();
+        let (conn, log) = mock();
+        let _id = mgr
+            .acquire("dev", "agent-claude", Duration::from_secs(900), &[], conn)
+            .expect("acquire");
+        let binds = log.lock().unwrap().executed_binds.clone();
+        // ACTION bind carries the agent identity.
+        assert!(
+            binds.iter().any(|(sql, b)| sql.contains("SET_MODULE")
+                && b == &vec![
+                    OracleBind::from("oraclemcp"),
+                    OracleBind::from("agent-claude"),
+                ]),
+            "MODULE/ACTION bound to oraclemcp/agent-claude: {binds:?}"
+        );
+        // CLIENT_INFO bind carries the agent (and a model label).
+        assert!(
+            binds.iter().any(|(sql, b)| sql.contains("SET_CLIENT_INFO")
+                && matches!(b.first(), Some(OracleBind::String(s)) if s.contains("agent=agent-claude"))),
+            "CLIENT_INFO carries the agent identity: {binds:?}"
+        );
     }
 
     #[test]

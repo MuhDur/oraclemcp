@@ -462,6 +462,9 @@ fn read_dbms_output_conn(
 mod args;
 use args::*;
 
+mod audit_marker;
+use audit_marker::with_audit_marker;
+
 /// Map a JSON value to an [`OracleBind`]. Agent argument values are always
 /// bound, never interpolated. Unsupported JSON (arrays/objects) is an
 /// `InvalidArguments` error rather than a silent coercion.
@@ -1664,6 +1667,22 @@ fn execute_sql_inner(
         .map(json_to_bind)
         .collect::<Result<Vec<_>, _>>()?;
 
+    // A3: prepend the per-statement audit marker. The gate/confirmation above ran
+    // on the bare SQL (the text the agent previewed/confirmed); `with_audit_marker`
+    // re-classifies the marked text and adopts it ONLY when its verdict is
+    // identical to the bare verdict (else it returns the bare SQL), so the text we
+    // are about to execute carries the SAME, already-gated classification. We
+    // additionally assert that here — defense in depth — and fail closed on any
+    // divergence so a marker can never change what runs. The marked text is what
+    // we execute AND what the audit log records (A8 digest covers the real text).
+    let executed_sql = with_audit_marker(&args.sql, active_profile, "oracle_execute");
+    if Classifier::new(ClassifierConfig::new()).classify(&executed_sql) != decision {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "audit marker changed the classifier verdict; refusing to execute",
+        ));
+    }
+
     // The audited danger tier (SAFE/GUARDED/DESTRUCTIVE) as a string; reads were
     // rejected above, so this is always a Guarded/Destructive write/DDL/Admin.
     let danger_str = serde_json::to_value(decision.danger)
@@ -1677,7 +1696,7 @@ fn execute_sql_inner(
     if let Some(auditor) = auditor {
         let pre = execute_audit_draft(
             agent_identity,
-            &args.sql,
+            &executed_sql,
             &danger_str,
             None,
             AuditOutcome::Pending,
@@ -1694,7 +1713,7 @@ fn execute_sql_inner(
     } else {
         None
     };
-    let rows_affected = match execute_conn(cx, conn, &args.sql, &binds) {
+    let rows_affected = match execute_conn(cx, conn, &executed_sql, &binds) {
         Ok(rows) => rows,
         Err(e) => {
             let _ = conn.rollback();
@@ -1702,7 +1721,7 @@ fn execute_sql_inner(
             if let Some(auditor) = auditor {
                 let post = execute_audit_draft(
                     agent_identity,
-                    &args.sql,
+                    &executed_sql,
                     &danger_str,
                     None,
                     AuditOutcome::Failed,
@@ -1720,7 +1739,7 @@ fn execute_sql_inner(
             if let Some(auditor) = auditor {
                 let post = execute_audit_draft(
                     agent_identity,
-                    &args.sql,
+                    &executed_sql,
                     &danger_str,
                     Some(rows_affected),
                     AuditOutcome::Failed,
@@ -1739,7 +1758,7 @@ fn execute_sql_inner(
     if let Some(auditor) = auditor {
         let post = execute_audit_draft(
             agent_identity,
-            &args.sql,
+            &executed_sql,
             &danger_str,
             Some(rows_affected),
             AuditOutcome::Succeeded,
@@ -3487,8 +3506,15 @@ impl OracleDispatcher {
             }
             "oracle_query" => {
                 let a: QueryArgs = parse_args(name, args)?;
+                // A3: mark first, then gate and read the EXACT marked text. The
+                // marker is verdict-preserving (verified inside with_audit_marker),
+                // so ensure_read_only on the marked text behaves identically to the
+                // bare SELECT, and the text classified is the text executed.
+                let active_profile = state.active_profile.clone();
                 return with_call_timeout(cx, conn, a.timeout_seconds, || {
-                    ensure_read_only(&a.sql)?;
+                    let executed_sql =
+                        with_audit_marker(&a.sql, active_profile.as_deref(), "oracle_query");
+                    ensure_read_only(&executed_sql)?;
                     let binds = a
                         .binds
                         .iter()
@@ -3499,7 +3525,7 @@ impl OracleDispatcher {
                         Some(cx) => read_query_cx(
                             cx,
                             conn,
-                            &a.sql,
+                            &executed_sql,
                             &binds,
                             query_caps_from_args(&a),
                             offset,
@@ -3507,7 +3533,7 @@ impl OracleDispatcher {
                         ),
                         None => read_query(
                             conn,
-                            &a.sql,
+                            &executed_sql,
                             &binds,
                             query_caps_from_args(&a),
                             offset,

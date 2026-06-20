@@ -1725,6 +1725,7 @@ struct DoctorProfileContext {
     wallet_location: Option<String>,
     protected_profile_writable: bool,
     connection_strategy: Option<String>,
+    proxy_user: bool,
     sensitive_values: Vec<String>,
 }
 
@@ -1795,6 +1796,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
             wallet_location: None,
             protected_profile_writable: false,
             connection_strategy: None,
+            proxy_user: false,
             sensitive_values: Vec::new(),
         };
     };
@@ -1808,6 +1810,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
                 .map(|path| path.display().to_string());
             let protected_profile_writable = resolved.level.is_protected()
                 && resolved.level.max_level() > OperatingLevel::ReadOnly;
+            let proxy_user = resolved.opts.auth_adapter.proxy_connect_user().is_some();
             let sensitive_values = doctor_sensitive_values(&resolved.opts);
             let connection_strategy = Some(
                 if resolved.pool_settings.is_some() {
@@ -1824,6 +1827,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
                     wallet_location,
                     protected_profile_writable,
                     connection_strategy,
+                    proxy_user,
                     sensitive_values,
                 },
                 Err(e) => DoctorProfileContext {
@@ -1832,6 +1836,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
                     wallet_location,
                     protected_profile_writable,
                     connection_strategy,
+                    proxy_user,
                     sensitive_values,
                 },
             }
@@ -1842,6 +1847,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
             wallet_location: None,
             protected_profile_writable: false,
             connection_strategy: None,
+            proxy_user: false,
             sensitive_values: Vec::new(),
         },
         Err(e) => DoctorProfileContext {
@@ -1850,6 +1856,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
             wallet_location: None,
             protected_profile_writable: false,
             connection_strategy: None,
+            proxy_user: false,
             sensitive_values: Vec::new(),
         },
     }
@@ -1867,6 +1874,7 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>) -> ExitCode {
         wallet_location: profile_ctx.wallet_location,
         protected_profile_writable: profile_ctx.protected_profile_writable,
         connection_strategy: profile_ctx.connection_strategy,
+        proxy_user: profile_ctx.proxy_user,
         sensitive_values: profile_ctx.sensitive_values,
     };
     let report = run_doctor(&ctx);
