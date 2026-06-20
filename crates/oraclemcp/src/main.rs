@@ -9,7 +9,7 @@
 //!
 //! A thin consumer of `oraclemcp-core` ([`OracleMcpServer`] +
 //! `oracle_capabilities`) and `oraclemcp-db` (the read-only dictionary ops plus
-//! one guarded execute primitive). It advertises safe-by-default
+//! one guarded execute primitive). It advertises governed, least-privilege
 //! live-DB/config-inspection tools ([`registry`]) and dispatches them through
 //! [`dispatch::OracleDispatcher`]. There is NO engine and NO `plsql-*`
 //! dependency; non-read execution is isolated behind the classifier,
@@ -60,9 +60,9 @@ const AUDIT_KEY_ENV: &str = "ORACLEMCP_AUDIT_KEY";
 #[command(
     name = "oraclemcp",
     version,
-    about = "Engine-free, safe-by-default Oracle Database MCP server",
+    about = "Engine-free, governed least-privilege Oracle Database MCP server",
     long_about = "Speaks the Model Context Protocol over stdio (default) or \
-                  Streamable HTTP (--listen). Exposes safe-by-default Oracle tools \
+                  Streamable HTTP (--listen). Exposes governed, least-privilege Oracle tools \
                   (profile discovery, connection info, query, schema_inspect, \
                   list_schemas, switch_profile, set_session_level, preview_sql, describe, get_ddl, \
                   get_source, compile_errors, search_source, plscope_inspect, \

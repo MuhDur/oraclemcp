@@ -1,7 +1,7 @@
 //! The advertised tool surface for the engine-free `oraclemcp` server.
 //!
 //! Pure data — no database access. [`tool_registry`] builds the
-//! safe-by-default config-inspection, read, and guarded execute tools the server dispatches (see
+//! governed, least-privilege config-inspection, read, and guarded execute tools the server dispatches (see
 //! [`crate::dispatch`]); [`capabilities`] assembles the zero-arg
 //! `oracle_capabilities` report from that surface plus the build's feature
 //! tiers. The `oracle_capabilities` discovery tool itself is answered by

@@ -18,10 +18,12 @@
 //! injected via [`LeaseAcquirer`] to keep this router engine-free and testable.
 //!
 //! Product-surface decision for `oraclemcp` v0.3.x: this router is deliberately
-//! not advertised by the read-only `oraclemcp` binary. It is guarded-write
-//! machinery for the broader Oracle MCP family; surfacing it here would weaken
-//! the binary's safe-by-default contract. If this tool is ever exposed, it
-//! belongs behind a separate explicit opt-in surface with its own release gates.
+//! not advertised by the `oraclemcp` binary, which exposes guarded write/DDL
+//! only through individual, classifier-gated tools (`oracle_execute`, …). It is
+//! broader lease/escalation/transaction orchestration for the Oracle MCP family;
+//! surfacing it here would widen the served write surface beyond that governed
+//! per-tool model. If this tool is ever exposed, it belongs behind a separate
+//! explicit opt-in surface with its own release gates.
 
 use std::time::Duration;
 

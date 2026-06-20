@@ -1,7 +1,7 @@
 [package]
 name = "oraclemcp"
 version = "0.3.0"
-description = "Engine-free, safe-by-default Oracle Database MCP server with a fail-closed SQL guard (independent open-source project)."
+description = "Engine-free, governed least-privilege Oracle Database MCP server with a fail-closed SQL guard and confirmation-gated operating levels (independent open-source project)."
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

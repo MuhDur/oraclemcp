@@ -99,7 +99,7 @@ jobs:
   # touches exactly one file. Mirrored by the `driver_seam` test in
   # crates/oraclemcp-db so `cargo test` catches a leak too.
   boundary:
-    name: engine-free boundary + driver-seam lint
+    name: engine-free boundary + driver-seam + honesty lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -110,6 +110,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - run: bash scripts/oraclemcp_boundary_lint.sh
       - run: bash scripts/oraclemcp_driver_seam_lint.sh
+      - run: bash scripts/oraclemcp_honesty_grep.sh
 
   release-metadata:
     name: release metadata sync

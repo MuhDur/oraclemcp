@@ -200,7 +200,7 @@ impl OracleMcpServer {
                 "name": "oraclemcp",
                 "version": self.version,
                 "title": "Oracle MCP server",
-                "description": "Safe-by-default Oracle Database MCP server with PL/SQL intelligence.",
+                "description": "Governed, least-privilege Oracle Database MCP server with a fail-closed SQL guard and PL/SQL intelligence.",
             },
             "instructions": SERVER_INSTRUCTIONS,
         })
