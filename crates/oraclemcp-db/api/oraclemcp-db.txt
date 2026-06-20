@@ -72,6 +72,9 @@ pub unsafe fn oraclemcp_db::AuthAdapter::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::AuthAdapter::drop(usize)
 pub unsafe fn oraclemcp_db::AuthAdapter::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::AuthAdapter
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::AuthAdapter
+impl<T> tracing::instrument::Instrument for oraclemcp_db::AuthAdapter
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::AuthAdapter
 impl<T> typenum::type_operators::Same for oraclemcp_db::AuthAdapter
 pub type oraclemcp_db::AuthAdapter::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::AuthAdapter where T: ?core::marker::Sized
@@ -137,6 +140,9 @@ pub unsafe fn oraclemcp_db::AuthAdapterError::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::AuthAdapterError::drop(usize)
 pub unsafe fn oraclemcp_db::AuthAdapterError::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::AuthAdapterError
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::AuthAdapterError
+impl<T> tracing::instrument::Instrument for oraclemcp_db::AuthAdapterError
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::AuthAdapterError
 impl<T> typenum::type_operators::Same for oraclemcp_db::AuthAdapterError
 pub type oraclemcp_db::AuthAdapterError::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::AuthAdapterError where T: ?core::marker::Sized
@@ -203,7 +209,10 @@ pub unsafe fn oraclemcp_db::ChangeKind::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::ChangeKind::drop(usize)
 pub unsafe fn oraclemcp_db::ChangeKind::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::ChangeKind
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ChangeKind
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::ChangeKind where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ChangeKind
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ChangeKind
 impl<T> typenum::type_operators::Same for oraclemcp_db::ChangeKind
 pub type oraclemcp_db::ChangeKind::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ChangeKind where T: ?core::marker::Sized
@@ -275,6 +284,9 @@ pub unsafe fn oraclemcp_db::DbError::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::DbError::drop(usize)
 pub unsafe fn oraclemcp_db::DbError::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::DbError
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DbError
+impl<T> tracing::instrument::Instrument for oraclemcp_db::DbError
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DbError
 impl<T> typenum::type_operators::Same for oraclemcp_db::DbError
 pub type oraclemcp_db::DbError::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DbError where T: ?core::marker::Sized
@@ -342,7 +354,10 @@ pub unsafe fn oraclemcp_db::DiagnosticsSource::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::DiagnosticsSource::drop(usize)
 pub unsafe fn oraclemcp_db::DiagnosticsSource::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::DiagnosticsSource
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DiagnosticsSource
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::DiagnosticsSource where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::DiagnosticsSource
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DiagnosticsSource
 impl<T> typenum::type_operators::Same for oraclemcp_db::DiagnosticsSource
 pub type oraclemcp_db::DiagnosticsSource::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DiagnosticsSource where T: ?core::marker::Sized
@@ -411,7 +426,10 @@ pub unsafe fn oraclemcp_db::DictionaryTier::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::DictionaryTier::drop(usize)
 pub unsafe fn oraclemcp_db::DictionaryTier::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::DictionaryTier
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DictionaryTier
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::DictionaryTier where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::DictionaryTier
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DictionaryTier
 impl<T> typenum::type_operators::Same for oraclemcp_db::DictionaryTier
 pub type oraclemcp_db::DictionaryTier::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DictionaryTier where T: ?core::marker::Sized
@@ -488,7 +506,10 @@ pub unsafe fn oraclemcp_db::HealthSubcheck::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::HealthSubcheck::drop(usize)
 pub unsafe fn oraclemcp_db::HealthSubcheck::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::HealthSubcheck
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::HealthSubcheck
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::HealthSubcheck where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::HealthSubcheck
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::HealthSubcheck
 impl<T> typenum::type_operators::Same for oraclemcp_db::HealthSubcheck
 pub type oraclemcp_db::HealthSubcheck::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::HealthSubcheck where T: ?core::marker::Sized
@@ -558,6 +579,9 @@ pub unsafe fn oraclemcp_db::OciError::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::OciError::drop(usize)
 pub unsafe fn oraclemcp_db::OciError::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::OciError
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OciError
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OciError
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OciError
 impl<T> typenum::type_operators::Same for oraclemcp_db::OciError
 pub type oraclemcp_db::OciError::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OciError where T: ?core::marker::Sized
@@ -626,7 +650,10 @@ pub unsafe fn oraclemcp_db::OracleBackend::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::OracleBackend::drop(usize)
 pub unsafe fn oraclemcp_db::OracleBackend::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::OracleBackend
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleBackend
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OracleBackend where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleBackend
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleBackend
 impl<T> typenum::type_operators::Same for oraclemcp_db::OracleBackend
 pub type oraclemcp_db::OracleBackend::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleBackend where T: ?core::marker::Sized
@@ -703,12 +730,89 @@ pub unsafe fn oraclemcp_db::OracleBind::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::OracleBind::drop(usize)
 pub unsafe fn oraclemcp_db::OracleBind::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::OracleBind
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleBind
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OracleBind where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleBind
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleBind
 impl<T> typenum::type_operators::Same for oraclemcp_db::OracleBind
 pub type oraclemcp_db::OracleBind::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleBind where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleBind where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::OracleBind::vzip(self) -> V
+pub enum oraclemcp_db::SearchDetailLevel
+pub oraclemcp_db::SearchDetailLevel::Full
+pub oraclemcp_db::SearchDetailLevel::Names
+pub oraclemcp_db::SearchDetailLevel::Standard
+pub oraclemcp_db::SearchDetailLevel::Summary
+impl oraclemcp_db::SearchDetailLevel
+pub fn oraclemcp_db::SearchDetailLevel::as_str(self) -> &'static str
+pub fn oraclemcp_db::SearchDetailLevel::parse(core::option::Option<&str>) -> core::option::Option<Self>
+impl core::clone::Clone for oraclemcp_db::SearchDetailLevel
+pub fn oraclemcp_db::SearchDetailLevel::clone(&self) -> oraclemcp_db::SearchDetailLevel
+impl core::cmp::Eq for oraclemcp_db::SearchDetailLevel
+impl core::cmp::PartialEq for oraclemcp_db::SearchDetailLevel
+pub fn oraclemcp_db::SearchDetailLevel::eq(&self, &oraclemcp_db::SearchDetailLevel) -> bool
+impl core::fmt::Debug for oraclemcp_db::SearchDetailLevel
+pub fn oraclemcp_db::SearchDetailLevel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::SearchDetailLevel
+impl core::marker::StructuralPartialEq for oraclemcp_db::SearchDetailLevel
+impl serde_core::ser::Serialize for oraclemcp_db::SearchDetailLevel
+pub fn oraclemcp_db::SearchDetailLevel::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::SearchDetailLevel
+pub fn oraclemcp_db::SearchDetailLevel::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::SearchDetailLevel
+impl core::marker::Send for oraclemcp_db::SearchDetailLevel
+impl core::marker::Sync for oraclemcp_db::SearchDetailLevel
+impl core::marker::Unpin for oraclemcp_db::SearchDetailLevel
+impl core::marker::UnsafeUnpin for oraclemcp_db::SearchDetailLevel
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::SearchDetailLevel
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::SearchDetailLevel
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::SearchDetailLevel where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::SearchDetailLevel where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::SearchDetailLevel where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::SearchDetailLevel::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::SearchDetailLevel where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::SearchDetailLevel where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::SearchDetailLevel where U: core::convert::From<T>
+pub fn oraclemcp_db::SearchDetailLevel::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::SearchDetailLevel where U: core::convert::Into<T>
+pub type oraclemcp_db::SearchDetailLevel::Error = core::convert::Infallible
+pub fn oraclemcp_db::SearchDetailLevel::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::SearchDetailLevel where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::SearchDetailLevel::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::SearchDetailLevel::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::SearchDetailLevel where T: core::clone::Clone
+pub type oraclemcp_db::SearchDetailLevel::Owned = T
+pub fn oraclemcp_db::SearchDetailLevel::clone_into(&self, &mut T)
+pub fn oraclemcp_db::SearchDetailLevel::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::SearchDetailLevel
+impl<T> core::any::Any for oraclemcp_db::SearchDetailLevel where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::SearchDetailLevel::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::SearchDetailLevel where T: ?core::marker::Sized
+pub fn oraclemcp_db::SearchDetailLevel::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::SearchDetailLevel where T: ?core::marker::Sized
+pub fn oraclemcp_db::SearchDetailLevel::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::SearchDetailLevel where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::SearchDetailLevel::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::SearchDetailLevel
+pub fn oraclemcp_db::SearchDetailLevel::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::SearchDetailLevel
+pub type oraclemcp_db::SearchDetailLevel::Init = T
+pub const oraclemcp_db::SearchDetailLevel::ALIGN: usize
+pub unsafe fn oraclemcp_db::SearchDetailLevel::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::SearchDetailLevel::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::SearchDetailLevel::drop(usize)
+pub unsafe fn oraclemcp_db::SearchDetailLevel::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::SearchDetailLevel
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::SearchDetailLevel
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::SearchDetailLevel where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::SearchDetailLevel
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::SearchDetailLevel
+impl<T> typenum::type_operators::Same for oraclemcp_db::SearchDetailLevel
+pub type oraclemcp_db::SearchDetailLevel::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SearchDetailLevel where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::SearchDetailLevel where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::SearchDetailLevel::vzip(self) -> V
 pub enum oraclemcp_db::SessionPurity
 pub oraclemcp_db::SessionPurity::New
 pub oraclemcp_db::SessionPurity::Reuse
@@ -769,7 +873,10 @@ pub unsafe fn oraclemcp_db::SessionPurity::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::SessionPurity::drop(usize)
 pub unsafe fn oraclemcp_db::SessionPurity::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::SessionPurity
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::SessionPurity
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::SessionPurity where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::SessionPurity
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::SessionPurity
 impl<T> typenum::type_operators::Same for oraclemcp_db::SessionPurity
 pub type oraclemcp_db::SessionPurity::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SessionPurity where T: ?core::marker::Sized
@@ -843,7 +950,10 @@ pub unsafe fn oraclemcp_db::Severity::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::Severity::drop(usize)
 pub unsafe fn oraclemcp_db::Severity::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::Severity
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::Severity
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::Severity where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::Severity
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::Severity
 impl<T> typenum::type_operators::Same for oraclemcp_db::Severity
 pub type oraclemcp_db::Severity::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::Severity where T: ?core::marker::Sized
@@ -911,7 +1021,10 @@ pub unsafe fn oraclemcp_db::StepKind::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::StepKind::drop(usize)
 pub unsafe fn oraclemcp_db::StepKind::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::StepKind
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::StepKind
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::StepKind where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::StepKind
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::StepKind
 impl<T> typenum::type_operators::Same for oraclemcp_db::StepKind
 pub type oraclemcp_db::StepKind::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::StepKind where T: ?core::marker::Sized
@@ -982,7 +1095,10 @@ pub unsafe fn oraclemcp_db::TopSqlMetric::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::TopSqlMetric::drop(usize)
 pub unsafe fn oraclemcp_db::TopSqlMetric::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::TopSqlMetric
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::TopSqlMetric
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::TopSqlMetric where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::TopSqlMetric
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::TopSqlMetric
 impl<T> typenum::type_operators::Same for oraclemcp_db::TopSqlMetric
 pub type oraclemcp_db::TopSqlMetric::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::TopSqlMetric where T: ?core::marker::Sized
@@ -1050,6 +1166,9 @@ pub unsafe fn oraclemcp_db::TypeRepr::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::TypeRepr::drop(usize)
 pub unsafe fn oraclemcp_db::TypeRepr::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::TypeRepr
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::TypeRepr
+impl<T> tracing::instrument::Instrument for oraclemcp_db::TypeRepr
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::TypeRepr
 impl<T> typenum::type_operators::Same for oraclemcp_db::TypeRepr
 pub type oraclemcp_db::TypeRepr::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::TypeRepr where T: ?core::marker::Sized
@@ -1113,6 +1232,9 @@ pub unsafe fn oraclemcp_db::ViewTier::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::ViewTier::drop(usize)
 pub unsafe fn oraclemcp_db::ViewTier::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::ViewTier
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ViewTier
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ViewTier
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ViewTier
 impl<T> typenum::type_operators::Same for oraclemcp_db::ViewTier
 pub type oraclemcp_db::ViewTier::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ViewTier where T: ?core::marker::Sized
@@ -1175,6 +1297,9 @@ pub unsafe fn oraclemcp_db::AdbConnectInfo::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::AdbConnectInfo::drop(usize)
 pub unsafe fn oraclemcp_db::AdbConnectInfo::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::AdbConnectInfo
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::AdbConnectInfo
+impl<T> tracing::instrument::Instrument for oraclemcp_db::AdbConnectInfo
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::AdbConnectInfo
 impl<T> typenum::type_operators::Same for oraclemcp_db::AdbConnectInfo
 pub type oraclemcp_db::AdbConnectInfo::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::AdbConnectInfo where T: ?core::marker::Sized
@@ -1240,7 +1365,10 @@ pub unsafe fn oraclemcp_db::CloudStatus::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::CloudStatus::drop(usize)
 pub unsafe fn oraclemcp_db::CloudStatus::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::CloudStatus
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::CloudStatus
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::CloudStatus where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::CloudStatus
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::CloudStatus
 impl<T> typenum::type_operators::Same for oraclemcp_db::CloudStatus
 pub type oraclemcp_db::CloudStatus::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CloudStatus where T: ?core::marker::Sized
@@ -1309,7 +1437,10 @@ pub unsafe fn oraclemcp_db::DbmsOutput::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::DbmsOutput::drop(usize)
 pub unsafe fn oraclemcp_db::DbmsOutput::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::DbmsOutput
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DbmsOutput
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::DbmsOutput where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::DbmsOutput
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DbmsOutput
 impl<T> typenum::type_operators::Same for oraclemcp_db::DbmsOutput
 pub type oraclemcp_db::DbmsOutput::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DbmsOutput where T: ?core::marker::Sized
@@ -1379,7 +1510,10 @@ pub unsafe fn oraclemcp_db::DrcpConfig::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::DrcpConfig::drop(usize)
 pub unsafe fn oraclemcp_db::DrcpConfig::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::DrcpConfig
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DrcpConfig
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::DrcpConfig where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::DrcpConfig
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DrcpConfig
 impl<T> typenum::type_operators::Same for oraclemcp_db::DrcpConfig
 pub type oraclemcp_db::DrcpConfig::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DrcpConfig where T: ?core::marker::Sized
@@ -1447,7 +1581,10 @@ pub unsafe fn oraclemcp_db::Finding::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::Finding::drop(usize)
 pub unsafe fn oraclemcp_db::Finding::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::Finding
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::Finding
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::Finding where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::Finding
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::Finding
 impl<T> typenum::type_operators::Same for oraclemcp_db::Finding
 pub type oraclemcp_db::Finding::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::Finding where T: ?core::marker::Sized
@@ -1511,6 +1648,9 @@ pub unsafe fn oraclemcp_db::IamToken::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::IamToken::drop(usize)
 pub unsafe fn oraclemcp_db::IamToken::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::IamToken
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::IamToken
+impl<T> tracing::instrument::Instrument for oraclemcp_db::IamToken
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::IamToken
 impl<T> typenum::type_operators::Same for oraclemcp_db::IamToken
 pub type oraclemcp_db::IamToken::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::IamToken where T: ?core::marker::Sized
@@ -1572,6 +1712,9 @@ pub unsafe fn oraclemcp_db::IndexDescription::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::IndexDescription::drop(usize)
 pub unsafe fn oraclemcp_db::IndexDescription::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::IndexDescription
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::IndexDescription
+impl<T> tracing::instrument::Instrument for oraclemcp_db::IndexDescription
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::IndexDescription
 impl<T> typenum::type_operators::Same for oraclemcp_db::IndexDescription
 pub type oraclemcp_db::IndexDescription::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::IndexDescription where T: ?core::marker::Sized
@@ -1640,7 +1783,10 @@ pub unsafe fn oraclemcp_db::LeaseId::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::LeaseId::drop(usize)
 pub unsafe fn oraclemcp_db::LeaseId::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::LeaseId
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::LeaseId
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::LeaseId where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::LeaseId
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::LeaseId
 impl<T> typenum::type_operators::Same for oraclemcp_db::LeaseId
 pub type oraclemcp_db::LeaseId::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::LeaseId where T: ?core::marker::Sized
@@ -1709,7 +1855,10 @@ pub unsafe fn oraclemcp_db::LeaseInfo::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::LeaseInfo::drop(usize)
 pub unsafe fn oraclemcp_db::LeaseInfo::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::LeaseInfo
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::LeaseInfo
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::LeaseInfo where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::LeaseInfo
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::LeaseInfo
 impl<T> typenum::type_operators::Same for oraclemcp_db::LeaseInfo
 pub type oraclemcp_db::LeaseInfo::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::LeaseInfo where T: ?core::marker::Sized
@@ -1770,6 +1919,9 @@ pub unsafe fn oraclemcp_db::LeaseManager::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::LeaseManager::drop(usize)
 pub unsafe fn oraclemcp_db::LeaseManager::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::LeaseManager
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::LeaseManager
+impl<T> tracing::instrument::Instrument for oraclemcp_db::LeaseManager
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::LeaseManager
 impl<T> typenum::type_operators::Same for oraclemcp_db::LeaseManager
 pub type oraclemcp_db::LeaseManager::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::LeaseManager where T: ?core::marker::Sized
@@ -1839,7 +1991,10 @@ pub unsafe fn oraclemcp_db::LobText::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::LobText::drop(usize)
 pub unsafe fn oraclemcp_db::LobText::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::LobText
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::LobText
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::LobText where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::LobText
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::LobText
 impl<T> typenum::type_operators::Same for oraclemcp_db::LobText
 pub type oraclemcp_db::LobText::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::LobText where T: ?core::marker::Sized
@@ -1905,6 +2060,9 @@ pub unsafe fn oraclemcp_db::MigrationStep::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::MigrationStep::drop(usize)
 pub unsafe fn oraclemcp_db::MigrationStep::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::MigrationStep
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::MigrationStep
+impl<T> tracing::instrument::Instrument for oraclemcp_db::MigrationStep
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::MigrationStep
 impl<T> typenum::type_operators::Same for oraclemcp_db::MigrationStep
 pub type oraclemcp_db::MigrationStep::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::MigrationStep where T: ?core::marker::Sized
@@ -1978,7 +2136,10 @@ pub unsafe fn oraclemcp_db::OracleCell::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::OracleCell::drop(usize)
 pub unsafe fn oraclemcp_db::OracleCell::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::OracleCell
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleCell
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OracleCell where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleCell
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleCell
 impl<T> typenum::type_operators::Same for oraclemcp_db::OracleCell
 pub type oraclemcp_db::OracleCell::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleCell where T: ?core::marker::Sized
@@ -2057,6 +2218,9 @@ pub unsafe fn oraclemcp_db::OracleConnectOptions::deref_mut<'a>(usize) -> &'a mu
 pub unsafe fn oraclemcp_db::OracleConnectOptions::drop(usize)
 pub unsafe fn oraclemcp_db::OracleConnectOptions::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::OracleConnectOptions
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleConnectOptions
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleConnectOptions
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleConnectOptions
 impl<T> typenum::type_operators::Same for oraclemcp_db::OracleConnectOptions
 pub type oraclemcp_db::OracleConnectOptions::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleConnectOptions where T: ?core::marker::Sized
@@ -2147,7 +2311,10 @@ pub unsafe fn oraclemcp_db::OracleConnectionInfo::deref_mut<'a>(usize) -> &'a mu
 pub unsafe fn oraclemcp_db::OracleConnectionInfo::drop(usize)
 pub unsafe fn oraclemcp_db::OracleConnectionInfo::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::OracleConnectionInfo
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleConnectionInfo
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OracleConnectionInfo where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleConnectionInfo
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleConnectionInfo
 impl<T> typenum::type_operators::Same for oraclemcp_db::OracleConnectionInfo
 pub type oraclemcp_db::OracleConnectionInfo::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleConnectionInfo where T: ?core::marker::Sized
@@ -2202,6 +2369,9 @@ pub unsafe fn oraclemcp_db::OracleConnectionManager::deref_mut<'a>(usize) -> &'a
 pub unsafe fn oraclemcp_db::OracleConnectionManager::drop(usize)
 pub unsafe fn oraclemcp_db::OracleConnectionManager::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::OracleConnectionManager
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleConnectionManager
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleConnectionManager
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleConnectionManager
 impl<T> typenum::type_operators::Same for oraclemcp_db::OracleConnectionManager
 pub type oraclemcp_db::OracleConnectionManager::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleConnectionManager where T: ?core::marker::Sized
@@ -2270,7 +2440,10 @@ pub unsafe fn oraclemcp_db::OracleDriverPosture::deref_mut<'a>(usize) -> &'a mut
 pub unsafe fn oraclemcp_db::OracleDriverPosture::drop(usize)
 pub unsafe fn oraclemcp_db::OracleDriverPosture::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::OracleDriverPosture
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleDriverPosture
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OracleDriverPosture where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleDriverPosture
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleDriverPosture
 impl<T> typenum::type_operators::Same for oraclemcp_db::OracleDriverPosture
 pub type oraclemcp_db::OracleDriverPosture::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleDriverPosture where T: ?core::marker::Sized
@@ -2281,9 +2454,11 @@ impl oraclemcp_db::OraclePool
 pub async fn oraclemcp_db::OraclePool::connect(&asupersync::cx::cx::Cx, oraclemcp_db::OracleConnectOptions, oraclemcp_db::PoolSettings) -> core::result::Result<Self, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::OraclePool::describe(&self, &asupersync::cx::cx::Cx) -> core::result::Result<oraclemcp_db::OracleConnectionInfo, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::OraclePool::execute(&self, &asupersync::cx::cx::Cx, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<oraclemcp_db::OracleBind>) -> core::result::Result<u64, oraclemcp_db::DbError>
+pub fn oraclemcp_db::OraclePool::metrics(&self) -> oraclemcp_db::PoolMetrics
 pub async fn oraclemcp_db::OraclePool::ping(&self, &asupersync::cx::cx::Cx) -> core::result::Result<(), oraclemcp_db::DbError>
 pub async fn oraclemcp_db::OraclePool::query_rows(&self, &asupersync::cx::cx::Cx, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<oraclemcp_db::OracleBind>) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::OraclePool::read_query(&self, &asupersync::cx::cx::Cx, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<oraclemcp_db::OracleBind>, oraclemcp_db::QueryCaps, usize, oraclemcp_db::SerializeOptions) -> core::result::Result<oraclemcp_db::QueryResponse, oraclemcp_db::DbError>
+pub fn oraclemcp_db::OraclePool::settings(&self) -> oraclemcp_db::PoolSettings
 pub fn oraclemcp_db::OraclePool::state_connections(&self) -> u32
 impl core::clone::Clone for oraclemcp_db::OraclePool
 pub fn oraclemcp_db::OraclePool::clone(&self) -> oraclemcp_db::OraclePool
@@ -2345,6 +2520,9 @@ pub unsafe fn oraclemcp_db::OraclePool::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::OraclePool::drop(usize)
 pub unsafe fn oraclemcp_db::OraclePool::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::OraclePool
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OraclePool
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OraclePool
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OraclePool
 impl<T> typenum::type_operators::Same for oraclemcp_db::OraclePool
 pub type oraclemcp_db::OraclePool::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OraclePool where T: ?core::marker::Sized
@@ -2414,7 +2592,10 @@ pub unsafe fn oraclemcp_db::OracleRow::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::OracleRow::drop(usize)
 pub unsafe fn oraclemcp_db::OracleRow::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::OracleRow
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleRow
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OracleRow where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleRow
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleRow
 impl<T> typenum::type_operators::Same for oraclemcp_db::OracleRow
 pub type oraclemcp_db::OracleRow::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleRow where T: ?core::marker::Sized
@@ -2491,7 +2672,10 @@ pub unsafe fn oraclemcp_db::OracleSessionIdentity::deref_mut<'a>(usize) -> &'a m
 pub unsafe fn oraclemcp_db::OracleSessionIdentity::drop(usize)
 pub unsafe fn oraclemcp_db::OracleSessionIdentity::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::OracleSessionIdentity
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleSessionIdentity
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OracleSessionIdentity where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleSessionIdentity
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleSessionIdentity
 impl<T> typenum::type_operators::Same for oraclemcp_db::OracleSessionIdentity
 pub type oraclemcp_db::OracleSessionIdentity::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleSessionIdentity where T: ?core::marker::Sized
@@ -2554,6 +2738,9 @@ pub unsafe fn oraclemcp_db::ParsedHealthRequest::deref_mut<'a>(usize) -> &'a mut
 pub unsafe fn oraclemcp_db::ParsedHealthRequest::drop(usize)
 pub unsafe fn oraclemcp_db::ParsedHealthRequest::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::ParsedHealthRequest
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ParsedHealthRequest
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ParsedHealthRequest
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ParsedHealthRequest
 impl<T> typenum::type_operators::Same for oraclemcp_db::ParsedHealthRequest
 pub type oraclemcp_db::ParsedHealthRequest::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ParsedHealthRequest where T: ?core::marker::Sized
@@ -2622,7 +2809,10 @@ pub unsafe fn oraclemcp_db::PlscopeIdentifier::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::PlscopeIdentifier::drop(usize)
 pub unsafe fn oraclemcp_db::PlscopeIdentifier::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::PlscopeIdentifier
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::PlscopeIdentifier
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::PlscopeIdentifier where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::PlscopeIdentifier
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::PlscopeIdentifier
 impl<T> typenum::type_operators::Same for oraclemcp_db::PlscopeIdentifier
 pub type oraclemcp_db::PlscopeIdentifier::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PlscopeIdentifier where T: ?core::marker::Sized
@@ -2688,17 +2878,97 @@ pub unsafe fn oraclemcp_db::PlscopeStatement::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::PlscopeStatement::drop(usize)
 pub unsafe fn oraclemcp_db::PlscopeStatement::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::PlscopeStatement
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::PlscopeStatement
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::PlscopeStatement where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::PlscopeStatement
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::PlscopeStatement
 impl<T> typenum::type_operators::Same for oraclemcp_db::PlscopeStatement
 pub type oraclemcp_db::PlscopeStatement::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PlscopeStatement where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::PlscopeStatement where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::PlscopeStatement::vzip(self) -> V
+pub struct oraclemcp_db::PoolMetrics
+pub oraclemcp_db::PoolMetrics::acquired: u64
+pub oraclemcp_db::PoolMetrics::discarded: u64
+pub oraclemcp_db::PoolMetrics::idle: u32
+pub oraclemcp_db::PoolMetrics::in_use: u32
+pub oraclemcp_db::PoolMetrics::max_size: u32
+pub oraclemcp_db::PoolMetrics::open: u32
+pub oraclemcp_db::PoolMetrics::released: u64
+impl oraclemcp_db::PoolMetrics
+pub fn oraclemcp_db::PoolMetrics::is_balanced(&self) -> bool
+pub fn oraclemcp_db::PoolMetrics::is_bounded(&self) -> bool
+impl core::clone::Clone for oraclemcp_db::PoolMetrics
+pub fn oraclemcp_db::PoolMetrics::clone(&self) -> oraclemcp_db::PoolMetrics
+impl core::cmp::Eq for oraclemcp_db::PoolMetrics
+impl core::cmp::PartialEq for oraclemcp_db::PoolMetrics
+pub fn oraclemcp_db::PoolMetrics::eq(&self, &oraclemcp_db::PoolMetrics) -> bool
+impl core::default::Default for oraclemcp_db::PoolMetrics
+pub fn oraclemcp_db::PoolMetrics::default() -> oraclemcp_db::PoolMetrics
+impl core::fmt::Debug for oraclemcp_db::PoolMetrics
+pub fn oraclemcp_db::PoolMetrics::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::PoolMetrics
+impl core::marker::StructuralPartialEq for oraclemcp_db::PoolMetrics
+impl core::marker::Freeze for oraclemcp_db::PoolMetrics
+impl core::marker::Send for oraclemcp_db::PoolMetrics
+impl core::marker::Sync for oraclemcp_db::PoolMetrics
+impl core::marker::Unpin for oraclemcp_db::PoolMetrics
+impl core::marker::UnsafeUnpin for oraclemcp_db::PoolMetrics
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::PoolMetrics
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::PoolMetrics
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::PoolMetrics where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::PoolMetrics where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::PoolMetrics where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::PoolMetrics::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::PoolMetrics where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::PoolMetrics where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::PoolMetrics where U: core::convert::From<T>
+pub fn oraclemcp_db::PoolMetrics::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::PoolMetrics where U: core::convert::Into<T>
+pub type oraclemcp_db::PoolMetrics::Error = core::convert::Infallible
+pub fn oraclemcp_db::PoolMetrics::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::PoolMetrics where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::PoolMetrics::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::PoolMetrics::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::PoolMetrics where T: core::clone::Clone
+pub type oraclemcp_db::PoolMetrics::Owned = T
+pub fn oraclemcp_db::PoolMetrics::clone_into(&self, &mut T)
+pub fn oraclemcp_db::PoolMetrics::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::PoolMetrics
+impl<T> core::any::Any for oraclemcp_db::PoolMetrics where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::PoolMetrics::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::PoolMetrics where T: ?core::marker::Sized
+pub fn oraclemcp_db::PoolMetrics::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::PoolMetrics where T: ?core::marker::Sized
+pub fn oraclemcp_db::PoolMetrics::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::PoolMetrics where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::PoolMetrics::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::PoolMetrics
+pub fn oraclemcp_db::PoolMetrics::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::PoolMetrics
+pub type oraclemcp_db::PoolMetrics::Init = T
+pub const oraclemcp_db::PoolMetrics::ALIGN: usize
+pub unsafe fn oraclemcp_db::PoolMetrics::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::PoolMetrics::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::PoolMetrics::drop(usize)
+pub unsafe fn oraclemcp_db::PoolMetrics::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::PoolMetrics
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::PoolMetrics
+impl<T> tracing::instrument::Instrument for oraclemcp_db::PoolMetrics
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::PoolMetrics
+impl<T> typenum::type_operators::Same for oraclemcp_db::PoolMetrics
+pub type oraclemcp_db::PoolMetrics::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PoolMetrics where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::PoolMetrics where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::PoolMetrics::vzip(self) -> V
 pub struct oraclemcp_db::PoolSettings
 pub oraclemcp_db::PoolSettings::acquire_timeout_secs: u64
 pub oraclemcp_db::PoolSettings::max_size: u32
 pub oraclemcp_db::PoolSettings::min_idle: u32
 pub oraclemcp_db::PoolSettings::statement_cache_size: u32
+impl oraclemcp_db::PoolSettings
+pub fn oraclemcp_db::PoolSettings::resolved(self) -> Self
+pub fn oraclemcp_db::PoolSettings::resolved_for_cpus(self, u32) -> Self
 impl core::clone::Clone for oraclemcp_db::PoolSettings
 pub fn oraclemcp_db::PoolSettings::clone(&self) -> oraclemcp_db::PoolSettings
 impl core::default::Default for oraclemcp_db::PoolSettings
@@ -2748,6 +3018,9 @@ pub unsafe fn oraclemcp_db::PoolSettings::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::PoolSettings::drop(usize)
 pub unsafe fn oraclemcp_db::PoolSettings::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::PoolSettings
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::PoolSettings
+impl<T> tracing::instrument::Instrument for oraclemcp_db::PoolSettings
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::PoolSettings
 impl<T> typenum::type_operators::Same for oraclemcp_db::PoolSettings
 pub type oraclemcp_db::PoolSettings::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PoolSettings where T: ?core::marker::Sized
@@ -2815,6 +3088,9 @@ pub unsafe fn oraclemcp_db::PreflightReport::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::PreflightReport::drop(usize)
 pub unsafe fn oraclemcp_db::PreflightReport::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::PreflightReport
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::PreflightReport
+impl<T> tracing::instrument::Instrument for oraclemcp_db::PreflightReport
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::PreflightReport
 impl<T> typenum::type_operators::Same for oraclemcp_db::PreflightReport
 pub type oraclemcp_db::PreflightReport::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PreflightReport where T: ?core::marker::Sized
@@ -2880,7 +3156,10 @@ pub unsafe fn oraclemcp_db::PreviewImpact::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::PreviewImpact::drop(usize)
 pub unsafe fn oraclemcp_db::PreviewImpact::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::PreviewImpact
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::PreviewImpact
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::PreviewImpact where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::PreviewImpact
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::PreviewImpact
 impl<T> typenum::type_operators::Same for oraclemcp_db::PreviewImpact
 pub type oraclemcp_db::PreviewImpact::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PreviewImpact where T: ?core::marker::Sized
@@ -2946,7 +3225,10 @@ pub unsafe fn oraclemcp_db::PrivilegeProfile::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::PrivilegeProfile::drop(usize)
 pub unsafe fn oraclemcp_db::PrivilegeProfile::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::PrivilegeProfile
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::PrivilegeProfile
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::PrivilegeProfile where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::PrivilegeProfile
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::PrivilegeProfile
 impl<T> typenum::type_operators::Same for oraclemcp_db::PrivilegeProfile
 pub type oraclemcp_db::PrivilegeProfile::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PrivilegeProfile where T: ?core::marker::Sized
@@ -3004,6 +3286,9 @@ pub unsafe fn oraclemcp_db::QueryCaps::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::QueryCaps::drop(usize)
 pub unsafe fn oraclemcp_db::QueryCaps::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::QueryCaps
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::QueryCaps
+impl<T> tracing::instrument::Instrument for oraclemcp_db::QueryCaps
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::QueryCaps
 impl<T> typenum::type_operators::Same for oraclemcp_db::QueryCaps
 pub type oraclemcp_db::QueryCaps::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::QueryCaps where T: ?core::marker::Sized
@@ -3072,7 +3357,10 @@ pub unsafe fn oraclemcp_db::QueryResponse::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::QueryResponse::drop(usize)
 pub unsafe fn oraclemcp_db::QueryResponse::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::QueryResponse
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::QueryResponse
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::QueryResponse where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::QueryResponse
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::QueryResponse
 impl<T> typenum::type_operators::Same for oraclemcp_db::QueryResponse
 pub type oraclemcp_db::QueryResponse::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::QueryResponse where T: ?core::marker::Sized
@@ -3134,6 +3422,9 @@ pub unsafe fn oraclemcp_db::RustOracleConnection::deref_mut<'a>(usize) -> &'a mu
 pub unsafe fn oraclemcp_db::RustOracleConnection::drop(usize)
 pub unsafe fn oraclemcp_db::RustOracleConnection::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::RustOracleConnection
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::RustOracleConnection
+impl<T> tracing::instrument::Instrument for oraclemcp_db::RustOracleConnection
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::RustOracleConnection
 impl<T> typenum::type_operators::Same for oraclemcp_db::RustOracleConnection
 pub type oraclemcp_db::RustOracleConnection::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::RustOracleConnection where T: ?core::marker::Sized
@@ -3201,6 +3492,9 @@ pub unsafe fn oraclemcp_db::SchemaDiff::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::SchemaDiff::drop(usize)
 pub unsafe fn oraclemcp_db::SchemaDiff::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::SchemaDiff
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::SchemaDiff
+impl<T> tracing::instrument::Instrument for oraclemcp_db::SchemaDiff
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::SchemaDiff
 impl<T> typenum::type_operators::Same for oraclemcp_db::SchemaDiff
 pub type oraclemcp_db::SchemaDiff::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SchemaDiff where T: ?core::marker::Sized
@@ -3266,7 +3560,10 @@ pub unsafe fn oraclemcp_db::SchemaObject::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::SchemaObject::drop(usize)
 pub unsafe fn oraclemcp_db::SchemaObject::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::SchemaObject
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::SchemaObject
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::SchemaObject where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::SchemaObject
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::SchemaObject
 impl<T> typenum::type_operators::Same for oraclemcp_db::SchemaObject
 pub type oraclemcp_db::SchemaObject::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SchemaObject where T: ?core::marker::Sized
@@ -3332,12 +3629,232 @@ pub unsafe fn oraclemcp_db::SchemaSnapshot::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::SchemaSnapshot::drop(usize)
 pub unsafe fn oraclemcp_db::SchemaSnapshot::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::SchemaSnapshot
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::SchemaSnapshot
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::SchemaSnapshot where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::SchemaSnapshot
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::SchemaSnapshot
 impl<T> typenum::type_operators::Same for oraclemcp_db::SchemaSnapshot
 pub type oraclemcp_db::SchemaSnapshot::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SchemaSnapshot where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::SchemaSnapshot where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::SchemaSnapshot::vzip(self) -> V
+pub struct oraclemcp_db::SearchColumn
+pub oraclemcp_db::SearchColumn::comment: core::option::Option<alloc::string::String>
+pub oraclemcp_db::SearchColumn::data_type: core::option::Option<alloc::string::String>
+pub oraclemcp_db::SearchColumn::name: alloc::string::String
+pub oraclemcp_db::SearchColumn::nullable: core::option::Option<alloc::string::String>
+impl core::clone::Clone for oraclemcp_db::SearchColumn
+pub fn oraclemcp_db::SearchColumn::clone(&self) -> oraclemcp_db::SearchColumn
+impl core::cmp::Eq for oraclemcp_db::SearchColumn
+impl core::cmp::PartialEq for oraclemcp_db::SearchColumn
+pub fn oraclemcp_db::SearchColumn::eq(&self, &oraclemcp_db::SearchColumn) -> bool
+impl core::fmt::Debug for oraclemcp_db::SearchColumn
+pub fn oraclemcp_db::SearchColumn::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::SearchColumn
+impl serde_core::ser::Serialize for oraclemcp_db::SearchColumn
+pub fn oraclemcp_db::SearchColumn::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::SearchColumn
+pub fn oraclemcp_db::SearchColumn::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::SearchColumn
+impl core::marker::Send for oraclemcp_db::SearchColumn
+impl core::marker::Sync for oraclemcp_db::SearchColumn
+impl core::marker::Unpin for oraclemcp_db::SearchColumn
+impl core::marker::UnsafeUnpin for oraclemcp_db::SearchColumn
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::SearchColumn
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::SearchColumn
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::SearchColumn where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::SearchColumn where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::SearchColumn where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::SearchColumn::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::SearchColumn where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::SearchColumn where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::SearchColumn where U: core::convert::From<T>
+pub fn oraclemcp_db::SearchColumn::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::SearchColumn where U: core::convert::Into<T>
+pub type oraclemcp_db::SearchColumn::Error = core::convert::Infallible
+pub fn oraclemcp_db::SearchColumn::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::SearchColumn where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::SearchColumn::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::SearchColumn::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::SearchColumn where T: core::clone::Clone
+pub type oraclemcp_db::SearchColumn::Owned = T
+pub fn oraclemcp_db::SearchColumn::clone_into(&self, &mut T)
+pub fn oraclemcp_db::SearchColumn::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::SearchColumn
+impl<T> core::any::Any for oraclemcp_db::SearchColumn where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::SearchColumn::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::SearchColumn where T: ?core::marker::Sized
+pub fn oraclemcp_db::SearchColumn::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::SearchColumn where T: ?core::marker::Sized
+pub fn oraclemcp_db::SearchColumn::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::SearchColumn where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::SearchColumn::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::SearchColumn
+pub fn oraclemcp_db::SearchColumn::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::SearchColumn
+pub type oraclemcp_db::SearchColumn::Init = T
+pub const oraclemcp_db::SearchColumn::ALIGN: usize
+pub unsafe fn oraclemcp_db::SearchColumn::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::SearchColumn::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::SearchColumn::drop(usize)
+pub unsafe fn oraclemcp_db::SearchColumn::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::SearchColumn
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::SearchColumn
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::SearchColumn where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::SearchColumn
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::SearchColumn
+impl<T> typenum::type_operators::Same for oraclemcp_db::SearchColumn
+pub type oraclemcp_db::SearchColumn::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SearchColumn where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::SearchColumn where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::SearchColumn::vzip(self) -> V
+pub struct oraclemcp_db::SearchIndex
+pub oraclemcp_db::SearchIndex::columns: alloc::vec::Vec<alloc::string::String>
+pub oraclemcp_db::SearchIndex::name: alloc::string::String
+pub oraclemcp_db::SearchIndex::uniqueness: core::option::Option<alloc::string::String>
+impl core::clone::Clone for oraclemcp_db::SearchIndex
+pub fn oraclemcp_db::SearchIndex::clone(&self) -> oraclemcp_db::SearchIndex
+impl core::cmp::Eq for oraclemcp_db::SearchIndex
+impl core::cmp::PartialEq for oraclemcp_db::SearchIndex
+pub fn oraclemcp_db::SearchIndex::eq(&self, &oraclemcp_db::SearchIndex) -> bool
+impl core::fmt::Debug for oraclemcp_db::SearchIndex
+pub fn oraclemcp_db::SearchIndex::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::SearchIndex
+impl serde_core::ser::Serialize for oraclemcp_db::SearchIndex
+pub fn oraclemcp_db::SearchIndex::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::SearchIndex
+pub fn oraclemcp_db::SearchIndex::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::SearchIndex
+impl core::marker::Send for oraclemcp_db::SearchIndex
+impl core::marker::Sync for oraclemcp_db::SearchIndex
+impl core::marker::Unpin for oraclemcp_db::SearchIndex
+impl core::marker::UnsafeUnpin for oraclemcp_db::SearchIndex
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::SearchIndex
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::SearchIndex
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::SearchIndex where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::SearchIndex where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::SearchIndex where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::SearchIndex::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::SearchIndex where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::SearchIndex where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::SearchIndex where U: core::convert::From<T>
+pub fn oraclemcp_db::SearchIndex::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::SearchIndex where U: core::convert::Into<T>
+pub type oraclemcp_db::SearchIndex::Error = core::convert::Infallible
+pub fn oraclemcp_db::SearchIndex::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::SearchIndex where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::SearchIndex::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::SearchIndex::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::SearchIndex where T: core::clone::Clone
+pub type oraclemcp_db::SearchIndex::Owned = T
+pub fn oraclemcp_db::SearchIndex::clone_into(&self, &mut T)
+pub fn oraclemcp_db::SearchIndex::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::SearchIndex
+impl<T> core::any::Any for oraclemcp_db::SearchIndex where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::SearchIndex::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::SearchIndex where T: ?core::marker::Sized
+pub fn oraclemcp_db::SearchIndex::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::SearchIndex where T: ?core::marker::Sized
+pub fn oraclemcp_db::SearchIndex::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::SearchIndex where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::SearchIndex::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::SearchIndex
+pub fn oraclemcp_db::SearchIndex::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::SearchIndex
+pub type oraclemcp_db::SearchIndex::Init = T
+pub const oraclemcp_db::SearchIndex::ALIGN: usize
+pub unsafe fn oraclemcp_db::SearchIndex::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::SearchIndex::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::SearchIndex::drop(usize)
+pub unsafe fn oraclemcp_db::SearchIndex::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::SearchIndex
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::SearchIndex
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::SearchIndex where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::SearchIndex
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::SearchIndex
+impl<T> typenum::type_operators::Same for oraclemcp_db::SearchIndex
+pub type oraclemcp_db::SearchIndex::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SearchIndex where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::SearchIndex where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::SearchIndex::vzip(self) -> V
+pub struct oraclemcp_db::SearchObject
+pub oraclemcp_db::SearchObject::column_count: core::option::Option<i64>
+pub oraclemcp_db::SearchObject::columns: core::option::Option<alloc::vec::Vec<oraclemcp_db::SearchColumn>>
+pub oraclemcp_db::SearchObject::comment: core::option::Option<alloc::string::String>
+pub oraclemcp_db::SearchObject::indexes: core::option::Option<alloc::vec::Vec<oraclemcp_db::SearchIndex>>
+pub oraclemcp_db::SearchObject::last_analyzed: core::option::Option<alloc::string::String>
+pub oraclemcp_db::SearchObject::num_rows: core::option::Option<i64>
+pub oraclemcp_db::SearchObject::object_name: alloc::string::String
+pub oraclemcp_db::SearchObject::object_type: alloc::string::String
+pub oraclemcp_db::SearchObject::owner: alloc::string::String
+pub oraclemcp_db::SearchObject::row_count_is_estimate: core::option::Option<bool>
+pub oraclemcp_db::SearchObject::stats_stale: core::option::Option<bool>
+pub oraclemcp_db::SearchObject::status: core::option::Option<alloc::string::String>
+impl core::clone::Clone for oraclemcp_db::SearchObject
+pub fn oraclemcp_db::SearchObject::clone(&self) -> oraclemcp_db::SearchObject
+impl core::cmp::Eq for oraclemcp_db::SearchObject
+impl core::cmp::PartialEq for oraclemcp_db::SearchObject
+pub fn oraclemcp_db::SearchObject::eq(&self, &oraclemcp_db::SearchObject) -> bool
+impl core::fmt::Debug for oraclemcp_db::SearchObject
+pub fn oraclemcp_db::SearchObject::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::SearchObject
+impl serde_core::ser::Serialize for oraclemcp_db::SearchObject
+pub fn oraclemcp_db::SearchObject::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::SearchObject
+pub fn oraclemcp_db::SearchObject::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::SearchObject
+impl core::marker::Send for oraclemcp_db::SearchObject
+impl core::marker::Sync for oraclemcp_db::SearchObject
+impl core::marker::Unpin for oraclemcp_db::SearchObject
+impl core::marker::UnsafeUnpin for oraclemcp_db::SearchObject
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::SearchObject
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::SearchObject
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::SearchObject where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::SearchObject where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::SearchObject where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::SearchObject::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::SearchObject where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::SearchObject where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::SearchObject where U: core::convert::From<T>
+pub fn oraclemcp_db::SearchObject::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::SearchObject where U: core::convert::Into<T>
+pub type oraclemcp_db::SearchObject::Error = core::convert::Infallible
+pub fn oraclemcp_db::SearchObject::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::SearchObject where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::SearchObject::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::SearchObject::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::SearchObject where T: core::clone::Clone
+pub type oraclemcp_db::SearchObject::Owned = T
+pub fn oraclemcp_db::SearchObject::clone_into(&self, &mut T)
+pub fn oraclemcp_db::SearchObject::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::SearchObject
+impl<T> core::any::Any for oraclemcp_db::SearchObject where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::SearchObject::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::SearchObject where T: ?core::marker::Sized
+pub fn oraclemcp_db::SearchObject::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::SearchObject where T: ?core::marker::Sized
+pub fn oraclemcp_db::SearchObject::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::SearchObject where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::SearchObject::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::SearchObject
+pub fn oraclemcp_db::SearchObject::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::SearchObject
+pub type oraclemcp_db::SearchObject::Init = T
+pub const oraclemcp_db::SearchObject::ALIGN: usize
+pub unsafe fn oraclemcp_db::SearchObject::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::SearchObject::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::SearchObject::drop(usize)
+pub unsafe fn oraclemcp_db::SearchObject::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::SearchObject
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::SearchObject
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::SearchObject where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::SearchObject
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::SearchObject
+impl<T> typenum::type_operators::Same for oraclemcp_db::SearchObject
+pub type oraclemcp_db::SearchObject::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SearchObject where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::SearchObject where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::SearchObject::vzip(self) -> V
 pub struct oraclemcp_db::SerializeOptions
 pub oraclemcp_db::SerializeOptions::max_blob_bytes: usize
 pub oraclemcp_db::SerializeOptions::max_lob_chars: usize
@@ -3396,6 +3913,9 @@ pub unsafe fn oraclemcp_db::SerializeOptions::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::SerializeOptions::drop(usize)
 pub unsafe fn oraclemcp_db::SerializeOptions::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::SerializeOptions
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::SerializeOptions
+impl<T> tracing::instrument::Instrument for oraclemcp_db::SerializeOptions
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::SerializeOptions
 impl<T> typenum::type_operators::Same for oraclemcp_db::SerializeOptions
 pub type oraclemcp_db::SerializeOptions::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SerializeOptions where T: ?core::marker::Sized
@@ -3465,7 +3985,10 @@ pub unsafe fn oraclemcp_db::SourceText::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::SourceText::drop(usize)
 pub unsafe fn oraclemcp_db::SourceText::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::SourceText
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::SourceText
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::SourceText where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::SourceText
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::SourceText
 impl<T> typenum::type_operators::Same for oraclemcp_db::SourceText
 pub type oraclemcp_db::SourceText::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SourceText where T: ?core::marker::Sized
@@ -3533,7 +4056,10 @@ pub unsafe fn oraclemcp_db::StandbyStatus::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::StandbyStatus::drop(usize)
 pub unsafe fn oraclemcp_db::StandbyStatus::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::StandbyStatus
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::StandbyStatus
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::StandbyStatus where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::StandbyStatus
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::StandbyStatus
 impl<T> typenum::type_operators::Same for oraclemcp_db::StandbyStatus
 pub type oraclemcp_db::StandbyStatus::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::StandbyStatus where T: ?core::marker::Sized
@@ -3598,6 +4124,9 @@ pub unsafe fn oraclemcp_db::SubcheckPreflight::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::SubcheckPreflight::drop(usize)
 pub unsafe fn oraclemcp_db::SubcheckPreflight::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::SubcheckPreflight
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::SubcheckPreflight
+impl<T> tracing::instrument::Instrument for oraclemcp_db::SubcheckPreflight
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::SubcheckPreflight
 impl<T> typenum::type_operators::Same for oraclemcp_db::SubcheckPreflight
 pub type oraclemcp_db::SubcheckPreflight::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SubcheckPreflight where T: ?core::marker::Sized
@@ -3662,6 +4191,9 @@ pub unsafe fn oraclemcp_db::ToolRequirement::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::ToolRequirement::drop(usize)
 pub unsafe fn oraclemcp_db::ToolRequirement::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::ToolRequirement
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ToolRequirement
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ToolRequirement
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ToolRequirement
 impl<T> typenum::type_operators::Same for oraclemcp_db::ToolRequirement
 pub type oraclemcp_db::ToolRequirement::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ToolRequirement where T: ?core::marker::Sized
@@ -3721,6 +4253,9 @@ pub unsafe fn oraclemcp_db::TriggerDescription::deref_mut<'a>(usize) -> &'a mut 
 pub unsafe fn oraclemcp_db::TriggerDescription::drop(usize)
 pub unsafe fn oraclemcp_db::TriggerDescription::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::TriggerDescription
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::TriggerDescription
+impl<T> tracing::instrument::Instrument for oraclemcp_db::TriggerDescription
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::TriggerDescription
 impl<T> typenum::type_operators::Same for oraclemcp_db::TriggerDescription
 pub type oraclemcp_db::TriggerDescription::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::TriggerDescription where T: ?core::marker::Sized
@@ -3781,6 +4316,9 @@ pub unsafe fn oraclemcp_db::ViewDescription::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::ViewDescription::drop(usize)
 pub unsafe fn oraclemcp_db::ViewDescription::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::ViewDescription
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ViewDescription
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ViewDescription
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ViewDescription
 impl<T> typenum::type_operators::Same for oraclemcp_db::ViewDescription
 pub type oraclemcp_db::ViewDescription::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ViewDescription where T: ?core::marker::Sized
@@ -3845,6 +4383,9 @@ pub unsafe fn oraclemcp_db::WalletContents::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::WalletContents::drop(usize)
 pub unsafe fn oraclemcp_db::WalletContents::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::WalletContents
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::WalletContents
+impl<T> tracing::instrument::Instrument for oraclemcp_db::WalletContents
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::WalletContents
 impl<T> typenum::type_operators::Same for oraclemcp_db::WalletContents
 pub type oraclemcp_db::WalletContents::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::WalletContents where T: ?core::marker::Sized
@@ -3911,6 +4452,9 @@ pub unsafe fn oraclemcp_db::WalletMode::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::WalletMode::drop(usize)
 pub unsafe fn oraclemcp_db::WalletMode::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::WalletMode
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::WalletMode
+impl<T> tracing::instrument::Instrument for oraclemcp_db::WalletMode
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::WalletMode
 impl<T> typenum::type_operators::Same for oraclemcp_db::WalletMode
 pub type oraclemcp_db::WalletMode::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::WalletMode where T: ?core::marker::Sized
@@ -3976,7 +4520,10 @@ pub unsafe fn oraclemcp_db::WritePosture::deref_mut<'a>(usize) -> &'a mut T
 pub unsafe fn oraclemcp_db::WritePosture::drop(usize)
 pub unsafe fn oraclemcp_db::WritePosture::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
 impl<T> either::into_either::IntoEither for oraclemcp_db::WritePosture
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::WritePosture
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::WritePosture where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::WritePosture
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::WritePosture
 impl<T> typenum::type_operators::Same for oraclemcp_db::WritePosture
 pub type oraclemcp_db::WritePosture::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::WritePosture where T: ?core::marker::Sized
@@ -4085,6 +4632,7 @@ pub fn oraclemcp_db::requirement_matrix() -> &'static [oraclemcp_db::ToolRequire
 pub async fn oraclemcp_db::resolve_top_sql_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, bool) -> oraclemcp_db::DiagnosticsSource
 pub async fn oraclemcp_db::run_health(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_db::HealthSubcheck]) -> alloc::vec::Vec<oraclemcp_db::Finding>
 pub async fn oraclemcp_db::sample_rows(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::search_objects(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, core::option::Option<&str>, core::option::Option<&str>, oraclemcp_db::SearchDetailLevel, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::SearchObject>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::search_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, &str, core::option::Option<&str>, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::select_diagnostics_source(bool, bool) -> oraclemcp_db::DiagnosticsSource
 pub fn oraclemcp_db::sequence_ceiling_sql(oraclemcp_db::ViewTier, u8) -> (&'static str, alloc::string::String)

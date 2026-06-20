@@ -40,8 +40,9 @@ pub struct PoolConfig {
 impl Default for PoolConfig {
     fn default() -> Self {
         // Plan §10: max_size = min(cpu*2+1, 20), min_idle 2, acquire 5s,
-        // statement_cache >= 50. The cpu-derived sizing is applied at pool
-        // construction; the static default is the documented ceiling.
+        // statement_cache >= 50. This static default is the documented CEILING;
+        // the cpu-derived clamp (min(configured, cpu*2+1)) is applied at pool
+        // construction by `oraclemcp_db::PoolSettings::resolved` (B4).
         PoolConfig {
             max_size: 20,
             min_idle: 2,

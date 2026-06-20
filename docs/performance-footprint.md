@@ -5,6 +5,14 @@ This file summarizes local measurement evidence for the thin-native
 host and commands recorded in
 `tests/artifacts/perf/20260615T182242Z-7dd4a60/`.
 
+The [Net load + shutdown soak](#net-load--shutdown-soak-b3) section below is the
+B3 release-gate evidence: an OFFLINE deterministic harness asserts the
+zero-leaked-sessions / clean-drain / bounded invariants without a database, and
+a `live-xe` variant captures real-Oracle latency (p50/p95/p99) when run against
+a live database. Live latency figures are NOT invented here — the
+["Live measurements"](#live-measurements-b3--d7) section is populated by a live
+run, exactly like the exact-SHA release qualification.
+
 ## Run
 
 | Field | Value |
@@ -79,6 +87,91 @@ baseline.
 | `oraclemcp-telemetry-0.3.0.crate` | 8,098 bytes |
 | `oraclemcp-core-0.3.0.crate` | 104,982 bytes |
 | `oraclemcp-0.3.0.crate` | 93,880 bytes |
+
+## Net load + shutdown soak (B3)
+
+The B3 release-gate evidence has two halves: an **offline deterministic**
+harness (always run in CI) and a **live** variant (run against a real database
+to capture latency). The offline half exercises B1's thread-per-connection +
+async model — N concurrent in-process clients, each its own OS thread driving
+its own current-thread Asupersync runtime via `block_on`, exactly as
+`oraclemcp-core/src/server.rs` drives one runtime per HTTP connection — through
+the session lifecycle the dispatch path uses (acquire a lease over a connection,
+run a query mix, release).
+
+### Load shape
+
+| Parameter | Offline soak | Live soak (`live-xe`) |
+|---|---|---|
+| Clients (N) | 8 concurrent (one runtime/thread each) | operator-chosen, ≤ per-DB ceiling |
+| Query mix | 70% read, 20% describe, 10% preview-DML | same mix |
+| Soak length | 200 iterations/client (1,600 ops) | operator-chosen duration |
+| Session model | acquire → op → release every iteration | same |
+| Clock | logical/deterministic | wall clock |
+
+The mix is selected by a per-client counter, so the offline verdict is
+reproducible and never schedule-accidental.
+
+### Metrics recorded
+
+* checkout accounting ledger — `acquired`, `released`, `discarded`, live count,
+  and the live high-water mark;
+* `LeaseManager::active_count()` after the shutdown drain;
+* commits observed on drained sessions (must be zero);
+* (live only) per-operation latency samples → p50/p95/p99, plus the real
+  `OraclePool` `PoolMetrics` snapshot (`is_balanced` / `is_bounded`).
+
+### Pass conditions (asserted in the harness)
+
+| Invariant | Assertion |
+|---|---|
+| ZERO leaked sessions | `acquired == released + discarded` AND live count returns to 0 |
+| No orphan session | `LeaseManager::active_count() == 0` after `release_all` |
+| Clean drain | shutdown stops new acquires; every open txn is force-rolled-back; readiness flips to draining |
+| No torn commit | commits on drained/preview sessions == 0 |
+| Bounded | live high-water mark ≤ N (the per-DB ceiling); open pool connections ≤ `max_size` |
+
+### How to run
+
+Offline (no database — runs in CI):
+
+```text
+cargo test -p oraclemcp-db --test load_soak \
+  load_soak_zero_leaked_sessions_clean_drain_bounded
+```
+
+Live latency capture (requires a real Oracle database):
+
+```text
+ORACLEMCP_LIVE_XE=1 ORACLEMCP_LIVE_DSN=... ORACLEMCP_LIVE_USER=... \
+  ORACLEMCP_LIVE_PASSWORD=... \
+  cargo test -p oraclemcp-db --test load_soak -- --ignored --nocapture
+```
+
+The live test skips with a clear message when `ORACLEMCP_LIVE_XE` is unset.
+
+### Live measurements (B3 / D7)
+
+> **Populated by a live run.** The figures below are intentionally left as
+> placeholders. They are filled in by the `live-xe` load/soak run against a real
+> Oracle database (coordinated with D7, which lands the numbers), the same way
+> the exact-SHA release qualification is filled in from a real build+run. Do NOT
+> hand-edit estimates into this table — the honesty-grep gate and the release
+> review reject invented performance numbers.
+
+| Metric | Value | Captured by |
+|---|---|---|
+| Run id | _pending live run_ | `live-xe` |
+| Database | _pending live run_ (Oracle XE / ADB / RAC) | `live-xe` |
+| Clients (N) | _pending live run_ | `live-xe` |
+| Soak duration | _pending live run_ | `live-xe` |
+| Total operations | _pending live run_ | `live-xe` |
+| `oracle_query` p50 | _pending live run_ | `live-xe` |
+| `oracle_query` p95 | _pending live run_ | `live-xe` |
+| `oracle_query` p99 | _pending live run_ | `live-xe` |
+| Leaked sessions | _pending live run_ (expected: 0) | `live-xe` |
+| Pool accounting balanced | _pending live run_ (expected: yes) | `live-xe` |
+| Clean drain | _pending live run_ (expected: yes) | `live-xe` |
 
 ## Scope Limits
 

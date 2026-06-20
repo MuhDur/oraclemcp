@@ -30,6 +30,7 @@ pub mod notifications;
 pub mod pagination;
 pub mod plugin;
 pub mod query_execute;
+pub mod request_budget;
 pub mod resilience;
 pub mod resources;
 pub mod server;
@@ -41,6 +42,9 @@ pub mod tls;
 pub mod tools;
 pub mod trace;
 
+pub use request_budget::{
+    CLEANUP_POLL_QUOTA, DEFAULT_REQUEST_POLL_QUOTA, DEFAULT_REQUEST_TIMEOUT, RequestBudget,
+};
 pub use resilience::{
     CircuitBreaker, CircuitState, RetryPolicy, is_transient_error, run_with_timeout,
 };

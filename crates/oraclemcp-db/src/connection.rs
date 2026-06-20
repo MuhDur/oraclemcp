@@ -1,9 +1,10 @@
 //! The backend-independent [`OracleConnection`] trait and the thin
 //! [`oracledb`]-backed [`RustOracleConnection`].
 //!
-//! The trait is synchronous because the current Oracle driver surface is
-//! blocking. Cancellation and deadline boundaries are explicit
-//! `&asupersync::Cx` checkpoints around DB calls.
+//! The trait is `async` and `Cx`-first (B1): every method takes an explicit
+//! `&asupersync::Cx`, so cancellation and the deadline/budget travel with the
+//! call. Each round trip is bracketed by explicit `Cx` checkpoints (the
+//! native-async driver also checkpoints `cx` internally).
 //!
 //! # Driver-adapter seam (B2; plan §8 release gate)
 //!

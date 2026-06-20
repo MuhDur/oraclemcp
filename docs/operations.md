@@ -382,6 +382,43 @@ sketch) longer than your slowest in-flight tool call so the rollback/lease-revok
 sequence completes before `SIGKILL`. `/healthz` stays 200 while draining; the
 process stays live until step 6.
 
+### 5.3.1 Connection pool and failover posture
+
+The stateless-read pool (`oraclemcp-db`, `[profiles.pool]`) is a bounded,
+pure-Rust async pool — no Tokio/r2d2 boundary. Its operating posture:
+
+- **Sizing.** `max_size` from the profile is a *ceiling*; the effective ceiling
+  applied at construction is `min(max_size, cpu*2+1)` (plan §10), so a large
+  configured ceiling never over-provisions sessions on a small host. `min_idle`
+  connections are opened eagerly so a bad profile fails fast. `min_idle` is
+  clamped to the resolved `max_size`.
+- **Acquire timeout.** A checkout waits up to `acquire_timeout_secs` (default
+  5s) for a free or newly-openable connection. If none is available within the
+  window — the pool is at `max_size` and all connections are in use — the
+  checkout returns a `Pool` (BUSY) error rather than blocking forever. The
+  per-DB session ceiling (admission layer) caps concurrent leases at the same
+  `max_size`, so a flood sheds load deterministically instead of opening
+  unbounded sessions.
+- **Dead / torn connections (dirty-discard).** A connection whose call errored
+  or was cancelled mid-flight is discarded **dirty**: it is dropped, never
+  returned to the idle set, and the freed slot is decremented so a fresh session
+  can replace it. A torn round trip can therefore never be reused. An idle
+  connection that fails its pre-checkout liveness ping is likewise forgotten and
+  a replacement is opened. This composes with the lease layer, which
+  force-rolls-back any open transaction before dropping a session.
+- **Failover.** Transient connection errors (ORA-03113/03114/12170/12541/…) are
+  the only retryable class and reads only — DML is never auto-retried
+  (double-execute risk). RAC/ADB failover is handled by the driver/connect
+  string; on a dead connection the pool discards dirty and the next checkout
+  opens a fresh session against the (failed-over) listener. A read-only standby
+  forces the session ceiling to `READ_ONLY` (§3.5, §5.8).
+
+Checkout accounting is observable via `PoolMetrics` (`acquired`, `released`,
+`discarded`, `in_use`, `open`); `is_balanced()` asserts every acquire was
+returned clean or discarded dirty (zero leaked sessions) and `is_bounded()`
+asserts `open ≤ max_size`. These are the invariants the B3 load/soak harness
+checks (see `docs/performance-footprint.md`).
+
 ### 5.4 Verify the audit trail
 
 Privileged actions are written to a hash-chained, HMAC-SHA256-signed audit log

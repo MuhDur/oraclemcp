@@ -29,13 +29,14 @@
 //! # Layers
 //!
 //! - [`OracleConnection`] — the backend-independent connection trait, with the
-//!   thin [`oracledb`]-backed [`RustOracleConnection`]. The trait is
-//!   synchronous because today's [`oracledb`] surface is blocking; cancellation
-//!   and deadline boundaries are explicit `&asupersync::Cx` checkpoints
-//!   (the `*_cx` methods). Every real [`oracledb`] driver call is confined to
-//!   the adapter seam (`connection.rs`, ADR-0002), so no driver type leaks into
-//!   this public surface — callers depend only on the `oraclemcp-db` types
-//!   below.
+//!   thin [`oracledb`]-backed [`RustOracleConnection`]. The trait is `async`
+//!   and `Cx`-first (B1): every method takes an explicit `&asupersync::Cx` so
+//!   cancellation and the deadline/budget travel with the call, and each round
+//!   trip is bracketed by explicit `Cx` checkpoints (the native-async
+//!   [`oracledb`] driver also checkpoints `cx` internally). Every real
+//!   [`oracledb`] driver call is confined to the adapter seam (`connection.rs`,
+//!   ADR-0002), so no driver type leaks into this public surface — callers
+//!   depend only on the `oraclemcp-db` types below.
 //! - [`OraclePool`] — a bounded pure-Rust thin session pool.
 //! - [`detect_oracle_driver`] — thin-driver posture data for `doctor`; thin
 //!   mode never requires Instant Client.
@@ -131,7 +132,7 @@ pub use types::{
     OracleSessionIdentity,
 };
 
-pub use pool::{OracleConnectionManager, OraclePool, PoolSettings};
+pub use pool::{OracleConnectionManager, OraclePool, PoolMetrics, PoolSettings};
 
 /// Re-export the shared agent-facing error envelope.
 pub use oraclemcp_error as error_envelope;

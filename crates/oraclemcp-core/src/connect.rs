@@ -46,6 +46,24 @@ impl std::fmt::Debug for SessionContext {
     }
 }
 
+impl SessionContext {
+    /// Derive this session's per-request resource budget (B6) from its
+    /// configured per-call timeout (or the default when unset), anchored to
+    /// `now` (pass the request `Cx`'s `cx.now()` so production and lab share one
+    /// deterministic clock).
+    ///
+    /// The dispatch boundary attaches this budget so the DB round trips run
+    /// under a single cooperative bound: a runaway request is bounded
+    /// (`Cancelled`/`Timeout`, per B1), while a normal request is unaffected.
+    /// The budget's deadline maps onto the same `call_timeout` the adapter
+    /// already pushes down as an Oracle op-deadline, so the two agree by
+    /// construction.
+    #[must_use]
+    pub fn request_budget(&self, now: asupersync::Time) -> crate::request_budget::RequestBudget {
+        crate::request_budget::RequestBudget::from_call_timeout(now, self.options.call_timeout)
+    }
+}
+
 /// Map a profile to driver connect options. `password` comes from the secrets
 /// backend (never the profile/metadata). `wallet_password` comes from the
 /// same secret-resolution path via `[profiles.oci].wallet_password_ref`.
