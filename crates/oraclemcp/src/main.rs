@@ -733,19 +733,50 @@ fn resolve_audit_signing_key(
     Ok(None)
 }
 
+/// The maximum operating level reachable across every profile this server can
+/// SERVE at runtime, plus the active/startup profile (bead A8, multi-profile).
+///
+/// E5 opt-in model: when MCP connection-scope isolation is ACTIVE (at least one
+/// profile sets `mcp_exposed`), only `mcp_exposed` profiles are servable — those
+/// are the only ones `oracle_switch_profile` can reach. When isolation is
+/// INACTIVE (the zero-config common case), the served surface exposes ALL
+/// profiles, so all are reachable. The active profile's ceiling is always
+/// included (the server starts on it). The result drives the fail-closed audit
+/// requirement: if it exceeds READ_ONLY, a signing key is mandatory.
+fn max_reachable_write_ceiling(
+    config: &OracleMcpConfig,
+    active_level: &SessionLevelState,
+) -> OperatingLevel {
+    let isolation_active = config.mcp_isolation_active();
+    let mut ceiling = active_level.max_level();
+    for profile in &config.profiles {
+        // Servable iff isolation is inactive (all profiles served) or the
+        // profile is explicitly `mcp_exposed`. A protected profile is always
+        // pinned at READ_ONLY by validation, so it contributes nothing here.
+        let servable = !isolation_active || profile.mcp_exposed();
+        if servable {
+            ceiling = ceiling.max(profile.max_level());
+        }
+    }
+    ceiling
+}
+
 /// Build the out-of-band auditor for the server.
 ///
 /// Fail-closed policy (bead A8): if any operating level **above ReadOnly** is
-/// reachable (the profile ceiling permits a write/DDL/escalation), a signing
-/// key is **required** — without one we refuse to start rather than run writes
-/// unaudited. When only ReadOnly is reachable, the auditor is optional: a
-/// configured key still builds one (so escalation previews/log stay available),
-/// otherwise `None` (pure reads never touch the chain).
+/// reachable — across the active profile OR any servable profile the server can
+/// `oracle_switch_profile` to (see [`max_reachable_write_ceiling`]) — a signing
+/// key is **required**; without one we refuse to start rather than run writes
+/// unaudited on a profile reached after startup. When only ReadOnly is reachable
+/// anywhere, the auditor is optional: a configured key still builds one (so
+/// escalation previews/log stay available), otherwise `None` (pure reads never
+/// touch the chain).
 fn build_auditor(
     audit: &AuditConfig,
     level: &SessionLevelState,
+    reachable_ceiling: OperatingLevel,
 ) -> Result<Option<Arc<Auditor>>, (&'static str, String)> {
-    let write_reachable = level.max_level() > OperatingLevel::ReadOnly;
+    let write_reachable = reachable_ceiling > OperatingLevel::ReadOnly;
     let key = resolve_audit_signing_key(audit, level.is_protected())?;
 
     let Some(key) = key else {
@@ -753,14 +784,15 @@ fn build_auditor(
             return Err((
                 "ORACLEMCP_AUDIT_KEY_REQUIRED",
                 format!(
-                    "this profile can reach operating level {} (above READ_ONLY) but no audit \
-                     signing key is configured; set [audit].key_ref or {AUDIT_KEY_ENV} so every \
-                     write/escalation is recorded on the signed audit chain",
-                    level.max_level().as_str()
+                    "a servable profile can reach operating level {} (above READ_ONLY) but no \
+                     audit signing key is configured; set [audit].key_ref or {AUDIT_KEY_ENV} so \
+                     every write/escalation is recorded on the signed audit chain",
+                    reachable_ceiling.as_str()
                 ),
             ));
         }
-        // Read-only only: no writes/escalations can occur, so no auditor needed.
+        // Read-only everywhere reachable: no writes/escalations can occur, so no
+        // auditor needed.
         return Ok(None);
     };
 
@@ -1274,8 +1306,14 @@ fn run_serve(
 
     // Arm the out-of-band audit chain. Fails closed if a write level is
     // reachable without a configured signing key (bead A8).
-    let audit_config = match OracleMcpConfig::load(None) {
-        Ok(cfg) => cfg.audit,
+    //
+    // A8 (multi-profile): the auditor decision must consider EVERY profile the
+    // server can reach at runtime — not just the startup/active profile. A
+    // server started on a read-only profile can `oracle_switch_profile` to a
+    // writable `mcp_exposed` profile and run writes/DDL there, so the signing
+    // key must be required if ANY reachable profile can exceed READ_ONLY.
+    let full_config = match OracleMcpConfig::load(None) {
+        Ok(cfg) => cfg,
         Err(e) => {
             emit_status_error(
                 robot_json,
@@ -1285,7 +1323,8 @@ fn run_serve(
             return ExitCode::from(2);
         }
     };
-    let auditor = match build_auditor(&audit_config, &level) {
+    let reachable_ceiling = max_reachable_write_ceiling(&full_config, &level);
+    let auditor = match build_auditor(&full_config.audit, &level, reachable_ceiling) {
         Ok(auditor) => auditor,
         Err((code, message)) => {
             emit_status_error(robot_json, code, &message);
@@ -2287,6 +2326,133 @@ mod tests {
     fn http_listen_refused_without_allow_no_auth() {
         let err = http_listen_guard(false, false, false, "127.0.0.1:7070", false).unwrap_err();
         assert_eq!(err.0, "ORACLEMCP_AUTH_REQUIRED");
+    }
+
+    // ── A8 multi-profile audit reachability (the keystone) ──────────────────
+
+    #[test]
+    fn reachable_ceiling_spans_writable_exposed_profile_with_readonly_startup() {
+        // Isolation ACTIVE (some profile sets mcp_exposed). The startup profile
+        // is read-only, but a writable profile is exposed — so a switch to it can
+        // run writes, and the reachable ceiling must reflect that.
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "ro_start"
+            connect_string = "localhost:1521/FREEPDB1"
+            mcp_exposed = true
+
+            [[profiles]]
+            name = "writable"
+            connect_string = "localhost:1521/FREEPDB1"
+            max_level = "DDL"
+            mcp_exposed = true
+            "#,
+        )
+        .expect("config parses");
+        let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+        assert_eq!(
+            max_reachable_write_ceiling(&cfg, &active),
+            OperatingLevel::Ddl
+        );
+    }
+
+    #[test]
+    fn reachable_ceiling_ignores_hidden_writable_profile_when_isolation_active() {
+        // Isolation ACTIVE: a writable profile that is NOT mcp_exposed is not
+        // servable (the agent can never switch to it), so it does not raise the
+        // reachable ceiling.
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "ro_exposed"
+            connect_string = "localhost:1521/FREEPDB1"
+            mcp_exposed = true
+
+            [[profiles]]
+            name = "hidden_writable"
+            connect_string = "localhost:1521/FREEPDB1"
+            max_level = "READ_WRITE"
+            "#,
+        )
+        .expect("config parses");
+        let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+        assert_eq!(
+            max_reachable_write_ceiling(&cfg, &active),
+            OperatingLevel::ReadOnly
+        );
+    }
+
+    #[test]
+    fn reachable_ceiling_spans_all_profiles_when_isolation_inactive() {
+        // Isolation INACTIVE (no profile sets mcp_exposed): all profiles are
+        // servable, so a writable one raises the reachable ceiling even though
+        // the server started on a read-only profile.
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "ro_start"
+            connect_string = "localhost:1521/FREEPDB1"
+
+            [[profiles]]
+            name = "writable"
+            connect_string = "localhost:1521/FREEPDB1"
+            max_level = "READ_WRITE"
+            "#,
+        )
+        .expect("config parses");
+        let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+        assert_eq!(
+            max_reachable_write_ceiling(&cfg, &active),
+            OperatingLevel::ReadWrite
+        );
+    }
+
+    #[test]
+    fn build_auditor_fails_closed_when_a_switchable_profile_can_write() {
+        // The A8 keystone: a read-only startup profile + a writable exposed
+        // profile + NO audit key must fail closed at startup (so the writable
+        // profile can never be switched into and run writes UNAUDITED). This is
+        // the case the old single-profile check missed. Assumes a clean env
+        // (no ORACLEMCP_AUDIT_KEY), as the rest of the suite does.
+        let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+        let audit = AuditConfig::default(); // no key_ref
+        match build_auditor(&audit, &active, OperatingLevel::Ddl) {
+            Err((code, _)) => assert_eq!(code, "ORACLEMCP_AUDIT_KEY_REQUIRED"),
+            Ok(_) => panic!("must fail closed: write reachable, no key"),
+        }
+    }
+
+    #[test]
+    fn build_auditor_installs_when_writable_profile_has_a_key() {
+        // With a signing key configured, a writable reachable profile installs
+        // an auditor (so the writable profile, after a switch, is audited).
+        let dir = target_tmp_file("a8-audit");
+        fs::create_dir_all(&dir).expect("tmp dir");
+        let audit = AuditConfig {
+            path: Some(dir.join("audit.jsonl")),
+            key_ref: Some("literal:test-signing-key-material".to_owned()),
+            ..AuditConfig::default()
+        };
+        let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+        match build_auditor(&audit, &active, OperatingLevel::Ddl) {
+            Ok(auditor) => assert!(
+                auditor.is_some(),
+                "an auditor must be installed when a write level is reachable"
+            ),
+            Err((code, msg)) => panic!("auditor should build with a key: {code}: {msg}"),
+        }
+    }
+
+    #[test]
+    fn build_auditor_optional_when_only_read_only_is_reachable() {
+        // Read-only everywhere reachable + no key: auditor is optional (None).
+        let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+        let audit = AuditConfig::default();
+        match build_auditor(&audit, &active, OperatingLevel::ReadOnly) {
+            Ok(auditor) => assert!(auditor.is_none()),
+            Err((code, msg)) => panic!("read-only-only needs no key: {code}: {msg}"),
+        }
     }
 
     #[test]

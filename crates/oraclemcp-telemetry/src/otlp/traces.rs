@@ -216,12 +216,19 @@ pub fn parse_traceparent(value: &str) -> Option<([u8; 16], [u8; 8], bool)> {
 }
 
 fn hex_to_array<const N: usize>(hex: &str) -> Option<[u8; N]> {
-    if hex.len() != N * 2 {
+    // Operate on bytes, not the &str: a non-ASCII (multi-byte UTF-8) char in an
+    // attacker-controlled `traceparent` header would otherwise make a byte-index
+    // slice land off a char boundary and PANIC. Validate ASCII-hex up front and
+    // index the byte slice in pairs so every input is rejected with `None`.
+    let bytes = hex.as_bytes();
+    if bytes.len() != N * 2 || !bytes.iter().all(u8::is_ascii_hexdigit) {
         return None;
     }
     let mut out = [0u8; N];
     for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+        let hi = (bytes[i * 2] as char).to_digit(16)?;
+        let lo = (bytes[i * 2 + 1] as char).to_digit(16)?;
+        *byte = (hi * 16 + lo) as u8;
     }
     Some(out)
 }
@@ -558,6 +565,24 @@ mod tests {
         assert!(sampled);
         assert!(parse_traceparent("garbage").is_none());
         assert!(parse_traceparent("01-aa-bb-01").is_none());
+    }
+
+    #[test]
+    fn non_ascii_traceparent_is_rejected_not_panicking() {
+        // A multi-byte UTF-8 char makes the byte length equal the expected hex
+        // length while landing a byte-index slice off a char boundary. The parse
+        // must return None, never panic (panic=abort would be a DoS).
+        // "é" is 2 bytes (0xC3 0xA9): a 16-char trace-id field built from 8 of
+        // them is 16 bytes long — the old length-only guard would slice into it.
+        let trace_id = "é".repeat(8); // 16 bytes, 8 chars
+        let span_id = "é".repeat(4); // 8 bytes, 4 chars
+        let tp = format!("00-{trace_id}-{span_id}-01");
+        assert!(parse_traceparent(&tp).is_none());
+        // Direct: a non-hex but correct-byte-length input is rejected.
+        assert!(hex_to_array::<16>(&"é".repeat(8)).is_none());
+        assert!(hex_to_array::<8>("zzzzzzzzzzzzzzzz").is_none());
+        // A lone multi-byte char with the right byte count still rejects.
+        assert!(hex_to_array::<1>("é").is_none());
     }
 
     #[test]

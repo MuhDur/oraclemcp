@@ -1,12 +1,14 @@
 //! OCI / Oracle Cloud (Autonomous DB) connectivity hardening (plan §9.1; bead
 //! P1-11 / oracle-qmwz.2.11; A5). This is **hop-2** (Oracle Net), independent of
 //! the MCP transport. Thin mode handles TCPS/wallet location directly where the
-//! published driver supports it. OCI IAM database-token auth **is** supported by
-//! the pinned driver (`ConnectOptions::with_access_token`): once a token is
-//! fetched here it is wired through the adapter and sent as `AUTH_TOKEN`, always
-//! over TCPS (fail-closed on a plaintext transport). Fetching the token from OCI
-//! IAM stays an injected edge call ([`IamTokenSource`] / [`ensure_fresh_token`]).
-//! This layer hardens the cloud edge:
+//! published driver supports it. The adapter can carry an OCI IAM database token
+//! to the pinned driver (`ConnectOptions::with_access_token`, sent as
+//! `AUTH_TOKEN` only over TCPS, fail-closed on a plaintext transport) **when one
+//! is injected** — but no production code injects a token today. The token
+//! source ([`IamTokenSource`] / [`ensure_fresh_token`]) is a **fail-closed seam
+//! pending a production OCI SDK backend**: the only implementations that ship are
+//! test mocks, and `use_iam_token` without an injected token returns a precise
+//! setup error rather than connecting. This layer hardens the cloud edge:
 //!
 //! - **Wallet discovery** — validate a downloaded ADB wallet directory has the
 //!   files mTLS auto-login needs (`cwallet.sso` + `tnsnames.ora`) and surface its
@@ -14,11 +16,12 @@
 //! - **ADB connect-string validation** — accept `tcps://…` (TLS), full TLS
 //!   descriptors, and bare wallet aliases; **reject plaintext `tcp`** for ADB
 //!   (cloud requires TLS/mTLS).
-//! - **IAM token refresh** — a database-token (OCI IAM) refresh seam on a
-//!   monotonic-skew expiry check; the actual OCI SDK call is injected at the
-//!   edge ([`IamTokenSource`]). The refreshed token is then carried in
-//!   [`OracleConnectOptions::iam_token`](crate::OracleConnectOptions) and wired
-//!   to the driver's `with_access_token` (TCPS-enforced) by the B2 adapter.
+//! - **IAM token refresh (seam)** — pure expiry/skew decision logic for a
+//!   database-token (OCI IAM) refresh, ready for a production source. The OCI SDK
+//!   call is an injected edge dependency ([`IamTokenSource`]) with **no shipping
+//!   implementation**; if one is wired, the resulting token is carried in
+//!   [`OracleConnectOptions::iam_token`](crate::OracleConnectOptions) and the B2
+//!   adapter sends it via `with_access_token` (TCPS-enforced).
 //! - **Cloud status** — a summary `oracle_capabilities` can surface.
 //!
 //! The parsing/validation/refresh logic is pure (FS-free) so it is fully
@@ -268,15 +271,24 @@ impl IamToken {
     }
 }
 
-/// Fetches a fresh OCI IAM database token (the OCI SDK call, injected at the edge).
+/// Injection seam for an OCI IAM database-token source (the OCI SDK call,
+/// supplied at the edge).
+///
+/// **Fail-closed seam pending a production backend.** No production
+/// implementation ships — the only impls in-tree are test mocks — so the IAM
+/// token path is inert until an embedder wires a real source. With
+/// `use_iam_token` set but no source/token injected, the adapter returns a setup
+/// error rather than attempting a connect.
 pub trait IamTokenSource {
-    /// Obtain a current database token.
+    /// Obtain a current database token from the (injected) source.
     fn fetch(&self) -> Result<IamToken, OciError>;
 }
 
-/// Return a token that is fresh at `now_unix`: reuse `current` if it does not
-/// need refresh, else fetch a new one. Proactive refresh avoids mid-session
-/// `ORA-` token-expiry failures.
+/// Pure refresh decision: return a token that is fresh at `now_unix` — reuse
+/// `current` if it does not need refresh, else ask `source` for a new one.
+/// Proactive (skew-based) refresh is intended to avoid mid-session `ORA-`
+/// token-expiry failures **once a production [`IamTokenSource`] is wired**; this
+/// function is the decision logic only and ships with no production source.
 pub fn ensure_fresh_token(
     current: Option<&IamToken>,
     source: &dyn IamTokenSource,

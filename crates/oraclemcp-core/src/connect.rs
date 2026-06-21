@@ -260,9 +260,30 @@ fn profile_to_options_for_level(
         app_context: profile_app_context(profile)?,
         sdu: profile.sdu,
         statement_cache_size: profile.pool.as_ref().map(|pool| pool.statement_cache_size),
-        call_timeout: profile.call_timeout_seconds.map(Duration::from_secs),
+        call_timeout: resolve_call_timeout(profile.call_timeout_seconds),
         session_statements: profile_session_statements(profile, level_state)?,
     })
+}
+
+/// Resolve the per-round-trip Oracle call timeout from a profile's
+/// `call_timeout_seconds`.
+///
+/// Liveness default (§10): the dispatcher holds the single per-connection lock
+/// across every DB `.await`, so an un-timeout-bounded socket read would hang
+/// every request indefinitely (a head-of-line DoS). We therefore make a bounded
+/// driver-level call timeout the **default**: when a profile omits
+/// `call_timeout_seconds`, we apply [`resilience::DEFAULT_CALL_TIMEOUT`] (30s),
+/// matching the `RequestBudget` default so the two layers agree.
+///
+/// Overrides: an explicit `Some(n)` (n >= 1) wins. The documented escape hatch
+/// `Some(0)` means *unbounded* (no driver-level deadline) for operators who
+/// knowingly opt out — the request budget still bounds the whole request.
+fn resolve_call_timeout(call_timeout_seconds: Option<u64>) -> Option<Duration> {
+    match call_timeout_seconds {
+        None => Some(crate::resilience::DEFAULT_CALL_TIMEOUT),
+        Some(0) => None,
+        Some(seconds) => Some(Duration::from_secs(seconds)),
+    }
 }
 
 fn profile_session_statements(
@@ -462,6 +483,68 @@ mod tests {
         assert_eq!(ctx.level_state.effective_level(), OperatingLevel::ReadWrite);
         assert_eq!(ctx.options.call_timeout, Some(Duration::from_secs(45)));
         assert!(!ctx.level_state.is_protected());
+    }
+
+    #[test]
+    fn omitted_call_timeout_defaults_to_bounded_30s() {
+        // Liveness: a profile that omits call_timeout_seconds must still bound
+        // the per-round-trip socket await (the dispatcher holds the connection
+        // lock across every DB .await). The default mirrors RequestBudget's 30s.
+        let p = profile(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            "#,
+        );
+        let ctx = build_session_context(&p, None, None, false).expect("context");
+        assert_eq!(
+            ctx.options.call_timeout,
+            Some(crate::resilience::DEFAULT_CALL_TIMEOUT)
+        );
+        assert_eq!(ctx.options.call_timeout, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn explicit_call_timeout_overrides_default_and_zero_means_unbounded() {
+        // An explicit value wins over the default...
+        let p = profile(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            call_timeout_seconds = 7
+            "#,
+        );
+        let ctx = build_session_context(&p, None, None, false).expect("context");
+        assert_eq!(ctx.options.call_timeout, Some(Duration::from_secs(7)));
+
+        // ...and the documented `0` escape hatch means unbounded (no driver
+        // deadline; the request budget still bounds the whole request).
+        let p0 = profile(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            call_timeout_seconds = 0
+            "#,
+        );
+        let ctx0 = build_session_context(&p0, None, None, false).expect("context");
+        assert_eq!(ctx0.options.call_timeout, None);
+    }
+
+    #[test]
+    fn resolve_call_timeout_table() {
+        assert_eq!(
+            resolve_call_timeout(None),
+            Some(crate::resilience::DEFAULT_CALL_TIMEOUT)
+        );
+        assert_eq!(resolve_call_timeout(Some(0)), None);
+        assert_eq!(resolve_call_timeout(Some(1)), Some(Duration::from_secs(1)));
+        assert_eq!(
+            resolve_call_timeout(Some(120)),
+            Some(Duration::from_secs(120))
+        );
     }
 
     #[test]

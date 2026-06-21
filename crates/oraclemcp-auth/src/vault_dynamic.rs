@@ -1,15 +1,25 @@
-//! Vault **dynamic** Oracle credentials + zero-downtime rotation (plan §7.4;
-//! bead P3-2 / oracle-qmwz.4.2). Beyond the static Vault backend (P2-5): Vault's
+//! Vault **dynamic** Oracle credentials + zero-downtime rotation — **decision
+//! logic + injection seam, pending a production Vault client** (plan §7.4; bead
+//! P3-2 / oracle-qmwz.4.2). Beyond the static Vault backend (P2-5): Vault's
 //! database secrets engine issues short-lived per-session credentials with a
-//! lease; the server renews the lease before it expires and, when renewal is no
-//! longer possible (max-TTL reached or revoked), rotates to a freshly-issued
-//! credential.
+//! lease, and the intended model is to renew the lease before it expires and,
+//! when renewal is no longer possible (max-TTL reached or revoked), rotate to a
+//! freshly-issued credential.
 //!
-//! **Zero-downtime:** this layer only *decides* when to renew/rotate and supplies
-//! the new credential — it never closes a connection. In-flight work finishes on
-//! its existing session; new sessions pick up the new credential (the pool
-//! drains + reconnects). The Vault client is injected ([`DynamicSecretsSource`])
-//! so this logic is engine/transport-free and unit-testable on an injected clock.
+//! **Status:** this module is the pure *decision* layer ([`rotate_if_due`])
+//! plus the client injection seam ([`DynamicSecretsSource`]). It is **not driven
+//! by any production rotation loop or connection pool** — the only
+//! [`DynamicSecretsSource`] implementation in-tree is a test mock. So the
+//! "zero-downtime" behavior below describes the intended wiring once a real Vault
+//! client and a pool-drain driver are connected; today nothing calls
+//! [`rotate_if_due`] in production.
+//!
+//! **Intended zero-downtime model:** this layer only *decides* when to
+//! renew/rotate and supplies the new credential — it never closes a connection.
+//! In-flight work finishes on its existing session; new sessions would pick up
+//! the new credential (the pool drains + reconnects). The Vault client is
+//! injected ([`DynamicSecretsSource`]) so this logic is engine/transport-free and
+//! unit-testable on an injected clock.
 
 use crate::secrets::{Secret, SecretError};
 
@@ -76,18 +86,25 @@ pub struct RotationDecision {
     pub new_credential: Option<DynamicCredential>,
 }
 
-/// The Vault database-secrets client (issue + renew). Injected at the edge.
+/// Injection seam for a Vault database-secrets client (issue + renew), supplied
+/// at the edge.
+///
+/// **Fail-closed seam pending a production backend.** No production Vault client
+/// implements this trait — the only in-tree impl is a test mock — so dynamic
+/// credentials are inert until an embedder wires a real client.
 pub trait DynamicSecretsSource {
-    /// Issue a brand-new dynamic credential.
+    /// Issue a brand-new dynamic credential from the (injected) source.
     fn issue(&self) -> Result<DynamicCredential, SecretError>;
     /// Renew the lease `lease_id`, returning the extended credential.
     fn renew(&self, lease_id: &str) -> Result<DynamicCredential, SecretError>;
 }
 
-/// Run one rotation cycle for `current` at `now_unix`. Renews before expiry; if
-/// renewal fails (revoked / max-TTL), rotates to a fresh credential. Never fails
-/// in-flight work: on `Reuse`/`Renew`/`Rotate` it always yields a usable
-/// credential decision (only an issue failure with no current credential errors).
+/// Pure decision for one rotation cycle of `current` at `now_unix`: renew before
+/// expiry; if renewal fails (revoked / max-TTL), rotate to a fresh credential.
+/// The decision never fails in-flight work — on `Reuse`/`Renew`/`Rotate` it
+/// always yields a usable credential decision (only an issue failure with no
+/// current credential errors). This is the decision logic only; no production
+/// caller drives it (it awaits a wired [`DynamicSecretsSource`] + rotation loop).
 pub fn rotate_if_due(
     current: &DynamicCredential,
     source: &dyn DynamicSecretsSource,

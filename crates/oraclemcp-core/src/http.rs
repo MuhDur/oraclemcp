@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -107,7 +107,9 @@ pub struct HttpTransportConfig {
 pub struct OAuthEnforcement {
     /// Issuer allowlist + RFC 8707 audience + required scopes.
     pub config: ResourceServerConfig,
-    /// The signature verifier (HS256 here; RS256/ES256 via a JWKS-backed impl).
+    /// The JWT signature verifier. Only symmetric HS256 is wired in production;
+    /// asymmetric algs (RS256/ES256 via JWKS) are a fail-closed seam pending a
+    /// JWKS-backed verifier — such tokens are rejected (`BadSignature`) today.
     pub verifier: Arc<dyn SignatureVerifier + Send + Sync>,
     /// The RFC 9728 metadata URL advertised in `WWW-Authenticate` on a 401.
     pub metadata_url: String,
@@ -563,6 +565,40 @@ mod tests {
         );
         let stale = handle_http_request(&scope_echo_server(), &cfg, stale);
         assert_eq!(stale.status, 404);
+    }
+
+    #[test]
+    fn session_ids_are_unpredictable_and_high_entropy() {
+        // Mint a batch and assert they are all distinct, never sequentially
+        // predictable (the old monotonic counter would make id N+1 trivially
+        // derivable from id N), and carry the canonical UUIDv4 shape.
+        let ids: Vec<String> = (0..256).map(|_| new_session_id()).collect();
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "session ids must be unique");
+
+        for id in &ids {
+            assert_eq!(id.len(), 36, "UUIDv4 shape: {id}");
+            // 8-4-4-4-12 hyphen layout, hex elsewhere, version nibble `4`.
+            let hyphens: Vec<usize> = id.match_indices('-').map(|(i, _)| i).collect();
+            assert_eq!(hyphens, vec![8, 13, 18, 23], "hyphen layout: {id}");
+            assert!(
+                id.chars().all(|c| c == '-' || c.is_ascii_hexdigit()),
+                "hex digits only: {id}"
+            );
+            assert_eq!(id.as_bytes()[14], b'4', "version nibble must be 4: {id}");
+        }
+
+        // No two consecutive ids share their leading random bytes (counter would).
+        let mut consecutive_prefix_collisions = 0;
+        for pair in ids.windows(2) {
+            if pair[0][..8] == pair[1][..8] {
+                consecutive_prefix_collisions += 1;
+            }
+        }
+        assert_eq!(
+            consecutive_prefix_collisions, 0,
+            "consecutive ids must not share a 32-bit prefix"
+        );
     }
 
     #[test]
@@ -1496,9 +1532,35 @@ fn write_sse_event(body: &mut Vec<u8>, id: Option<&str>, retry: Option<u64>, dat
 }
 
 fn new_session_id() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("00000000-0000-4000-8000-{n:012x}")
+    // Mint an unpredictable UUIDv4-shaped id from the OS CSPRNG. A monotonic
+    // counter would let a client guess other sessions' ids; the session-id is a
+    // bearer credential for the stateful Streamable HTTP transport, so it must
+    // carry full entropy. Validation is pure membership (no format parsing), so
+    // the shape is cosmetic — but we keep the canonical UUIDv4 layout (version
+    // nibble `4`, variant bits `10`).
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).expect("OS random source required for HTTP session ids");
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10xx
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    )
 }
 
 /// Serve the MCP server over plaintext Streamable HTTP on `listener`.

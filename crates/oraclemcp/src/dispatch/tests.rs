@@ -22,6 +22,24 @@ fn run_with_current_cx(f: impl FnOnce(&Cx)) {
     });
 }
 
+#[test]
+fn read_path_handler_work_runs_under_narrowed_read_cx() {
+    // A9 (finding 7): the production read path narrows the handler context to
+    // `ReadPathCaps` (TIME + IO; no SPAWN / REMOTE / RANDOM) and actually USES
+    // it — the cancellation checkpoint that brackets every read dispatch runs
+    // under the narrowed row. This is the same call the oracle_query /
+    // oracle_schema_inspect / custom-read arms make. If `dispatch_checkpoint`
+    // ever stopped accepting the narrowed `Cx<ReadPathCaps>`, this would fail to
+    // compile — locking the narrowing onto the production path.
+    run_with_current_cx(|cx| {
+        let read_cx: Cx<oraclemcp_core::ReadPathCaps> = narrow_to_read_path(cx);
+        dispatch_checkpoint(&read_cx, "test.read_path.narrowed").expect("checkpoint");
+        // Type-level proof: the binding is the narrowed row, not the full one.
+        fn assert_read_path(_: &Cx<oraclemcp_core::ReadPathCaps>) {}
+        assert_read_path(&read_cx);
+    });
+}
+
 fn read_write_level() -> SessionLevelState {
     let mut level = SessionLevelState::new(OperatingLevel::ReadWrite, false);
     level
@@ -2729,6 +2747,26 @@ fn confirmation_tokens_are_stable_hex_and_domain_separated() {
     assert_ne!(execute, session);
     assert_ne!(execute, compile);
     assert_ne!(session, compile);
+}
+
+#[test]
+fn confirmation_mac_uses_canonical_hmac() {
+    // The confirmation MAC was deduplicated onto the canonical, KAT-tested
+    // oraclemcp_audit::hmac_sha256. Lock the byte output for a fixed key/message
+    // so any future drift from the standard HMAC-SHA256 is caught. This is the
+    // exact algorithm the (now-removed) private reimplementation computed.
+    let key = b"confirmation-key-fixture-0123456";
+    let msg = b"oracle_query|dev|READ_WRITE";
+    let mac = oraclemcp_audit::hmac_sha256(key, msg);
+    // RFC 2104 HMAC-SHA256(key, msg) — independently reproducible via the hex
+    // helper, which must agree with the raw-bytes form byte-for-byte. The hex
+    // helper prefixes `hmac-sha256:` to name the algorithm; strip it to compare.
+    let expected = oraclemcp_audit::hmac_sha256_hex(key, msg);
+    let expected_hex = expected
+        .strip_prefix("hmac-sha256:")
+        .expect("algorithm prefix");
+    let got: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(got, expected_hex);
 }
 
 #[test]

@@ -36,7 +36,6 @@ async-trait.workspace = true
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 getrandom = "0.2"
 tracing.workspace = true
 tracing-subscriber = "0.3"

@@ -41,7 +41,6 @@ use oraclemcp_guard::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 /// Default cap on `oracle_search_source` result rows when the caller omits it.
 const DEFAULT_SEARCH_MAX_ROWS: usize = 200;
@@ -760,7 +759,10 @@ where
     }
 }
 
-fn dispatch_checkpoint(cx: &Cx, phase: &'static str) -> Result<(), ErrorEnvelope> {
+/// Cancellation/budget checkpoint. Generic over the capability row so it can be
+/// driven by the narrowed read-path context (`ReadPathCaps`) as well as the full
+/// row — checkpointing only observes TIME/cancellation, never an effect bit.
+fn dispatch_checkpoint<Caps>(cx: &Cx<Caps>, phase: &'static str) -> Result<(), ErrorEnvelope> {
     cx.checkpoint_with(phase).map_err(|err| {
         ErrorEnvelope::new(ErrorClass::Timeout, format!("tool call cancelled: {err}"))
     })
@@ -1068,37 +1070,15 @@ fn confirmation_key() -> &'static [u8; 32] {
     })
 }
 
-fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
-    const BLOCK: usize = 64;
-    let mut k = [0u8; BLOCK];
-    if key.len() > BLOCK {
-        k[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        k[..key.len()].copy_from_slice(key);
-    }
-    let mut ipad = [0x36u8; BLOCK];
-    let mut opad = [0x5cu8; BLOCK];
-    for i in 0..BLOCK {
-        ipad[i] ^= k[i];
-        opad[i] ^= k[i];
-    }
-    let mut inner = Sha256::new();
-    inner.update(ipad);
-    inner.update(msg);
-    let inner = inner.finalize();
-    let mut outer = Sha256::new();
-    outer.update(opad);
-    outer.update(inner);
-    outer.finalize().into()
-}
-
 fn confirmation_mac(parts: &[&[u8]]) -> String {
     let mut message = Vec::new();
     for part in parts {
         message.extend_from_slice(&(part.len() as u64).to_le_bytes());
         message.extend_from_slice(part);
     }
-    let digest = hmac_sha256(confirmation_key(), &message);
+    // Use the canonical, RFC 4231 KAT-tested HMAC-SHA256 from oraclemcp-audit
+    // rather than a local reimplementation (reduces crypto-reimpl surface).
+    let digest = oraclemcp_audit::hmac_sha256(confirmation_key(), &message);
     let mut out = String::with_capacity(16);
     for byte in &digest[..8] {
         out.push_str(&format!("{byte:02x}"));
@@ -3477,9 +3457,11 @@ impl CustomToolExecutor for ReadOnlyCustomToolExecutor<'_> {
         };
         ensure_read_only(&sql)?;
         // A9: operator-defined read tools also narrow the handler context to the
-        // read-path capability row (the DB round trip itself takes the full
-        // `cx`, like the oracle_query arm).
-        let _read_cx = narrow_to_read_path(self.cx);
+        // read-path capability row. The cancellation checkpoint runs under the
+        // narrowed `read_cx`; only the locked, object-safe `OracleConnection`
+        // round trip takes the full `cx` (the one documented IO exception).
+        let read_cx = narrow_to_read_path(self.cx);
+        dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.custom_read.before")?;
         read_query_named(
             self.cx,
             self.conn,
@@ -3632,6 +3614,22 @@ impl ToolDispatch for OracleDispatcher {
     ) -> DispatchFuture<'a> {
         Box::pin(async move { self.dispatch_with_cx_inner(cx, context, name, args).await })
     }
+}
+
+/// `oracle_query` request, parsed and classified ONCE up front (A3/perf).
+///
+/// The dispatcher previously parsed `QueryArgs` twice and ran the
+/// mark+classify pipeline on each of the read-only backstop path and the read
+/// handler path — six classifier runs per call, all under the held
+/// per-connection lock. This carries the single parse, the single marked
+/// `executed_sql` (classified == executed), and the single read-only gate
+/// result so both paths reuse them. Behavior is identical to the prior code.
+struct QueryPrepared {
+    args: QueryArgs,
+    /// The audit-marked SQL actually executed (== the text that was classified).
+    executed_sql: String,
+    /// The read-only gate verdict for `executed_sql`, computed once.
+    gate: Result<(), ErrorEnvelope>,
 }
 
 impl OracleDispatcher {
@@ -3893,28 +3891,42 @@ impl OracleDispatcher {
         ) {
             state.read_only_backstop.disarm();
         }
-        // A1: read path. For oracle_query (a SELECT/WITH on the pinned session),
-        // lazily ensure SET TRANSACTION READ ONLY is in force so a MISCLASSIFIED
-        // write would still hit ORA-01456 from the engine. `ensure_armed` is a
-        // no-op when the effective level is above READ_ONLY (a write may be
-        // authorized) or when already armed (no per-read round trip), and it
-        // fails closed if the statement cannot apply.
-        //
-        // Guard-before-I/O: we run the read-only classifier on the (marked) SQL
-        // here FIRST and only arm the backstop when it passes. A refused
-        // statement therefore never issues the backstop round trip (or any DB
-        // I/O) — the arm below re-derives the identical structured refusal. This
-        // is done before the immutable `conn` borrow, via a disjoint split of the
-        // guard's fields. The marking/gate are pure (no DB I/O); the arm re-runs
-        // them on the same text so the read still classifies == executes.
-        if tool == "oracle_query"
-            && let Ok(peek) = parse_args::<QueryArgs>(name, args.clone())
-        {
-            let marked =
-                with_audit_marker(&peek.sql, state.active_profile.as_deref(), "oracle_query");
-            // Only arm when the statement is a provable read; otherwise leave the
-            // backstop untouched so the refusal arm does no DB I/O.
-            if ensure_read_only(&marked).is_ok() {
+        // A3/perf: oracle_query is handled here as a dedicated early-return arm
+        // (like the write-class tools above) so its args are parsed ONCE and the
+        // mark+classify pipeline runs ONCE. The prior code parsed `QueryArgs`
+        // twice and marked/classified the same SQL on both the backstop path and
+        // the read path — six classifier runs per call under the held
+        // per-connection lock. Here we parse once, compute the single marked
+        // `executed_sql` (classified == executed) and its single read-only gate
+        // verdict, and reuse them for both the backstop and the read. Behavior
+        // is identical; the conditional `args` move is confined to this diverging
+        // branch, so `args` stays owned for the non-query match below.
+        if tool == "oracle_query" {
+            let prepared = {
+                let parsed = parse_args::<QueryArgs>(name, args)?;
+                let executed_sql =
+                    with_audit_marker(&parsed.sql, state.active_profile.as_deref(), "oracle_query");
+                let gate = ensure_read_only(&executed_sql);
+                QueryPrepared {
+                    args: parsed,
+                    executed_sql,
+                    gate,
+                }
+            };
+
+            // A1: lazily ensure SET TRANSACTION READ ONLY is in force so a
+            // MISCLASSIFIED write would still hit ORA-01456 from the engine.
+            // `ensure_armed` is a no-op when the effective level is above
+            // READ_ONLY (a write may be authorized) or when already armed (no
+            // per-read round trip), and it fails closed if the statement cannot
+            // apply.
+            //
+            // Guard-before-I/O: consult the single read-only gate computed above
+            // and only arm when it passes. A refused statement therefore never
+            // issues the backstop round trip (or any DB I/O); the read below
+            // reuses the same verdict to surface the identical structured
+            // refusal. The arm uses a disjoint &mut split of the guard's fields.
+            if prepared.gate.is_ok() {
                 let DispatcherState {
                     conn,
                     read_only_backstop,
@@ -3928,6 +3940,15 @@ impl OracleDispatcher {
                     .ensure_armed(cx, conn.as_ref(), &scoped_level)
                     .await?;
             }
+
+            let active_profile = state.active_profile.clone();
+            // E3/E3b: resolve the export access context (scope fingerprint)
+            // before the immutable conn borrow / read closure.
+            let export_scopes = context.scope_grant().map(|grant| grant.0.clone());
+            let conn: &dyn OracleConnection = state.conn.as_ref();
+            return self
+                .run_prepared_query(cx, conn, active_profile, export_scopes, prepared)
+                .await;
         }
         let conn: &dyn OracleConnection = state.conn.as_ref();
         let metadata_conn: &dyn OracleConnection = state
@@ -4017,73 +4038,6 @@ impl OracleDispatcher {
                 }
                 Ok(value)
             }
-            "oracle_query" => {
-                let a: QueryArgs = parse_args(name, args)?;
-                // A3: mark first, then gate and read the EXACT marked text. The
-                // marker is verdict-preserving (verified inside with_audit_marker),
-                // so ensure_read_only on the marked text behaves identically to the
-                // bare SELECT, and the text classified is the text executed.
-                let active_profile = state.active_profile.clone();
-                let timeout_seconds = a.timeout_seconds;
-                // E3/E3b: resolve the export access context (scope fingerprint)
-                // and the shared registry before entering the read closure.
-                let export_scopes = context.scope_grant().map(|grant| grant.0.clone());
-                let exports = self.exports.clone();
-                // A9: narrowing the handler context to the read-path capability
-                // row (TIME + IO; no SPAWN / REMOTE / RANDOM) is still applied as
-                // the structural guarantee, even though the DB round trip itself
-                // takes the full `cx` (the native driver needs `IO`).
-                let _read_cx = narrow_to_read_path(cx);
-                return with_call_timeout(cx, conn, timeout_seconds, || async {
-                    let executed_sql =
-                        with_audit_marker(&a.sql, active_profile.as_deref(), "oracle_query");
-                    ensure_read_only(&executed_sql)?;
-                    let binds = a
-                        .binds
-                        .iter()
-                        .map(json_to_bind)
-                        .collect::<Result<Vec<_>, _>>()?;
-                    // E2: the page cursor is an opaque, tamper-evident token
-                    // bound to THIS statement + active profile, decoded to a raw
-                    // offset here (a forged/cross-statement cursor fails closed).
-                    let offset = decode_query_cursor(
-                        a.cursor.as_deref(),
-                        &a.sql,
-                        active_profile.as_deref(),
-                    )?;
-                    // E3b: when the caller opts into export, materialize the
-                    // bounded full result as an oracle-export://{id} resource and
-                    // return a resource_link instead of inlining the rows.
-                    if a.export {
-                        return export_query_to_resource(
-                            cx,
-                            conn,
-                            &executed_sql,
-                            &a,
-                            &binds,
-                            offset,
-                            active_profile.as_deref(),
-                            export_scopes.as_deref(),
-                            exports.as_deref(),
-                        )
-                        .await;
-                    }
-                    read_query(
-                        cx,
-                        conn,
-                        &executed_sql,
-                        &binds,
-                        query_caps_from_args(&a),
-                        offset,
-                        &query_serialize_options_from_args(&a),
-                    )
-                    .await
-                    .map(|resp| serde_json::to_value(resp).unwrap_or(Value::Null))
-                    .map(|resp| reseal_query_cursor(resp, &a.sql, active_profile.as_deref()))
-                    .map_err(DbError::into_envelope)
-                })
-                .await;
-            }
             "oracle_schema_inspect" => {
                 let a: SchemaInspectArgs = parse_args(name, args)?;
                 let owner_arg = non_empty_arg(a.owner);
@@ -4169,8 +4123,18 @@ impl OracleDispatcher {
                         )
                     }
                 };
-                let _read_cx = narrow_to_read_path(cx);
-                dispatch_checkpoint(cx, "oraclemcp.dispatch.search_objects.before")?;
+                // A9: the dispatch-level handler work (cancellation checkpoints)
+                // runs under the narrowed read-path row — no SPAWN / REMOTE /
+                // RANDOM is reachable here.
+                let read_cx = narrow_to_read_path(cx);
+                dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.search_objects.before")?;
+                // The DB round trip is the single documented IO exception: the
+                // object-safe, API-locked `OracleConnection` trait takes `&Cx`
+                // (the full row) because the native driver needs `IO`, so the
+                // round trip itself is handed the full `cx`. `ReadPathCaps` does
+                // carry `IO`, but the locked trait cannot be made generic without
+                // breaking object safety — narrowing therefore applies to the
+                // handler scaffolding, and the IO call is the explicit exception.
                 let results = search_objects(
                     cx,
                     metadata_conn,
@@ -4182,7 +4146,7 @@ impl OracleDispatcher {
                 )
                 .await
                 .map_err(DbError::into_envelope)?;
-                dispatch_checkpoint(cx, "oraclemcp.dispatch.search_objects.after")?;
+                dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.search_objects.after")?;
                 Ok(json!({
                     "owner": owner_filter.as_deref().unwrap_or("*"),
                     "object_type": object_type,
@@ -4565,6 +4529,82 @@ impl OracleDispatcher {
         };
 
         result
+    }
+
+    /// Run an oracle_query whose args were parsed and whose SQL was marked +
+    /// classified ONCE up front (see `QueryPrepared`). Reuses the prepared
+    /// `executed_sql` and `gate` instead of re-parsing/re-marking/re-classifying
+    /// — behavior is identical to the prior inline arm, with one classify run.
+    async fn run_prepared_query(
+        &self,
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+        active_profile: Option<String>,
+        export_scopes: Option<Vec<String>>,
+        prepared: QueryPrepared,
+    ) -> Result<Value, ErrorEnvelope> {
+        let QueryPrepared {
+            args: a,
+            executed_sql,
+            gate,
+        } = prepared;
+        let timeout_seconds = a.timeout_seconds;
+        let exports = self.exports.clone();
+        // A9: narrow the handler context to the read-path capability row
+        // (TIME + IO; no SPAWN / REMOTE / RANDOM). The pure handler work below —
+        // gate, bind conversion, cursor decode, serialization — runs under this
+        // narrowed row; only the locked DB round trip (`OracleConnection` is
+        // object-safe and takes the full `&Cx`) is handed the full `cx`, the one
+        // documented IO exception.
+        let read_cx = narrow_to_read_path(cx);
+        with_call_timeout(cx, conn, timeout_seconds, || async {
+            dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.query.before")?;
+            // The read-only gate was computed ONCE up front (classified ==
+            // executed); reuse the same verdict here. `executed_sql` is the
+            // marked text that gate was computed against.
+            gate?;
+            let binds = a
+                .binds
+                .iter()
+                .map(json_to_bind)
+                .collect::<Result<Vec<_>, _>>()?;
+            // E2: the page cursor is an opaque, tamper-evident token bound to
+            // THIS statement + active profile, decoded to a raw offset here (a
+            // forged/cross-statement cursor fails closed).
+            let offset =
+                decode_query_cursor(a.cursor.as_deref(), &a.sql, active_profile.as_deref())?;
+            // E3b: when the caller opts into export, materialize the bounded full
+            // result as an oracle-export://{id} resource and return a
+            // resource_link instead of inlining the rows.
+            if a.export {
+                return export_query_to_resource(
+                    cx,
+                    conn,
+                    &executed_sql,
+                    &a,
+                    &binds,
+                    offset,
+                    active_profile.as_deref(),
+                    export_scopes.as_deref(),
+                    exports.as_deref(),
+                )
+                .await;
+            }
+            read_query(
+                cx,
+                conn,
+                &executed_sql,
+                &binds,
+                query_caps_from_args(&a),
+                offset,
+                &query_serialize_options_from_args(&a),
+            )
+            .await
+            .map(|resp| serde_json::to_value(resp).unwrap_or(Value::Null))
+            .map(|resp| reseal_query_cursor(resp, &a.sql, active_profile.as_deref()))
+            .map_err(DbError::into_envelope)
+        })
+        .await
     }
 }
 
