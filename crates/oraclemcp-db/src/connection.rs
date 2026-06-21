@@ -56,7 +56,13 @@ use std::time::Duration;
 /// cancellation boundary around every native-async driver round trip; the
 /// driver itself also checkpoints `cx` internally, so a cancelled call is
 /// observed either here or inside the driver and never silently completes.
-fn db_checkpoint(cx: &Cx, phase: &'static str) -> Result<(), DbError> {
+///
+/// Generic over the `Cx` capability row (A9): a read handler running under a
+/// narrowed `Cx<ReadPathCaps>` checkpoints identically to one under the full
+/// row, since cancellation/budget state lives on `Cx` independent of the effect
+/// capabilities. This is the single crate-wide checkpoint helper; `query.rs`,
+/// `lease.rs`, and `pool.rs` all route through it.
+pub(crate) fn db_checkpoint<Caps>(cx: &Cx<Caps>, phase: &'static str) -> Result<(), DbError> {
     cx.checkpoint_with(phase)
         .map_err(|err| DbError::Cancelled(format!("{phase}: {err}")))
 }

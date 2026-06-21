@@ -8,19 +8,14 @@ use serde_json::Value;
 
 use asupersync::Cx;
 
-use crate::connection::OracleConnection;
+// Cancellation checkpoints route through the single crate-wide
+// `connection::db_checkpoint`, which is generic over the `Cx` capability row:
+// a read handler running under a narrowed `Cx<ReadPathCaps>` (A9) checkpoints
+// exactly like one under the full row — no `SPAWN`/`REMOTE`/`RANDOM` needed.
+use crate::connection::{OracleConnection, db_checkpoint};
 use crate::error::DbError;
 use crate::serialize::{PageColumnCache, SerializeOptions, json_byte_len};
 use crate::types::OracleBind;
-
-/// Cancellation checkpoint that works for ANY capability row. Cancellation /
-/// budget state lives on `Cx` independent of the effect capabilities, so a
-/// read handler running under a narrowed `Cx<ReadPathCaps>` (A9) checkpoints
-/// exactly like one under the full row — no `SPAWN`/`REMOTE`/`RANDOM` needed.
-fn query_checkpoint<Caps>(cx: &Cx<Caps>, phase: &'static str) -> Result<(), DbError> {
-    cx.checkpoint_with(phase)
-        .map_err(|err| DbError::Cancelled(format!("{phase}: {err}")))
-}
 
 /// Caps on a single page of results (plan §8.2 / §10).
 #[derive(Clone, Copy, Debug)]
@@ -134,7 +129,7 @@ fn query_response_from_rows_checked<Caps>(
     offset: usize,
     serialize_opts: &SerializeOptions,
 ) -> Result<QueryResponse, DbError> {
-    query_checkpoint(cx, "oracle_query.serialize.before")?;
+    db_checkpoint(cx, "oracle_query.serialize.before")?;
     let more_by_rows = rows.len() > caps.max_rows;
     let page = &rows[..rows.len().min(caps.max_rows)];
 
@@ -149,7 +144,7 @@ fn query_response_from_rows_checked<Caps>(
     let mut byte_truncated = false;
     for (idx, row) in page.iter().enumerate() {
         if idx % 64 == 0 {
-            query_checkpoint(cx, "oracle_query.serialize.rows")?;
+            db_checkpoint(cx, "oracle_query.serialize.rows")?;
         }
         let value = match &column_cache {
             Some(cache) => cache.serialize_row(row, serialize_opts),
@@ -172,7 +167,7 @@ fn query_response_from_rows_checked<Caps>(
         None
     };
 
-    query_checkpoint(cx, "oracle_query.serialize.after")?;
+    db_checkpoint(cx, "oracle_query.serialize.after")?;
     Ok(QueryResponse {
         columns,
         row_count: out_rows.len(),

@@ -34,7 +34,18 @@
 //! observe the client's model, so `llm` defaults to the binary name and may be
 //! overridden by the `ORACLEMCP_AGENT_MODEL` environment variable).
 
+use std::sync::LazyLock;
+
 use oraclemcp_guard::{Classifier, ClassifierConfig};
+
+/// Shared default classifier for the marker's classified-==-executed check.
+/// `classify` takes `&self` and is pure for a fixed (empty) config + the
+/// fail-closed `UnknownOracle`, so the two per-call classify passes here reuse
+/// one instance instead of allocating a fresh `Arc<UnknownOracle>` per call.
+/// Behavior is identical; this only drops the per-call allocation on the hot
+/// path (`with_audit_marker` runs on every executed statement).
+static MARKER_CLASSIFIER: LazyLock<Classifier> =
+    LazyLock::new(|| Classifier::new(ClassifierConfig::new()));
 
 /// Environment variable an operator/host may set to label the driving agent
 /// model in the audit marker. Best-effort, non-secret; absent -> `oraclemcp`.
@@ -118,8 +129,7 @@ pub(crate) fn with_audit_marker(sql: &str, profile: Option<&str>, tool: &str) ->
     // Classified == executed: only adopt the marker if the verdict is unchanged.
     // A divergence (which sanitization is designed to make impossible) fails
     // closed to the bare SQL rather than risking a different gate.
-    let classifier = Classifier::new(ClassifierConfig::new());
-    if classifier.classify(&marked) == classifier.classify(sql) {
+    if MARKER_CLASSIFIER.classify(&marked) == MARKER_CLASSIFIER.classify(sql) {
         marked
     } else {
         sql.to_owned()

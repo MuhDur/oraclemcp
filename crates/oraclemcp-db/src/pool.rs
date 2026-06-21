@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use asupersync::Cx;
 use async_trait::async_trait;
 
-use crate::connection::{OracleConnection, RustOracleConnection};
+use crate::connection::{OracleConnection, RustOracleConnection, db_checkpoint};
 use crate::error::DbError;
 use crate::types::{
     OracleBackend, OracleBind, OracleConnectOptions, OracleConnectionInfo, OracleRow,
@@ -47,11 +47,9 @@ impl OracleConnectionManager {
 
 impl OracleConnectionManager {
     async fn connect(&self, cx: &Cx) -> Result<RustOracleConnection, DbError> {
-        cx.checkpoint_with("oracle_pool.connect.before")
-            .map_err(|err| DbError::Cancelled(format!("oracle_pool.connect.before: {err}")))?;
+        db_checkpoint(cx, "oracle_pool.connect.before")?;
         let conn = RustOracleConnection::connect(cx, self.opts.clone()).await?;
-        cx.checkpoint_with("oracle_pool.connect.after")
-            .map_err(|err| DbError::Cancelled(format!("oracle_pool.connect.after: {err}")))?;
+        db_checkpoint(cx, "oracle_pool.connect.after")?;
         Ok(conn)
     }
 
@@ -341,8 +339,7 @@ impl OraclePool {
             Box<dyn std::future::Future<Output = Result<T, DbError>> + 'a>,
         >,
     {
-        cx.checkpoint_with("oracle_pool.checkout.before")
-            .map_err(|err| DbError::Cancelled(format!("oracle_pool.checkout.before: {err}")))?;
+        db_checkpoint(cx, "oracle_pool.checkout.before")?;
         let conn = self.checkout(cx).await?;
         // A connection is in our hands: the matching check-in below is
         // UNCONDITIONAL (it runs on every exit path of `f`, success, error, or
@@ -369,8 +366,7 @@ impl OraclePool {
     async fn checkout(&self, cx: &Cx) -> Result<RustOracleConnection, DbError> {
         let deadline = Instant::now() + Duration::from_secs(self.settings.acquire_timeout_secs);
         loop {
-            cx.checkpoint_with("oracle_pool.checkout.loop")
-                .map_err(|err| DbError::Cancelled(format!("oracle_pool.checkout.loop: {err}")))?;
+            db_checkpoint(cx, "oracle_pool.checkout.loop")?;
             if let Some(conn) = self.try_checkout(cx).await? {
                 return Ok(conn);
             }

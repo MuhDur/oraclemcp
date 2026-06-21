@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 
 use asupersync::Cx;
@@ -392,6 +392,18 @@ impl OracleDispatcher {
         self
     }
 }
+
+/// The process-wide default SQL classifier (empty `ClassifierConfig`, the
+/// fail-closed `UnknownOracle`). `Classifier::classify` takes `&self` and is
+/// pure given a fixed config + oracle, so every request arm can share one
+/// instance instead of rebuilding `Classifier::new(ClassifierConfig::new())`
+/// (which allocates a fresh `Arc<UnknownOracle>`) on each call. Behavior is
+/// identical — the same statement yields the same `GuardDecision` — this only
+/// drops the per-call allocation on the gate hot path. Allow/block-list
+/// configs are not used on this served surface, so the empty config is the one
+/// every existing site already constructed.
+static DEFAULT_CLASSIFIER: LazyLock<Classifier> =
+    LazyLock::new(|| Classifier::new(ClassifierConfig::new()));
 
 /// Serialize a slice of rows to a JSON array via the canonical row serializer.
 fn rows_to_json(rows: &[oraclemcp_db::OracleRow]) -> Value {
@@ -974,7 +986,7 @@ async fn owner_and_name_arg(
 /// from configured profiles and never execute caller-supplied statements, so
 /// they need no raw-SQL gate.
 fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
-    let decision = Classifier::new(ClassifierConfig::new()).classify(sql);
+    let decision = DEFAULT_CLASSIFIER.classify(sql);
     // A session whose ceiling is READ_ONLY: `gate` returns `Allow` only for
     // statements the guard proved read-only; everything else is `Blocked` or
     // `RequireStepUp`, both of which this (step-up-less) server rejects.
@@ -1084,6 +1096,20 @@ fn confirmation_mac(parts: &[&[u8]]) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
+}
+
+/// Constant-time check that a `supplied` confirmation/commit/step-up token
+/// matches the `expected` MAC string. These tokens are HMAC tags, so the
+/// comparison routes through `oraclemcp_audit::ct_eq` (no early-out on first
+/// mismatch) rather than a plain `==`/`!=` that would leak a timing oracle on
+/// the matching-prefix length. `None` (no token supplied) never matches; the
+/// accept/reject outcome is otherwise identical to the prior string compare
+/// (`ct_eq` already rejects length mismatches).
+fn token_matches(supplied: Option<&str>, expected: &str) -> bool {
+    match supplied {
+        Some(s) => oraclemcp_audit::ct_eq(s.as_bytes(), expected.as_bytes()),
+        None => false,
+    }
 }
 
 fn execute_confirmation_token(
@@ -1479,7 +1505,7 @@ fn set_session_level(
             "message": "The active session already permits this level.",
         })),
         LevelDecision::RequireStepUp { .. } => {
-            if args.confirm.as_deref() != Some(confirm.as_str()) {
+            if !token_matches(args.confirm.as_deref(), &confirm) {
                 return Err(session_level_gate_error(session, target));
             }
             session
@@ -1727,7 +1753,7 @@ fn verify_commit_confirmation(
                 "read-only statements do not use oracle_execute commit confirmation",
             )
         })?;
-    if confirm == Some(expected.as_str()) {
+    if token_matches(confirm, &expected) {
         return Ok(());
     }
     Err(ErrorEnvelope::new(
@@ -1858,7 +1884,7 @@ fn execute_approved_args(
     }
     if session.evaluate(Some(grant.required_level)) != LevelDecision::Allow {
         return Err(execute_gate_error(
-            &Classifier::new(ClassifierConfig::new()).classify(&grant.sql),
+            &DEFAULT_CLASSIFIER.classify(&grant.sql),
             session.evaluate(Some(grant.required_level)),
             session,
         ));
@@ -1903,6 +1929,18 @@ fn audit_agent_identity(active_profile: Option<&str>) -> String {
         .unwrap_or_else(|| "oraclemcp".to_owned())
 }
 
+/// The audit-sink bundle threaded through the execute-path tools: the optional
+/// out-of-band [`Auditor`] and the server-controlled `agent_identity` recorded
+/// on every entry. Bundling these two always-paired values keeps the
+/// execute/create-or-replace/deploy-DDL signatures under the argument-count
+/// limit (so no `#[allow(clippy::too_many_arguments)]` is needed) without
+/// changing any behavior — every consumer reads the same two fields.
+#[derive(Clone, Copy)]
+struct AuditCtx<'a> {
+    auditor: Option<&'a Auditor>,
+    agent_identity: &'a str,
+}
+
 /// Build an audit draft for an execute call at a known danger level.
 fn execute_audit_draft(
     agent_identity: &str,
@@ -1922,42 +1960,50 @@ fn execute_audit_draft(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Durably append one execute-path audit entry when an auditor is configured.
+/// Fail-closed: a failed append surfaces as an [`ErrorEnvelope`] so the call
+/// errors rather than proceeding un-audited. No-op when `auditor` is `None`.
+fn append_audit(
+    auditor: Option<&Auditor>,
+    agent_identity: &str,
+    sql: &str,
+    danger_level: &str,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+) -> Result<(), ErrorEnvelope> {
+    if let Some(auditor) = auditor {
+        let draft = execute_audit_draft(agent_identity, sql, danger_level, rows_affected, outcome);
+        auditor
+            .append(&draft, audit_timestamp(), true)
+            .map_err(audit_error_to_envelope)?;
+    }
+    Ok(())
+}
+
 async fn execute_sql(
     cx: &Cx,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
-    auditor: Option<&Auditor>,
-    agent_identity: &str,
+    audit: AuditCtx<'_>,
     args: ExecuteArgs,
 ) -> Result<Value, ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
     with_call_timeout(cx, conn, timeout_seconds, || {
-        execute_sql_inner(
-            cx,
-            conn,
-            active_profile,
-            session,
-            auditor,
-            agent_identity,
-            args,
-        )
+        execute_sql_inner(cx, conn, active_profile, session, audit, args)
     })
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_sql_inner(
     cx: &Cx,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
-    auditor: Option<&Auditor>,
-    agent_identity: &str,
+    audit: AuditCtx<'_>,
     args: ExecuteArgs,
 ) -> Result<Value, ErrorEnvelope> {
-    let decision = Classifier::new(ClassifierConfig::new()).classify(&args.sql);
+    let decision = DEFAULT_CLASSIFIER.classify(&args.sql);
     let gate = decision.gate(session);
     if !matches!(gate, LevelDecision::Allow) {
         return Err(execute_gate_error(&decision, gate, session));
@@ -2010,7 +2056,7 @@ async fn execute_sql_inner(
     // divergence so a marker can never change what runs. The marked text is what
     // we execute AND what the audit log records (A8 digest covers the real text).
     let executed_sql = with_audit_marker(&args.sql, active_profile, "oracle_execute");
-    if Classifier::new(ClassifierConfig::new()).classify(&executed_sql) != decision {
+    if DEFAULT_CLASSIFIER.classify(&executed_sql) != decision {
         return Err(ErrorEnvelope::new(
             ErrorClass::Internal,
             "audit marker changed the classifier verdict; refusing to execute",
@@ -2027,18 +2073,14 @@ async fn execute_sql_inner(
     // fsync-before-execute (§5.13): durably log the approved statement BEFORE it
     // runs so a crash between here and the execute leaves the log written and the
     // database untouched. A failed durable append fails the call closed.
-    if let Some(auditor) = auditor {
-        let pre = execute_audit_draft(
-            agent_identity,
-            &executed_sql,
-            &danger_str,
-            None,
-            AuditOutcome::Pending,
-        );
-        auditor
-            .append(&pre, audit_timestamp(), true)
-            .map_err(audit_error_to_envelope)?;
-    }
+    append_audit(
+        audit.auditor,
+        audit.agent_identity,
+        &executed_sql,
+        &danger_str,
+        None,
+        AuditOutcome::Pending,
+    )?;
 
     let dbms_output_limits = if args.capture_dbms_output {
         let (max_lines, max_chars, buffer_bytes) = dbms_output_limits(&args);
@@ -2054,36 +2096,28 @@ async fn execute_sql_inner(
         Err(e) => {
             let _ = conn.rollback(cx).await;
             // Durably log the failed outcome before propagating.
-            if let Some(auditor) = auditor {
-                let post = execute_audit_draft(
-                    agent_identity,
-                    &executed_sql,
-                    &danger_str,
-                    None,
-                    AuditOutcome::Failed,
-                );
-                auditor
-                    .append(&post, audit_timestamp(), true)
-                    .map_err(audit_error_to_envelope)?;
-            }
+            append_audit(
+                audit.auditor,
+                audit.agent_identity,
+                &executed_sql,
+                &danger_str,
+                None,
+                AuditOutcome::Failed,
+            )?;
             return Err(DbError::into_envelope(e));
         }
     };
     if args.commit {
         if let Err(e) = commit_conn(cx, conn).await {
             let _ = conn.rollback(cx).await;
-            if let Some(auditor) = auditor {
-                let post = execute_audit_draft(
-                    agent_identity,
-                    &executed_sql,
-                    &danger_str,
-                    Some(rows_affected),
-                    AuditOutcome::Failed,
-                );
-                auditor
-                    .append(&post, audit_timestamp(), true)
-                    .map_err(audit_error_to_envelope)?;
-            }
+            append_audit(
+                audit.auditor,
+                audit.agent_identity,
+                &executed_sql,
+                &danger_str,
+                Some(rows_affected),
+                AuditOutcome::Failed,
+            )?;
             return Err(DbError::into_envelope(e));
         }
     } else {
@@ -2091,18 +2125,14 @@ async fn execute_sql_inner(
     }
 
     // Durably log the successful (committed or rolled-back-preview) outcome.
-    if let Some(auditor) = auditor {
-        let post = execute_audit_draft(
-            agent_identity,
-            &executed_sql,
-            &danger_str,
-            Some(rows_affected),
-            AuditOutcome::Succeeded,
-        );
-        auditor
-            .append(&post, audit_timestamp(), true)
-            .map_err(audit_error_to_envelope)?;
-    }
+    append_audit(
+        audit.auditor,
+        audit.agent_identity,
+        &executed_sql,
+        &danger_str,
+        Some(rows_affected),
+        AuditOutcome::Succeeded,
+    )?;
     let dbms_output = match dbms_output_limits {
         Some((max_lines, max_chars)) => Some(
             read_dbms_output_conn(cx, conn, max_lines, max_chars)
@@ -2173,7 +2203,7 @@ fn verify_token_confirmation(
             missing_token_message,
         ));
     };
-    if supplied != Some(expected.as_str()) {
+    if !token_matches(supplied, &expected) {
         return Err(
             ErrorEnvelope::new(ErrorClass::ChallengeRequired, challenge_message)
                 .with_suggested_tool(suggested_tool)
@@ -2998,7 +3028,7 @@ async fn patch_source_inner(
         create_or_replace_ddl_from_source(&patched_source)
     };
     let patched_ddl = create_or_replace_source_arg(tool_name, Some(patched_ddl))?;
-    let decision = Classifier::new(ClassifierConfig::new()).classify(&patched_ddl);
+    let decision = DEFAULT_CLASSIFIER.classify(&patched_ddl);
     let classifier_gate = decision.gate(session);
     let classifier_forbidden = matches!(
         &classifier_gate,
@@ -3146,46 +3176,33 @@ async fn patch_source_inner(
 // Audit context (auditor + agent_identity) is threaded through the DDL path so
 // every CREATE OR REPLACE is hash-chained (A8). TODO(simplify): bundle the audit
 // context into an `AuditCtx` to drop back under the arg-count lint.
-#[allow(clippy::too_many_arguments)]
 async fn create_or_replace(
     cx: &Cx,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
-    auditor: Option<&Auditor>,
-    agent_identity: &str,
+    audit: AuditCtx<'_>,
     tool_name: &str,
     args: CreateOrReplaceArgs,
 ) -> Result<Value, ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
     with_call_timeout(cx, conn, timeout_seconds, || {
-        create_or_replace_inner(
-            cx,
-            conn,
-            active_profile,
-            session,
-            auditor,
-            agent_identity,
-            tool_name,
-            args,
-        )
+        create_or_replace_inner(cx, conn, active_profile, session, audit, tool_name, args)
     })
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn create_or_replace_inner(
     cx: &Cx,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
-    auditor: Option<&Auditor>,
-    agent_identity: &str,
+    audit: AuditCtx<'_>,
     tool_name: &str,
     args: CreateOrReplaceArgs,
 ) -> Result<Value, ErrorEnvelope> {
     let source = create_or_replace_source_arg(tool_name, args.source_code)?;
-    let decision = Classifier::new(ClassifierConfig::new()).classify(&source);
+    let decision = DEFAULT_CLASSIFIER.classify(&source);
     let gate = decision.gate(session);
     let (gate_decision, blocked_reason, step_up_target) = gate_decision_json(&gate);
     let detected = detect_create_or_replace_object(cx, conn, &source).await;
@@ -3232,8 +3249,7 @@ async fn create_or_replace_inner(
         conn,
         active_profile,
         session,
-        auditor,
-        agent_identity,
+        audit,
         ExecuteArgs {
             sql: source.clone(),
             binds: Vec::new(),
@@ -3282,39 +3298,27 @@ async fn create_or_replace_inner(
     Ok(executed)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn deploy_ddl(
     cx: &Cx,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
-    auditor: Option<&Auditor>,
-    agent_identity: &str,
+    audit: AuditCtx<'_>,
     args: DeployDdlArgs,
 ) -> Result<Value, ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
     with_call_timeout(cx, conn, timeout_seconds, || {
-        deploy_ddl_inner(
-            cx,
-            conn,
-            active_profile,
-            session,
-            auditor,
-            agent_identity,
-            args,
-        )
+        deploy_ddl_inner(cx, conn, active_profile, session, audit, args)
     })
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn deploy_ddl_inner(
     cx: &Cx,
     conn: &dyn OracleConnection,
     active_profile: Option<&str>,
     session: &SessionLevelState,
-    auditor: Option<&Auditor>,
-    agent_identity: &str,
+    audit: AuditCtx<'_>,
     args: DeployDdlArgs,
 ) -> Result<Value, ErrorEnvelope> {
     let ddl = required_non_empty_arg("deploy_ddl", "ddl", args.ddl)?;
@@ -3330,8 +3334,7 @@ async fn deploy_ddl_inner(
             conn,
             active_profile,
             session,
-            auditor,
-            agent_identity,
+            audit,
             "deploy_ddl",
             CreateOrReplaceArgs {
                 source_code: Some(ddl),
@@ -3350,7 +3353,7 @@ async fn deploy_ddl_inner(
         return Ok(out);
     }
 
-    let decision = Classifier::new(ClassifierConfig::new()).classify(&ddl);
+    let decision = DEFAULT_CLASSIFIER.classify(&ddl);
     let required_level = decision.required_level.ok_or_else(|| {
         ErrorEnvelope::new(
             ErrorClass::ForbiddenStatement,
@@ -3401,8 +3404,7 @@ async fn deploy_ddl_inner(
         conn,
         active_profile,
         session,
-        auditor,
-        agent_identity,
+        audit,
         ExecuteArgs {
             sql: ddl,
             binds: Vec::new(),
@@ -3478,7 +3480,7 @@ impl CustomToolExecutor for ReadOnlyCustomToolExecutor<'_> {
 }
 
 fn preview_sql(sql: &str, session: &SessionLevelState, active_profile: Option<&str>) -> Value {
-    let decision = Classifier::new(ClassifierConfig::new()).classify(sql);
+    let decision = DEFAULT_CLASSIFIER.classify(sql);
     let gate = decision.gate(session);
     let (gate_decision, blocked_reason, step_up_target) = match gate {
         LevelDecision::Allow => ("allow", Value::Null, Value::Null),
@@ -3841,13 +3843,16 @@ impl OracleDispatcher {
             // next read re-assert it on the fresh transaction.
             state.read_only_backstop.disarm();
             let conn: &dyn OracleConnection = state.conn.as_ref();
+            let audit = AuditCtx {
+                auditor: self.auditor.as_deref(),
+                agent_identity: &agent_identity,
+            };
             return execute_sql(
                 cx,
                 conn,
                 active_profile.as_deref(),
                 &scoped_level,
-                self.auditor.as_deref(),
-                &agent_identity,
+                audit,
                 execute_args,
             )
             .await;
@@ -3859,16 +3864,11 @@ impl OracleDispatcher {
             // A1: see execute_approved — disarm before a gated write/DDL.
             state.read_only_backstop.disarm();
             let conn: &dyn OracleConnection = state.conn.as_ref();
-            return deploy_ddl(
-                cx,
-                conn,
-                active_profile.as_deref(),
-                &scoped_level,
-                self.auditor.as_deref(),
-                &agent_identity,
-                a,
-            )
-            .await;
+            let audit = AuditCtx {
+                auditor: self.auditor.as_deref(),
+                agent_identity: &agent_identity,
+            };
+            return deploy_ddl(cx, conn, active_profile.as_deref(), &scoped_level, audit, a).await;
         }
         if tool == "read_patch_preview" {
             let a: ReadPatchPreviewArgs = parse_args(name, args)?;
@@ -3960,13 +3960,16 @@ impl OracleDispatcher {
             "oracle_execute" => {
                 let a: ExecuteArgs = parse_args(name, args)?;
                 let agent_identity = audit_agent_identity(state.active_profile.as_deref());
+                let audit = AuditCtx {
+                    auditor: self.auditor.as_deref(),
+                    agent_identity: &agent_identity,
+                };
                 return execute_sql(
                     cx,
                     conn,
                     state.active_profile.as_deref(),
                     &scoped_level,
-                    self.auditor.as_deref(),
-                    &agent_identity,
+                    audit,
                     a,
                 )
                 .await;
@@ -3986,13 +3989,16 @@ impl OracleDispatcher {
             "oracle_create_or_replace" => {
                 let a: CreateOrReplaceArgs = parse_args(name, args)?;
                 let agent_identity = audit_agent_identity(state.active_profile.as_deref());
+                let audit = AuditCtx {
+                    auditor: self.auditor.as_deref(),
+                    agent_identity: &agent_identity,
+                };
                 return create_or_replace(
                     cx,
                     conn,
                     state.active_profile.as_deref(),
                     &scoped_level,
-                    self.auditor.as_deref(),
-                    &agent_identity,
+                    audit,
                     name,
                     a,
                 )

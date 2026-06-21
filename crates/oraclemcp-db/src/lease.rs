@@ -22,13 +22,10 @@ use asupersync::sync::Mutex as AsyncMutex;
 use oraclemcp_guard::MonotonicDeadline;
 use serde::{Deserialize, Serialize};
 
-use crate::connection::OracleConnection;
+// Cancellation checkpoints route through the single crate-wide
+// `connection::db_checkpoint`.
+use crate::connection::{OracleConnection, db_checkpoint};
 use crate::error::DbError;
-
-fn lease_checkpoint(cx: &Cx, phase: &'static str) -> Result<(), DbError> {
-    cx.checkpoint_with(phase)
-        .map_err(|err| DbError::Cancelled(format!("{phase}: {err}")))
-}
 
 /// Oracle limits: MODULE ≤ 48 chars, ACTION ≤ 32 chars (`DBMS_APPLICATION_INFO`).
 const MODULE_NAME: &str = "oraclemcp";
@@ -378,17 +375,17 @@ impl LeaseManager {
             let mut lease = arc.lock(cx).await.map_err(lock_err)?;
             let savepoint_sql = format!("SAVEPOINT {SP}");
             let rollback_sql = format!("ROLLBACK TO SAVEPOINT {SP}");
-            lease_checkpoint(cx, "oracle_lease.preview.savepoint.before")?;
+            db_checkpoint(cx, "oracle_lease.preview.savepoint.before")?;
             lease.conn.execute(cx, &savepoint_sql, &[]).await?;
             lease.in_transaction = true;
-            let preview_result = match lease_checkpoint(cx, "oracle_lease.preview.execute.before") {
+            let preview_result = match db_checkpoint(cx, "oracle_lease.preview.execute.before") {
                 Ok(()) => lease.conn.execute(cx, sql, binds).await,
                 Err(err) => Err(err),
             };
             let rollback_result = lease.conn.execute(cx, &rollback_sql, &[]).await;
             match (preview_result, rollback_result) {
                 (Ok(rows_affected), Ok(_)) => {
-                    lease_checkpoint(cx, "oracle_lease.preview.rollback.after")?;
+                    db_checkpoint(cx, "oracle_lease.preview.rollback.after")?;
                     Ok(PreviewImpact {
                         rows_affected,
                         rolled_back: true,
