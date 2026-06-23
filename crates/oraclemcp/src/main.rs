@@ -503,7 +503,12 @@ fn block_on_connect<F, T>(f: impl FnOnce(Cx) -> F) -> T
 where
     F: std::future::Future<Output = T>,
 {
+    // The async `oracledb` driver needs a reactor to drive socket I/O; a runtime
+    // built without one hangs on the first round trip (release-gre.16).
+    let reactor = asupersync::runtime::reactor::create_reactor()
+        .expect("Asupersync native reactor builds for connection setup");
     let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
         .build()
         .expect("Asupersync current-thread runtime builds for connection setup");
     runtime.block_on(async move {

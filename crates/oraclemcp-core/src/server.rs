@@ -142,7 +142,13 @@ impl OracleMcpServer {
         dispatcher: Arc<dyn ToolDispatch>,
         exports: Arc<crate::export::ExportRegistry>,
     ) -> Self {
+        // The per-call DB path runs the async `oracledb` driver on this runtime,
+        // so it needs a reactor to drive socket I/O — without one the first real
+        // round trip hangs (release-gre.16).
+        let dispatch_reactor = asupersync::runtime::reactor::create_reactor()
+            .expect("Asupersync native reactor builds for MCP dispatch");
         let dispatch_runtime = RuntimeBuilder::current_thread()
+            .with_reactor(dispatch_reactor)
             .build()
             .expect("Asupersync current-thread runtime builds for MCP dispatch");
         let registry = Arc::new(registry);

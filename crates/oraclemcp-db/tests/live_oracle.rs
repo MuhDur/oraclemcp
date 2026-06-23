@@ -42,7 +42,12 @@ where
     F: FnOnce(Cx) -> Fut,
     Fut: std::future::Future<Output = T>,
 {
-    let runtime = RuntimeBuilder::current_thread().build().expect("rt");
+    // Live tests do real socket I/O, so the runtime needs a reactor (release-gre.16).
+    let reactor = asupersync::runtime::reactor::create_reactor().expect("native reactor");
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .expect("rt");
     runtime.block_on(async move {
         let cx = Cx::current().expect("block_on installs a current Cx");
         body(cx).await

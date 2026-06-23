@@ -64,7 +64,10 @@ where
     F: FnOnce(Cx) -> Fut,
     Fut: std::future::Future<Output = T>,
 {
+    let reactor =
+        asupersync::runtime::reactor::create_reactor().expect("native reactor for live I/O");
     let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
         .build()
         .expect("current-thread runtime");
     runtime.block_on(async move {

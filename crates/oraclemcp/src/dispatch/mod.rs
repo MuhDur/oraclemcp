@@ -3660,9 +3660,15 @@ impl OracleDispatcher {
         // DB round-trip path). The server's real entry is the async
         // `ToolDispatch::dispatch` which is `.await`-ed on the dispatch runtime;
         // this sync wrapper exists only for non-server/test callers.
+        // A reactor is required for the async `oracledb` driver's socket I/O
+        // (release-gre.16).
+        let reactor = asupersync::runtime::reactor::create_reactor()
+            .expect("native reactor for dispatch I/O");
         asupersync::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(reactor)
             .build()
             .expect("current-thread runtime")
+            // block-on-boundary: one-shot dispatch ENTRY runtime (release-gre.16).
             .block_on(async move {
                 self.dispatch_with_cx_inner(&caller_cx, DispatchContext::default(), name, args)
                     .await
@@ -3689,9 +3695,15 @@ impl OracleDispatcher {
     ) -> Result<Value, ErrorEnvelope> {
         // block-on-boundary: sync->async dispatch ENTRY shim (not the per-call
         // DB round-trip path); see `dispatch_with_cx`.
+        // A reactor is required for the async `oracledb` driver's socket I/O
+        // (release-gre.16).
+        let reactor = asupersync::runtime::reactor::create_reactor()
+            .expect("native reactor for dispatch I/O");
         asupersync::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(reactor)
             .build()
             .expect("current-thread runtime")
+            // block-on-boundary: one-shot dispatch ENTRY runtime (release-gre.16).
             .block_on(async move {
                 let cx = Cx::current().expect("block_on installs a request Cx");
                 self.dispatch_with_cx_inner(&cx, context, name, args).await

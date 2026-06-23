@@ -226,7 +226,16 @@ impl Drop for ExportPump {
 fn run_pump(shared: &Arc<Shared>) {
     use asupersync::runtime::RuntimeBuilder;
 
-    let Ok(runtime) = RuntimeBuilder::current_thread().build() else {
+    // OTLP export is real network I/O; the export runtime needs a reactor to
+    // drive it — without one the export hangs (release-gre.16).
+    let Ok(reactor) = asupersync::runtime::reactor::create_reactor() else {
+        tracing::warn!("oraclemcp-otlp: could not build export reactor; telemetry export disabled");
+        return;
+    };
+    let Ok(runtime) = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+    else {
         tracing::warn!("oraclemcp-otlp: could not build export runtime; telemetry export disabled");
         return;
     };

@@ -1,0 +1,46 @@
+{
+  "run_id": "1782218694_705540",
+  "captured_at_utc": "2026-06-23T12:44:55Z",
+  "git_sha": "473f9a86979e0dd03a010c131f2693d2ea2063f7",
+  "git_dirty": true,
+  "hardware": {
+    "cpu_model": "AMD EPYC 7713 64-Core Processor",
+    "cpu_cores_per_socket": 64,
+    "cpu_sockets": 1,
+    "cpu_threads_total": 128,
+    "cpu_mhz_reported": "",
+    "ram_total": "259284596 kB",
+    "swap_total": "8388604 kB"
+  },
+  "storage": {
+    "device": "/dev/mapper/ubuntu--vg-ubuntu--lv",
+    "model": "unknown",
+    "mount_point": "/home/durakovic/projects/oraclemcp",
+    "filesystem": "ext4",
+    "mount_options": "rw,relatime"
+  },
+  "os": {
+    "distribution": "Ubuntu 25.10",
+    "kernel": "6.17.0-35-generic"
+  },
+  "toolchain": {
+    "rustc": "rustc 1.97.0-nightly (4b0c9d76a 2026-05-10)",
+    "go": "go version go1.24.4 linux/amd64",
+    "node": "",
+    "python": "Python 3.13.7",
+    "clang": "Ubuntu clang version 20.1.8 (0ubuntu4)",
+    "gcc": "gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0"
+  },
+  "build_profile": {
+    "name": "release-perf"
+  },
+  "tuning_applied": {
+    "governor": "schedutil",
+    "no_turbo": "n/a",
+    "smt_active": "1",
+    "perf_event_paranoid": "4",
+    "kptr_restrict": "1",
+    "nmi_watchdog": "1",
+    "thp": "madvise"
+  }
+}

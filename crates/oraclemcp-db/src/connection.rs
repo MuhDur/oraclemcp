@@ -1340,7 +1340,10 @@ mod driver {
                 );
                 return;
             };
+            // Live test does real socket I/O, so the runtime needs a reactor (release-gre.16).
+            let reactor = asupersync::runtime::reactor::create_reactor().expect("native reactor");
             let runtime = RuntimeBuilder::current_thread()
+                .with_reactor(reactor)
                 .build()
                 .expect("current-thread runtime");
             runtime.block_on(async {

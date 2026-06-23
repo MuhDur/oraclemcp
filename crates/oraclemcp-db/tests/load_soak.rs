@@ -357,42 +357,61 @@ fn live_xe_load_soak_pool_accounting_and_latency() {
         password: Some(password),
         ..Default::default()
     };
-    let settings = PoolSettings {
-        max_size: CLIENTS as u32,
-        min_idle: 2,
-        ..Default::default()
-    };
-
-    // Build the pool (skip if the database is unreachable — never panic).
-    let pool = {
+    // Reachability probe (reactor-backed runtime, connect once); skip cleanly if
+    // the DB is unreachable. A connection's socket is bound to the reactor that
+    // drives it, so each client below owns its runtime + reactor + pool — the
+    // production thread-per-connection model. A single pool shared across multiple
+    // reactor-backed runtimes would mis-route socket readiness and hang.
+    {
+        let reactor =
+            asupersync::runtime::reactor::create_reactor().expect("native reactor for live I/O");
         let runtime = RuntimeBuilder::current_thread()
+            .with_reactor(reactor)
             .build()
-            .expect("pool runtime builds");
-        match runtime.block_on(async {
+            .expect("probe runtime builds");
+        let reachable = runtime.block_on(async {
             let cx = Cx::current().expect("block_on installs a current Cx");
-            OraclePool::connect(&cx, opts, settings).await
-        }) {
-            Ok(pool) => Arc::new(pool),
-            Err(e) => {
-                eprintln!("live_xe_load_soak: skipped — no reachable Oracle ({e})");
-                return;
-            }
+            let probe = PoolSettings {
+                max_size: 1,
+                min_idle: 1,
+                ..Default::default()
+            };
+            OraclePool::connect(&cx, opts.clone(), probe).await.is_ok()
+        });
+        if !reachable {
+            eprintln!("live_xe_load_soak: skipped — no reachable Oracle at the configured DSN");
+            return;
         }
-    };
+    }
 
-    // Fan out N thread-per-connection clients; each runs ITERATIONS read ops
-    // through the SHARED pool on its own current-thread runtime, timing each op.
+    // Fan out N thread-per-connection clients; each owns its runtime + reactor +
+    // a small pool, runs ITERATIONS ops, and checks its pool's checkout accounting.
+    let opts = Arc::new(opts);
     let latencies: Arc<Mutex<Vec<u128>>> = Arc::new(Mutex::new(Vec::new()));
+    let leaks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let mut handles = Vec::with_capacity(CLIENTS);
     for client_id in 0..CLIENTS {
-        let pool = Arc::clone(&pool);
+        let opts = Arc::clone(&opts);
         let latencies = Arc::clone(&latencies);
+        let leaks = Arc::clone(&leaks);
         handles.push(std::thread::spawn(move || {
+            let reactor = asupersync::runtime::reactor::create_reactor()
+                .expect("native reactor for live I/O");
             let runtime = RuntimeBuilder::current_thread()
+                .with_reactor(reactor)
                 .build()
                 .expect("client runtime builds");
             runtime.block_on(async move {
                 let cx = Cx::current().expect("block_on installs a current Cx");
+                let settings = PoolSettings {
+                    max_size: 2,
+                    min_idle: 1,
+                    ..Default::default()
+                };
+                let pool = match OraclePool::connect(&cx, (*opts).clone(), settings).await {
+                    Ok(pool) => pool,
+                    Err(_) => return,
+                };
                 let mut local = Vec::with_capacity(ITERATIONS);
                 for iteration in 0..ITERATIONS {
                     // 80% scalar read / 20% describe, deterministic per client.
@@ -408,6 +427,14 @@ fn live_xe_load_soak_pool_accounting_and_latency() {
                     local.push(start.elapsed().as_micros());
                     outcome.expect("live pool op succeeds against a healthy DB");
                 }
+                // Per-client pool checkout accounting: zero leaked sessions, bounded.
+                let m = pool.metrics();
+                if !(m.is_balanced() && m.is_bounded()) {
+                    leaks.lock().expect("leaks lock").push(format!(
+                        "client {client_id}: in_use={} acquired={} released={} discarded={} open={} max={}",
+                        m.in_use, m.acquired, m.released, m.discarded, m.open, m.max_size
+                    ));
+                }
                 latencies.lock().expect("latency lock").extend(local);
             });
         }));
@@ -416,21 +443,12 @@ fn live_xe_load_soak_pool_accounting_and_latency() {
         handle.join().expect("client thread joins cleanly");
     }
 
-    // ── Pool checkout accounting: ZERO leaked sessions, bounded ──────────────
-    let metrics = pool.metrics();
+    // ── ZERO leaked sessions across every client pool ────────────────────────
+    let leaks = leaks.lock().expect("leaks lock");
     assert!(
-        metrics.is_balanced(),
-        "leaked pool session: in_use={} acquired={} released={} discarded={}",
-        metrics.in_use,
-        metrics.acquired,
-        metrics.released,
-        metrics.discarded
-    );
-    assert!(
-        metrics.is_bounded(),
-        "pool exceeded its ceiling: open={} max_size={}",
-        metrics.open,
-        metrics.max_size
+        leaks.is_empty(),
+        "pool accounting failed under load: {:?}",
+        *leaks
     );
 
     // ── Latency p50/p95/p99 (D7 evidence — recorded from the real run, never
@@ -446,13 +464,10 @@ fn live_xe_load_soak_pool_accounting_and_latency() {
     };
     eprintln!(
         "live_xe_load_soak: {} ops across {CLIENTS} clients (ITERATIONS={ITERATIONS}) — \
-         p50={}us p95={}us p99={}us; pool balanced (acquired={}, released={}, discarded={})",
+         p50={}us p95={}us p99={}us; all per-client pools balanced",
         lat.len(),
         pct(0.50),
         pct(0.95),
-        pct(0.99),
-        metrics.acquired,
-        metrics.released,
-        metrics.discarded
+        pct(0.99)
     );
 }

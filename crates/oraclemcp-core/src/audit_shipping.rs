@@ -137,7 +137,12 @@ impl SiemHttpForwarder {
     /// Blocking: the [`ShippingAuditSink`](oraclemcp_audit::ShippingAuditSink)
     /// calls this after the local fsync, off the request hot path.
     fn post(&self, body: Vec<u8>) -> Result<(), ShippingError> {
+        // The SIEM POST is real network I/O; the forwarder runtime needs a
+        // reactor to drive it — without one the POST hangs (release-gre.16).
+        let reactor = asupersync::runtime::reactor::create_reactor()
+            .map_err(|e| ShippingError::Transport(format!("forwarder reactor: {e}")))?;
         let runtime = RuntimeBuilder::current_thread()
+            .with_reactor(reactor)
             .build()
             .map_err(|e| ShippingError::Transport(format!("forwarder runtime: {e}")))?;
 

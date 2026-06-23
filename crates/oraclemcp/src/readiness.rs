@@ -115,7 +115,16 @@ fn run_pinger(connection: &dyn OracleConnection, state: &Arc<ProbeState>, stop: 
 /// Run a single cancellation-aware ping on a one-shot current-thread runtime.
 /// Returns `true` only if the ping succeeds within [`PROBE_TIMEOUT`].
 fn probe_once(connection: &dyn OracleConnection) -> bool {
-    let Ok(runtime) = asupersync::runtime::RuntimeBuilder::current_thread().build() else {
+    // The DB ping runs the async `oracledb` driver, so the probe runtime needs a
+    // reactor to drive socket I/O — without one the ping hangs (release-gre.16).
+    let Ok(reactor) = asupersync::runtime::reactor::create_reactor() else {
+        tracing::warn!("oraclemcp-readyz: could not build probe reactor; /readyz stays not-ready");
+        return false;
+    };
+    let Ok(runtime) = asupersync::runtime::RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+    else {
         tracing::warn!("oraclemcp-readyz: could not build probe runtime; /readyz stays not-ready");
         return false;
     };
