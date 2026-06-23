@@ -47,15 +47,15 @@
 //!   * `ledger.committed == 0` on the shutdown-drained leases (no torn commit)
 //!   * readiness flips to draining and never flips back
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
-    DbError, LeaseManager, OracleBackend, OracleBind, OracleConnection, OracleConnectionInfo,
-    OracleRow,
+    DbError, LeaseManager, OracleBackend, OracleBind, OracleConnectOptions, OracleConnection,
+    OracleConnectionInfo, OraclePool, OracleRow, PoolSettings,
 };
 
 /// Number of concurrent in-process clients (one OS thread + runtime each).
@@ -314,35 +314,145 @@ fn load_soak_zero_leaked_sessions_clean_drain_bounded() {
 }
 
 /// LIVE variant (ignored offline): the same load shape against a real database
-/// via a pooled connection, capturing p50/p95/p99 latency and asserting the
-/// real `OraclePool` checkout accounting balances (`PoolMetrics::is_balanced`).
-/// Skips with a clear message when no database is configured, exactly like the
-/// exact-SHA qualification. Run it with:
+/// via the real [`OraclePool`], capturing p50/p95/p99 latency and asserting the
+/// pool checkout accounting balances ([`PoolMetrics::is_balanced`] — zero leaked
+/// sessions). Skips with a clear message (never panics) when the live gate is
+/// off or no database is reachable, exactly like the exact-SHA qualification.
+/// Run it with:
 ///
 /// ```text
-/// ORACLEMCP_LIVE_XE=1 ORACLEMCP_LIVE_DSN=... ORACLEMCP_LIVE_USER=... \
-///   ORACLEMCP_LIVE_PASSWORD=... \
+/// ORACLEMCP_LIVE_XE=1 ORACLEMCP_TEST_DSN=... ORACLEMCP_TEST_USER=... \
+///   ORACLEMCP_TEST_PASSWORD=... \
 ///   cargo test -p oraclemcp-db --test load_soak -- --ignored --nocapture
 /// ```
 #[test]
 #[ignore = "live-xe: requires a real Oracle database; see docs/performance-footprint.md"]
 fn live_xe_load_soak_pool_accounting_and_latency() {
+    // Heavy live soak is explicitly opt-in via ORACLEMCP_LIVE_XE; connection
+    // params come from the unified ORACLEMCP_TEST_* env the rest of the live
+    // suite uses. Any missing prerequisite SKIPS (never fails/panics).
     if std::env::var("ORACLEMCP_LIVE_XE").is_err() {
         eprintln!(
-            "live_xe_load_soak: skipped — set ORACLEMCP_LIVE_XE=1 (+ ORACLEMCP_LIVE_DSN/USER/\
-             PASSWORD) to run the live load/soak and capture p50/p95/p99 latency. The offline \
+            "live_xe_load_soak: skipped — set ORACLEMCP_LIVE_XE=1 (+ ORACLEMCP_TEST_DSN/_USER/\
+             _PASSWORD) to run the live load/soak and capture p50/p95/p99 latency. The offline \
              test load_soak_zero_leaked_sessions_clean_drain_bounded covers the deterministic \
              zero-leak/clean-drain/bounded invariants without a database."
         );
         return;
     }
-    // The live load shape, pool wiring, latency capture, and the
-    // `PoolMetrics::is_balanced` assertion are documented in
-    // docs/performance-footprint.md (the "Live measurements" section is
-    // populated by this run, like the exact-SHA qualification). The numbers are
-    // NOT fabricated here: this harness records them when run against a real DB.
-    unimplemented!(
-        "live-xe load/soak is wired by D7 against a real database; the offline invariants are \
-         asserted by load_soak_zero_leaked_sessions_clean_drain_bounded"
+    let (Ok(dsn), Ok(user), Ok(password)) = (
+        std::env::var("ORACLEMCP_TEST_DSN"),
+        std::env::var("ORACLEMCP_TEST_USER"),
+        std::env::var("ORACLEMCP_TEST_PASSWORD"),
+    ) else {
+        eprintln!(
+            "live_xe_load_soak: skipped — ORACLEMCP_LIVE_XE is set but \
+             ORACLEMCP_TEST_DSN/_USER/_PASSWORD are not; nothing to connect to."
+        );
+        return;
+    };
+    let opts = OracleConnectOptions {
+        connect_string: dsn,
+        username: Some(user),
+        password: Some(password),
+        ..Default::default()
+    };
+    let settings = PoolSettings {
+        max_size: CLIENTS as u32,
+        min_idle: 2,
+        ..Default::default()
+    };
+
+    // Build the pool (skip if the database is unreachable — never panic).
+    let pool = {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("pool runtime builds");
+        match runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            OraclePool::connect(&cx, opts, settings).await
+        }) {
+            Ok(pool) => Arc::new(pool),
+            Err(e) => {
+                eprintln!("live_xe_load_soak: skipped — no reachable Oracle ({e})");
+                return;
+            }
+        }
+    };
+
+    // Fan out N thread-per-connection clients; each runs ITERATIONS read ops
+    // through the SHARED pool on its own current-thread runtime, timing each op.
+    let latencies: Arc<Mutex<Vec<u128>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut handles = Vec::with_capacity(CLIENTS);
+    for client_id in 0..CLIENTS {
+        let pool = Arc::clone(&pool);
+        let latencies = Arc::clone(&latencies);
+        handles.push(std::thread::spawn(move || {
+            let runtime = RuntimeBuilder::current_thread()
+                .build()
+                .expect("client runtime builds");
+            runtime.block_on(async move {
+                let cx = Cx::current().expect("block_on installs a current Cx");
+                let mut local = Vec::with_capacity(ITERATIONS);
+                for iteration in 0..ITERATIONS {
+                    // 80% scalar read / 20% describe, deterministic per client.
+                    let op = (client_id + iteration) % 10;
+                    let start = std::time::Instant::now();
+                    let outcome: Result<(), DbError> = if op < 8 {
+                        pool.query_rows(&cx, "SELECT 1 FROM dual", vec![])
+                            .await
+                            .map(|_| ())
+                    } else {
+                        pool.describe(&cx).await.map(|_| ())
+                    };
+                    local.push(start.elapsed().as_micros());
+                    outcome.expect("live pool op succeeds against a healthy DB");
+                }
+                latencies.lock().expect("latency lock").extend(local);
+            });
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("client thread joins cleanly");
+    }
+
+    // ── Pool checkout accounting: ZERO leaked sessions, bounded ──────────────
+    let metrics = pool.metrics();
+    assert!(
+        metrics.is_balanced(),
+        "leaked pool session: in_use={} acquired={} released={} discarded={}",
+        metrics.in_use,
+        metrics.acquired,
+        metrics.released,
+        metrics.discarded
+    );
+    assert!(
+        metrics.is_bounded(),
+        "pool exceeded its ceiling: open={} max_size={}",
+        metrics.open,
+        metrics.max_size
+    );
+
+    // ── Latency p50/p95/p99 (D7 evidence — recorded from the real run, never
+    //    fabricated; feeds docs/performance-footprint.md) ─────────────────────
+    let mut lat = latencies.lock().expect("latency lock").clone();
+    lat.sort_unstable();
+    let pct = |p: f64| -> u128 {
+        if lat.is_empty() {
+            return 0;
+        }
+        let idx = (((lat.len() - 1) as f64) * p).round() as usize;
+        lat[idx]
+    };
+    eprintln!(
+        "live_xe_load_soak: {} ops across {CLIENTS} clients (ITERATIONS={ITERATIONS}) — \
+         p50={}us p95={}us p99={}us; pool balanced (acquired={}, released={}, discarded={})",
+        lat.len(),
+        pct(0.50),
+        pct(0.95),
+        pct(0.99),
+        metrics.acquired,
+        metrics.released,
+        metrics.discarded
     );
 }
