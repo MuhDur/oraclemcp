@@ -1453,9 +1453,9 @@ dependencies = [
 
 [[package]]
 name = "oracledb"
-version = "0.2.2"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee075736560abebbea3ca421b10935e7bfbf3331061dccef54e7d38709a93862"
+checksum = "c34b5e993db86eab59a1754f43dbdb492d17fcbb2f1b3375d9f6f6f66a633d30"
 dependencies = [
  "asupersync",
  "oracledb-protocol",
@@ -1469,9 +1469,9 @@ dependencies = [
 
 [[package]]
 name = "oracledb-protocol"
-version = "0.2.2"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dae982274909842bc8ed14205cd40ce37fb6d58df75c10d866efeea0eb3a8a0a"
+checksum = "05f714cd2517e30229b6ce137fe1cf3199723e73a10c24db9a4c3eff6b5174db"
 dependencies = [
  "aes",
  "hex",

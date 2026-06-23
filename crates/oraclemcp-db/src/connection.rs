@@ -10,23 +10,25 @@
 //!
 //! This file is **the adapter** — the single, enforced isolation boundary for
 //! the `oracledb` driver. Every real `oracledb::` call (connect, the
-//! `execute_query*` family, fetch, LOB, REF CURSOR, auth, commit/rollback,
+//! `execute_raw` execute path, fetch, LOB, REF CURSOR, auth, commit/rollback,
 //! ping, error sanitization) lives here and nowhere else. The rest of the
 //! workspace talks to Oracle exclusively through the [`OracleConnection`] trait
 //! and the `oraclemcp-db` public surface; no other crate or module names an
 //! `oracledb::` path. References to `oracledb` elsewhere are intentionally only
 //! doc-links and human-readable driver descriptions (no driver calls).
 //!
-//! Isolating the driver here means the `oracledb` 0.3.0 cut-over (four
-//! operation-specific request types, single absolute op-deadline, accessor-based
-//! result/metadata types with selective `#[non_exhaustive]`, module/re-export
-//! path moves) touches exactly this one file. Drive that migration from
-//! `oracledb`'s `MIGRATING-0.3.md`; never lean on the 0.3.0 deprecated shims.
-//! Against today's pinned 0.2.2 surface, error classification is string-based
+//! Isolating the driver here meant the `oracledb` 0.2.2 → 0.5.0 cut-over touched
+//! exactly this one file: the removed `execute_query*` initial-execute family
+//! collapsed onto the retained low-level `Connection::execute_raw` (same
+//! `QueryResult`, same prefetch + optional per-call timeout, still composing with
+//! the fetch primitives below); `QueryValue`/`BindValue` became
+//! `#[non_exhaustive]`; and `oracledb::ConnectOptions` field reads moved to
+//! getters. Error classification stays string-based
 //! (`oraclemcp_error::parse_ora_code`) and the driver `Error` type is consumed
 //! generically via [`Display`](std::fmt::Display) in `sanitize_driver_error`, so
-//! no exhaustive match on `oracledb::{BindValue,QueryValue,Error}` exists to
-//! break.
+//! no exhaustive match on the driver `Error` type exists to break; the one
+//! exhaustive `QueryValue` match carries a fail-safe wildcard arm for any future
+//! `#[non_exhaustive]` value kind.
 //!
 //! The seam is mechanically enforced two ways, both of which must keep passing:
 //! - `scripts/oraclemcp_driver_seam_lint.sh` (wired into `.github/workflows/ci.yml`)
@@ -297,7 +299,7 @@ mod driver {
     use oracledb::protocol::{
         ClientIdentity,
         thin::{
-            BindValue, CS_FORM_IMPLICIT, ColumnMetadata, ORA_TYPE_NUM_BFILE,
+            BindValue, CS_FORM_IMPLICIT, ColumnMetadata, ExecuteOptions, ORA_TYPE_NUM_BFILE,
             ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_FLOAT, ORA_TYPE_NUM_BINARY_INTEGER,
             ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_BOOLEAN, ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB,
             ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_INTERVAL_DS,
@@ -604,8 +606,18 @@ mod driver {
         opts: &OracleConnectOptions,
         context: &'static str,
     ) -> Result<QueryResult, DbError> {
+        // oracledb 0.5.0 removed the 0.2.2 `execute_query_with_binds` family;
+        // `Connection::execute_raw` is the retained low-level entry that returns the
+        // same `QueryResult` and composes with the fetch primitives below. `bind_rows`
+        // is positional array DML — one inner row applies our binds in a single round
+        // trip, and an empty slice runs `sql` once with no binds.
+        let bind_rows: Vec<Vec<BindValue>> = if binds.is_empty() {
+            Vec::new()
+        } else {
+            vec![binds.to_vec()]
+        };
         inner
-            .execute_query_with_binds(cx, sql, 0, binds)
+            .execute_raw(cx, sql, 0, &bind_rows, ExecuteOptions::default(), None)
             .await
             .map_err(|err| {
                 DbError::Execute(format!("{context}: {}", sanitize_driver_error(err, opts)))
@@ -623,8 +635,20 @@ mod driver {
         opts: &OracleConnectOptions,
         context: &'static str,
     ) -> Result<QueryResult, DbError> {
+        let bind_rows: Vec<Vec<BindValue>> = if binds.is_empty() {
+            Vec::new()
+        } else {
+            vec![binds.to_vec()]
+        };
         inner
-            .execute_query_with_binds_and_timeout(cx, sql, prefetch_rows, binds, timeout_ms)
+            .execute_raw(
+                cx,
+                sql,
+                prefetch_rows,
+                &bind_rows,
+                ExecuteOptions::default(),
+                timeout_ms,
+            )
             .await
             .map_err(|err| {
                 DbError::Query(format!("{context}: {}", sanitize_driver_error(err, opts)))
@@ -832,7 +856,7 @@ mod driver {
     fn columns_require_define(columns: &[ColumnMetadata]) -> bool {
         columns.iter().any(|column| {
             matches!(
-                column.ora_type_num,
+                column.ora_type_num(),
                 ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR | ORA_TYPE_NUM_JSON
             )
         })
@@ -859,7 +883,7 @@ mod driver {
                 for (idx, meta) in columns.iter().enumerate() {
                     let value = row.get(idx).cloned().flatten();
                     cells.push((
-                        meta.name.clone(),
+                        meta.name().to_owned(),
                         value_to_cell(
                             cx,
                             inner,
@@ -994,6 +1018,15 @@ mod driver {
                     oracle_type,
                     Some(format!("<unsupported ARRAY len={}>", values.len())),
                 ),
+                // `QueryValue` is `#[non_exhaustive]` as of oracledb 0.5.0. Every wire
+                // value kind that exists today is handled explicitly above; this arm
+                // fails SAFE on any future kind with a clearly-marked, non-silent
+                // placeholder — never a silent wrong value (cf. the NUMBER→string
+                // invariant). Unreachable against the current driver.
+                Some(_) => OracleCell::new(
+                    oracle_type,
+                    Some("<unsupported Oracle value kind>".to_owned()),
+                ),
             };
             Ok(cell)
         })
@@ -1122,7 +1155,10 @@ mod driver {
     }
 
     fn cursor_column_names(columns: &[ColumnMetadata]) -> Vec<String> {
-        columns.iter().map(|column| column.name.clone()).collect()
+        columns
+            .iter()
+            .map(|column| column.name().to_owned())
+            .collect()
     }
 
     fn materialize_lob_cell(
@@ -1246,10 +1282,7 @@ mod driver {
         fn cursor(column_count: usize) -> CursorValue {
             CursorValue {
                 columns: (0..column_count)
-                    .map(|idx| ColumnMetadata {
-                        name: format!("C{idx}"),
-                        ..Default::default()
-                    })
+                    .map(|idx| ColumnMetadata::new(format!("C{idx}"), 0))
                     .collect(),
                 cursor_id: 42,
             }
@@ -1348,7 +1381,7 @@ mod driver {
                     "unexpected error: {err}"
                 );
                 let probe = inner
-                    .execute_query(&cx, "SELECT 1 AS n FROM dual", 1)
+                    .execute_raw(&cx, "SELECT 1 AS n FROM dual", 1, &[], ExecuteOptions::default(), None)
                     .await
                     .expect("connection remains usable after cursor fetch failure");
                 let n = probe.rows[0][0]
@@ -1553,7 +1586,7 @@ mod driver {
     }
 
     fn oracle_type_name(meta: &ColumnMetadata) -> String {
-        let base = match meta.ora_type_num {
+        let base = match meta.ora_type_num() {
             ORA_TYPE_NUM_VARCHAR => "VARCHAR2",
             ORA_TYPE_NUM_NUMBER => "NUMBER",
             ORA_TYPE_NUM_BINARY_INTEGER => "BINARY_INTEGER",
@@ -1581,7 +1614,7 @@ mod driver {
             ORA_TYPE_NUM_VECTOR => "VECTOR",
             other => return format!("ORA_TYPE_{other}"),
         };
-        if meta.is_json && base != "JSON" {
+        if meta.is_json() && base != "JSON" {
             "JSON".to_owned()
         } else {
             base.to_owned()
@@ -1780,7 +1813,14 @@ mod driver {
             let mut inner = self.lock_inner(cx).await?;
             let result = if binds.is_empty() && timeout.is_none() {
                 inner
-                    .execute_query(cx, sql, prefetch_rows_for_statement(sql))
+                    .execute_raw(
+                        cx,
+                        sql,
+                        prefetch_rows_for_statement(sql),
+                        &[],
+                        ExecuteOptions::default(),
+                        None,
+                    )
                     .await
                     .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?
             } else {
@@ -1836,7 +1876,14 @@ mod driver {
             let result = if binds.is_empty() {
                 if timeout.is_none() {
                     inner
-                        .execute_query(cx, sql, prefetch_rows_for_statement(sql))
+                        .execute_raw(
+                            cx,
+                            sql,
+                            prefetch_rows_for_statement(sql),
+                            &[],
+                            ExecuteOptions::default(),
+                            None,
+                        )
                         .await
                         .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?
                 } else {
@@ -1922,11 +1969,11 @@ mod driver {
             let mut inner = self.lock_inner(cx).await?;
             for _ in 0..max_lines {
                 let result = inner
-                    .execute_query_with_binds_and_timeout(
+                    .execute_raw(
                         cx,
                         "BEGIN DBMS_OUTPUT.GET_LINE(:1, :2); END;",
                         0,
-                        &[
+                        &[vec![
                             BindValue::Output {
                                 ora_type_num: ORA_TYPE_NUM_VARCHAR,
                                 csfrm: CS_FORM_IMPLICIT,
@@ -1937,7 +1984,8 @@ mod driver {
                                 csfrm: CS_FORM_IMPLICIT,
                                 buffer_size: 22,
                             },
-                        ],
+                        ]],
+                        ExecuteOptions::default(),
                         timeout,
                     )
                     .await
@@ -2072,11 +2120,11 @@ mod tests {
 
         let connect = driver::to_connect_options(&opts).expect("connect options");
 
-        assert_eq!(connect.identity.program, "profile-program");
-        assert_eq!(connect.identity.machine, "profile-machine");
-        assert_eq!(connect.identity.osuser, "profile-os-user");
-        assert_eq!(connect.identity.terminal, "profile-terminal");
-        assert_eq!(connect.identity.driver_name, "profile-driver");
+        assert_eq!(connect.identity().program, "profile-program");
+        assert_eq!(connect.identity().machine, "profile-machine");
+        assert_eq!(connect.identity().osuser, "profile-os-user");
+        assert_eq!(connect.identity().terminal, "profile-terminal");
+        assert_eq!(connect.identity().driver_name, "profile-driver");
     }
 
     #[test]
@@ -2095,11 +2143,11 @@ mod tests {
 
         let connect = driver::to_connect_options(&opts).expect("connect options");
 
-        assert_eq!(connect.identity.program, "legacy-module-program");
-        assert_eq!(connect.identity.terminal, "legacy-client-terminal");
-        assert_eq!(connect.identity.driver_name, "oraclemcp-thin");
-        assert!(!connect.identity.machine.is_empty());
-        assert!(!connect.identity.osuser.is_empty());
+        assert_eq!(connect.identity().program, "legacy-module-program");
+        assert_eq!(connect.identity().terminal, "legacy-client-terminal");
+        assert_eq!(connect.identity().driver_name, "oraclemcp-thin");
+        assert!(!connect.identity().machine.is_empty());
+        assert!(!connect.identity().osuser.is_empty());
     }
 
     #[test]
@@ -2118,14 +2166,14 @@ mod tests {
 
         let connect = driver::to_connect_options(&opts).expect("connect options");
 
-        assert_eq!(connect.wallet_location.as_deref(), Some("/wallets/private"));
-        assert_eq!(connect.wallet_password.as_deref(), Some("wallet-secret"));
-        assert!(!connect.ssl_server_dn_match);
+        assert_eq!(connect.wallet_location(), Some("/wallets/private"));
+        assert_eq!(connect.wallet_password(), Some("wallet-secret"));
+        assert!(!connect.ssl_server_dn_match());
         assert_eq!(
-            connect.ssl_server_cert_dn.as_deref(),
+            connect.ssl_server_cert_dn(),
             Some("CN=db.example.com,O=Example,C=US")
         );
-        assert!(!connect.use_sni);
+        assert!(!connect.use_sni());
     }
 
     #[test]
@@ -2140,14 +2188,14 @@ mod tests {
 
         let connect = driver::to_connect_options(&opts).expect("connect options");
 
-        assert_eq!(connect.wallet_location.as_deref(), Some("/wallets/private"));
+        assert_eq!(connect.wallet_location(), Some("/wallets/private"));
         assert!(
-            connect.use_sni,
+            connect.use_sni(),
             "existing wallet profiles default to SNI on"
         );
-        assert!(connect.ssl_server_dn_match);
-        assert_eq!(connect.wallet_password, None);
-        assert_eq!(connect.ssl_server_cert_dn, None);
+        assert!(connect.ssl_server_dn_match());
+        assert_eq!(connect.wallet_password(), None);
+        assert_eq!(connect.ssl_server_cert_dn(), None);
     }
 
     #[test]
@@ -2165,8 +2213,8 @@ mod tests {
 
         let connect = driver::to_connect_options(&opts).expect("connect options");
 
-        assert_eq!(connect.user, "MCP_PROXY");
-        assert_eq!(connect.proxy_user.as_deref(), Some("APP_OWNER"));
+        assert_eq!(connect.user(), "MCP_PROXY");
+        assert_eq!(connect.proxy_user(), Some("APP_OWNER"));
     }
 
     #[test]
@@ -2192,7 +2240,7 @@ mod tests {
 
         let connect = driver::to_connect_options(&opts).expect("connect options");
 
-        assert_eq!(connect.app_context, opts.app_context);
+        assert_eq!(connect.app_context(), opts.app_context.as_slice());
     }
 
     #[test]
@@ -2207,7 +2255,7 @@ mod tests {
 
         let connect = driver::to_connect_options(&opts).expect("connect options");
 
-        assert_eq!(connect.sdu, 32_768u16);
+        assert_eq!(connect.sdu(), 32_768u16);
     }
 
     #[test]
@@ -2221,7 +2269,7 @@ mod tests {
 
         let connect = driver::to_connect_options(&opts).expect("connect options");
 
-        assert_eq!(connect.sdu, 8192u16);
+        assert_eq!(connect.sdu(), 8192u16);
     }
 
     #[test]
@@ -2236,7 +2284,7 @@ mod tests {
 
         let connect = driver::to_connect_options(&opts).expect("connect options");
 
-        assert_eq!(connect.statement_cache_size, 128);
+        assert_eq!(connect.statement_cache_size(), 128);
     }
 
     #[test]
@@ -2250,7 +2298,7 @@ mod tests {
 
         let connect = driver::to_connect_options(&opts).expect("connect options");
 
-        assert_eq!(connect.statement_cache_size, 20);
+        assert_eq!(connect.statement_cache_size(), 20);
     }
 
     #[test]
@@ -2268,7 +2316,7 @@ mod tests {
 
         let connect = driver::to_connect_options(&opts).expect("connect options");
 
-        assert_eq!(connect.edition.as_deref(), Some("E_TEST"));
+        assert_eq!(connect.edition(), Some("E_TEST"));
     }
 
     #[test]
@@ -2302,11 +2350,11 @@ mod tests {
 
         let connect = driver::to_connect_options(&opts).expect("iam token connect options");
         assert!(
-            connect.access_token.is_some(),
+            connect.access_token().is_some(),
             "the IAM token must be wired through with_access_token"
         );
         // The token must never leak through Debug.
-        let rendered = format!("{:?}", connect.access_token);
+        let rendered = format!("{:?}", connect.access_token());
         assert!(!rendered.contains("iam.jwt.token"), "{rendered}");
     }
 
@@ -2342,7 +2390,7 @@ mod tests {
         };
 
         let connect = driver::to_connect_options(&opts).expect("wallet-backed token options");
-        assert!(connect.access_token.is_some());
+        assert!(connect.access_token().is_some());
     }
 
     #[test]

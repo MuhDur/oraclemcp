@@ -37,12 +37,12 @@ asupersync = { version = "0.3.4", default-features = false, features = ["metrics
 # dispatch future across OS threads). MIT/Apache-2.0 — covered by deny.toml's
 # permissive license allow-list.
 async-trait = "0.1"
-# Pinned EXACTLY today (B2; plan §8). The whole oracledb surface is isolated
-# behind one adapter (crates/oraclemcp-db/src/connection.rs), so the 0.3.0
-# cut-over is a deliberate, single-file change driven by oracledb's
-# MIGRATING-0.3.md — never an accidental float into 0.3.x. Relax to "^0.3"
-# only as part of that cut-over.
-oracledb = { version = "=0.2.2", default-features = false }
+# Pinned EXACTLY (B2; plan §8). The whole oracledb surface is isolated behind one
+# adapter (crates/oraclemcp-db/src/connection.rs); the 0.2.2 → 0.5.0 cut-over was
+# the deliberate, single-file change that exact pin guarantees — never an
+# accidental float into a new minor. Keep the `=` pin; bump it deliberately
+# (adapter + contract suite green, full gate battery re-run) for each upgrade.
+oracledb = { version = "=0.5.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # D1 observability: hand-rolled OTLP metrics/trace protobuf encoders

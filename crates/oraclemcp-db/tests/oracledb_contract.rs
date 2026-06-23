@@ -21,8 +21,8 @@
 //!   fidelity, ISO-8601 dates, RAW hex, BLOB base64, NULL, unsupported marker),
 //!   and the [`OracleConnection`] trait contract exercised through a scripted
 //!   in-process backend (query rows + typed values, positional and named bind
-//!   variants, execute + rowcount, the single-execute path that stands in for
-//!   `execute_many` on the pinned 0.2.2 surface, the explicit default
+//!   variants, execute + rowcount, the single-execute path the adapter drives
+//!   through 0.5.0's `execute_raw` primitive, the explicit default
 //!   rejections, and the cancellation-checkpoint mapping of the `*_cx`
 //!   methods).
 //! - **Live (`live-xe` feature, env-gated):** the same cases against a real
@@ -30,17 +30,21 @@
 //!   live case prints a loud SKIP banner and returns, matching the repo's
 //!   `live-xe` convention so CI without a database stays green.
 //!
-//! ## `execute_many` on the pinned driver
+//! ## `execute` on the 0.5.0 driver
 //!
-//! The `oracledb` 0.2.2 driver exposes array DML
-//! (`execute_query_with_bind_rows*`), but the [`OracleConnection`] adapter
-//! surface that `oraclemcp` depends on intentionally exposes only the
-//! single-statement `execute` / `execute_cx` today: the server's guarded write
-//! path runs one classified statement at a time, never a hidden batch. The
-//! contract therefore pins the **single-execute rowcount path** as the
-//! supported surface and documents array DML as a deliberate non-member of the
-//! adapter contract until a future seam extension adds it (at which point a
-//! `execute_many` case is added here and to the shared oracledb copy).
+//! The `oracledb` 0.5.0 driver exposes its execute surface through
+//! `Connection::execute_raw` — the array-DML primitive taking
+//! `&[Vec<BindValue>]` (the 0.2.2 `execute_query_with_binds*` family was
+//! removed). The [`OracleConnection`] adapter surface that `oraclemcp` depends
+//! on intentionally exposes only the single-statement `execute` / `execute_cx`:
+//! the adapter always drives `execute_raw` with **at most one bind row**,
+//! because the server's guarded write path runs one classified statement at a
+//! time, never a hidden batch. The contract therefore pins the **single-execute
+//! rowcount path** (and, live, the DBMS_OUTPUT OUT-bind retrieval that rides the
+//! same `execute_raw` path) as the supported surface, and treats multi-row array
+//! DML as a deliberate non-member of the adapter contract until a future seam
+//! extension adds it (at which point an `execute_many` case is added here and to
+//! the shared oracledb copy).
 
 use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
@@ -830,6 +834,44 @@ mod live {
             assert_eq!(env.ora_code, Some(942), "envelope: {env:?}");
             assert_eq!(env.error_class, ErrorClass::ObjectNotFound);
             assert!(!env.error_class.is_retryable());
+        });
+    }
+
+    #[test]
+    fn live_contract_dbms_output_out_binds() {
+        // Pins the OUT-bind retrieval path that the 0.2.2 -> 0.5.0 cut-over moved
+        // onto `execute_raw`: `read_dbms_output` runs `DBMS_OUTPUT.GET_LINE(:1, :2)`
+        // and reads the two OUT binds (`:1` line text, `:2` status) out of
+        // `QueryResult::out_values` via the adapter's key-based `output_value`.
+        // The adversarial cut-over review flagged this equivalence as resting on
+        // the external 0.5.0 driver contract; this asserts it against a real 23ai.
+        run_with_cx(|cx| async move {
+            let Some(conn) = connect_or_skip(&cx, "live_contract_dbms_output_out_binds").await
+            else {
+                return;
+            };
+            conn.enable_dbms_output(&cx, None)
+                .await
+                .expect("enable dbms_output");
+            conn.execute(
+                &cx,
+                "BEGIN DBMS_OUTPUT.PUT_LINE('b7 line one'); \
+                 DBMS_OUTPUT.PUT_LINE('b7 line two'); END;",
+                &[],
+            )
+            .await
+            .expect("emit dbms_output lines");
+            let out = conn
+                .read_dbms_output(&cx, 100, 100_000)
+                .await
+                .expect("drain dbms_output");
+            assert_eq!(
+                out.lines,
+                vec!["b7 line one".to_owned(), "b7 line two".to_owned()],
+                "DBMS_OUTPUT lines must drain in emission order through the \
+                 execute_raw OUT-bind path"
+            );
+            assert!(!out.truncated, "two short lines must not truncate");
         });
     }
 }
