@@ -18,14 +18,16 @@ The current pin is **`nightly-2026-05-11`**.
 
 ## 1. Why the pin exists (one paragraph)
 
-The thin-native line compiles the pure-Rust `oracledb` driver on the Asupersync
-async runtime, and Asupersync uses nightly-only language features. There is
-therefore **no stable MSRV** for this workspace, and both `oracledb` and
-Asupersync are pre-1.0 and still moving. We pin a single nightly and bump it
-**deliberately**, rather than tracking `nightly` automatically, so a surprise
-upstream toolchain change can never silently break a build or a release. See
-ADR-0001 for the full decision and its review trigger (`oracledb` 1.0 + the
-required features reaching stable).
+The thin-native line runs on the **asupersync 0.3.4** async runtime, and
+asupersync uses nightly-only language features (`#![feature(try_trait_v2)]` and
+`try_trait_v2_residual`). There is therefore **no stable MSRV** for this
+workspace. The pinned `oracledb` 0.5.0 driver is **stable-clean** and is *not*
+the reason for the nightly pin; asupersync is the constraint, and it is pre-1.0
+and still moving. We pin a single nightly and bump it **deliberately**, rather
+than tracking `nightly` automatically, so a surprise upstream toolchain change
+can never silently break a build or a release. See ADR-0001 for the full
+decision and its review trigger (asupersync no longer needing those nightly-only
+features — `try_trait_v2` reaching stable, or asupersync dropping it).
 
 ---
 
@@ -34,9 +36,12 @@ required features reaching stable).
 Re-pin **deliberately and infrequently**, coordinated with the stack — never to
 chase the newest nightly for its own sake. Trigger a bump when:
 
-- **An Asupersync or `oracledb` upgrade requires it.** This is the primary
-  driver. A new release of either may depend on a language feature only present
-  in a later nightly. The toolchain bump and the dependency bump land together.
+- **An asupersync upgrade requires it.** This is the primary driver: asupersync
+  is what depends on nightly-only language features, so a new asupersync release
+  may need a feature only present in a later nightly. The toolchain bump and the
+  asupersync bump land together. (An `oracledb` upgrade does not by itself force
+  a re-pin — the driver is stable-clean — but bump the pin if a coordinated
+  `oracledb` upgrade rides along with an asupersync change that needs it.)
 - **The multi-nightly early-warning job has gone red and you have triaged it.**
   CI runs an advisory `multi-nightly` matrix (pinned date + the floating
   `nightly` channel, `continue-on-error: true`) precisely so an upcoming
@@ -170,8 +175,9 @@ toolchain.
 `ci.yml` runs a `multi-nightly` matrix job that builds and tests on the pinned
 date **and** the floating `nightly` channel, marked `continue-on-error: true`.
 It is **advisory, not a gate**: because the line has no stable MSRV and depends
-on specific nightly-only features in Asupersync/`oracledb`, a future toolchain
-breaking us is a *when*, not an *if*. The job turns that into an early warning —
+on specific nightly-only features in **asupersync** (`try_trait_v2` +
+`try_trait_v2_residual`; the `oracledb` driver is stable-clean), a future
+toolchain breaking us is a *when*, not an *if*. The job turns that into an early warning —
 a red square that tells you to start §2 triage — instead of a release-day
 surprise. The boundary lint additionally surfaces an `opentelemetry-sdk`
 `rt-tokio` feature flip (which would drag Tokio into the forbidden-dependency

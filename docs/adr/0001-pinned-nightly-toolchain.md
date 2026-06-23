@@ -1,4 +1,4 @@
-# ADR 0001 — Pinned nightly toolchain + Asupersync, no stable MSRV until `oracledb` 1.0
+# ADR 0001 — Pinned nightly toolchain (Asupersync needs nightly-only features), no stable MSRV
 
 ## Status
 
@@ -7,9 +7,11 @@ Accepted (0.4.0).
 ## Context
 
 `oraclemcp` is engine-free pure Rust with the thin `oracledb` driver compiled
-in. The thin-native line (the `oracledb` driver on the Asupersync async runtime)
-uses nightly-only language features, so the workspace has no stable MSRV. Both
-`oracledb` and Asupersync are pre-1.0 and still moving.
+in. The workspace has no stable MSRV because **asupersync 0.3.4** — the async
+runtime the transport and DB seam run on — uses nightly-only language features
+(`#![feature(try_trait_v2)]` and `try_trait_v2_residual`). The pinned `oracledb`
+0.5.0 driver itself is **stable-clean**: it is *not* the reason for the nightly
+pin. Asupersync is pre-1.0 and still moving, and `try_trait_v2` is unstable.
 
 We could chase a stable MSRV by forking the runtime, vendoring patched
 dependencies, or dropping the thin driver for a thick (Instant Client / ODPI-C)
@@ -19,12 +21,12 @@ with no native Oracle client — for toolchain convenience.
 ## Decision
 
 Pin the toolchain to a single nightly (`nightly-2026-05-11`, recorded in
-`rust-toolchain.toml`) and accept the nightly dependency until `oracledb`
-reaches 1.0 and the required features land on stable. The pin is **build-time
-only**: the shipped binary and the `ghcr.io/muhdur/oraclemcp` runtime image
-carry no Rust toolchain and have no runtime dependency on nightly. Operators run
-a plain native binary. CI, `release.yml`, and `docker.yml` all build on the
-pinned toolchain.
+`rust-toolchain.toml`) and accept the nightly dependency for as long as
+asupersync requires those nightly-only language features. The pin is
+**build-time only**: the shipped binary and the `ghcr.io/muhdur/oraclemcp`
+runtime image carry no Rust toolchain and have no runtime dependency on nightly.
+Operators run a plain native binary. CI, `release.yml`, and `docker.yml` all
+build on the pinned toolchain.
 
 ## Consequences
 
@@ -39,9 +41,11 @@ pinned toolchain.
 
 ## Review trigger
 
-Revisit when **`oracledb` ships a 1.0 release** *and* the language features
-Asupersync/`oracledb` rely on are available on a stable Rust release. At that
-point, evaluate adopting a stable MSRV and dropping the nightly pin.
+Revisit when **asupersync no longer requires nightly-only language features** —
+either `try_trait_v2` / `try_trait_v2_residual` stabilize on a stable Rust
+release, or an asupersync version drops its use of them. At that point (the
+`oracledb` driver is already stable-clean) evaluate adopting a stable MSRV and
+dropping the nightly pin.
 
 The concrete procedure for bumping the pin in the meantime — when, the exact
 files to edit, how to validate, and how to roll back — lives in

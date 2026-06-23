@@ -22,8 +22,9 @@ the database account, not from the binary being incapable of writing.
 ## 1. The pinned nightly toolchain is build-time-only
 
 `oraclemcp` builds on a pinned Rust toolchain (`nightly-2026-05-11`, recorded in
-`rust-toolchain.toml`). The thin-native line has no stable MSRV because the
-Asupersync/`oracledb` stack uses nightly-only language features.
+`rust-toolchain.toml`). The thin-native line has no stable MSRV because
+**asupersync 0.3.4** uses nightly-only language features (`try_trait_v2` +
+`try_trait_v2_residual`); the pinned `oracledb` 0.5.0 driver is stable-clean.
 
 **This is invisible at runtime.** Once compiled, `oraclemcp` is an ordinary
 native binary. The toolchain pin matters only when you build the binary or image
@@ -513,6 +514,45 @@ Operator setup for the destination:
   WORM window.
 - **Verify the mirror after incident review**, exactly as for the local log
   (§5.4): a `BROKEN` result names the first divergent `seq`.
+
+### 5.7 Live verification against a test database
+
+The offline suite needs no database. To exercise the live thin paths
+(connectivity, auth, the profile/config matrix, and the load/soak), point the
+unified `ORACLEMCP_TEST_*` env at a real Oracle 23ai. A throwaway Oracle FREE
+instance is enough — it provides `FREEPDB1` on `:1521`:
+
+```sh
+docker run -d --name oracle-free -p 1521:1521 \
+  -e ORACLE_PASSWORD=<pw> gvenzl/oracle-free:23-slim
+```
+
+The live tests read these env vars (unified across the suite):
+
+```sh
+# Required for any live test.
+export ORACLEMCP_TEST_DSN=localhost:1521/FREEPDB1
+export ORACLEMCP_TEST_USER=...
+export ORACLEMCP_TEST_PASSWORD=...
+
+# Optional, per scenario:
+#   ORACLEMCP_TEST_WALLET_LOCATION, ORACLEMCP_TEST_WALLET_PASSWORD  (TCPS/wallet)
+#   ORACLEMCP_TEST_SSL_SERVER_DN_MATCH, ORACLEMCP_TEST_SSL_SERVER_CERT_DN, ORACLEMCP_TEST_USE_SNI
+#   ORACLEMCP_TEST_PROXY_USER, ORACLEMCP_TEST_PROXY_TARGET_SCHEMA  (proxy auth)
+#   ORACLEMCP_TEST_DRCP=1, ORACLEMCP_TEST_DRCP_CLASS               (DRCP routing)
+#   ORACLEMCP_TEST_EDITION, ORACLEMCP_TEST_APP_CONTEXT            (edition / app context)
+
+# Live profile/config matrix.
+cargo test -p oraclemcp-db --features live-xe --test live_oracle -- --nocapture
+
+# Heavy load/soak — additionally opt-in via ORACLEMCP_LIVE_XE=1.
+ORACLEMCP_LIVE_XE=1 cargo test -p oraclemcp-db --test load_soak -- --ignored --nocapture
+```
+
+The load/soak is gated behind `ORACLEMCP_LIVE_XE=1` (a second, explicit opt-in
+on top of the connection env) and skips with a clear message when it is unset.
+Latency thresholds and the run-recording table are in
+[`performance-footprint.md`](performance-footprint.md).
 
 ---
 

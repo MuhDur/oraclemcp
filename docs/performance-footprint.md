@@ -150,15 +150,25 @@ cargo test -p oraclemcp-db --test load_soak \
 Live latency capture (requires a real Oracle database):
 
 ```text
-ORACLEMCP_LIVE_XE=1 ORACLEMCP_LIVE_DSN=... ORACLEMCP_LIVE_USER=... \
-  ORACLEMCP_LIVE_PASSWORD=... \
+ORACLEMCP_LIVE_XE=1 \
+  ORACLEMCP_TEST_DSN=localhost:1521/FREEPDB1 \
+  ORACLEMCP_TEST_USER=... ORACLEMCP_TEST_PASSWORD=... \
   cargo test -p oraclemcp-db --test load_soak -- --ignored --nocapture
+```
+
+Start a throwaway Oracle FREE 23ai database for this with:
+
+```sh
+docker run -d --name oracle-free -p 1521:1521 \
+  -e ORACLE_PASSWORD=<pw> gvenzl/oracle-free:23-slim   # provides FREEPDB1 on :1521
 ```
 
 The live test skips with a clear message when `ORACLEMCP_LIVE_XE` is unset. The
 env-var names above are the exact ones the harness reads
-(`crates/oraclemcp-db/tests/load_soak.rs`): `ORACLEMCP_LIVE_XE` (the on switch),
-`ORACLEMCP_LIVE_DSN`, `ORACLEMCP_LIVE_USER`, `ORACLEMCP_LIVE_PASSWORD`.
+(`crates/oraclemcp-db/tests/load_soak.rs`): `ORACLEMCP_LIVE_XE` is the on switch
+(the heavy load/soak is explicitly opt-in), and the connection parameters come
+from the unified `ORACLEMCP_TEST_DSN` / `ORACLEMCP_TEST_USER` /
+`ORACLEMCP_TEST_PASSWORD` env shared by the rest of the live suite.
 
 ### Latency pass thresholds (judged against the live run)
 

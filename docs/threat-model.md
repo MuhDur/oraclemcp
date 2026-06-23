@@ -216,6 +216,39 @@ bounded shutdown budget (telemetry failure never blocks the request path).
 - `crates/oraclemcp-telemetry/src/otlp/pump.rs` —
   `submit_is_non_blocking_and_shutdown_is_bounded`, `overflow_drops_newest_and_counts`.
 
+### T10 — Cross-profile exposure (I, E; assets A1, A2)
+
+*Threat.* The agent reaches a connection profile the operator did not intend to
+surface — an operator-only or privileged target — by enumerating, switching to,
+searching, or completing its name through the served surface.
+
+*Mitigation.* E5 connection-scope isolation: a profile can be scoped out of the
+agent-facing surface with `mcp_exposed = false` (a **per-profile opt-out** —
+profiles are exposed by default; only an explicit `false` hides one). A hidden
+profile is invisible to every served path — `oracle_list_profiles`,
+`oracle_switch_profile`, `oracle_search_objects`, and `completion/complete` — so
+a hidden or guessed name fails closed identically (the served lookup goes through
+`mcp_profile`, which returns `None` for a non-exposed profile). One profile's
+setting never affects another's, and the operator/CLI still sees every profile.
+
+Exposure is a **visibility/scoping convenience, not the access boundary.** The
+enforced bound on what a reachable profile can do remains the operating-level
+ladder — `max_level` / `protected` (pinned `READ_ONLY`) / `read_only_standby` /
+the underlying least-privilege DB account / the fail-closed classifier (T1, T2).
+So hide the privileged target *and* keep it genuinely least-privileged; do not
+treat `mcp_exposed` as a substitute for a low `max_level`. A behavior-neutral
+startup line (`MCP exposing N profile(s): …`, to stderr) lets the operator
+confirm at a glance which profiles — and ceilings — the agent can reach.
+
+*Evidence (green; CI):*
+- `crates/oraclemcp-config/src/lib.rs` tests
+  (`mcp_exposure_defaults_open_and_hides_only_explicit_false`,
+  `mcp_exposure_has_no_global_flip`, `mcp_exposed_inherits_through_base`) — the
+  default-open opt-out, the no-global-flip invariant, and inheritance.
+- `crates/oraclemcp-config/tests/example_config_parses.rs` — the shipped worked
+  example (an exposed read-only profile beside a hidden privileged one) parses,
+  validates, and the served list omits the hidden profile.
+
 ## Evidence summary — run it yourself
 
 ```sh

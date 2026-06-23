@@ -1,0 +1,260 @@
+# oraclemcp example configuration — fully annotated, copy-pasteable.
+#
+# This is the canonical worked example for `~/.config/oraclemcp/profiles.toml`
+# (or any file pointed at by $ORACLEMCP_CONFIG). Every field below is shown with
+# its default noted inline; uncomment and edit the ones you need. The full field
+# reference — types, effects, precedence, and validation rules — lives in
+# docs/configuration.md. Audit log shipping/operations is documented in
+# docs/operations.md (cross-linked; not duplicated here).
+#
+# Parsing is STRICT: unknown keys are rejected (deny_unknown_fields) and the
+# whole config is validated at load (fail fast). This file is kept honest by the
+# test crates/oraclemcp-config/tests/example_config_parses.rs, which loads and
+# validates it through the real loader, so it can never silently rot.
+#
+# SECRETS: credential_ref / wallet_password_ref / key_ref / *_secret_ref values
+# are ALWAYS references, never literal secrets. Use `env:VAR_NAME` (read from the
+# process environment) or `vault:path` (a secrets backend). A dev-only
+# `literal:value` form exists but is REJECTED on a `protected = true` profile.
+
+# Config schema version this build understands. Default: 1. A config declaring a
+# higher version than the build supports is rejected (forward-incompatible)
+# rather than silently mis-read.
+schema_version = 1
+
+# Optional profile name used when the launcher does not pass `serve --profile
+# <name>`. Default: none. Must name a profile defined below. With no
+# default_profile and exactly one profile, that sole profile is used.
+default_profile = "dev_ro"
+
+# ---------------------------------------------------------------------------
+# [http] — native Streamable HTTP transport. Optional; omit entirely for the
+# stdio-only default. The HTTP listener fails closed: it binds only with OAuth
+# bearer enforcement or an explicit `--allow-no-auth`, and refuses a non-loopback
+# bind unless ORACLEMCP_HTTP_ALLOW_REMOTE=1.
+# ---------------------------------------------------------------------------
+[http]
+# Allowed `Host` authorities beyond loopback. Default: [] (loopback only).
+allowed_hosts = ["127.0.0.1:7070"]
+# Allowed browser `Origin` values beyond loopback origins. Default: [].
+allowed_origins = ["https://client.example.com"]
+# Prefer direct JSON responses for stateless requests. Default: false.
+json_response = true
+# Enable Streamable HTTP stateful session framing. Default: false.
+stateful = false
+
+# [http.oauth] — OAuth 2.1 resource-server protection for /mcp. Optional;
+# omit for an unauthenticated dev listener (which then requires --allow-no-auth).
+[http.oauth]
+# Canonical resource/audience expected in the JWT `aud`. Required when [http.oauth] is present.
+resource = "http://127.0.0.1:7070/mcp"
+# Allowed JWT issuers (`iss`). Required (non-empty) when [http.oauth] is present.
+allowed_issuers = ["https://issuer.example.com"]
+# Authorization servers advertised in RFC 9728 metadata. Required (non-empty).
+authorization_servers = ["https://issuer.example.com"]
+# Scopes every token must carry before dispatch. Required (non-empty). Granted
+# `oracle:*` scopes can only LOWER the effective operating ceiling, never raise it.
+required_scopes = ["oracle:read"]
+# Secret reference for the built-in HS256 verifier. Required when [http.oauth] is present.
+hs256_secret_ref = "env:ORACLEMCP_OAUTH_HS256_SECRET"
+# Metadata URL advertised in `WWW-Authenticate`. Default: derived from `resource`.
+# metadata_url = "http://127.0.0.1:7070/.well-known/oauth-protected-resource"
+
+# [http.tls] — optional native HTTPS / mTLS listener (rustls). cert_chain_path and
+# private_key_path must be set together. Adding client_ca_path requires mTLS.
+# Server-only TLS is transport encryption, NOT application auth — /mcp still needs
+# OAuth or --allow-no-auth.
+# [http.tls]
+# cert_chain_path = "/etc/oraclemcp/server-chain.pem"   # Default: none
+# private_key_path = "/etc/oraclemcp/server-key.pem"    # Default: none
+# client_ca_path = "/etc/oraclemcp/client-ca.pem"       # Default: none (no mTLS)
+
+# ---------------------------------------------------------------------------
+# [audit] — out-of-band, hash-chained, HMAC-SHA256-signed JSONL audit log.
+# Optional. When a level above READ_ONLY is reachable, a signing key is REQUIRED
+# (the server fails closed at startup without one). See docs/operations.md §5.4
+# and §5.6 for verification and WORM/SIEM shipping.
+# ---------------------------------------------------------------------------
+[audit]
+# Audit log file path. Default: ~/.config/oraclemcp/audit.jsonl when unset.
+path = "/var/log/oraclemcp/audit.jsonl"
+# Secret reference for the HMAC signing key (`env:`/`vault:`/dev-only `literal:`).
+# Default: none.
+key_ref = "env:ORACLEMCP_AUDIT_KEY"
+# Label for the active signing key, recorded per record so keys can rotate while
+# old records keep verifying. Default: "default".
+key_id = "2026-q2"
+
+# [audit.shipping] — optional mirror of each signed record to an external
+# WORM store and/or SIEM. OFF by default (no [audit.shipping] table = nothing
+# forwarded). At least one of worm_path / siem_endpoint is required when present.
+# Full operational detail: docs/operations.md §5.6.
+# [audit.shipping]
+# worm_path = "/mnt/worm/oraclemcp-audit.jsonl"                 # Default: none
+# siem_endpoint = "https://siem.example.com/services/collector/raw"  # Default: none
+# siem_format = "json"                                          # Default: "json" (also "cef" / "syslog")
+# siem_auth_header_ref = "env:SIEM_TOKEN"                       # Default: none
+# siem_auth_header_name = "Authorization"                       # Default: "Authorization"
+
+# ===========================================================================
+# [[profiles]] — named Oracle connection profiles. Every field is shown below
+# on this first profile, an EXPOSED, read-only development target.
+# ===========================================================================
+[[profiles]]
+# Stable identifier the agent connects by. Required, unique.
+name = "dev_ro"
+# Friendly description shown in list_profiles. Default: none.
+description = "Read-only development database"
+# Oracle Net connect identifier: EZConnect (host:port/service), EZConnect-Plus
+# (tcps://host:port/service?wallet_location=...), or a tnsnames.ora alias.
+# Required (after base inheritance).
+connect_string = "localhost:1521/FREEPDB1"
+# Oracle username. Default: none (none for wallet / OS-auth / OCI-IAM).
+username = "APP_READONLY"
+# Reference to the credential in a secrets backend. NEVER a literal secret; never
+# surfaced in list_profiles metadata. Default: none.
+credential_ref = "env:ORACLE_APP_PASSWORD"
+# Per-target operating-level ceiling: READ_ONLY < READ_WRITE < DDL < ADMIN.
+# Default: READ_ONLY. This is the immutable cap; session elevation can never exceed it.
+max_level = "READ_ONLY"
+# The level a fresh session starts at. Default: READ_ONLY. Must not exceed max_level.
+default_level = "READ_ONLY"
+# Require HMAC signatures for operator-defined custom tools on this profile.
+# Default: false (a `protected = true` profile implies true regardless).
+require_signed_tools = true
+# Mark target as a read-only standby (Active Data Guard): forces READ_ONLY
+# regardless of max_level. Default: false.
+# read_only_standby = false
+# Production profile: pins the ceiling immutable. Default: false. When true,
+# max_level MUST be READ_ONLY (else config load error) and `literal:` secret refs
+# are rejected.
+# protected = false
+# E5 per-profile MCP exposure. Default: true (exposed to the agent). See the
+# `prod_admin` profile below for the opt-out (= false). This is a
+# visibility/scoping convenience, NOT an access control.
+mcp_exposed = true
+# Optional per-round-trip Oracle call timeout, in seconds. Default: none (driver
+# default). Tool calls exposing `timeout_seconds` can override it for one call.
+call_timeout_seconds = 30
+# Optional thin Session Data Unit request size. Default: none (negotiated).
+# Validated as 512..=65535 bytes.
+sdu = 32768
+# Path to a login script (ALTER SESSION ...) run on lease acquire. Default: none.
+# Restricted to allowlisted `ALTER SESSION SET ...` parameters.
+# login_script = "/home/operator/login.sql"
+# Inline login statements (allowlist-validated `ALTER SESSION SET ...`). Default: none.
+login_statements = [
+  "ALTER SESSION SET NLS_LANGUAGE = english",
+  "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'",
+]
+# Trusted local session setup, authored by the profile owner and NEVER accepted
+# from agent tool calls. Run verbatim after the guarded login statements.
+# Default: none.
+trusted_session_statements = [
+  "BEGIN DBMS_OUTPUT.ENABLE(500000); END;",
+]
+
+# [profiles.oci] — OCI / Oracle Cloud (Autonomous DB) connection fields. Optional.
+[profiles.oci]
+# Cloud wallet directory (cwallet.sso + tnsnames.ora). Default: none.
+wallet_location = "/etc/oracle/wallet"
+# Secret reference for an encrypted-wallet password. NEVER a literal. Default: none.
+wallet_password_ref = "env:WALLET_PASSWORD"
+# Override server-certificate DN matching (ssl_server_dn_match). Default: none (driver default).
+ssl_server_dn_match = true
+# Exact expected server-certificate DN (ssl_server_cert_dn). Default: none.
+ssl_server_cert_dn = "CN=dbhost.example.com"
+# Override TCPS SNI behavior (use_sni). Default: none (driver default).
+use_sni = true
+# Authenticate with an OCI IAM database token instead of a password. Default: false.
+# NOTE: this PARSES but the 0.5.0 thin adapter FAILS CLOSED on an IAM-token connect
+# today (structured unsupported-auth diagnostic; refused over non-TCPS). See
+# docs/configuration.md and the README OCI section. Deferred bead k6q.9.
+# use_iam_token = false
+# `~/.oci/config` profile name for the IAM token. Default: none. (Parses; inert today.)
+# iam_config_profile = "DEFAULT"
+
+# [profiles.drcp] — Database Resident Connection Pooling server routing. Optional.
+# Separate from [profiles.pool] (which is local client-side reuse).
+[profiles.drcp]
+# Request a DRCP pooled server (SERVER=POOLED). Default: false.
+pooled = true
+# DRCP connection class (pool_connection_class). Default: none. Requires pooled = true.
+connection_class = "ORACLE_MCP_AGENTS"
+# DRCP session purity: "reuse" or "new". Default: "reuse".
+purity = "reuse"
+
+# [profiles.pool] — local client-side pool for stateless catalog/metadata reads.
+# Optional; omit to keep the pinned-main-session-only strategy.
+# [profiles.pool]
+# max_size = 4                  # Default: 20 (also the documented ceiling; clamped to min(configured, cpu*2+1))
+# min_idle = 1                  # Default: 2. Must be <= max_size.
+# acquire_timeout_secs = 5      # Default: 5. Must be >= 1.
+# statement_cache_size = 50     # Default: 50.
+
+# [profiles.proxy_auth] — thin proxy authentication. Optional. When set,
+# credential_ref belongs to proxy_user; top-level `username`, if present, must
+# match proxy_user. Needs: ALTER USER <target_schema> GRANT CONNECT THROUGH <proxy_user>.
+# [profiles.proxy_auth]
+# proxy_user = "MCP_PROXY"       # Default: none (required if [profiles.proxy_auth] present)
+# target_schema = "APP_OWNER"    # Default: none (required if [profiles.proxy_auth] present)
+
+# [[profiles.app_context]] — driver-level application context triples applied at
+# logon. Optional, repeatable (max 64 entries). Values are treated as sensitive
+# and redacted from list_profiles/diagnostics. A child inherits the base list when
+# omitted, replaces it when entries are set, and clears it with `app_context = []`.
+[[profiles.app_context]]
+namespace = "ORACLEMCP_CTX"   # Required, non-empty, <= 128 chars
+key = "tenant_id"             # Required, non-empty, <= 128 chars
+value = "tenant-123"          # Default: "" (empty allowed); <= 4000 chars
+
+[[profiles.app_context]]
+namespace = "ORACLEMCP_CTX"
+key = "request_id"
+value = "req-456"
+
+# [profiles.session_identity] — optional end-to-end Oracle session identity.
+# All values are profile-local and are NOT shown by list_profiles. Connect-time
+# fields (program/machine/os_user/terminal/driver_name) are set during thin auth;
+# module/action/client_identifier/client_info are applied post-connect via session APIs.
+[profiles.session_identity]
+# edition = "ORA$BASE"        # Default: none. Edition-Based Redefinition; applied during auth.
+program = "oraclemcp"          # Default: none. V$SESSION.PROGRAM
+machine = "local-workstation"  # Default: none. V$SESSION.MACHINE
+os_user = "local-operator"     # Default: none. V$SESSION.OSUSER
+terminal = "agent"             # Default: none. V$SESSION.TERMINAL
+driver_name = "oraclemcp"      # Default: none. Driver name in connection-info views.
+module = "oraclemcp"           # Default: none. DBMS_APPLICATION_INFO module.
+action = "inspect"             # Default: none. DBMS_APPLICATION_INFO action.
+client_identifier = "agent"    # Default: none. DBMS_SESSION client identifier.
+client_info = "local-workstation"  # Default: none. DBMS_APPLICATION_INFO client info.
+
+# ===========================================================================
+# Worked mcp_exposed opt-out example.
+#
+# This second profile is a PRIVILEGED, OPERATOR-ONLY target sitting right next to
+# the exposed read-only one above. It sets `mcp_exposed = false`, so it is HIDDEN
+# from the MCP agent surface: oracle_list_profiles, oracle_switch_profile,
+# oracle_search_objects, and completion/complete all behave as if it does not
+# exist. The operator/CLI (`oraclemcp profiles`, `doctor`, `--profile`) still sees
+# and uses it.
+#
+# Profiles are exposed to the agent BY DEFAULT (the opt-out default): you set
+# `mcp_exposed = false` to HIDE one. There is no global flip and no other knob;
+# one profile's setting never affects another's. Exposure is a
+# visibility/scoping convenience — the REAL bound on what a profile can do is
+# max_level / protected / DB privileges / the fail-closed classifier.
+# ===========================================================================
+[[profiles]]
+name = "prod_admin"
+description = "Privileged production target — operator/CLI only, hidden from the agent"
+connect_string = "prod-db.internal:1521/PRODPDB1"
+username = "MCP_ADMIN"
+credential_ref = "vault:oraclemcp/prod_admin"
+# Opt out of MCP exposure. DEFAULT IS true (exposed); this explicit `false`
+# hides ONLY this profile from the agent. The others stay exposed.
+mcp_exposed = false
+# Even though this profile is hidden, exposure is not the access boundary:
+# max_level / protected / the DB account are. Here it is capped at READ_WRITE.
+max_level = "READ_WRITE"
+default_level = "READ_ONLY"

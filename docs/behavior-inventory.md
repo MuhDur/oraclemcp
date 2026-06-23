@@ -104,10 +104,10 @@ query text.
 
 ## Thin Driver Release Dependency Decision
 
-Verified on 2026-06-18:
+Verified on 2026-06-23:
 
-- `Cargo.lock` resolves the published `oracledb = 0.2.2` and
-  `oracledb-protocol = 0.2.2` crates from crates.io.
+- `Cargo.lock` resolves the published `oracledb = 0.5.0` and
+  `oracledb-protocol = 0.5.0` crates from crates.io.
 - The published driver exposes the pure-Rust thin connection path plus the
   blocking facade used by the current synchronous DB trait boundary.
 - The local `/home/durakovic/projects/rust-oracledb` checkout is a normal
@@ -117,7 +117,7 @@ Verified on 2026-06-18:
 
 Decision:
 
-- `oraclemcp` consumes `oracledb = 0.2.2` from crates.io, declared in the
+- `oraclemcp` consumes `oracledb = 0.5.0` from crates.io, declared in the
   workspace dependency table with `default-features = false`.
 - No vendoring is used. No releaseable `oraclemcp` crate may depend on
   `/home/durakovic/projects/rust-oracledb` or any other external local path.
@@ -158,8 +158,9 @@ Remaining upstream thin-driver gaps tracked in `/home/durakovic/projects/rust-or
 
 - `rust-oracledb-o0b`: external wallet auth without username/password.
 - `rust-oracledb-5bh`: end-to-end OCI IAM database-token retrieval/refresh for
-  `oraclemcp` profiles remains unwired even though `oracledb` 0.2.2 exposes the
-  lower-level access-token connect option.
+  `oraclemcp` profiles remains unwired even though `oracledb` 0.5.0 exposes the
+  lower-level access-token connect option (`ConnectOptions::with_access_token`).
+  Tracked downstream as deferred bead k6q.9.
 
 ## Proxy Auth, DRCP, and Enterprise Auth
 
@@ -168,7 +169,7 @@ Remaining upstream thin-driver gaps tracked in `/home/durakovic/projects/rust-or
 | Proxy auth | Thin connect authenticates as `proxy_user` and passes the target schema through the driver's proxy-user connect option. | Requires normal Oracle `CONNECT THROUGH` grants; live tests run when both proxy env vars are set. |
 | External/wallet auth | Legacy thick mode could attempt empty username/password wallet auth. Thin mode now reports unsupported external wallet auth explicitly until the published driver grows that path. | Never silently fall back to password auth or thick mode. |
 | Kerberos/RADIUS | Thin adapter rejects these modes with targeted unsupported-auth errors. | Add only if the published thin driver exposes a safe implementation. |
-| IAM token | `use_iam_token` still fails closed because `oraclemcp` has no end-to-end OCI token source/refresh path in profiles. | Wire only with redacted token sourcing, refresh, and live coverage; do not claim support from the lower-level driver primitive alone. |
+| IAM token | `use_iam_token` / `iam_config_profile` parse but fail closed: the `oracledb` 0.5.0 adapter has the `with_access_token` primitive, yet `oraclemcp` wires no production OCI token source, so a configured IAM-token connect returns a structured unsupported-auth diagnostic and any token over a non-TCPS transport is refused. Deferred bead k6q.9. | Wire only with redacted token sourcing, refresh, and live coverage; do not claim support from the lower-level driver primitive alone. |
 | DRCP | `drcp.rs` appends connect string parameters such as `server=pooled`, class, and purity. | Parser and live checks cover the connect-string shaping; keep pool identity attributes segregated. |
 | Non-homogeneous pools | Pool settings carry the full thin `OracleConnectOptions` for each pool instance. | Do not reuse sessions across incompatible identity/auth attributes. |
 
