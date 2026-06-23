@@ -40,8 +40,9 @@ pub struct PoolConfig {
 impl Default for PoolConfig {
     fn default() -> Self {
         // Plan §10: max_size = min(cpu*2+1, 20), min_idle 2, acquire 5s,
-        // statement_cache >= 50. The cpu-derived sizing is applied at pool
-        // construction; the static default is the documented ceiling.
+        // statement_cache >= 50. This static default is the documented CEILING;
+        // the cpu-derived clamp (min(configured, cpu*2+1)) is applied at pool
+        // construction by `oraclemcp_db::PoolSettings::resolved` (B4).
         PoolConfig {
             max_size: 20,
             min_idle: 2,
@@ -501,6 +502,19 @@ pub struct ConnectionProfile {
     /// Force `READ_ONLY` regardless of profile (Active Data Guard standby).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only_standby: Option<bool>,
+    /// Whether this profile is exposed to the MCP **served** surface (E5
+    /// connection-scope isolation). PER-PROFILE OPT-OUT: a profile is exposed to
+    /// agents **by default**; set `mcp_exposed = false` to hide it. A hidden
+    /// profile is invisible to every agent-facing path — `oracle_list_profiles`,
+    /// `oracle_switch_profile`, `oracle_search_objects`, and
+    /// `completion/complete` all behave as if it does not exist. The CLI and the
+    /// operator (`oraclemcp profiles`, `doctor`, `--profile`) always see and use
+    /// every profile regardless of this flag. One profile's setting never affects
+    /// another's (there is no global activation). This is a visibility/scoping
+    /// convenience, **not** an access control — the real bound on what an exposed
+    /// profile can do is `max_level`/`protected`/DB privileges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_exposed: Option<bool>,
     /// Optional per-connection Oracle session identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_identity: Option<SessionIdentityConfig>,
@@ -589,6 +603,17 @@ impl ConnectionProfile {
         self.read_only_standby.unwrap_or(false)
     }
 
+    /// Whether this profile is exposed to the MCP served (agent-facing) surface
+    /// (E5). Per-profile opt-out: defaults to `true` (exposed); only an explicit
+    /// `mcp_exposed = false` hides it from
+    /// `oracle_list_profiles`/`oracle_switch_profile`/search/completion. The
+    /// CLI/operator still sees every profile regardless of this flag.
+    #[must_use]
+    pub fn mcp_exposed(&self) -> bool {
+        // Per-profile opt-out: exposed by default; only an explicit `= false` hides.
+        self.mcp_exposed.unwrap_or(true)
+    }
+
     /// The effective pool settings (defaults applied).
     #[must_use]
     pub fn pool(&self) -> PoolConfig {
@@ -618,6 +643,7 @@ impl ConnectionProfile {
             protected,
             require_signed_tools,
             read_only_standby,
+            mcp_exposed,
             session_identity,
             pool,
             oci,
@@ -644,6 +670,7 @@ impl ConnectionProfile {
             protected: self.protected(),
             require_signed_tools: self.require_signed_tools(),
             read_only_standby: self.read_only_standby(),
+            mcp_exposed: self.mcp_exposed(),
         }
     }
 
@@ -720,6 +747,10 @@ pub struct ProfileMetadata {
     pub require_signed_tools: bool,
     /// Whether the profile is a read-only standby.
     pub read_only_standby: bool,
+    /// Whether the profile is exposed to the MCP served (agent-facing) surface
+    /// (E5). The CLI shows this for every profile; the served `oracle_list_profiles`
+    /// only ever returns profiles where this is `true`.
+    pub mcp_exposed: bool,
 }
 
 /// Resolve `base` inheritance across all profiles, in place. Detects unknown
@@ -790,6 +821,7 @@ mod tests {
             protected: None,
             require_signed_tools: None,
             read_only_standby: None,
+            mcp_exposed: None,
             session_identity: None,
             pool: None,
             oci: None,

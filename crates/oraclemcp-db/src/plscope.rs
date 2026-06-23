@@ -10,6 +10,8 @@
 //! Pure DB (no engine): deepens the Tier-1 offline calls/refs ([P1-5]) when
 //! PL/Scope is available on the target.
 
+use asupersync::Cx;
+
 use crate::connection::OracleConnection;
 use crate::error::DbError;
 use crate::types::OracleBind;
@@ -112,16 +114,20 @@ fn row_i64(row: &crate::types::OracleRow, col: &str) -> i64 {
 
 /// Query the PL/Scope identifier cross-reference for `owner.name`
 /// (`ALL_IDENTIFIERS`). Read-only.
-pub fn plscope_identifiers(
+pub async fn plscope_identifiers(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     owner: &str,
     name: &str,
 ) -> Result<Vec<PlscopeIdentifier>, DbError> {
-    let rows = conn.query_rows(
-        "SELECT name, type, usage, line, col, signature FROM all_identifiers \
+    let rows = conn
+        .query_rows(
+            cx,
+            "SELECT name, type, usage, line, col, signature FROM all_identifiers \
          WHERE owner = :1 AND object_name = :2 ORDER BY line, col",
-        &[OracleBind::from(owner), OracleBind::from(name)],
-    )?;
+            &[OracleBind::from(owner), OracleBind::from(name)],
+        )
+        .await?;
     Ok(rows
         .iter()
         .map(|r| PlscopeIdentifier {
@@ -137,16 +143,20 @@ pub fn plscope_identifiers(
 
 /// Query the PL/Scope SQL statement map for `owner.name` (`ALL_STATEMENTS`).
 /// Read-only.
-pub fn plscope_statements(
+pub async fn plscope_statements(
+    cx: &Cx,
     conn: &dyn OracleConnection,
     owner: &str,
     name: &str,
 ) -> Result<Vec<PlscopeStatement>, DbError> {
-    let rows = conn.query_rows(
-        "SELECT type, line, sql_id FROM all_statements \
+    let rows = conn
+        .query_rows(
+            cx,
+            "SELECT type, line, sql_id FROM all_statements \
          WHERE owner = :1 AND object_name = :2 ORDER BY line",
-        &[OracleBind::from(owner), OracleBind::from(name)],
-    )?;
+            &[OracleBind::from(owner), OracleBind::from(name)],
+        )
+        .await?;
     Ok(rows
         .iter()
         .map(|r| PlscopeStatement {
@@ -284,19 +294,41 @@ mod tests {
         assert_eq!(execute_immediate_audit(&stmts), vec![10]);
     }
 
+    use asupersync::runtime::RuntimeBuilder;
+
+    fn run_with_cx<F, Fut, T>(body: F) -> T
+    where
+        F: FnOnce(Cx) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            body(cx).await
+        })
+    }
+
     /// Mock returning one ALL_IDENTIFIERS row.
     struct IdentMock;
+    #[async_trait::async_trait(?Send)]
     impl OracleConnection for IdentMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
         }
-        fn ping(&self) -> Result<(), DbError> {
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
             Ok(OracleConnectionInfo::default())
         }
-        fn query_rows(&self, sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
             assert!(sql.to_ascii_lowercase().contains("all_identifiers"));
             Ok(vec![OracleRow {
                 columns: vec![
@@ -321,20 +353,24 @@ mod tests {
                 ],
             }])
         }
-        fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
             Ok(0)
         }
-        fn commit(&self) -> Result<(), DbError> {
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn rollback(&self) -> Result<(), DbError> {
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
     }
 
     #[test]
     fn plscope_identifiers_parses_rows() {
-        let ids = plscope_identifiers(&IdentMock, "HR", "EMP_API").expect("query");
+        let ids = run_with_cx(|cx| async move {
+            plscope_identifiers(&cx, &IdentMock, "HR", "EMP_API")
+                .await
+                .expect("query")
+        });
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0].name, "CALC");
         assert_eq!(ids[0].object_type, "FUNCTION");

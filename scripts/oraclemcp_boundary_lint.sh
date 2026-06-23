@@ -143,6 +143,43 @@ show_all_target_dependency_graph() {
   done
 }
 
+# Early-warning feature inspection (bead D4 / WP-D). opentelemetry-sdk is NOT a
+# forbidden package — the telemetry crate may legitimately grow an OTLP exporter
+# — but its `rt-tokio`/`rt-tokio-current-thread` runtime features pull Tokio in.
+# If an upstream opentelemetry-sdk release ever flips one of those on by default,
+# the Tokio gate above WILL fail; this check fires first and names the cause, so
+# the Tokio failure is diagnosed as "opentelemetry-sdk dragged in a runtime"
+# rather than chased blind. It complements the `-i tokio` / `-i reqwest` gates.
+# Advisory: it explains, it does not itself fail the build (the Tokio gate does).
+inspect_opentelemetry_runtime() {
+  # The crate resolves under the underscore spelling (`opentelemetry_sdk`); the
+  # hyphen form never matches `cargo tree -i`. Check the underscore name (and the
+  # hyphen as a belt-and-braces fallback) so the early-warning actually fires for
+  # the crate the asupersync `metrics` feature pulls in (bead D1/.1: catch an
+  # upstream rt-tokio default flip before the Tokio gate above fails blind).
+  local package
+  local tree
+  for package in opentelemetry_sdk opentelemetry-sdk; do
+    if tree="$(tree_package_present "opentelemetry runtime" "$package" -e normal --target all)"; then
+      echo "NOTE[otel]: '$package' is present in the production graph. Confirm no" \
+        "rt-tokio* feature is enabled (that would pull Tokio and fail the gate above):"
+      indent_text <<<"$tree"
+      # Surface the resolved features so an rt-tokio flip is visible in the log.
+      cargo tree --locked --workspace -e features --target all -i "$package" 2>/dev/null \
+        | grep -iE 'rt-tokio|tokio' | indent_text || true
+      return
+    fi
+    case "$?" in
+      2)
+        violations=$((violations + 1))
+        return
+        ;;
+      *) ;;
+    esac
+  done
+  echo "OK[otel]: opentelemetry_sdk absent from the production graph (no rt-tokio runtime risk)."
+}
+
 check_compat_markers() {
   local hits
 
@@ -159,6 +196,7 @@ check_compat_markers() {
 
 check_production_dependency_graph
 show_all_target_dependency_graph
+inspect_opentelemetry_runtime
 check_compat_markers
 
 if [ "$violations" -ne 0 ]; then

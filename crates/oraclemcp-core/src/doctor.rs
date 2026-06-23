@@ -13,9 +13,10 @@
 //! In-MCP, the live-state subset is mirrored by `oracle_capabilities` (an agent
 //! can call it); `doctor` is the CLI mode.
 
+use asupersync::Cx;
 use oraclemcp_db::{
-    OracleConnection, canonical_nls_statements, detect_oracle_driver, detect_standby,
-    probe_privileges,
+    DiagnosticsSource, OracleConnection, canonical_nls_statements, detect_oracle_driver,
+    detect_standby, preflight, probe_privileges, probe_write_posture, supported_wallet_modes,
 };
 use oraclemcp_error::{ErrorClass, classify_ora_code, parse_ora_code};
 use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel};
@@ -50,7 +51,7 @@ impl CheckStatus {
 /// One diagnostic check result.
 #[derive(Clone, Debug, Serialize)]
 pub struct CheckResult {
-    /// Stable check number (1..=9).
+    /// Stable check number (1..=11).
     pub id: u8,
     /// Short check name.
     pub name: String,
@@ -64,6 +65,10 @@ pub struct CheckResult {
     /// Machine-stable failure class for agent triage.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_class: Option<ErrorClass>,
+    /// Precise auth/transport classification for a connectivity failure (A5):
+    /// driver-unsupported auth vs bad-creds vs TLS vs listener.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_mode: Option<AuthModeClass>,
     /// Parsed Oracle error code, when a check failed because Oracle returned ORA-NNNNN.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ora_code: Option<i32>,
@@ -78,6 +83,7 @@ impl CheckResult {
             detail: detail.into(),
             fix: None,
             failure_class: None,
+            auth_mode: None,
             ora_code: None,
         }
     }
@@ -87,6 +93,10 @@ impl CheckResult {
     }
     fn with_failure_class(mut self, class: ErrorClass) -> Self {
         self.failure_class = Some(class);
+        self
+    }
+    fn with_auth_mode(mut self, class: AuthModeClass) -> Self {
+        self.auth_mode = Some(class);
         self
     }
     fn with_oracle_error(mut self, message: &str) -> Self {
@@ -115,6 +125,8 @@ pub struct DoctorContext<'a> {
     /// Runtime connection strategy label, such as `single_session` or
     /// `hybrid_pool`. This is non-secret operator-facing metadata.
     pub connection_strategy: Option<String>,
+    /// Whether a proxy / least-privilege connect user is configured (A2).
+    pub proxy_user: bool,
     /// Exact setup values that must never appear in doctor output.
     pub sensitive_values: Vec<String>,
 }
@@ -197,18 +209,24 @@ const ADVERSARIAL_CORPUS: &[&str] = &[
 ];
 
 /// Run all diagnostic checks and assemble the report.
-#[must_use]
-pub fn run_doctor(ctx: &DoctorContext) -> DoctorReport {
+///
+/// `Cx`-first and `async` (B1): the connectivity/role/privilege/preflight/
+/// write-posture checks issue real DB round trips through the now-async
+/// [`OracleConnection`] surface, so they thread `cx` and `.await`. The
+/// non-DB checks remain synchronous.
+pub async fn run_doctor(cx: &Cx, ctx: &DoctorContext<'_>) -> DoctorReport {
     let checks = vec![
         check_oracle_driver(),
         check_tns_admin(ctx),
-        check_connectivity(ctx),
-        check_role_standby(ctx),
+        check_connectivity(cx, ctx).await,
+        check_role_standby(cx, ctx).await,
         check_nls(ctx),
-        check_privilege_tier(ctx),
+        check_privilege_tier(cx, ctx).await,
         check_snapshot_freshness(),
         check_classifier_selftest(),
         check_virtual_tools(),
+        check_dba_suite_preflight(cx, ctx).await,
+        check_write_posture(cx, ctx).await,
     ];
     DoctorReport { checks }
 }
@@ -276,6 +294,89 @@ fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
     }
 }
 
+/// Why a connection attempt's *authentication / transport* step failed, as a
+/// precise typed classification (A5). The fail-closed posture distinguishes a
+/// driver-unsupported auth mode (Kerberos / RADIUS / passwordless external
+/// wallet — features the pinned thin driver cannot satisfy at all) from a
+/// recoverable bad-credential, TLS/wallet, or listener/network failure. This is
+/// the load-bearing distinction: a driver-unsupported mode will NEVER succeed
+/// by retrying with different inputs, whereas the other three are operator-
+/// fixable. IAM token auth is NOT driver-unsupported (the pinned driver wires
+/// it via `with_access_token`); a token over a plaintext transport is a `Tls`
+/// failure (it requires TCPS), not a driver-capability gap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthModeClass {
+    /// An enterprise auth mode the published thin driver cannot satisfy:
+    /// Kerberos, RADIUS/native MFA, or passwordless external-wallet auth.
+    /// Retrying with different credentials cannot help; the operator must use a
+    /// supported mode (username/password, proxy, wallet+password, or IAM token).
+    DriverUnsupported,
+    /// The driver supports this auth mode but the supplied credentials were
+    /// rejected (ORA-01017 / invalid username-password).
+    BadCredentials,
+    /// A TLS/TCPS transport failure: wallet load, handshake, server-cert / DN
+    /// mismatch, or an access token offered over a non-TLS transport.
+    Tls,
+    /// A listener / network / TNS-resolution failure: the request never reached
+    /// an authenticating database service (ORA-12154 / 12514 / 12541, refused).
+    Listener,
+    /// A connectivity failure that is not specifically an auth/transport class
+    /// above (kept honest rather than forced into a category).
+    Other,
+}
+
+/// Classify the authentication / transport posture of a connection failure into
+/// a precise [`AuthModeClass`] (A5). Driver-unsupported enterprise auth modes
+/// are detected by the typed adapter messages the DB layer emits; the
+/// credential / TLS / listener cases are detected by ORA- code and message.
+#[must_use]
+pub fn classify_auth_mode(error: &str) -> AuthModeClass {
+    let lower = error.to_ascii_lowercase();
+
+    // Driver-unsupported enterprise auth modes. These come from the DB-layer
+    // adapter as precise typed `UnsupportedAuth` messages and will never succeed
+    // by changing credentials — they are a driver-capability gap.
+    let driver_unsupported = lower.contains("kerberos")
+        || lower.contains("radius/native mfa")
+        || lower.contains("radius")
+        || lower.contains("external/wallet auth without username and password");
+    if driver_unsupported {
+        return AuthModeClass::DriverUnsupported;
+    }
+
+    // Bad credentials: ORA-01017 / invalid username-password.
+    if lower.contains("ora-01017") || lower.contains("invalid username/password") {
+        return AuthModeClass::BadCredentials;
+    }
+
+    // TLS / TCPS transport failures, including an access token offered over a
+    // non-TLS transport (IAM requires TCPS — a transport failure, not a missing
+    // driver capability).
+    let tls = lower.contains("dpy-3001")
+        || lower.contains("requires a tls")
+        || lower.contains("requires a tls (tcps)")
+        || lower.contains("tcps")
+        || lower.contains("tls")
+        || (lower.contains("wallet") && !lower.contains("password"));
+    if tls {
+        return AuthModeClass::Tls;
+    }
+
+    // Listener / network / TNS resolution: never reached an auth step.
+    let listener = lower.contains("ora-12154")
+        || lower.contains("ora-12514")
+        || lower.contains("ora-12541")
+        || lower.contains("listener")
+        || lower.contains("could not resolve")
+        || lower.contains("tns");
+    if listener {
+        return AuthModeClass::Listener;
+    }
+
+    AuthModeClass::Other
+}
+
 fn connectivity_fix(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
     if lower.contains("proxy_auth") {
@@ -335,13 +436,14 @@ fn connectivity_failure_class(error: &str) -> ErrorClass {
     }
 }
 
-fn check_connectivity(ctx: &DoctorContext) -> CheckResult {
+async fn check_connectivity(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     if let Some(error) = &ctx.connection_error {
         let detail = sanitized_detail(ctx, format!("connect failed: {error}"));
         let fix = connectivity_fix(&detail);
         return CheckResult::new(3, "Connectivity", CheckStatus::Fail, detail)
             .with_fix(fix)
             .with_failure_class(connectivity_failure_class(error))
+            .with_auth_mode(classify_auth_mode(error))
             .with_oracle_error(error);
     }
     match ctx.conn {
@@ -351,7 +453,7 @@ fn check_connectivity(ctx: &DoctorContext) -> CheckResult {
             CheckStatus::Skip,
             "offline — supply a profile/connection to test connectivity + auth",
         ),
-        Some(conn) => match conn.ping() {
+        Some(conn) => match conn.ping(cx).await {
             Ok(()) => {
                 let detail = ctx.connection_strategy.as_deref().map_or_else(
                     || "connected + authenticated".to_owned(),
@@ -367,12 +469,13 @@ fn check_connectivity(ctx: &DoctorContext) -> CheckResult {
             )
             .with_fix(connectivity_fix(&e.to_string()))
             .with_failure_class(connectivity_failure_class(&e.to_string()))
+            .with_auth_mode(classify_auth_mode(&e.to_string()))
             .with_oracle_error(&e.to_string()),
         },
     }
 }
 
-fn check_role_standby(ctx: &DoctorContext) -> CheckResult {
+async fn check_role_standby(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     if ctx.connection_error.is_some() {
         return CheckResult::new(
             4,
@@ -388,7 +491,7 @@ fn check_role_standby(ctx: &DoctorContext) -> CheckResult {
             CheckStatus::Skip,
             "offline — requires a live connection",
         ),
-        Some(conn) => match detect_standby(conn) {
+        Some(conn) => match detect_standby(cx, conn).await {
             Ok(s) => {
                 let role = s.database_role.unwrap_or_else(|| "unknown".to_owned());
                 let mode = s.open_mode.unwrap_or_else(|| "unknown".to_owned());
@@ -432,7 +535,7 @@ fn check_nls(ctx: &DoctorContext) -> CheckResult {
     )
 }
 
-fn check_privilege_tier(ctx: &DoctorContext) -> CheckResult {
+async fn check_privilege_tier(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     if ctx.connection_error.is_some() {
         return if ctx.protected_profile_writable {
             CheckResult::new(
@@ -471,7 +574,7 @@ fn check_privilege_tier(ctx: &DoctorContext) -> CheckResult {
             }
         }
         Some(conn) => {
-            let p = probe_privileges(conn);
+            let p = probe_privileges(cx, conn).await;
             let detail = format!(
                 "dictionary tier {:?}, diagnostics_pack={}, plscope={}",
                 p.dictionary_tier, p.diagnostics_pack, p.plscope
@@ -550,50 +653,262 @@ fn check_virtual_tools() -> CheckResult {
     )
 }
 
+/// Check 10 — DBA-suite privilege/feature preflight (bead C9, **report-only**).
+///
+/// Reports, for the read-only DBA diagnostic suite, which dictionary tier /
+/// diagnostics feature is actually available so an operator knows what
+/// `oracle_db_health` / `oracle_top_queries` will be able to run. It reuses
+/// `oraclemcp_db::preflight` (and through it the fail-closed `detect_view_tier`
+/// / `detect_diagnostics_pack` / `detect_statspack` probes), runs only the cheap
+/// `WHERE 1=0` tier probes plus the feature probes, and NEVER runs a diagnostic
+/// query or touches a paid-pack object unless the Diagnostics Pack license was
+/// confirmed first. It is informational: it reports `Pass` (full tier coverage),
+/// `Warn` (some subchecks would degrade/skip, or historical perf history is
+/// unavailable), or `Skip` (offline) — never `Fail`.
+async fn check_dba_suite_preflight(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
+    const ID: u8 = 10;
+    const NAME: &str = "DBA suite preflight";
+
+    if ctx.connection_error.is_some() {
+        return CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Skip,
+            "skipped because connectivity failed",
+        );
+    }
+    let Some(conn) = ctx.conn else {
+        return CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Skip,
+            "offline — supply a profile/connection to preflight the read-only DBA diagnostic suite",
+        );
+    };
+
+    let report = preflight(cx, conn).await;
+    let (runnable, skipped) = report.runnable_skipped();
+    let total = runnable + skipped;
+    let history = match report.top_queries_historical {
+        DiagnosticsSource::AwrAsh => "AWR/ASH (Diagnostics Pack licensed)",
+        DiagnosticsSource::Statspack => "Statspack (free fallback)",
+        DiagnosticsSource::Unavailable => "none (no Diagnostics Pack, no Statspack)",
+        // The default top-queries source is always the live cursor; historical
+        // never resolves to it, but report it honestly if it ever does.
+        DiagnosticsSource::LiveCursor => "live cursor only",
+    };
+    let detail = format!(
+        "oracle_db_health: {runnable}/{total} subchecks runnable, {skipped} would skip; \
+         oracle_top_queries default=live cursor (free), historical={history}"
+    );
+
+    // Report-only: a degraded posture is a Warn (informational), never a Fail.
+    let history_unavailable = report.top_queries_historical == DiagnosticsSource::Unavailable;
+    if skipped == 0 && !history_unavailable {
+        CheckResult::new(ID, NAME, CheckStatus::Pass, detail)
+    } else {
+        CheckResult::new(ID, NAME, CheckStatus::Warn, detail).with_fix(
+            "report-only: grant SELECT on the missing DBA_*/V$ views for full coverage, \
+             or install Statspack (free) / license the Diagnostics Pack for historical top-SQL",
+        )
+    }
+}
+
+/// A one-line, honest summary of the wallet auth modes the pinned thin driver
+/// supports (A2, Round 3): unencrypted `ewallet.pem`, auto-login `cwallet.sso`,
+/// and password-protected `ewallet.p12` are all SUPPORTED — never fail-closed.
+fn supported_wallet_modes_note() -> String {
+    let modes: Vec<&str> = supported_wallet_modes()
+        .iter()
+        .filter(|m| m.supported)
+        .map(|m| m.mode)
+        .collect();
+    format!("supported wallet modes: {}", modes.join(", "))
+}
+
+/// Check 11 — read-only proxy-user / role posture (bead A2, **report-only**).
+///
+/// Reports whether the connected principal can write at the database. A
+/// least-privilege proxy user / read-only role holds NO write-implying system
+/// privileges; if it does, the operator is WARNED (the classifier + per-DB
+/// ceiling are still the enforced control, but a write-capable principal is not
+/// defense in depth). The detail always reports the SUPPORTED wallet modes so an
+/// operator can see unencrypted/SSO/password wallets are not fail-closed. Never
+/// `Fail`s the suite.
+async fn check_write_posture(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
+    const ID: u8 = 11;
+    const NAME: &str = "Write posture";
+    let wallet_note = supported_wallet_modes_note();
+
+    if ctx.connection_error.is_some() {
+        return CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Skip,
+            format!("skipped because connectivity failed; {wallet_note}"),
+        );
+    }
+    let proxy = if ctx.proxy_user {
+        "proxy/least-privilege connect user configured"
+    } else {
+        "direct connect user (no proxy)"
+    };
+    match ctx.conn {
+        None => CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Skip,
+            format!("offline — supply a profile/connection to probe write posture; {wallet_note}"),
+        ),
+        Some(conn) => {
+            let posture = probe_write_posture(cx, conn, ctx.proxy_user).await;
+            match posture.can_write {
+                Some(false) => CheckResult::new(
+                    ID,
+                    NAME,
+                    CheckStatus::Pass,
+                    format!(
+                        "read-only posture: principal holds no write-implying system privileges ({proxy}); {wallet_note}"
+                    ),
+                ),
+                Some(true) => CheckResult::new(
+                    ID,
+                    NAME,
+                    CheckStatus::Warn,
+                    sanitized_detail(
+                        ctx,
+                        format!(
+                            "principal CAN write — holds {} ({proxy}); {wallet_note}",
+                            posture.write_privileges.join(", ")
+                        ),
+                    ),
+                )
+                .with_fix(
+                    "for least-privilege, connect as a read-only proxy user / role with only \
+                     CREATE SESSION + SELECT (or SELECT ANY DICTIONARY); the classifier + per-DB \
+                     ceiling remain the enforced control, but a non-writable principal is defense in depth",
+                ),
+                None => CheckResult::new(
+                    ID,
+                    NAME,
+                    CheckStatus::Warn,
+                    format!(
+                        "could not determine write posture from SESSION_PRIVS ({proxy}); {wallet_note}"
+                    ),
+                )
+                .with_fix("grant the session SELECT on SESSION_PRIVS, or accept reduced posture reporting"),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asupersync::runtime::RuntimeBuilder;
     use oraclemcp_db::{DbError, OracleBackend, OracleBind, OracleConnectionInfo, OracleRow};
 
+    /// Run `run_doctor` on a fresh current-thread runtime with an installed `Cx`.
+    fn doctor(ctx: &DoctorContext<'_>) -> DoctorReport {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            run_doctor(&cx, ctx).await
+        })
+    }
+
     struct LiveMock;
+    #[async_trait::async_trait(?Send)]
     impl OracleConnection for LiveMock {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
         }
-        fn ping(&self) -> Result<(), DbError> {
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
             Ok(OracleConnectionInfo::default())
         }
-        fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
             // dba_objects/all_identifiers probes succeed -> Dba tier, plscope true.
             Ok(vec![OracleRow { columns: vec![] }])
         }
-        fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
             Ok(0)
         }
-        fn commit(&self) -> Result<(), DbError> {
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn rollback(&self) -> Result<(), DbError> {
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    /// A live mock whose `SESSION_PRIVS` includes write-implying privileges
+    /// (exercises the A2 write-posture WARN path).
+    struct WriteCapableMock;
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for WriteCapableMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            if sql.to_ascii_lowercase().contains("session_privs") {
+                return Ok(["CREATE SESSION", "CREATE ANY TABLE", "INSERT ANY TABLE"]
+                    .iter()
+                    .map(|p| OracleRow {
+                        columns: vec![(
+                            "PRIVILEGE".to_owned(),
+                            oraclemcp_db::OracleCell::new("VARCHAR2", Some((*p).to_owned())),
+                        )],
+                    })
+                    .collect());
+            }
+            Ok(vec![OracleRow { columns: vec![] }])
+        }
+        async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+            Ok(0)
+        }
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
     }
 
     #[test]
-    fn report_has_nine_checks_and_classifier_self_test_passes() {
-        let report = run_doctor(&DoctorContext::default());
-        assert_eq!(report.checks.len(), 9);
+    fn report_has_eleven_checks_and_classifier_self_test_passes() {
+        let report = doctor(&DoctorContext::default());
+        assert_eq!(report.checks.len(), 11);
         let selftest = report.checks.iter().find(|c| c.id == 8).unwrap();
         assert_eq!(selftest.status, CheckStatus::Pass, "{}", selftest.detail);
     }
 
     #[test]
     fn offline_skips_live_checks_and_does_not_fail() {
-        let report = run_doctor(&DoctorContext::default());
-        // Connectivity, role/standby, privilege-tier, and snapshot skip offline.
-        for id in [3u8, 4, 6, 7] {
+        let report = doctor(&DoctorContext::default());
+        // Connectivity, role/standby, privilege-tier, snapshot, the DBA-suite
+        // preflight (10), and write posture (11) all skip offline.
+        for id in [3u8, 4, 6, 7, 10, 11] {
             let c = report.checks.iter().find(|c| c.id == id).unwrap();
             assert_eq!(
                 c.status,
@@ -616,7 +931,7 @@ mod tests {
             conn: Some(&conn),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         assert_eq!(
             report.checks.iter().find(|c| c.id == 3).unwrap().status,
             CheckStatus::Pass
@@ -635,7 +950,7 @@ mod tests {
             connection_strategy: Some("hybrid_pool".to_owned()),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
 
         assert_eq!(connectivity.status, CheckStatus::Pass);
@@ -651,7 +966,7 @@ mod tests {
             protected_profile_writable: true,
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let priv_check = report.checks.iter().find(|c| c.id == 6).unwrap();
         assert_eq!(priv_check.status, CheckStatus::Warn);
         assert!(priv_check.fix.is_some());
@@ -665,7 +980,7 @@ mod tests {
             tns_admin: Some("/nonexistent/tns/dir/xyz".to_owned()),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let tns = report.checks.iter().find(|c| c.id == 2).unwrap();
         assert_eq!(tns.status, CheckStatus::Fail);
         assert!(tns.fix.is_some());
@@ -680,7 +995,7 @@ mod tests {
             wallet_location: Some("/home/operator/private-wallet".to_owned()),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let rendered = report.to_json().to_string();
         assert!(!rendered.contains("/home/operator/private-wallet"));
         let tns = report.checks.iter().find(|c| c.id == 2).unwrap();
@@ -704,7 +1019,7 @@ mod tests {
             ],
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let serialized = serde_json::to_string(&report.to_json()).expect("json");
         for forbidden in [
             "APP_USER",
@@ -743,7 +1058,7 @@ mod tests {
             ),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
         assert_eq!(connectivity.status, CheckStatus::Fail);
         assert!(
@@ -764,7 +1079,7 @@ mod tests {
             ),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
         assert_eq!(connectivity.status, CheckStatus::Fail);
         let fix = connectivity.fix.as_deref().unwrap();
@@ -774,13 +1089,58 @@ mod tests {
 
     #[test]
     fn text_and_json_render() {
-        let report = run_doctor(&DoctorContext::default());
+        let report = doctor(&DoctorContext::default());
         let text = report.to_text();
         assert!(text.contains("oraclemcp doctor"));
         assert!(text.contains("Classifier self-test"));
         let j = report.to_json();
-        assert_eq!(j["checks"].as_array().unwrap().len(), 9);
+        assert_eq!(j["checks"].as_array().unwrap().len(), 11);
         assert_eq!(j["exit_code"], json!(0));
+    }
+
+    /// C9 — the DBA-suite preflight is report-only: with a live connection it
+    /// reports the resolved tier/feature posture and never `Fail`s the suite,
+    /// even when a subcheck would skip or historical perf history is missing.
+    #[test]
+    fn dba_suite_preflight_is_report_only_and_never_fails() {
+        // LiveMock answers every probe with one empty row: every tier probe
+        // succeeds (Dba), detect_statspack succeeds, but detect_diagnostics_pack
+        // is false (no DIAGNOSTIC value) -> historical resolves to Statspack, so
+        // the preflight passes and, regardless, never fails.
+        let conn = LiveMock;
+        let ctx = DoctorContext {
+            conn: Some(&conn),
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let preflight_check = report.checks.iter().find(|c| c.id == 10).unwrap();
+        assert_ne!(
+            preflight_check.status,
+            CheckStatus::Fail,
+            "the preflight is report-only and must never fail the suite"
+        );
+        assert!(
+            preflight_check.detail.contains("oracle_db_health")
+                && preflight_check.detail.contains("oracle_top_queries"),
+            "reports what each DBA tool will be able to run: {}",
+            preflight_check.detail
+        );
+        assert_eq!(report.exit_code(), 0, "report-only never exits non-zero");
+    }
+
+    /// When connectivity fails, the preflight (10) skips rather than running any
+    /// probe against a dead connection.
+    #[test]
+    fn dba_suite_preflight_skips_when_connectivity_failed() {
+        let ctx = DoctorContext {
+            connection_error: Some("could not open connection".to_owned()),
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        assert_eq!(
+            report.checks.iter().find(|c| c.id == 10).unwrap().status,
+            CheckStatus::Skip
+        );
     }
 
     #[test]
@@ -789,7 +1149,7 @@ mod tests {
             connection_error: Some("could not open connection".to_owned()),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         assert_eq!(
             report.checks.iter().find(|c| c.id == 3).unwrap().status,
             CheckStatus::Fail
@@ -813,7 +1173,7 @@ mod tests {
             ),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
         assert_eq!(connectivity.status, CheckStatus::Fail);
         assert_eq!(
@@ -830,13 +1190,101 @@ mod tests {
         );
     }
 
+    /// A5 (R4 acceptance) — the doctor distinguishes driver-unsupported auth
+    /// (Kerberos / RADIUS / passwordless external wallet) from bad-creds, TLS,
+    /// and listener failures, each with a precise typed [`AuthModeClass`]. This
+    /// is the load-bearing distinction: a driver-unsupported mode never succeeds
+    /// by retrying, whereas the other three are operator-fixable.
+    #[test]
+    fn doctor_classifies_auth_failure_modes_precisely() {
+        let cases = [
+            // Driver-unsupported enterprise auth (typed UnsupportedAuth from the
+            // DB adapter) — distinct from a credential / TLS / listener failure.
+            (
+                "Kerberos authentication is not supported by the published thin driver yet",
+                AuthModeClass::DriverUnsupported,
+            ),
+            (
+                "RADIUS/native MFA authentication is not supported by the published thin driver yet",
+                AuthModeClass::DriverUnsupported,
+            ),
+            (
+                "external/wallet auth without username and password is not supported by the published thin driver yet",
+                AuthModeClass::DriverUnsupported,
+            ),
+            // Bad credentials — the driver supports the mode, the secret was wrong.
+            (
+                "ORA-01017: invalid username/password; logon denied",
+                AuthModeClass::BadCredentials,
+            ),
+            // TLS / TCPS transport failures, including an IAM token offered over
+            // a non-TLS transport (requires TCPS — a transport failure, NOT a
+            // driver-capability gap).
+            (
+                "DPY-3001: access token authentication requires a TLS (TCPS) connection",
+                AuthModeClass::Tls,
+            ),
+            (
+                "TLS/TCPS error: wallet handshake failed",
+                AuthModeClass::Tls,
+            ),
+            // Listener / network / TNS resolution — never reached an auth step.
+            ("ORA-12541: TNS:no listener", AuthModeClass::Listener),
+            (
+                "ORA-12154: TNS:could not resolve the connect identifier specified",
+                AuthModeClass::Listener,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(
+                classify_auth_mode(error),
+                expected,
+                "auth-mode classification for {error:?}"
+            );
+        }
+
+        // And every category is mutually distinct (a driver-unsupported mode is
+        // never collapsed into bad-creds / TLS / listener).
+        use std::collections::HashSet;
+        let distinct: HashSet<_> = cases.iter().map(|(_, class)| *class).collect();
+        assert_eq!(
+            distinct.len(),
+            4,
+            "all four auth-mode classes must be represented and distinct"
+        );
+
+        // The classification is surfaced on the connectivity check itself.
+        let ctx = DoctorContext {
+            connection_error: Some(
+                "Kerberos authentication is not supported by the published thin driver yet"
+                    .to_owned(),
+            ),
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
+        assert_eq!(connectivity.status, CheckStatus::Fail);
+        assert_eq!(
+            connectivity.auth_mode,
+            Some(AuthModeClass::DriverUnsupported)
+        );
+        // Driver-unsupported auth carries no ORA- code (it never reached Oracle).
+        assert_eq!(connectivity.ora_code, None);
+        // It serializes into the machine-readable report for agent triage.
+        let serialized = serde_json::to_string(&report.to_json()).expect("json");
+        assert!(
+            serialized.contains("\"auth_mode\":\"driver_unsupported\""),
+            "{serialized}"
+        );
+    }
+
     #[test]
     fn missing_profile_is_a_structured_setup_error() {
         let ctx = DoctorContext {
             connection_error: Some("connection profile `missing_ro` not found".to_owned()),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
         assert_eq!(connectivity.status, CheckStatus::Fail);
         assert_eq!(
@@ -852,7 +1300,7 @@ mod tests {
             tns_admin: Some("/nonexistent/tns/dir/xyz".to_owned()),
             ..DoctorContext::default()
         };
-        let report = run_doctor(&ctx);
+        let report = doctor(&ctx);
         assert_eq!(report.exit_code(), 1);
         assert_eq!(report.to_json_with_exit_code(2)["exit_code"], json!(2));
         assert!(
@@ -860,5 +1308,68 @@ mod tests {
                 .to_text_with_exit_code(2)
                 .contains("verdict: FAILED (exit 2)")
         );
+    }
+
+    /// A2 — a read-only (least-privilege) principal: the write-posture check (11)
+    /// passes and reports read-only posture; the suite never fails.
+    #[test]
+    fn read_only_principal_reports_read_only_write_posture() {
+        let conn = LiveMock;
+        let ctx = DoctorContext {
+            conn: Some(&conn),
+            proxy_user: true,
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let posture = report.checks.iter().find(|c| c.id == 11).unwrap();
+        assert_eq!(posture.status, CheckStatus::Pass, "{}", posture.detail);
+        assert!(posture.detail.contains("read-only posture"));
+        assert!(
+            posture
+                .detail
+                .contains("proxy/least-privilege connect user")
+        );
+        assert_eq!(report.exit_code(), 0);
+    }
+
+    /// A2 — a write-capable principal is WARNED (not least-privilege), with the
+    /// offending privileges named; a warning never fails the suite.
+    #[test]
+    fn write_capable_principal_warns_with_evidence() {
+        let conn = WriteCapableMock;
+        let ctx = DoctorContext {
+            conn: Some(&conn),
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let posture = report.checks.iter().find(|c| c.id == 11).unwrap();
+        assert_eq!(posture.status, CheckStatus::Warn, "{}", posture.detail);
+        assert!(posture.detail.contains("principal CAN write"));
+        assert!(posture.detail.contains("CREATE ANY TABLE"));
+        assert!(posture.fix.as_deref().unwrap().contains("read-only proxy"));
+        assert_eq!(report.exit_code(), 0, "a warning is not a failure");
+    }
+
+    /// A2 (Round 3) — the write-posture check always reports the SUPPORTED wallet
+    /// modes: unencrypted ewallet.pem, auto-login cwallet.sso, and password
+    /// ewallet.p12 are SUPPORTED (not fail-closed).
+    #[test]
+    fn doctor_reports_supported_wallet_modes() {
+        let conn = LiveMock;
+        let ctx = DoctorContext {
+            conn: Some(&conn),
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let posture = report.checks.iter().find(|c| c.id == 11).unwrap();
+        for needle in ["cwallet.sso", "ewallet.pem", "ewallet.p12"] {
+            assert!(
+                posture.detail.contains(needle),
+                "wallet mode {needle} should be reported SUPPORTED: {}",
+                posture.detail
+            );
+        }
+        // And the underlying source-of-truth marks every mode SUPPORTED.
+        assert!(supported_wallet_modes().iter().all(|m| m.supported));
     }
 }

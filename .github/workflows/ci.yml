@@ -59,9 +59,10 @@ jobs:
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --doc
 
-  # The thin-native line is pinned to nightly because asupersync/oracledb require
-  # nightly-only language features. This is a build-only ratchet separate from
-  # the test job so toolchain installation failures stay obvious.
+  # The thin-native line is pinned to nightly because asupersync requires
+  # nightly-only language features (oracledb 0.5.0 is stable-clean). This is a
+  # build-only ratchet separate from the test job so toolchain installation
+  # failures stay obvious.
   pinned-nightly:
     name: build on pinned nightly
     runs-on: ubuntu-latest
@@ -74,6 +75,40 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
+
+  # Multi-nightly early-warning (bead D4 / WP-D). ADVISORY ONLY — NOT a required
+  # gate. The pinned nightly above is the gate; this job builds and tests against
+  # an *additional, more recent* nightly so an upcoming toolchain that will break
+  # the Asupersync/oracledb stack is surfaced early, before we deliberately re-pin
+  # (see docs/TOOLCHAIN.md + ADR-0001). The line has no stable MSRV — both
+  # Asupersync and oracledb depend on specific nightly-only language features — so
+  # a red square here is an early warning to investigate, never a release blocker.
+  # continue-on-error keeps it from reddening required CI. The matrix carries the
+  # pinned date (so the comparison is apples-to-apples) plus the floating
+  # `nightly` channel; add a second pinned date here when bisecting a regression.
+  multi-nightly:
+    name: multi-nightly early-warning (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain:
+          - nightly-2026-05-11   # the pinned gate, repeated here as the baseline
+          - nightly              # floating: the next toolchain we may have to adopt
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.toolchain }}
+      - run: cargo +${{ matrix.toolchain }} build --workspace
+      - run: cargo +${{ matrix.toolchain }} test --workspace --all-targets
 
   docs:
     name: cargo doc (builds)
@@ -93,8 +128,13 @@ jobs:
   # The one-way engine-free boundary: no oraclemcp-* crate may import a plsql-*
   # engine crate. Trivially satisfied in this repo (there are no plsql-* crates),
   # but kept as a standing guard against an accidental re-introduction.
+  #
+  # The driver-adapter seam (B2): every real `oracledb::` driver call stays
+  # behind the single adapter file so an oracledb driver cut-over (e.g. the
+  # completed 0.2.2 -> 0.5.0 bump) touches exactly one file. Mirrored by the
+  # `driver_seam` test in crates/oraclemcp-db so `cargo test` catches a leak too.
   boundary:
-    name: engine-free boundary lint
+    name: engine-free boundary + driver-seam + honesty lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -104,6 +144,42 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - run: bash scripts/oraclemcp_boundary_lint.sh
+      - run: bash scripts/oraclemcp_driver_seam_lint.sh
+      - run: bash scripts/oraclemcp_honesty_grep.sh
+
+  # Public-API lock (B5; ADR-0002 mirror). oraclemcp-db is the canonical shared
+  # foundation (ADR-0006) and oraclemcp-error / oraclemcp-guard are the
+  # engine-free spine plsql-mcp converges onto, so their public API is a product
+  # with two consumers. Two complementary gates keep it from drifting:
+  #   * cargo public-api — exact-surface diff against the committed baselines in
+  #     crates/<crate>/api/<crate>.txt (deterministic, offline). Refresh the
+  #     baseline in the same PR for an INTENTIONAL change (see the script header
+  #     and crates/oraclemcp-db/README.md).
+  #   * cargo semver-checks — the SemVer contract: compares the working tree
+  #     against the last published release and fails when the diff is not allowed
+  #     by the version bump.
+  # Both tools render rustdoc JSON, so they run on the pinned nightly. The tools
+  # are not workspace dependencies (installed as standalone binaries), so they do
+  # not enter the dependency graph or affect cargo deny.
+  api-lock:
+    name: public-API lock (cargo public-api + semver-checks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-public-api,cargo-semver-checks
+      # Exact public-API surface lock against the committed baselines.
+      - run: bash scripts/oraclemcp_api_lock.sh
+      # SemVer contract for each locked crate (working tree vs last published
+      # release). Skipped automatically for a crate with no published baseline.
+      - run: cargo semver-checks check-release -p oraclemcp-error -p oraclemcp-guard -p oraclemcp-db
 
   release-metadata:
     name: release metadata sync

@@ -1,7 +1,7 @@
 [package]
 name = "oraclemcp"
-version = "0.3.0"
-description = "Engine-free, safe-by-default Oracle Database MCP server with a fail-closed SQL guard (independent open-source project)."
+version = "0.4.0"
+description = "Engine-free, governed least-privilege Oracle Database MCP server with a fail-closed SQL guard and confirmation-gated operating levels (independent open-source project)."
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -13,18 +13,29 @@ categories.workspace = true
 name = "oraclemcp"
 path = "src/main.rs"
 
+[features]
+default = []
+# A7 (oraclemcp-040-epic-wp-a-ia1.7): the consolidated trust/safety suite's
+# LIVE assertions need a reachable Oracle. This forwards to the canonical
+# `oraclemcp-db/live-xe` gate so `cargo test -p oraclemcp --features live-xe`
+# turns on the same DB-backed coverage; without it the live tests are compiled
+# out and the deterministic coverage still runs green offline.
+live-xe = ["oraclemcp-db/live-xe"]
+
 [dependencies]
-oraclemcp-core = { path = "../oraclemcp-core", version = "0.3.0" }
-oraclemcp-db = { path = "../oraclemcp-db", version = "0.3.0" }
-oraclemcp-config = { path = "../oraclemcp-config", version = "0.3.0" }
-oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.3.0" }
-oraclemcp-auth = { path = "../oraclemcp-auth", version = "0.3.0" }
-oraclemcp-error = { path = "../oraclemcp-error", version = "0.3.0" }
+oraclemcp-core = { path = "../oraclemcp-core", version = "0.4.0" }
+oraclemcp-db = { path = "../oraclemcp-db", version = "0.4.0" }
+oraclemcp-config = { path = "../oraclemcp-config", version = "0.4.0" }
+oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.4.0" }
+oraclemcp-auth = { path = "../oraclemcp-auth", version = "0.4.0" }
+oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.4.0" }
+oraclemcp-error = { path = "../oraclemcp-error", version = "0.4.0" }
+oraclemcp-telemetry = { path = "../oraclemcp-telemetry", version = "0.4.0" }
 asupersync.workspace = true
+async-trait.workspace = true
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 getrandom = "0.2"
 tracing.workspace = true
 tracing-subscriber = "0.3"

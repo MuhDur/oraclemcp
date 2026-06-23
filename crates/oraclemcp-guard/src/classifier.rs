@@ -764,11 +764,19 @@ fn user_defined_calls(sql: &str) -> Vec<ObjectRef> {
             {
                 continue;
             }
+            // `is_qualified` was established above with `matches!(toks[i - 3],
+            // Token::Word(_))`, so the schema word is present in correct logic.
+            // Fail closed rather than `unreachable!()`: under `panic = "abort"` a
+            // reached panic would crash the process instead of refusing. If the
+            // token state ever diverges, fall back to a schema-less qualified
+            // call — the routine is STILL pushed (over-detection only adds
+            // Guarded), so an unexpected state refuses by flagging rather than
+            // aborting and never fail-opens to Safe.
             let (schema, fname) = if is_qualified {
-                let Token::Word(s) = toks[i - 3] else {
-                    unreachable!()
-                };
-                (Some(s.value.clone()), name.value.clone())
+                match toks[i - 3] {
+                    Token::Word(s) => (Some(s.value.clone()), name.value.clone()),
+                    _ => (None, name.value.clone()),
+                }
             } else {
                 (None, name.value.clone())
             };
@@ -2298,6 +2306,29 @@ mod tests {
         let d = classify("SELECT 1 FROM dual; DROP TABLE orders");
         assert_eq!(d.danger, DangerLevel::Destructive);
         assert_eq!(d.required_level, Some(OperatingLevel::Ddl));
+    }
+
+    #[test]
+    fn qualified_udf_call_classify_path_stays_guarded() {
+        // The schema-qualified UDF detection path in `user_defined_calls` (the
+        // one that extracts the schema word from `toks[i - 3]`) must keep
+        // surfacing the call as a Guarded routine candidate. The schema-word
+        // extraction was hardened from `unreachable!()` to a fail-closed
+        // fallback (under `panic = "abort"` a reached panic would crash rather
+        // than refuse); the fallback still PUSHES the call, so an unexpected
+        // token state flags Guarded rather than fail-opening to Safe. Default
+        // oracle (Unknown purity) ⇒ a qualified UDF call is Guarded.
+        let d = classify("SELECT billing.weird_udf(x) FROM dual");
+        assert_eq!(d.danger, DangerLevel::Guarded);
+        assert!(
+            d.objects_affected
+                .iter()
+                .any(|o| o.to_ascii_lowercase().contains("weird_udf")),
+            "the qualified routine call should be surfaced"
+        );
+        // The bare-name builtin filter still applies when NOT qualified.
+        let safe = classify("SELECT ROUND(x) FROM dual");
+        assert_eq!(safe.danger, DangerLevel::Safe);
     }
 
     #[test]

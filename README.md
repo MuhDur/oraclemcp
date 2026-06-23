@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/assets/hero.svg" alt="oraclemcp: safe-by-default Oracle Database MCP server in pure Rust" width="100%">
+  <img src=".github/assets/hero.svg" alt="oraclemcp: governed, least-privilege Oracle Database MCP server in pure Rust" width="100%">
 </p>
 
 <p align="center">
@@ -10,9 +10,9 @@
   <img src="https://img.shields.io/badge/rustc-nightly--2026--05--11-orange.svg" alt="nightly-2026-05-11">
 </p>
 
-> **Safe-by-default Oracle Database MCP server, in pure Rust.**
+> **Governed, least-privilege Oracle Database access for AI agents — in pure Rust.**
 
-`oraclemcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives an AI agent safe-by-default access to an Oracle database: schema introspection, DDL, compile errors, source search, ad-hoc read queries, plan analysis, and an explicit profile-gated execution path for non-read SQL. Every raw statement the agent submits is classified *before* it can reach Oracle. Read tools only admit statements proven read-only; `oracle_execute` only runs statements permitted by the active profile/session level, rolls DML back by default, and requires a preview-derived confirmation token before commit. Session elevation is explicit, temporary, and capped by profile `max_level`. The core is engine-free and `#![forbid(unsafe_code)]`.
+`oraclemcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives an AI agent governed, least-privilege access to an Oracle database: schema introspection, DDL, compile errors, source search, ad-hoc read queries, plan analysis, and an explicit profile-gated execution path for non-read SQL. Every raw statement the agent submits is classified *before* it can reach Oracle. Read tools only admit statements proven read-only; `oracle_execute` only runs statements permitted by the active profile/session level, rolls DML back by default, and requires a preview-derived confirmation token before commit. Session elevation is explicit, temporary, and capped by profile `max_level`. The core is engine-free and `#![forbid(unsafe_code)]`.
 
 > _An independent open-source project; not affiliated with Oracle. For Oracle's own MCP servers, see [oracle/mcp](https://github.com/oracle/mcp)._
 
@@ -28,9 +28,11 @@
 ## Quick start
 
 This branch is pinned to **`nightly-2026-05-11`**. The thin-native line has no
-stable MSRV because the Asupersync/oracledb stack uses nightly-only language
-features. The repository's `rust-toolchain.toml` selects the pin for local
-builds; direct `cargo install` users should use the same toolchain.
+stable MSRV because **asupersync 0.3.4** uses nightly-only language features
+(`#![feature(try_trait_v2)]` and `try_trait_v2_residual`); the pinned `oracledb`
+0.5.0 driver itself is stable-clean. The repository's `rust-toolchain.toml`
+selects the pin for local builds; direct `cargo install` users should use the
+same toolchain.
 
 ```sh
 rustup toolchain install nightly-2026-05-11 --component rustfmt --component clippy
@@ -70,9 +72,9 @@ oraclemcp --json setup --profile db_ro
 docker run -i --rm \
   -v "$HOME/.config/oraclemcp:/root/.config/oraclemcp:ro" \
   -e ORACLE_APP_PASSWORD \
-  ghcr.io/muhdur/oraclemcp:0.3.0          # MCP over stdio, against the configured profile
+  ghcr.io/muhdur/oraclemcp:0.4.0          # MCP over stdio, against the configured profile
 
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.3.0   # tool surface only (no DB)
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.4.0   # tool surface only (no DB)
 ```
 
 > The Docker image and crates are Apache-2.0 OR MIT and do not redistribute Oracle Instant Client.
@@ -149,6 +151,12 @@ or an explicit `--allow-no-auth` development opt-in. Non-loopback binds require
 Connection profiles are resolved from layered configuration (`oraclemcp-config`); select one with `serve --profile <name>`.
 
 ### Connection profiles
+
+> **See also:** [`oraclemcp.example.toml`](oraclemcp.example.toml) is a fully
+> annotated, copy-pasteable config showing every field with its default;
+> [`docs/configuration.md`](docs/configuration.md) is the canonical field
+> reference (types, defaults, precedence, the operating-level ladder, the
+> `mcp_exposed` opt-out, auth modes, and `base` inheritance).
 
 For live database access, create `~/.config/oraclemcp/profiles.toml`:
 
@@ -328,6 +336,20 @@ A few further profile keys are optional:
   `app_context = []`.
 - `read_only_standby = true`: mark the target as a read-only standby so the
   profile cannot be elevated above `READ_ONLY` regardless of `max_level`.
+- `mcp_exposed = false`: hide this profile from the MCP **agent-facing** surface
+  (E5). This is a **per-profile opt-out** — a profile is exposed to the agent
+  **by default**, and setting `false` hides only that one profile. A hidden
+  profile is invisible to `oracle_list_profiles`, `oracle_switch_profile`,
+  `oracle_search_objects`, and completion (a hidden or guessed name fails closed
+  identically); the operator/CLI (`oraclemcp profiles`, `doctor`, `--profile`)
+  still sees every profile. There is no global flip, and one profile's setting
+  never affects another's. It is a **visibility/scoping convenience, not an
+  access control** — the real bound on what a profile can do is
+  `max_level`/`protected`/DB privileges/the fail-closed classifier. At startup
+  the server logs a behavior-neutral exposure summary to stderr, e.g.
+  `MCP exposing 1 profile(s): dev_ro [ReadOnly] (1 hidden via mcp_exposed=false)`.
+  See [`docs/configuration.md`](docs/configuration.md) and the cross-profile
+  exposure threat in [`docs/threat-model.md`](docs/threat-model.md).
 
 Then launch:
 
@@ -348,12 +370,25 @@ only. Literal credentials are rejected when `protected = true`.
 
 The current `oraclemcp` thin adapter fails explicitly for auth/features it
 cannot serve end-to-end safely, such as external wallet auth without
-username/password, OCI IAM token retrieval from local OCI config, and
-Kerberos/RADIUS auth. These appear as structured unsupported diagnostics in
+username/password, OCI IAM database-token connect, and Kerberos/RADIUS auth.
+These appear as structured unsupported diagnostics in
 `oraclemcp doctor --profile <profile>` and MCP error envelopes; the binary does
-not silently fall back to thick mode. The published `oracledb` 0.2.2 driver has
-lower-level access-token support, but `oraclemcp` does not yet wire a complete
-IAM token source and refresh flow into connection profiles.
+not silently fall back to thick mode.
+
+#### OCI IAM database-token auth
+
+The OCI cloud fields `use_iam_token` (bool) and `iam_config_profile`
+(`Option<String>`) under `[profiles.oci]` **parse** through strict config
+validation, but the pinned `oracledb` 0.5.0 thin adapter **fails closed** on an
+IAM-token connect today: `oraclemcp` wires no production OCI token source, so
+`use_iam_token = true` returns a structured unsupported-auth diagnostic
+(pointing at the as-yet-unwired IAM token-source seam) rather than connecting,
+and any database access token is **refused over a non-TCPS transport** before it
+can reach the driver (defense in depth — a token must never travel in clear
+text). This parse-but-fail-closed behavior is covered by the
+`iam_token_over_non_tcps_is_refused_fail_closed` test in
+`crates/oraclemcp-db/src/connection.rs`. End-to-end IAM-token support is
+deferred (bead k6q.9), pending a production OCI SDK token source/refresh path.
 
 Thin result conversion materializes driver-side locators and cursors before
 serializing tool output: CLOB/BLOB/BFILE locators are read with the query LOB
@@ -398,6 +433,22 @@ cargo test -p oraclemcp-db --features live-xe --test live_oracle -- --nocapture
 
 # Faster profile-only smoke subset.
 cargo test -p oraclemcp-db --features live-xe live_profile_config -- --nocapture
+
+# Heavy live load/soak (latency p50/p95/p99, leak/balance/drain). Additionally
+# opt-in via ORACLEMCP_LIVE_XE=1 on top of the same ORACLEMCP_TEST_* connection
+# env. See docs/performance-footprint.md.
+ORACLEMCP_LIVE_XE=1 \
+  ORACLEMCP_TEST_DSN=localhost:1521/FREEPDB1 \
+  ORACLEMCP_TEST_USER=... ORACLEMCP_TEST_PASSWORD=... \
+  cargo test -p oraclemcp-db --test load_soak -- --ignored --nocapture
+```
+
+Start a throwaway Oracle FREE 23ai database for the live suite with Docker (it
+provides `FREEPDB1` on `:1521`):
+
+```sh
+docker run -d --name oracle-free -p 1521:1521 \
+  -e ORACLE_PASSWORD=<pw> gvenzl/oracle-free:23-slim
 ```
 
 If `serve --profile <name>` is provided, it overrides `default_profile`. If neither is set and exactly one profile exists, that sole profile is used.
@@ -454,6 +505,77 @@ oraclemcp sign-tool ~/.config/oraclemcp/tools.d/customer.toml --tool app_custome
 
 The command prints the signature values to place into matching `[[tool]]`
 blocks; it does not print the HMAC key.
+
+## Building and testing
+
+`oraclemcp` builds on a single **pinned Rust nightly** (`nightly-2026-05-11`,
+recorded in `rust-toolchain.toml`). The pin exists because **asupersync 0.3.4**
+uses nightly-only language features (`try_trait_v2` + `try_trait_v2_residual`) —
+the `oracledb` 0.5.0 driver is stable-clean. The pin is **build-time only**: the
+shipped binary has no runtime dependency on nightly. See
+[`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) for the full rationale and the
+re-pin runbook.
+
+```sh
+rustup toolchain install nightly-2026-05-11 --component rustfmt --component clippy
+
+# Build and run the full test matrix (the workspace's rust-toolchain.toml picks the pin).
+cargo build --workspace
+cargo test --workspace --all-targets
+cargo test --workspace --doc
+```
+
+Before a release, the same gates CI enforces must pass on the pinned toolchain
+(full list and a copy-pasteable checklist in
+[`docs/release-checklist.md`](docs/release-checklist.md)):
+
+```sh
+cargo fmt --all -- --check                                  # formatting
+cargo clippy --workspace --all-targets -- -D warnings       # lint, warnings = errors
+cargo deny check                                            # advisories / licenses / bans / sources
+bash scripts/oraclemcp_driver_seam_lint.sh                  # driver-adapter seam stays one file
+bash scripts/oraclemcp_honesty_grep.sh                      # no over-claiming framing
+bash scripts/oraclemcp_api_lock.sh                          # public API lock (no unreviewed surface drift)
+RELEASE_TAG=vX.Y.Z bash scripts/release_preflight.sh        # release metadata sync
+```
+
+### Running the live suite
+
+The default test run needs no database. The live thin paths run against a real
+Oracle 23ai via the unified `ORACLEMCP_TEST_*` env; a throwaway Oracle FREE is
+enough (provides `FREEPDB1` on `:1521`):
+
+```sh
+docker run -d --name oracle-free -p 1521:1521 \
+  -e ORACLE_PASSWORD=<pw> gvenzl/oracle-free:23-slim
+
+export ORACLEMCP_TEST_DSN=localhost:1521/FREEPDB1
+export ORACLEMCP_TEST_USER=... ORACLEMCP_TEST_PASSWORD=...
+cargo test -p oraclemcp-db --features live-xe --test live_oracle -- --nocapture
+
+# Heavy load/soak is additionally opt-in via ORACLEMCP_LIVE_XE=1.
+ORACLEMCP_LIVE_XE=1 cargo test -p oraclemcp-db --test load_soak -- --ignored --nocapture
+```
+
+The full live env block (wallet/TCPS, proxy, DRCP, edition, app-context vars) is
+in [the live test commands above](#connection-profiles) and in
+[`docs/operations.md`](docs/operations.md) §5.7. Connection-profile fields are
+documented in [`docs/configuration.md`](docs/configuration.md).
+
+## Supported Oracle versions
+
+| Dimension | Support |
+|---|---|
+| **Database version** | Tested against **Oracle Database 23ai**, including the free **Oracle FREE 23ai** image (`gvenzl/oracle-free:23-slim`, `FREEPDB1`). The pure-Rust thin `oracledb` driver speaks the Oracle Net protocol directly — no Instant Client or ODPI-C. |
+| **EZConnect** | Supported (`host:port/service`, plus EZConnect-Plus `tcps://…?wallet_location=…`) and `tnsnames.ora` aliases. |
+| **TCPS / wallet (TLS, mTLS)** | Supported — auto-login `cwallet.sso`, unencrypted `ewallet.pem`, and password-protected `ewallet.p12` (via `wallet_password_ref`), with `ssl_server_dn_match` / `ssl_server_cert_dn` / `use_sni` controls. |
+| **OCI IAM database token** | Fields parse but **fail closed today** (structured unsupported-auth diagnostic; refused over non-TCPS). End-to-end support is deferred — see the [OCI section](#oci-iam-database-token-auth) and [`docs/configuration.md`](docs/configuration.md). |
+| **Proxy auth** | Supported (`proxy_user` + `target_schema` with `CONNECT THROUGH`). |
+| **DRCP** | Supported (server routing: `pooled` / `connection_class` / `purity`). |
+| **Read-only standby (Active Data Guard)** | Supported — mark the profile `read_only_standby = true` to force `READ_ONLY` regardless of `max_level`; `oracle_explain_plan` (which writes `PLAN_TABLE`) refuses on a standby. |
+
+Connection modes are configured per profile in `profiles.toml`; see
+[`docs/configuration.md`](docs/configuration.md) for the field reference.
 
 ## Tools
 
@@ -572,6 +694,15 @@ READ_ONLY  <  READ_WRITE  <  DDL  <  ADMIN
 
 Profiles default to **`READ_ONLY`** unless the operator explicitly sets a higher `default_level`, and `max_level` is an immutable ceiling for that profile. For every raw statement, the classifier derives the *minimum* level the statement needs; the level gate then admits it only when the active session already permits that level. Everything else is refused fail-closed, and a statement the classifier cannot prove safe is treated as dangerous, never the reverse. The classifier is whitespace-, comment-, quote-, and batch-aware (it fails closed on desynchronized multi-statement input), and is continuously exercised by a differential adversarial corpus and a cargo-fuzz target.
 
+A profile can also be scoped **out of the agent's view** with `mcp_exposed =
+false` (a per-profile opt-out; profiles are exposed by default). A hidden profile
+is invisible to the agent-facing tools while the operator/CLI still sees it. This
+is a visibility convenience, *not* a security boundary — the enforced limit on
+what any profile can do remains `max_level`/`protected`/DB privileges/the
+classifier, so keep a hidden privileged target genuinely least-privileged too.
+The startup log prints which profiles are exposed and at what ceiling. See
+[`docs/configuration.md`](docs/configuration.md) for the full model.
+
 `oracle_set_session_level` is the only general session-elevation tool. It never
 touches database data, never raises the profile ceiling, and defaults to
 preview. Elevating to `READ_WRITE`, `DDL`, or `ADMIN` requires the preview token
@@ -606,6 +737,39 @@ synchronously in the generic core.
 in-process patch preview for the active profile, but the applying call must
 still pass the confirmation token from the preview.
 
+### Least-privilege database account
+
+The classifier and the per-DB operating-level ceiling are the *enforced*
+control, but they are strongest when paired with a database account that simply
+**cannot** write — defense in depth. For a read-only profile, connect as a
+least-privilege user (ideally a [proxy
+user](#connection-profiles) so individual identity is preserved in the audit
+trail) granted only:
+
+```sql
+-- Minimum: connect + read the data dictionary the read tools rely on.
+CREATE USER mcp_ro IDENTIFIED BY <secret>;
+GRANT CREATE SESSION TO mcp_ro;
+GRANT SELECT ANY DICTIONARY TO mcp_ro;   -- powers schema_inspect / get_ddl / describe
+-- Then grant SELECT only on the specific objects the agent should read, e.g.:
+GRANT SELECT ON app.customers TO mcp_ro;
+-- For proxy auth (preferred), let the proxy connect as the read-only target:
+ALTER USER mcp_ro GRANT CONNECT THROUGH mcp_proxy;
+```
+
+Grant **no** write-implying system privileges (`CREATE TABLE`, `INSERT/UPDATE/
+DELETE ANY TABLE`, `CREATE/ALTER ANY PROCEDURE`, `ALTER SYSTEM`, …). For a
+read-write profile, grant only the specific object DML/DDL the agent needs, and
+keep the profile `max_level` no higher than that work requires.
+
+`oraclemcp doctor --profile <p>` includes a **Write posture** check (11): with a
+live connection it reads the session's own `SESSION_PRIVS` and reports a
+read-only posture when the principal holds no write-implying system privilege, or
+**warns** (naming the offending privileges) when it can write. The same check
+reports the supported TCPS wallet modes — auto-login `cwallet.sso`, unencrypted
+`ewallet.pem`, and password-protected `ewallet.p12` (via `wallet_password` /
+`wallet_password_ref`) are all supported.
+
 ## Architecture
 
 The engine-free MCP core is a small, one-way dependency DAG; no crate here imports a PL/SQL analysis engine (a boundary the CI enforces):
@@ -635,10 +799,6 @@ If no profile is configured or Oracle is unreachable, `oraclemcp` falls back to
 a stub connection: `serve`, `capabilities`, and `doctor` all work, and any live
 tool call returns a structured error envelope rather than crashing. This makes
 the binary safe to install, inspect, and test anywhere, CI included.
-
-## About Contributions
-
-*About Contributions:* Please don't take this the wrong way, but I do not accept outside contributions for any of my projects. I simply don't have the mental bandwidth to review anything, and it's my name on the thing, so I'm responsible for any problems it causes; thus, the risk-reward is highly asymmetric from my perspective. I'd also have to worry about other "stakeholders," which seems unwise for tools I mostly make for myself for free. Feel free to submit issues, and even PRs if you want to illustrate a proposed fix, but know I won't merge them directly. Instead, I'll have Claude or Codex review submissions via `gh` and independently decide whether and how to address them. Bug reports in particular are welcome. Sorry if this offends, but I want to avoid wasted time and hurt feelings. I understand this isn't in sync with the prevailing open-source ethos that seeks community contributions, but it's the only way I can move at this velocity and keep my sanity.
 
 ## License
 

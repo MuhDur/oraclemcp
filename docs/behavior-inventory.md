@@ -12,7 +12,7 @@ query text.
 | --- | --- | --- |
 | Workspace | Cargo workspace with 9 crates plus `oraclemcp` binary, `resolver = "2"`, edition 2024, pinned nightly `nightly-2026-05-11`, and no stable MSRV on the thin-native line. | `Cargo.toml`, `rust-toolchain.toml` |
 | Safety posture | Every crate forbids unsafe code; raw SQL safety is centered on `oraclemcp-guard`. | `Cargo.toml`, crate roots, `AGENTS.md` |
-| Current release line | All package versions and `server.json` are aligned at 0.3.0. | `Cargo.toml`, crate `Cargo.toml` files, `server.json` |
+| Current release line | All package versions and `server.json` are aligned at 0.4.0. | `Cargo.toml`, crate `Cargo.toml` files, `server.json` |
 | Current DB mode | Default build includes live Oracle support through the pure-Rust `oracledb` thin driver. | `README.md`, `crates/oraclemcp-db/Cargo.toml` |
 | Current runtime/transport | Native stdio and native Streamable HTTP live in `oraclemcp-core`; dispatch receives explicit Asupersync `Cx` contexts; Tokio, `rmcp`, Axum, Hyper, ODPI-C, and `r2d2` are absent from the current manifests and lockfile. | `crates/oraclemcp-core/src/server.rs`, `crates/oraclemcp-core/src/http.rs`, `Cargo.lock`, `Cargo.toml` |
 | Current bead state | Repo-local `.beads/` contains the migration graph and W-series release hardening work. | `br list --json`, `bv --robot-triage` |
@@ -52,7 +52,7 @@ query text.
 | Profile/session | `oracle_list_profiles`, `oracle_connection_info`, `oracle_switch_profile`, `oracle_set_session_level`. Session level cannot exceed profile ceiling; protected profiles remain read-only. | `README.md`, `crates/oraclemcp/src/registry.rs`, `crates/oraclemcp/src/dispatch/mod.rs` |
 | Read/query | `oracle_query`, `oracle_preview_sql`, `oracle_sample_rows`, `oracle_read_clob`. Raw SQL is classified before DB access; reads admit only proven read-only SQL. | `crates/oraclemcp/src/dispatch/mod.rs`, `crates/oraclemcp-guard/tests/*` |
 | Guarded execution | `oracle_execute`, `oracle_compile_object`, `oracle_create_or_replace`, `oracle_patch_source`. DML is rollback-by-default; DDL/Admin require commit and confirmation. | `README.md`, `crates/oraclemcp/src/dispatch/mod.rs`, `crates/oraclemcp/src/dispatch/tests.rs` |
-| Unadvertised guarded-write router | `crates/oraclemcp-core/src/session_tool.rs` implements `oracle_session` lease/escalation/transaction routing, but `oraclemcp` deliberately does not include it in `TOOL_NAMES` or `tools/list`. This read-only binary keeps guarded-write session orchestration out of the served surface unless a future explicit opt-in build adds separate release gates. | `crates/oraclemcp-core/src/session_tool.rs`, `crates/oraclemcp/src/registry.rs`, `AGENTS.md` |
+| Unadvertised guarded-write router | `crates/oraclemcp-core/src/session_tool.rs` implements `oracle_session` lease/escalation/transaction routing, but `oraclemcp` deliberately does not include it in `TOOL_NAMES` or `tools/list`. The served binary exposes guarded write/DDL execution only through individual classifier-gated tools (`oracle_execute`, `oracle_create_or_replace`, …); it keeps the broader `oracle_session` lease/escalation/transaction router off the served surface unless a future explicit opt-in build adds separate release gates. | `crates/oraclemcp-core/src/session_tool.rs`, `crates/oraclemcp/src/registry.rs`, `AGENTS.md` |
 | Dictionary/source | `oracle_list_schemas`, `oracle_schema_inspect`, `oracle_describe`, `oracle_describe_index`, `oracle_describe_trigger`, `oracle_describe_view`, `oracle_get_ddl`, `oracle_get_source`, `oracle_compile_errors`, `oracle_search_source`, `oracle_plscope_inspect`. Uses `ALL_*`/dictionary views with privilege degradation. | `README.md`, `crates/oraclemcp-db/src/intelligence.rs`, `crates/oraclemcp-db/src/privileges.rs` |
 | Diagnostics | `oracle_explain_plan`, `oracle_capabilities`. Explain-plan is an explicit diagnostic write on primary because it writes `PLAN_TABLE`; it is refused by default and requires `READ_WRITE` plus `allow_plan_table_write=true`. | `crates/oraclemcp/src/dispatch/mod.rs`, `crates/oraclemcp-db/src/intelligence.rs`, `crates/oraclemcp-db/src/standby.rs`, `oraclemcp-thin-only-oracle-driver-kod.1` |
 | Compatibility aliases | Legacy names such as `query`, `execute_approved`, `describe_table`, `get_ddl`, `get_object_source`, and others are still registered for client compatibility. | `README.md`, `crates/oraclemcp/src/registry.rs` |
@@ -104,10 +104,10 @@ query text.
 
 ## Thin Driver Release Dependency Decision
 
-Verified on 2026-06-18:
+Verified on 2026-06-23:
 
-- `Cargo.lock` resolves the published `oracledb = 0.2.2` and
-  `oracledb-protocol = 0.2.2` crates from crates.io.
+- `Cargo.lock` resolves the published `oracledb = 0.5.0` and
+  `oracledb-protocol = 0.5.0` crates from crates.io.
 - The published driver exposes the pure-Rust thin connection path plus the
   blocking facade used by the current synchronous DB trait boundary.
 - The local `/home/durakovic/projects/rust-oracledb` checkout is a normal
@@ -117,7 +117,7 @@ Verified on 2026-06-18:
 
 Decision:
 
-- `oraclemcp` consumes `oracledb = 0.2.2` from crates.io, declared in the
+- `oraclemcp` consumes `oracledb = 0.5.0` from crates.io, declared in the
   workspace dependency table with `default-features = false`.
 - No vendoring is used. No releaseable `oraclemcp` crate may depend on
   `/home/durakovic/projects/rust-oracledb` or any other external local path.
@@ -158,8 +158,9 @@ Remaining upstream thin-driver gaps tracked in `/home/durakovic/projects/rust-or
 
 - `rust-oracledb-o0b`: external wallet auth without username/password.
 - `rust-oracledb-5bh`: end-to-end OCI IAM database-token retrieval/refresh for
-  `oraclemcp` profiles remains unwired even though `oracledb` 0.2.2 exposes the
-  lower-level access-token connect option.
+  `oraclemcp` profiles remains unwired even though `oracledb` 0.5.0 exposes the
+  lower-level access-token connect option (`ConnectOptions::with_access_token`).
+  Tracked downstream as deferred bead k6q.9.
 
 ## Proxy Auth, DRCP, and Enterprise Auth
 
@@ -168,7 +169,7 @@ Remaining upstream thin-driver gaps tracked in `/home/durakovic/projects/rust-or
 | Proxy auth | Thin connect authenticates as `proxy_user` and passes the target schema through the driver's proxy-user connect option. | Requires normal Oracle `CONNECT THROUGH` grants; live tests run when both proxy env vars are set. |
 | External/wallet auth | Legacy thick mode could attempt empty username/password wallet auth. Thin mode now reports unsupported external wallet auth explicitly until the published driver grows that path. | Never silently fall back to password auth or thick mode. |
 | Kerberos/RADIUS | Thin adapter rejects these modes with targeted unsupported-auth errors. | Add only if the published thin driver exposes a safe implementation. |
-| IAM token | `use_iam_token` still fails closed because `oraclemcp` has no end-to-end OCI token source/refresh path in profiles. | Wire only with redacted token sourcing, refresh, and live coverage; do not claim support from the lower-level driver primitive alone. |
+| IAM token | `use_iam_token` / `iam_config_profile` parse but fail closed: the `oracledb` 0.5.0 adapter has the `with_access_token` primitive, yet `oraclemcp` wires no production OCI token source, so a configured IAM-token connect returns a structured unsupported-auth diagnostic and any token over a non-TCPS transport is refused. Deferred bead k6q.9. | Wire only with redacted token sourcing, refresh, and live coverage; do not claim support from the lower-level driver primitive alone. |
 | DRCP | `drcp.rs` appends connect string parameters such as `server=pooled`, class, and purity. | Parser and live checks cover the connect-string shaping; keep pool identity attributes segregated. |
 | Non-homogeneous pools | Pool settings carry the full thin `OracleConnectOptions` for each pool instance. | Do not reuse sessions across incompatible identity/auth attributes. |
 

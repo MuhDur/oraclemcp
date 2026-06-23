@@ -219,7 +219,13 @@ mod tests {
                 self.0.flush()
             }
         }
-        (Auditor::new(Box::new(Shared(sink.clone()))), sink)
+        (
+            Auditor::new(
+                Box::new(Shared(sink.clone())),
+                oraclemcp_audit::SigningKey::new("test", b"qe-test-key".to_vec()),
+            ),
+            sink,
+        )
     }
 
     const SQL: &str = "UPDATE orders SET status='X' WHERE id=42";

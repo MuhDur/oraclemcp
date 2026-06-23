@@ -41,15 +41,32 @@ pub enum ResourceUri {
     Capabilities,
     /// `oracle://tools` — the operator virtual-tool catalog (P1-13).
     Tools,
+    /// `oracle-export://{id}` — a materialized large-result export (E3). The
+    /// `id` is an opaque, tamper-evident, access-bound token.
+    Export {
+        /// The opaque export id.
+        id: String,
+    },
 }
 
 impl ResourceUri {
-    /// Parse an `oracle://…` URI.
+    /// Parse an `oracle://…` (or `oracle-export://…`) URI.
     pub fn parse(uri: &str) -> Result<Self, ErrorEnvelope> {
+        // E3 export URIs use their own scheme so the opaque id (which contains a
+        // `.` and is not an `oracle://<segment>/...` path) is carried verbatim.
+        if let Some(id) = uri.strip_prefix("oracle-export://") {
+            if id.is_empty() || id.contains('/') {
+                return Err(ErrorEnvelope::new(
+                    ErrorClass::InvalidArguments,
+                    format!("unrecognized export resource URI: {uri}"),
+                ));
+            }
+            return Ok(ResourceUri::Export { id: id.to_owned() });
+        }
         let rest = uri.strip_prefix("oracle://").ok_or_else(|| {
             ErrorEnvelope::new(
                 ErrorClass::InvalidArguments,
-                "resource URI must start with oracle://",
+                "resource URI must start with oracle:// (or oracle-export://)",
             )
         })?;
         let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
@@ -92,6 +109,7 @@ impl ResourceUri {
             ResourceUri::Session { lease_id } => format!("oracle://session/{lease_id}"),
             ResourceUri::Capabilities => "oracle://capabilities".to_owned(),
             ResourceUri::Tools => "oracle://tools".to_owned(),
+            ResourceUri::Export { id } => format!("oracle-export://{id}"),
         }
     }
 }

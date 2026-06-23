@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
+use asupersync::Cx;
 use oraclemcp::dispatch::OracleDispatcher;
 use oraclemcp::registry::{capabilities, tool_registry};
 use oraclemcp_auth::{ResourceServerConfig, SignatureVerifier};
@@ -17,32 +18,38 @@ use serde_json::{Value, json};
 
 struct NoExecMock;
 
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for NoExecMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
 
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo::default())
     }
 
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         Ok(Vec::new())
     }
 
-    fn execute(&self, _sql: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _sql: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         panic!("read-scoped HTTP test must not reach DB execution")
     }
 
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 }
@@ -110,9 +117,9 @@ fn server() -> OracleMcpServer {
 fn server_with_max_level(max_level: OperatingLevel) -> OracleMcpServer {
     let registry = tool_registry();
     OracleMcpServer::new(
-        "0.3.0",
+        env!("CARGO_PKG_VERSION"),
         registry,
-        capabilities("0.3.0", true, false),
+        capabilities(env!("CARGO_PKG_VERSION"), true, false),
         Arc::new(OracleDispatcher::new_with_profile_level(
             Box::new(NoExecMock),
             Some("http-oauth-e2e".to_owned()),

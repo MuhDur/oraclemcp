@@ -8,18 +8,14 @@ use serde_json::Value;
 
 use asupersync::Cx;
 
-use crate::connection::OracleConnection;
+// Cancellation checkpoints route through the single crate-wide
+// `connection::db_checkpoint`, which is generic over the `Cx` capability row:
+// a read handler running under a narrowed `Cx<ReadPathCaps>` (A9) checkpoints
+// exactly like one under the full row — no `SPAWN`/`REMOTE`/`RANDOM` needed.
+use crate::connection::{OracleConnection, db_checkpoint};
 use crate::error::DbError;
 use crate::serialize::{PageColumnCache, SerializeOptions, json_byte_len};
 use crate::types::OracleBind;
-
-fn query_checkpoint(cx: Option<&Cx>, phase: &'static str) -> Result<(), DbError> {
-    let Some(cx) = cx else {
-        return Ok(());
-    };
-    cx.checkpoint_with(phase)
-        .map_err(|err| DbError::Cancelled(format!("{phase}: {err}")))
-}
 
 /// Caps on a single page of results (plan §8.2 / §10).
 #[derive(Clone, Copy, Debug)]
@@ -80,22 +76,16 @@ pub fn cursor_to_offset(cursor: Option<&str>) -> usize {
 
 /// Execute one page of a read query against `conn`: bind-first, paginated, and
 /// capped. Fetches `max_rows + 1` to detect "more"; truncates on the byte cap.
-pub fn read_query(
-    conn: &dyn OracleConnection,
-    sql: &str,
-    binds: &[OracleBind],
-    caps: QueryCaps,
-    offset: usize,
-    serialize_opts: &SerializeOptions,
-) -> Result<QueryResponse, DbError> {
-    let fetch = caps.max_rows.saturating_add(1).max(1);
-    let wrapped = paginated_sql(sql, offset, fetch);
-    let rows = conn.query_rows_with_serialize_options(&wrapped, binds, serialize_opts)?;
-    query_response_from_rows_checked(None, rows, caps, offset, serialize_opts)
-}
-
-/// Cancellation-aware variant of [`read_query`].
-pub fn read_query_cx(
+///
+/// `Cx`-first and `async` (B1): cancellation/budget travel with the call, and
+/// the DB round trip is `.await`-ed on the one ambient runtime. The
+/// page-building/serialization loop is checkpointed against the SAME `cx`. The
+/// read DB round trip needs the full `&Cx` (the native driver requires `IO`);
+/// the dispatcher still narrows its handler-level context to
+/// `oraclemcp_core::ReadPathCaps` for the A9 structural guarantee — the DB
+/// round trip is the one place that legitimately needs the unnarrowed effect
+/// row.
+pub async fn read_query(
     cx: &Cx,
     conn: &dyn OracleConnection,
     sql: &str,
@@ -106,29 +96,16 @@ pub fn read_query_cx(
 ) -> Result<QueryResponse, DbError> {
     let fetch = caps.max_rows.saturating_add(1).max(1);
     let wrapped = paginated_sql(sql, offset, fetch);
-    let rows = conn.query_rows_with_serialize_options_cx(cx, &wrapped, binds, serialize_opts)?;
-    query_response_from_rows_checked(Some(cx), rows, caps, offset, serialize_opts)
+    let rows = conn
+        .query_rows_with_serialize_options(cx, &wrapped, binds, serialize_opts)
+        .await?;
+    query_response_from_rows_checked(cx, rows, caps, offset, serialize_opts)
 }
 
 /// Execute one page of a read query with named binds (`:name`). This is used by
 /// operator-defined tools, whose SQL is authored in config and naturally refers
-/// to named parameters.
-pub fn read_query_named(
-    conn: &dyn OracleConnection,
-    sql: &str,
-    binds: &[(String, OracleBind)],
-    caps: QueryCaps,
-    offset: usize,
-    serialize_opts: &SerializeOptions,
-) -> Result<QueryResponse, DbError> {
-    let fetch = caps.max_rows.saturating_add(1).max(1);
-    let wrapped = paginated_sql(sql, offset, fetch);
-    let rows = conn.query_rows_named_with_serialize_options(&wrapped, binds, serialize_opts)?;
-    query_response_from_rows_checked(None, rows, caps, offset, serialize_opts)
-}
-
-/// Cancellation-aware variant of [`read_query_named`].
-pub fn read_query_named_cx(
+/// to named parameters. `Cx`-first and `async` (B1) — see [`read_query`].
+pub async fn read_query_named(
     cx: &Cx,
     conn: &dyn OracleConnection,
     sql: &str,
@@ -139,30 +116,20 @@ pub fn read_query_named_cx(
 ) -> Result<QueryResponse, DbError> {
     let fetch = caps.max_rows.saturating_add(1).max(1);
     let wrapped = paginated_sql(sql, offset, fetch);
-    let rows =
-        conn.query_rows_named_with_serialize_options_cx(cx, &wrapped, binds, serialize_opts)?;
-    query_response_from_rows_checked(Some(cx), rows, caps, offset, serialize_opts)
+    let rows = conn
+        .query_rows_named_with_serialize_options(cx, &wrapped, binds, serialize_opts)
+        .await?;
+    query_response_from_rows_checked(cx, rows, caps, offset, serialize_opts)
 }
 
-#[cfg(test)]
-fn query_response_from_rows(
-    rows: Vec<crate::types::OracleRow>,
-    caps: QueryCaps,
-    offset: usize,
-    serialize_opts: &SerializeOptions,
-) -> QueryResponse {
-    query_response_from_rows_checked(None, rows, caps, offset, serialize_opts)
-        .expect("non-cancellable query response construction cannot be cancelled")
-}
-
-fn query_response_from_rows_checked(
-    cx: Option<&Cx>,
+fn query_response_from_rows_checked<Caps>(
+    cx: &Cx<Caps>,
     rows: Vec<crate::types::OracleRow>,
     caps: QueryCaps,
     offset: usize,
     serialize_opts: &SerializeOptions,
 ) -> Result<QueryResponse, DbError> {
-    query_checkpoint(cx, "oracle_query.serialize.before")?;
+    db_checkpoint(cx, "oracle_query.serialize.before")?;
     let more_by_rows = rows.len() > caps.max_rows;
     let page = &rows[..rows.len().min(caps.max_rows)];
 
@@ -177,7 +144,7 @@ fn query_response_from_rows_checked(
     let mut byte_truncated = false;
     for (idx, row) in page.iter().enumerate() {
         if idx % 64 == 0 {
-            query_checkpoint(cx, "oracle_query.serialize.rows")?;
+            db_checkpoint(cx, "oracle_query.serialize.rows")?;
         }
         let value = match &column_cache {
             Some(cache) => cache.serialize_row(row, serialize_opts),
@@ -200,7 +167,7 @@ fn query_response_from_rows_checked(
         None
     };
 
-    query_checkpoint(cx, "oracle_query.serialize.after")?;
+    db_checkpoint(cx, "oracle_query.serialize.after")?;
     Ok(QueryResponse {
         columns,
         row_count: out_rows.len(),
@@ -216,23 +183,61 @@ mod tests {
     use super::*;
     use crate::types::{OracleCell, OracleConnectionInfo, OracleRow};
 
+    use asupersync::runtime::RuntimeBuilder;
+
+    /// Run an async test body on a fresh current-thread runtime, handing it the
+    /// installed request `Cx`.
+    fn run_with_cx<F, Fut, T>(body: F) -> T
+    where
+        F: FnOnce(Cx) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            body(cx).await
+        })
+    }
+
+    /// Build a query response from already-materialized rows on a real `Cx`
+    /// (the serialize path is checkpointed, so it needs a context).
+    fn query_response_from_rows(
+        rows: Vec<crate::types::OracleRow>,
+        caps: QueryCaps,
+        offset: usize,
+        serialize_opts: &SerializeOptions,
+    ) -> QueryResponse {
+        run_with_cx(|cx| async move {
+            query_response_from_rows_checked(&cx, rows, caps, offset, serialize_opts)
+                .expect("uncancelled query response construction cannot be cancelled")
+        })
+    }
+
     /// A mock returning `n` synthetic rows for any query (ignores pagination SQL
     /// — pagination wrapping is exercised separately by `paginated_sql` + the
     /// live test).
     struct NRowMock {
         n: usize,
     }
+    #[async_trait::async_trait(?Send)]
     impl OracleConnection for NRowMock {
         fn backend(&self) -> crate::types::OracleBackend {
             crate::types::OracleBackend::RustOracle
         }
-        fn ping(&self) -> Result<(), DbError> {
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
             Ok(OracleConnectionInfo::default())
         }
-        fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
             Ok((0..self.n)
                 .map(|i| OracleRow {
                     columns: vec![
@@ -248,35 +253,40 @@ mod tests {
                 })
                 .collect())
         }
-        fn query_rows_named(
+        async fn query_rows_named(
             &self,
+            cx: &Cx,
             _sql: &str,
             b: &[(String, OracleBind)],
         ) -> Result<Vec<OracleRow>, DbError> {
             assert_eq!(b, &[("id".to_owned(), OracleBind::I64(42))]);
-            self.query_rows("", &[])
+            self.query_rows(cx, "", &[]).await
         }
-        fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
             Ok(0)
         }
-        fn commit(&self) -> Result<(), DbError> {
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-        fn rollback(&self) -> Result<(), DbError> {
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
     }
 
     fn run(n: usize, caps: QueryCaps) -> QueryResponse {
-        read_query(
-            &NRowMock { n },
-            "SELECT id, name FROM t",
-            &[],
-            caps,
-            0,
-            &SerializeOptions::default(),
-        )
-        .expect("read")
+        run_with_cx(|cx| async move {
+            read_query(
+                &cx,
+                &NRowMock { n },
+                "SELECT id, name FROM t",
+                &[],
+                caps,
+                0,
+                &SerializeOptions::default(),
+            )
+            .await
+            .expect("read")
+        })
     }
 
     #[test]
@@ -285,15 +295,19 @@ mod tests {
             max_rows: 2,
             max_result_bytes: 1_000_000,
         };
-        let response = read_query_named(
-            &NRowMock { n: 3 },
-            "SELECT * FROM t WHERE id = :id",
-            &[("id".to_owned(), OracleBind::I64(42))],
-            caps,
-            5,
-            &SerializeOptions::default(),
-        )
-        .expect("read named");
+        let response = run_with_cx(|cx| async move {
+            read_query_named(
+                &cx,
+                &NRowMock { n: 3 },
+                "SELECT * FROM t WHERE id = :id",
+                &[("id".to_owned(), OracleBind::I64(42))],
+                caps,
+                5,
+                &SerializeOptions::default(),
+            )
+            .await
+            .expect("read named")
+        });
         assert_eq!(response.row_count, 2);
         assert_eq!(response.next_cursor.as_deref(), Some("7"));
     }

@@ -103,6 +103,11 @@ if [ -n "$stale_image_refs" ]; then
   exit 1
 fi
 
+# Honesty gate (F1a / §8 item 8): no over-claiming framing in release-visible
+# text (README/docs/package metadata/source docs). oraclemcp is governed +
+# least-privilege, never "safe-by-default" / a "read-only binary".
+bash "$ROOT/scripts/oraclemcp_honesty_grep.sh"
+
 if [ "${RELEASE_REQUIRE_MAIN:-false}" = "true" ]; then
   need git
   git fetch --no-tags origin main >/dev/null 2>&1 || fail "could not fetch origin/main for tag ancestry check"

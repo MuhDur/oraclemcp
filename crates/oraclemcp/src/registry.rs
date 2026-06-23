@@ -1,7 +1,7 @@
 //! The advertised tool surface for the engine-free `oraclemcp` server.
 //!
 //! Pure data — no database access. [`tool_registry`] builds the
-//! safe-by-default config-inspection, read, and guarded execute tools the server dispatches (see
+//! governed, least-privilege config-inspection, read, and guarded execute tools the server dispatches (see
 //! [`crate::dispatch`]); [`capabilities`] assembles the zero-arg
 //! `oracle_capabilities` report from that surface plus the build's feature
 //! tiers. The `oracle_capabilities` discovery tool itself is answered by
@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
-pub const TOOL_NAMES: [&str; 49] = [
+pub const TOOL_NAMES: [&str; 52] = [
     "oracle_list_profiles",
     "oracle_connection_info",
     "oracle_switch_profile",
@@ -28,6 +28,7 @@ pub const TOOL_NAMES: [&str; 49] = [
     "oracle_patch_source",
     "oracle_list_schemas",
     "oracle_schema_inspect",
+    "oracle_search_objects",
     "oracle_describe",
     "oracle_describe_index",
     "oracle_describe_trigger",
@@ -40,6 +41,8 @@ pub const TOOL_NAMES: [&str; 49] = [
     "oracle_search_source",
     "oracle_plscope_inspect",
     "oracle_explain_plan",
+    "oracle_top_queries",
+    "oracle_db_health",
     // Compatibility aliases for agents migrating from shorter Oracle MCP tool
     // names. These route to the prefixed tools in dispatch and share the same
     // guardrails.
@@ -169,11 +172,23 @@ fn query_output_schema() -> Value {
             },
             "row_count": { "type": "integer", "minimum": 0 },
             "truncated": { "type": "boolean" },
-            "next_cursor": { "type": "string" },
-            "total_bytes": { "type": "integer", "minimum": 0 }
+            "next_cursor": { "type": ["string", "null"] },
+            "total_bytes": { "type": "integer", "minimum": 0 },
+            "inlined": { "type": "boolean", "description": "False when the result was materialized as an export resource (export=true) rather than inlined." },
+            "export": {
+                "type": "object",
+                "description": "Present when export=true: metadata for the materialized oracle-export://{id} resource.",
+                "additionalProperties": true
+            },
+            "resource_link": {
+                "type": "object",
+                "description": "Present when export=true: an MCP resource_link to the export, to fetch via resources/read.",
+                "additionalProperties": true
+            },
+            "next_step": { "type": "string" }
         },
-        "required": ["columns", "rows", "row_count", "truncated", "total_bytes"],
-        "additionalProperties": false
+        "required": ["columns", "row_count"],
+        "additionalProperties": true
     })
 }
 
@@ -457,6 +472,26 @@ pub fn tool_registry() -> ToolRegistry {
 
     registry.register(
         ToolDescriptor::new(
+            "oracle_search_objects",
+            ToolTier::FoundationLiveDb,
+            "Unified read-only object search/inspection with a detail_level. names=identifiers only; summary=+column count, comments, and the optimizer ALL_TABLES.NUM_ROWS row-count ESTIMATE (gathered statistics, never COUNT(*) — may be stale, reported via stats_stale/last_analyzed); standard (default)=+columns; full=+indexes. Returns {count, results, truncated}. Owner/type/name filters are bound; quoted/case-sensitive identifiers are matched verbatim.",
+        )
+        .with_input_schema(object_schema(
+            json!({
+                "owner": { "type": "string", "description": "Optional schema owner (case-insensitive for ordinary identifiers; quoted identifiers match verbatim). Omit or use * for all accessible schemas." },
+                "object_type": { "type": "string", "description": "Optional object type filter, e.g. TABLE, VIEW, PACKAGE." },
+                "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for object_name, e.g. EMP%." },
+                "detail_level": { "type": "string", "enum": ["names", "summary", "standard", "full"], "description": "Enrichment level. names=identifiers only; summary=+column count + comments + the optimizer ALL_TABLES.NUM_ROWS estimate (NOT COUNT(*)); standard (default)=+columns; full=+indexes." },
+                "detail": { "type": "string", "description": "Alias for detail_level." },
+                "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum objects to return (default 100, hard cap 5000)." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." }
+            }),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
             "oracle_describe",
             ToolTier::FoundationLiveDb,
             "Describe a table/view's columns and constraint metadata.",
@@ -667,6 +702,43 @@ pub fn tool_registry() -> ToolRegistry {
 
     registry.register(
         ToolDescriptor::new(
+            "oracle_top_queries",
+            ToolTier::FoundationLiveDb,
+            "Read-only top-SQL ranked by elapsed/CPU/buffer-gets/disk-reads over the free live cursor cache (V$SQLSTATS). Opt into historical AWR only when a Diagnostics Pack is licensed, else Statspack, else a structured-unavailable error — never invokes a paid pack unlicensed.",
+        )
+        .with_input_schema(object_schema(
+            props_with(
+                json!({
+                    "metric": { "type": "string", "enum": ["elapsed", "cpu", "buffer_gets", "disk_reads"], "description": "Ranking metric. Defaults to elapsed." },
+                    "top_n": { "type": "integer", "minimum": 1, "maximum": 100, "description": "How many statements to return (1-100, default 20)." },
+                    "historical": { "type": "boolean", "description": "If true, use historical AWR (requires a licensed Diagnostics Pack) or Statspack instead of the live cursor cache. Defaults false (the free live source)." },
+                    "min_pct_of_total": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Live source only: keep only statements consuming at least this percent of the total selected metric (e.g. 5 for the 5%-of-total view)." }
+                }),
+                &[timeout_seconds_prop()],
+            ),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
+            "oracle_db_health",
+            ToolTier::FoundationLiveDb,
+            "Read-only DBA health-check suite. health_type='all' (default) or a comma list of subchecks (invalid_objects, unusable_indexes, tablespace_undo, sequence_ceiling, disabled_constraints, buffer_cache_hit_ratio). Pure V$/DBA_*/ALL_* reads; each subcheck degrades DBA_*->ALL_* and yields a structured skip on insufficient privilege rather than failing the suite.",
+        )
+        .with_input_schema(object_schema(
+            props_with(
+                json!({
+                    "health_type": { "type": "string", "description": "Either 'all' (default) or a comma-separated list of subcheck names: invalid_objects, unusable_indexes, tablespace_undo, sequence_ceiling, disabled_constraints, buffer_cache_hit_ratio. Unknown names are reported, not fatal." }
+                }),
+                &[timeout_seconds_prop()],
+            ),
+            &[],
+        )),
+    );
+
+    registry.register(
+        ToolDescriptor::new(
             "current_database",
             ToolTier::FoundationLiveDb,
             "Compatibility alias for oracle_connection_info; returns connected=false with recovery hints when live connection metadata is unavailable.",
@@ -743,7 +815,9 @@ pub fn tool_registry() -> ToolRegistry {
                     "max_col_width": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Compatibility text cap for ordinary text/raw columns." },
                     "max_lob_chars": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Maximum CLOB characters to inline per cell." },
                     "max_blob_bytes": { "type": "integer", "minimum": 1, "maximum": 5242880, "description": "Maximum BLOB bytes to inline per cell as base64." },
-                    "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible." }
+                    "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible." },
+                    "export": { "type": "boolean", "description": "When true, materialize the bounded full result as an oracle-export://{id} resource and return a resource_link instead of inlining rows." },
+                    "export_format": { "type": "string", "enum": ["csv", "json"], "description": "Export serialization when export=true: csv (default) or json." }
                 }),
                 &[timeout_seconds_prop()],
             ),
@@ -1275,11 +1349,27 @@ mod tests {
                 .as_ref()
                 .unwrap_or_else(|| panic!("{name} declares output_schema"));
             assert_eq!(schema["type"], json!("object"), "{name}");
+            // The inline page and the E3 export arm share one output schema:
+            // columns + row_count are always present; rows/truncated/total_bytes
+            // are the inline-page fields, and export/resource_link/inlined are
+            // the export-arm fields (additionalProperties=true admits both).
             assert_eq!(
                 schema["required"],
-                json!(["columns", "rows", "row_count", "truncated", "total_bytes"]),
+                json!(["columns", "row_count"]),
                 "{name}"
             );
+            for field in [
+                "rows",
+                "truncated",
+                "total_bytes",
+                "export",
+                "resource_link",
+            ] {
+                assert!(
+                    schema["properties"].get(field).is_some(),
+                    "{name} documents the {field} output field"
+                );
+            }
             assert_eq!(
                 schema["properties"]["rows"]["items"]["additionalProperties"]["oneOf"][0]["type"],
                 json!("string"),

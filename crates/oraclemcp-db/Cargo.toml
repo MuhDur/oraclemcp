@@ -1,7 +1,8 @@
 [package]
 name = "oraclemcp-db"
-version = "0.3.0"
+version = "0.4.0"
 description = "Oracle connectivity, pooling, session leases and the type/NLS serializer for oraclemcp."
+readme = "README.md"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -16,15 +17,20 @@ live-xe = []
 
 [dependencies]
 asupersync.workspace = true
-oraclemcp-error = { path = "../oraclemcp-error", version = "0.3.0" }
-oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.3.0" }
+async-trait.workspace = true
+oraclemcp-error = { path = "../oraclemcp-error", version = "0.4.0" }
+oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.4.0" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-oracledb.workspace = true
+# D1-traces (bead oraclemcp-040-epic-wp-d-1il.3): enable oracledb's `tracing`
+# feature so DB-call spans flow into the OTLP trace layer. It only adds the
+# `tracing` dep (no async runtime), so the engine-free boundary holds.
+oracledb = { workspace = true, features = ["tracing"] }
 
 [dev-dependencies]
+async-trait.workspace = true
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]

@@ -15,6 +15,9 @@ on:
 permissions:
   contents: read
   packages: write
+  # Match release.yml: image provenance attestation + keyless signing need OIDC.
+  id-token: write
+  attestations: write
 
 env:
   RUST_TOOLCHAIN: nightly-2026-05-11
@@ -63,6 +66,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -70,7 +74,25 @@ jobs:
           tags: |
             ghcr.io/muhdur/oraclemcp:${{ steps.ver.outputs.v }}
             ghcr.io/muhdur/oraclemcp:latest
-          provenance: false
+          # SLSA provenance + SBOM baked into the manifest, matching release.yml.
+          provenance: mode=max
+          sbom: true
+
+      # GitHub-native build provenance attestation, keyed by the image digest.
+      - name: Attest image build provenance
+        uses: actions/attest-build-provenance@v3.2.0
+        with:
+          subject-name: ghcr.io/muhdur/oraclemcp
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # Keyless cosign signature over the image digest.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.10.1
+      - name: Sign image (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: cosign sign --recursive "ghcr.io/muhdur/oraclemcp@${{ steps.build.outputs.digest }}"
 
       - name: Smoke pushed image
         shell: bash

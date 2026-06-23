@@ -1,0 +1,27 @@
+error[E0277]: the trait bound `(asupersync::cx::cap::sealed::Bit<true>, asupersync::cx::cap::sealed::Bit<false>): asupersync::cx::cap::sealed::Le` is not satisfied
+  --> tests/ui/widen_narrowed_cx_rejected.rs:21:49
+   |
+21 |     let _widened: Cx<AllCaps> = read.restrict::<AllCaps>();
+   |                                      --------   ^^^^^^^ unsatisfied trait bound
+   |                                      |
+   |                                      required by a bound introduced by this call
+   |
+   = help: the trait `asupersync::cx::cap::sealed::Le` is not implemented for `(asupersync::cx::cap::sealed::Bit<true>, asupersync::cx::cap::sealed::Bit<false>)`
+help: the following other types implement trait `asupersync::cx::cap::sealed::Le`
+  --> $CARGO/asupersync-$VERSION/src/cx/cap.rs
+   |
+   |     impl Le for (Bit<false>, Bit<false>) {}
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(asupersync::cx::cap::sealed::Bit<false>, asupersync::cx::cap::sealed::Bit<false>)`
+   |     impl Le for (Bit<false>, Bit<true>) {}
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(asupersync::cx::cap::sealed::Bit<false>, asupersync::cx::cap::sealed::Bit<true>)`
+   |     impl Le for (Bit<true>, Bit<true>) {}
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `(asupersync::cx::cap::sealed::Bit<true>, asupersync::cx::cap::sealed::Bit<true>)`
+   = note: required for `CapSet<true, true, true, true, true>` to implement `SubsetOf<CapSet<false, true, false, true, false>>`
+note: required by a bound in `asupersync::Cx::<Caps>::restrict`
+  --> $CARGO/asupersync-$VERSION/src/cx/cx.rs
+   |
+   |     pub fn restrict<NewCaps>(&self) -> Cx<NewCaps>
+   |            -------- required by a bound in this associated function
+   |     where
+   |         NewCaps: cap::SubsetOf<Caps>,
+   |                  ^^^^^^^^^^^^^^^^^^^ required by this bound in `Cx::<Caps>::restrict`

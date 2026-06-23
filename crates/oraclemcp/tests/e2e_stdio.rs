@@ -14,6 +14,7 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
+use asupersync::Cx;
 use oraclemcp::dispatch::OracleDispatcher;
 use oraclemcp::registry::{TOOL_NAMES, capabilities, tool_registry};
 use oraclemcp_core::{CAPABILITIES_TOOL, OracleMcpServer, StdioAuthPolicy};
@@ -26,44 +27,56 @@ use serde_json::{Value, json};
 /// A driver-free mock whose every query fails with a classifiable ORA- error,
 /// so a live tool call exercises the DbError -> ErrorEnvelope path offline.
 struct FailingMock;
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for FailingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo::default())
     }
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         Err(DbError::Query(
             "ORA-00942: table or view does not exist".to_owned(),
         ))
     }
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         Err(DbError::Execute("ORA-00942".to_owned()))
     }
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 }
 
 struct SuccessfulQueryMock;
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for SuccessfulQueryMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo::default())
     }
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         Ok(vec![OracleRow {
             columns: vec![(
                 "OBJECT_COUNT".to_owned(),
@@ -71,13 +84,19 @@ impl OracleConnection for SuccessfulQueryMock {
             )],
         }])
     }
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, sql: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        // A1: the read path lazily issues `SET TRANSACTION READ ONLY` as a
+        // defense-in-depth backstop. Accept exactly that statement; ANY other
+        // execute on the read path is still an error (a read must not write).
+        if sql == oraclemcp_guard::SET_TRANSACTION_READ_ONLY {
+            return Ok(0);
+        }
         Err(DbError::Execute("unexpected execute".to_owned()))
     }
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 }
@@ -285,10 +304,22 @@ fn tools_list_advertises_registry_tools_plus_capabilities() {
             .get("outputSchema")
             .unwrap_or_else(|| panic!("{name} must advertise outputSchema"));
         assert_eq!(output_schema["type"], json!("object"));
-        assert_eq!(
-            output_schema["required"],
-            json!(["columns", "rows", "row_count", "truncated", "total_bytes"])
-        );
+        // E3: the inline-page and export arms share one output schema; only
+        // columns + row_count are always required, while rows/truncated/
+        // total_bytes (inline) and export/resource_link (export) are optional.
+        assert_eq!(output_schema["required"], json!(["columns", "row_count"]));
+        for field in [
+            "rows",
+            "truncated",
+            "total_bytes",
+            "export",
+            "resource_link",
+        ] {
+            assert!(
+                output_schema["properties"].get(field).is_some(),
+                "{name} outputSchema must document the {field} field"
+            );
+        }
         assert_eq!(
             output_schema["properties"]["rows"]["items"]["additionalProperties"]["oneOf"][0]["type"],
             json!("string"),

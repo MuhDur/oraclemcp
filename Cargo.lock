@@ -190,10 +190,13 @@ dependencies = [
  "memchr",
  "nix",
  "nkeys",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "parking_lot",
  "pin-project",
  "polling",
  "prost",
+ "regex",
  "rmp-serde",
  "rustls",
  "rustls-pemfile",
@@ -211,6 +214,9 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "thiserror",
+ "tracing",
+ "tracing-subscriber",
+ "visibility",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -224,6 +230,17 @@ name = "asupersync-macros"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0f5adb3656cbf0422a51fc053f5d35893b5976a915179e6aa1724968c46e5df"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "async-trait"
+version = "0.1.89"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -822,7 +839,7 @@ dependencies = [
  "pear",
  "serde",
  "tempfile",
- "toml",
+ "toml 0.8.23",
  "uncased",
  "version_check",
 ]
@@ -888,10 +905,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "futures-channel"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d"
+dependencies = [
+ "futures-core",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
+
+[[package]]
+name = "futures-executor"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baf29c38818342a3b26b5b923639e7b1f4a61fc5e76102d4b1981c6dc7a7579d"
+dependencies = [
+ "futures-core",
+ "futures-task",
+ "futures-util",
+]
 
 [[package]]
 name = "futures-io"
@@ -913,6 +950,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "futures-macro"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "futures-sink"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c39754e157331b013978ec91992bde1ac089843443c49cbc7f46150b0fad0893"
+
+[[package]]
 name = "futures-task"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -925,6 +979,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
 dependencies = [
  "futures-core",
+ "futures-macro",
+ "futures-sink",
  "futures-task",
  "pin-project-lite",
  "slab",
@@ -987,6 +1043,12 @@ dependencies = [
  "opaque-debug",
  "polyval",
 ]
+
+[[package]]
+name = "glob"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "half"
@@ -1362,10 +1424,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
-name = "oracledb"
-version = "0.2.2"
+name = "opentelemetry"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee075736560abebbea3ca421b10935e7bfbf3331061dccef54e7d38709a93862"
+checksum = "b84bcd6ae87133e903af7ef497404dda70c60d0ea14895fc8a5e6722754fc2a0"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "js-sys",
+ "pin-project-lite",
+ "thiserror",
+]
+
+[[package]]
+name = "opentelemetry_sdk"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e14ae4f5991976fd48df6d843de219ca6d31b01daaab2dad5af2badeded372bd"
+dependencies = [
+ "futures-channel",
+ "futures-executor",
+ "futures-util",
+ "opentelemetry",
+ "percent-encoding",
+ "rand 0.9.4",
+ "thiserror",
+]
+
+[[package]]
+name = "oracledb"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c34b5e993db86eab59a1754f43dbdb492d17fcbb2f1b3375d9f6f6f66a633d30"
 dependencies = [
  "asupersync",
  "oracledb-protocol",
@@ -1373,14 +1463,15 @@ dependencies = [
  "rustls-pki-types",
  "rustls-webpki",
  "thiserror",
+ "tracing",
  "x509-cert",
 ]
 
 [[package]]
 name = "oracledb-protocol"
-version = "0.2.2"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dae982274909842bc8ed14205cd40ce37fb6d58df75c10d866efeea0eb3a8a0a"
+checksum = "05f714cd2517e30229b6ce137fe1cf3199723e73a10c24db9a4c3eff6b5174db"
 dependencies = [
  "aes",
  "hex",
@@ -1396,28 +1487,30 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "asupersync",
+ "async-trait",
  "clap",
  "getrandom 0.2.17",
+ "oraclemcp-audit",
  "oraclemcp-auth",
  "oraclemcp-config",
  "oraclemcp-core",
  "oraclemcp-db",
  "oraclemcp-error",
  "oraclemcp-guard",
+ "oraclemcp-telemetry",
  "rcgen",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "oraclemcp-audit"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "oraclemcp-error",
  "serde",
@@ -1425,11 +1518,12 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
 name = "oraclemcp-auth"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "oraclemcp-audit",
  "oraclemcp-error",
@@ -1443,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-config"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "figment",
  "oraclemcp-error",
@@ -1455,9 +1549,11 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "asupersync",
+ "async-trait",
+ "getrandom 0.2.17",
  "oraclemcp-audit",
  "oraclemcp-auth",
  "oraclemcp-config",
@@ -1471,16 +1567,18 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
- "toml",
+ "toml 0.8.23",
  "tracing",
+ "trybuild",
  "wait-timeout",
 ]
 
 [[package]]
 name = "oraclemcp-db"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "asupersync",
+ "async-trait",
  "criterion",
  "oracledb",
  "oraclemcp-error",
@@ -1493,7 +1591,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-error"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1502,7 +1600,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-guard"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "oraclemcp-audit",
  "oraclemcp-error",
@@ -1517,9 +1615,11 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-telemetry"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
+ "asupersync",
  "oraclemcp-error",
+ "prost",
  "serde",
  "serde_json",
  "tracing",
@@ -1606,6 +1706,12 @@ checksum = "88b39c9bfcfc231068454382784bb460aae594343fb030d46e9f50a645418412"
 dependencies = [
  "base64ct",
 ]
+
+[[package]]
+name = "percent-encoding"
+version = "2.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pin-project"
@@ -2168,6 +2274,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_spanned"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2372,6 +2487,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "target-triple"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "591ef38edfb78ca4771ee32cf494cb8771944bee237a9b91fc9c1424ac4b777b"
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2382,6 +2503,15 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "termcolor"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
+dependencies = [
+ "winapi-util",
 ]
 
 [[package]]
@@ -2482,9 +2612,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
 dependencies = [
  "serde",
- "serde_spanned",
- "toml_datetime",
+ "serde_spanned 0.6.9",
+ "toml_datetime 0.6.11",
  "toml_edit",
+]
+
+[[package]]
+name = "toml"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81f3d15e84cbcd896376e6730314d59fb5a87f31e4b038454184435cd57defee"
+dependencies = [
+ "indexmap",
+ "serde_core",
+ "serde_spanned 1.1.1",
+ "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_parser",
+ "toml_writer",
+ "winnow 1.0.3",
 ]
 
 [[package]]
@@ -2497,6 +2642,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml_datetime"
+version = "1.1.1+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "toml_edit"
 version = "0.22.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2504,10 +2658,19 @@ checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
 dependencies = [
  "indexmap",
  "serde",
- "serde_spanned",
- "toml_datetime",
+ "serde_spanned 0.6.9",
+ "toml_datetime 0.6.11",
  "toml_write",
- "winnow",
+ "winnow 0.7.15",
+]
+
+[[package]]
+name = "toml_parser"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
+dependencies = [
+ "winnow 1.0.3",
 ]
 
 [[package]]
@@ -2515,6 +2678,12 @@ name = "toml_write"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+
+[[package]]
+name = "toml_writer"
+version = "1.1.1+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
 
 [[package]]
 name = "tracing"
@@ -2588,6 +2757,21 @@ dependencies = [
  "tracing-core",
  "tracing-log",
  "tracing-serde",
+]
+
+[[package]]
+name = "trybuild"
+version = "1.0.116"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47c635f0191bd3a2941013e5062667100969f8c4e9cd787c14f977265d73616e"
+dependencies = [
+ "glob",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "target-triple",
+ "termcolor",
+ "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]
@@ -2668,6 +2852,17 @@ name = "virtue-next"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d5208a9710a6ca1c2da0d64289a5dcca13deb05afdedf651f4e11bcd9fc53eb"
+
+[[package]]
+name = "visibility"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d674d135b4a8c1d7e813e2f8d1c9a58308aee4a680323066025e53132218bd91"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "wait-timeout"
@@ -2991,6 +3186,12 @@ checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "winnow"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0592e1c9d151f854e6fd382574c3a0855250e1d9b2f99d9281c6e6391af352f1"
 
 [[package]]
 name = "wit-bindgen"

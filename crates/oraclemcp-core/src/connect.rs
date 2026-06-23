@@ -46,6 +46,24 @@ impl std::fmt::Debug for SessionContext {
     }
 }
 
+impl SessionContext {
+    /// Derive this session's per-request resource budget (B6) from its
+    /// configured per-call timeout (or the default when unset), anchored to
+    /// `now` (pass the request `Cx`'s `cx.now()` so production and lab share one
+    /// deterministic clock).
+    ///
+    /// The dispatch boundary attaches this budget so the DB round trips run
+    /// under a single cooperative bound: a runaway request is bounded
+    /// (`Cancelled`/`Timeout`, per B1), while a normal request is unaffected.
+    /// The budget's deadline maps onto the same `call_timeout` the adapter
+    /// already pushes down as an Oracle op-deadline, so the two agree by
+    /// construction.
+    #[must_use]
+    pub fn request_budget(&self, now: asupersync::Time) -> crate::request_budget::RequestBudget {
+        crate::request_budget::RequestBudget::from_call_timeout(now, self.options.call_timeout)
+    }
+}
+
 /// Map a profile to driver connect options. `password` comes from the secrets
 /// backend (never the profile/metadata). `wallet_password` comes from the
 /// same secret-resolution path via `[profiles.oci].wallet_password_ref`.
@@ -215,6 +233,14 @@ fn profile_to_options_for_level(
         ssl_server_cert_dn: oci.as_ref().and_then(|o| o.ssl_server_cert_dn.clone()),
         use_sni: oci.as_ref().and_then(|o| o.use_sni),
         use_iam_token: oci.as_ref().is_some_and(|o| o.use_iam_token),
+        // The B2 adapter (oraclemcp_db) now wires an IAM database token through
+        // `with_access_token` (TCPS-enforced) whenever this field is `Some`. The
+        // token itself is fetched at the edge from OCI IAM via
+        // `oraclemcp_db::IamTokenSource` / `ensure_fresh_token` and injected here
+        // by the caller that owns the token lifecycle (proactive skew-based
+        // refresh); profile bootstrap never embeds a token. With `use_iam_token`
+        // set but no token yet injected, the adapter returns a precise setup
+        // error rather than attempting a password connect.
         iam_token: None,
         session_identity: profile
             .session_identity
@@ -234,9 +260,30 @@ fn profile_to_options_for_level(
         app_context: profile_app_context(profile)?,
         sdu: profile.sdu,
         statement_cache_size: profile.pool.as_ref().map(|pool| pool.statement_cache_size),
-        call_timeout: profile.call_timeout_seconds.map(Duration::from_secs),
+        call_timeout: resolve_call_timeout(profile.call_timeout_seconds),
         session_statements: profile_session_statements(profile, level_state)?,
     })
+}
+
+/// Resolve the per-round-trip Oracle call timeout from a profile's
+/// `call_timeout_seconds`.
+///
+/// Liveness default (§10): the dispatcher holds the single per-connection lock
+/// across every DB `.await`, so an un-timeout-bounded socket read would hang
+/// every request indefinitely (a head-of-line DoS). We therefore make a bounded
+/// driver-level call timeout the **default**: when a profile omits
+/// `call_timeout_seconds`, we apply [`resilience::DEFAULT_CALL_TIMEOUT`] (30s),
+/// matching the `RequestBudget` default so the two layers agree.
+///
+/// Overrides: an explicit `Some(n)` (n >= 1) wins. The documented escape hatch
+/// `Some(0)` means *unbounded* (no driver-level deadline) for operators who
+/// knowingly opt out — the request budget still bounds the whole request.
+fn resolve_call_timeout(call_timeout_seconds: Option<u64>) -> Option<Duration> {
+    match call_timeout_seconds {
+        None => Some(crate::resilience::DEFAULT_CALL_TIMEOUT),
+        Some(0) => None,
+        Some(seconds) => Some(Duration::from_secs(seconds)),
+    }
 }
 
 fn profile_session_statements(
@@ -436,6 +483,68 @@ mod tests {
         assert_eq!(ctx.level_state.effective_level(), OperatingLevel::ReadWrite);
         assert_eq!(ctx.options.call_timeout, Some(Duration::from_secs(45)));
         assert!(!ctx.level_state.is_protected());
+    }
+
+    #[test]
+    fn omitted_call_timeout_defaults_to_bounded_30s() {
+        // Liveness: a profile that omits call_timeout_seconds must still bound
+        // the per-round-trip socket await (the dispatcher holds the connection
+        // lock across every DB .await). The default mirrors RequestBudget's 30s.
+        let p = profile(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            "#,
+        );
+        let ctx = build_session_context(&p, None, None, false).expect("context");
+        assert_eq!(
+            ctx.options.call_timeout,
+            Some(crate::resilience::DEFAULT_CALL_TIMEOUT)
+        );
+        assert_eq!(ctx.options.call_timeout, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn explicit_call_timeout_overrides_default_and_zero_means_unbounded() {
+        // An explicit value wins over the default...
+        let p = profile(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            call_timeout_seconds = 7
+            "#,
+        );
+        let ctx = build_session_context(&p, None, None, false).expect("context");
+        assert_eq!(ctx.options.call_timeout, Some(Duration::from_secs(7)));
+
+        // ...and the documented `0` escape hatch means unbounded (no driver
+        // deadline; the request budget still bounds the whole request).
+        let p0 = profile(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            call_timeout_seconds = 0
+            "#,
+        );
+        let ctx0 = build_session_context(&p0, None, None, false).expect("context");
+        assert_eq!(ctx0.options.call_timeout, None);
+    }
+
+    #[test]
+    fn resolve_call_timeout_table() {
+        assert_eq!(
+            resolve_call_timeout(None),
+            Some(crate::resilience::DEFAULT_CALL_TIMEOUT)
+        );
+        assert_eq!(resolve_call_timeout(Some(0)), None);
+        assert_eq!(resolve_call_timeout(Some(1)), Some(Duration::from_secs(1)));
+        assert_eq!(
+            resolve_call_timeout(Some(120)),
+            Some(Duration::from_secs(120))
+        );
     }
 
     #[test]

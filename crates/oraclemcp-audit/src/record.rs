@@ -8,6 +8,8 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::hmac::{ct_eq, hmac_sha256_hex};
+
 /// The guard decision being audited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -78,6 +80,56 @@ pub struct AuditRecord {
     pub prev_hash: String,
     /// Hash of this entry (covers seq + content + prev_hash).
     pub entry_hash: String,
+    /// Identifier of the key that produced `signature` (rotation: an operator
+    /// can roll the key while old records keep verifying under their own
+    /// `key_id`). `None` only for legacy unsigned records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    /// `hmac-sha256:<hex>` keyed MAC over `entry_hash`. A bare SHA-256 chain is
+    /// forgeable by recompute-from-genesis; this MAC binds the record to a key
+    /// no forger holds. `None` only for legacy unsigned records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+}
+
+/// A keyed signing identity for the audit chain: an opaque `key_id` (stored in
+/// each record for rotation) plus the secret HMAC key bytes (never serialized).
+#[derive(Clone)]
+pub struct SigningKey {
+    key_id: String,
+    key: Vec<u8>,
+}
+
+impl SigningKey {
+    /// Build a signing key from an id and the raw secret bytes.
+    #[must_use]
+    pub fn new(key_id: impl Into<String>, key: impl Into<Vec<u8>>) -> Self {
+        SigningKey {
+            key_id: key_id.into(),
+            key: key.into(),
+        }
+    }
+
+    /// The key identifier recorded alongside each signature.
+    #[must_use]
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    /// The `hmac-sha256:<hex>` signature over an `entry_hash`.
+    #[must_use]
+    pub fn sign(&self, entry_hash: &str) -> String {
+        hmac_sha256_hex(&self.key, entry_hash.as_bytes())
+    }
+}
+
+impl std::fmt::Debug for SigningKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SigningKey")
+            .field("key_id", &self.key_id)
+            .field("key", &"***redacted***")
+            .finish()
+    }
 }
 
 /// The fields of an audit entry before the chain hashes are attached.
@@ -103,10 +155,32 @@ pub struct AuditEntryDraft {
 const PREVIEW_LEN: usize = 120;
 
 impl AuditRecord {
-    /// Build a chained record from a draft, the assigned `seq`, the previous
-    /// entry hash, and an RFC-3339 timestamp.
+    /// Build a chained, **signed** record from a draft, the assigned `seq`, the
+    /// previous entry hash, and an RFC-3339 timestamp. The record's `entry_hash`
+    /// is signed with `key`, and the `key_id` is recorded for rotation.
     #[must_use]
-    pub fn chained(draft: &AuditEntryDraft, seq: u64, prev_hash: &str, timestamp: String) -> Self {
+    pub fn chained_signed(
+        draft: &AuditEntryDraft,
+        seq: u64,
+        prev_hash: &str,
+        timestamp: String,
+        key: &SigningKey,
+    ) -> Self {
+        let mut record = Self::chained_unsigned(draft, seq, prev_hash, timestamp);
+        record.signature = Some(key.sign(&record.entry_hash));
+        record.key_id = Some(key.key_id().to_owned());
+        record
+    }
+
+    /// Build a chained record from a draft, the assigned `seq`, the previous
+    /// entry hash, and an RFC-3339 timestamp, leaving the keyed MAC unset.
+    #[must_use]
+    pub fn chained_unsigned(
+        draft: &AuditEntryDraft,
+        seq: u64,
+        prev_hash: &str,
+        timestamp: String,
+    ) -> Self {
         let sql_sha256 = sha256_hex(draft.sql.as_bytes());
         let sql_preview: String = draft.sql.chars().take(PREVIEW_LEN).collect();
         let entry_hash = compute_entry_hash(
@@ -135,11 +209,15 @@ impl AuditRecord {
             outcome: draft.outcome,
             prev_hash: prev_hash.to_owned(),
             entry_hash,
+            key_id: None,
+            signature: None,
         }
     }
 
     /// Recompute this record's hash and check it matches `entry_hash` (used by
-    /// chain verification).
+    /// chain verification). This is the **unkeyed** check: it proves the record
+    /// has not been edited in place but NOT that it was not forged by a
+    /// recompute-from-genesis. Pair it with [`Self::signature_is_valid`].
     #[must_use]
     pub fn hash_is_valid(&self) -> bool {
         let recomputed = compute_entry_hash(
@@ -156,6 +234,18 @@ impl AuditRecord {
             &self.prev_hash,
         );
         recomputed == self.entry_hash
+    }
+
+    /// Check this record's keyed MAC against `key`. A forger who recomputes the
+    /// chain from genesis without the key cannot reproduce a valid signature,
+    /// so this fails for any unsigned or wrong-key record.
+    #[must_use]
+    pub fn signature_is_valid(&self, key: &SigningKey) -> bool {
+        let Some(signature) = self.signature.as_deref() else {
+            return false;
+        };
+        let expected = key.sign(&self.entry_hash);
+        ct_eq(expected.as_bytes(), signature.as_bytes())
     }
 }
 
@@ -220,9 +310,18 @@ mod tests {
         }
     }
 
+    fn key() -> SigningKey {
+        SigningKey::new("k1", b"audit-signing-key".to_vec())
+    }
+
     #[test]
     fn record_hashes_and_previews_without_storing_sql_verbatim() {
-        let r = AuditRecord::chained(&draft(), 1, GENESIS_HASH, "2026-06-01T00:00:00Z".to_owned());
+        let r = AuditRecord::chained_unsigned(
+            &draft(),
+            1,
+            GENESIS_HASH,
+            "2026-06-01T00:00:00Z".to_owned(),
+        );
         assert!(r.sql_sha256.starts_with("sha256:"));
         assert_eq!(r.sql_preview, "DELETE FROM orders WHERE id = 1");
         assert!(r.hash_is_valid());
@@ -231,8 +330,12 @@ mod tests {
 
     #[test]
     fn tampering_breaks_the_hash() {
-        let mut r =
-            AuditRecord::chained(&draft(), 1, GENESIS_HASH, "2026-06-01T00:00:00Z".to_owned());
+        let mut r = AuditRecord::chained_unsigned(
+            &draft(),
+            1,
+            GENESIS_HASH,
+            "2026-06-01T00:00:00Z".to_owned(),
+        );
         assert!(r.hash_is_valid());
         r.danger_level = "SAFE".to_owned(); // someone downgrades the record
         assert!(!r.hash_is_valid(), "tampered record must fail verification");
@@ -244,8 +347,12 @@ mod tests {
         // an actor with write access to the append-only log must not be able to
         // rewrite "DELETE FROM orders ..." -> "SELECT 1" without breaking
         // verification, even while leaving sql_sha256 / danger_level intact.
-        let mut r =
-            AuditRecord::chained(&draft(), 1, GENESIS_HASH, "2026-06-01T00:00:00Z".to_owned());
+        let mut r = AuditRecord::chained_unsigned(
+            &draft(),
+            1,
+            GENESIS_HASH,
+            "2026-06-01T00:00:00Z".to_owned(),
+        );
         assert!(r.hash_is_valid());
         assert_eq!(r.sql_preview, "DELETE FROM orders WHERE id = 1");
         r.sql_preview = "SELECT 1".to_owned(); // forge the only operator-legible field
@@ -259,7 +366,80 @@ mod tests {
     fn long_sql_preview_truncates() {
         let mut d = draft();
         d.sql = "X".repeat(500);
-        let r = AuditRecord::chained(&d, 2, "sha256:prev", "t".to_owned());
+        let r = AuditRecord::chained_unsigned(&d, 2, "sha256:prev", "t".to_owned());
         assert_eq!(r.sql_preview.chars().count(), PREVIEW_LEN);
+    }
+
+    #[test]
+    fn signed_record_verifies_under_its_key() {
+        let r = AuditRecord::chained_signed(
+            &draft(),
+            1,
+            GENESIS_HASH,
+            "2026-06-01T00:00:00Z".to_owned(),
+            &key(),
+        );
+        assert!(r.hash_is_valid());
+        assert!(r.signature_is_valid(&key()));
+        assert_eq!(r.key_id.as_deref(), Some("k1"));
+        assert!(
+            r.signature
+                .as_deref()
+                .is_some_and(|s| s.starts_with("hmac-sha256:"))
+        );
+    }
+
+    #[test]
+    fn wrong_key_fails_signature() {
+        let r = AuditRecord::chained_signed(
+            &draft(),
+            1,
+            GENESIS_HASH,
+            "2026-06-01T00:00:00Z".to_owned(),
+            &key(),
+        );
+        let attacker = SigningKey::new("k1", b"guessed-key".to_vec());
+        assert!(
+            !r.signature_is_valid(&attacker),
+            "a record signed with one key must not verify under another"
+        );
+    }
+
+    #[test]
+    fn recompute_from_genesis_without_key_is_detected_by_mac() {
+        // The forgery the bare hash chain cannot catch: an attacker edits a
+        // record's content and recomputes entry_hash so hash_is_valid() passes.
+        // Without the key they cannot produce a matching MAC.
+        let mut forged = AuditRecord::chained_signed(
+            &draft(),
+            1,
+            GENESIS_HASH,
+            "2026-06-01T00:00:00Z".to_owned(),
+            &key(),
+        );
+        // Forge the operator-legible field and recompute the (unkeyed) hash so
+        // the bare-hash check would pass — but leave the old MAC in place.
+        forged.sql_preview = "SELECT 1".to_owned();
+        forged.entry_hash = compute_entry_hash(
+            forged.seq,
+            &forged.timestamp,
+            &forged.agent_identity,
+            &forged.tool,
+            &forged.sql_sha256,
+            &forged.sql_preview,
+            &forged.danger_level,
+            forged.decision,
+            forged.rows_affected,
+            forged.outcome,
+            &forged.prev_hash,
+        );
+        assert!(
+            forged.hash_is_valid(),
+            "recompute-from-genesis defeats the bare hash chain"
+        );
+        assert!(
+            !forged.signature_is_valid(&key()),
+            "but the keyed MAC over the (now different) entry_hash must not verify"
+        );
     }
 }

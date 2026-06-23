@@ -18,13 +18,16 @@
 //! injected via [`LeaseAcquirer`] to keep this router engine-free and testable.
 //!
 //! Product-surface decision for `oraclemcp` v0.3.x: this router is deliberately
-//! not advertised by the read-only `oraclemcp` binary. It is guarded-write
-//! machinery for the broader Oracle MCP family; surfacing it here would weaken
-//! the binary's safe-by-default contract. If this tool is ever exposed, it
-//! belongs behind a separate explicit opt-in surface with its own release gates.
+//! not advertised by the `oraclemcp` binary, which exposes guarded write/DDL
+//! only through individual, classifier-gated tools (`oracle_execute`, …). It is
+//! broader lease/escalation/transaction orchestration for the Oracle MCP family;
+//! surfacing it here would widen the served write surface beyond that governed
+//! per-tool model. If this tool is ever exposed, it belongs behind a separate
+//! explicit opt-in surface with its own release gates.
 
 use std::time::Duration;
 
+use asupersync::Cx;
 use oraclemcp_db::{LeaseId, LeaseManager};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
@@ -197,9 +200,14 @@ fn apply_window(
 }
 
 /// Dispatch one `oracle_session` action.
-pub fn oracle_session(
+///
+/// `Cx`-first and `async` (B1): the lease actions issue real DB round trips
+/// through the now-async [`oraclemcp_db::LeaseManager`], so `cx` threads through
+/// and each lease call is `.await`-ed.
+pub async fn oracle_session(
+    cx: &Cx,
     action: SessionAction,
-    deps: &mut SessionDeps,
+    deps: &mut SessionDeps<'_>,
 ) -> Result<Value, ErrorEnvelope> {
     match action {
         SessionAction::LeaseAcquire {
@@ -218,7 +226,8 @@ pub fn oracle_session(
         SessionAction::LeaseRenew { lease_id } => {
             let info = deps
                 .leases
-                .renew(&LeaseId(lease_id))
+                .renew(cx, &LeaseId(lease_id))
+                .await
                 .map_err(oraclemcp_db::DbError::into_envelope)?;
             let mut v = serde_json::to_value(&info).unwrap_or(Value::Null);
             if let Value::Object(map) = &mut v {
@@ -227,7 +236,7 @@ pub fn oracle_session(
             Ok(v)
         }
         SessionAction::LeaseRelease { lease_id } => {
-            deps.leases.release(&LeaseId(lease_id.clone()));
+            deps.leases.release(cx, &LeaseId(lease_id.clone())).await;
             Ok(json!({ "action": "lease_release", "lease_id": lease_id, "released": true }))
         }
         SessionAction::DeEscalate => {
@@ -251,37 +260,43 @@ pub fn oracle_session(
                 ));
             }
             deps.leases
-                .apply_session_statement(&LeaseId(lease_id), &statement)
+                .apply_session_statement(cx, &LeaseId(lease_id), &statement)
+                .await
                 .map_err(oraclemcp_db::DbError::into_envelope)?;
             Ok(json!({ "action": "set_session", "applied": statement }))
         }
         SessionAction::EnableDbmsOutput { lease_id } => {
             deps.leases
-                .enable_dbms_output(&LeaseId(lease_id))
+                .enable_dbms_output(cx, &LeaseId(lease_id))
+                .await
                 .map_err(oraclemcp_db::DbError::into_envelope)?;
             Ok(json!({ "action": "enable_dbms_output", "enabled": true }))
         }
         SessionAction::Begin { lease_id } => {
             deps.leases
-                .begin_transaction(&LeaseId(lease_id))
+                .begin_transaction(cx, &LeaseId(lease_id))
+                .await
                 .map_err(oraclemcp_db::DbError::into_envelope)?;
             Ok(json!({ "action": "begin", "in_transaction": true }))
         }
         SessionAction::Commit { lease_id } => {
             deps.leases
-                .commit(&LeaseId(lease_id))
+                .commit(cx, &LeaseId(lease_id))
+                .await
                 .map_err(oraclemcp_db::DbError::into_envelope)?;
             Ok(json!({ "action": "commit", "in_transaction": false }))
         }
         SessionAction::Rollback { lease_id } => {
             deps.leases
-                .rollback(&LeaseId(lease_id))
+                .rollback(cx, &LeaseId(lease_id))
+                .await
                 .map_err(oraclemcp_db::DbError::into_envelope)?;
             Ok(json!({ "action": "rollback", "in_transaction": false }))
         }
         SessionAction::Savepoint { lease_id, name } => {
             deps.leases
-                .savepoint(&LeaseId(lease_id), &name)
+                .savepoint(cx, &LeaseId(lease_id), &name)
+                .await
                 .map_err(oraclemcp_db::DbError::into_envelope)?;
             Ok(json!({ "action": "savepoint", "name": name }))
         }
@@ -408,6 +423,18 @@ mod tests {
         serde_json::from_str(json_str).expect("parse action")
     }
 
+    /// Run `oracle_session` on a fresh current-thread runtime with an installed
+    /// `Cx` (the lease actions are now async).
+    fn sess(action: SessionAction, deps: &mut SessionDeps<'_>) -> Result<Value, ErrorEnvelope> {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            oracle_session(&cx, action, deps).await
+        })
+    }
+
     #[test]
     fn lease_acquire_routes_to_the_acquirer() {
         let leases = LeaseManager::new();
@@ -415,7 +442,7 @@ mod tests {
         let stepup = StepUpRegistry::new();
         let acq = OkAcquirer;
         let mut d = deps(&leases, &mut level, &stepup, &acq);
-        let out = oracle_session(
+        let out = sess(
             parse(r#"{"action":"lease_acquire","profile":"dev","agent_identity":"a"}"#),
             &mut d,
         )
@@ -439,7 +466,7 @@ mod tests {
             r#"{"action":"savepoint","lease_id":"nope","name":"sp1"}"#,
             r#"{"action":"enable_dbms_output","lease_id":"nope"}"#,
         ] {
-            let err = oracle_session(parse(action), &mut d).expect_err(action);
+            let err = sess(parse(action), &mut d).expect_err(action);
             // LeaseNotFound maps to a RuntimeStateRequired/lease envelope, never a panic.
             assert!(
                 matches!(
@@ -461,8 +488,8 @@ mod tests {
         let stepup = StepUpRegistry::new();
         let acq = OkAcquirer;
         let mut d = deps(&leases, &mut level, &stepup, &acq);
-        let err = oracle_session(
-            parse(r#"{"action":"set_session","lease_id":"l","statement":"ALTER SESSION SET CONTAINER = CDB$ROOT"}"#),
+        let err = sess(
+parse(r#"{"action":"set_session","lease_id":"l","statement":"ALTER SESSION SET CONTAINER = CDB$ROOT"}"#),
             &mut d,
         )
         .expect_err("forbidden");
@@ -476,7 +503,7 @@ mod tests {
         let stepup = StepUpRegistry::new();
         let acq = OkAcquirer;
         let mut d = deps(&leases, &mut level, &stepup, &acq);
-        let out = oracle_session(
+        let out = sess(
             parse(r#"{"action":"escalate","target_level":"READ_WRITE"}"#),
             &mut d,
         )
@@ -505,7 +532,7 @@ mod tests {
             )
             .expect("resolve");
         let mut d = deps(&leases, &mut level, &stepup, &acq);
-        let out = oracle_session(
+        let out = sess(
             parse(&format!(
                 r#"{{"action":"escalate","target_level":"READ_WRITE","challenge_id":"{}"}}"#,
                 chal.challenge_id
@@ -538,7 +565,7 @@ mod tests {
             )
             .expect("resolve");
         let mut d = deps(&leases, &mut level, &stepup, &acq);
-        let err = oracle_session(
+        let err = sess(
             parse(&format!(
                 r#"{{"action":"escalate","target_level":"DDL","challenge_id":"{}"}}"#,
                 chal.challenge_id
@@ -560,8 +587,7 @@ mod tests {
         let stepup = StepUpRegistry::new();
         let acq = OkAcquirer;
         let mut d = deps(&leases, &mut level, &stepup, &acq);
-        let out =
-            oracle_session(parse(r#"{"action":"de_escalate"}"#), &mut d).expect("de-escalate");
+        let out = sess(parse(r#"{"action":"de_escalate"}"#), &mut d).expect("de-escalate");
         assert_eq!(out["status"], json!("de_escalated"));
         assert!(!d.level.has_active_elevation());
     }
@@ -573,7 +599,7 @@ mod tests {
         let stepup = StepUpRegistry::new();
         let acq = OkAcquirer;
         let mut d = deps(&leases, &mut level, &stepup, &acq);
-        let out = oracle_session(parse(r#"{"action":"get_session"}"#), &mut d).expect("get");
+        let out = sess(parse(r#"{"action":"get_session"}"#), &mut d).expect("get");
         assert_eq!(out["session"]["max_level"], json!("DDL"));
         assert_eq!(out["session"]["current_level"], json!("READ_ONLY"));
         assert_eq!(out["session"]["protected"], json!(false));

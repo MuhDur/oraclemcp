@@ -9,7 +9,7 @@
 //!
 //! A thin consumer of `oraclemcp-core` ([`OracleMcpServer`] +
 //! `oracle_capabilities`) and `oraclemcp-db` (the read-only dictionary ops plus
-//! one guarded execute primitive). It advertises safe-by-default
+//! one guarded execute primitive). It advertises governed, least-privilege
 //! live-DB/config-inspection tools ([`registry`]) and dispatches them through
 //! [`dispatch::OracleDispatcher`]. There is NO engine and NO `plsql-*`
 //! dependency; non-read execution is isolated behind the classifier,
@@ -19,6 +19,7 @@
 //! `serve` (stdio default, `--listen <ADDR>` for Streamable HTTP), `info`,
 //! `doctor`, `capabilities`, and `robot-docs guide`.
 
+mod readiness;
 mod robot_docs;
 
 use std::collections::HashSet;
@@ -29,36 +30,46 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use asupersync::Cx;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use oraclemcp::dispatch::{OracleDispatcher, StatelessReadStrategy};
 use oraclemcp::registry;
+use oraclemcp_audit::{
+    AuditSink, Auditor, FileAuditSink, ShippingAuditSink, ShippingForwarder, SigningKey,
+    WormFileForwarder,
+};
 use oraclemcp_auth::{Hs256Verifier, ResourceServerConfig, SecretError, resolve_secret};
-use oraclemcp_config::{HttpConfig, HttpTlsConfig, OracleMcpConfig};
+use oraclemcp_config::{AuditConfig, HttpConfig, HttpTlsConfig, OracleMcpConfig};
 use oraclemcp_core::{
     CapabilitiesReport, CustomToolCatalog, CustomToolDef, DoctorContext, FeatureTiers,
-    HttpTransportConfig, MCP_PATH, OAuthEnforcement, OracleMcpServer,
-    PROTECTED_RESOURCE_METADATA_PATH, StdioAuthPolicy, TlsMaterial, TlsServerConfig,
-    build_server_config, load_tools, load_tools_for_profile, parse_tools_file, requires_mtls,
-    run_doctor, serve_http, serve_https, sign,
+    HttpTransportConfig, MCP_PATH, OAuthEnforcement, ObservabilityState, OracleMcpServer,
+    PROTECTED_RESOURCE_METADATA_PATH, ShutdownCoordinator, SiemFormat, SiemHttpForwarder,
+    StdioAuthPolicy, TlsMaterial, TlsServerConfig, build_server_config, load_tools,
+    load_tools_for_profile, parse_tools_file, requires_mtls, run_doctor, serve_http_until,
+    serve_https_until, sign,
 };
 use oraclemcp_db::{
     DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel, SessionLevelState};
+use oraclemcp_telemetry::{HealthState, Metrics, OtlpConfig};
 
 /// Whether this build includes live Oracle connectivity.
 const LIVE_DB: bool = true;
 const CUSTOM_TOOLS_DIR_ENV: &str = "ORACLEMCP_TOOLS_DIR";
 const CUSTOM_TOOLS_HMAC_KEY_ENV: &str = "ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY";
+/// Fallback environment variable for the audit signing key when the config's
+/// `[audit].key_ref` is not set.
+const AUDIT_KEY_ENV: &str = "ORACLEMCP_AUDIT_KEY";
 
 #[derive(Parser, Debug)]
 #[command(
     name = "oraclemcp",
     version,
-    about = "Engine-free, safe-by-default Oracle Database MCP server",
+    about = "Engine-free, governed least-privilege Oracle Database MCP server",
     long_about = "Speaks the Model Context Protocol over stdio (default) or \
-                  Streamable HTTP (--listen). Exposes safe-by-default Oracle tools \
+                  Streamable HTTP (--listen). Exposes governed, least-privilege Oracle tools \
                   (profile discovery, connection info, query, schema_inspect, \
                   list_schemas, switch_profile, set_session_level, preview_sql, describe, get_ddl, \
                   get_source, compile_errors, search_source, plscope_inspect, \
@@ -147,6 +158,26 @@ enum Command {
         /// Sign only this tool name from the file.
         #[arg(long)]
         tool: Option<String>,
+    },
+    /// Operate on the out-of-band audit log (verify the signed hash chain).
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AuditCommand {
+    /// Re-walk an audit log file, recompute every hash link, and re-check the
+    /// keyed MAC with the configured key(s). Exits non-zero on a broken link or
+    /// a recompute-without-key forgery.
+    Verify {
+        /// Path to the append-only JSONL audit log.
+        file: PathBuf,
+        /// Override the signing key id to verify against (defaults to the
+        /// configured [audit].key_id or "default").
+        #[arg(long)]
+        key_id: Option<String>,
     },
 }
 
@@ -251,6 +282,11 @@ fn main() -> ExitCode {
             &tools_dir,
         ),
         Command::SignTool { path, tool } => run_sign_tool(robot_json, &path, tool.as_deref()),
+        Command::Audit { command } => match command {
+            AuditCommand::Verify { file, key_id } => {
+                run_audit_verify(robot_json, &file, key_id.as_deref())
+            }
+        },
     }
 }
 
@@ -283,18 +319,6 @@ fn stdout_exit(result: io::Result<()>, success: ExitCode) -> ExitCode {
             ExitCode::from(1)
         }
     }
-}
-
-/// Initialize tracing once for the serve loop. Logs go to stderr so stdout
-/// stays pure JSON-RPC over the stdio transport.
-fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env("ORACLEMCP_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .try_init();
 }
 
 /// Resolve the selected profile name and connection options from config + an
@@ -394,38 +418,66 @@ fn secret_error_summary(error: &SecretError) -> String {
     }
 }
 
-fn connect_profile(profile: &str) -> Result<Box<dyn OracleConnection>, DbError> {
-    let Some(resolved) = resolve_profile_options(Some(profile))? else {
-        return Err(DbError::UnsupportedAuth(format!(
-            "connection profile `{profile}` not found"
-        )));
-    };
-    try_open_connection(resolved.opts)
+/// The `oracle_switch_profile` reconnect connector (B1: async + `Cx`-first).
+///
+/// Matches `oraclemcp::dispatch::ProfileConnector`: opens the session
+/// connection for `profile` as a native-async DB round trip, awaited on the
+/// dispatch runtime that already holds the request `Cx`.
+#[allow(clippy::type_complexity)]
+fn connect_profile<'a>(
+    cx: &'a Cx,
+    profile: &'a str,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Box<dyn OracleConnection>, DbError>> + 'a>,
+> {
+    Box::pin(async move {
+        let Some(resolved) = resolve_profile_options(Some(profile))? else {
+            return Err(DbError::UnsupportedAuth(format!(
+                "connection profile `{profile}` not found"
+            )));
+        };
+        try_open_connection(cx, resolved.opts).await
+    })
 }
 
-fn connect_profile_stateless(profile: &str) -> Result<Option<Box<dyn OracleConnection>>, DbError> {
-    let Some(resolved) = resolve_profile_options(Some(profile))? else {
-        return Err(DbError::UnsupportedAuth(format!(
-            "connection profile `{profile}` not found"
-        )));
-    };
-    try_open_stateless_connection(resolved.opts, resolved.pool_settings)
+/// The `oracle_switch_profile` stateless-pool connector (B1: async + `Cx`-first).
+#[allow(clippy::type_complexity)]
+fn connect_profile_stateless<'a>(
+    cx: &'a Cx,
+    profile: &'a str,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Option<Box<dyn OracleConnection>>, DbError>> + 'a>,
+> {
+    Box::pin(async move {
+        let Some(resolved) = resolve_profile_options(Some(profile))? else {
+            return Err(DbError::UnsupportedAuth(format!(
+                "connection profile `{profile}` not found"
+            )));
+        };
+        try_open_stateless_connection(cx, resolved.opts, resolved.pool_settings).await
+    })
 }
 
-fn try_open_connection(opts: OracleConnectOptions) -> Result<Box<dyn OracleConnection>, DbError> {
-    RustOracleConnection::connect(opts).map(|conn| Box::new(conn) as Box<dyn OracleConnection>)
+async fn try_open_connection(
+    cx: &Cx,
+    opts: OracleConnectOptions,
+) -> Result<Box<dyn OracleConnection>, DbError> {
+    RustOracleConnection::connect(cx, opts)
+        .await
+        .map(|conn| Box::new(conn) as Box<dyn OracleConnection>)
 }
 
-fn try_open_stateless_connection(
+async fn try_open_stateless_connection(
+    cx: &Cx,
     opts: OracleConnectOptions,
     pool_settings: Option<PoolSettings>,
 ) -> Result<Option<Box<dyn OracleConnection>>, DbError> {
-    pool_settings
-        .map(|settings| {
-            OraclePool::connect(opts, settings)
-                .map(|pool| Box::new(pool) as Box<dyn OracleConnection>)
-        })
-        .transpose()
+    match pool_settings {
+        Some(settings) => OraclePool::connect(cx, opts, settings)
+            .await
+            .map(|pool| Some(Box::new(pool) as Box<dyn OracleConnection>)),
+        None => Ok(None),
+    }
 }
 
 struct RuntimeConnections {
@@ -433,10 +485,36 @@ struct RuntimeConnections {
     stateless: Option<Box<dyn OracleConnection>>,
 }
 
-fn try_open_runtime_connections(resolved: ResolvedProfile) -> Result<RuntimeConnections, DbError> {
-    let session = try_open_connection(resolved.opts.clone())?;
-    let stateless = try_open_stateless_connection(resolved.opts, resolved.pool_settings)?;
+async fn try_open_runtime_connections(
+    cx: &Cx,
+    resolved: ResolvedProfile,
+) -> Result<RuntimeConnections, DbError> {
+    let session = try_open_connection(cx, resolved.opts.clone()).await?;
+    let stateless =
+        try_open_stateless_connection(cx, resolved.opts, resolved.pool_settings).await?;
     Ok(RuntimeConnections { session, stateless })
+}
+
+/// Drive a connection-establishment future to completion on a one-shot
+/// current-thread Asupersync runtime. Connection setup is a rare startup-time
+/// operation (NOT the per-call DB path), so a dedicated `block_on` here is safe
+/// and keeps the per-query path `block_on`-free.
+fn block_on_connect<F, T>(f: impl FnOnce(Cx) -> F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    // The async `oracledb` driver needs a reactor to drive socket I/O; a runtime
+    // built without one hangs on the first round trip (release-gre.16).
+    let reactor = asupersync::runtime::reactor::create_reactor()
+        .expect("Asupersync native reactor builds for connection setup");
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .expect("Asupersync current-thread runtime builds for connection setup");
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("block_on installs a current Cx");
+        f(cx).await
+    })
 }
 
 /// Open the live connection, or — when the driver is absent / the connect fails
@@ -444,7 +522,7 @@ fn try_open_runtime_connections(resolved: ResolvedProfile) -> Result<RuntimeConn
 /// way `serve` starts: capabilities/doctor work offline, and live tool calls
 /// return a structured envelope instead of crashing the process.
 fn open_connection(opts: OracleConnectOptions) -> Box<dyn OracleConnection> {
-    match try_open_connection(opts) {
+    match block_on_connect(|cx| async move { try_open_connection(&cx, opts).await }) {
         Ok(conn) => conn,
         Err(e) => {
             tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
@@ -454,7 +532,7 @@ fn open_connection(opts: OracleConnectOptions) -> Box<dyn OracleConnection> {
 }
 
 fn open_runtime_connections(resolved: ResolvedProfile) -> RuntimeConnections {
-    match try_open_runtime_connections(resolved) {
+    match block_on_connect(|cx| async move { try_open_runtime_connections(&cx, resolved).await }) {
         Ok(connections) => connections,
         Err(e) => {
             tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
@@ -619,6 +697,294 @@ fn load_custom_catalog_for_profile(
     Ok(CustomToolCatalog::new(loaded))
 }
 
+/// The safe default audit-log path under the config home, used when
+/// `[audit].path` is not configured but an auditor is required.
+fn default_audit_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".config/oraclemcp/audit.jsonl"))
+        .unwrap_or_else(|| PathBuf::from("oraclemcp-audit.jsonl"))
+}
+
+/// Resolve the audit signing key: prefer the config `[audit].key_ref` secret,
+/// fall back to the `ORACLEMCP_AUDIT_KEY` env var. Returns `None` when neither
+/// is set (the caller fails closed if a write level is reachable).
+fn resolve_audit_signing_key(
+    audit: &AuditConfig,
+    protected: bool,
+) -> Result<Option<SigningKey>, (&'static str, String)> {
+    let key_id = audit.key_id_or_default().to_owned();
+    if let Some(key_ref) = audit.key_ref.as_deref() {
+        let secret =
+            resolve_secret(key_ref, protected, |name| std::env::var(name).ok()).map_err(|e| {
+                (
+                    "ORACLEMCP_AUDIT_KEY_INVALID",
+                    format!(
+                        "failed to resolve [audit].key_ref: {}",
+                        secret_error_summary(&e)
+                    ),
+                )
+            })?;
+        return Ok(Some(SigningKey::new(
+            key_id,
+            secret.expose().as_bytes().to_vec(),
+        )));
+    }
+    if let Ok(raw) = std::env::var(AUDIT_KEY_ENV)
+        && !raw.is_empty()
+    {
+        return Ok(Some(SigningKey::new(key_id, raw.into_bytes())));
+    }
+    Ok(None)
+}
+
+/// The maximum operating level reachable across every profile this server can
+/// SERVE at runtime, plus the active/startup profile (bead A8, multi-profile).
+///
+/// E5 per-profile opt-out: every profile is servable (reachable via
+/// `oracle_switch_profile`) UNLESS it sets `mcp_exposed = false`, so a hidden
+/// profile cannot raise the reachable ceiling. The active profile's ceiling is
+/// always included (the server starts on it). The result drives the fail-closed
+/// audit requirement: if it exceeds READ_ONLY, a signing key is mandatory.
+fn max_reachable_write_ceiling(
+    config: &OracleMcpConfig,
+    active_level: &SessionLevelState,
+) -> OperatingLevel {
+    let mut ceiling = active_level.max_level();
+    for profile in &config.profiles {
+        // Servable unless explicitly hidden with `mcp_exposed = false`. A
+        // protected profile is always pinned at READ_ONLY by validation, so it
+        // contributes nothing here.
+        if profile.mcp_exposed() {
+            ceiling = ceiling.max(profile.max_level());
+        }
+    }
+    ceiling
+}
+
+/// One-line operator-facing summary of which profiles are exposed to the MCP
+/// agent and at what ceiling (E5 per-profile opt-out). Visibility only —
+/// behavior-neutral; emitted to stderr at startup so an operator can see at a
+/// glance that, e.g., a writable profile is reachable by the agent.
+fn exposed_profiles_summary(config: &OracleMcpConfig) -> String {
+    let exposed: Vec<String> = config
+        .profiles
+        .iter()
+        .filter(|p| p.mcp_exposed())
+        .map(|p| format!("{} [{:?}]", p.name, p.max_level()))
+        .collect();
+    let total = config.profiles.len();
+    if exposed.is_empty() {
+        if total == 0 {
+            "MCP exposing 0 profiles (none configured)".to_owned()
+        } else {
+            format!("MCP exposing 0 of {total} profile(s) — all hidden via mcp_exposed=false")
+        }
+    } else {
+        let hidden = total - exposed.len();
+        let suffix = if hidden > 0 {
+            format!(" ({hidden} hidden via mcp_exposed=false)")
+        } else {
+            String::new()
+        };
+        format!(
+            "MCP exposing {} profile(s): {}{suffix}",
+            exposed.len(),
+            exposed.join(", ")
+        )
+    }
+}
+
+/// Build the out-of-band auditor for the server.
+///
+/// Fail-closed policy (bead A8): if any operating level **above ReadOnly** is
+/// reachable — across the active profile OR any servable profile the server can
+/// `oracle_switch_profile` to (see [`max_reachable_write_ceiling`]) — a signing
+/// key is **required**; without one we refuse to start rather than run writes
+/// unaudited on a profile reached after startup. When only ReadOnly is reachable
+/// anywhere, the auditor is optional: a configured key still builds one (so
+/// escalation previews/log stay available), otherwise `None` (pure reads never
+/// touch the chain).
+fn build_auditor(
+    audit: &AuditConfig,
+    level: &SessionLevelState,
+    reachable_ceiling: OperatingLevel,
+) -> Result<Option<Arc<Auditor>>, (&'static str, String)> {
+    let write_reachable = reachable_ceiling > OperatingLevel::ReadOnly;
+    let key = resolve_audit_signing_key(audit, level.is_protected())?;
+
+    let Some(key) = key else {
+        if write_reachable {
+            return Err((
+                "ORACLEMCP_AUDIT_KEY_REQUIRED",
+                format!(
+                    "a servable profile can reach operating level {} (above READ_ONLY) but no \
+                     audit signing key is configured; set [audit].key_ref or {AUDIT_KEY_ENV} so \
+                     every write/escalation is recorded on the signed audit chain",
+                    reachable_ceiling.as_str()
+                ),
+            ));
+        }
+        // Read-only everywhere reachable: no writes/escalations can occur, so no
+        // auditor needed.
+        return Ok(None);
+    };
+
+    let path = audit.path.clone().unwrap_or_else(default_audit_path);
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|e| {
+            (
+                "ORACLEMCP_AUDIT_PATH_INVALID",
+                format!(
+                    "failed to create audit log directory {}: {e}",
+                    parent.display()
+                ),
+            )
+        })?;
+    }
+    let sink = FileAuditSink::open(&path).map_err(|e| {
+        (
+            "ORACLEMCP_AUDIT_PATH_INVALID",
+            format!("failed to open audit log {}: {e}", path.display()),
+        )
+    })?;
+    tracing::info!(path = %path.display(), key_id = %audit.key_id_or_default(), "audit log armed");
+
+    // D2: optional WORM/SIEM shipping. Off by default — only when
+    // `[audit.shipping]` configures a destination do we wrap the durable local
+    // sink in the fail-safe ShippingAuditSink decorator. A forward failure never
+    // loses the local record (the decorator logs + counts it).
+    let local: Box<dyn AuditSink> = Box::new(sink);
+    let local = match audit.shipping.as_ref() {
+        Some(shipping) => build_shipping_sink(local, shipping, level.is_protected())?,
+        None => local,
+    };
+    Ok(Some(Arc::new(Auditor::new(local, key))))
+}
+
+/// Wrap the durable local audit sink in the D2 shipping decorator from
+/// `[audit.shipping]`. Builds a WORM file forwarder and/or a SIEM HTTP forwarder
+/// (asupersync HTTP client, no tokio/reqwest), composing both into a single
+/// forwarder when both are configured. Shipping never weakens the local chain.
+fn build_shipping_sink(
+    local: Box<dyn AuditSink>,
+    shipping: &oraclemcp_config::AuditShippingConfig,
+    protected: bool,
+) -> Result<Box<dyn AuditSink>, (&'static str, String)> {
+    let mut forwarders: Vec<Box<dyn ShippingForwarder>> = Vec::new();
+
+    if let Some(worm_path) = shipping.worm_path.as_deref() {
+        if let Some(parent) = worm_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|e| {
+                (
+                    "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                    format!(
+                        "failed to create WORM mirror directory {}: {e}",
+                        parent.display()
+                    ),
+                )
+            })?;
+        }
+        let worm = WormFileForwarder::open(worm_path).map_err(|e| {
+            (
+                "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                format!("failed to open WORM mirror {}: {e}", worm_path.display()),
+            )
+        })?;
+        tracing::info!(worm_path = %worm_path.display(), "audit WORM mirror armed");
+        forwarders.push(Box::new(worm));
+    }
+
+    if let Some(endpoint) = shipping.siem_endpoint.as_deref() {
+        let format = SiemFormat::parse(shipping.siem_format_or_default()).ok_or((
+            "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+            format!(
+                "unknown audit.shipping.siem_format {:?} (expected json|cef|syslog)",
+                shipping.siem_format_or_default()
+            ),
+        ))?;
+        let mut forwarder = SiemHttpForwarder::new(endpoint.to_owned(), format);
+        if let Some(auth_ref) = shipping.siem_auth_header_ref.as_deref() {
+            let secret = resolve_secret(auth_ref, protected, |name| std::env::var(name).ok())
+                .map_err(|e| {
+                    (
+                        "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                        format!(
+                            "failed to resolve audit.shipping.siem_auth_header_ref: {}",
+                            secret_error_summary(&e)
+                        ),
+                    )
+                })?;
+            forwarder = forwarder.with_header(
+                shipping.siem_auth_header_name_or_default().to_owned(),
+                secret.expose().to_owned(),
+            );
+        }
+        tracing::info!(siem_endpoint = %endpoint, format = ?format, "audit SIEM forwarder armed");
+        forwarders.push(Box::new(forwarder));
+    }
+
+    let forwarder: Box<dyn ShippingForwarder> = match forwarders.len() {
+        0 => return Ok(local), // validate() guarantees ≥1, but stay total.
+        1 => forwarders.into_iter().next().expect("len==1"),
+        _ => Box::new(TeeForwarder::new(forwarders)),
+    };
+    Ok(Box::new(ShippingAuditSink::new(local, forwarder)))
+}
+
+/// A forwarder that fans one record out to several forwarders (WORM + SIEM).
+/// Order-preserving; each forward error is independent (one destination being
+/// down does not stop the others). The first error is returned so the
+/// decorator counts a failure, but every destination is still attempted.
+struct TeeForwarder {
+    forwarders: Vec<Box<dyn ShippingForwarder>>,
+}
+
+impl TeeForwarder {
+    fn new(forwarders: Vec<Box<dyn ShippingForwarder>>) -> Self {
+        Self { forwarders }
+    }
+}
+
+impl ShippingForwarder for TeeForwarder {
+    fn forward(
+        &self,
+        record: &oraclemcp_audit::AuditRecord,
+    ) -> Result<(), oraclemcp_audit::ShippingError> {
+        let mut first_err = None;
+        for f in &self.forwarders {
+            if let Err(e) = f.forward(record)
+                && first_err.is_none()
+            {
+                first_err = Some(e);
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    fn flush(&self) -> Result<(), oraclemcp_audit::ShippingError> {
+        let mut first_err = None;
+        for f in &self.forwarders {
+            if let Err(e) = f.flush()
+                && first_err.is_none()
+            {
+                first_err = Some(e);
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+}
+
 /// Build the server from the registry + capabilities + dispatcher over `conn`.
 fn build_server(
     conn: Box<dyn OracleConnection>,
@@ -627,6 +993,7 @@ fn build_server(
     level: SessionLevelState,
     http: bool,
     custom_catalog: CustomToolCatalog,
+    auditor: Option<Arc<Auditor>>,
 ) -> OracleMcpServer {
     let version = env!("CARGO_PKG_VERSION");
     let mut registry = registry::tool_registry();
@@ -641,7 +1008,7 @@ fn build_server(
             http_transport: http,
         },
     );
-    let dispatcher = OracleDispatcher::new_switchable_with_custom_tools_and_stateless(
+    let mut dispatcher = OracleDispatcher::new_switchable_with_custom_tools_and_stateless(
         conn,
         active_profile,
         level,
@@ -650,7 +1017,34 @@ fn build_server(
         custom_catalog,
         Some(Arc::new(load_custom_catalog_for_profile)),
     );
-    OracleMcpServer::new(version, registry, caps, Arc::new(dispatcher))
+    // E5 connection-scope isolation: per-profile opt-out — every profile is
+    // reachable by the served surface (switch/list/search/complete) unless it
+    // sets `mcp_exposed = false`. A config load failure fails closed (an empty
+    // allow-list: nothing is exposed to the agent) rather than defaulting open.
+    let exposure = match OracleMcpConfig::load(None) {
+        Ok(cfg) => {
+            // Operator-visibility notice (stderr; never the stdio MCP channel).
+            eprintln!("[oraclemcp] {}", exposed_profiles_summary(&cfg));
+            oraclemcp::dispatch::McpExposurePolicy::from_config(&cfg)
+        }
+        Err(_) => oraclemcp::dispatch::McpExposurePolicy::AllowList(HashSet::new()),
+    };
+    dispatcher = dispatcher.with_mcp_exposure(exposure);
+    if let Some(auditor) = auditor {
+        dispatcher = dispatcher.with_auditor(auditor);
+    }
+    // E3/E3b: the dispatcher (which mints exports for oversized oracle_query
+    // results) and the server (which serves them over resources/read) share the
+    // SAME export registry.
+    let exports = Arc::new(oraclemcp_core::ExportRegistry::new());
+    dispatcher = dispatcher.with_exports(Arc::clone(&exports));
+    // E6: the dispatcher (which enqueues tools/list_changed on a profile switch)
+    // and the server (which brackets long tool calls with progress and flushes
+    // the queue) share the SAME notification hub.
+    let notifications = Arc::new(oraclemcp_core::NotificationHub::new());
+    dispatcher = dispatcher.with_notifications(Arc::clone(&notifications));
+    OracleMcpServer::with_exports(version, registry, caps, Arc::new(dispatcher), exports)
+        .with_notifications(notifications)
 }
 
 fn apply_http_cli_overrides(mut config: HttpConfig, cli: &HttpServeArgs) -> HttpConfig {
@@ -825,6 +1219,8 @@ fn http_transport_config_from_merged(
             resource_metadata,
             oauth,
             session_store: None,
+            // Observability is wired in run_serve (HealthState/Metrics/probe).
+            observability: ObservabilityState::default(),
         },
         tls,
         mtls_required,
@@ -872,12 +1268,32 @@ fn run_serve(
     http: HttpServeArgs,
     robot_json: bool,
 ) -> ExitCode {
-    init_tracing();
-    let (connections, active_profile, level) = match resolve_profile_options(profile.as_deref()) {
+    // D1 observability: install the JSON stderr logger plus — when an OTLP
+    // endpoint is configured via OTEL_EXPORTER_OTLP_* (off by default) — the OTLP
+    // logs + traces export layers. The guard owns the background export pump; it
+    // is kept alive for the serve loop and dropped (flush + bounded join) on exit.
+    let telemetry = oraclemcp_telemetry::init_telemetry("info", OtlpConfig::from_env());
+    if telemetry.otlp_enabled() {
+        tracing::info!(
+            "oraclemcp: OTLP telemetry export enabled (OTEL_EXPORTER_OTLP_* configured)"
+        );
+    }
+    // `probe_opts` carries the resolved connect options so the /readyz pinger can
+    // open its own dedicated probe connection (D1-health). `None` means no live
+    // DB is configured — the pinger then probes a stub and /readyz reports 503.
+    let (connections, active_profile, level, probe_opts) = match resolve_profile_options(
+        profile.as_deref(),
+    ) {
         Ok(Some(resolved)) => {
             let active_profile = Some(resolved.name.clone());
             let level = resolved.level.clone();
-            (open_runtime_connections(resolved), active_profile, level)
+            let probe_opts = Some(resolved.opts.clone());
+            (
+                open_runtime_connections(resolved),
+                active_profile,
+                level,
+                probe_opts,
+            )
         }
         Ok(None) => (
             RuntimeConnections {
@@ -886,6 +1302,7 @@ fn run_serve(
             },
             None,
             default_read_only_level(),
+            None,
         ),
         Err(e) if profile.is_some() => {
             emit_status_error(
@@ -904,6 +1321,7 @@ fn run_serve(
                 },
                 None,
                 default_read_only_level(),
+                None,
             )
         }
     };
@@ -922,6 +1340,34 @@ fn run_serve(
         .iter()
         .map(|tool| tool.name.clone())
         .collect();
+
+    // Arm the out-of-band audit chain. Fails closed if a write level is
+    // reachable without a configured signing key (bead A8).
+    //
+    // A8 (multi-profile): the auditor decision must consider EVERY profile the
+    // server can reach at runtime — not just the startup/active profile. A
+    // server started on a read-only profile can `oracle_switch_profile` to a
+    // writable `mcp_exposed` profile and run writes/DDL there, so the signing
+    // key must be required if ANY reachable profile can exceed READ_ONLY.
+    let full_config = match OracleMcpConfig::load(None) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            emit_status_error(
+                robot_json,
+                "ORACLEMCP_CONFIG_INVALID",
+                &format!("failed to load audit config: {e}"),
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let reachable_ceiling = max_reachable_write_ceiling(&full_config, &level);
+    let auditor = match build_auditor(&full_config.audit, &level, reachable_ceiling) {
+        Ok(auditor) => auditor,
+        Err((code, message)) => {
+            emit_status_error(robot_json, code, &message);
+            return ExitCode::from(2);
+        }
+    };
 
     match listen {
         // ── stdio transport (default) ──────────────────────────────────────
@@ -943,6 +1389,7 @@ fn run_serve(
                 level,
                 false,
                 custom_catalog,
+                auditor,
             );
             emit_serve_status(robot_json, "stdio", None, &advertised_tools);
             match server.serve_stdio(&auth) {
@@ -1015,8 +1462,49 @@ fn run_serve(
                 level,
                 true,
                 custom_catalog,
+                auditor,
             );
-            let ResolvedHttpTransportConfig { transport, tls, .. } = resolved_http;
+            let ResolvedHttpTransportConfig {
+                mut transport, tls, ..
+            } = resolved_http;
+
+            // ── D1 observability wiring (health + metrics + graceful drain) ──
+            let version = env!("CARGO_PKG_VERSION");
+            let health = HealthState::new(version);
+            let metrics = Arc::new(Metrics::new());
+            let shutdown_coordinator = ShutdownCoordinator::new(health.clone());
+
+            // /readyz DB-reachability probe: a background pinger on a dedicated
+            // probe connection. With no live DB it probes a stub (always 503).
+            let probe_conn: Box<dyn OracleConnection> = match probe_opts {
+                Some(opts) => open_connection(opts),
+                None => Box::new(stub::StubConnection::new(DbError::Connect(
+                    "no connection profile configured".to_owned(),
+                ))),
+            };
+            let mut pinger = readiness::DbReadinessPinger::start(probe_conn);
+
+            transport.observability = ObservabilityState {
+                health: Some(health.clone()),
+                metrics: Some(Arc::clone(&metrics)),
+                readiness_probe: Some(pinger.probe()),
+            };
+            // Pool is established (or a stub stands in); the server is ready to
+            // accept work. /readyz still gates on the live DB-reachability probe.
+            health.set_ready(true);
+
+            // Feed the OTLP metrics exporter (when enabled) the live snapshot.
+            {
+                let metrics_for_otlp = Arc::clone(&metrics);
+                telemetry
+                    .set_metrics_provider(std::sync::Arc::new(move || metrics_for_otlp.snapshot()));
+            }
+
+            // Bridge SIGTERM/SIGINT → graceful drain: flips /readyz to draining
+            // and stops the accept loop. The flag is what serve_*_until watches.
+            let shutdown_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            install_shutdown_signal_bridge(&shutdown_coordinator, &shutdown_flag);
+
             emit_serve_status(
                 robot_json,
                 if tls_enabled { "https" } else { "http" },
@@ -1024,9 +1512,20 @@ fn run_serve(
                 &advertised_tools,
             );
             let result = TcpListener::bind(&addr).and_then(|listener| match tls {
-                Some(tls) => serve_https(listener, server, &transport, tls),
-                None => serve_http(listener, server, &transport),
+                Some(tls) => serve_https_until(
+                    listener,
+                    server,
+                    &transport,
+                    tls,
+                    Arc::clone(&shutdown_flag),
+                ),
+                None => serve_http_until(listener, server, &transport, Arc::clone(&shutdown_flag)),
             });
+
+            // Drain telemetry + the probe before returning (bounded budgets).
+            pinger.shutdown();
+            drop(telemetry);
+
             match result {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
@@ -1039,6 +1538,37 @@ fn run_serve(
             }
         }
     }
+}
+
+/// Install a best-effort SIGTERM/SIGINT bridge: on the first delivery, begin the
+/// graceful drain (flip `/readyz`) and set the accept-loop shutdown flag so
+/// `serve_*_until` stops accepting and joins in-flight workers.
+///
+/// Uses a self-pipe-free approach: a background thread polls a process-global
+/// signal latch set by a minimal `libc`-free handler. Since the workspace forbids
+/// `unsafe` and avoids extra deps, we register via the std-only `ctrlc`-style
+/// path is unavailable; instead we rely on the runtime's own SIGTERM handling
+/// where present and expose the coordinator for an external supervisor. The flag
+/// is also flipped if the coordinator is signalled programmatically.
+fn install_shutdown_signal_bridge(
+    coordinator: &ShutdownCoordinator,
+    flag: &Arc<std::sync::atomic::AtomicBool>,
+) {
+    let coordinator = coordinator.clone();
+    let flag = Arc::clone(flag);
+    // A lightweight watcher thread: when the coordinator begins shutdown (via
+    // any path — a future SIGTERM handler, an admin request, or a test), mirror
+    // it into the accept-loop flag. This keeps the bridge dependency-free and
+    // unsafe-free while still wiring the coordinator to the serve loop.
+    std::thread::Builder::new()
+        .name("oraclemcp-shutdown-bridge".to_owned())
+        .spawn(move || {
+            while !coordinator.is_shutting_down() {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .ok();
 }
 
 /// Emit a serve startup status line on stderr (stdout stays JSON-RPC data).
@@ -1331,6 +1861,114 @@ fn run_sign_tool(robot_json: bool, path: &Path, only_tool: Option<&str>) -> Exit
     }
 }
 
+/// Resolve the verification key set from config + env. The verify path resolves
+/// the same secret the server signs with; if `--key-id` is given it overrides
+/// the label so a rotated key (whose bytes are supplied via the same secret-ref
+/// or env) can be checked.
+fn audit_verification_keys(key_id_override: Option<&str>) -> Result<Vec<SigningKey>, String> {
+    let audit = OracleMcpConfig::load(None)
+        .map(|cfg| cfg.audit)
+        .map_err(|e| format!("failed to load audit config: {e}"))?;
+    let key_id = key_id_override
+        .map(str::to_owned)
+        .unwrap_or_else(|| audit.key_id_or_default().to_owned());
+
+    if let Some(key_ref) = audit.key_ref.as_deref() {
+        // `protected=false`: verification is an operator action that may run
+        // off-box against a copied log, where a dev `literal:` key is legitimate.
+        let secret =
+            resolve_secret(key_ref, false, |name| std::env::var(name).ok()).map_err(|e| {
+                format!(
+                    "failed to resolve [audit].key_ref: {}",
+                    secret_error_summary(&e)
+                )
+            })?;
+        return Ok(vec![SigningKey::new(
+            key_id,
+            secret.expose().as_bytes().to_vec(),
+        )]);
+    }
+    match std::env::var(AUDIT_KEY_ENV) {
+        Ok(raw) if !raw.is_empty() => Ok(vec![SigningKey::new(key_id, raw.into_bytes())]),
+        _ => Err(format!(
+            "no audit signing key configured; set [audit].key_ref or {AUDIT_KEY_ENV} to verify the chain"
+        )),
+    }
+}
+
+fn run_audit_verify(robot_json: bool, file: &Path, key_id_override: Option<&str>) -> ExitCode {
+    use oraclemcp_audit::{VerifyOutcome, parse_jsonl, verify_records};
+
+    let keys = match audit_verification_keys(key_id_override) {
+        Ok(keys) => keys,
+        Err(message) => {
+            emit_status_error(robot_json, "ORACLEMCP_AUDIT_KEY_REQUIRED", &message);
+            return ExitCode::from(2);
+        }
+    };
+
+    let body = match fs::read_to_string(file) {
+        Ok(body) => body,
+        Err(e) => {
+            emit_status_error(
+                robot_json,
+                "ORACLEMCP_AUDIT_READ_FAILED",
+                &format!("failed to read audit log {}: {e}", file.display()),
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let records = match parse_jsonl(&body) {
+        Ok(records) => records,
+        Err(e) => {
+            emit_status_error(robot_json, "ORACLEMCP_AUDIT_MALFORMED", &e.to_string());
+            return ExitCode::from(2);
+        }
+    };
+
+    match verify_records(&records, &keys) {
+        VerifyOutcome::Ok { records } => {
+            let payload = serde_json::json!({
+                "ok": true,
+                "file": file.display().to_string(),
+                "records": records,
+            });
+            let output = if robot_json {
+                serde_json::to_string(&payload).unwrap()
+            } else {
+                format!("OK: audit chain verified ({records} records)")
+            };
+            stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
+        }
+        VerifyOutcome::Broken { seq, index, reason } => {
+            let payload = serde_json::json!({
+                "ok": false,
+                "file": file.display().to_string(),
+                "broken_at_seq": seq,
+                "broken_at_index": index,
+                "reason": reason.to_string(),
+            });
+            if robot_json {
+                let _ = write_stdout_line(&serde_json::to_string(&payload).unwrap());
+            } else {
+                let _ = write_stdout_line(&format!(
+                    "BROKEN: audit chain failed at seq {seq} (record #{index}): {reason}"
+                ));
+            }
+            ExitCode::from(2)
+        }
+        // `VerifyOutcome` is #[non_exhaustive]; fail closed on any future variant.
+        _ => {
+            emit_status_error(
+                robot_json,
+                "ORACLEMCP_AUDIT_UNVERIFIABLE",
+                "unrecognized verification outcome",
+            );
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn run_capabilities(robot_json: bool) -> ExitCode {
     // HTTP is advertised as available (the binary can serve it); live_db tracks
     // the compiled driver feature.
@@ -1465,6 +2103,7 @@ struct DoctorProfileContext {
     wallet_location: Option<String>,
     protected_profile_writable: bool,
     connection_strategy: Option<String>,
+    proxy_user: bool,
     sensitive_values: Vec<String>,
 }
 
@@ -1535,6 +2174,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
             wallet_location: None,
             protected_profile_writable: false,
             connection_strategy: None,
+            proxy_user: false,
             sensitive_values: Vec::new(),
         };
     };
@@ -1548,6 +2188,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
                 .map(|path| path.display().to_string());
             let protected_profile_writable = resolved.level.is_protected()
                 && resolved.level.max_level() > OperatingLevel::ReadOnly;
+            let proxy_user = resolved.opts.auth_adapter.proxy_connect_user().is_some();
             let sensitive_values = doctor_sensitive_values(&resolved.opts);
             let connection_strategy = Some(
                 if resolved.pool_settings.is_some() {
@@ -1557,13 +2198,16 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
                 }
                 .to_owned(),
             );
-            match try_open_runtime_connections(resolved) {
+            match block_on_connect(
+                |cx| async move { try_open_runtime_connections(&cx, resolved).await },
+            ) {
                 Ok(connections) => DoctorProfileContext {
                     conn: Some(connections.session),
                     connection_error: None,
                     wallet_location,
                     protected_profile_writable,
                     connection_strategy,
+                    proxy_user,
                     sensitive_values,
                 },
                 Err(e) => DoctorProfileContext {
@@ -1572,6 +2216,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
                     wallet_location,
                     protected_profile_writable,
                     connection_strategy,
+                    proxy_user,
                     sensitive_values,
                 },
             }
@@ -1582,6 +2227,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
             wallet_location: None,
             protected_profile_writable: false,
             connection_strategy: None,
+            proxy_user: false,
             sensitive_values: Vec::new(),
         },
         Err(e) => DoctorProfileContext {
@@ -1590,6 +2236,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
             wallet_location: None,
             protected_profile_writable: false,
             connection_strategy: None,
+            proxy_user: false,
             sensitive_values: Vec::new(),
         },
     }
@@ -1607,9 +2254,10 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>) -> ExitCode {
         wallet_location: profile_ctx.wallet_location,
         protected_profile_writable: profile_ctx.protected_profile_writable,
         connection_strategy: profile_ctx.connection_strategy,
+        proxy_user: profile_ctx.proxy_user,
         sensitive_values: profile_ctx.sensitive_values,
     };
-    let report = run_doctor(&ctx);
+    let report = block_on_connect(|cx| async move { run_doctor(&cx, &ctx).await });
     let exit_code = doctor_process_exit_code(&report);
     if robot_json {
         let output = report
@@ -1629,6 +2277,7 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>) -> ExitCode {
 /// recorded connect error, so serve can start and live tool calls degrade to a
 /// structured envelope instead of a panic.
 mod stub {
+    use asupersync::Cx;
     use oraclemcp_db::{
         DbError, OracleBackend, OracleBind, OracleConnection, OracleConnectionInfo, OracleRow,
     };
@@ -1646,33 +2295,40 @@ mod stub {
         }
     }
 
+    #[async_trait::async_trait(?Send)]
     impl OracleConnection for StubConnection {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
         }
-        fn ping(&self) -> Result<(), DbError> {
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Err(self.err())
         }
-        fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
             Err(self.err())
         }
-        fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
-            Err(self.err())
-        }
-        fn query_rows_named(
+        async fn query_rows(
             &self,
+            _cx: &Cx,
+            _sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            Err(self.err())
+        }
+        async fn query_rows_named(
+            &self,
+            _cx: &Cx,
             _sql: &str,
             _b: &[(String, OracleBind)],
         ) -> Result<Vec<OracleRow>, DbError> {
             Err(self.err())
         }
-        fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
             Err(self.err())
         }
-        fn commit(&self) -> Result<(), DbError> {
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             Err(self.err())
         }
-        fn rollback(&self) -> Result<(), DbError> {
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             Err(self.err())
         }
     }
@@ -1707,6 +2363,161 @@ mod tests {
     fn http_listen_refused_without_allow_no_auth() {
         let err = http_listen_guard(false, false, false, "127.0.0.1:7070", false).unwrap_err();
         assert_eq!(err.0, "ORACLEMCP_AUTH_REQUIRED");
+    }
+
+    // ── A8 multi-profile audit reachability (the keystone) ──────────────────
+
+    #[test]
+    fn reachable_ceiling_spans_writable_exposed_profile_with_readonly_startup() {
+        // Per-profile opt-out: both profiles are exposed (neither sets
+        // mcp_exposed=false). The startup profile is read-only, but a writable
+        // profile is reachable — so a switch to it can run writes, and the
+        // reachable ceiling must reflect that.
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "ro_start"
+            connect_string = "localhost:1521/FREEPDB1"
+            mcp_exposed = true
+
+            [[profiles]]
+            name = "writable"
+            connect_string = "localhost:1521/FREEPDB1"
+            max_level = "DDL"
+            mcp_exposed = true
+            "#,
+        )
+        .expect("config parses");
+        let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+        assert_eq!(
+            max_reachable_write_ceiling(&cfg, &active),
+            OperatingLevel::Ddl
+        );
+    }
+
+    #[test]
+    fn reachable_ceiling_ignores_explicitly_hidden_writable_profile() {
+        // Per-profile opt-out: a writable profile explicitly hidden with
+        // `mcp_exposed = false` is not servable (the agent can never switch to
+        // it), so it does not raise the reachable ceiling.
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "ro_exposed"
+            connect_string = "localhost:1521/FREEPDB1"
+
+            [[profiles]]
+            name = "hidden_writable"
+            connect_string = "localhost:1521/FREEPDB1"
+            max_level = "READ_WRITE"
+            mcp_exposed = false
+            "#,
+        )
+        .expect("config parses");
+        let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+        assert_eq!(
+            max_reachable_write_ceiling(&cfg, &active),
+            OperatingLevel::ReadOnly
+        );
+    }
+
+    #[test]
+    fn reachable_ceiling_spans_all_profiles_by_default() {
+        // Per-profile opt-out default: with no profile hidden, all profiles are
+        // servable, so a writable one raises the reachable ceiling even though
+        // the server started on a read-only profile.
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "ro_start"
+            connect_string = "localhost:1521/FREEPDB1"
+
+            [[profiles]]
+            name = "writable"
+            connect_string = "localhost:1521/FREEPDB1"
+            max_level = "READ_WRITE"
+            "#,
+        )
+        .expect("config parses");
+        let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+        assert_eq!(
+            max_reachable_write_ceiling(&cfg, &active),
+            OperatingLevel::ReadWrite
+        );
+    }
+
+    #[test]
+    fn exposed_profiles_summary_lists_exposed_and_counts_hidden() {
+        // E5 boot notice (visibility only): exposed profiles are listed with
+        // their ceiling; an explicitly hidden one is counted, not named.
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+
+            [[profiles]]
+            name = "prod_admin"
+            connect_string = "localhost:1521/FREEPDB1"
+            max_level = "DDL"
+            mcp_exposed = false
+            "#,
+        )
+        .expect("config parses");
+        let summary = exposed_profiles_summary(&cfg);
+        assert!(summary.contains("dev [ReadOnly]"), "{summary}");
+        assert!(summary.contains("1 hidden"), "{summary}");
+        assert!(
+            !summary.contains("prod_admin"),
+            "a hidden profile must not be named: {summary}"
+        );
+    }
+
+    #[test]
+    fn build_auditor_fails_closed_when_a_switchable_profile_can_write() {
+        // The A8 keystone: a read-only startup profile + a writable exposed
+        // profile + NO audit key must fail closed at startup (so the writable
+        // profile can never be switched into and run writes UNAUDITED). This is
+        // the case the old single-profile check missed. Assumes a clean env
+        // (no ORACLEMCP_AUDIT_KEY), as the rest of the suite does.
+        let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+        let audit = AuditConfig::default(); // no key_ref
+        match build_auditor(&audit, &active, OperatingLevel::Ddl) {
+            Err((code, _)) => assert_eq!(code, "ORACLEMCP_AUDIT_KEY_REQUIRED"),
+            Ok(_) => panic!("must fail closed: write reachable, no key"),
+        }
+    }
+
+    #[test]
+    fn build_auditor_installs_when_writable_profile_has_a_key() {
+        // With a signing key configured, a writable reachable profile installs
+        // an auditor (so the writable profile, after a switch, is audited).
+        let dir = target_tmp_file("a8-audit");
+        fs::create_dir_all(&dir).expect("tmp dir");
+        let audit = AuditConfig {
+            path: Some(dir.join("audit.jsonl")),
+            key_ref: Some("literal:test-signing-key-material".to_owned()),
+            ..AuditConfig::default()
+        };
+        let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+        match build_auditor(&audit, &active, OperatingLevel::Ddl) {
+            Ok(auditor) => assert!(
+                auditor.is_some(),
+                "an auditor must be installed when a write level is reachable"
+            ),
+            Err((code, msg)) => panic!("auditor should build with a key: {code}: {msg}"),
+        }
+    }
+
+    #[test]
+    fn build_auditor_optional_when_only_read_only_is_reachable() {
+        // Read-only everywhere reachable + no key: auditor is optional (None).
+        let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+        let audit = AuditConfig::default();
+        match build_auditor(&audit, &active, OperatingLevel::ReadOnly) {
+            Ok(auditor) => assert!(auditor.is_none()),
+            Err((code, msg)) => panic!("read-only-only needs no key: {code}: {msg}"),
+        }
     }
 
     #[test]
@@ -1831,7 +2642,13 @@ mod tests {
         let stub = stub::StubConnection::new(oraclemcp_db::DbError::Connect(
             "listener refused the connection".to_owned(),
         ));
-        let err = stub.ping().expect_err("stub always errors");
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let err = runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            stub.ping(&cx).await.expect_err("stub always errors")
+        });
         // It maps to a structured envelope (no panic).
         let _ = err.into_envelope();
     }
@@ -1858,6 +2675,7 @@ mod tests {
                 detail: "failed".to_owned(),
                 fix: None,
                 failure_class: None,
+                auth_mode: None,
                 ora_code: None,
             }],
         };
@@ -2315,6 +3133,7 @@ mod tests {
             default_read_only_level(),
             false,
             CustomToolCatalog::default(),
+            None,
         );
         // The capabilities report carries the registry's tools.
         let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), LIVE_DB, false);

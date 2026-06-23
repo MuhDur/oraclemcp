@@ -17,24 +17,35 @@
 
 pub mod admin_auth;
 pub mod admission;
+pub mod audit_shipping;
 pub mod capabilities;
+pub mod capability;
 pub mod connect;
 pub mod custom_tools;
 pub mod doctor;
+pub mod export;
+pub mod fence;
 pub mod http;
 pub mod init_token;
+pub mod notifications;
+pub mod pagination;
 pub mod plugin;
 pub mod query_execute;
+pub mod request_budget;
 pub mod resilience;
 pub mod resources;
 pub mod server;
 pub mod session_tool;
 pub mod shutdown;
 pub mod subscriptions;
+pub mod tamper_token;
 pub mod tls;
 pub mod tools;
 pub mod trace;
 
+pub use request_budget::{
+    CLEANUP_POLL_QUOTA, DEFAULT_REQUEST_POLL_QUOTA, DEFAULT_REQUEST_TIMEOUT, RequestBudget,
+};
 pub use resilience::{
     CircuitBreaker, CircuitState, RetryPolicy, is_transient_error, run_with_timeout,
 };
@@ -45,8 +56,12 @@ pub use shutdown::{CancelOutcome, ShutdownCoordinator, install_panic_hook};
 
 pub use admin_auth::{AdminAssertionVerifier, AdminAuthError, AdminAuthPolicy};
 pub use admission::{AdmissionController, AdmissionPermit};
+pub use audit_shipping::{SiemFormat, SiemHttpForwarder};
 pub use capabilities::{
     CapabilitiesReport, ConnectionStatus, FeatureTiers, OperatingLevelReport, PROTOCOL_VERSION,
+};
+pub use capability::{
+    PrivilegedEffect, ReadPathCaps, narrow_to_read_path, requires_privileged_effect,
 };
 pub use connect::{SessionContext, build_session_context, profile_to_options, session_level_state};
 pub use custom_tools::{
@@ -55,12 +70,21 @@ pub use custom_tools::{
     enforce_signature, execute_custom_tool, load_tools, load_tools_for_profile, parse_tools_file,
     register_custom_tools, sign, verify_signature,
 };
-pub use doctor::{CheckResult, CheckStatus, DoctorContext, DoctorReport, run_doctor};
+pub use doctor::{
+    AuthModeClass, CheckResult, CheckStatus, DoctorContext, DoctorReport, classify_auth_mode,
+    run_doctor,
+};
+pub use export::{
+    ExportAccess, ExportContents, ExportFormat, ExportHandle, ExportRegistry, export_uri,
+};
 pub use http::{
-    HttpRequest, HttpResponse, HttpTransportConfig, MCP_PATH, OAuthEnforcement,
-    PROTECTED_RESOURCE_METADATA_PATH, ScopeGrant, handle_http_request, serve_http, serve_https,
+    HEALTHZ_PATH, HttpRequest, HttpResponse, HttpTransportConfig, MCP_PATH, METRICS_PATH,
+    OAuthEnforcement, ObservabilityState, PROTECTED_RESOURCE_METADATA_PATH, READYZ_PATH,
+    ReadinessProbe, ScopeGrant, handle_http_request, serve_http, serve_http_until, serve_https,
+    serve_https_until,
 };
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
+pub use notifications::{NotificationHub, progress_token_from_params};
 pub use plugin::{
     PluginCapability, PluginError, PluginManifest, PluginRequest, PluginResponse, SubprocessPlugin,
     check_capability,
@@ -71,7 +95,8 @@ pub use resources::{
     ResourceUri, prompt_catalog, read_resource, render_prompt, resource_templates,
 };
 pub use session_tool::{LeaseAcquirer, SessionAction, SessionDeps, oracle_session};
-pub use subscriptions::SubscriptionRegistry;
+pub use subscriptions::{PollingSource, SubscribeSource, SubscriptionHub, SubscriptionRegistry};
+pub use tamper_token::{sign_token, verify_token};
 pub use tls::{TlsError, TlsMaterial, TlsServerConfig, build_server_config, requires_mtls};
 pub use tools::{ToolDescriptor, ToolRegistry, ToolTier};
 pub use trace::TraceContext;

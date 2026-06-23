@@ -48,6 +48,7 @@
         "jsonrpc": "2.0",
         "result": {
           "capabilities": {
+            "completions": {},
             "prompts": {
               "listChanged": false
             },
@@ -56,16 +57,16 @@
               "subscribe": false
             },
             "tools": {
-              "listChanged": false
+              "listChanged": true
             }
           },
           "instructions": "Call oracle_capabilities first to discover tools, the current/max operating level, and connection status. Reads are frictionless; writes/DDL require a gated escalation.",
           "protocolVersion": "2025-11-25",
           "serverInfo": {
-            "description": "Safe-by-default Oracle Database MCP server with PL/SQL intelligence.",
+            "description": "Governed, least-privilege Oracle Database MCP server with a fail-closed SQL guard and PL/SQL intelligence.",
             "name": "oraclemcp",
             "title": "Oracle MCP server",
-            "version": "0.3.0"
+            "version": "0.4.0"
           }
         }
       },

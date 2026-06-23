@@ -6,29 +6,47 @@
 //! in-process least-privilege connection (the live tagged job runs the same
 //! assertions against a real least-priv Oracle account).
 
+use asupersync::Cx;
+use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::error_envelope::{ErrorClass, classify_ora_code};
 use oraclemcp_db::{
     DictionaryTier, OracleBackend, OracleBind, OracleConnection, OracleConnectionInfo, OracleRow,
     probe_privileges, requirement_matrix,
 };
 
+fn run_with_cx<F, Fut, T>(body: F) -> T
+where
+    F: FnOnce(Cx) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("current-thread runtime");
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("block_on installs a current Cx");
+        body(cx).await
+    })
+}
+
 /// A least-privilege account: every dictionary view above `USER_*` is denied,
 /// `v$parameter` is denied (no Diagnostics Pack visibility), and PL/Scope
 /// identifiers are denied — exactly what a locked-down service user sees.
 struct LeastPrivConn;
 
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for LeastPrivConn {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), oraclemcp_db::DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), oraclemcp_db::DbError> {
         Ok(())
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, oraclemcp_db::DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, oraclemcp_db::DbError> {
         Ok(OracleConnectionInfo::default())
     }
-    fn query_rows(
+    async fn query_rows(
         &self,
+        _cx: &Cx,
         sql: &str,
         _binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, oraclemcp_db::DbError> {
@@ -46,20 +64,25 @@ impl OracleConnection for LeastPrivConn {
         }
         Ok(vec![OracleRow { columns: vec![] }])
     }
-    fn execute(&self, _sql: &str, _binds: &[OracleBind]) -> Result<u64, oraclemcp_db::DbError> {
+    async fn execute(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _binds: &[OracleBind],
+    ) -> Result<u64, oraclemcp_db::DbError> {
         Ok(0)
     }
-    fn commit(&self) -> Result<(), oraclemcp_db::DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), oraclemcp_db::DbError> {
         Ok(())
     }
-    fn rollback(&self) -> Result<(), oraclemcp_db::DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), oraclemcp_db::DbError> {
         Ok(())
     }
 }
 
 #[test]
 fn least_privilege_account_degrades_to_user_tier() {
-    let profile = probe_privileges(&LeastPrivConn);
+    let profile = run_with_cx(|cx| async move { probe_privileges(&cx, &LeastPrivConn).await });
     // The probe falls back DBA_* -> ALL_* -> USER_* and lands on USER_.
     assert_eq!(profile.dictionary_tier, DictionaryTier::User);
     // No Diagnostics Pack visibility and no PL/Scope — reported honestly.

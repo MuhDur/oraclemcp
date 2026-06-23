@@ -4,10 +4,12 @@
 
 use super::*;
 use crate::registry::TOOL_NAMES;
+use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_core::{DispatchContext, ScopeGrant};
 use oraclemcp_db::{OracleBackend, OracleCell, OracleRow};
 use std::sync::Barrier;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn run_with_current_cx(f: impl FnOnce(&Cx)) {
@@ -17,6 +19,24 @@ fn run_with_current_cx(f: impl FnOnce(&Cx)) {
     runtime.block_on(async {
         let cx = Cx::current().expect("block_on installs a current Cx");
         f(&cx);
+    });
+}
+
+#[test]
+fn read_path_handler_work_runs_under_narrowed_read_cx() {
+    // A9 (finding 7): the production read path narrows the handler context to
+    // `ReadPathCaps` (TIME + IO; no SPAWN / REMOTE / RANDOM) and actually USES
+    // it — the cancellation checkpoint that brackets every read dispatch runs
+    // under the narrowed row. This is the same call the oracle_query /
+    // oracle_schema_inspect / custom-read arms make. If `dispatch_checkpoint`
+    // ever stopped accepting the narrowed `Cx<ReadPathCaps>`, this would fail to
+    // compile — locking the narrowing onto the production path.
+    run_with_current_cx(|cx| {
+        let read_cx: Cx<oraclemcp_core::ReadPathCaps> = narrow_to_read_path(cx);
+        dispatch_checkpoint(&read_cx, "test.read_path.narrowed").expect("checkpoint");
+        // Type-level proof: the binding is the narrowed row, not the full one.
+        fn assert_read_path(_: &Cx<oraclemcp_core::ReadPathCaps>) {}
+        assert_read_path(&read_cx);
     });
 }
 
@@ -43,14 +63,15 @@ fn scope_grant(scope: &str) -> ScopeGrant {
 /// A driver-free mock that returns one synthetic row for any query — mirrors
 /// `oraclemcp_db::query`'s `NRowMock` so the dispatch arms exercise offline.
 struct OneRowMock;
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for OneRowMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
             connection_strategy: Some("single_session".to_owned()),
@@ -76,7 +97,12 @@ impl OracleConnection for OneRowMock {
             client_driver: Some("oraclemcp-driver".to_owned()),
         })
     }
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         Ok(vec![OracleRow {
                 columns: vec![
                     (
@@ -112,8 +138,9 @@ impl OracleConnection for OneRowMock {
                 ],
             }])
     }
-    fn query_rows_named(
+    async fn query_rows_named(
         &self,
+        cx: &Cx,
         sql: &str,
         b: &[(String, OracleBind)],
     ) -> Result<Vec<OracleRow>, DbError> {
@@ -122,15 +149,15 @@ impl OracleConnection for OneRowMock {
             "custom SQL should preserve named bind references: {sql}"
         );
         assert_eq!(b, &[("id".to_owned(), OracleBind::I64(7))]);
-        self.query_rows(sql, &[])
+        self.query_rows(cx, sql, &[]).await
     }
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         Ok(0)
     }
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 }
@@ -151,17 +178,18 @@ impl LabeledMock {
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for LabeledMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
 
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         self.counts.ping.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         self.counts.describe.fetch_add(1, Ordering::SeqCst);
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
@@ -172,7 +200,12 @@ impl OracleConnection for LabeledMock {
         })
     }
 
-    fn query_rows(&self, sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         self.counts.query.fetch_add(1, Ordering::SeqCst);
         let column = if sql.to_ascii_lowercase().contains("all_objects") {
             "SCHEMA_NAME"
@@ -187,38 +220,44 @@ impl OracleConnection for LabeledMock {
         }])
     }
 
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         self.counts.execute.fetch_add(1, Ordering::SeqCst);
         Ok(1)
     }
 
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         self.counts.commit.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         self.counts.rollback.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
 
 struct SourceLookupMock;
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for SourceLookupMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
             current_schema: Some("APP".to_owned()),
             ..Default::default()
         })
     }
-    fn query_rows(&self, sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         if sql.contains("SELECT type") {
             return Ok(vec![
                 OracleRow {
@@ -249,13 +288,13 @@ impl OracleConnection for SourceLookupMock {
             )],
         }])
     }
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         Ok(0)
     }
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 }
@@ -263,65 +302,77 @@ impl OracleConnection for SourceLookupMock {
 /// A mock whose every query fails with a classifiable ORA- error, so we can
 /// assert DbError -> ErrorEnvelope mapping end to end.
 struct FailingMock;
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for FailingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo::default())
     }
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         Err(DbError::Query(
             "ORA-00942: table or view does not exist".to_owned(),
         ))
     }
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         Err(DbError::Execute(
             "ORA-00942: table or view does not exist".to_owned(),
         ))
     }
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 }
 
 struct DescribeFailingMock;
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for DescribeFailingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Err(DbError::BackendNotCompiled {
             backend: OracleBackend::RustOracle,
         })
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Err(DbError::BackendNotCompiled {
             backend: OracleBackend::RustOracle,
         })
     }
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         Err(DbError::BackendNotCompiled {
             backend: OracleBackend::RustOracle,
         })
     }
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         Err(DbError::BackendNotCompiled {
             backend: OracleBackend::RustOracle,
         })
     }
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Err(DbError::BackendNotCompiled {
             backend: OracleBackend::RustOracle,
         })
     }
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Err(DbError::BackendNotCompiled {
             backend: OracleBackend::RustOracle,
         })
@@ -350,16 +401,17 @@ struct CancelAfterExecuteMock {
     state: Arc<ExecState>,
 }
 
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for CancelAfterExecuteMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
 
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
             current_schema: Some("APP".to_owned()),
@@ -367,33 +419,33 @@ impl OracleConnection for CancelAfterExecuteMock {
         })
     }
 
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         Ok(Vec::new())
     }
 
-    fn execute(&self, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, cx: &Cx, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
         self.state
             .executed
             .lock()
             .expect("exec mutex")
             .push((sql.to_owned(), b.to_vec()));
-        Ok(1)
-    }
-
-    fn execute_cx(&self, cx: &Cx, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
-        let _ = self.execute(sql, b)?;
         cx.set_cancel_requested(true);
         Err(DbError::Cancelled(
             "test cancellation after execute".to_owned(),
         ))
     }
 
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         self.state.commits.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         self.state.rollbacks.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -408,16 +460,17 @@ impl ExecRecordingMock {
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for ExecRecordingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
 
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
             current_schema: Some("APP".to_owned()),
@@ -425,7 +478,12 @@ impl OracleConnection for ExecRecordingMock {
         })
     }
 
-    fn query_rows(&self, sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         let sql_lc = sql.to_ascii_lowercase();
         if sql_lc.contains("from all_errors") {
             return Ok(self
@@ -452,7 +510,7 @@ impl OracleConnection for ExecRecordingMock {
         Ok(Vec::new())
     }
 
-    fn execute(&self, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
         self.state
             .executed
             .lock()
@@ -483,14 +541,23 @@ impl OracleConnection for ExecRecordingMock {
         Ok(())
     }
 
-    fn enable_dbms_output(&self, _buffer_bytes: Option<u32>) -> Result<(), DbError> {
+    async fn enable_dbms_output(
+        &self,
+        _cx: &Cx,
+        _buffer_bytes: Option<u32>,
+    ) -> Result<(), DbError> {
         self.state
             .dbms_output_enabled
             .fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    fn read_dbms_output(&self, max_lines: usize, max_chars: usize) -> Result<DbmsOutput, DbError> {
+    async fn read_dbms_output(
+        &self,
+        _cx: &Cx,
+        max_lines: usize,
+        max_chars: usize,
+    ) -> Result<DbmsOutput, DbError> {
         self.state
             .dbms_output_limits
             .lock()
@@ -499,12 +566,12 @@ impl OracleConnection for ExecRecordingMock {
         Ok(self.state.dbms_output.lock().expect("output mutex").clone())
     }
 
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         self.state.commits.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         self.state.rollbacks.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -551,6 +618,7 @@ fn args_for(name: &str) -> Value {
         "oracle_query" => json!({ "sql": "SELECT 1 FROM dual" }),
         "oracle_list_schemas" => json!({ "name_like": "APP%", "limit": 10 }),
         "oracle_schema_inspect" => json!({ "owner": "HR" }),
+        "oracle_search_objects" => json!({ "owner": "HR", "detail_level": "names" }),
         "oracle_describe" => json!({ "owner": "HR", "table": "EMPLOYEES" }),
         "oracle_describe_index" => json!({ "owner": "HR", "name": "EMP_NAME_IX" }),
         "oracle_describe_trigger" => json!({ "owner": "HR", "name": "EMP_BIU" }),
@@ -571,6 +639,8 @@ fn args_for(name: &str) -> Value {
         "oracle_explain_plan" => {
             json!({ "sql": "SELECT 1 FROM dual", "allow_plan_table_write": true })
         }
+        "oracle_top_queries" => json!({ "metric": "elapsed", "top_n": 5 }),
+        "oracle_db_health" => json!({ "health_type": "all" }),
         "oracle_preview_sql" => json!({ "sql": "SELECT 1 FROM dual" }),
         "oracle_execute" => {
             json!({ "sql": "UPDATE employees SET name = name WHERE employee_id = 100" })
@@ -639,7 +709,9 @@ fn every_registry_tool_routes_and_deserializes_offline() {
             Box::new(OneRowMock),
             Some("dev".to_owned()),
             ddl_level(),
-            Arc::new(|_| Ok(Box::new(OneRowMock))),
+            Arc::new(|_cx, _profile| {
+                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+            }),
         );
         let out = dispatcher
             .dispatch(name, args_for(name))
@@ -654,7 +726,9 @@ fn compatibility_aliases_route_to_prefixed_tools() {
         Box::new(OneRowMock),
         Some("dev".to_owned()),
         default_read_only_level(),
-        Arc::new(|_| Ok(Box::new(OneRowMock))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+        }),
     );
     for name in [
         "current_database",
@@ -715,7 +789,9 @@ fn connection_info_reports_stateless_read_strategy_when_configured() {
         )),
         Some("dev".to_owned()),
         default_read_only_level(),
-        Arc::new(|_| Err(DbError::Connect("unused".to_owned()))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Err(DbError::Connect("unused".to_owned())) })
+        }),
         StatelessReadStrategy::new(
             Some(Box::new(LabeledMock::new(
                 "pool",
@@ -760,7 +836,9 @@ fn stateless_pool_is_used_only_for_metadata_tools() {
         )),
         Some("dev".to_owned()),
         default_read_only_level(),
-        Arc::new(|_| Err(DbError::Connect("unused".to_owned()))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Err(DbError::Connect("unused".to_owned())) })
+        }),
         StatelessReadStrategy::new(
             Some(Box::new(LabeledMock::new(
                 "pool",
@@ -854,7 +932,7 @@ fn profile_response_omits_connection_and_secret_material() {
     )
     .expect("valid config");
 
-    let out = profiles_response(&cfg);
+    let out = profiles_response(&cfg, &McpExposurePolicy::AllowAll);
     assert_eq!(out["profiles"][0]["name"], json!("prod"));
     assert_eq!(out["profiles"][0]["is_default"], json!(true));
 
@@ -883,7 +961,9 @@ fn failed_profile_switch_does_not_replace_the_current_connection() {
         Box::new(OneRowMock),
         Some("dev".to_owned()),
         default_read_only_level(),
-        Arc::new(|_| Err(DbError::Connect("connect failed".to_owned()))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Err(DbError::Connect("connect failed".to_owned())) })
+        }),
     );
 
     let err = dispatcher
@@ -928,7 +1008,9 @@ fn profile_switch_reports_metadata_errors_after_switching() {
         Box::new(OneRowMock),
         Some("dev".to_owned()),
         default_read_only_level(),
-        Arc::new(|_| Ok(Box::new(DescribeFailingMock))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(DescribeFailingMock) as Box<dyn OracleConnection>) })
+        }),
     );
 
     let out = dispatcher
@@ -954,6 +1036,188 @@ fn profile_switch_reports_metadata_errors_after_switching() {
     assert_eq!(current["connected"], json!(false));
 }
 
+/// E5 connection-scope isolation: a switchable dispatcher with an explicit
+/// allow-list containing only `agent_ro` (NOT `prod_admin`). Used by the
+/// adversarial isolation tests below.
+fn exposed_only_dispatcher() -> OracleDispatcher {
+    OracleDispatcher::new_switchable(
+        Box::new(OneRowMock),
+        Some("agent_ro".to_owned()),
+        default_read_only_level(),
+        // The connector would happily connect to anything; the E5 gate must
+        // refuse the non-exposed name BEFORE the connector is ever reached.
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+        }),
+    )
+    .with_mcp_exposure(McpExposurePolicy::AllowList(
+        ["agent_ro".to_owned()].into_iter().collect(),
+    ))
+}
+
+#[test]
+fn e5_switch_to_an_exposed_profile_is_allowed() {
+    let dispatcher = exposed_only_dispatcher();
+    let out = dispatcher
+        .dispatch("oracle_switch_profile", json!({ "profile": "agent_ro" }))
+        .expect("switching to an mcp_exposed profile is permitted");
+    assert_eq!(out["active_profile"], json!("agent_ro"));
+}
+
+#[test]
+fn e5_adversarial_guessed_non_exposed_profile_is_rejected_by_switch() {
+    // The load-bearing E5 adversarial test: an agent that GUESSES the name of a
+    // profile the operator did not expose (`prod_admin`) must be refused by
+    // oracle_switch_profile, and the refusal must not reveal that the name
+    // happened to match a real-but-hidden profile (same envelope as a wholly
+    // unknown name).
+    let dispatcher = exposed_only_dispatcher();
+
+    let hidden = dispatcher
+        .dispatch("oracle_switch_profile", json!({ "profile": "prod_admin" }))
+        .expect_err("a guessed non-exposed profile is refused by switch");
+    let unknown = dispatcher
+        .dispatch(
+            "oracle_switch_profile",
+            json!({ "profile": "totally_made_up" }),
+        )
+        .expect_err("a wholly unknown profile is refused by switch");
+
+    assert_eq!(hidden.error_class, ErrorClass::InvalidArguments);
+    assert_eq!(unknown.error_class, ErrorClass::InvalidArguments);
+    // Indistinguishable: a hidden profile and an unknown one yield the identical
+    // class and (modulo the echoed name) message, so the agent learns nothing.
+    assert_eq!(
+        hidden.message.replace("prod_admin", "X"),
+        unknown.message.replace("totally_made_up", "X"),
+        "a hidden profile must be indistinguishable from an unknown one"
+    );
+    assert_eq!(
+        hidden.suggested_tool.as_deref(),
+        Some("oracle_list_profiles")
+    );
+
+    // And the active connection is untouched — the failed switch never reached
+    // the connector.
+    let current = dispatcher
+        .dispatch("oracle_connection_info", json!({}))
+        .expect("current connection still usable");
+    assert_eq!(current["active_profile"], json!("agent_ro"));
+
+    // The `switch_database`/`db` compatibility alias is gated identically.
+    let alias = dispatcher
+        .dispatch("switch_database", json!({ "db": "prod_admin" }))
+        .expect_err("the db alias is gated by E5 too");
+    assert_eq!(alias.error_class, ErrorClass::InvalidArguments);
+}
+
+#[test]
+fn e5_list_profiles_omits_non_exposed_profiles() {
+    // The served oracle_list_profiles must filter to the exposure allow-list, so
+    // a hidden profile never appears (and so can never be guessed FROM the list).
+    let cfg = OracleMcpConfig::from_toml_str(
+        r#"
+            [[profiles]]
+            name = "agent_ro"
+            connect_string = "ro:1521/svc"
+            mcp_exposed = true
+
+            [[profiles]]
+            name = "prod_admin"
+            connect_string = "prod:1521/svc"
+            "#,
+    )
+    .expect("valid config");
+
+    let exposed = McpExposurePolicy::AllowList(["agent_ro".to_owned()].into_iter().collect());
+    let out = profiles_response(&cfg, &exposed);
+    let names: Vec<&str> = out["profiles"]
+        .as_array()
+        .expect("profiles array")
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["agent_ro"],
+        "only the exposed profile is listed"
+    );
+    let serialized = serde_json::to_string(&out).expect("json");
+    assert!(
+        !serialized.contains("prod_admin"),
+        "a non-exposed profile name must never be surfaced"
+    );
+}
+
+#[test]
+fn e5_from_config_opt_out_hides_only_explicit_false() {
+    // Per-profile opt-out: a zero-config / single-profile setup (no mcp_exposed
+    // anywhere) yields AllowAll so every profile is reachable out of the box.
+    let zero = OracleMcpConfig::from_toml_str(
+        r#"
+            [[profiles]]
+            name = "only"
+            connect_string = "db:1521/svc"
+            "#,
+    )
+    .expect("valid config");
+    let policy = McpExposurePolicy::from_config(&zero);
+    assert!(
+        matches!(policy, McpExposurePolicy::AllowAll),
+        "nothing hidden -> expose all (usable out of the box)"
+    );
+    assert!(policy.is_exposed("only"));
+
+    // Two profiles, neither hidden -> still AllowAll (`mcp_exposed = true` is a
+    // no-op confirmation of the default; it does not segment).
+    let both_default = OracleMcpConfig::from_toml_str(
+        r#"
+            [[profiles]]
+            name = "agent_ro"
+            connect_string = "ro:1521/svc"
+            mcp_exposed = true
+
+            [[profiles]]
+            name = "dev"
+            connect_string = "dev:1521/svc"
+            "#,
+    )
+    .expect("valid config");
+    let policy = McpExposurePolicy::from_config(&both_default);
+    assert!(
+        matches!(policy, McpExposurePolicy::AllowAll),
+        "no profile hidden -> AllowAll regardless of an explicit = true"
+    );
+    assert!(policy.is_exposed("agent_ro"));
+    assert!(policy.is_exposed("dev"));
+
+    // The moment one profile sets `mcp_exposed = false`, ONLY that one is hidden;
+    // the others stay reachable (no global flip).
+    let one_hidden = OracleMcpConfig::from_toml_str(
+        r#"
+            [[profiles]]
+            name = "agent_ro"
+            connect_string = "ro:1521/svc"
+
+            [[profiles]]
+            name = "prod_admin"
+            connect_string = "prod:1521/svc"
+            mcp_exposed = false
+            "#,
+    )
+    .expect("valid config");
+    let policy = McpExposurePolicy::from_config(&one_hidden);
+    assert!(matches!(policy, McpExposurePolicy::AllowList(_)));
+    assert!(
+        policy.is_exposed("agent_ro"),
+        "an unflagged profile stays exposed even when another is hidden"
+    );
+    assert!(
+        !policy.is_exposed("prod_admin"),
+        "the explicitly hidden profile is unreachable"
+    );
+}
+
 #[test]
 fn compile_errors_can_default_to_current_schema() {
     let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
@@ -972,6 +1236,182 @@ fn schema_inspect_can_default_to_current_schema() {
     assert_eq!(out["owner"], json!("APP"));
     assert_eq!(out["max_rows"], json!(DEFAULT_SCHEMA_INSPECT_MAX_ROWS));
     assert!(out["objects"].is_array());
+}
+
+/// E4: a scripted mock that drives `oracle_search_objects` through dispatch,
+/// returning SQL-shape-dependent rows so the detail levels and the
+/// ALL_TABLES.NUM_ROWS path are exercised end-to-end.
+struct SearchObjectsDispatchMock;
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for SearchObjectsDispatchMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let row = |pairs: &[(&str, &str)]| OracleRow {
+            columns: pairs
+                .iter()
+                .map(|(n, v)| {
+                    (
+                        (*n).to_owned(),
+                        OracleCell::new("VARCHAR2", Some((*v).to_owned())),
+                    )
+                })
+                .collect(),
+        };
+        if sql.contains("FROM all_objects") {
+            return Ok(vec![row(&[
+                ("OWNER", "APP"),
+                ("OBJECT_NAME", "EMPLOYEES"),
+                ("OBJECT_TYPE", "TABLE"),
+                ("STATUS", "VALID"),
+            ])]);
+        }
+        if sql.contains("all_col_comments") {
+            return Ok(vec![row(&[
+                ("COLUMN_NAME", "ID"),
+                ("DATA_TYPE", "NUMBER"),
+                ("NULLABLE", "N"),
+            ])]);
+        }
+        if sql.contains("FROM all_indexes") {
+            return Ok(vec![row(&[
+                ("INDEX_NAME", "EMP_PK"),
+                ("UNIQUENESS", "UNIQUE"),
+            ])]);
+        }
+        if sql.contains("all_ind_columns") {
+            return Ok(vec![row(&[("COLUMN_NAME", "ID")])]);
+        }
+        Ok(Vec::new())
+    }
+    async fn query_optional_row(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Option<OracleRow>, DbError> {
+        let row = |pairs: &[(&str, &str)]| {
+            Some(OracleRow {
+                columns: pairs
+                    .iter()
+                    .map(|(n, v)| {
+                        (
+                            (*n).to_owned(),
+                            OracleCell::new("VARCHAR2", Some((*v).to_owned())),
+                        )
+                    })
+                    .collect(),
+            })
+        };
+        if sql.contains("FROM all_tables") {
+            return Ok(row(&[
+                ("NUM_ROWS", "999"),
+                ("LAST_ANALYZED", "2026-06-01T00:00:00"),
+            ]));
+        }
+        if sql.contains("COUNT(*) AS column_count") {
+            return Ok(row(&[("COLUMN_COUNT", "1")]));
+        }
+        if sql.contains("all_tab_comments") {
+            return Ok(row(&[("COMMENTS", "emp table")]));
+        }
+        Ok(None)
+    }
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        // A read-only dictionary tool must never call execute(): an execute here
+        // would be a bug, so make it loud.
+        panic!("oracle_search_objects must be read-only and never call execute()");
+    }
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        panic!("oracle_search_objects must be read-only and never commit()");
+    }
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn search_objects_detail_levels_and_truncation_through_dispatch() {
+    let dispatcher = OracleDispatcher::new(Box::new(SearchObjectsDispatchMock));
+
+    // names: identifiers only.
+    let names = dispatcher
+        .dispatch(
+            "oracle_search_objects",
+            json!({ "owner": "APP", "detail_level": "names" }),
+        )
+        .expect("names search");
+    assert_eq!(names["detail_level"], json!("names"));
+    assert_eq!(names["count"], json!(1));
+    assert_eq!(names["results"][0]["object_name"], json!("EMPLOYEES"));
+    assert!(names["results"][0].get("num_rows").is_none());
+    assert!(names["results"][0].get("columns").is_none());
+
+    // summary: ALL_TABLES.NUM_ROWS estimate + column count + comment, no columns.
+    let summary = dispatcher
+        .dispatch(
+            "oracle_search_objects",
+            json!({ "owner": "APP", "detail": "summary" }),
+        )
+        .expect("summary search");
+    assert_eq!(summary["detail_level"], json!("summary"));
+    assert_eq!(summary["results"][0]["num_rows"], json!(999));
+    assert_eq!(summary["results"][0]["row_count_is_estimate"], json!(true));
+    assert_eq!(summary["results"][0]["column_count"], json!(1));
+    assert_eq!(summary["results"][0]["comment"], json!("emp table"));
+    assert!(summary["results"][0].get("columns").is_none());
+
+    // standard (default): + columns.
+    let standard = dispatcher
+        .dispatch("oracle_search_objects", json!({ "owner": "APP" }))
+        .expect("standard search");
+    assert_eq!(standard["detail_level"], json!("standard"));
+    assert_eq!(standard["results"][0]["columns"][0]["name"], json!("ID"));
+    assert!(standard["results"][0].get("indexes").is_none());
+
+    // full: + indexes.
+    let full = dispatcher
+        .dispatch(
+            "oracle_search_objects",
+            json!({ "owner": "APP", "detail_level": "full" }),
+        )
+        .expect("full search");
+    assert_eq!(full["results"][0]["indexes"][0]["name"], json!("EMP_PK"));
+
+    // truncation: max_rows=1 with one returned row flags truncated=true.
+    let capped = dispatcher
+        .dispatch(
+            "oracle_search_objects",
+            json!({ "owner": "APP", "detail_level": "names", "max_rows": 1 }),
+        )
+        .expect("capped search");
+    assert_eq!(capped["max_rows"], json!(1));
+    assert_eq!(capped["truncated"], json!(true));
+
+    // an unknown detail level is a structured invalid-arguments error.
+    let bad = dispatcher
+        .dispatch(
+            "oracle_search_objects",
+            json!({ "owner": "APP", "detail_level": "everything" }),
+        )
+        .expect_err("unknown detail level rejected");
+    assert_eq!(bad.error_class, ErrorClass::InvalidArguments);
 }
 
 #[test]
@@ -1141,7 +1581,9 @@ fn patch_source_preview_requires_unique_match_and_returns_confirmation() {
         Box::new(SourceLookupMock),
         Some("dev".to_owned()),
         ddl_level(),
-        Arc::new(|_| Ok(Box::new(SourceLookupMock))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(SourceLookupMock) as Box<dyn OracleConnection>) })
+        }),
     );
     let out = dispatcher
         .dispatch(
@@ -1208,7 +1650,9 @@ fn patch_source_execute_refetches_and_uses_create_or_replace_gate() {
         Box::new(ExecRecordingMock::new(state.clone())),
         Some("dev".to_owned()),
         ddl_level(),
-        Arc::new(|_| Ok(Box::new(OneRowMock))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+        }),
     );
     let preview_args = json!({
         "owner": "APP",
@@ -1250,7 +1694,9 @@ fn patch_view_alias_defaults_to_view_ddl() {
         Box::new(OneRowMock),
         Some("dev".to_owned()),
         ddl_level(),
-        Arc::new(|_| Ok(Box::new(OneRowMock))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+        }),
     );
     let out = dispatcher
         .dispatch("patch_view", args_for("patch_view"))
@@ -1267,7 +1713,9 @@ fn read_patch_preview_lists_and_reads_last_preview() {
         Box::new(SourceLookupMock),
         Some("dev".to_owned()),
         ddl_level(),
-        Arc::new(|_| Ok(Box::new(SourceLookupMock))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(SourceLookupMock) as Box<dyn OracleConnection>) })
+        }),
     );
 
     let empty = dispatcher
@@ -1361,7 +1809,9 @@ fn custom_read_only_tool_dispatches_with_named_binds() {
         Box::new(OneRowMock),
         Some("dev".to_owned()),
         default_read_only_level(),
-        Arc::new(|_| Ok(Box::new(OneRowMock))),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+        }),
         CustomToolCatalog::new(loaded),
         None,
     );
@@ -1396,13 +1846,17 @@ fn null_args_behave_like_empty_object_args() {
             Box::new(OneRowMock),
             Some("dev".to_owned()),
             ddl_level(),
-            Arc::new(|_| Ok(Box::new(OneRowMock))),
+            Arc::new(|_cx, _profile| {
+                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+            }),
         );
         let d_null = OracleDispatcher::new_switchable(
             Box::new(OneRowMock),
             Some("dev".to_owned()),
             ddl_level(),
-            Arc::new(|_| Ok(Box::new(OneRowMock))),
+            Arc::new(|_cx, _profile| {
+                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+            }),
         );
         let empty = d_empty.dispatch(name, json!({}));
         let null = d_null.dispatch(name, Value::Null);
@@ -1498,26 +1952,32 @@ fn invalid_bind_type_is_invalid_arguments() {
 /// A connection that MUST never be touched: any query/execute panics. Proves
 /// the read-only gate refuses a statement *before* it can reach Oracle.
 struct NoExecMock;
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for NoExecMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo::default())
     }
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         panic!("a refused statement must never reach the database (query_rows)")
     }
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         panic!("a refused statement must never reach the database (execute)")
     }
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
 }
@@ -1547,37 +2007,43 @@ struct TouchCountingMock {
     counts: Arc<TouchCounts>,
 }
 
+#[async_trait::async_trait(?Send)]
 impl OracleConnection for TouchCountingMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
 
-    fn ping(&self) -> Result<(), DbError> {
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
         self.counts.ping.fetch_add(1, Ordering::SeqCst);
         panic!("guard-before-I/O test must not ping the database")
     }
 
-    fn describe(&self) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         self.counts.describe.fetch_add(1, Ordering::SeqCst);
         panic!("guard-before-I/O test must not describe the database")
     }
 
-    fn query_rows(&self, _sql: &str, _b: &[OracleBind]) -> Result<Vec<OracleRow>, DbError> {
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
         self.counts.query.fetch_add(1, Ordering::SeqCst);
         panic!("guard-before-I/O test must not query the database")
     }
 
-    fn execute(&self, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         self.counts.execute.fetch_add(1, Ordering::SeqCst);
         panic!("guard-before-I/O test must not execute against the database")
     }
 
-    fn commit(&self) -> Result<(), DbError> {
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         self.counts.commit.fetch_add(1, Ordering::SeqCst);
         panic!("guard-before-I/O test must not commit")
     }
 
-    fn rollback(&self) -> Result<(), DbError> {
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         self.counts.rollback.fetch_add(1, Ordering::SeqCst);
         panic!("guard-before-I/O test must not roll back")
     }
@@ -1837,7 +2303,14 @@ fn create_or_replace_execute_applies_and_reports_compile_errors() {
     assert_eq!(state.commits.load(Ordering::SeqCst), 1);
     let executed = state.executed.lock().expect("exec mutex");
     assert_eq!(executed.len(), 1);
-    assert_eq!(executed[0].0, source);
+    // A3: the executed text carries the per-statement audit marker (a leading,
+    // verdict-preserving comment) followed by the exact source.
+    assert!(
+        executed[0].0.starts_with("/* oraclemcp llm="),
+        "executed SQL should carry the A3 audit marker: {}",
+        executed[0].0
+    );
+    assert!(executed[0].0.ends_with(source));
 }
 
 #[test]
@@ -2298,6 +2771,26 @@ fn confirmation_tokens_are_stable_hex_and_domain_separated() {
     assert_ne!(execute, session);
     assert_ne!(execute, compile);
     assert_ne!(session, compile);
+}
+
+#[test]
+fn confirmation_mac_uses_canonical_hmac() {
+    // The confirmation MAC was deduplicated onto the canonical, KAT-tested
+    // oraclemcp_audit::hmac_sha256. Lock the byte output for a fixed key/message
+    // so any future drift from the standard HMAC-SHA256 is caught. This is the
+    // exact algorithm the (now-removed) private reimplementation computed.
+    let key = b"confirmation-key-fixture-0123456";
+    let msg = b"oracle_query|dev|READ_WRITE";
+    let mac = oraclemcp_audit::hmac_sha256(key, msg);
+    // RFC 2104 HMAC-SHA256(key, msg) — independently reproducible via the hex
+    // helper, which must agree with the raw-bytes form byte-for-byte. The hex
+    // helper prefixes `hmac-sha256:` to name the algorithm; strip it to compare.
+    let expected = oraclemcp_audit::hmac_sha256_hex(key, msg);
+    let expected_hex = expected
+        .strip_prefix("hmac-sha256:")
+        .expect("algorithm prefix");
+    let got: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(got, expected_hex);
 }
 
 #[test]
@@ -3070,4 +3563,558 @@ fn cancellation_after_mutating_execute_rolls_back_dirty_session() {
         0,
         "cancelled dirty session must not commit"
     );
+}
+
+/// A8: the hash-chained, keyed-MAC auditor is wired into the SERVED dispatch
+/// path (not just the standalone `oracle_query_execute` helper). These prove the
+/// wiring end to end: writes/DDL and escalations are chained; pure reads are not.
+mod audit_wiring {
+    use super::*;
+    use oraclemcp_audit::{
+        AuditError, AuditOutcome, AuditRecord, AuditSink, MemoryAuditSink, SigningKey,
+    };
+    use std::sync::Arc;
+
+    /// Share one `MemoryAuditSink` between the `Auditor` (which owns a
+    /// `Box<dyn AuditSink>`) and the test (which inspects the records).
+    struct SharedSink(Arc<MemoryAuditSink>);
+    impl AuditSink for SharedSink {
+        fn append(&self, r: &AuditRecord) -> Result<(), AuditError> {
+            self.0.append(r)
+        }
+        fn flush(&self) -> Result<(), AuditError> {
+            self.0.flush()
+        }
+    }
+
+    fn auditor_with_sink() -> (Arc<Auditor>, Arc<MemoryAuditSink>) {
+        let sink = Arc::new(MemoryAuditSink::new());
+        let key = SigningKey::new("test-key", b"0123456789abcdef0123456789abcdef".to_vec());
+        let auditor = Arc::new(Auditor::new(Box::new(SharedSink(sink.clone())), key));
+        (auditor, sink)
+    }
+
+    /// Ceiling permits DDL but the session starts read-only, so a level increase
+    /// is gated by step-up (the path that A8 must audit).
+    fn escalatable_read_only() -> SessionLevelState {
+        SessionLevelState::new(OperatingLevel::Ddl, false)
+    }
+
+    fn dispatcher_with(level: SessionLevelState, auditor: Arc<Auditor>) -> OracleDispatcher {
+        OracleDispatcher::new_switchable(
+            Box::new(OneRowMock),
+            Some("dev".to_owned()),
+            level,
+            Arc::new(|_cx, _profile| {
+                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+            }),
+        )
+        .with_auditor(auditor)
+    }
+
+    #[test]
+    fn served_write_appends_pending_then_signed_outcome() {
+        let (auditor, sink) = auditor_with_sink();
+        let dispatcher = dispatcher_with(ddl_level(), auditor);
+        let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+        let confirm = execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("dev"))
+            .expect("confirm token");
+        let out = dispatcher
+            .dispatch("execute_approved", json!({ "sql": sql, "token": confirm }))
+            .expect("write dispatches");
+        assert!(out.is_object());
+
+        let recs = sink.records();
+        assert_eq!(
+            recs.len(),
+            2,
+            "a served write logs Pending then its outcome"
+        );
+        assert_eq!(recs[0].outcome, AuditOutcome::Pending);
+        assert_eq!(recs[1].outcome, AuditOutcome::Succeeded);
+        // Hash chain links pre -> post.
+        assert_eq!(recs[1].prev_hash, recs[0].entry_hash);
+        // Every served record is signed by the keyed MAC (not forgeable by a
+        // bare recompute-from-genesis).
+        assert!(recs[0].signature.is_some(), "pre record is signed");
+        assert!(recs[1].signature.is_some(), "post record is signed");
+        assert_eq!(recs[1].key_id.as_deref(), Some("test-key"));
+        // The SQL bytes are never stored verbatim — only the digest + preview.
+        assert!(recs[1].sql_sha256.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn served_read_is_not_audited() {
+        let (auditor, sink) = auditor_with_sink();
+        let dispatcher = dispatcher_with(ddl_level(), auditor);
+        let _ = dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("read dispatches");
+        assert!(
+            sink.records().is_empty(),
+            "pure reads must not touch the audit chain"
+        );
+    }
+
+    #[test]
+    fn session_level_escalation_is_audited() {
+        let (auditor, sink) = auditor_with_sink();
+        let dispatcher = dispatcher_with(escalatable_read_only(), auditor);
+        // A preview mints the confirmation token; apply (execute=true) escalates.
+        let confirm = session_level_confirmation_token(Some("dev"), OperatingLevel::ReadWrite, 60);
+        let out = dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({
+                    "level": "READ_WRITE",
+                    "ttl_seconds": 60,
+                    "execute": true,
+                    "confirm": confirm,
+                }),
+            )
+            .expect("escalation dispatches");
+        assert_eq!(out["changed"], json!(true), "escalation applied");
+
+        let recs = sink.records();
+        assert_eq!(recs.len(), 1, "a level increase logs exactly one record");
+        assert_eq!(recs[0].tool, "oracle_set_session_level");
+        assert_eq!(recs[0].outcome, AuditOutcome::Succeeded);
+        assert!(recs[0].signature.is_some(), "escalation record is signed");
+    }
+}
+
+/// C8: `oracle_top_queries` surfaces the existing awr.rs builder as a served,
+/// read-only tool. The free live cursor cache (V$SQLSTATS) is the default; the
+/// licensed AWR path is opt-in and gated (proven in awr.rs unit tests).
+mod top_queries {
+    use super::*;
+    use std::sync::Arc;
+
+    fn dispatcher() -> OracleDispatcher {
+        OracleDispatcher::new_switchable(
+            Box::new(OneRowMock),
+            Some("dev".to_owned()),
+            read_write_level(),
+            Arc::new(|_cx, _profile| {
+                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+            }),
+        )
+    }
+
+    #[test]
+    fn live_source_is_the_default_and_returns_ranked_rows() {
+        let out = dispatcher()
+            .dispatch("oracle_top_queries", json!({ "metric": "cpu", "top_n": 3 }))
+            .expect("top_queries dispatches");
+        // Free live cursor cache, no Diagnostics Pack needed.
+        assert_eq!(out["source"], json!("live_cursor"));
+        assert_eq!(out["metric"], json!("cpu"));
+        assert!(out["rows"].is_array(), "returns ranked rows");
+    }
+
+    #[test]
+    fn unknown_metric_is_rejected_with_a_clear_error() {
+        let err = dispatcher()
+            .dispatch("oracle_top_queries", json!({ "metric": "bogus" }))
+            .expect_err("unknown metric is rejected");
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+    }
+
+    #[test]
+    fn five_pct_of_total_mode_is_accepted_on_the_live_source() {
+        let out = dispatcher()
+            .dispatch("oracle_top_queries", json!({ "min_pct_of_total": 5 }))
+            .expect("5%-of-total dispatches");
+        assert_eq!(out["source"], json!("live_cursor"));
+        assert!(out["rows"].is_array());
+    }
+}
+
+/// C1–C7: the read-only `oracle_db_health` suite. The framework dispatches the
+/// requested subchecks, aggregates findings tagged with severity + source view,
+/// and — per C1's load-bearing AC — never lets a missing privilege become a raw
+/// ORA-/hard failure: it degrades DBA_*→ALL_*, then yields a structured skip.
+mod db_health {
+    use super::*;
+    use std::sync::Arc;
+
+    /// A mock that fails every query (no DBA_* and no ALL_* access) so every
+    /// subcheck must degrade to a structured skip.
+    struct NoPrivilegeMock;
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for NoPrivilegeMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo {
+                current_schema: Some("APP".to_owned()),
+                ..Default::default()
+            })
+        }
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            Err(DbError::Query(
+                "ORA-00942: table or view does not exist".to_owned(),
+            ))
+        }
+        async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+            Ok(0)
+        }
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    fn dispatcher_with(conn: impl OracleConnection + 'static) -> OracleDispatcher {
+        OracleDispatcher::new_switchable(
+            Box::new(conn),
+            Some("dev".to_owned()),
+            read_write_level(),
+            Arc::new(|_cx, _profile| {
+                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+            }),
+        )
+    }
+
+    #[test]
+    fn all_runs_every_subcheck_and_returns_findings() {
+        // OneRowMock answers any query, so every probe + subcheck succeeds.
+        let out = dispatcher_with(OneRowMock)
+            .dispatch("oracle_db_health", json!({ "health_type": "all" }))
+            .expect("db_health dispatches");
+        let findings = out["findings"].as_array().expect("findings array");
+        assert_eq!(findings.len(), 6, "all six subchecks produce a finding");
+        // Every finding carries a subcheck, severity, and source_view.
+        for f in findings {
+            assert!(f["subcheck"].is_string());
+            assert!(f["severity"].is_string());
+            assert!(f["source_view"].is_string());
+        }
+        assert_eq!(
+            out["checks_run"].as_array().expect("checks_run").len(),
+            6,
+            "nothing skipped when the views are readable"
+        );
+        assert!(
+            out["checks_skipped"]
+                .as_array()
+                .expect("checks_skipped")
+                .is_empty()
+        );
+        assert!(
+            out["unknown_checks"]
+                .as_array()
+                .expect("unknown")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn comma_list_runs_only_the_requested_subchecks() {
+        let out = dispatcher_with(OneRowMock)
+            .dispatch(
+                "oracle_db_health",
+                json!({ "health_type": "invalid_objects, sequence_ceiling" }),
+            )
+            .expect("db_health dispatches");
+        let run: Vec<&str> = out["checks_run"]
+            .as_array()
+            .expect("checks_run")
+            .iter()
+            .map(|v| v.as_str().expect("name"))
+            .collect();
+        assert_eq!(run, vec!["invalid_objects", "sequence_ceiling"]);
+    }
+
+    #[test]
+    fn unknown_subcheck_is_reported_not_fatal() {
+        let out = dispatcher_with(OneRowMock)
+            .dispatch(
+                "oracle_db_health",
+                json!({ "health_type": "invalid_objects, not_a_real_check" }),
+            )
+            .expect("db_health tolerates an unknown subcheck");
+        assert_eq!(out["checks_run"], json!(["invalid_objects"]));
+        assert_eq!(out["unknown_checks"], json!(["not_a_real_check"]));
+    }
+
+    #[test]
+    fn missing_privilege_yields_a_structured_skip_never_an_error() {
+        // No DBA_* and no ALL_* access: the whole suite must still succeed,
+        // every subcheck reported as a structured skip (never a raw ORA-).
+        let out = dispatcher_with(NoPrivilegeMock)
+            .dispatch("oracle_db_health", json!({ "health_type": "all" }))
+            .expect("db_health never hard-fails on privilege");
+        assert!(
+            out["checks_run"].as_array().expect("checks_run").is_empty(),
+            "no subcheck could read its view"
+        );
+        assert_eq!(
+            out["checks_skipped"]
+                .as_array()
+                .expect("checks_skipped")
+                .len(),
+            6,
+            "every subcheck degraded to a skip"
+        );
+        let findings = out["findings"].as_array().expect("findings");
+        for f in findings {
+            assert_eq!(f["detail"]["status"], json!("skipped"));
+            assert_eq!(f["severity"], json!("info"));
+            // Structured skip carries the views it tried, not a raw ORA- bubble.
+            assert!(f["detail"]["attempted_views"].is_array());
+            assert!(
+                !f["summary"].as_str().unwrap_or("").contains("ORA-"),
+                "skip summary must not surface a raw ORA- error"
+            );
+        }
+    }
+}
+
+/// A1 (oraclemcp-040-epic-wp-a-ia1.1): the lazy read-only backstop, exercised
+/// END TO END through the real dispatch path (not just the unit-tested
+/// `ReadOnlyBackstop` primitive). These prove the backstop is WIRED into
+/// `oracle_query`/`oracle_execute` on the pinned session: armed lazily on the
+/// read path, disarmed by a gated write so an authorized write is never blocked,
+/// and re-asserted on the next read transaction.
+mod read_only_backstop_wiring {
+    use super::*;
+    use oraclemcp_guard::SET_TRANSACTION_READ_ONLY;
+
+    /// Records every `execute` (so the backstop statement is observable) and
+    /// returns rows for `query_rows` (so a `oracle_query` succeeds). The execute
+    /// log lets a test assert the backstop is issued lazily and at the right
+    /// transaction boundaries through the real dispatcher.
+    #[derive(Default)]
+    struct BackstopRecordingState {
+        executed: Mutex<Vec<String>>,
+    }
+
+    struct BackstopRecordingMock {
+        state: Arc<BackstopRecordingState>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for BackstopRecordingMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo {
+                current_schema: Some("APP".to_owned()),
+                ..Default::default()
+            })
+        }
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            Ok(vec![OracleRow {
+                columns: vec![(
+                    "N".to_owned(),
+                    OracleCell::new("NUMBER", Some("1".to_owned())),
+                )],
+            }])
+        }
+        async fn query_rows_with_serialize_options(
+            &self,
+            cx: &Cx,
+            sql: &str,
+            b: &[OracleBind],
+            _opts: &SerializeOptions,
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.query_rows(cx, sql, b).await
+        }
+        async fn execute(&self, _cx: &Cx, sql: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+            self.state
+                .executed
+                .lock()
+                .expect("exec mutex")
+                .push(sql.to_owned());
+            Ok(0)
+        }
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    fn backstop_statements(state: &Arc<BackstopRecordingState>) -> usize {
+        state
+            .executed
+            .lock()
+            .expect("exec mutex")
+            .iter()
+            .filter(|sql| sql.as_str() == SET_TRANSACTION_READ_ONLY)
+            .count()
+    }
+
+    #[test]
+    fn read_path_arms_set_transaction_read_only_lazily_once() {
+        // Three oracle_query calls on a READ_ONLY session: the backstop is
+        // asserted exactly once (lazy), not once per read.
+        let state = Arc::new(BackstopRecordingState::default());
+        let dispatcher = OracleDispatcher::new_with_profile(
+            Box::new(BackstopRecordingMock {
+                state: state.clone(),
+            }),
+            Some("dev".to_owned()),
+        );
+        for _ in 0..3 {
+            dispatcher
+                .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+                .expect("read succeeds under the backstop");
+        }
+        assert_eq!(
+            backstop_statements(&state),
+            1,
+            "SET TRANSACTION READ ONLY is issued exactly once across many reads (lazy)"
+        );
+    }
+
+    #[test]
+    fn gated_write_disarms_then_next_read_re_asserts() {
+        // READ_WRITE session. A read arms the backstop; a gated UPDATE
+        // (commit=true) disarms it BEFORE it runs so the write is not blocked;
+        // the next read re-asserts the backstop on the fresh transaction.
+        let state = Arc::new(BackstopRecordingState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(BackstopRecordingMock {
+                state: state.clone(),
+            }),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+        // A read at READ_WRITE does NOT arm the backstop (a write may be
+        // authorized); prove the read path is a no-op above READ_ONLY.
+        dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("read at read/write");
+        assert_eq!(
+            backstop_statements(&state),
+            0,
+            "no SET TRANSACTION READ ONLY at READ_WRITE — a legitimate write must not be blocked"
+        );
+
+        // A gated write that commits — must succeed (not refused by the backstop)
+        // and the executed log must NOT contain a SET TRANSACTION READ ONLY
+        // immediately gating it.
+        let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+        let confirm = execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("dev"))
+            .expect("confirm token");
+        let out = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": sql, "commit": true, "confirm": confirm }),
+            )
+            .expect("gated write is not blocked by the read-only backstop");
+        assert_eq!(out["executed"], json!(true));
+        assert_eq!(out["committed"], json!(true));
+        assert_eq!(
+            backstop_statements(&state),
+            0,
+            "the authorized write path never issues SET TRANSACTION READ ONLY"
+        );
+    }
+
+    #[test]
+    fn read_only_session_write_attempt_is_classifier_blocked_with_backstop_set() {
+        // Defense-in-depth contract: on a READ_ONLY session a read arms the
+        // backstop; an attempted write via oracle_execute is refused by the
+        // CLASSIFIER (layer C) before it reaches the DB, while the backstop
+        // (layer B) is already set so even a misclassified write would raise
+        // ORA-01456 at the engine. (A real ORA-01456 is asserted by the live-xe
+        // test; offline we assert the layered posture deterministically.)
+        let state = Arc::new(BackstopRecordingState::default());
+        let dispatcher = OracleDispatcher::new_with_profile(
+            Box::new(BackstopRecordingMock {
+                state: state.clone(),
+            }),
+            Some("dev".to_owned()),
+        );
+        dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("read arms the backstop");
+        assert_eq!(
+            backstop_statements(&state),
+            1,
+            "backstop set on the read path"
+        );
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": "UPDATE employees SET name = name WHERE employee_id = 100" }),
+            )
+            .expect_err("a write on a READ_ONLY session is refused");
+        assert!(
+            matches!(
+                err.error_class,
+                ErrorClass::OperatingLevelTooLow | ErrorClass::ForbiddenStatement
+            ),
+            "write refused by the operating-level gate, not silently run: {:?}",
+            err.error_class
+        );
+    }
+
+    #[test]
+    fn profile_switch_resets_the_backstop_so_the_new_session_re_asserts() {
+        // After a profile switch the pinned session is replaced; the new
+        // session's first read must re-assert the backstop on its own
+        // transaction.
+        let first = Arc::new(BackstopRecordingState::default());
+        let second = Arc::new(BackstopRecordingState::default());
+        let second_for_connector = second.clone();
+        let dispatcher = OracleDispatcher::new_switchable(
+            Box::new(BackstopRecordingMock {
+                state: first.clone(),
+            }),
+            Some("dev".to_owned()),
+            default_read_only_level(),
+            Arc::new(move |_cx, _profile| {
+                let state = second_for_connector.clone();
+                Box::pin(async move {
+                    Ok(Box::new(BackstopRecordingMock { state }) as Box<dyn OracleConnection>)
+                })
+            }),
+        );
+        // Arm on the first session.
+        dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("read on first session");
+        assert_eq!(backstop_statements(&first), 1);
+
+        // Switch profiles (replaces the pinned session, resets the backstop).
+        dispatcher
+            .dispatch("oracle_switch_profile", json!({ "profile": "other" }))
+            .expect("switch profile");
+
+        // The new session's first read re-asserts on its own transaction.
+        dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("read on second session");
+        assert_eq!(
+            backstop_statements(&second),
+            1,
+            "the new pinned session re-asserts SET TRANSACTION READ ONLY on its first read"
+        );
+    }
 }

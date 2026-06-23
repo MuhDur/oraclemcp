@@ -26,6 +26,15 @@ pub(super) struct QueryArgs {
     pub(super) numbers_as_float: Option<bool>,
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
+    /// E3/E3b: when true, materialize the (bounded) full result as an
+    /// `oracle-export://{id}` resource and return a `resource_link` instead of
+    /// inlining rows. Default false preserves the inline, paginated behavior.
+    #[serde(default, alias = "export_to_resource")]
+    pub(super) export: bool,
+    /// Export serialization format: `csv` (default) or `json`. Only meaningful
+    /// with `export=true`.
+    #[serde(default, alias = "format")]
+    pub(super) export_format: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -182,6 +191,20 @@ pub(super) struct SchemaInspectArgs {
 }
 
 #[derive(Deserialize)]
+pub(super) struct SearchObjectsArgs {
+    #[serde(default)]
+    pub(super) owner: Option<String>,
+    #[serde(default)]
+    pub(super) object_type: Option<String>,
+    #[serde(default)]
+    pub(super) name_like: Option<String>,
+    #[serde(default, alias = "detail")]
+    pub(super) detail_level: Option<String>,
+    #[serde(default, alias = "limit")]
+    pub(super) max_rows: Option<usize>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct ListSchemasArgs {
     #[serde(default)]
     pub(super) name_like: Option<String>,
@@ -250,6 +273,36 @@ pub(super) struct SampleRowsArgs {
     pub(super) table: String,
     #[serde(default, alias = "limit")]
     pub(super) max_rows: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TopQueriesArgs {
+    /// Ranking metric (`elapsed`/`cpu`/`buffer_gets`/`disk_reads`); defaults to elapsed.
+    #[serde(default)]
+    pub(super) metric: Option<String>,
+    /// How many statements to return (clamped 1..=100 in awr.rs).
+    #[serde(default)]
+    pub(super) top_n: Option<u32>,
+    /// Opt into historical AWR/Statspack instead of the free live cursor cache.
+    #[serde(default)]
+    pub(super) historical: bool,
+    /// Live source only: keep only statements at or above this percent of the
+    /// total selected metric (the "5%-of-total" view).
+    #[serde(default)]
+    pub(super) min_pct_of_total: Option<u8>,
+    #[serde(default)]
+    pub(super) timeout_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct DbHealthArgs {
+    /// `"all"` (default) or a comma-separated list of subcheck names
+    /// (`invalid_objects`, `unusable_indexes`, `tablespace_undo`,
+    /// `sequence_ceiling`, `disabled_constraints`, `buffer_cache_hit_ratio`).
+    #[serde(default, alias = "checks", alias = "check")]
+    pub(super) health_type: Option<String>,
+    #[serde(default)]
+    pub(super) timeout_seconds: Option<u64>,
 }
 
 #[derive(Deserialize)]

@@ -39,6 +39,7 @@ pub const ENV_PREFIX: &str = "ORACLEMCP_";
 pub const CONFIG_PATH_ENV: &str = "ORACLEMCP_CONFIG";
 
 const IGNORED_ENV_KEYS: &[&str] = &[
+    "audit_key",
     "config",
     "custom_tools_hmac_key",
     "log",
@@ -67,6 +68,9 @@ pub struct OracleMcpConfig {
     /// Native Streamable HTTP transport configuration.
     #[serde(default)]
     pub http: HttpConfig,
+    /// Out-of-band, hash-chained, keyed-MAC audit log configuration.
+    #[serde(default)]
+    pub audit: AuditConfig,
     /// Named connection profiles.
     #[serde(default)]
     pub profiles: Vec<ConnectionProfile>,
@@ -78,8 +82,116 @@ impl Default for OracleMcpConfig {
             schema_version: SUPPORTED_SCHEMA_VERSION,
             default_profile: None,
             http: HttpConfig::default(),
+            audit: AuditConfig::default(),
             profiles: Vec::new(),
         }
+    }
+}
+
+/// Out-of-band durable audit configuration (plan §5.13, §6.4; bead A8).
+///
+/// The audit log is an append-only, hash-chained, HMAC-SHA256-signed JSONL file
+/// written out-of-band of the Oracle session. `path` is where it lives;
+/// `key_ref` is a secret-ref (mirrors `wallet_password_ref`: `env:VAR`,
+/// `vault:...`, or dev-only `literal:`) for the keyed MAC; `key_id` labels the
+/// active key for rotation. When unset, the binary picks a safe default path
+/// and fails closed at startup if an operating level above ReadOnly is
+/// reachable without a configured key.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuditConfig {
+    /// Append-only audit log file path. When `None`, the binary chooses a safe
+    /// default under the config home.
+    pub path: Option<PathBuf>,
+    /// Secret reference for the HMAC signing key (`env:`/`vault:`/`literal:`).
+    pub key_ref: Option<String>,
+    /// Identifier of the active signing key, recorded in each record so the key
+    /// can be rotated while old records keep verifying. Defaults to `default`.
+    pub key_id: Option<String>,
+    /// Optional shipping of the signed audit chain to an external WORM/SIEM
+    /// destination (bead D2). **Off by default** — when `None`, nothing is
+    /// forwarded and the auditor uses the local file sink alone.
+    pub shipping: Option<AuditShippingConfig>,
+}
+
+impl AuditConfig {
+    /// The configured key id, or the `"default"` label.
+    #[must_use]
+    pub fn key_id_or_default(&self) -> &str {
+        self.key_id.as_deref().unwrap_or("default")
+    }
+}
+
+/// Audit-log shipping configuration (bead D2): mirror each signed, durable
+/// record to an external write-once-read-many (WORM) store and/or a SIEM
+/// endpoint. The local signed chain stays authoritative; shipping is a
+/// fail-safe mirror (a forwarding failure never loses the local record).
+///
+/// At least one destination (`worm_path` or `siem_endpoint`) must be set for the
+/// shipping decorator to be installed; an empty config is rejected so a typo'd
+/// `[audit.shipping]` table is not silently a no-op.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuditShippingConfig {
+    /// Append-only WORM mirror file path. Point it at a WORM-mounted volume or
+    /// an object-lock bucket's sync directory. The mirror is byte-identical
+    /// JSONL, so `oraclemcp audit verify <worm_path>` verifies it under the
+    /// signing key.
+    pub worm_path: Option<PathBuf>,
+    /// SIEM HTTP(S) endpoint that receives one signed record per POST.
+    pub siem_endpoint: Option<String>,
+    /// SIEM wire format: `json` (default), `cef`, or `syslog`.
+    pub siem_format: Option<String>,
+    /// Secret reference for an outbound SIEM auth header value
+    /// (`env:`/`vault:`/`literal:`), e.g. a Splunk HEC token.
+    pub siem_auth_header_ref: Option<String>,
+    /// Header name for the SIEM auth value. Defaults to `Authorization`.
+    pub siem_auth_header_name: Option<String>,
+}
+
+impl AuditShippingConfig {
+    /// The configured SIEM format string, or the `"json"` default.
+    #[must_use]
+    pub fn siem_format_or_default(&self) -> &str {
+        self.siem_format.as_deref().unwrap_or("json")
+    }
+
+    /// The SIEM auth header name, or the `Authorization` default.
+    #[must_use]
+    pub fn siem_auth_header_name_or_default(&self) -> &str {
+        self.siem_auth_header_name
+            .as_deref()
+            .unwrap_or("Authorization")
+    }
+
+    /// Whether any destination is configured (a WORM path or a SIEM endpoint).
+    #[must_use]
+    pub fn has_destination(&self) -> bool {
+        self.worm_path.is_some() || self.siem_endpoint.is_some()
+    }
+
+    /// Validate the shipping config: at least one destination, and SIEM auth
+    /// only alongside a SIEM endpoint.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::InvalidAuditShipping`] when no destination is set
+    /// or a SIEM auth ref is given without an endpoint.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !self.has_destination() {
+            return Err(ConfigError::InvalidAuditShipping {
+                reason: "set at least one of audit.shipping.worm_path or \
+                         audit.shipping.siem_endpoint",
+            });
+        }
+        if self.siem_endpoint.is_none()
+            && (self.siem_auth_header_ref.is_some() || self.siem_format.is_some())
+        {
+            return Err(ConfigError::InvalidAuditShipping {
+                reason: "audit.shipping.siem_format / siem_auth_header_ref require \
+                         audit.shipping.siem_endpoint",
+            });
+        }
+        Ok(())
     }
 }
 
@@ -280,6 +392,9 @@ impl OracleMcpConfig {
             });
         }
         self.http.validate()?;
+        if let Some(shipping) = self.audit.shipping.as_ref() {
+            shipping.validate()?;
+        }
         resolve_inheritance(&mut self.profiles)?;
         if let Some(default_profile) = self.default_profile.as_deref()
             && !self.profiles.iter().any(|p| p.name == default_profile)
@@ -327,14 +442,41 @@ impl OracleMcpConfig {
         Ok(self)
     }
 
-    /// Look up a profile by name.
+    /// Look up a profile by name. This is the **operator/CLI** lookup: it sees
+    /// every configured profile regardless of MCP exposure. The agent-facing
+    /// served surface must use [`Self::mcp_profile`] instead, which fails closed
+    /// on non-`mcp_exposed` profiles (E5).
     #[must_use]
     pub fn profile(&self, name: &str) -> Option<&ConnectionProfile> {
         self.profiles.iter().find(|p| p.name == name)
     }
 
-    /// Non-secret metadata for every profile (`list_profiles`). No secret
-    /// reference is ever included (plan §8.4).
+    /// Look up a profile by name for the MCP **served** surface (E5
+    /// connection-scope isolation). Returns `None` — exactly as if the profile
+    /// did not exist — for any profile hidden with `mcp_exposed = false`
+    /// (per-profile opt-out; profiles are exposed by default). This is the gate
+    /// the agent-facing dispatch (`oracle_switch_profile`, `oracle_search_objects`,
+    /// `completion/complete`) routes profile lookups through, so a hidden or
+    /// guessed name is never switchable, searchable, or completable.
+    #[must_use]
+    pub fn mcp_profile(&self, name: &str) -> Option<&ConnectionProfile> {
+        self.profiles
+            .iter()
+            .find(|p| p.name == name && p.mcp_exposed())
+    }
+
+    /// Whether `name` is a configured profile exposed to the MCP served surface
+    /// (E5). A hidden (`mcp_exposed = false`) or unknown name is
+    /// indistinguishable: both return `false`.
+    #[must_use]
+    pub fn is_mcp_exposed(&self, name: &str) -> bool {
+        self.mcp_profile(name).is_some()
+    }
+
+    /// Non-secret metadata for every profile (`profiles` CLI / operator view).
+    /// No secret reference is ever included (plan §8.4). This includes
+    /// non-`mcp_exposed` profiles, since the operator is allowed to see the full
+    /// topology; the agent-facing surface uses [`Self::list_mcp_profiles`].
     #[must_use]
     pub fn list_profiles(&self) -> Vec<ProfileMetadata> {
         self.profiles
@@ -345,6 +487,18 @@ impl OracleMcpConfig {
                     self.default_profile.as_deref() == Some(profile.name.as_str());
                 metadata
             })
+            .collect()
+    }
+
+    /// Non-secret metadata for only the MCP-exposed profiles (E5) — every profile
+    /// except those hidden with `mcp_exposed = false`. This is what the served
+    /// `oracle_list_profiles` tool returns; a hidden profile is omitted entirely
+    /// (not redacted): it is invisible to the agent.
+    #[must_use]
+    pub fn list_mcp_profiles(&self) -> Vec<ProfileMetadata> {
+        self.list_profiles()
+            .into_iter()
+            .filter(|metadata| metadata.mcp_exposed)
             .collect()
     }
 }
@@ -449,6 +603,12 @@ pub enum ConfigError {
     InvalidHttp {
         /// Field name.
         field: &'static str,
+        /// Validation failure.
+        reason: &'static str,
+    },
+    /// Audit-log shipping configuration is malformed (bead D2).
+    #[error("invalid audit.shipping: {reason}")]
+    InvalidAuditShipping {
         /// Validation failure.
         reason: &'static str,
     },
@@ -734,6 +894,116 @@ mod tests {
     }
 
     #[test]
+    fn audit_config_loads_and_defaults_empty() {
+        let cfg = OracleMcpConfig::from_toml_str("").expect("empty loads");
+        assert_eq!(cfg.audit, AuditConfig::default());
+        assert!(cfg.audit.path.is_none());
+        assert_eq!(cfg.audit.key_id_or_default(), "default");
+
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [audit]
+            path = "/var/log/oraclemcp/audit.jsonl"
+            key_ref = "env:ORACLEMCP_AUDIT_KEY"
+            key_id = "2026-q2"
+            "#,
+        )
+        .expect("audit config loads");
+        assert_eq!(
+            cfg.audit.path.as_deref(),
+            Some(Path::new("/var/log/oraclemcp/audit.jsonl"))
+        );
+        assert_eq!(
+            cfg.audit.key_ref.as_deref(),
+            Some("env:ORACLEMCP_AUDIT_KEY")
+        );
+        assert_eq!(cfg.audit.key_id_or_default(), "2026-q2");
+    }
+
+    #[test]
+    fn audit_shipping_is_off_by_default() {
+        let cfg = OracleMcpConfig::from_toml_str("").expect("empty loads");
+        assert!(
+            cfg.audit.shipping.is_none(),
+            "audit shipping is off by default (no [audit.shipping] table)"
+        );
+    }
+
+    #[test]
+    fn audit_shipping_worm_and_siem_load() {
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [audit]
+            key_ref = "env:ORACLEMCP_AUDIT_KEY"
+
+            [audit.shipping]
+            worm_path = "/mnt/worm/oraclemcp-audit.jsonl"
+            siem_endpoint = "https://siem.example.com/services/collector/raw"
+            siem_format = "cef"
+            siem_auth_header_ref = "env:SIEM_TOKEN"
+            "#,
+        )
+        .expect("shipping config loads");
+        let shipping = cfg.audit.shipping.expect("shipping present");
+        assert_eq!(
+            shipping.worm_path.as_deref(),
+            Some(Path::new("/mnt/worm/oraclemcp-audit.jsonl"))
+        );
+        assert_eq!(
+            shipping.siem_endpoint.as_deref(),
+            Some("https://siem.example.com/services/collector/raw")
+        );
+        assert_eq!(shipping.siem_format_or_default(), "cef");
+        assert_eq!(shipping.siem_auth_header_name_or_default(), "Authorization");
+        assert!(shipping.has_destination());
+        shipping.validate().expect("valid shipping config");
+    }
+
+    #[test]
+    fn audit_shipping_requires_a_destination() {
+        // An empty [audit.shipping] table is a likely typo (a no-op mirror), so
+        // it is rejected rather than silently forwarding nothing.
+        let err = OracleMcpConfig::from_toml_str(
+            r#"
+            [audit.shipping]
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidAuditShipping { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn audit_shipping_siem_auth_requires_endpoint() {
+        let err = OracleMcpConfig::from_toml_str(
+            r#"
+            [audit.shipping]
+            worm_path = "/mnt/worm/a.jsonl"
+            siem_auth_header_ref = "env:SIEM_TOKEN"
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidAuditShipping { .. }),
+            "SIEM auth without a SIEM endpoint is rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_audit_key_is_rejected() {
+        let err = OracleMcpConfig::from_toml_str(
+            r#"
+            [audit]
+            secret = "oops"
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::Figment(_)), "got {err:?}");
+    }
+
+    #[test]
     fn list_profiles_excludes_connection_and_credentials() {
         let cfg = OracleMcpConfig::from_toml_str(
             r#"
@@ -753,5 +1023,125 @@ mod tests {
         assert!(!json.contains("prod:1521/svc"));
         assert!(!json.contains("connect_string"));
         assert!(json.contains("\"is_default\":true"));
+    }
+
+    #[test]
+    fn mcp_exposure_defaults_open_and_hides_only_explicit_false() {
+        // E5 per-profile opt-out: a profile is exposed by default; only an
+        // explicit `mcp_exposed = false` hides it from the served surface. The
+        // operator-facing list_profiles always sees both.
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "exposed_default"
+            connect_string = "internal:1521/svc"
+
+            [[profiles]]
+            name = "hidden"
+            connect_string = "ro:1521/svc"
+            mcp_exposed = false
+            "#,
+        )
+        .expect("loads");
+
+        // Default-open: the unflagged profile is exposed; the `= false` one hidden.
+        assert!(cfg.profile("exposed_default").unwrap().mcp_exposed());
+        assert!(!cfg.profile("hidden").unwrap().mcp_exposed());
+        assert!(cfg.mcp_profile("exposed_default").is_some());
+        assert!(cfg.mcp_profile("hidden").is_none());
+        assert!(cfg.is_mcp_exposed("exposed_default"));
+        assert!(!cfg.is_mcp_exposed("hidden"));
+
+        // A guessed/unknown name is indistinguishable from a hidden one.
+        assert!(cfg.mcp_profile("does_not_exist").is_none());
+        assert!(!cfg.is_mcp_exposed("does_not_exist"));
+
+        // The served list shows only the exposed profile; the operator/CLI list
+        // shows both.
+        let served: Vec<String> = cfg
+            .list_mcp_profiles()
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        assert_eq!(served, vec!["exposed_default".to_owned()]);
+        let all: Vec<String> = cfg.list_profiles().iter().map(|p| p.name.clone()).collect();
+        assert_eq!(all, vec!["exposed_default".to_owned(), "hidden".to_owned()]);
+    }
+
+    #[test]
+    fn mcp_exposure_has_no_global_flip() {
+        // Regression guard for the old footgun: one profile's setting must NOT
+        // change another profile's exposure. With no flags, all are exposed; when
+        // one profile sets `= false`, ONLY that one is hidden and the others stay
+        // exposed (no global activation / allow-list flip).
+        let none_flagged = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "a"
+            connect_string = "db:1521/svc"
+
+            [[profiles]]
+            name = "b"
+            connect_string = "db2:1521/svc"
+            "#,
+        )
+        .expect("loads");
+        assert!(none_flagged.is_mcp_exposed("a"));
+        assert!(none_flagged.is_mcp_exposed("b"));
+
+        let one_hidden = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "a"
+            connect_string = "db:1521/svc"
+            mcp_exposed = false
+
+            [[profiles]]
+            name = "b"
+            connect_string = "db2:1521/svc"
+            "#,
+        )
+        .expect("loads");
+        assert!(
+            !one_hidden.is_mcp_exposed("a"),
+            "explicit false hides only a"
+        );
+        assert!(
+            one_hidden.is_mcp_exposed("b"),
+            "b stays exposed — one profile's flag never changes another's"
+        );
+    }
+
+    #[test]
+    fn mcp_exposed_inherits_through_base() {
+        // E5: the exposure flag participates in base inheritance like other scalar
+        // fields. A base that hides (`= false`) propagates to a child that does
+        // not override it; an explicit child `= true` un-hides.
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "hidden_base"
+            connect_string = "host:1521/svc"
+            mcp_exposed = false
+
+            [[profiles]]
+            name = "inherits_hidden"
+            base = "hidden_base"
+
+            [[profiles]]
+            name = "overrides_exposed"
+            base = "hidden_base"
+            mcp_exposed = true
+            "#,
+        )
+        .expect("loads");
+        assert!(
+            cfg.mcp_profile("inherits_hidden").is_none(),
+            "child inherits the base's hidden flag"
+        );
+        assert!(
+            cfg.mcp_profile("overrides_exposed").is_some(),
+            "child override re-exposes"
+        );
     }
 }

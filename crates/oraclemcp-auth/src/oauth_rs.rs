@@ -3,13 +3,15 @@
 //!
 //! This module owns the security-relevant validation logic, kept transport- and
 //! crypto-edge-agnostic so it is fully unit-testable and the highest-CVE surface
-//! is small and audited:
+//! is small:
 //!
 //! - **JWT parse**: `header.payload.signature`, base64url, alg check.
-//! - **Signature**: real HS256 (HMAC-SHA256) verification built on `sha2`;
-//!   asymmetric algs (RS256/ES256 via JWKS) go through the [`SignatureVerifier`]
-//!   boundary supplied by the embedding transport, so this crate carries no
-//!   RSA/ring dependency.
+//! - **Signature**: real HS256 (HMAC-SHA256) verification built on `sha2`. This
+//!   is the only algorithm wired in production. Asymmetric algs (RS256/ES256 via
+//!   JWKS) are routed through the [`SignatureVerifier`] boundary so this crate
+//!   carries no RSA/ring dependency — but it is a **fail-closed seam**: no
+//!   JWKS-backed asymmetric verifier ships, so such tokens are currently rejected
+//!   (`BadSignature`/`UnsupportedAlg`) until an embedding transport supplies one.
 //! - **Claims**: issuer allowlist; **RFC 8707 audience binding** (the token's
 //!   `aud` MUST contain our resource, which prevents a token minted for another
 //!   resource being replayed here); `exp`/`nbf` against an injected wall clock;
@@ -56,8 +58,10 @@ pub enum TokenError {
     InsufficientScope,
 }
 
-/// Verifies a JWT signature for a given `alg`. Implemented for HS256 here; the
-/// transport supplies an asymmetric verifier (RS256/ES256 via JWKS).
+/// Verifies a JWT signature for a given `alg`. Only HS256 is implemented in
+/// production ([`Hs256Verifier`]). An asymmetric verifier (RS256/ES256 via JWKS)
+/// is a fail-closed seam the embedding transport may supply; none ships, so
+/// asymmetric tokens are rejected until one is wired.
 pub trait SignatureVerifier {
     /// Whether `signature` is valid for `signing_input` under `alg`.
     fn verify(&self, alg: &str, signing_input: &[u8], signature: &[u8]) -> bool;
