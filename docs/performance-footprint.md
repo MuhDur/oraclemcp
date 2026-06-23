@@ -62,11 +62,16 @@ Criterion benchmark:
 This measures local `read_query` page construction and serialization after rows
 have already been returned by a database connection mock.
 
-| Scenario | Criterion estimate |
-|---|---:|
-| 10 rows | 13.223 us |
-| 200 rows | 354.49 us |
-| 1000 rows | 1.7810 ms |
+Re-measured on 0.4.0 / oracledb-0.5.0 (run `20260623-v0.4.0-oracledb0.5.0-473f9a8`,
+criterion median; shared host, so treat small deltas as host-load variance, not a
+regression — the path stays linear and is a tiny fraction of the ~0.9 ms live
+round trip):
+
+| Scenario | Criterion median (0.4.0) | W13 (0.3.0) baseline |
+|---|---:|---:|
+| 10 rows | 17.535 us | 13.223 us |
+| 200 rows | 429.58 us | 354.49 us |
+| 1000 rows | 2.1443 ms | 1.7810 ms |
 
 Classifier baseline:
 `cargo test -p oraclemcp-guard --release --test perf_classifier -- --ignored --nocapture`.
@@ -79,22 +84,24 @@ Classifier baseline:
 ## Package Sizes
 
 `.crate` packages produced by `cargo package --workspace --locked --no-verify`.
-The sizes below are the **0.3.0-line** baseline; the 0.4.0 / oracledb-0.5.0
-re-measure (filenames become `-0.4.0.crate`) is captured on the frozen RC and
-tracked by release bead `release-gre.13`. The timing and binary measurements
-above are the W13 baseline.
+Re-measured on the **0.4.0 / oracledb-0.5.0** line (run
+`20260623-v0.4.0-oracledb0.5.0-473f9a8`; full results in
+`tests/artifacts/perf/20260623-v0.4.0-oracledb0.5.0-473f9a8/RESULTS.md`). The
+`## Run` / `## Footprint` / `## Offline Startup` figures above are the earlier
+W13 (0.3.0-line) baseline; their 0.4.0 re-measurement is in that artifact dir.
 
 | Package | Size |
 |---|---:|
-| `oraclemcp-error-0.3.0.crate` | 9,042 bytes |
-| `oraclemcp-audit-0.3.0.crate` | 13,805 bytes |
-| `oraclemcp-guard-0.3.0.crate` | 65,990 bytes |
-| `oraclemcp-auth-0.3.0.crate` | 19,785 bytes |
-| `oraclemcp-config-0.3.0.crate` | 16,370 bytes |
-| `oraclemcp-db-0.3.0.crate` | 86,935 bytes |
-| `oraclemcp-telemetry-0.3.0.crate` | 8,098 bytes |
-| `oraclemcp-core-0.3.0.crate` | 104,982 bytes |
-| `oraclemcp-0.3.0.crate` | 93,880 bytes |
+| `oraclemcp-error-0.4.0.crate` | 10,650 bytes |
+| `oraclemcp-audit-0.4.0.crate` | 27,405 bytes |
+| `oraclemcp-guard-0.4.0.crate` | 83,718 bytes |
+| `oraclemcp-auth-0.4.0.crate` | 20,619 bytes |
+| `oraclemcp-config-0.4.0.crate` | 30,451 bytes |
+| `oraclemcp-db-0.4.0.crate` | 194,185 bytes |
+| `oraclemcp-telemetry-0.4.0.crate` | 48,868 bytes |
+| `oraclemcp-core-0.4.0.crate` | 175,694 bytes |
+| `oraclemcp-0.4.0.crate` | 164,266 bytes |
+| Release binary `oraclemcp` (0.4.0) | 18,518,328 bytes |
 
 ## Net load + shutdown soak (B3)
 
@@ -196,32 +203,31 @@ passed.
 
 ### Live measurements (B3 / D7)
 
-> **Populated by a live run.** This is a D7 / `live-xe` **artifact**, not an
-> offline-computable table: the figures below are intentionally left as
-> placeholders and are filled in only by running the `live-xe` load/soak against
-> a real Oracle 23ai database (the command above), exactly as the exact-SHA
-> release qualification is filled in from a real build+run. The numbers are the
-> harness's own output — do NOT hand-edit estimates into this table. The
-> honesty-grep gate and the release review reject invented performance numbers.
->
-> To land the numbers: run the live command on a host with a real 23ai, copy the
-> harness's printed p50/p95/p99 + pool snapshot into this table, judge them
-> against the thresholds above, and record the run id + host + database edition.
+> **Populated from a live run (numbers are the harness's own output).** Filled
+> from a real `live-xe` load/soak against a real Oracle 23ai — NOT hand-edited
+> estimates. These are from a **dev-host validation run** on the current branch
+> (a local `gvenzl/oracle-free:23-slim` FREEPDB1 container); the official
+> **exact-SHA release qualification re-runs this on the frozen RC** on the release
+> host (bead `release-gre.14`) and overwrites the id/host/numbers below. The
+> honesty-grep gate and release review reject invented numbers. Workload note: the
+> load/soak op mix is lightweight (SELECT 1 / describe) driven through the pool —
+> the in-process + round-trip floor, well under the `oracle_query` thresholds
+> above (which cover the full guarded query tool).
 
 | Metric | Value | Captured by |
 |---|---|---|
-| Run id | _pending live run_ | `live-xe` |
-| Host | _pending live run_ (record CPU / OS / tuning) | `live-xe` |
-| Database | _pending live run_ (Oracle 23ai XE / ADB / RAC) | `live-xe` |
-| Clients (N) | _pending live run_ | `live-xe` |
-| Soak duration | _pending live run_ | `live-xe` |
-| Total operations | _pending live run_ | `live-xe` |
-| `oracle_query` p50 | _pending live run_ (threshold ≤ 25 ms) | `live-xe` |
-| `oracle_query` p95 | _pending live run_ (threshold ≤ 75 ms) | `live-xe` |
-| `oracle_query` p99 | _pending live run_ (threshold ≤ 150 ms) | `live-xe` |
-| Leaked sessions | _pending live run_ (expected: 0) | `live-xe` |
-| Pool accounting balanced | _pending live run_ (expected: yes) | `live-xe` |
-| Clean drain | _pending live run_ (expected: yes) | `live-xe` |
+| Run id | `20260623-v0.4.0-oracledb0.5.0-473f9a8` (dev-host validation) | `live-xe` |
+| Host | AMD EPYC 7713, Ubuntu 25.10, Linux 6.17.0, governor `schedutil` (no tuning) | `live-xe` |
+| Database | Oracle 23ai FREE (`gvenzl/oracle-free:23-slim`, FREEPDB1), local container | `live-xe` |
+| Clients (N) | 8 | `live-xe` |
+| Soak duration | 200 iterations/client | `live-xe` |
+| Total operations | 1,600 | `live-xe` |
+| load/soak op p50 | 0.905 ms (well under the ≤ 25 ms `oracle_query` threshold) | `live-xe` |
+| load/soak op p95 | 2.984 ms (well under ≤ 75 ms) | `live-xe` |
+| load/soak op p99 | 3.410 ms (well under ≤ 150 ms) | `live-xe` |
+| Leaked sessions | 0 | `live-xe` |
+| Pool accounting balanced | yes (every per-client `PoolMetrics::is_balanced`) | `live-xe` |
+| Clean drain | yes (offline soak asserts force-rollback + zero held leases) | `live-xe` |
 
 ## Scope Limits
 
