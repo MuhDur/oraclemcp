@@ -72,9 +72,9 @@ oraclemcp --json setup --profile db_ro
 docker run -i --rm \
   -v "$HOME/.config/oraclemcp:/root/.config/oraclemcp:ro" \
   -e ORACLE_APP_PASSWORD \
-  ghcr.io/muhdur/oraclemcp:0.3.0          # MCP over stdio, against the configured profile
+  ghcr.io/muhdur/oraclemcp:0.4.0          # MCP over stdio, against the configured profile
 
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.3.0   # tool surface only (no DB)
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.4.0   # tool surface only (no DB)
 ```
 
 > The Docker image and crates are Apache-2.0 OR MIT and do not redistribute Oracle Instant Client.

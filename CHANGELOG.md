@@ -4,6 +4,42 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-06-23
+
+Production-hardening line (no API removals from 0.3.0). Trust & safety depth,
+async/adapter foundations, the read-only DBA suite, production ops, ergonomics,
+and the oracledb driver cut-over.
+
+### Added
+- Hash-chained, HMAC-SHA256-signed out-of-band audit log wired into the served
+  dispatch path, with an `audit verify` CLI and optional WORM/SIEM shipping.
+- Compile-time capability narrowing (read handlers cannot spawn/connect out).
+- Read-only DBA diagnostic suite: `oracle_db_health` and `oracle_top_queries`
+  (privilege-degrading; AWR/diagnostics-pack license-gated).
+- OTLP logs/metrics/traces + `/healthz`//`readyz`//`metrics`, with two-layer
+  secret redaction (`db.statement`/`db.query.text` never exported).
+- A1 read-only transaction backstop; B6 per-request budget bounds.
+- Supply-chain integrity: CycloneDX SBOM, cosign keyless signing, multi-nightly
+  CI, ADRs, severity policy.
+- Canonical annotated `oraclemcp.example.toml` and `docs/configuration.md`.
+
+### Changed
+- Live Oracle access now uses the pure-Rust thin `oracledb` **0.5.0** driver
+  (was 0.2.2 in 0.3.0); all driver use stays behind the single adapter seam.
+- Full async DB path (dropped the blocking-connection facade; native async
+  `oracledb::Connection` with cancellation-correct checkpoints).
+- E5 `mcp_exposed` is a **per-profile opt-out** (exposed by default; set
+  `mcp_exposed = false` to hide; no global flip).
+- The nightly-toolchain requirement is owed to **asupersync** (`try_trait_v2`),
+  not oracledb — oracledb 0.5.0 is stable-clean.
+
+### Fixed
+- Pool checkout retry no longer parks forever on a timer-less runtime.
+- Default per-call timeout prevents a head-of-line hang.
+- Hardened `traceparent` parsing (no panic under `panic=abort`); CSPRNG session
+  ids; constant-time MAC comparisons; fail-closed SQL classifier on unparseable
+  input.
+
 ## [0.3.0] — 2026-06-18
 
 This is the thin-native line: Oracle Instant Client/ODPI-C thick mode, Tokio,
@@ -190,6 +226,7 @@ pure Rust. (Not affiliated with Oracle Corporation.)
   closed on desynchronized multi-statement input. It carries a differential
   adversarial corpus (run in CI) and a `cargo-fuzz` target.
 
+[0.4.0]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.3.0
 [0.2.1]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.2.1
 [0.1.0]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.1.0
