@@ -736,29 +736,54 @@ fn resolve_audit_signing_key(
 /// The maximum operating level reachable across every profile this server can
 /// SERVE at runtime, plus the active/startup profile (bead A8, multi-profile).
 ///
-/// E5 opt-in model: when MCP connection-scope isolation is ACTIVE (at least one
-/// profile sets `mcp_exposed`), only `mcp_exposed` profiles are servable — those
-/// are the only ones `oracle_switch_profile` can reach. When isolation is
-/// INACTIVE (the zero-config common case), the served surface exposes ALL
-/// profiles, so all are reachable. The active profile's ceiling is always
-/// included (the server starts on it). The result drives the fail-closed audit
-/// requirement: if it exceeds READ_ONLY, a signing key is mandatory.
+/// E5 per-profile opt-out: every profile is servable (reachable via
+/// `oracle_switch_profile`) UNLESS it sets `mcp_exposed = false`, so a hidden
+/// profile cannot raise the reachable ceiling. The active profile's ceiling is
+/// always included (the server starts on it). The result drives the fail-closed
+/// audit requirement: if it exceeds READ_ONLY, a signing key is mandatory.
 fn max_reachable_write_ceiling(
     config: &OracleMcpConfig,
     active_level: &SessionLevelState,
 ) -> OperatingLevel {
-    let isolation_active = config.mcp_isolation_active();
     let mut ceiling = active_level.max_level();
     for profile in &config.profiles {
-        // Servable iff isolation is inactive (all profiles served) or the
-        // profile is explicitly `mcp_exposed`. A protected profile is always
-        // pinned at READ_ONLY by validation, so it contributes nothing here.
-        let servable = !isolation_active || profile.mcp_exposed();
-        if servable {
+        // Servable unless explicitly hidden with `mcp_exposed = false`. A
+        // protected profile is always pinned at READ_ONLY by validation, so it
+        // contributes nothing here.
+        if profile.mcp_exposed() {
             ceiling = ceiling.max(profile.max_level());
         }
     }
     ceiling
+}
+
+/// One-line operator-facing summary of which profiles are exposed to the MCP
+/// agent and at what ceiling (E5 per-profile opt-out). Visibility only —
+/// behavior-neutral; emitted to stderr at startup so an operator can see at a
+/// glance that, e.g., a writable profile is reachable by the agent.
+fn exposed_profiles_summary(config: &OracleMcpConfig) -> String {
+    let exposed: Vec<String> = config
+        .profiles
+        .iter()
+        .filter(|p| p.mcp_exposed())
+        .map(|p| format!("{} [{:?}]", p.name, p.max_level()))
+        .collect();
+    let total = config.profiles.len();
+    if exposed.is_empty() {
+        format!("MCP exposing 0 of {total} profile(s) — all hidden via mcp_exposed=false")
+    } else {
+        let hidden = total - exposed.len();
+        let suffix = if hidden > 0 {
+            format!(" ({hidden} hidden via mcp_exposed=false)")
+        } else {
+            String::new()
+        };
+        format!(
+            "MCP exposing {} profile(s): {}{suffix}",
+            exposed.len(),
+            exposed.join(", ")
+        )
+    }
 }
 
 /// Build the out-of-band auditor for the server.
@@ -983,13 +1008,16 @@ fn build_server(
         custom_catalog,
         Some(Arc::new(load_custom_catalog_for_profile)),
     );
-    // E5 connection-scope isolation: snapshot the `mcp_exposed` allow-list from
-    // config so the served surface (switch/list/search/complete) can only reach
-    // profiles the operator opted in. A config load failure fails closed (an
-    // empty allow-list: nothing is exposed to the agent) rather than defaulting
-    // open.
+    // E5 connection-scope isolation: per-profile opt-out — every profile is
+    // reachable by the served surface (switch/list/search/complete) unless it
+    // sets `mcp_exposed = false`. A config load failure fails closed (an empty
+    // allow-list: nothing is exposed to the agent) rather than defaulting open.
     let exposure = match OracleMcpConfig::load(None) {
-        Ok(cfg) => oraclemcp::dispatch::McpExposurePolicy::from_config(&cfg),
+        Ok(cfg) => {
+            // Operator-visibility notice (stderr; never the stdio MCP channel).
+            eprintln!("[oraclemcp] {}", exposed_profiles_summary(&cfg));
+            oraclemcp::dispatch::McpExposurePolicy::from_config(&cfg)
+        }
         Err(_) => oraclemcp::dispatch::McpExposurePolicy::AllowList(HashSet::new()),
     };
     dispatcher = dispatcher.with_mcp_exposure(exposure);
@@ -2332,9 +2360,10 @@ mod tests {
 
     #[test]
     fn reachable_ceiling_spans_writable_exposed_profile_with_readonly_startup() {
-        // Isolation ACTIVE (some profile sets mcp_exposed). The startup profile
-        // is read-only, but a writable profile is exposed — so a switch to it can
-        // run writes, and the reachable ceiling must reflect that.
+        // Per-profile opt-out: both profiles are exposed (neither sets
+        // mcp_exposed=false). The startup profile is read-only, but a writable
+        // profile is reachable — so a switch to it can run writes, and the
+        // reachable ceiling must reflect that.
         let cfg = OracleMcpConfig::from_toml_str(
             r#"
             [[profiles]]
@@ -2358,21 +2387,21 @@ mod tests {
     }
 
     #[test]
-    fn reachable_ceiling_ignores_hidden_writable_profile_when_isolation_active() {
-        // Isolation ACTIVE: a writable profile that is NOT mcp_exposed is not
-        // servable (the agent can never switch to it), so it does not raise the
-        // reachable ceiling.
+    fn reachable_ceiling_ignores_explicitly_hidden_writable_profile() {
+        // Per-profile opt-out: a writable profile explicitly hidden with
+        // `mcp_exposed = false` is not servable (the agent can never switch to
+        // it), so it does not raise the reachable ceiling.
         let cfg = OracleMcpConfig::from_toml_str(
             r#"
             [[profiles]]
             name = "ro_exposed"
             connect_string = "localhost:1521/FREEPDB1"
-            mcp_exposed = true
 
             [[profiles]]
             name = "hidden_writable"
             connect_string = "localhost:1521/FREEPDB1"
             max_level = "READ_WRITE"
+            mcp_exposed = false
             "#,
         )
         .expect("config parses");
@@ -2384,8 +2413,8 @@ mod tests {
     }
 
     #[test]
-    fn reachable_ceiling_spans_all_profiles_when_isolation_inactive() {
-        // Isolation INACTIVE (no profile sets mcp_exposed): all profiles are
+    fn reachable_ceiling_spans_all_profiles_by_default() {
+        // Per-profile opt-out default: with no profile hidden, all profiles are
         // servable, so a writable one raises the reachable ceiling even though
         // the server started on a read-only profile.
         let cfg = OracleMcpConfig::from_toml_str(
@@ -2405,6 +2434,33 @@ mod tests {
         assert_eq!(
             max_reachable_write_ceiling(&cfg, &active),
             OperatingLevel::ReadWrite
+        );
+    }
+
+    #[test]
+    fn exposed_profiles_summary_lists_exposed_and_counts_hidden() {
+        // E5 boot notice (visibility only): exposed profiles are listed with
+        // their ceiling; an explicitly hidden one is counted, not named.
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+
+            [[profiles]]
+            name = "prod_admin"
+            connect_string = "localhost:1521/FREEPDB1"
+            max_level = "DDL"
+            mcp_exposed = false
+            "#,
+        )
+        .expect("config parses");
+        let summary = exposed_profiles_summary(&cfg);
+        assert!(summary.contains("dev [ReadOnly]"), "{summary}");
+        assert!(summary.contains("1 hidden"), "{summary}");
+        assert!(
+            !summary.contains("prod_admin"),
+            "a hidden profile must not be named: {summary}"
         );
     }
 

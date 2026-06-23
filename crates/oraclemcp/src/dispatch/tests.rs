@@ -1150,11 +1150,9 @@ fn e5_list_profiles_omits_non_exposed_profiles() {
 }
 
 #[test]
-fn e5_from_config_is_opt_in_zero_config_exposes_all() {
-    // Opt-in segmentation: a zero-config / single-profile setup (no mcp_exposed
-    // anywhere) must remain usable — from_config yields AllowAll so every profile
-    // is reachable. (Regression guard against an empty allow-list hiding the only
-    // profile and making the server unusable out of the box.)
+fn e5_from_config_opt_out_hides_only_explicit_false() {
+    // Per-profile opt-out: a zero-config / single-profile setup (no mcp_exposed
+    // anywhere) yields AllowAll so every profile is reachable out of the box.
     let zero = OracleMcpConfig::from_toml_str(
         r#"
             [[profiles]]
@@ -1166,13 +1164,13 @@ fn e5_from_config_is_opt_in_zero_config_exposes_all() {
     let policy = McpExposurePolicy::from_config(&zero);
     assert!(
         matches!(policy, McpExposurePolicy::AllowAll),
-        "no profile opted in -> expose all (usable out of the box)"
+        "nothing hidden -> expose all (usable out of the box)"
     );
     assert!(policy.is_exposed("only"));
 
-    // Once a profile opts in, segmentation activates and the unflagged profile
-    // is hidden (fail-closed allow-list).
-    let segmented = OracleMcpConfig::from_toml_str(
+    // Two profiles, neither hidden -> still AllowAll (`mcp_exposed = true` is a
+    // no-op confirmation of the default; it does not segment).
+    let both_default = OracleMcpConfig::from_toml_str(
         r#"
             [[profiles]]
             name = "agent_ro"
@@ -1180,17 +1178,43 @@ fn e5_from_config_is_opt_in_zero_config_exposes_all() {
             mcp_exposed = true
 
             [[profiles]]
-            name = "prod_admin"
-            connect_string = "prod:1521/svc"
+            name = "dev"
+            connect_string = "dev:1521/svc"
             "#,
     )
     .expect("valid config");
-    let policy = McpExposurePolicy::from_config(&segmented);
-    assert!(matches!(policy, McpExposurePolicy::AllowList(_)));
+    let policy = McpExposurePolicy::from_config(&both_default);
+    assert!(
+        matches!(policy, McpExposurePolicy::AllowAll),
+        "no profile hidden -> AllowAll regardless of an explicit = true"
+    );
     assert!(policy.is_exposed("agent_ro"));
+    assert!(policy.is_exposed("dev"));
+
+    // The moment one profile sets `mcp_exposed = false`, ONLY that one is hidden;
+    // the others stay reachable (no global flip).
+    let one_hidden = OracleMcpConfig::from_toml_str(
+        r#"
+            [[profiles]]
+            name = "agent_ro"
+            connect_string = "ro:1521/svc"
+
+            [[profiles]]
+            name = "prod_admin"
+            connect_string = "prod:1521/svc"
+            mcp_exposed = false
+            "#,
+    )
+    .expect("valid config");
+    let policy = McpExposurePolicy::from_config(&one_hidden);
+    assert!(matches!(policy, McpExposurePolicy::AllowList(_)));
+    assert!(
+        policy.is_exposed("agent_ro"),
+        "an unflagged profile stays exposed even when another is hidden"
+    );
     assert!(
         !policy.is_exposed("prod_admin"),
-        "unflagged profile hidden once segmentation is active"
+        "the explicitly hidden profile is unreachable"
     );
 }
 

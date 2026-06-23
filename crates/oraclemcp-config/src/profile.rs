@@ -503,13 +503,16 @@ pub struct ConnectionProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only_standby: Option<bool>,
     /// Whether this profile is exposed to the MCP **served** surface (E5
-    /// connection-scope isolation). When `false` (the fail-closed default), the
+    /// connection-scope isolation). PER-PROFILE OPT-OUT: a profile is exposed to
+    /// agents **by default**; set `mcp_exposed = false` to hide it. A hidden
     /// profile is invisible to every agent-facing path — `oracle_list_profiles`,
     /// `oracle_switch_profile`, `oracle_search_objects`, and
     /// `completion/complete` all behave as if it does not exist. The CLI and the
-    /// operator (`oraclemcp profiles`, `doctor`, `--profile`) still see and use
-    /// every profile. Defaults to `false`: a profile is hidden from agents
-    /// unless an operator opts it in.
+    /// operator (`oraclemcp profiles`, `doctor`, `--profile`) always see and use
+    /// every profile regardless of this flag. One profile's setting never affects
+    /// another's (there is no global activation). This is a visibility/scoping
+    /// convenience, **not** an access control — the real bound on what an exposed
+    /// profile can do is `max_level`/`protected`/DB privileges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_exposed: Option<bool>,
     /// Optional per-connection Oracle session identity.
@@ -606,7 +609,8 @@ impl ConnectionProfile {
     /// CLI/operator still sees every profile regardless of this flag.
     #[must_use]
     pub fn mcp_exposed(&self) -> bool {
-        self.mcp_exposed.unwrap_or(false)
+        // Per-profile opt-out: exposed by default; only an explicit `= false` hides.
+        self.mcp_exposed.unwrap_or(true)
     }
 
     /// The effective pool settings (defaults applied).

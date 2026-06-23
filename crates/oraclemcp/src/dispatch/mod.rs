@@ -448,25 +448,25 @@ pub enum McpExposurePolicy {
     /// binary always installs an explicit [`Self::AllowList`].
     #[default]
     AllowAll,
-    /// Only these profile names (the `mcp_exposed = true` set, snapshotted from
-    /// config at server-wiring time) are reachable by the agent. Fail-closed:
-    /// any name not in this set is invisible and non-switchable.
+    /// Only these profile names (the exposed set — every profile except those
+    /// hidden with `mcp_exposed = false`, snapshotted at server-wiring time) are
+    /// reachable by the agent. Any name not in this set is invisible and
+    /// non-switchable.
     AllowList(std::collections::HashSet<String>),
 }
 
 impl McpExposurePolicy {
-    /// Build the exposure policy from config (E5), opt-in segmentation. The
+    /// Build the exposure policy from config (E5), per-profile opt-out. The
     /// served binary calls this once with the loaded config.
     ///
-    /// If NO profile opts into the `mcp_exposed` flag (the zero-config /
-    /// single-profile common case), isolation is inactive and every profile is
-    /// reachable ([`Self::AllowAll`]) so the server is usable out of the box.
-    /// Once *any* profile sets `mcp_exposed`, the operator has opted into
-    /// segmentation and only the `mcp_exposed = true` set is reachable (a
-    /// fail-closed [`Self::AllowList`]).
+    /// A profile is reachable by the agent UNLESS it sets `mcp_exposed = false`.
+    /// When nothing is hidden (the common case) that is exactly
+    /// [`Self::AllowAll`]; otherwise the exposed (non-hidden) set is snapshotted
+    /// as an [`Self::AllowList`] so the hidden profiles are unreachable. One
+    /// profile's flag never changes another's exposure (no global activation).
     #[must_use]
     pub fn from_config(cfg: &OracleMcpConfig) -> Self {
-        if !cfg.mcp_isolation_active() {
+        if cfg.profiles.iter().all(|p| p.mcp_exposed()) {
             return McpExposurePolicy::AllowAll;
         }
         McpExposurePolicy::AllowList(
