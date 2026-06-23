@@ -604,8 +604,9 @@ impl ConnectionProfile {
     }
 
     /// Whether this profile is exposed to the MCP served (agent-facing) surface
-    /// (E5). Fail-closed: defaults to `false`, so an unflagged profile is hidden
-    /// from `oracle_list_profiles`/`oracle_switch_profile`/search/completion. The
+    /// (E5). Per-profile opt-out: defaults to `true` (exposed); only an explicit
+    /// `mcp_exposed = false` hides it from
+    /// `oracle_list_profiles`/`oracle_switch_profile`/search/completion. The
     /// CLI/operator still sees every profile regardless of this flag.
     #[must_use]
     pub fn mcp_exposed(&self) -> bool {

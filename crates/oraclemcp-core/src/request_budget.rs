@@ -24,10 +24,9 @@
 //!   the request budget) so teardown still runs after the request budget is
 //!   spent, but can never itself run away.
 //!
-//! At today's pinned `oracledb` 0.2.2 the budget composes with the existing
-//! call-timeout. At `oracledb` 0.3.0 (W1-T3) the per-call deadline becomes a
-//! single absolute op-deadline; this budget's deadline maps directly onto it
-//! (note carried in B2).
+//! Against the pinned `oracledb` 0.5.0 driver the budget composes with the
+//! adapter's per-call timeout: the seam maps this budget's deadline onto the
+//! driver's `execute_raw` timeout (see `crates/oraclemcp-db/src/connection.rs`).
 //!
 //! The type is deliberately small and pure so it is testable with
 //! [`Cx::for_testing_with_budget`](asupersync::Cx) / a `LabRuntime` clock with

@@ -59,9 +59,10 @@ jobs:
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --doc
 
-  # The thin-native line is pinned to nightly because asupersync/oracledb require
-  # nightly-only language features. This is a build-only ratchet separate from
-  # the test job so toolchain installation failures stay obvious.
+  # The thin-native line is pinned to nightly because asupersync requires
+  # nightly-only language features (oracledb 0.5.0 is stable-clean). This is a
+  # build-only ratchet separate from the test job so toolchain installation
+  # failures stay obvious.
   pinned-nightly:
     name: build on pinned nightly
     runs-on: ubuntu-latest
@@ -129,9 +130,9 @@ jobs:
   # but kept as a standing guard against an accidental re-introduction.
   #
   # The driver-adapter seam (B2): every real `oracledb::` driver call stays
-  # behind the single adapter file so the eventual oracledb 0.3.0 cut-over
-  # touches exactly one file. Mirrored by the `driver_seam` test in
-  # crates/oraclemcp-db so `cargo test` catches a leak too.
+  # behind the single adapter file so an oracledb driver cut-over (e.g. the
+  # completed 0.2.2 -> 0.5.0 bump) touches exactly one file. Mirrored by the
+  # `driver_seam` test in crates/oraclemcp-db so `cargo test` catches a leak too.
   boundary:
     name: engine-free boundary + driver-seam + honesty lint
     runs-on: ubuntu-latest

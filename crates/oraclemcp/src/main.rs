@@ -770,7 +770,11 @@ fn exposed_profiles_summary(config: &OracleMcpConfig) -> String {
         .collect();
     let total = config.profiles.len();
     if exposed.is_empty() {
-        format!("MCP exposing 0 of {total} profile(s) — all hidden via mcp_exposed=false")
+        if total == 0 {
+            "MCP exposing 0 profiles (none configured)".to_owned()
+        } else {
+            format!("MCP exposing 0 of {total} profile(s) — all hidden via mcp_exposed=false")
+        }
     } else {
         let hidden = total - exposed.len();
         let suffix = if hidden > 0 {

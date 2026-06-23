@@ -78,10 +78,11 @@ Classifier baseline:
 
 ## Package Sizes
 
-Current `.crate` packages produced by `cargo package --workspace --locked
---no-verify`. Package filenames and compressed sizes were refreshed after the
-W14 version bump; the timing and binary measurements above remain the W13
-baseline.
+`.crate` packages produced by `cargo package --workspace --locked --no-verify`.
+The sizes below are the **0.3.0-line** baseline; the 0.4.0 / oracledb-0.5.0
+re-measure (filenames become `-0.4.0.crate`) is captured on the frozen RC and
+tracked by release bead `release-gre.13`. The timing and binary measurements
+above are the W13 baseline.
 
 | Package | Size |
 |---|---:|

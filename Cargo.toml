@@ -18,7 +18,8 @@ license = "Apache-2.0 OR MIT"
 repository = "https://github.com/MuhDur/oraclemcp"
 homepage = "https://github.com/MuhDur/oraclemcp"
 # No `rust-version`: the thin-native line is pinned to nightly because
-# asupersync/oracledb require nightly-only language features.
+# asupersync uses nightly-only language features (try_trait_v2 + its residual).
+# The oracledb 0.5.0 driver is stable-clean and is NOT the reason for the pin.
 keywords = ["oracle", "mcp", "database", "sql"]
 categories = ["database", "development-tools"]
 
