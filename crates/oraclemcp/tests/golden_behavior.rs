@@ -188,9 +188,9 @@ impl OracleConnection for FailingMock {
 
 fn server_over(conn: Box<dyn OracleConnection>) -> OracleMcpServer {
     OracleMcpServer::new(
-        "0.3.0",
+        env!("CARGO_PKG_VERSION"),
         tool_registry(),
-        capabilities("0.3.0", true, false),
+        capabilities(env!("CARGO_PKG_VERSION"), true, false),
         Arc::new(OracleDispatcher::new(conn)),
     )
 }
@@ -571,9 +571,9 @@ fn golden_stdio_resource_subscribe_and_updated_notification() {
 
     let build = || {
         OracleMcpServer::new(
-            "0.3.0",
+            env!("CARGO_PKG_VERSION"),
             tool_registry(),
-            capabilities("0.3.0", true, false),
+            capabilities(env!("CARGO_PKG_VERSION"), true, false),
             Arc::new(OracleDispatcher::new(Box::new(OneRowMock))),
         )
         .with_subscriptions(Arc::clone(&hub))
@@ -698,9 +698,9 @@ fn golden_stdio_query_export_resource_and_resource_link() {
     let exports = Arc::new(oraclemcp_core::ExportRegistry::new());
     let dispatcher = OracleDispatcher::new(Box::new(ExportMock)).with_exports(Arc::clone(&exports));
     let server = OracleMcpServer::with_exports(
-        "0.3.0",
+        env!("CARGO_PKG_VERSION"),
         tool_registry(),
-        capabilities("0.3.0", true, false),
+        capabilities(env!("CARGO_PKG_VERSION"), true, false),
         Arc::new(dispatcher),
         exports,
     );
@@ -976,9 +976,9 @@ fn golden_stdio_search_objects_detail_levels() {
     // stats_stale), never COUNT(*).
     let build = || {
         OracleMcpServer::new(
-            "0.3.0",
+            env!("CARGO_PKG_VERSION"),
             tool_registry(),
-            capabilities("0.3.0", true, false),
+            capabilities(env!("CARGO_PKG_VERSION"), true, false),
             Arc::new(OracleDispatcher::new(Box::new(SearchMock))),
         )
     };
@@ -1013,9 +1013,9 @@ fn golden_stdio_completion_complete_owner_type_object() {
     // E7: completion/complete for owner/type/object, scoped by context.arguments.
     let build = || {
         OracleMcpServer::new(
-            "0.3.0",
+            env!("CARGO_PKG_VERSION"),
             tool_registry(),
-            capabilities("0.3.0", true, false),
+            capabilities(env!("CARGO_PKG_VERSION"), true, false),
             Arc::new(OracleDispatcher::new(Box::new(SearchMock))),
         )
     };
@@ -1062,9 +1062,9 @@ fn golden_stdio_progress_and_tools_list_changed_notifications() {
     // we capture the progress bracket end-to-end over stdio.
     let server = || {
         OracleMcpServer::new(
-            "0.3.0",
+            env!("CARGO_PKG_VERSION"),
             tool_registry(),
-            capabilities("0.3.0", true, false),
+            capabilities(env!("CARGO_PKG_VERSION"), true, false),
             Arc::new(OracleDispatcher::new(Box::new(SearchMock))),
         )
     };

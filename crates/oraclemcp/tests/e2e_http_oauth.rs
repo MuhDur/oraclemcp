@@ -117,9 +117,9 @@ fn server() -> OracleMcpServer {
 fn server_with_max_level(max_level: OperatingLevel) -> OracleMcpServer {
     let registry = tool_registry();
     OracleMcpServer::new(
-        "0.3.0",
+        env!("CARGO_PKG_VERSION"),
         registry,
-        capabilities("0.3.0", true, false),
+        capabilities(env!("CARGO_PKG_VERSION"), true, false),
         Arc::new(OracleDispatcher::new_with_profile_level(
             Box::new(NoExecMock),
             Some("http-oauth-e2e".to_owned()),
