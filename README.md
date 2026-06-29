@@ -77,6 +77,26 @@ docker run -i --rm \
 docker run -i --rm ghcr.io/muhdur/oraclemcp:0.4.1   # tool surface only (no DB)
 ```
 
+An optional PL/SQL intelligence image is available from the manual Docker
+workflow. It is the same server compiled with `--features plsql-intelligence`;
+it can start without a database connection and advertises the offline
+`oracle_plsql_*` tools immediately. Live PL/SQL tools still require a profile.
+
+```sh
+docker run -i --rm ghcr.io/muhdur/oraclemcp:<version>-plsql-intelligence --json info
+docker run -i --rm ghcr.io/muhdur/oraclemcp:<version>-plsql-intelligence capabilities
+```
+
+Local feature-image builds need the sibling `plsql-intelligence` checkout:
+
+```sh
+docker buildx build \
+  --build-context plsql-intelligence=../plsql-intelligence \
+  --target runtime-plsql-intelligence \
+  -t oraclemcp:plsql-intelligence .
+docker run -i --rm oraclemcp:plsql-intelligence --json info
+```
+
 > The Docker image and crates are Apache-2.0 OR MIT and do not redistribute Oracle Instant Client.
 
 Wire it into an MCP client (e.g. Claude Desktop) over stdio:
@@ -786,12 +806,12 @@ oraclemcp-core       → all of the above  MCP protocol surface, server, tool re
 oraclemcp            → core, db, …        this binary
 ```
 
-## oraclemcp vs. plsql-mcp
+## oraclemcp Core vs. PL/SQL Intelligence
 
-`oraclemcp` is the lean half of a two-binary family:
+`oraclemcp` now owns the Oracle MCP server surface:
 
-- **`oraclemcp`** (this repo): the engine-free Oracle **database** MCP server for safe DB access. Reach for it when you want schema introspection, guarded reads, and tightly gated SQL execution without a PL/SQL analysis engine.
-- **`plsql-mcp`** (in [plsql-intelligence](https://github.com/MuhDur/plsql-intelligence)): the full **superset**. Everything here *plus* offline PL/SQL code intelligence (parse/analyze, dependency graph, lineage, SAST, impact analysis) and richer PL/SQL workflows. Reach for it when you want deep PL/SQL understanding, not just database access. Available as `docker run -i ghcr.io/muhdur/plsql-mcp` and in the MCP registry as `io.github.MuhDur/plsql-mcp`.
+- **Core build**: the default, engine-free Oracle **database** MCP server for schema introspection, guarded reads, and tightly gated SQL execution.
+- **PL/SQL intelligence build**: the same MCP server compiled with the offline [plsql-intelligence](https://github.com/MuhDur/plsql-intelligence) engine. It adds `oracle_plsql_*` tools for parse/analyze, dependency graph, lineage, SAST, documentation, and impact workflows while keeping live database access behind the usual profile controls.
 
 ## Offline behavior
 

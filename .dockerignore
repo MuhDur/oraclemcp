@@ -1,4 +1,13 @@
 target/
+target*/
+**/target/
+**/target*/
+plsql-intelligence/
+.beads/
+.claude/
+.ntm/
+beads_compliance_audit/
+tests/artifacts/
 .git/
 .github/
 *.md

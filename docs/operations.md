@@ -82,6 +82,25 @@ docker run -i --rm ghcr.io/muhdur/oraclemcp:0.4.1 info       # version, tools, t
 docker run -i --rm ghcr.io/muhdur/oraclemcp:0.4.1 --json doctor
 ```
 
+The optional PL/SQL intelligence image uses the same runtime contract, but the
+binary is compiled with `--features plsql-intelligence`. It does not need a
+database connection to start, list capabilities, or expose the offline
+`oracle_plsql_parse`, `oracle_plsql_analyze`, `oracle_plsql_lineage`,
+`oracle_plsql_sast`, and `oracle_plsql_doc` tools. Live snapshot and blast
+radius tools still need a configured profile.
+
+```sh
+# Published by the manual Docker workflow with variant=plsql-intelligence.
+docker run -i --rm ghcr.io/muhdur/oraclemcp:<version>-plsql-intelligence --json info
+
+# Local build from sibling checkouts.
+docker buildx build \
+  --build-context plsql-intelligence=../plsql-intelligence \
+  --target runtime-plsql-intelligence \
+  -t oraclemcp:plsql-intelligence .
+docker run -i --rm oraclemcp:plsql-intelligence --json info
+```
+
 Pin to an immutable tag (`:0.4.1`), not `:latest`, in any non-interactive
 deployment, and verify the image digest against the release. The exact
 verification commands — SBOM, provenance, and signatures for both the binaries

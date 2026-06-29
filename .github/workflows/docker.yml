@@ -11,6 +11,14 @@ on:
         description: "Image version tag. Empty means the current Cargo package version."
         required: false
         default: ""
+      variant:
+        description: "Image variant to build."
+        required: false
+        default: "core"
+        type: choice
+        options:
+          - core
+          - plsql-intelligence
 
 permissions:
   contents: read
@@ -26,6 +34,7 @@ jobs:
   docker:
     name: build + push (GHCR)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
         with:
@@ -34,11 +43,12 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      - name: Resolve version
+      - name: Resolve version and variant
         id: ver
         shell: bash
         env:
           INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_VARIANT: ${{ github.event.inputs.variant }}
         run: |
           if [ -n "$INPUT_VERSION" ]; then
             version="$INPUT_VERSION"
@@ -49,12 +59,47 @@ jobs:
             echo "invalid image version: $version" >&2
             exit 1
           }
-          echo "v=$version" >> "$GITHUB_OUTPUT"
+          variant="${INPUT_VARIANT:-core}"
+          case "$variant" in
+            core)
+              target="runtime"
+              expected_engine="false"
+              image="ghcr.io/muhdur/oraclemcp:${version}"
+              tags="$(printf 'ghcr.io/muhdur/oraclemcp:%s\nghcr.io/muhdur/oraclemcp:latest\n' "$version")"
+              ;;
+            plsql-intelligence)
+              target="runtime-plsql-intelligence"
+              expected_engine="true"
+              image="ghcr.io/muhdur/oraclemcp:${version}-plsql-intelligence"
+              tags="$(printf 'ghcr.io/muhdur/oraclemcp:%s-plsql-intelligence\nghcr.io/muhdur/oraclemcp:plsql-intelligence-latest\n' "$version")"
+              ;;
+            *)
+              echo "invalid image variant: $variant" >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "v=$version"
+            echo "variant=$variant"
+            echo "target=$target"
+            echo "expected_engine=$expected_engine"
+            echo "image=$image"
+            echo "tags<<EOF"
+            printf '%s\n' "$tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Validate release metadata
         env:
           RELEASE_TAG: v${{ steps.ver.outputs.v }}
         run: bash scripts/release_preflight.sh
+
+      - name: Check out plsql-intelligence engine context
+        uses: actions/checkout@v6
+        with:
+          repository: MuhDur/plsql-intelligence
+          path: plsql-intelligence
+          persist-credentials: false
 
       - uses: docker/setup-buildx-action@v4
 
@@ -70,10 +115,11 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          target: ${{ steps.ver.outputs.target }}
           push: true
-          tags: |
-            ghcr.io/muhdur/oraclemcp:${{ steps.ver.outputs.v }}
-            ghcr.io/muhdur/oraclemcp:latest
+          tags: ${{ steps.ver.outputs.tags }}
+          build-contexts: |
+            plsql-intelligence=./plsql-intelligence
           # SLSA provenance + SBOM baked into the manifest, matching release.yml.
           provenance: mode=max
           sbom: true
@@ -97,12 +143,16 @@ jobs:
       - name: Smoke pushed image
         shell: bash
         env:
-          IMAGE: ghcr.io/muhdur/oraclemcp:${{ steps.ver.outputs.v }}
+          IMAGE: ${{ steps.ver.outputs.image }}
           VERSION: ${{ steps.ver.outputs.v }}
+          EXPECTED_ENGINE: ${{ steps.ver.outputs.expected_engine }}
         run: |
           set -euo pipefail
           docker pull "$IMAGE"
-          docker run --rm --entrypoint /bin/bash -e EXPECTED_VERSION="$VERSION" "$IMAGE" -lc '
+          docker run --rm --entrypoint /bin/bash \
+            -e EXPECTED_VERSION="$VERSION" \
+            -e EXPECTED_ENGINE="$EXPECTED_ENGINE" \
+            "$IMAGE" -lc '
             set -euo pipefail
             if command -v gcc >/dev/null 2>&1; then
               echo "runtime image unexpectedly contains gcc" >&2
@@ -110,5 +160,11 @@ jobs:
             fi
             oraclemcp info >/tmp/oraclemcp-info.json
             grep -q "\"version\": \"$EXPECTED_VERSION\"" /tmp/oraclemcp-info.json
+            grep -q "\"engine\": $EXPECTED_ENGINE" /tmp/oraclemcp-info.json
+            if [ "$EXPECTED_ENGINE" = "true" ]; then
+              grep -q "oracle_plsql_parse" /tmp/oraclemcp-info.json
+            else
+              ! grep -q "oracle_plsql_parse" /tmp/oraclemcp-info.json
+            fi
             oraclemcp capabilities | head -c 1200 >/dev/null
           '

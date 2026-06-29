@@ -292,6 +292,12 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - name: Check out plsql-intelligence engine context
+        uses: actions/checkout@v6
+        with:
+          repository: MuhDur/plsql-intelligence
+          path: plsql-intelligence
+          persist-credentials: false
       - name: Resolve Docker tags
         id: tags
         shell: bash
@@ -317,8 +323,11 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          target: runtime
           push: true
           tags: ${{ steps.tags.outputs.tags }}
+          build-contexts: |
+            plsql-intelligence=./plsql-intelligence
           # SLSA provenance baked into the image manifest by BuildKit. `mode=max`
           # records the full build graph (base images, build steps).
           provenance: mode=max
