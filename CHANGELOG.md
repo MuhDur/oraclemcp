@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-06-29
+
+### Changed
+- Bumped the exact pure-Rust thin driver pin to `oracledb` 0.5.1 so downstream
+  `plsql-mcp` can validate the trio-stack live gate against the current
+  rust-oracledb patch line.
+- Kept the driver behind the same `oraclemcp-db` adapter seam and release
+  metadata gates; no public API removals.
+
 ## [0.4.0] — 2026-06-23
 
 Production-hardening line (no API removals from 0.3.0). Trust & safety depth,
@@ -226,6 +235,7 @@ pure Rust. (Not affiliated with Oracle Corporation.)
   closed on desynchronized multi-statement input. It carries a differential
   adversarial corpus (run in CI) and a `cargo-fuzz` target.
 
+[0.4.1]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.4.1
 [0.4.0]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.3.0
 [0.2.1]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.2.1

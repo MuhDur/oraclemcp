@@ -19,7 +19,7 @@ repository = "https://github.com/MuhDur/oraclemcp"
 homepage = "https://github.com/MuhDur/oraclemcp"
 # No `rust-version`: the thin-native line is pinned to nightly because
 # asupersync uses nightly-only language features (try_trait_v2 + its residual).
-# The oracledb 0.5.0 driver is stable-clean and is NOT the reason for the pin.
+# The oracledb 0.5.1 driver is stable-clean and is NOT the reason for the pin.
 keywords = ["oracle", "mcp", "database", "sql"]
 categories = ["database", "development-tools"]
 
@@ -39,11 +39,11 @@ asupersync = { version = "0.3.4", default-features = false, features = ["metrics
 # permissive license allow-list.
 async-trait = "0.1"
 # Pinned EXACTLY (B2; plan §8). The whole oracledb surface is isolated behind one
-# adapter (crates/oraclemcp-db/src/connection.rs); the 0.2.2 → 0.5.0 cut-over was
+# adapter (crates/oraclemcp-db/src/connection.rs); the 0.2.2 -> 0.5.x cut-over was
 # the deliberate, single-file change that exact pin guarantees — never an
 # accidental float into a new minor. Keep the `=` pin; bump it deliberately
 # (adapter + contract suite green, full gate battery re-run) for each upgrade.
-oracledb = { version = "=0.5.0", default-features = false }
+oracledb = { version = "=0.5.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # D1 observability: hand-rolled OTLP metrics/trace protobuf encoders

@@ -30,7 +30,7 @@
 This branch is pinned to **`nightly-2026-05-11`**. The thin-native line has no
 stable MSRV because **asupersync 0.3.4** uses nightly-only language features
 (`#![feature(try_trait_v2)]` and `try_trait_v2_residual`); the pinned `oracledb`
-0.5.0 driver itself is stable-clean. The repository's `rust-toolchain.toml`
+0.5.1 driver itself is stable-clean. The repository's `rust-toolchain.toml`
 selects the pin for local builds; direct `cargo install` users should use the
 same toolchain.
 
@@ -72,9 +72,9 @@ oraclemcp --json setup --profile db_ro
 docker run -i --rm \
   -v "$HOME/.config/oraclemcp:/root/.config/oraclemcp:ro" \
   -e ORACLE_APP_PASSWORD \
-  ghcr.io/muhdur/oraclemcp:0.4.0          # MCP over stdio, against the configured profile
+  ghcr.io/muhdur/oraclemcp:0.4.1          # MCP over stdio, against the configured profile
 
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.4.0   # tool surface only (no DB)
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.4.1   # tool surface only (no DB)
 ```
 
 > The Docker image and crates are Apache-2.0 OR MIT and do not redistribute Oracle Instant Client.
@@ -379,7 +379,7 @@ not silently fall back to thick mode.
 
 The OCI cloud fields `use_iam_token` (bool) and `iam_config_profile`
 (`Option<String>`) under `[profiles.oci]` **parse** through strict config
-validation, but the pinned `oracledb` 0.5.0 thin adapter **fails closed** on an
+validation, but the pinned `oracledb` 0.5.1 thin adapter **fails closed** on an
 IAM-token connect today: `oraclemcp` wires no production OCI token source, so
 `use_iam_token = true` returns a structured unsupported-auth diagnostic
 (pointing at the as-yet-unwired IAM token-source seam) rather than connecting,
@@ -511,7 +511,7 @@ blocks; it does not print the HMAC key.
 `oraclemcp` builds on a single **pinned Rust nightly** (`nightly-2026-05-11`,
 recorded in `rust-toolchain.toml`). The pin exists because **asupersync 0.3.4**
 uses nightly-only language features (`try_trait_v2` + `try_trait_v2_residual`) —
-the `oracledb` 0.5.0 driver is stable-clean. The pin is **build-time only**: the
+the `oracledb` 0.5.1 driver is stable-clean. The pin is **build-time only**: the
 shipped binary has no runtime dependency on nightly. See
 [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) for the full rationale and the
 re-pin runbook.

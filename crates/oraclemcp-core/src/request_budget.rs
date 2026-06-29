@@ -24,7 +24,7 @@
 //!   the request budget) so teardown still runs after the request budget is
 //!   spent, but can never itself run away.
 //!
-//! Against the pinned `oracledb` 0.5.0 driver the budget composes with the
+//! Against the pinned `oracledb` 0.5.1 driver the budget composes with the
 //! adapter's per-call timeout: the seam maps this budget's deadline onto the
 //! driver's `execute_raw` timeout (see `crates/oraclemcp-db/src/connection.rs`).
 //!

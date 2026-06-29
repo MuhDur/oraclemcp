@@ -12,7 +12,7 @@ query text.
 | --- | --- | --- |
 | Workspace | Cargo workspace with 9 crates plus `oraclemcp` binary, `resolver = "2"`, edition 2024, pinned nightly `nightly-2026-05-11`, and no stable MSRV on the thin-native line. | `Cargo.toml`, `rust-toolchain.toml` |
 | Safety posture | Every crate forbids unsafe code; raw SQL safety is centered on `oraclemcp-guard`. | `Cargo.toml`, crate roots, `AGENTS.md` |
-| Current release line | All package versions and `server.json` are aligned at 0.4.0. | `Cargo.toml`, crate `Cargo.toml` files, `server.json` |
+| Current release line | All package versions and `server.json` are aligned at 0.4.1. | `Cargo.toml`, crate `Cargo.toml` files, `server.json` |
 | Current DB mode | Default build includes live Oracle support through the pure-Rust `oracledb` thin driver. | `README.md`, `crates/oraclemcp-db/Cargo.toml` |
 | Current runtime/transport | Native stdio and native Streamable HTTP live in `oraclemcp-core`; dispatch receives explicit Asupersync `Cx` contexts; Tokio, `rmcp`, Axum, Hyper, ODPI-C, and `r2d2` are absent from the current manifests and lockfile. | `crates/oraclemcp-core/src/server.rs`, `crates/oraclemcp-core/src/http.rs`, `Cargo.lock`, `Cargo.toml` |
 | Current bead state | Repo-local `.beads/` contains the migration graph and W-series release hardening work. | `br list --json`, `bv --robot-triage` |
@@ -106,8 +106,8 @@ query text.
 
 Verified on 2026-06-23:
 
-- `Cargo.lock` resolves the published `oracledb = 0.5.0` and
-  `oracledb-protocol = 0.5.0` crates from crates.io.
+- `Cargo.lock` resolves the published `oracledb = 0.5.1` and
+  `oracledb-protocol = 0.5.1` crates from crates.io.
 - The published driver exposes the pure-Rust thin connection path plus the
   blocking facade used by the current synchronous DB trait boundary.
 - The local `/home/durakovic/projects/rust-oracledb` checkout is a normal
@@ -117,7 +117,7 @@ Verified on 2026-06-23:
 
 Decision:
 
-- `oraclemcp` consumes `oracledb = 0.5.0` from crates.io, declared in the
+- `oraclemcp` consumes `oracledb = 0.5.1` from crates.io, declared in the
   workspace dependency table with `default-features = false`.
 - No vendoring is used. No releaseable `oraclemcp` crate may depend on
   `/home/durakovic/projects/rust-oracledb` or any other external local path.
@@ -158,7 +158,7 @@ Remaining upstream thin-driver gaps tracked in `/home/durakovic/projects/rust-or
 
 - `rust-oracledb-o0b`: external wallet auth without username/password.
 - `rust-oracledb-5bh`: end-to-end OCI IAM database-token retrieval/refresh for
-  `oraclemcp` profiles remains unwired even though `oracledb` 0.5.0 exposes the
+  `oraclemcp` profiles remains unwired even though `oracledb` 0.5.1 exposes the
   lower-level access-token connect option (`ConnectOptions::with_access_token`).
   Tracked downstream as deferred bead k6q.9.
 
@@ -169,7 +169,7 @@ Remaining upstream thin-driver gaps tracked in `/home/durakovic/projects/rust-or
 | Proxy auth | Thin connect authenticates as `proxy_user` and passes the target schema through the driver's proxy-user connect option. | Requires normal Oracle `CONNECT THROUGH` grants; live tests run when both proxy env vars are set. |
 | External/wallet auth | Legacy thick mode could attempt empty username/password wallet auth. Thin mode now reports unsupported external wallet auth explicitly until the published driver grows that path. | Never silently fall back to password auth or thick mode. |
 | Kerberos/RADIUS | Thin adapter rejects these modes with targeted unsupported-auth errors. | Add only if the published thin driver exposes a safe implementation. |
-| IAM token | `use_iam_token` / `iam_config_profile` parse but fail closed: the `oracledb` 0.5.0 adapter has the `with_access_token` primitive, yet `oraclemcp` wires no production OCI token source, so a configured IAM-token connect returns a structured unsupported-auth diagnostic and any token over a non-TCPS transport is refused. Deferred bead k6q.9. | Wire only with redacted token sourcing, refresh, and live coverage; do not claim support from the lower-level driver primitive alone. |
+| IAM token | `use_iam_token` / `iam_config_profile` parse but fail closed: the `oracledb` 0.5.1 adapter has the `with_access_token` primitive, yet `oraclemcp` wires no production OCI token source, so a configured IAM-token connect returns a structured unsupported-auth diagnostic and any token over a non-TCPS transport is refused. Deferred bead k6q.9. | Wire only with redacted token sourcing, refresh, and live coverage; do not claim support from the lower-level driver primitive alone. |
 | DRCP | `drcp.rs` appends connect string parameters such as `server=pooled`, class, and purity. | Parser and live checks cover the connect-string shaping; keep pool identity attributes segregated. |
 | Non-homogeneous pools | Pool settings carry the full thin `OracleConnectOptions` for each pool instance. | Do not reuse sessions across incompatible identity/auth attributes. |
 

@@ -22,7 +22,7 @@
 //!   and the [`OracleConnection`] trait contract exercised through a scripted
 //!   in-process backend (query rows + typed values, positional and named bind
 //!   variants, execute + rowcount, the single-execute path the adapter drives
-//!   through 0.5.0's `execute_raw` primitive, the explicit default
+//!   through 0.5.x's `execute_raw` primitive, the explicit default
 //!   rejections, and the cancellation-checkpoint mapping of the `*_cx`
 //!   methods).
 //! - **Live (`live-xe` feature, env-gated):** the same cases against a real
@@ -30,9 +30,9 @@
 //!   live case prints a loud SKIP banner and returns, matching the repo's
 //!   `live-xe` convention so CI without a database stays green.
 //!
-//! ## `execute` on the 0.5.0 driver
+//! ## `execute` on the 0.5.x driver
 //!
-//! The `oracledb` 0.5.0 driver exposes its execute surface through
+//! The `oracledb` 0.5.x driver exposes its execute surface through
 //! `Connection::execute_raw` — the array-DML primitive taking
 //! `&[Vec<BindValue>]` (the 0.2.2 `execute_query_with_binds*` family was
 //! removed). The [`OracleConnection`] adapter surface that `oraclemcp` depends
@@ -842,12 +842,12 @@ mod live {
 
     #[test]
     fn live_contract_dbms_output_out_binds() {
-        // Pins the OUT-bind retrieval path that the 0.2.2 -> 0.5.0 cut-over moved
+        // Pins the OUT-bind retrieval path that the 0.2.2 -> 0.5.x cut-over moved
         // onto `execute_raw`: `read_dbms_output` runs `DBMS_OUTPUT.GET_LINE(:1, :2)`
         // and reads the two OUT binds (`:1` line text, `:2` status) out of
         // `QueryResult::out_values` via the adapter's key-based `output_value`.
         // The adversarial cut-over review flagged this equivalence as resting on
-        // the external 0.5.0 driver contract; this asserts it against a real 23ai.
+        // the external 0.5.x driver contract; this asserts it against a real 23ai.
         run_with_cx(|cx| async move {
             let Some(conn) = connect_or_skip(&cx, "live_contract_dbms_output_out_binds").await
             else {

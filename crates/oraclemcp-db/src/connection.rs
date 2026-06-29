@@ -17,7 +17,7 @@
 //! `oracledb::` path. References to `oracledb` elsewhere are intentionally only
 //! doc-links and human-readable driver descriptions (no driver calls).
 //!
-//! Isolating the driver here meant the `oracledb` 0.2.2 → 0.5.0 cut-over touched
+//! Isolating the driver here meant the `oracledb` 0.2.2 -> 0.5.x cut-over touched
 //! exactly this one file: the removed `execute_query*` initial-execute family
 //! collapsed onto the retained low-level `Connection::execute_raw` (same
 //! `QueryResult`, same prefetch + optional per-call timeout, still composing with
@@ -606,7 +606,7 @@ mod driver {
         opts: &OracleConnectOptions,
         context: &'static str,
     ) -> Result<QueryResult, DbError> {
-        // oracledb 0.5.0 removed the 0.2.2 `execute_query_with_binds` family;
+        // oracledb 0.5.x removed the 0.2.2 `execute_query_with_binds` family;
         // `Connection::execute_raw` is the retained low-level entry that returns the
         // same `QueryResult` and composes with the fetch primitives below. `bind_rows`
         // is positional array DML — one inner row applies our binds in a single round
@@ -1018,7 +1018,7 @@ mod driver {
                     oracle_type,
                     Some(format!("<unsupported ARRAY len={}>", values.len())),
                 ),
-                // `QueryValue` is `#[non_exhaustive]` as of oracledb 0.5.0. Every wire
+                // `QueryValue` is `#[non_exhaustive]` as of oracledb 0.5.x. Every wire
                 // value kind that exists today is handled explicitly above; this arm
                 // fails SAFE on any future kind with a clearly-marked, non-silent
                 // placeholder — never a silent wrong value (cf. the NUMBER→string
@@ -1548,8 +1548,12 @@ mod driver {
         #[test]
         fn unsupported_lob_subtype_is_explicit_error() {
             let lob = lob(ORA_TYPE_NUM_RAW, 8);
+            let mut attempted_read = false;
             let mut read_lob = |_locator: &[u8], _offset: u64, _amount: u64| {
-                panic!("unsupported subtype must not read")
+                attempted_read = true;
+                Err(DbError::Query(
+                    "unsupported subtype test closure invoked".to_owned(),
+                ))
             };
 
             let err = materialize_lob_cell(
@@ -1566,6 +1570,10 @@ mod driver {
             assert!(
                 err.to_string()
                     .contains("unsupported LOB locator type ORA_TYPE_23")
+            );
+            assert!(
+                !attempted_read,
+                "unsupported LOB subtype must fail before reading locator data"
             );
         }
     }
@@ -2513,8 +2521,7 @@ mod driver_seam {
     }
 
     fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-        let entries = std::fs::read_dir(dir)
-            .unwrap_or_else(|err| panic!("read_dir {}: {err}", dir.display()));
+        let entries = std::fs::read_dir(dir).expect("read source directory for seam lint");
         for entry in entries {
             let entry = entry.expect("dir entry");
             let path = entry.path();
@@ -2573,8 +2580,7 @@ mod driver_seam {
             if ADAPTER_ALLOWLIST.contains(&rel.as_str()) {
                 continue;
             }
-            let contents = std::fs::read_to_string(file)
-                .unwrap_or_else(|err| panic!("read {}: {err}", file.display()));
+            let contents = std::fs::read_to_string(file).expect("read Rust source for seam lint");
             for (n, line) in contents.lines().enumerate() {
                 if names_driver_path(line) {
                     violations.push(format!("{rel}:{}: {}", n + 1, line.trim()));
@@ -2664,8 +2670,7 @@ mod driver_seam {
             if rel.ends_with("/tests.rs") || rel.contains("/tests/") {
                 continue;
             }
-            let contents = std::fs::read_to_string(file)
-                .unwrap_or_else(|err| panic!("read {}: {err}", file.display()));
+            let contents = std::fs::read_to_string(file).expect("read Rust source for seam lint");
 
             // Track whether the current line is inside a `#[cfg(test)]` module by
             // brace depth: when a `mod ... {` follows a `#[cfg(test)]` attribute,

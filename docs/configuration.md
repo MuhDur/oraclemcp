@@ -286,7 +286,7 @@ never surfaced in `list_profiles` metadata or diagnostics. Supported forms:
 
 The fields `use_iam_token` (bool) and `iam_config_profile` (`Option<String>`)
 under `[profiles.oci]` **parse** through strict config validation, but the pinned
-`oracledb` 0.5.0 thin adapter **fails closed on an IAM-token connect today**:
+`oracledb` 0.5.1 thin adapter **fails closed on an IAM-token connect today**:
 
 - The driver exposes the lower-level primitive
   (`ConnectOptions::with_access_token`, sent as `AUTH_TOKEN`), but `oraclemcp`
