@@ -59,6 +59,7 @@
 
 mod auth_adapter;
 mod awr;
+mod catalog_extract;
 mod connection;
 mod doctor;
 mod drcp;
@@ -81,6 +82,10 @@ pub use auth_adapter::{AuthAdapter, AuthAdapterError};
 pub use awr::{
     DiagnosticsSource, TopSqlMetric, detect_diagnostics_pack, detect_statspack,
     resolve_top_sql_source, select_diagnostics_source, top_sql_query,
+};
+pub use catalog_extract::{
+    CatalogExtractReport, CatalogExtractRequest, CatalogExtractWarning, CatalogRowBatch,
+    CatalogRowSetName, CatalogSchemaFilter, catalog_extract_rowsets, extract_catalog_rowsets,
 };
 pub use connection::{DbmsOutput, OracleConnection, RustOracleConnection};
 pub use doctor::{OracleDriverPosture, detect_oracle_driver, oracle_driver_compiled};

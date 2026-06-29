@@ -27,9 +27,9 @@
 use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
-    AuthAdapter, DbError, DrcpConfig, OracleBind, OracleConnectOptions, OracleConnection,
-    OracleSessionIdentity, QueryCaps, RustOracleConnection, SearchDetailLevel, SessionPurity,
-    search_objects,
+    AuthAdapter, CatalogExtractRequest, CatalogRowSetName, DbError, DrcpConfig, OracleBind,
+    OracleConnectOptions, OracleConnection, OracleSessionIdentity, QueryCaps, RustOracleConnection,
+    SearchDetailLevel, SessionPurity, extract_catalog_rowsets, search_objects,
 };
 use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use serde_json::json;
@@ -553,6 +553,44 @@ fn live_connect_ping_query_bind_describe() {
             .await
             .expect("query after describe");
         assert_eq!(rows[0].text("AFTER_DESCRIBE"), Some("1"));
+    });
+}
+
+#[test]
+fn live_catalog_extract_current_schema_rowsets() {
+    run_with_cx(|cx| async move {
+        let test_name = "live_catalog_extract_current_schema_rowsets";
+        let Some(conn) = connect_or_skip(&cx, test_name, test_opts()).await else {
+            return;
+        };
+
+        let report = extract_catalog_rowsets(
+            &cx,
+            &conn,
+            &CatalogExtractRequest::for_current_schema().with_plscope(true),
+        )
+        .await
+        .expect("live catalog extraction runs against Oracle dictionary views");
+
+        assert!(
+            !report.schema_names.is_empty(),
+            "current schema must resolve"
+        );
+        let rowsets = report
+            .batches
+            .iter()
+            .map(|batch| batch.row_set)
+            .collect::<Vec<_>>();
+        assert!(rowsets.starts_with(CatalogRowSetName::CORE));
+        assert!(rowsets.contains(&CatalogRowSetName::Objects));
+        assert!(rowsets.contains(&CatalogRowSetName::RoutineArguments));
+        assert!(rowsets.contains(&CatalogRowSetName::Dependencies));
+        eprintln!(
+            "[live-xe] catalog extraction schema={:?} batches={} warnings={}",
+            report.schema_names,
+            report.batches.len(),
+            report.warnings.len()
+        );
     });
 }
 
