@@ -15,6 +15,18 @@ path = "src/main.rs"
 
 [features]
 default = []
+# P5.1 offline-pivot bridge: opt in to the sibling PL/SQL intelligence engine
+# crates from plsql-intelligence. P5.3 wires the actual intelligence tools;
+# P5.7 switches these path deps to crates.io 0.7.0 engine deps.
+plsql-intelligence = [
+    "dep:plsql-engine",
+    "dep:plsql-catalog",
+    "dep:plsql-depgraph",
+    "dep:plsql-lineage",
+    "dep:plsql-doc",
+    "dep:plsql-sast",
+    "dep:plsql-output",
+]
 # A7 (oraclemcp-040-epic-wp-a-ia1.7): the consolidated trust/safety suite's
 # LIVE assertions need a reachable Oracle. This forwards to the canonical
 # `oraclemcp-db/live-xe` gate so `cargo test -p oraclemcp --features live-xe`
@@ -39,6 +51,13 @@ serde_json.workspace = true
 getrandom = "0.2"
 tracing.workspace = true
 tracing-subscriber = "0.3"
+plsql-engine = { path = "../../../plsql-intelligence/crates/plsql-engine", version = "0.1.0", optional = true, default-features = false }
+plsql-catalog = { path = "../../../plsql-intelligence/crates/plsql-catalog", version = "0.1.2", optional = true, default-features = false }
+plsql-depgraph = { path = "../../../plsql-intelligence/crates/plsql-depgraph", version = "0.6.0", optional = true, default-features = false }
+plsql-lineage = { path = "../../../plsql-intelligence/crates/plsql-lineage", version = "0.1.0", optional = true, default-features = false }
+plsql-doc = { path = "../../../plsql-intelligence/crates/plsql-doc", version = "0.1.0", optional = true, default-features = false }
+plsql-sast = { path = "../../../plsql-intelligence/crates/plsql-sast", version = "0.1.0", optional = true, default-features = false }
+plsql-output = { path = "../../../plsql-intelligence/crates/plsql-output", version = "0.1.0", optional = true, default-features = false }
 
 [dev-dependencies]
 rcgen = "0.13"

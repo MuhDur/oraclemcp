@@ -1004,7 +1004,7 @@ fn build_server(
         OperatingLevel::ReadOnly,
         FeatureTiers {
             live_db: LIVE_DB,
-            engine: false,
+            engine: cfg!(feature = "plsql-intelligence"),
             http_transport: http,
         },
     );
@@ -1661,7 +1661,7 @@ fn run_info(robot_json: bool) -> ExitCode {
     let info = serde_json::json!({
         "binary": "oraclemcp",
         "version": env!("CARGO_PKG_VERSION"),
-        "engine": false,
+        "engine": cfg!(feature = "plsql-intelligence"),
         "live_db": LIVE_DB,
         "transports": ["stdio", "http"],
         "tools": &registry::TOOL_NAMES[..],

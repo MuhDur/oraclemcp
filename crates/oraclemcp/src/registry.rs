@@ -1245,8 +1245,8 @@ pub fn tool_registry() -> ToolRegistry {
 
 /// Assemble the `oracle_capabilities` report for this build. `live_db` reflects
 /// whether the Oracle driver is compiled in; `http` reflects whether the
-/// Streamable HTTP transport is exposed by `serve`. The
-/// engine tier is always `false` — this is the engine-free server.
+/// Streamable HTTP transport is exposed by `serve`. The engine tier reflects the
+/// optional `plsql-intelligence` feature; default builds stay engine-free.
 pub fn capabilities(version: impl Into<String>, live_db: bool, http: bool) -> CapabilitiesReport {
     let registry = tool_registry();
     CapabilitiesReport::new(
@@ -1255,7 +1255,7 @@ pub fn capabilities(version: impl Into<String>, live_db: bool, http: bool) -> Ca
         OperatingLevel::ReadOnly,
         FeatureTiers {
             live_db,
-            engine: false,
+            engine: cfg!(feature = "plsql-intelligence"),
             http_transport: http,
         },
     )
@@ -1816,7 +1816,7 @@ mod tests {
     fn capabilities_reflects_feature_tiers_and_the_tool_surface() {
         let caps = capabilities("0.1.0", true, false);
         assert!(caps.features.live_db);
-        assert!(!caps.features.engine, "engine-free server");
+        assert_eq!(caps.features.engine, cfg!(feature = "plsql-intelligence"));
         assert!(!caps.features.http_transport);
         assert_eq!(caps.tools.len(), TOOL_NAMES.len());
         // Offline build: live_db false, http true.
