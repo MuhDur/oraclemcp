@@ -13,4 +13,6 @@
 //! integration suite drive the real server surface.
 
 pub mod dispatch;
+#[cfg(feature = "plsql-intelligence")]
+pub mod plsql_tools;
 pub mod registry;

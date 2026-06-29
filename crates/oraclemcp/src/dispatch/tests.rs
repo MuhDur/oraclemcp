@@ -3,7 +3,7 @@
 //! every raw-string fixture byte-identical.
 
 use super::*;
-use crate::registry::TOOL_NAMES;
+use crate::registry::tool_names;
 use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_core::{DispatchContext, ScopeGrant};
@@ -100,14 +100,82 @@ impl OracleConnection for OneRowMock {
     async fn query_rows(
         &self,
         _cx: &Cx,
-        _sql: &str,
+        sql: &str,
         _b: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        let sql_lower = sql.to_ascii_lowercase();
+        if sql_lower.contains("from all_users") {
+            return Ok(vec![OracleRow {
+                columns: vec![(
+                    "USERNAME".to_owned(),
+                    OracleCell::new("VARCHAR2", Some("APP".to_owned())),
+                )],
+            }]);
+        }
+        if catalog_extract_empty_rowset(&sql_lower) {
+            return Ok(Vec::new());
+        }
         Ok(vec![OracleRow {
                 columns: vec![
                     (
+                        "OWNER".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("APP".to_owned())),
+                    ),
+                    (
                         "OBJECT_NAME".to_owned(),
                         OracleCell::new("VARCHAR2", Some("EMPLOYEES".to_owned())),
+                    ),
+                    (
+                        "INDEX_NAME".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("EMP_NAME_IX".to_owned())),
+                    ),
+                    (
+                        "TABLE_OWNER".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("APP".to_owned())),
+                    ),
+                    (
+                        "TABLE_NAME".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("EMPLOYEES".to_owned())),
+                    ),
+                    (
+                        "IS_UNIQUE".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("NO".to_owned())),
+                    ),
+                    (
+                        "INDEX_TYPE".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("NORMAL".to_owned())),
+                    ),
+                    (
+                        "TRIGGER_NAME".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("EMP_BIU".to_owned())),
+                    ),
+                    (
+                        "TRIGGER_TYPE".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("BEFORE EACH ROW".to_owned())),
+                    ),
+                    (
+                        "TRIGGERING_EVENT".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("INSERT OR UPDATE".to_owned())),
+                    ),
+                    (
+                        "VIEW_NAME".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("EMP_V".to_owned())),
+                    ),
+                    (
+                        "TEXT_VC".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("SELECT 1 AS ID FROM dual".to_owned())),
+                    ),
+                    (
+                        "READ_ONLY".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("N".to_owned())),
+                    ),
+                    (
+                        "OBJECT_TYPE".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("TABLE".to_owned())),
+                    ),
+                    (
+                        "STATUS".to_owned(),
+                        OracleCell::new("VARCHAR2", Some("VALID".to_owned())),
                     ),
                     (
                         "SCHEMA_NAME".to_owned(),
@@ -160,6 +228,31 @@ impl OracleConnection for OneRowMock {
     async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
+}
+
+fn catalog_extract_empty_rowset(sql_lower: &str) -> bool {
+    [
+        "from all_tab_cols",
+        "from all_constraints",
+        "from all_synonyms",
+        "from all_procedures",
+        "from all_arguments",
+        "from all_mviews",
+        "from all_sequences",
+        "from all_type_attrs",
+        "from all_tab_privs",
+        "from all_db_links",
+        "from all_tab_comments",
+        "from all_col_comments",
+        "from all_editions",
+        "from all_editioning_views",
+        "from all_policies",
+        "from all_dependencies",
+        "from all_plsql_object_settings",
+        "from all_identifiers",
+    ]
+    .iter()
+    .any(|needle| sql_lower.contains(needle))
 }
 
 struct LabeledMock {
@@ -641,6 +734,24 @@ fn args_for(name: &str) -> Value {
         }
         "oracle_top_queries" => json!({ "metric": "elapsed", "top_n": 5 }),
         "oracle_db_health" => json!({ "health_type": "all" }),
+        "oracle_plsql_parse" => {
+            json!({ "source": "CREATE OR REPLACE PACKAGE p AS PROCEDURE q; END;" })
+        }
+        "oracle_plsql_analyze" => json!({ "project_root": "" }),
+        "oracle_plsql_what_breaks" => {
+            json!({ "changeset": { "objects": [], "unclassified_files": [] } })
+        }
+        "oracle_plsql_lineage" => json!({ "project_root": "", "target": "APP.P" }),
+        "oracle_plsql_sast" => json!({ "project_root": "" }),
+        "oracle_plsql_doc" => {
+            json!({ "source": "/** doc */\nCREATE PROCEDURE p IS BEGIN NULL; END;" })
+        }
+        "oracle_plsql_live_snapshot" => {
+            json!({ "schemas": ["APP"], "include_plscope": false })
+        }
+        "oracle_plsql_blast_radius" => {
+            json!({ "schemas": ["APP"], "include_plscope": false, "changeset": { "objects": [], "unclassified_files": [] } })
+        }
         "oracle_preview_sql" => json!({ "sql": "SELECT 1 FROM dual" }),
         "oracle_execute" => {
             json!({ "sql": "UPDATE employees SET name = name WHERE employee_id = 100" })
@@ -704,7 +815,7 @@ fn args_for(name: &str) -> Value {
 
 #[test]
 fn every_registry_tool_routes_and_deserializes_offline() {
-    for name in TOOL_NAMES {
+    for name in tool_names() {
         let dispatcher = OracleDispatcher::new_switchable(
             Box::new(OneRowMock),
             Some("dev".to_owned()),
@@ -1841,7 +1952,7 @@ fn malformed_args_are_invalid_arguments_not_a_panic() {
 
 #[test]
 fn null_args_behave_like_empty_object_args() {
-    for name in TOOL_NAMES {
+    for name in tool_names() {
         let d_empty = OracleDispatcher::new_switchable(
             Box::new(OneRowMock),
             Some("dev".to_owned()),

@@ -3969,6 +3969,14 @@ impl OracleDispatcher {
             .unwrap_or_else(|| state.conn.as_ref());
 
         let result: Result<Value, ErrorEnvelope> = match tool {
+            #[cfg(feature = "plsql-intelligence")]
+            tool if crate::plsql_tools::is_static_tool(tool) => {
+                crate::plsql_tools::dispatch_static(tool, args)
+            }
+            #[cfg(feature = "plsql-intelligence")]
+            "oracle_plsql_live_snapshot" | "oracle_plsql_blast_radius" => {
+                return crate::plsql_tools::dispatch_live(cx, metadata_conn, tool, args).await;
+            }
             "oracle_execute" => {
                 let a: ExecuteArgs = parse_args(name, args)?;
                 let agent_identity = audit_agent_identity(state.active_profile.as_deref());

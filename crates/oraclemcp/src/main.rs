@@ -1664,7 +1664,7 @@ fn run_info(robot_json: bool) -> ExitCode {
         "engine": cfg!(feature = "plsql-intelligence"),
         "live_db": LIVE_DB,
         "transports": ["stdio", "http"],
-        "tools": &registry::TOOL_NAMES[..],
+        "tools": registry::tool_names(),
         "mcp_protocol_version": oraclemcp_core::PROTOCOL_VERSION,
     });
     let output = if robot_json {
@@ -3137,7 +3137,7 @@ mod tests {
         );
         // The capabilities report carries the registry's tools.
         let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), LIVE_DB, false);
-        assert_eq!(caps.tools.len(), registry::TOOL_NAMES.len());
+        assert_eq!(caps.tools.len(), registry::tool_names().len());
         // Smoke: the server clones (it is Clone) — proves it is fully built.
         let _ = server.clone();
     }

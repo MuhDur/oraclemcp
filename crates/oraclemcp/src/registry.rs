@@ -73,6 +73,20 @@ pub const TOOL_NAMES: [&str; 52] = [
     "get_clob",
 ];
 
+#[must_use]
+pub fn tool_names() -> Vec<&'static str> {
+    #[cfg(feature = "plsql-intelligence")]
+    {
+        let mut names = TOOL_NAMES.to_vec();
+        names.extend_from_slice(&crate::plsql_tools::TOOL_NAMES);
+        names
+    }
+    #[cfg(not(feature = "plsql-intelligence"))]
+    {
+        TOOL_NAMES.to_vec()
+    }
+}
+
 /// A JSON-Schema `object` with the given required string properties (plus any
 /// extra property fragments), `additionalProperties: false`.
 fn object_schema(props: Value, required: &[&str]) -> Value {
@@ -1240,6 +1254,9 @@ pub fn tool_registry() -> ToolRegistry {
         )),
     );
 
+    #[cfg(feature = "plsql-intelligence")]
+    crate::plsql_tools::register_tools(&mut registry);
+
     registry
 }
 
@@ -1268,9 +1285,10 @@ mod tests {
     #[test]
     fn registry_lists_exactly_the_registered_tools() {
         let registry = tool_registry();
-        assert_eq!(registry.len(), TOOL_NAMES.len(), "exact tool surface");
+        let expected = tool_names();
+        assert_eq!(registry.len(), expected.len(), "exact tool surface");
         let names: Vec<&str> = registry.tools.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, TOOL_NAMES.to_vec());
+        assert_eq!(names, expected);
         let destructive: Vec<&str> = registry
             .tools
             .iter()
@@ -1818,7 +1836,7 @@ mod tests {
         assert!(caps.features.live_db);
         assert_eq!(caps.features.engine, cfg!(feature = "plsql-intelligence"));
         assert!(!caps.features.http_transport);
-        assert_eq!(caps.tools.len(), TOOL_NAMES.len());
+        assert_eq!(caps.tools.len(), tool_names().len());
         // Offline build: live_db false, http true.
         let caps = capabilities("0.1.0", false, true);
         assert!(!caps.features.live_db);

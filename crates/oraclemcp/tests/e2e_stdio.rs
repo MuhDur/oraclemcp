@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use asupersync::Cx;
 use oraclemcp::dispatch::OracleDispatcher;
-use oraclemcp::registry::{TOOL_NAMES, capabilities, tool_registry};
+use oraclemcp::registry::{capabilities, tool_names, tool_registry};
 use oraclemcp_core::{CAPABILITIES_TOOL, OracleMcpServer, StdioAuthPolicy};
 use oraclemcp_db::{
     DbError, OracleBackend, OracleBind, OracleCell, OracleConnection, OracleConnectionInfo,
@@ -228,9 +228,10 @@ fn tools_list_advertises_registry_tools_plus_capabilities() {
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
 
-    for name in TOOL_NAMES {
+    let registry_tools = tool_names();
+    for name in &registry_tools {
         assert!(
-            names.contains(&name),
+            names.contains(name),
             "tools/list missing `{name}`: {names:?}"
         );
     }
@@ -240,7 +241,7 @@ fn tools_list_advertises_registry_tools_plus_capabilities() {
     );
     assert_eq!(
         names.len(),
-        TOOL_NAMES.len() + 1,
+        registry_tools.len() + 1,
         "registry tools + oracle_capabilities, got {names:?}"
     );
     // oracle_capabilities appears exactly once (no dup with the registry).
@@ -362,7 +363,7 @@ fn call_oracle_capabilities_returns_the_report() {
     // The advertised tool surface in the report is the registry surface.
     assert_eq!(
         structured["tools"].as_array().map(Vec::len),
-        Some(TOOL_NAMES.len()),
+        Some(tool_names().len()),
         "capability report lists the registry tools"
     );
 }

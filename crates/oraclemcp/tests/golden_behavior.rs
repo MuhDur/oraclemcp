@@ -10,9 +10,11 @@ use std::sync::Arc;
 use asupersync::Cx;
 use oraclemcp::dispatch::OracleDispatcher;
 use oraclemcp::registry::{capabilities, tool_registry};
+#[cfg(not(feature = "plsql-intelligence"))]
+use oraclemcp_core::CAPABILITIES_TOOL;
+use oraclemcp_core::OracleMcpServer;
 use oraclemcp_core::init_token::StdioAuthPolicy;
 use oraclemcp_core::server::INIT_TOKEN_META_KEY;
-use oraclemcp_core::{CAPABILITIES_TOOL, OracleMcpServer};
 use oraclemcp_db::{
     DbError, OracleBackend, OracleBind, OracleCell, OracleConnection, OracleConnectionInfo,
     OracleRow,
@@ -301,6 +303,7 @@ fn golden_stdio_init_token_failures() {
 }
 
 #[test]
+#[cfg(not(feature = "plsql-intelligence"))]
 fn golden_stdio_main_tool_transcript() {
     let transcript = run_stdio_script(
         server_over(Box::new(OneRowMock)),
@@ -536,9 +539,11 @@ impl OracleConnection for ExportMock {
 
 /// A scripted polling source whose fingerprint advances on demand so the E1
 /// golden can model "the watched resource changed".
+#[cfg(not(feature = "plsql-intelligence"))]
 struct GoldenPollingSource {
     fingerprints: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
+#[cfg(not(feature = "plsql-intelligence"))]
 impl oraclemcp_core::subscriptions::PollingSource for GoldenPollingSource {
     fn poll(&self, uri: &str) -> Option<String> {
         self.fingerprints.lock().unwrap().get(uri).cloned()
@@ -546,6 +551,7 @@ impl oraclemcp_core::subscriptions::PollingSource for GoldenPollingSource {
 }
 
 #[test]
+#[cfg(not(feature = "plsql-intelligence"))]
 fn golden_stdio_resource_subscribe_and_updated_notification() {
     use oraclemcp_core::subscriptions::{SubscribeSource, SubscriptionHub};
 

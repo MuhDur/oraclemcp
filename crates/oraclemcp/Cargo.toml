@@ -19,10 +19,15 @@ default = []
 # crates from plsql-intelligence. P5.3 wires the actual intelligence tools;
 # P5.7 switches these path deps to crates.io 0.7.0 engine deps.
 plsql-intelligence = [
+    "dep:chrono",
+    "dep:plsql-core",
     "dep:plsql-engine",
     "dep:plsql-catalog",
     "dep:plsql-depgraph",
     "dep:plsql-lineage",
+    "dep:plsql-ir",
+    "dep:plsql-parser-antlr",
+    "dep:plsql-cicd",
     "dep:plsql-doc",
     "dep:plsql-sast",
     "dep:plsql-output",
@@ -51,10 +56,15 @@ serde_json.workspace = true
 getrandom = "0.2"
 tracing.workspace = true
 tracing-subscriber = "0.3"
+chrono = { version = "0.4.44", features = ["serde"], optional = true }
+plsql-core = { path = "../../../plsql-intelligence/crates/plsql-core", version = "0.1.0", optional = true, default-features = false }
 plsql-engine = { path = "../../../plsql-intelligence/crates/plsql-engine", version = "0.1.0", optional = true, default-features = false }
 plsql-catalog = { path = "../../../plsql-intelligence/crates/plsql-catalog", version = "0.1.2", optional = true, default-features = false }
 plsql-depgraph = { path = "../../../plsql-intelligence/crates/plsql-depgraph", version = "0.6.0", optional = true, default-features = false }
 plsql-lineage = { path = "../../../plsql-intelligence/crates/plsql-lineage", version = "0.1.0", optional = true, default-features = false }
+plsql-ir = { path = "../../../plsql-intelligence/crates/plsql-ir", version = "0.1.0", optional = true, default-features = false }
+plsql-parser-antlr = { path = "../../../plsql-intelligence/crates/plsql-parser-antlr", version = "0.1.0", optional = true, default-features = false }
+plsql-cicd = { path = "../../../plsql-intelligence/crates/plsql-cicd", version = "0.6.2", optional = true, default-features = false }
 plsql-doc = { path = "../../../plsql-intelligence/crates/plsql-doc", version = "0.1.0", optional = true, default-features = false }
 plsql-sast = { path = "../../../plsql-intelligence/crates/plsql-sast", version = "0.1.0", optional = true, default-features = false }
 plsql-output = { path = "../../../plsql-intelligence/crates/plsql-output", version = "0.1.0", optional = true, default-features = false }
