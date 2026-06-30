@@ -85,7 +85,7 @@ field is unset after inheritance.
 | `description` | string | none | no | Friendly description shown in `list_profiles`. |
 | `connect_string` | string | none | **yes** (after inheritance) | Oracle Net connect identifier: EZConnect (`host:port/service`), EZConnect-Plus (`tcps://host:port/service?wallet_location=…`), or a `tnsnames.ora` alias. A profile with no usable `connect_string` is a load error. |
 | `username` | string | none | no | Oracle username. Omit for wallet / OS-auth / OCI-IAM. |
-| `credential_ref` | string | none | no | Reference to the credential in a secrets backend. **Never a literal secret**; never surfaced in `list_profiles` metadata. See [Credentials and secret references](#credentials-and-secret-references). |
+| `credential_ref` | string | none | no | Reference to the credential in a secrets backend. Use `env:`, `file:`, `keyring:`, or future `vault:` for production; `literal:` is dev-only and rejected when `protected = true`. Never surfaced in `list_profiles` metadata. See [Credentials and secret references](#credentials-and-secret-references). |
 
 ### Operating level and protection
 
@@ -125,7 +125,7 @@ field is unset after inheritance.
 | Field | Type | Default | Effect |
 |---|---|---|---|
 | `wallet_location` | path | none | Cloud wallet directory (`cwallet.sso` + `tnsnames.ora`). |
-| `wallet_password_ref` | string | none | Secret reference for an encrypted-wallet password. Never a literal. |
+| `wallet_password_ref` | string | none | Secret reference for an encrypted-wallet password. Use `env:`, `file:`, `keyring:`, or future `vault:` for production; `literal:` is dev-only and rejected when `protected = true`. |
 | `ssl_server_dn_match` | bool | none (driver default) | Override server-certificate DN matching. |
 | `ssl_server_cert_dn` | string | none | Exact expected server-certificate DN. |
 | `use_sni` | bool | none (driver default) | Override TCPS SNI behavior. |

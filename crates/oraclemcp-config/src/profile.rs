@@ -85,7 +85,8 @@ impl PoolConfig {
 pub struct OciConfig {
     /// Cloud wallet directory (`cwallet.sso` + `tnsnames.ora`) passed to the thin driver.
     pub wallet_location: Option<PathBuf>,
-    /// Secret reference for encrypted-wallet passwords; never a literal value.
+    /// Secret reference for encrypted-wallet passwords. `literal:` is dev-only
+    /// and rejected when the profile is protected.
     pub wallet_password_ref: Option<String>,
     /// Override Oracle server-certificate DN matching (`ssl_server_dn_match`).
     pub ssl_server_dn_match: Option<bool>,
@@ -466,8 +467,8 @@ pub struct ConnectionProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     /// Reference to the credential in a secrets backend (e.g.
-    /// `"keyring:prod_ro"`). **Never** a literal secret; never surfaced in
-    /// `list_profiles` metadata.
+    /// `"keyring:prod_ro"`). `literal:` is dev-only and rejected when
+    /// `protected = true`; never surfaced in `list_profiles` metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_ref: Option<String>,
     /// Path to a login script (`ALTER SESSION …`) run on lease acquire (§6.5).
