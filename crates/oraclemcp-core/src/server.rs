@@ -47,12 +47,45 @@ const SERVER_INSTRUCTIONS: &str = "Call oracle_capabilities first to discover to
 /// the real dispatcher is polled on its owning lane thread.
 pub type DispatchFuture<'a> = Pin<Box<dyn Future<Output = Result<Value, ErrorEnvelope>> + 'a>>;
 
+/// Boxed dispatcher lifecycle future. Like [`DispatchFuture`], this is not
+/// `Send` because stateful cleanup must run on the lane/runtime that owns the
+/// Oracle session.
+pub type DispatchCloseFuture<'a> = Pin<Box<dyn Future<Output = Result<(), ErrorEnvelope>> + 'a>>;
+
+/// Why a stateful dispatcher is being closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DispatchCloseReason {
+    /// MCP Streamable HTTP `DELETE` for one `MCP-Session-Id`.
+    SessionDelete,
+    /// Idle/abandoned stateful session timeout.
+    Timeout,
+    /// Listener/process shutdown is draining all stateful sessions.
+    ServerShutdown,
+    /// Last-handle drop without an explicit transport lifecycle call.
+    RuntimeDrop,
+}
+
+impl DispatchCloseReason {
+    /// Stable label for logs/audit metadata.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionDelete => "session_delete",
+            Self::Timeout => "idle_timeout",
+            Self::ServerShutdown => "server_shutdown",
+            Self::RuntimeDrop => "runtime_drop",
+        }
+    }
+}
+
 /// Per-request authorization context supplied by transports.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DispatchContext<'a> {
     scope_grant: Option<&'a crate::http::ScopeGrant>,
     http_session_id: Option<&'a str>,
     principal_key: Option<&'a str>,
+    lane_id: Option<&'a str>,
+    lane_generation: Option<u64>,
 }
 
 impl<'a> DispatchContext<'a> {
@@ -79,6 +112,14 @@ impl<'a> DispatchContext<'a> {
         self
     }
 
+    /// Attach the server-owned dispatch lane identity for this request.
+    #[must_use]
+    pub fn with_lane_identity(mut self, lane_id: &'a str, generation: u64) -> Self {
+        self.lane_id = Some(lane_id);
+        self.lane_generation = Some(generation);
+        self
+    }
+
     /// The validated OAuth scopes for this request, if any.
     #[must_use]
     pub fn scope_grant(self) -> Option<&'a crate::http::ScopeGrant> {
@@ -97,6 +138,18 @@ impl<'a> DispatchContext<'a> {
         self.principal_key
     }
 
+    /// The server-owned dispatch lane id for this request, if it crossed one.
+    #[must_use]
+    pub fn lane_id(self) -> Option<&'a str> {
+        self.lane_id
+    }
+
+    /// The lane generation captured when this request entered the lane.
+    #[must_use]
+    pub fn lane_generation(self) -> Option<u64> {
+        self.lane_generation
+    }
+
     /// Clone request-local borrowed authorization into a mailbox-safe context.
     #[must_use]
     pub fn to_owned_context(self) -> OwnedDispatchContext {
@@ -104,6 +157,8 @@ impl<'a> DispatchContext<'a> {
             scope_grant: self.scope_grant.cloned(),
             http_session_id: self.http_session_id.map(str::to_owned),
             principal_key: self.principal_key.map(str::to_owned),
+            lane_id: self.lane_id.map(str::to_owned),
+            lane_generation: self.lane_generation,
         }
     }
 }
@@ -116,6 +171,8 @@ pub struct OwnedDispatchContext {
     scope_grant: Option<crate::http::ScopeGrant>,
     http_session_id: Option<String>,
     principal_key: Option<String>,
+    lane_id: Option<String>,
+    lane_generation: Option<u64>,
 }
 
 impl OwnedDispatchContext {
@@ -126,6 +183,8 @@ impl OwnedDispatchContext {
             scope_grant: self.scope_grant.as_ref(),
             http_session_id: self.http_session_id.as_deref(),
             principal_key: self.principal_key.as_deref(),
+            lane_id: self.lane_id.as_deref(),
+            lane_generation: self.lane_generation,
         }
     }
 }
@@ -142,6 +201,15 @@ pub trait ToolDispatch: Send + Sync + 'static {
         name: &'a str,
         args: Value,
     ) -> DispatchFuture<'a>;
+
+    /// Lifecycle cleanup before a stateful dispatch lane exits.
+    ///
+    /// Stateless/test dispatchers can keep the default no-op. DB-backed
+    /// dispatchers override this to roll back dirty work, revoke in-memory
+    /// grants, and drop/discard session state on their owning lane runtime.
+    fn close<'a>(&'a self, _cx: &'a Cx, _reason: DispatchCloseReason) -> DispatchCloseFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// The MCP server surface shared by native stdio and HTTP transports.

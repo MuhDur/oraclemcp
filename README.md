@@ -12,7 +12,7 @@
 
 > **Governed, least-privilege Oracle Database access for AI agents — in pure Rust.**
 
-`oraclemcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives an AI agent governed, least-privilege access to an Oracle database: schema introspection, DDL, compile errors, source search, ad-hoc read queries, plan analysis, and an explicit profile-gated execution path for non-read SQL. Every raw statement the agent submits is classified *before* it can reach Oracle. Read tools only admit statements proven read-only; `oracle_execute` only runs statements permitted by the active profile/session level, rolls DML back by default, and requires a preview-derived confirmation token before commit. Session elevation is explicit, temporary, and capped by profile `max_level`. The core is engine-free and `#![forbid(unsafe_code)]`.
+`oraclemcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives an AI agent governed, least-privilege access to an Oracle database: schema introspection, DDL, compile errors, source search, ad-hoc read queries, plan analysis, and an explicit profile-gated execution path for non-read SQL. Every raw statement the agent submits is classified *before* it can reach Oracle. Read tools only admit statements proven read-only; `oracle_execute` only runs statements permitted by the active profile/session level, rolls DML back by default, and requires a preview-derived execution grant before commit. Session elevation is explicit, temporary, and capped by profile `max_level`. The core is engine-free and `#![forbid(unsafe_code)]`.
 
 > _An independent open-source project; not affiliated with Oracle. For Oracle's own MCP servers, see [oracle/mcp](https://github.com/oracle/mcp)._
 
@@ -211,7 +211,8 @@ credential_ref = "env:ORACLE_APP_PASSWORD"
 max_level = "READ_ONLY"
 default_level = "READ_ONLY"
 require_signed_tools = true
-# Optional Oracle per-round-trip timeout. Tool calls can override it with
+# Optional Oracle call timeout and request-budget ceiling. Omit for the 30s
+# default; set 0 only to opt out deliberately. Tool calls can tighten it with
 # timeout_seconds where advertised.
 call_timeout_seconds = 30
 # Optional thin Session Data Unit request. Validated as 512..=65535 bytes.
@@ -276,7 +277,7 @@ value = "req-456"
 
 [profiles.session_identity]
 # Optional: all values are profile-local and are not shown by list_profiles.
-# oracle_connection_info reports the session-visible fields for verification.
+# oracle_connection_info reports these only as redacted field names.
 # Edition selection is applied during thin authentication before user SQL.
 # edition = "ORA$BASE"
 program = "oraclemcp"
@@ -291,26 +292,29 @@ client_info = "local-workstation"
 ```
 
 `max_level` is the profile ceiling; `default_level` is the starting session
-level and must not exceed that ceiling. `call_timeout_seconds` is an optional
-Oracle per-round-trip timeout for the physical connection; read/write/compile
-tools that expose `timeout_seconds` can override it for one call. Both settings
-bound individual Oracle round trips, not the total wall-clock time of a
-multi-round-trip operation. `login_statements` and `login_script` are for
-profile-local session policy only and are restricted to allowlisted `ALTER
-SESSION SET ...` parameters.
+level and must not exceed that ceiling. `call_timeout_seconds` defaults to 30
+seconds when omitted. It sets the Oracle driver call timeout for the physical
+connection and the dispatcher request-budget ceiling for the whole tool call;
+tools that expose `timeout_seconds` can tighten that budget for one call but
+cannot loosen the profile ceiling. Set `call_timeout_seconds = 0` only as an
+explicit opt-out from the driver call timeout; `doctor` warns on that posture.
+`login_statements` and `login_script` are for profile-local session policy only
+and are restricted to allowlisted `ALTER SESSION SET ...` parameters.
 `trusted_session_statements` are an explicit profile-owner escape hatch for
 local session initialization such as `DBMS_APPLICATION_INFO`, application
 contexts, or `DBMS_OUTPUT`; they are never accepted from agent tool calls, and
 they keep environment-specific conventions in private config rather than in the
 open-source core.
-The `oracle_connection_info` tool also reports diagnostic fields such as
-`os_user`, `program`, `machine`, `terminal`, and `client_driver` when the
-database exposes them. The Rust thin backend can set the connect-time client
-identity fields (`program`, `machine`, `os_user`, `terminal`, and
-`driver_name`) from profile config. It also applies `module`, `action`,
-`client_identifier`, and `client_info` after connect through Oracle session
-APIs, so operators can keep driver identity and DBMS session attributes
-separate.
+The `oracle_connection_info` tool reports allow-listed connection posture
+(`backend`, connection strategy, server version, role/open mode, read-only
+status). Session identity and client topology fields such as `os_user`,
+`program`, `machine`, `terminal`, `client_driver`, `module`, `action`,
+`client_identifier`, and `client_info` are redacted by default and appear only
+as names in `redacted_fields` when present. The Rust thin backend can still set
+the connect-time client identity fields (`program`, `machine`, `os_user`,
+`terminal`, and `driver_name`) from profile config, and it applies `module`,
+`action`, `client_identifier`, and `client_info` after connect through Oracle
+session APIs.
 `require_signed_tools = true` requires HMAC signatures for operator-defined
 custom tools on that profile; `protected = true` implies the same policy.
 
@@ -383,9 +387,11 @@ Config discovery order is:
 2. `~/.config/oraclemcp/profiles.toml`
 3. `~/.config/oraclemcp/config.toml`
 
-`credential_ref` and `wallet_password_ref` support `env:VAR` for
-environment-injected credentials and `literal:value` for local development
-only. Literal credentials are rejected when `protected = true`.
+`credential_ref` and `wallet_password_ref` resolve through the same
+SecretResolver seam as audit and HTTP secrets. Supported forms are `env:VAR`,
+`file:/path/to/secret`, `keyring:account` / `keyring:service/account`, and the
+future `vault:path` seam (fail-closed unless wired). `literal:value` is for
+local development only and is rejected when `protected = true`.
 
 The current `oraclemcp` thin adapter fails explicitly for auth/features it
 cannot serve end-to-end safely, such as external wallet auth without
@@ -460,6 +466,10 @@ ORACLEMCP_LIVE_XE=1 \
   ORACLEMCP_TEST_DSN=localhost:1521/FREEPDB1 \
   ORACLEMCP_TEST_USER=... ORACLEMCP_TEST_PASSWORD=... \
   cargo test -p oraclemcp-db --test load_soak -- --ignored --nocapture
+
+# Structured e2e harness and JSON-line logs for acceptance beads.
+bash scripts/e2e/run_all.sh --log --dry-run
+bash scripts/e2e/run_all.sh --log
 ```
 
 Start a throwaway Oracle FREE 23ai database for the live suite with Docker (it
@@ -601,13 +611,13 @@ Connection modes are configured per profile in `profiles.toml`; see
 | Tool | Purpose |
 | --- | --- |
 | `oracle_list_profiles` | List configured connection profiles without exposing connect strings, usernames, or credential references |
-| `oracle_connection_info` | Describe the active profile and connection; if live metadata is unavailable, returns `connected=false` with a structured `connection_error` and `next_actions` |
+| `oracle_connection_info` | Describe the active profile and redacted connection posture; if live metadata is unavailable, returns `connected=false` with a structured `connection_error` and `next_actions` |
 | `oracle_switch_profile` | Reconnect the server to another configured profile |
 | `oracle_set_session_level` | Preview/apply a temporary session operating-level elevation within the profile ceiling, or drop back to `READ_ONLY` |
 | `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |
 | `oracle_preview_sql` | Classify SQL and report whether it is read-only, needs profile-permitted step-up, or exceeds the active profile ceiling, without executing it |
-| `oracle_execute` | Execute one non-read statement through the active profile/session gate; DML rolls back by default, while commits and DDL/Admin require the confirmation token from `oracle_preview_sql`; optionally captures bounded `DBMS_OUTPUT` |
-| `oracle_compile_object` | Preview or compile one PL/SQL/view object through the `DDL` profile gate; execution requires the confirmation token returned by preview |
+| `oracle_execute` | Execute one non-read statement through the active profile/session gate; DML rolls back by default, while commits and DDL/Admin require the execution grant from `oracle_preview_sql`; optionally captures bounded `DBMS_OUTPUT` |
+| `oracle_compile_object` | Preview or compile one PL/SQL/view object through the `DDL` profile gate; execution requires the single-use confirmation grant returned by preview |
 | `oracle_create_or_replace` | Preview or apply one `CREATE OR REPLACE` statement through the classifier and `DDL` profile gate |
 | `oracle_patch_source` | Preview or apply an exact `old_text`→`new_text` patch to one stored PL/SQL source object (package/body/type/view) through the classifier and `DDL` profile gate; TOCTOU-safe, re-fetching the current source and re-confirming at execute time |
 | `oracle_list_schemas` | List schemas that own objects visible to this session |
@@ -665,7 +675,7 @@ compatibility aliases that route to the guarded `oracle_*` tools:
 | `disable_writes` | `oracle_set_session_level` with `action=drop`; immediately returns the session to `READ_ONLY` |
 | `query` | `oracle_query` |
 | `preview_sql` | `oracle_preview_sql` |
-| `execute_approved` | Compatibility wrapper around `oracle_execute`; token-only calls work for five minutes after `preview_sql` in the same server process |
+| `execute_approved` | Compatibility wrapper around `oracle_execute`; token-only calls work for five minutes after `preview_sql`/`oracle_preview_sql` in the same server process |
 | `compile_object` | `oracle_compile_object` |
 | `compile_with_warnings` | `oracle_compile_object` with `warnings=true` |
 | `create_or_replace` | `oracle_create_or_replace` |
@@ -688,15 +698,26 @@ compatibility aliases that route to the guarded `oracle_*` tools:
 Aliases share the same SQL classifier, argument validation, profile handling,
 and operating-level behavior as their `oracle_*` targets.
 
-`oracle_query` and the inner SQL of `oracle_explain_plan` pass through the read-only gate. `oracle_explain_plan` is not a pure read on Oracle primary databases: `EXPLAIN PLAN` writes `PLAN_TABLE`, so the tool refuses by default, refuses on read-only standby, and only runs when the active session is already `READ_WRITE` and the caller passes `allow_plan_table_write=true`. `oracle_preview_sql` runs the classifier without executing the SQL and includes the active profile ceiling so agents can distinguish "allowed on this profile", "requires a higher profile/session level", and "blocked by policy." When a non-read statement is currently executable, `oracle_preview_sql` also returns `execute_confirmation.confirm`; pass that value to `oracle_execute` with `commit=true` only when you intend to commit that exact statement on the active profile. The dictionary tools build their own parameterized SQL and never execute caller-supplied statements.
+`oracle_query` and the inner SQL of `oracle_explain_plan` pass through the read-only gate. `oracle_explain_plan` is not a pure read on Oracle primary databases: `EXPLAIN PLAN` writes `PLAN_TABLE`, so the tool refuses by default, refuses on read-only standby, and only runs when the active session is already `READ_WRITE` and the caller passes `allow_plan_table_write=true`. `oracle_preview_sql` runs the classifier without executing the SQL and includes the active profile ceiling so agents can distinguish "allowed on this profile", "requires a higher profile/session level", and "blocked by policy." When a non-read statement is currently executable, `oracle_preview_sql` also returns `execute_confirmation.confirm`; pass that opaque grant reference to `oracle_execute` with `commit=true` only when you intend to commit that exact statement on the active profile, MCP session, lane, principal, and lane generation. The dictionary tools build their own parameterized SQL and never execute caller-supplied statements.
 
-Confirmation tokens are process-local preview tokens. Regenerate them after
-restarting the server or switching profiles.
+Execution grants are process-local, single-use preview grants. Regenerate them
+after restarting the server, switching profiles, changing session level, or
+changing HTTP session/principal/lane.
+
+For committing tools, the server also writes a durable intent before it touches
+Oracle. The intent log stores only non-secret hashes and routing facts
+(idempotency-key hash, subject, lane, SQL hash, timestamp) under
+`$XDG_STATE_HOME/oraclemcp/write-intents/intents.jsonl`, or
+`$HOME/.local/state/oraclemcp/...` when `XDG_STATE_HOME` is unset. If a writable
+server restarts and recovers an unresolved intent, startup fails closed with
+`ORACLEMCP_WRITE_INTENT_IN_DOUBT`; verify the database outcome before starting a
+writable service again.
 
 When a statement is allowed by the profile ceiling but above the current session
 level, call `oracle_set_session_level` first without `execute=true`. The preview
-returns the target level, TTL, gate decision, and a confirmation token. A second
-call with `execute=true` and that token applies a temporary elevation window.
+returns the target level, TTL, gate decision, and a single-use confirmation
+grant. A second call with `execute=true` and that grant applies a temporary
+elevation window.
 Lowering to a less-capable level is allowed without a token; use
 `oracle_set_session_level` with `action="drop"` (or the `disable_writes` alias)
 to return the session to `READ_ONLY`. Elevation cannot raise `max_level`; if a
@@ -728,20 +749,29 @@ preview. Elevating to `READ_WRITE`, `DDL`, or `ADMIN` requires the preview token
 and creates a bounded window (default 900 seconds, maximum 3600 seconds).
 Lowering to a less-capable level is immediate and does not require a token.
 
-`oracle_execute` is intentionally narrow. It accepts one statement with positional binds, refuses read-only SQL (use `oracle_query`), refuses anything above the active profile/session level, rolls DML back unless `commit=true`, and requires the `oracle_preview_sql` confirmation token before any commit. DDL/Admin statements cannot be rollback-previewed by Oracle, so they require `commit=true` plus confirmation before execution. Set `capture_dbms_output=true` to enable `DBMS_OUTPUT` before the statement and return bounded output after the commit or rollback; `dbms_output_max_lines` and `dbms_output_max_chars` cap the response.
+`oracle_execute` is intentionally narrow. It accepts one statement with positional binds, refuses read-only SQL (use `oracle_query`), refuses anything above the active profile/session level, rolls DML back unless `commit=true`, and requires the single-use `oracle_preview_sql` execution grant before any commit. DDL/Admin statements cannot be rollback-previewed by Oracle, so they require `commit=true` plus confirmation before execution. Set `capture_dbms_output=true` to enable `DBMS_OUTPUT` before the statement and return bounded output after the commit or rollback; `dbms_output_max_lines` and `dbms_output_max_chars` cap the response.
 
-Cancellation and timeouts are fail-closed at the DB boundary. A cancelled or
-failed pooled call is treated as an uncertain Oracle session and is discarded
-instead of returned to idle reuse. Lease-backed preview DML rolls back to its
-savepoint even when cancellation is observed after the DML; if that cleanup
-fails, the lease is force-rolled-back and dropped.
+Cancellation and timeouts are fail-closed at the DB boundary. Profile
+`call_timeout_seconds` defaults to 30 seconds and is met with any per-tool
+`timeout_seconds` override to form one total request budget; the Oracle driver
+call timeout bounds the wire round trip. A cancelled or failed pooled call is
+treated as an uncertain Oracle session and is discarded instead of returned to
+idle reuse. Lease-backed preview DML rolls back to its savepoint even when
+cancellation is observed after the DML; if cleanup certainty is lost, the lease
+is dropped and the structured error/audit outcome is `rolled_back`,
+`commit_in_doubt`, or `unknown_discarded` as appropriate. A failed commit is
+never "fixed" by a follow-up rollback; the dispatcher quarantines that session
+as `commit_in_doubt` and requires the operator to verify the Oracle outcome
+before retrying non-idempotent work. `commit_in_doubt` and unknown outcomes keep
+their durable write intent unresolved, so a restart cannot silently re-execute
+the same non-idempotent work.
 
-`oracle_compile_object` is the structured alternative to handcrafting `ALTER ... COMPILE`. A call without `execute=true` only previews the validated compile statements, required `DDL` level, gate decision, and confirmation token. A second call with `execute=true` and that token runs the compile and returns current `ALL_ERRORS` rows for the object. Set `plscope=true` to enable PL/Scope collection before compiling, or `warnings=true` to enable `PLSQL_WARNINGS='ENABLE:ALL'` before compiling. Both options remain profile-gated at `DDL`; `compile_with_warnings` is a compatibility alias for the warnings path.
+`oracle_compile_object` is the structured alternative to handcrafting `ALTER ... COMPILE`. A call without `execute=true` only previews the validated compile statements, required `DDL` level, gate decision, and single-use confirmation grant. A second call with `execute=true` and that grant runs the compile and returns current `ALL_ERRORS` rows for the object. Set `plscope=true` to enable PL/Scope collection before compiling, or `warnings=true` to enable `PLSQL_WARNINGS='ENABLE:ALL'` before compiling. Both options remain profile-gated at `DDL`; `compile_with_warnings` is a compatibility alias for the warnings path.
 
 `oracle_create_or_replace` is the structured deployment macro for one full
 `CREATE OR REPLACE` statement. It validates that the source has the expected
 shape, classifies it, defaults to preview, and applies only through the same
-confirmation token and `DDL` session/profile gate as `oracle_execute`. When it
+single-use execution-grant and `DDL` session/profile gate as `oracle_execute`. When it
 can infer the target object from a simple package/procedure/function/trigger/
 type/view name, the apply result includes current compile errors for that
 object.
@@ -754,7 +784,7 @@ synchronously in the generic core.
 `old_text` to `new_text` replacements against current stored source. The
 `read_patch_preview` compatibility helper can list or return the last remembered
 in-process patch preview for the active profile, but the applying call must
-still pass the confirmation token from the preview.
+still pass the single-use confirmation grant from the preview.
 
 ### Least-privilege database account
 

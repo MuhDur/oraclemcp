@@ -10,6 +10,9 @@ use sha2::{Digest, Sha256};
 
 use crate::hmac::{ct_eq, hmac_sha256_hex};
 
+/// Current on-disk audit record schema.
+pub const AUDIT_SCHEMA_VERSION: u16 = 2;
+
 /// The guard decision being audited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -36,6 +39,12 @@ pub enum AuditOutcome {
     Failed,
     /// Rolled back (lease expiry / cancel / savepoint preview).
     RolledBack,
+    /// The session was discarded while uncommitted work may have existed.
+    DiscardedUncommitted,
+    /// A commit was sent but the client could not prove whether Oracle accepted it.
+    CommitInDoubt,
+    /// The session state is unknown; it was discarded and must not be reused.
+    UnknownDiscarded,
 }
 
 /// Compute `sha256:<hex>` of bytes.
@@ -50,17 +59,154 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
+fn legacy_schema_version() -> u16 {
+    1
+}
+
+/// Server-derived subject identity for an audited action.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditSubject {
+    /// Subject namespace, e.g. `profile`, `lane`, `oauth`, `system`.
+    pub kind: String,
+    /// Stable, non-secret identifier within `kind`.
+    pub stable_id: String,
+    /// Authentication method that established this subject, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authn_method: Option<String>,
+    /// OAuth/mTLS client id, when known and non-secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// mTLS leaf certificate fingerprint, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbprint: Option<String>,
+}
+
+impl AuditSubject {
+    /// Build a subject from server-derived, non-secret values.
+    #[must_use]
+    pub fn new(kind: impl Into<String>, stable_id: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            stable_id: stable_id.into(),
+            authn_method: None,
+            client_id: None,
+            thumbprint: None,
+        }
+    }
+
+    /// Attach an authentication method.
+    #[must_use]
+    pub fn with_authn_method(mut self, authn_method: impl Into<String>) -> Self {
+        self.authn_method = Some(authn_method.into());
+        self
+    }
+
+    /// Attach a non-secret client id.
+    #[must_use]
+    pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
+        self.client_id = Some(client_id.into());
+        self
+    }
+
+    /// Attach an mTLS leaf certificate fingerprint.
+    #[must_use]
+    pub fn with_thumbprint(mut self, thumbprint: impl Into<String>) -> Self {
+        self.thumbprint = Some(thumbprint.into());
+        self
+    }
+
+    /// Legacy string projection retained for older SIEM fields and v1 readers.
+    #[must_use]
+    pub fn legacy_agent_identity(&self) -> String {
+        if self.kind.is_empty() {
+            self.stable_id.clone()
+        } else {
+            format!("{}:{}", self.kind, self.stable_id)
+        }
+    }
+}
+
+impl Default for AuditSubject {
+    fn default() -> Self {
+        Self::new("unknown", "unknown")
+    }
+}
+
+/// Optional database-observed evidence attached to an audit record.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DbEvidence {
+    /// Oracle session user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_user: Option<String>,
+    /// Oracle current user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_user: Option<String>,
+    /// Oracle current schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_schema: Option<String>,
+    /// Oracle `CLIENT_IDENTIFIER`, if set by the served session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_identifier: Option<String>,
+    /// Oracle module, if set by the served session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+    /// Oracle action, if set by the served session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Database role from `V$DATABASE`, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_role: Option<String>,
+    /// Database open mode from `V$DATABASE`, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_mode: Option<String>,
+}
+
+/// Optional structured cancellation/lifecycle reason attached to an audit
+/// record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditCancel {
+    /// Stable cancellation kind, e.g. `User`, `Timeout`, or `Shutdown`.
+    pub kind: String,
+    /// Stable reason within that kind, e.g. `session_delete`.
+    pub reason: String,
+}
+
+impl AuditCancel {
+    /// Build a structured cancel/lifecycle marker.
+    #[must_use]
+    pub fn new(kind: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            reason: reason.into(),
+        }
+    }
+}
+
 /// One audit entry. `seq` + `prev_hash` + `entry_hash` form the tamper-evident
 /// chain; `entry_hash` covers the seq and all content fields — including the
 /// operator-legible `sql_preview` — so any edit or reorder breaks verification.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditRecord {
+    /// On-disk record schema version. Missing means v1 for pre-FN2 records.
+    #[serde(default = "legacy_schema_version")]
+    pub schema_version: u16,
     /// Monotonic sequence number — the authoritative order key.
     pub seq: u64,
     /// RFC-3339 wall timestamp (display/forensics only; NOT the order key).
     pub timestamp: String,
-    /// The agent / session identity.
+    /// Legacy string projection of the subject, retained for v1 compatibility.
+    #[serde(default)]
     pub agent_identity: String,
+    /// Structured server-derived subject identity.
+    #[serde(default)]
+    pub subject: AuditSubject,
+    /// Optional database-observed evidence for correlating this record with
+    /// Oracle session state. None for legacy/offline records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_evidence: Option<DbEvidence>,
+    /// Optional structured cancellation/lifecycle reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel: Option<AuditCancel>,
     /// The tool invoked.
     pub tool: String,
     /// `sha256:<hex>` of the exact SQL bytes (never the bind values).
@@ -135,8 +281,12 @@ impl std::fmt::Debug for SigningKey {
 /// The fields of an audit entry before the chain hashes are attached.
 #[derive(Clone, Debug)]
 pub struct AuditEntryDraft {
-    /// Agent / session identity.
-    pub agent_identity: String,
+    /// Server-derived subject identity.
+    pub subject: AuditSubject,
+    /// Optional database-observed evidence.
+    pub db_evidence: Option<DbEvidence>,
+    /// Optional structured cancellation/lifecycle reason.
+    pub cancel: Option<AuditCancel>,
     /// Tool name.
     pub tool: String,
     /// The exact SQL (hashed + previewed here; never stored verbatim).
@@ -183,10 +333,14 @@ impl AuditRecord {
     ) -> Self {
         let sql_sha256 = sha256_hex(draft.sql.as_bytes());
         let sql_preview: String = draft.sql.chars().take(PREVIEW_LEN).collect();
-        let entry_hash = compute_entry_hash(
+        let agent_identity = draft.subject.legacy_agent_identity();
+        let entry_hash = compute_entry_hash_v2(
             seq,
             &timestamp,
-            &draft.agent_identity,
+            &agent_identity,
+            &draft.subject,
+            draft.db_evidence.as_ref(),
+            draft.cancel.as_ref(),
             &draft.tool,
             &sql_sha256,
             &sql_preview,
@@ -197,9 +351,13 @@ impl AuditRecord {
             prev_hash,
         );
         AuditRecord {
+            schema_version: AUDIT_SCHEMA_VERSION,
             seq,
             timestamp,
-            agent_identity: draft.agent_identity.clone(),
+            agent_identity,
+            subject: draft.subject.clone(),
+            db_evidence: draft.db_evidence.clone(),
+            cancel: draft.cancel.clone(),
             tool: draft.tool.clone(),
             sql_sha256,
             sql_preview,
@@ -220,19 +378,38 @@ impl AuditRecord {
     /// recompute-from-genesis. Pair it with [`Self::signature_is_valid`].
     #[must_use]
     pub fn hash_is_valid(&self) -> bool {
-        let recomputed = compute_entry_hash(
-            self.seq,
-            &self.timestamp,
-            &self.agent_identity,
-            &self.tool,
-            &self.sql_sha256,
-            &self.sql_preview,
-            &self.danger_level,
-            self.decision,
-            self.rows_affected,
-            self.outcome,
-            &self.prev_hash,
-        );
+        let recomputed = if self.schema_version <= 1 {
+            compute_entry_hash_v1(
+                self.seq,
+                &self.timestamp,
+                &self.agent_identity,
+                &self.tool,
+                &self.sql_sha256,
+                &self.sql_preview,
+                &self.danger_level,
+                self.decision,
+                self.rows_affected,
+                self.outcome,
+                &self.prev_hash,
+            )
+        } else {
+            compute_entry_hash_v2(
+                self.seq,
+                &self.timestamp,
+                &self.agent_identity,
+                &self.subject,
+                self.db_evidence.as_ref(),
+                self.cancel.as_ref(),
+                &self.tool,
+                &self.sql_sha256,
+                &self.sql_preview,
+                &self.danger_level,
+                self.decision,
+                self.rows_affected,
+                self.outcome,
+                &self.prev_hash,
+            )
+        };
         recomputed == self.entry_hash
     }
 
@@ -249,10 +426,10 @@ impl AuditRecord {
     }
 }
 
-/// Deterministically hash an entry's seq + content + prev_hash. The seq leads,
+/// Deterministically hash a v1 entry's seq + content + prev_hash. The seq leads,
 /// so ordering is bound into the hash independently of the wall timestamp.
 #[allow(clippy::too_many_arguments)]
-fn compute_entry_hash(
+pub(crate) fn compute_entry_hash_v1(
     seq: u64,
     timestamp: &str,
     agent_identity: &str,
@@ -291,6 +468,103 @@ fn compute_entry_hash(
     out
 }
 
+fn hash_str(hasher: &mut Sha256, field: &str) {
+    hasher.update((field.len() as u64).to_be_bytes());
+    hasher.update(field.as_bytes());
+}
+
+fn hash_opt_str(hasher: &mut Sha256, field: Option<&str>) {
+    match field {
+        Some(value) => {
+            hasher.update([1]);
+            hash_str(hasher, value);
+        }
+        None => hasher.update([0]),
+    }
+}
+
+fn hash_subject(hasher: &mut Sha256, subject: &AuditSubject) {
+    hash_str(hasher, &subject.kind);
+    hash_str(hasher, &subject.stable_id);
+    hash_opt_str(hasher, subject.authn_method.as_deref());
+    hash_opt_str(hasher, subject.client_id.as_deref());
+    hash_opt_str(hasher, subject.thumbprint.as_deref());
+}
+
+fn hash_db_evidence(hasher: &mut Sha256, evidence: Option<&DbEvidence>) {
+    let Some(evidence) = evidence else {
+        hasher.update([0]);
+        return;
+    };
+    hasher.update([1]);
+    hash_opt_str(hasher, evidence.session_user.as_deref());
+    hash_opt_str(hasher, evidence.current_user.as_deref());
+    hash_opt_str(hasher, evidence.current_schema.as_deref());
+    hash_opt_str(hasher, evidence.client_identifier.as_deref());
+    hash_opt_str(hasher, evidence.module.as_deref());
+    hash_opt_str(hasher, evidence.action.as_deref());
+    hash_opt_str(hasher, evidence.database_role.as_deref());
+    hash_opt_str(hasher, evidence.open_mode.as_deref());
+}
+
+fn hash_cancel(hasher: &mut Sha256, cancel: Option<&AuditCancel>) {
+    let Some(cancel) = cancel else {
+        hasher.update([0]);
+        return;
+    };
+    hasher.update([1]);
+    hash_str(hasher, &cancel.kind);
+    hash_str(hasher, &cancel.reason);
+}
+
+/// Deterministically hash a v2 entry's seq + content + prev_hash, including the
+/// structured subject, database-evidence, and cancellation/lifecycle fields.
+#[allow(clippy::too_many_arguments)]
+fn compute_entry_hash_v2(
+    seq: u64,
+    timestamp: &str,
+    agent_identity: &str,
+    subject: &AuditSubject,
+    db_evidence: Option<&DbEvidence>,
+    cancel: Option<&AuditCancel>,
+    tool: &str,
+    sql_sha256: &str,
+    sql_preview: &str,
+    danger_level: &str,
+    decision: AuditDecision,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+    prev_hash: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(AUDIT_SCHEMA_VERSION.to_be_bytes());
+    hasher.update(seq.to_be_bytes());
+    for field in [
+        timestamp,
+        agent_identity,
+        tool,
+        sql_sha256,
+        sql_preview,
+        danger_level,
+    ] {
+        hash_str(&mut hasher, field);
+    }
+    hash_subject(&mut hasher, subject);
+    hash_db_evidence(&mut hasher, db_evidence);
+    hash_cancel(&mut hasher, cancel);
+    hasher.update(format!("{decision:?}").as_bytes());
+    hasher.update(rows_affected.unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(format!("{outcome:?}").as_bytes());
+    hasher.update(prev_hash.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(7 + digest.len() * 2);
+    out.push_str("sha256:");
+    for b in digest {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
 /// The genesis prev-hash for the first entry.
 pub const GENESIS_HASH: &str = "genesis";
 
@@ -300,7 +574,9 @@ mod tests {
 
     fn draft() -> AuditEntryDraft {
         AuditEntryDraft {
-            agent_identity: "agent-1".to_owned(),
+            subject: AuditSubject::new("agent", "agent-1"),
+            db_evidence: None,
+            cancel: None,
             tool: "oracle_query".to_owned(),
             sql: "DELETE FROM orders WHERE id = 1".to_owned(),
             danger_level: "GUARDED".to_owned(),
@@ -322,10 +598,56 @@ mod tests {
             GENESIS_HASH,
             "2026-06-01T00:00:00Z".to_owned(),
         );
+        assert_eq!(r.schema_version, AUDIT_SCHEMA_VERSION);
+        assert_eq!(r.subject, AuditSubject::new("agent", "agent-1"));
+        assert_eq!(r.agent_identity, "agent:agent-1");
         assert!(r.sql_sha256.starts_with("sha256:"));
         assert_eq!(r.sql_preview, "DELETE FROM orders WHERE id = 1");
         assert!(r.hash_is_valid());
         assert_eq!(r.prev_hash, GENESIS_HASH);
+    }
+
+    #[test]
+    fn db_evidence_is_hash_covered() {
+        let mut d = draft();
+        d.db_evidence = Some(DbEvidence {
+            session_user: Some("APP_USER".to_owned()),
+            current_schema: Some("APP".to_owned()),
+            client_identifier: Some("agent-a".to_owned()),
+            ..DbEvidence::default()
+        });
+        let mut r = AuditRecord::chained_signed(
+            &d,
+            1,
+            GENESIS_HASH,
+            "2026-06-01T00:00:00Z".to_owned(),
+            &key(),
+        );
+        assert!(r.hash_is_valid());
+        r.db_evidence.as_mut().expect("db evidence").current_schema = Some("OTHER".to_owned());
+        assert!(
+            !r.hash_is_valid(),
+            "tampered DB evidence must fail verification"
+        );
+    }
+
+    #[test]
+    fn cancel_reason_is_hash_covered() {
+        let mut d = draft();
+        d.cancel = Some(AuditCancel::new("User", "session_delete"));
+        let mut r = AuditRecord::chained_signed(
+            &d,
+            1,
+            GENESIS_HASH,
+            "2026-06-01T00:00:00Z".to_owned(),
+            &key(),
+        );
+        assert!(r.hash_is_valid());
+        r.cancel.as_mut().expect("cancel").reason = "server_shutdown".to_owned();
+        assert!(
+            !r.hash_is_valid(),
+            "tampered cancel reason must fail verification"
+        );
     }
 
     #[test]
@@ -420,10 +742,13 @@ mod tests {
         // Forge the operator-legible field and recompute the (unkeyed) hash so
         // the bare-hash check would pass — but leave the old MAC in place.
         forged.sql_preview = "SELECT 1".to_owned();
-        forged.entry_hash = compute_entry_hash(
+        forged.entry_hash = compute_entry_hash_v2(
             forged.seq,
             &forged.timestamp,
             &forged.agent_identity,
+            &forged.subject,
+            forged.db_evidence.as_ref(),
+            forged.cancel.as_ref(),
             &forged.tool,
             &forged.sql_sha256,
             &forged.sql_preview,

@@ -32,23 +32,30 @@ use std::sync::Arc;
 
 use asupersync::Cx;
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use oraclemcp::dispatch::{McpExposurePolicy, OracleDispatcher, StatelessReadStrategy};
+use oraclemcp::dispatch::{
+    McpExposurePolicy, OracleDispatcher, ProfileConnector, ProfileStatelessConnector,
+    StatelessReadStrategy,
+};
 use oraclemcp::registry;
 use oraclemcp_audit::{
     AuditSink, Auditor, FileAuditSink, ShippingAuditSink, ShippingForwarder, SigningKey,
     WormFileForwarder,
 };
-use oraclemcp_auth::{Hs256Verifier, ResourceServerConfig, SecretError, resolve_secret};
+use oraclemcp_auth::{
+    Hs256Verifier, ResourceServerConfig, SecretError, SecretResolver, SystemSecretResolver,
+    resolve_secret_with,
+};
 use oraclemcp_config::{AuditConfig, HttpConfig, HttpTlsConfig, OracleMcpConfig};
 use oraclemcp_core::http::SinglePrincipalGuard;
 use oraclemcp_core::{
-    CapabilitiesReport, CustomToolCatalog, CustomToolDef, DoctorContext, ExportRegistry,
-    FeatureTiers, HttpTransportConfig, LaneContext, LaneDispatchFactory, LaneRuntime, MCP_PATH,
-    OAuthEnforcement, ObservabilityState, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH,
-    ShutdownCoordinator, SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy,
-    TlsMaterial, TlsServerConfig, ToolDispatch, build_server_config, load_tools,
-    load_tools_for_profile, parse_tools_file, requires_mtls, run_doctor, serve_http_until,
-    serve_https_until, sign,
+    AdmissionController, CapabilitiesReport, CustomToolCatalog, CustomToolDef, DoctorContext,
+    ExportRegistry, FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext,
+    LaneDispatchFactory, LaneRuntime, MCP_PATH, OAuthEnforcement, ObservabilityState,
+    OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport, ShutdownCoordinator,
+    SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial,
+    TlsServerConfig, ToolDispatch, WriteIntentLog, build_server_config, load_tools,
+    load_tools_for_profile, parse_tools_file, requires_mtls, run_doctor, sign,
+    start_oraclemcp_service_app_with_transport,
 };
 use oraclemcp_db::{
     DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
@@ -339,6 +346,14 @@ struct ResolvedProfile {
 }
 
 fn resolve_profile_options(profile: Option<&str>) -> Result<Option<ResolvedProfile>, DbError> {
+    let resolver = SystemSecretResolver;
+    resolve_profile_options_with(profile, &resolver)
+}
+
+fn resolve_profile_options_with(
+    profile: Option<&str>,
+    secret_resolver: &dyn SecretResolver,
+) -> Result<Option<ResolvedProfile>, DbError> {
     let cfg = OracleMcpConfig::load(None)
         .map_err(|e| DbError::UnsupportedAuth(format!("config load failed: {e}")))?;
 
@@ -365,6 +380,7 @@ fn resolve_profile_options(profile: Option<&str>) -> Result<Option<ResolvedProfi
         &chosen.name,
         chosen.credential_ref.as_deref(),
         chosen.protected(),
+        secret_resolver,
     )?;
     let wallet_password = resolve_profile_secret(
         "wallet_password_ref",
@@ -374,6 +390,7 @@ fn resolve_profile_options(profile: Option<&str>) -> Result<Option<ResolvedProfi
             .as_ref()
             .and_then(|oci| oci.wallet_password_ref.as_deref()),
         chosen.protected(),
+        secret_resolver,
     )?;
 
     let ctx = oraclemcp_core::build_session_context(chosen, password, wallet_password, false)?;
@@ -390,17 +407,17 @@ fn resolve_profile_secret(
     profile_name: &str,
     secret_ref: Option<&str>,
     protected: bool,
+    secret_resolver: &dyn SecretResolver,
 ) -> Result<Option<String>, DbError> {
     let Some(reference) = secret_ref else {
         return Ok(None);
     };
-    let secret =
-        resolve_secret(reference, protected, |name| std::env::var(name).ok()).map_err(|e| {
-            DbError::UnsupportedAuth(format!(
-                "failed to resolve {field} for profile `{profile_name}`: {}",
-                secret_error_summary(&e)
-            ))
-        })?;
+    let secret = resolve_secret_with(reference, protected, secret_resolver).map_err(|e| {
+        DbError::UnsupportedAuth(format!(
+            "failed to resolve {field} for profile `{profile_name}`: {}",
+            secret_error_summary(&e)
+        ))
+    })?;
     Ok(Some(secret.expose().to_owned()))
 }
 
@@ -413,6 +430,12 @@ fn secret_error_summary(error: &SecretError) -> String {
         SecretError::PlaintextForbidden => {
             "plaintext literal credential is forbidden on a protected profile".to_owned()
         }
+        SecretError::InvalidUtf8(scheme) => {
+            format!("secret backend `{scheme}` returned invalid utf-8")
+        }
+        SecretError::BackendFailure(scheme) => {
+            format!("secret backend `{scheme}` failed")
+        }
         SecretError::BackendUnavailable(scheme) => {
             format!("secrets backend not available for scheme `{scheme}` (feature-gated)")
         }
@@ -424,39 +447,41 @@ fn secret_error_summary(error: &SecretError) -> String {
 ///
 /// Matches `oraclemcp::dispatch::ProfileConnector`: opens the session
 /// connection for `profile` as a native-async DB round trip, awaited on the
-/// dispatch runtime that already holds the request `Cx`.
-#[allow(clippy::type_complexity)]
-fn connect_profile<'a>(
-    cx: &'a Cx,
-    profile: &'a str,
-) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<Box<dyn OracleConnection>, DbError>> + 'a>,
-> {
-    Box::pin(async move {
-        let Some(resolved) = resolve_profile_options(Some(profile))? else {
-            return Err(DbError::UnsupportedAuth(format!(
-                "connection profile `{profile}` not found"
-            )));
-        };
-        try_open_connection(cx, resolved.opts).await
+/// dispatch runtime that already holds the request `Cx`. The connector captures
+/// the D18 SecretResolver seam so profile credentials are resolved only at the
+/// connect boundary.
+fn profile_connector(secret_resolver: Arc<dyn SecretResolver>) -> Arc<ProfileConnector> {
+    Arc::new(move |cx: &Cx, profile: &str| {
+        let secret_resolver = Arc::clone(&secret_resolver);
+        Box::pin(async move {
+            let Some(resolved) =
+                resolve_profile_options_with(Some(profile), secret_resolver.as_ref())?
+            else {
+                return Err(DbError::UnsupportedAuth(format!(
+                    "connection profile `{profile}` not found"
+                )));
+            };
+            try_open_connection(cx, resolved.opts).await
+        })
     })
 }
 
 /// The `oracle_switch_profile` stateless-pool connector (B1: async + `Cx`-first).
-#[allow(clippy::type_complexity)]
-fn connect_profile_stateless<'a>(
-    cx: &'a Cx,
-    profile: &'a str,
-) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<Option<Box<dyn OracleConnection>>, DbError>> + 'a>,
-> {
-    Box::pin(async move {
-        let Some(resolved) = resolve_profile_options(Some(profile))? else {
-            return Err(DbError::UnsupportedAuth(format!(
-                "connection profile `{profile}` not found"
-            )));
-        };
-        try_open_stateless_connection(cx, resolved.opts, resolved.pool_settings).await
+fn profile_stateless_connector(
+    secret_resolver: Arc<dyn SecretResolver>,
+) -> Arc<ProfileStatelessConnector> {
+    Arc::new(move |cx: &Cx, profile: &str| {
+        let secret_resolver = Arc::clone(&secret_resolver);
+        Box::pin(async move {
+            let Some(resolved) =
+                resolve_profile_options_with(Some(profile), secret_resolver.as_ref())?
+            else {
+                return Err(DbError::UnsupportedAuth(format!(
+                    "connection profile `{profile}` not found"
+                )));
+            };
+            try_open_stateless_connection(cx, resolved.opts, resolved.pool_settings).await
+        })
     })
 }
 
@@ -714,19 +739,19 @@ fn default_audit_path() -> PathBuf {
 fn resolve_audit_signing_key(
     audit: &AuditConfig,
     protected: bool,
+    secret_resolver: &dyn SecretResolver,
 ) -> Result<Option<SigningKey>, (&'static str, String)> {
     let key_id = audit.key_id_or_default().to_owned();
     if let Some(key_ref) = audit.key_ref.as_deref() {
-        let secret =
-            resolve_secret(key_ref, protected, |name| std::env::var(name).ok()).map_err(|e| {
-                (
-                    "ORACLEMCP_AUDIT_KEY_INVALID",
-                    format!(
-                        "failed to resolve [audit].key_ref: {}",
-                        secret_error_summary(&e)
-                    ),
-                )
-            })?;
+        let secret = resolve_secret_with(key_ref, protected, secret_resolver).map_err(|e| {
+            (
+                "ORACLEMCP_AUDIT_KEY_INVALID",
+                format!(
+                    "failed to resolve [audit].key_ref: {}",
+                    secret_error_summary(&e)
+                ),
+            )
+        })?;
         return Ok(Some(SigningKey::new(
             key_id,
             secret.expose().as_bytes().to_vec(),
@@ -811,9 +836,10 @@ fn build_auditor(
     audit: &AuditConfig,
     level: &SessionLevelState,
     reachable_ceiling: OperatingLevel,
+    secret_resolver: &dyn SecretResolver,
 ) -> Result<Option<Arc<Auditor>>, (&'static str, String)> {
     let write_reachable = reachable_ceiling > OperatingLevel::ReadOnly;
-    let key = resolve_audit_signing_key(audit, level.is_protected())?;
+    let key = resolve_audit_signing_key(audit, level.is_protected(), secret_resolver)?;
 
     let Some(key) = key else {
         if write_reachable {
@@ -860,10 +886,77 @@ fn build_auditor(
     // loses the local record (the decorator logs + counts it).
     let local: Box<dyn AuditSink> = Box::new(sink);
     let local = match audit.shipping.as_ref() {
-        Some(shipping) => build_shipping_sink(local, shipping, level.is_protected())?,
+        Some(shipping) => {
+            build_shipping_sink(local, shipping, level.is_protected(), secret_resolver)?
+        }
         None => local,
     };
     Ok(Some(Arc::new(Auditor::new(local, key))))
+}
+
+fn build_write_intent_log(
+    reachable_ceiling: OperatingLevel,
+) -> Result<Option<Arc<WriteIntentLog>>, (&'static str, String)> {
+    if reachable_ceiling <= OperatingLevel::ReadOnly {
+        return Ok(None);
+    }
+    let log = WriteIntentLog::open_default().map_err(|e| {
+        (
+            "ORACLEMCP_WRITE_INTENT_LOG_INVALID",
+            format!("failed to open durable write-intent log: {e}"),
+        )
+    })?;
+    finish_write_intent_log_build(log)
+}
+
+#[cfg(test)]
+fn build_write_intent_log_at(
+    root: &Path,
+    reachable_ceiling: OperatingLevel,
+) -> Result<Option<Arc<WriteIntentLog>>, (&'static str, String)> {
+    if reachable_ceiling <= OperatingLevel::ReadOnly {
+        return Ok(None);
+    }
+    let log = WriteIntentLog::open(root).map_err(|e| {
+        (
+            "ORACLEMCP_WRITE_INTENT_LOG_INVALID",
+            format!("failed to open durable write-intent log: {e}"),
+        )
+    })?;
+    finish_write_intent_log_build(log)
+}
+
+fn finish_write_intent_log_build(
+    log: WriteIntentLog,
+) -> Result<Option<Arc<WriteIntentLog>>, (&'static str, String)> {
+    let unresolved = log.unresolved().map_err(|e| {
+        (
+            "ORACLEMCP_WRITE_INTENT_LOG_INVALID",
+            format!("failed to recover durable write-intent log: {e}"),
+        )
+    })?;
+    let path = log
+        .path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "<unknown>".to_owned());
+    if let Some(first) = unresolved.first() {
+        return Err((
+            "ORACLEMCP_WRITE_INTENT_IN_DOUBT",
+            format!(
+                "durable write-intent log {} contains {} unresolved intent(s); first intent {} \
+                 subject={} lane={} sql_hash={}. Verify the database outcome before restarting \
+                 a writable server so non-idempotent work is never silently re-executed.",
+                path,
+                unresolved.len(),
+                first.intent_id,
+                first.subject,
+                first.lane,
+                first.sql_sha256
+            ),
+        ));
+    }
+    tracing::info!(path = %path, "durable write-intent log armed");
+    Ok(Some(Arc::new(log)))
 }
 
 /// Wrap the durable local audit sink in the D2 shipping decorator from
@@ -874,6 +967,7 @@ fn build_shipping_sink(
     local: Box<dyn AuditSink>,
     shipping: &oraclemcp_config::AuditShippingConfig,
     protected: bool,
+    secret_resolver: &dyn SecretResolver,
 ) -> Result<Box<dyn AuditSink>, (&'static str, String)> {
     let mut forwarders: Vec<Box<dyn ShippingForwarder>> = Vec::new();
 
@@ -911,8 +1005,8 @@ fn build_shipping_sink(
         ))?;
         let mut forwarder = SiemHttpForwarder::new(endpoint.to_owned(), format);
         if let Some(auth_ref) = shipping.siem_auth_header_ref.as_deref() {
-            let secret = resolve_secret(auth_ref, protected, |name| std::env::var(name).ok())
-                .map_err(|e| {
+            let secret =
+                resolve_secret_with(auth_ref, protected, secret_resolver).map_err(|e| {
                     (
                         "ORACLEMCP_AUDIT_SHIPPING_INVALID",
                         format!(
@@ -991,9 +1085,12 @@ impl ShippingForwarder for TeeForwarder {
 struct DispatcherWiring {
     active_profile: Option<String>,
     level: SessionLevelState,
+    request_timeout: Option<std::time::Duration>,
+    secret_resolver: Arc<dyn SecretResolver>,
     custom_catalog: CustomToolCatalog,
     exposure: McpExposurePolicy,
     auditor: Option<Arc<Auditor>>,
+    write_intents: Option<Arc<WriteIntentLog>>,
     exports: Arc<ExportRegistry>,
     notifications: Arc<oraclemcp_core::NotificationHub>,
 }
@@ -1007,16 +1104,25 @@ fn build_oracle_dispatcher(
         conn,
         wiring.active_profile.clone(),
         wiring.level.clone(),
-        Arc::new(connect_profile),
-        StatelessReadStrategy::new(stateless_conn, Some(Arc::new(connect_profile_stateless))),
+        profile_connector(Arc::clone(&wiring.secret_resolver)),
+        StatelessReadStrategy::new(
+            stateless_conn,
+            Some(profile_stateless_connector(Arc::clone(
+                &wiring.secret_resolver,
+            ))),
+        ),
         wiring.custom_catalog.clone(),
         Some(Arc::new(load_custom_catalog_for_profile)),
     )
+    .with_request_timeout(wiring.request_timeout)
     .with_mcp_exposure(wiring.exposure.clone())
     .with_exports(Arc::clone(&wiring.exports))
     .with_notifications(Arc::clone(&wiring.notifications));
     if let Some(auditor) = &wiring.auditor {
         dispatcher = dispatcher.with_auditor(Arc::clone(auditor));
+    }
+    if let Some(write_intents) = &wiring.write_intents {
+        dispatcher = dispatcher.with_write_intent_log(Arc::clone(write_intents));
     }
     dispatcher
 }
@@ -1024,10 +1130,12 @@ fn build_oracle_dispatcher(
 async fn open_lane_runtime_connections(
     cx: &Cx,
     active_profile: Option<&str>,
+    secret_resolver: &dyn SecretResolver,
 ) -> Result<RuntimeConnections, DbError> {
     match active_profile {
         Some(profile) => {
-            let Some(resolved) = resolve_profile_options(Some(profile))? else {
+            let Some(resolved) = resolve_profile_options_with(Some(profile), secret_resolver)?
+            else {
                 return Err(DbError::UnsupportedAuth(format!(
                     "connection profile `{profile}` not found"
                 )));
@@ -1063,9 +1171,13 @@ fn stateful_lane_factory(wiring: DispatcherWiring) -> Arc<LaneDispatchFactory> {
     Arc::new(move |cx: &Cx, _lane_context: &LaneContext| {
         let wiring = wiring.clone();
         Box::pin(async move {
-            let connections = open_lane_runtime_connections(cx, wiring.active_profile.as_deref())
-                .await
-                .map_err(DbError::into_envelope)?;
+            let connections = open_lane_runtime_connections(
+                cx,
+                wiring.active_profile.as_deref(),
+                wiring.secret_resolver.as_ref(),
+            )
+            .await
+            .map_err(DbError::into_envelope)?;
             let dispatcher =
                 build_oracle_dispatcher(connections.session, connections.stateless, &wiring);
             Ok(Arc::new(dispatcher) as Arc<dyn ToolDispatch>)
@@ -1086,19 +1198,41 @@ impl ServerTransportMode {
     }
 }
 
+struct ServerBuildOptions {
+    transport: ServerTransportMode,
+    custom_catalog: CustomToolCatalog,
+    auditor: Option<Arc<Auditor>>,
+    write_intents: Option<Arc<WriteIntentLog>>,
+    secret_resolver: Arc<dyn SecretResolver>,
+    request_timeout: Option<std::time::Duration>,
+}
+
+struct BuiltServer {
+    server: OracleMcpServer,
+    session_lifecycle: Option<Arc<dyn HttpSessionLifecycle>>,
+}
+
 /// Build the server from the registry + capabilities + dispatcher over `conn`.
 fn build_server(
     conn: Box<dyn OracleConnection>,
     stateless_conn: Option<Box<dyn OracleConnection>>,
     active_profile: Option<String>,
     level: SessionLevelState,
-    transport: ServerTransportMode,
-    custom_catalog: CustomToolCatalog,
-    auditor: Option<Arc<Auditor>>,
+    options: ServerBuildOptions,
 ) -> OracleMcpServer {
+    build_server_with_lifecycle(conn, stateless_conn, active_profile, level, options).server
+}
+
+fn build_server_with_lifecycle(
+    conn: Box<dyn OracleConnection>,
+    stateless_conn: Option<Box<dyn OracleConnection>>,
+    active_profile: Option<String>,
+    level: SessionLevelState,
+    options: ServerBuildOptions,
+) -> BuiltServer {
     let version = env!("CARGO_PKG_VERSION");
     let mut registry = registry::tool_registry();
-    custom_catalog.register_first_class(&mut registry);
+    options.custom_catalog.register_first_class(&mut registry);
     let caps = CapabilitiesReport::new(
         version,
         registry.tools.clone(),
@@ -1106,7 +1240,7 @@ fn build_server(
         FeatureTiers {
             live_db: LIVE_DB,
             engine: cfg!(feature = "plsql-intelligence"),
-            http_transport: transport.is_http(),
+            http_transport: options.transport.is_http(),
         },
     );
     // E5 connection-scope isolation: per-profile opt-out — every profile is
@@ -1132,18 +1266,27 @@ fn build_server(
     let wiring = DispatcherWiring {
         active_profile,
         level,
-        custom_catalog,
+        request_timeout: options.request_timeout,
+        secret_resolver: options.secret_resolver,
+        custom_catalog: options.custom_catalog,
         exposure,
-        auditor,
+        auditor: options.auditor,
+        write_intents: options.write_intents,
         exports: Arc::clone(&exports),
         notifications: Arc::clone(&notifications),
     };
-    let dispatcher: Arc<dyn ToolDispatch> = if transport.is_http() {
-        if matches!(transport, ServerTransportMode::HttpStateful) {
-            Arc::new(StatefulLaneDispatch::with_dispatch_factory(
-                stateful_lane_factory(wiring.clone()),
-                wiring.auditor.clone(),
-            ))
+    let mut session_lifecycle: Option<Arc<dyn HttpSessionLifecycle>> = None;
+    let dispatcher: Arc<dyn ToolDispatch> = if options.transport.is_http() {
+        if matches!(options.transport, ServerTransportMode::HttpStateful) {
+            let stateful = Arc::new(
+                StatefulLaneDispatch::with_dispatch_factory(
+                    stateful_lane_factory(wiring.clone()),
+                    wiring.auditor.clone(),
+                )
+                .with_admission_controller(Arc::new(AdmissionController::n4_stateful_defaults())),
+            );
+            session_lifecycle = Some(stateful.clone());
+            stateful
         } else {
             let dispatcher = build_oracle_dispatcher(conn, stateless_conn, &wiring);
             let lane: Arc<dyn ToolDispatch> =
@@ -1158,8 +1301,12 @@ fn build_server(
         let dispatcher = build_oracle_dispatcher(conn, stateless_conn, &wiring);
         Arc::new(dispatcher)
     };
-    OracleMcpServer::with_exports(version, registry, caps, dispatcher, exports)
-        .with_notifications(notifications)
+    let server = OracleMcpServer::with_exports(version, registry, caps, dispatcher, exports)
+        .with_notifications(notifications);
+    BuiltServer {
+        server,
+        session_lifecycle,
+    }
 }
 
 fn apply_http_cli_overrides(mut config: HttpConfig, cli: &HttpServeArgs) -> HttpConfig {
@@ -1243,6 +1390,7 @@ struct ResolvedHttpTransportConfig {
 fn resolve_http_transport_config(
     cli: &HttpServeArgs,
     level: &SessionLevelState,
+    secret_resolver: &dyn SecretResolver,
 ) -> Result<ResolvedHttpTransportConfig, (&'static str, String)> {
     let cfg = OracleMcpConfig::load(None).map_err(|e| {
         (
@@ -1251,13 +1399,13 @@ fn resolve_http_transport_config(
         )
     })?;
     let http = apply_http_cli_overrides(cfg.http, cli);
-    http_transport_config_from_merged(http, level.is_protected(), |name| std::env::var(name).ok())
+    http_transport_config_from_merged(http, level.is_protected(), secret_resolver)
 }
 
 fn http_transport_config_from_merged(
     http: HttpConfig,
     protected: bool,
-    env_lookup: impl Fn(&str) -> Option<String>,
+    secret_resolver: &dyn SecretResolver,
 ) -> Result<ResolvedHttpTransportConfig, (&'static str, String)> {
     http.validate().map_err(|e| {
         (
@@ -1297,15 +1445,16 @@ fn http_transport_config_from_merged(
                 .hs256_secret_ref
                 .as_deref()
                 .expect("validated oauth secret ref");
-            let secret = resolve_secret(secret_ref, protected, env_lookup).map_err(|e| {
-                (
-                    "ORACLEMCP_HTTP_OAUTH_SECRET_INVALID",
-                    format!(
-                        "failed to resolve http.oauth.hs256_secret_ref: {}",
-                        secret_error_summary(&e)
-                    ),
-                )
-            })?;
+            let secret =
+                resolve_secret_with(secret_ref, protected, secret_resolver).map_err(|e| {
+                    (
+                        "ORACLEMCP_HTTP_OAUTH_SECRET_INVALID",
+                        format!(
+                            "failed to resolve http.oauth.hs256_secret_ref: {}",
+                            secret_error_summary(&e)
+                        ),
+                    )
+                })?;
             let resource_config = ResourceServerConfig {
                 resource,
                 allowed_issuers: oauth_cfg.allowed_issuers,
@@ -1331,9 +1480,12 @@ fn http_transport_config_from_merged(
             allowed_origins: http.allowed_origins,
             json_response: http.json_response,
             stateful: http.stateful,
+            stateful_idle_ttl: std::time::Duration::from_secs(http.stateful_idle_ttl_seconds),
             resource_metadata,
             oauth,
             session_store: None,
+            result_store: None,
+            session_lifecycle: None,
             single_principal_guard: Some(SinglePrincipalGuard::new()),
             // Observability is wired in run_serve (HealthState/Metrics/probe).
             observability: ObservabilityState::default(),
@@ -1384,6 +1536,7 @@ fn run_serve(
     http: HttpServeArgs,
     robot_json: bool,
 ) -> ExitCode {
+    let secret_resolver: Arc<dyn SecretResolver> = Arc::new(SystemSecretResolver);
     // D1 observability: install the JSON stderr logger plus — when an OTLP
     // endpoint is configured via OTEL_EXPORTER_OTLP_* (off by default) — the OTLP
     // logs + traces export layers. The guard owns the background export pump; it
@@ -1397,50 +1550,54 @@ fn run_serve(
     // `probe_opts` carries the resolved connect options so the /readyz pinger can
     // open its own dedicated probe connection (D1-health). `None` means no live
     // DB is configured — the pinger then probes a stub and /readyz reports 503.
-    let (connections, active_profile, level, probe_opts) = match resolve_profile_options(
-        profile.as_deref(),
-    ) {
-        Ok(Some(resolved)) => {
-            let active_profile = Some(resolved.name.clone());
-            let level = resolved.level.clone();
-            let probe_opts = Some(resolved.opts.clone());
-            (
-                open_runtime_connections(resolved),
-                active_profile,
-                level,
-                probe_opts,
-            )
-        }
-        Ok(None) => (
-            RuntimeConnections {
-                session: open_connection(OracleConnectOptions::default()),
-                stateless: None,
-            },
-            None,
-            default_read_only_level(),
-            None,
-        ),
-        Err(e) if profile.is_some() => {
-            emit_status_error(
-                robot_json,
-                "ORACLEMCP_CONFIG_INVALID",
-                &format!("failed to resolve connection profile: {e}"),
-            );
-            return ExitCode::from(2);
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
-            (
+    let (connections, active_profile, level, request_timeout, probe_opts) =
+        match resolve_profile_options_with(profile.as_deref(), secret_resolver.as_ref()) {
+            Ok(Some(resolved)) => {
+                let active_profile = Some(resolved.name.clone());
+                let level = resolved.level.clone();
+                let request_timeout = resolved.opts.call_timeout;
+                let probe_opts = Some(resolved.opts.clone());
+                (
+                    open_runtime_connections(resolved),
+                    active_profile,
+                    level,
+                    request_timeout,
+                    probe_opts,
+                )
+            }
+            Ok(None) => (
                 RuntimeConnections {
-                    session: Box::new(stub::StubConnection::new(e)) as Box<dyn OracleConnection>,
+                    session: open_connection(OracleConnectOptions::default()),
                     stateless: None,
                 },
                 None,
                 default_read_only_level(),
+                OracleConnectOptions::default().call_timeout,
                 None,
-            )
-        }
-    };
+            ),
+            Err(e) if profile.is_some() => {
+                emit_status_error(
+                    robot_json,
+                    "ORACLEMCP_CONFIG_INVALID",
+                    &format!("failed to resolve connection profile: {e}"),
+                );
+                return ExitCode::from(2);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
+                (
+                    RuntimeConnections {
+                        session: Box::new(stub::StubConnection::new(e))
+                            as Box<dyn OracleConnection>,
+                        stateless: None,
+                    },
+                    None,
+                    default_read_only_level(),
+                    OracleConnectOptions::default().call_timeout,
+                    None,
+                )
+            }
+        };
 
     let custom_catalog = match load_custom_catalog_for_profile(active_profile.as_deref(), &level) {
         Ok(catalog) => catalog,
@@ -1477,8 +1634,20 @@ fn run_serve(
         }
     };
     let reachable_ceiling = max_reachable_write_ceiling(&full_config, &level);
-    let auditor = match build_auditor(&full_config.audit, &level, reachable_ceiling) {
+    let auditor = match build_auditor(
+        &full_config.audit,
+        &level,
+        reachable_ceiling,
+        secret_resolver.as_ref(),
+    ) {
         Ok(auditor) => auditor,
+        Err((code, message)) => {
+            emit_status_error(robot_json, code, &message);
+            return ExitCode::from(2);
+        }
+    };
+    let write_intents = match build_write_intent_log(reachable_ceiling) {
+        Ok(write_intents) => write_intents,
         Err((code, message)) => {
             emit_status_error(robot_json, code, &message);
             return ExitCode::from(2);
@@ -1503,9 +1672,14 @@ fn run_serve(
                 connections.stateless,
                 active_profile,
                 level,
-                ServerTransportMode::Stdio,
-                custom_catalog,
-                auditor,
+                ServerBuildOptions {
+                    transport: ServerTransportMode::Stdio,
+                    custom_catalog,
+                    auditor,
+                    write_intents,
+                    secret_resolver: Arc::clone(&secret_resolver),
+                    request_timeout,
+                },
             );
             emit_serve_status(robot_json, "stdio", None, &advertised_tools);
             match server.serve_stdio(&auth) {
@@ -1518,13 +1692,14 @@ fn run_serve(
         }
         // ── Streamable HTTP transport (--listen) ───────────────────────────
         Some(addr) => {
-            let mut resolved_http = match resolve_http_transport_config(&http, &level) {
-                Ok(cfg) => cfg,
-                Err((code, message)) => {
-                    emit_status_error(robot_json, code, &message);
-                    return ExitCode::from(2);
-                }
-            };
+            let mut resolved_http =
+                match resolve_http_transport_config(&http, &level, secret_resolver.as_ref()) {
+                    Ok(cfg) => cfg,
+                    Err((code, message)) => {
+                        emit_status_error(robot_json, code, &message);
+                        return ExitCode::from(2);
+                    }
+                };
             let oauth_enabled = resolved_http.transport.oauth.is_some();
             let tls_enabled = resolved_http.tls.is_some();
             let auth_enabled = oauth_enabled || resolved_http.mtls_required;
@@ -1575,22 +1750,29 @@ fn run_serve(
             if http_stateful {
                 resolved_http.transport.single_principal_guard = None;
             }
-            let server = build_server(
+            let built = build_server_with_lifecycle(
                 connections.session,
                 connections.stateless,
                 active_profile,
                 level,
-                if http_stateful {
-                    ServerTransportMode::HttpStateful
-                } else {
-                    ServerTransportMode::HttpStateless
+                ServerBuildOptions {
+                    transport: if http_stateful {
+                        ServerTransportMode::HttpStateful
+                    } else {
+                        ServerTransportMode::HttpStateless
+                    },
+                    custom_catalog,
+                    auditor,
+                    write_intents,
+                    secret_resolver: Arc::clone(&secret_resolver),
+                    request_timeout,
                 },
-                custom_catalog,
-                auditor,
             );
+            let server = built.server;
             let ResolvedHttpTransportConfig {
                 mut transport, tls, ..
             } = resolved_http;
+            transport.session_lifecycle = built.session_lifecycle;
 
             // ── D1 observability wiring (health + metrics + graceful drain) ──
             let version = env!("CARGO_PKG_VERSION");
@@ -1629,34 +1811,76 @@ fn run_serve(
             let shutdown_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
             install_shutdown_signal_bridge(&shutdown_coordinator, &shutdown_flag);
 
+            let listener = match TcpListener::bind(&addr) {
+                Ok(listener) => listener,
+                Err(e) => {
+                    eprintln!(
+                        "oraclemcp serve: {} bind error on {addr}: {e}",
+                        if tls_enabled { "https" } else { "http" }
+                    );
+                    pinger.shutdown();
+                    drop(telemetry);
+                    return ExitCode::from(1);
+                }
+            };
+            let service_transport = match tls {
+                Some(tls) => ServiceTransport::Https {
+                    listener,
+                    server,
+                    config: transport,
+                    tls,
+                },
+                None => ServiceTransport::Http {
+                    listener,
+                    server,
+                    config: transport,
+                },
+            };
+            let mut service_app = match start_oraclemcp_service_app_with_transport(
+                None,
+                service_transport,
+                Arc::clone(&shutdown_flag),
+            ) {
+                Ok(app) => app,
+                Err(e) => {
+                    eprintln!("oraclemcp serve: service AppSpec failed to start: {e}");
+                    pinger.shutdown();
+                    drop(telemetry);
+                    return ExitCode::from(1);
+                }
+            };
             emit_serve_status(
                 robot_json,
                 if tls_enabled { "https" } else { "http" },
                 Some(&addr),
                 &advertised_tools,
             );
-            let result = TcpListener::bind(&addr).and_then(|listener| match tls {
-                Some(tls) => serve_https_until(
-                    listener,
-                    server,
-                    &transport,
-                    tls,
-                    Arc::clone(&shutdown_flag),
-                ),
-                None => serve_http_until(listener, server, &transport, Arc::clone(&shutdown_flag)),
-            });
+            let result = service_app.wait_for_transport();
+            let app_stop_result = service_app.stop_and_join();
 
             // Drain telemetry + the probe before returning (bounded budgets).
             pinger.shutdown();
             drop(telemetry);
 
-            match result {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
+            match (result, app_stop_result) {
+                (Ok(()), Ok(())) => ExitCode::SUCCESS,
+                (Ok(()), Err(e)) => {
+                    eprintln!(
+                        "oraclemcp serve: service AppSpec shutdown did not resolve cleanly: {e}"
+                    );
+                    ExitCode::from(1)
+                }
+                (Err(e), app_stop_result) => {
                     eprintln!(
                         "oraclemcp serve: {} transport error on {addr}: {e}",
                         if tls_enabled { "https" } else { "http" }
                     );
+                    if let Err(app_err) = app_stop_result {
+                        eprintln!(
+                            "oraclemcp serve: service AppSpec shutdown after transport error \
+                             also failed: {app_err}"
+                        );
+                    }
                     ExitCode::from(1)
                 }
             }
@@ -2000,13 +2224,12 @@ fn audit_verification_keys(key_id_override: Option<&str>) -> Result<Vec<SigningK
     if let Some(key_ref) = audit.key_ref.as_deref() {
         // `protected=false`: verification is an operator action that may run
         // off-box against a copied log, where a dev `literal:` key is legitimate.
-        let secret =
-            resolve_secret(key_ref, false, |name| std::env::var(name).ok()).map_err(|e| {
-                format!(
-                    "failed to resolve [audit].key_ref: {}",
-                    secret_error_summary(&e)
-                )
-            })?;
+        let secret = resolve_secret_with(key_ref, false, &SystemSecretResolver).map_err(|e| {
+            format!(
+                "failed to resolve [audit].key_ref: {}",
+                secret_error_summary(&e)
+            )
+        })?;
         return Ok(vec![SigningKey::new(
             key_id,
             secret.expose().as_bytes().to_vec(),
@@ -2227,6 +2450,8 @@ struct DoctorProfileContext {
     wallet_location: Option<String>,
     protected_profile_writable: bool,
     connection_strategy: Option<String>,
+    call_timeout_resolved: bool,
+    call_timeout: Option<std::time::Duration>,
     proxy_user: bool,
     sensitive_values: Vec<String>,
 }
@@ -2298,6 +2523,8 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
             wallet_location: None,
             protected_profile_writable: false,
             connection_strategy: None,
+            call_timeout_resolved: false,
+            call_timeout: None,
             proxy_user: false,
             sensitive_values: Vec::new(),
         };
@@ -2314,6 +2541,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
                 && resolved.level.max_level() > OperatingLevel::ReadOnly;
             let proxy_user = resolved.opts.auth_adapter.proxy_connect_user().is_some();
             let sensitive_values = doctor_sensitive_values(&resolved.opts);
+            let call_timeout = resolved.opts.call_timeout;
             let connection_strategy = Some(
                 if resolved.pool_settings.is_some() {
                     "hybrid_pool"
@@ -2331,6 +2559,8 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
                     wallet_location,
                     protected_profile_writable,
                     connection_strategy,
+                    call_timeout_resolved: true,
+                    call_timeout,
                     proxy_user,
                     sensitive_values,
                 },
@@ -2340,6 +2570,8 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
                     wallet_location,
                     protected_profile_writable,
                     connection_strategy,
+                    call_timeout_resolved: true,
+                    call_timeout,
                     proxy_user,
                     sensitive_values,
                 },
@@ -2351,6 +2583,8 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
             wallet_location: None,
             protected_profile_writable: false,
             connection_strategy: None,
+            call_timeout_resolved: false,
+            call_timeout: None,
             proxy_user: false,
             sensitive_values: Vec::new(),
         },
@@ -2360,6 +2594,8 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
             wallet_location: None,
             protected_profile_writable: false,
             connection_strategy: None,
+            call_timeout_resolved: false,
+            call_timeout: None,
             proxy_user: false,
             sensitive_values: Vec::new(),
         },
@@ -2378,6 +2614,8 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>) -> ExitCode {
         wallet_location: profile_ctx.wallet_location,
         protected_profile_writable: profile_ctx.protected_profile_writable,
         connection_strategy: profile_ctx.connection_strategy,
+        call_timeout_resolved: profile_ctx.call_timeout_resolved,
+        call_timeout: profile_ctx.call_timeout,
         proxy_user: profile_ctx.proxy_user,
         sensitive_values: profile_ctx.sensitive_values,
     };
@@ -2606,7 +2844,7 @@ mod tests {
         // (no ORACLEMCP_AUDIT_KEY), as the rest of the suite does.
         let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
         let audit = AuditConfig::default(); // no key_ref
-        match build_auditor(&audit, &active, OperatingLevel::Ddl) {
+        match build_auditor(&audit, &active, OperatingLevel::Ddl, &SystemSecretResolver) {
             Err((code, _)) => assert_eq!(code, "ORACLEMCP_AUDIT_KEY_REQUIRED"),
             Ok(_) => panic!("must fail closed: write reachable, no key"),
         }
@@ -2624,7 +2862,7 @@ mod tests {
             ..AuditConfig::default()
         };
         let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
-        match build_auditor(&audit, &active, OperatingLevel::Ddl) {
+        match build_auditor(&audit, &active, OperatingLevel::Ddl, &SystemSecretResolver) {
             Ok(auditor) => assert!(
                 auditor.is_some(),
                 "an auditor must be installed when a write level is reachable"
@@ -2638,9 +2876,43 @@ mod tests {
         // Read-only everywhere reachable + no key: auditor is optional (None).
         let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
         let audit = AuditConfig::default();
-        match build_auditor(&audit, &active, OperatingLevel::ReadOnly) {
+        match build_auditor(
+            &audit,
+            &active,
+            OperatingLevel::ReadOnly,
+            &SystemSecretResolver,
+        ) {
             Ok(auditor) => assert!(auditor.is_none()),
             Err((code, msg)) => panic!("read-only-only needs no key: {code}: {msg}"),
+        }
+    }
+
+    #[test]
+    fn build_write_intent_log_fails_closed_on_unresolved_restart_intent() {
+        let root = target_tmp_file("cx-c1-write-intents");
+        {
+            let log = WriteIntentLog::open(&root).expect("open intent log");
+            let binding =
+                oraclemcp_guard::ExecGrantBinding::new("sess-1", "lane-1", "principal-1", 1);
+            let intent = oraclemcp_core::WriteIntent::new(oraclemcp_core::WriteIntentDetails {
+                idempotency_key_material: "grant-1",
+                subject: "profile:dev",
+                active_profile: Some("dev"),
+                tool: "oracle_execute",
+                sql: "UPDATE employees SET name = name WHERE employee_id = 100",
+                required_level: OperatingLevel::ReadWrite,
+                binding: &binding,
+            });
+            log.append_pending(intent).expect("append pending intent");
+        }
+
+        match build_write_intent_log_at(&root, OperatingLevel::ReadWrite) {
+            Err((code, message)) => {
+                assert_eq!(code, "ORACLEMCP_WRITE_INTENT_IN_DOUBT");
+                assert!(message.contains("unresolved intent"), "{message}");
+                assert!(message.contains("sql_hash=sha256:"), "{message}");
+            }
+            Ok(_) => panic!("writable startup must fail closed with an unresolved intent"),
         }
     }
 
@@ -2691,7 +2963,7 @@ mod tests {
             ..Default::default()
         };
         let http = apply_http_cli_overrides(HttpConfig::default(), &args);
-        let cfg = http_transport_config_from_merged(http, false, |_| None)
+        let cfg = http_transport_config_from_merged(http, false, &SystemSecretResolver)
             .expect("valid OAuth transport config");
 
         assert!(cfg.transport.oauth.is_some());
@@ -2724,7 +2996,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = http_transport_config_from_merged(http, true, |_| None)
+        let err = http_transport_config_from_merged(http, true, &SystemSecretResolver)
             .expect_err("protected profile rejects literal OAuth secret");
         assert_eq!(err.0, "ORACLEMCP_HTTP_OAUTH_SECRET_INVALID");
         assert!(err.1.contains("plaintext literal credential is forbidden"));
@@ -2756,7 +3028,7 @@ mod tests {
             Some(client_ca_path.as_path())
         );
 
-        let cfg = http_transport_config_from_merged(http, false, |_| None)
+        let cfg = http_transport_config_from_merged(http, false, &SystemSecretResolver)
             .expect("native TLS listener config builds");
         assert!(cfg.tls.is_some());
         assert!(cfg.mtls_required);
@@ -2876,15 +3148,25 @@ mod tests {
 
     #[test]
     fn wallet_password_ref_uses_profile_secret_resolution_policy() {
-        let secret =
-            resolve_profile_secret("wallet_password_ref", "dev", Some("literal:wallet"), false)
-                .expect("dev literal")
-                .expect("secret");
+        let secret = resolve_profile_secret(
+            "wallet_password_ref",
+            "dev",
+            Some("literal:wallet"),
+            false,
+            &SystemSecretResolver,
+        )
+        .expect("dev literal")
+        .expect("secret");
         assert_eq!(secret, "wallet");
 
-        let err =
-            resolve_profile_secret("wallet_password_ref", "prod", Some("literal:wallet"), true)
-                .expect_err("protected literal rejected");
+        let err = resolve_profile_secret(
+            "wallet_password_ref",
+            "prod",
+            Some("literal:wallet"),
+            true,
+            &SystemSecretResolver,
+        )
+        .expect_err("protected literal rejected");
         assert!(err.to_string().contains("wallet_password_ref"));
         assert!(
             err.to_string()
@@ -2899,6 +3181,7 @@ mod tests {
             "prod",
             Some("env:PRIVATE_WALLET_PASSWORD_NAME"),
             true,
+            &SystemSecretResolver,
         )
         .expect_err("missing env var");
         let rendered = err.to_string();
@@ -2907,9 +3190,14 @@ mod tests {
         assert!(!rendered.contains("PRIVATE_WALLET_PASSWORD_NAME"));
         assert!(!rendered.contains("env:"));
 
-        let err =
-            resolve_profile_secret("credential_ref", "prod", Some("noscheme-secret-ref"), true)
-                .expect_err("malformed ref");
+        let err = resolve_profile_secret(
+            "credential_ref",
+            "prod",
+            Some("noscheme-secret-ref"),
+            true,
+            &SystemSecretResolver,
+        )
+        .expect_err("malformed ref");
         let rendered = err.to_string();
         assert!(rendered.contains("credential_ref"));
         assert!(rendered.contains("malformed secret reference"));
@@ -2993,6 +3281,92 @@ mod tests {
         assert!(!serialized.contains("app_context"));
         assert!(!serialized.contains("FREEPDB1"));
         assert!(!serialized.contains("connect_string"));
+    }
+
+    #[test]
+    fn resolved_secret_material_is_absent_from_rendered_surfaces() {
+        let resolved_db_secret = "resolved-db-secret-not-in-config";
+        let resolved_wallet_secret = "resolved-wallet-secret-not-in-config";
+        let resolved_audit_secret = "resolved-audit-secret-not-in-config";
+        let credential_ref = "keyring:prod/app";
+        let wallet_ref = "file:/run/secrets/oracle-wallet";
+
+        let cfg = OracleMcpConfig::from_toml_str(&format!(
+            r#"
+            schema_version = 1
+
+            [[profiles]]
+            name = "prod"
+            connect_string = "prod:1521/svc"
+            username = "APP_USER"
+            credential_ref = "{credential_ref}"
+
+            [profiles.oci]
+            wallet_password_ref = "{wallet_ref}"
+            "#
+        ))
+        .expect("valid config");
+        let profile_json = serde_json::to_string(&profiles_json(&cfg)).expect("profile json");
+
+        let opts = OracleConnectOptions {
+            connect_string: "prod:1521/svc".to_owned(),
+            username: Some("APP_USER".to_owned()),
+            password: Some(resolved_db_secret.to_owned()),
+            wallet_password: Some(resolved_wallet_secret.to_owned()),
+            iam_token: Some("resolved-iam-token-not-in-config".to_owned()),
+            ..OracleConnectOptions::default()
+        };
+        let options_debug = format!("{opts:?}");
+
+        let connection_info = oraclemcp_db::OracleConnectionInfo {
+            session_user: Some("APP_USER".to_owned()),
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        };
+        let connection_info_json = serde_json::to_string(&connection_info).expect("conn json");
+
+        let signing_key = SigningKey::new("test-key", resolved_audit_secret.as_bytes().to_vec());
+        let signing_key_debug = format!("{signing_key:?}");
+        let audit_record = oraclemcp_audit::AuditRecord::chained_signed(
+            &oraclemcp_audit::AuditEntryDraft {
+                subject: oraclemcp_audit::AuditSubject::new("subject", "hash"),
+                db_evidence: None,
+                cancel: None,
+                tool: "oracle_query".to_owned(),
+                sql: "select 1 from dual".to_owned(),
+                danger_level: "READ_ONLY".to_owned(),
+                decision: oraclemcp_audit::AuditDecision::Allowed,
+                rows_affected: None,
+                outcome: oraclemcp_audit::AuditOutcome::Succeeded,
+            },
+            1,
+            oraclemcp_audit::GENESIS_HASH,
+            "2026-06-30T00:00:00Z".to_owned(),
+            &signing_key,
+        );
+        let audit_json = serde_json::to_string(&audit_record).expect("audit json");
+
+        for rendered in [
+            profile_json.as_str(),
+            options_debug.as_str(),
+            connection_info_json.as_str(),
+            signing_key_debug.as_str(),
+            audit_json.as_str(),
+        ] {
+            for forbidden in [
+                resolved_db_secret,
+                resolved_wallet_secret,
+                resolved_audit_secret,
+                "resolved-iam-token-not-in-config",
+                credential_ref,
+                wallet_ref,
+            ] {
+                assert!(
+                    !rendered.contains(forbidden),
+                    "rendered surface leaked {forbidden}: {rendered}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3256,9 +3630,14 @@ mod tests {
             None,
             None,
             default_read_only_level(),
-            ServerTransportMode::Stdio,
-            CustomToolCatalog::default(),
-            None,
+            ServerBuildOptions {
+                transport: ServerTransportMode::Stdio,
+                custom_catalog: CustomToolCatalog::default(),
+                auditor: None,
+                write_intents: None,
+                secret_resolver: Arc::new(SystemSecretResolver),
+                request_timeout: OracleConnectOptions::default().call_timeout,
+            },
         );
         // The capabilities report carries the registry's tools.
         let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), LIVE_DB, false);

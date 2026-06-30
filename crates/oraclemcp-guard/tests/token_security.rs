@@ -7,7 +7,9 @@
 
 use std::time::Duration;
 
-use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord, GENESIS_HASH};
+use oraclemcp_audit::{
+    AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord, AuditSubject, GENESIS_HASH,
+};
 use oraclemcp_guard::{
     AllowOnceError, AllowOnceStore, CiToken, OperatingLevel, StepUpOption, StepUpRegistry,
     sql_digest,
@@ -139,7 +141,9 @@ fn approval_token_never_appears_in_the_audit_record() {
     let token = store.issue(sql, Duration::from_secs(60));
 
     let draft = AuditEntryDraft {
-        agent_identity: "agent-1".to_owned(),
+        subject: AuditSubject::new("agent", "agent-1"),
+        db_evidence: None,
+        cancel: None,
         tool: "oracle_query_execute".to_owned(),
         sql: sql.to_owned(),
         danger_level: "GUARDED".to_owned(),

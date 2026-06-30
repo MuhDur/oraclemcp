@@ -1,15 +1,19 @@
 //! The execution grant (plan §5.5, §8.1; bead P1-QE / oracle-qmwz.2.16).
 //!
 //! When `oracle_query` classifies a write statement and the step-up gate
-//! approves an operating level, the server mints an [`ExecGrant`] bound to the
-//! SQL digest, the issuing session, the granted operating level, and a
-//! **monotonic** deadline (P0-CLK). `oracle_query_execute` later consumes it,
-//! validating all four invariants before the statement runs:
+//! approves an operating level, the server mints an execution grant bound to the
+//! SQL digest, the issuing lane/session/subject binding, the lane generation,
+//! the granted operating level, and a **monotonic** deadline (P0-CLK).
+//! `oracle_query_execute` later consumes it, validating those invariants before
+//! the statement runs:
 //!
 //! - **single-use** — a consumed grant cannot be replayed;
 //! - **digest match** — the executed SQL must be byte-for-byte (whitespace-
 //!   normalized) the statement that was approved;
-//! - **session match** — the grant is pinned to the session that requested it;
+//! - **binding match** — the grant is pinned to the lane/session/subject that
+//!   requested it;
+//! - **generation match** — a grant minted before profile/level generation
+//!   changes cannot be replayed after the change;
 //! - **not expired** — the monotonic deadline has not passed;
 //! - **level not exceeded** — the requested level is ≤ the granted level.
 //!
@@ -28,7 +32,7 @@ use crate::clock::MonotonicDeadline;
 use crate::levels::OperatingLevel;
 use crate::token::sql_digest;
 
-/// Why consuming an [`ExecGrant`] failed. Validation failures other than
+/// Why consuming an execution grant failed. Validation failures other than
 /// `Expired` do **not** consume the grant (a correct retry can still succeed);
 /// `Expired` removes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +46,17 @@ pub enum ExecGrantError {
     DigestMismatch,
     /// The presented session id does not match the grant's session.
     SessionMismatch,
+    /// The presented lane id does not match the grant's lane.
+    LaneMismatch,
+    /// The presented subject id does not match the grant's subject.
+    SubjectMismatch,
+    /// The lane/profile generation changed after the grant was minted.
+    GenerationMismatch {
+        /// The generation presented by the caller.
+        presented: u64,
+        /// The generation captured when the grant was minted.
+        granted: u64,
+    },
     /// The requested operating level exceeds the granted level.
     LevelExceedsGrant {
         /// The level the caller asked to run at.
@@ -51,9 +66,40 @@ pub enum ExecGrantError {
     },
 }
 
+/// The non-secret lane binding captured when an execution grant is minted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecGrantBinding {
+    /// MCP Streamable HTTP session id or equivalent server-owned session key.
+    pub session_id: String,
+    /// Server-assigned lane id.
+    pub lane_id: String,
+    /// Verified, server-derived subject/principal id.
+    pub subject_id: String,
+    /// Monotonic lane/profile/level generation.
+    pub generation: u64,
+}
+
+impl ExecGrantBinding {
+    /// Build a binding from already-verified, non-secret lane identity values.
+    #[must_use]
+    pub fn new(
+        session_id: impl Into<String>,
+        lane_id: impl Into<String>,
+        subject_id: impl Into<String>,
+        generation: u64,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            lane_id: lane_id.into(),
+            subject_id: subject_id.into(),
+            generation,
+        }
+    }
+}
+
 struct Entry {
     sql_digest: String,
-    session_id: String,
+    binding: ExecGrantBinding,
     granted_level: OperatingLevel,
     deadline: MonotonicDeadline,
 }
@@ -72,12 +118,12 @@ impl ExecGrantStore {
         Self::default()
     }
 
-    /// Mint a grant binding `sql`, `session_id`, and `granted_level` for `ttl`.
+    /// Mint a grant binding `sql`, `binding`, and `granted_level` for `ttl`.
     /// Returns the opaque token id the agent echoes back to `oracle_query_execute`.
     pub fn issue(
         &self,
         sql: &str,
-        session_id: impl Into<String>,
+        binding: ExecGrantBinding,
         granted_level: OperatingLevel,
         ttl: Duration,
     ) -> String {
@@ -90,7 +136,7 @@ impl ExecGrantStore {
             id.clone(),
             Entry {
                 sql_digest: sql_digest(sql),
-                session_id: session_id.into(),
+                binding,
                 granted_level,
                 deadline: MonotonicDeadline::after(ttl),
             },
@@ -98,14 +144,15 @@ impl ExecGrantStore {
         id
     }
 
-    /// Consume `token` to run `sql` in `session_id` at `requested_level`.
-    /// Validates single-use, expiry, digest, session, and level; on success the
-    /// grant is removed (cannot be replayed) and the **granted** level returned.
+    /// Consume `token` to run `sql` under `binding` at `requested_level`.
+    /// Validates single-use, expiry, digest, lane/session/subject binding,
+    /// generation, and level; on success the grant is removed (cannot be
+    /// replayed) and the **granted** level returned.
     pub fn consume(
         &self,
         token: &str,
         sql: &str,
-        session_id: &str,
+        binding: &ExecGrantBinding,
         requested_level: OperatingLevel,
     ) -> Result<OperatingLevel, ExecGrantError> {
         let mut entries = self.entries.lock().expect("poisoned");
@@ -115,8 +162,20 @@ impl ExecGrantStore {
             return Err(ExecGrantError::Expired);
         }
         // Non-consuming validation failures (a correct retry may still succeed).
-        if entry.session_id != session_id {
+        if entry.binding.session_id != binding.session_id {
             return Err(ExecGrantError::SessionMismatch);
+        }
+        if entry.binding.lane_id != binding.lane_id {
+            return Err(ExecGrantError::LaneMismatch);
+        }
+        if entry.binding.subject_id != binding.subject_id {
+            return Err(ExecGrantError::SubjectMismatch);
+        }
+        if entry.binding.generation != binding.generation {
+            return Err(ExecGrantError::GenerationMismatch {
+                presented: binding.generation,
+                granted: entry.binding.generation,
+            });
         }
         if entry.sql_digest != sql_digest(sql) {
             return Err(ExecGrantError::DigestMismatch);
@@ -139,6 +198,12 @@ impl ExecGrantStore {
         entries.retain(|_, e| !e.deadline.is_expired());
         before - entries.len()
     }
+
+    /// Drop all in-process grants, for example after a lane profile/level
+    /// generation transition. Existing client tokens become unknown.
+    pub fn clear(&self) {
+        self.entries.lock().expect("poisoned").clear();
+    }
 }
 
 #[cfg(test)]
@@ -148,23 +213,28 @@ mod tests {
     const SQL: &str = "UPDATE orders SET status='X' WHERE id=42";
     const TTL: Duration = Duration::from_secs(60);
 
+    fn binding() -> ExecGrantBinding {
+        ExecGrantBinding::new("sess-1", "lane-1", "subject-1", 1)
+    }
+
     #[test]
     fn valid_grant_runs_once_then_replay_is_rejected() {
         let store = ExecGrantStore::new();
-        let tok = store.issue(SQL, "sess-1", OperatingLevel::ReadWrite, TTL);
+        let binding = binding();
+        let tok = store.issue(SQL, binding.clone(), OperatingLevel::ReadWrite, TTL);
         // Whitespace-insensitive digest match, same session, level <= grant.
         assert_eq!(
             store.consume(
                 &tok,
                 "UPDATE   orders SET status='X' WHERE id=42",
-                "sess-1",
+                &binding,
                 OperatingLevel::ReadWrite
             ),
             Ok(OperatingLevel::ReadWrite)
         );
         // Replay -> unknown (single-use).
         assert_eq!(
-            store.consume(&tok, SQL, "sess-1", OperatingLevel::ReadWrite),
+            store.consume(&tok, SQL, &binding, OperatingLevel::ReadWrite),
             Err(ExecGrantError::Unknown)
         );
     }
@@ -172,19 +242,20 @@ mod tests {
     #[test]
     fn digest_mismatch_does_not_consume() {
         let store = ExecGrantStore::new();
-        let tok = store.issue(SQL, "sess-1", OperatingLevel::ReadWrite, TTL);
+        let binding = binding();
+        let tok = store.issue(SQL, binding.clone(), OperatingLevel::ReadWrite, TTL);
         assert_eq!(
             store.consume(
                 &tok,
                 "DROP TABLE orders",
-                "sess-1",
+                &binding,
                 OperatingLevel::ReadWrite
             ),
             Err(ExecGrantError::DigestMismatch)
         );
         // Not consumed: the correct SQL still works.
         assert_eq!(
-            store.consume(&tok, SQL, "sess-1", OperatingLevel::ReadWrite),
+            store.consume(&tok, SQL, &binding, OperatingLevel::ReadWrite),
             Ok(OperatingLevel::ReadWrite)
         );
     }
@@ -192,13 +263,62 @@ mod tests {
     #[test]
     fn session_mismatch_is_rejected_without_consuming() {
         let store = ExecGrantStore::new();
-        let tok = store.issue(SQL, "sess-1", OperatingLevel::ReadWrite, TTL);
+        let binding = binding();
+        let tok = store.issue(SQL, binding.clone(), OperatingLevel::ReadWrite, TTL);
+        let other_session = ExecGrantBinding::new("other-session", "lane-1", "subject-1", 1);
         assert_eq!(
-            store.consume(&tok, SQL, "other-session", OperatingLevel::ReadWrite),
+            store.consume(&tok, SQL, &other_session, OperatingLevel::ReadWrite),
             Err(ExecGrantError::SessionMismatch)
         );
         assert_eq!(
-            store.consume(&tok, SQL, "sess-1", OperatingLevel::ReadWrite),
+            store.consume(&tok, SQL, &binding, OperatingLevel::ReadWrite),
+            Ok(OperatingLevel::ReadWrite)
+        );
+    }
+
+    #[test]
+    fn lane_subject_and_generation_mismatch_do_not_consume() {
+        let store = ExecGrantStore::new();
+        let binding = binding();
+
+        let lane_tok = store.issue(SQL, binding.clone(), OperatingLevel::ReadWrite, TTL);
+        let other_lane = ExecGrantBinding::new("sess-1", "lane-2", "subject-1", 1);
+        assert_eq!(
+            store.consume(&lane_tok, SQL, &other_lane, OperatingLevel::ReadWrite),
+            Err(ExecGrantError::LaneMismatch)
+        );
+        assert_eq!(
+            store.consume(&lane_tok, SQL, &binding, OperatingLevel::ReadWrite),
+            Ok(OperatingLevel::ReadWrite)
+        );
+
+        let subject_tok = store.issue(SQL, binding.clone(), OperatingLevel::ReadWrite, TTL);
+        let other_subject = ExecGrantBinding::new("sess-1", "lane-1", "subject-2", 1);
+        assert_eq!(
+            store.consume(&subject_tok, SQL, &other_subject, OperatingLevel::ReadWrite),
+            Err(ExecGrantError::SubjectMismatch)
+        );
+        assert_eq!(
+            store.consume(&subject_tok, SQL, &binding, OperatingLevel::ReadWrite),
+            Ok(OperatingLevel::ReadWrite)
+        );
+
+        let generation_tok = store.issue(SQL, binding.clone(), OperatingLevel::ReadWrite, TTL);
+        let stale_generation = ExecGrantBinding::new("sess-1", "lane-1", "subject-1", 2);
+        assert_eq!(
+            store.consume(
+                &generation_tok,
+                SQL,
+                &stale_generation,
+                OperatingLevel::ReadWrite
+            ),
+            Err(ExecGrantError::GenerationMismatch {
+                presented: 2,
+                granted: 1,
+            })
+        );
+        assert_eq!(
+            store.consume(&generation_tok, SQL, &binding, OperatingLevel::ReadWrite),
             Ok(OperatingLevel::ReadWrite)
         );
     }
@@ -206,9 +326,15 @@ mod tests {
     #[test]
     fn requesting_above_the_granted_level_is_rejected() {
         let store = ExecGrantStore::new();
-        let tok = store.issue("DROP TABLE t", "s", OperatingLevel::ReadWrite, TTL);
+        let binding = ExecGrantBinding::new("s", "lane", "subject", 1);
+        let tok = store.issue(
+            "DROP TABLE t",
+            binding.clone(),
+            OperatingLevel::ReadWrite,
+            TTL,
+        );
         assert_eq!(
-            store.consume(&tok, "DROP TABLE t", "s", OperatingLevel::Ddl),
+            store.consume(&tok, "DROP TABLE t", &binding, OperatingLevel::Ddl),
             Err(ExecGrantError::LevelExceedsGrant {
                 requested: OperatingLevel::Ddl,
                 granted: OperatingLevel::ReadWrite,
@@ -216,7 +342,7 @@ mod tests {
         );
         // A request AT the granted level is fine, and consumes the grant.
         assert_eq!(
-            store.consume(&tok, "DROP TABLE t", "s", OperatingLevel::ReadWrite),
+            store.consume(&tok, "DROP TABLE t", &binding, OperatingLevel::ReadWrite),
             Ok(OperatingLevel::ReadWrite)
         );
     }
@@ -224,13 +350,19 @@ mod tests {
     #[test]
     fn expired_grant_is_rejected_and_purged() {
         let store = ExecGrantStore::new();
-        let tok = store.issue(SQL, "s", OperatingLevel::ReadWrite, Duration::from_secs(0));
+        let binding = ExecGrantBinding::new("s", "lane", "subject", 1);
+        let tok = store.issue(
+            SQL,
+            binding.clone(),
+            OperatingLevel::ReadWrite,
+            Duration::from_secs(0),
+        );
         assert_eq!(
-            store.consume(&tok, SQL, "s", OperatingLevel::ReadWrite),
+            store.consume(&tok, SQL, &binding, OperatingLevel::ReadWrite),
             Err(ExecGrantError::Expired)
         );
         assert_eq!(
-            store.consume(&tok, SQL, "s", OperatingLevel::ReadWrite),
+            store.consume(&tok, SQL, &binding, OperatingLevel::ReadWrite),
             Err(ExecGrantError::Unknown)
         );
     }
@@ -238,10 +370,16 @@ mod tests {
     #[test]
     fn purge_drops_only_expired() {
         let store = ExecGrantStore::new();
-        store.issue("a", "s", OperatingLevel::ReadWrite, Duration::from_secs(0));
+        let binding = ExecGrantBinding::new("s", "lane", "subject", 1);
+        store.issue(
+            "a",
+            binding.clone(),
+            OperatingLevel::ReadWrite,
+            Duration::from_secs(0),
+        );
         store.issue(
             "b",
-            "s",
+            binding,
             OperatingLevel::ReadWrite,
             Duration::from_secs(3600),
         );

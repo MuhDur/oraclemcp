@@ -41,6 +41,20 @@ GENERIC_PATTERNS=(
   '-----BEGIN [A-Z ]*PRIVATE KEY-----[A-Za-z0-9+/=[:space:]]{40,}'  # real PEM private-key block
 )
 
+RENDERED_SURFACE_PATTERNS=(
+  'resolved-db-secret-not-in-config'
+  'resolved-wallet-secret-not-in-config'
+  'resolved-audit-secret-not-in-config'
+  'resolved-iam-token-not-in-config'
+  'keyring:prod/app'
+  'file:/run/secrets/oracle-wallet'
+  'n-s6-bind-secret-not-in-rendered-surfaces'
+  'N_S6_CURRENT_SCHEMA_SECRET'
+  'N_S6_SESSION_USER_SECRET'
+  'N_S6_CLIENT_IDENTIFIER_SECRET'
+  'N_S6_CLIENT_DRIVER_SECRET'
+)
+
 hits=0
 report() { echo "SENSITIVE-DATA LEAK SUSPECTED ($1):" >&2; echo "  $2" >&2; hits=$((hits + 1)); }
 
@@ -56,6 +70,37 @@ for pat in "${GENERIC_PATTERNS[@]}"; do
   while IFS= read -r line; do
     [ -n "$line" ] && report "generic" "$line"
   done < <(scan_pattern "$pat")
+done
+
+rendered_surface_file() {
+  case "$1" in
+    *.json|*.jsonl|*.log|*.out|*.stdout|*.stderr|*.snap|*.snapshot|*.golden|*.txt)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+mapfile -t RENDERED_FILES < <(
+  for f in "${FILES[@]}"; do
+    rendered_surface_file "$f" && printf '%s\n' "$f"
+  done
+)
+
+scan_rendered_pattern() {
+  local pat="$1"
+  [ "${#RENDERED_FILES[@]}" -gt 0 ] || return 0
+  grep -InE "$pat" "${RENDERED_FILES[@]}" 2>/dev/null | grep -v 'sensitive-lint:allow' | while IFS= read -r line; do
+    printf '%s\n' "$line"
+  done
+}
+
+for pat in "${RENDERED_SURFACE_PATTERNS[@]}"; do
+  while IFS= read -r line; do
+    [ -n "$line" ] && report "rendered-surface" "$line"
+  done < <(scan_rendered_pattern "$pat")
 done
 
 DENYLIST="${ORACLEMCP_SENSITIVE_DENYLIST_FILE:-}"

@@ -191,11 +191,15 @@ impl ShippingForwarder for SiemHttpForwarder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, GENESIS_HASH, SigningKey};
+    use oraclemcp_audit::{
+        AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, GENESIS_HASH, SigningKey,
+    };
 
     fn rec() -> AuditRecord {
         let draft = AuditEntryDraft {
-            agent_identity: "agent-1".to_owned(),
+            subject: AuditSubject::new("agent", "agent-1"),
+            db_evidence: None,
+            cancel: None,
             tool: "oracle_execute".to_owned(),
             sql: "DELETE FROM orders WHERE id = 1".to_owned(),
             danger_level: "DESTRUCTIVE".to_owned(),

@@ -29,6 +29,7 @@ permissions:
 
 env:
   RUST_TOOLCHAIN: nightly-2026-05-11
+  NODE_VERSION: 22.17.0
 
 jobs:
   docker:
@@ -42,6 +43,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
 
       - name: Resolve version and variant
         id: ver
@@ -88,6 +94,12 @@ jobs:
             printf '%s\n' "$tags"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Build dashboard bundle
+        run: |
+          npm ci
+          npm run check
+        working-directory: web
 
       - name: Validate release metadata
         env:

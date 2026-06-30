@@ -59,6 +59,8 @@ pub enum ErrorClass {
     OperatingLevelTooLow,
     /// Admission control rejected the call before it touched the pool (§5.6).
     Busy,
+    /// Capacity admission refused a new lane/connection before touching Oracle.
+    AtCapacity,
     /// The request arguments were malformed or failed validation.
     InvalidArguments,
     /// A configured per-schema / `protected`-profile policy denied the call
@@ -96,7 +98,7 @@ impl ErrorClass {
     pub fn is_retryable(self) -> bool {
         matches!(
             self,
-            ErrorClass::Busy | ErrorClass::Transient | ErrorClass::Timeout
+            ErrorClass::Busy | ErrorClass::AtCapacity | ErrorClass::Transient | ErrorClass::Timeout
         )
     }
 }
@@ -446,6 +448,7 @@ mod tests {
     #[test]
     fn retryability_matches_class() {
         assert!(ErrorClass::Busy.is_retryable());
+        assert!(ErrorClass::AtCapacity.is_retryable());
         assert!(ErrorClass::Transient.is_retryable());
         assert!(!ErrorClass::ObjectNotFound.is_retryable());
         assert!(!ErrorClass::ForbiddenStatement.is_retryable());

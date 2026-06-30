@@ -395,11 +395,15 @@ pub oraclemcp_db::DbError::Internal(alloc::string::String)
 pub oraclemcp_db::DbError::LeaseNotFound(alloc::string::String)
 pub oraclemcp_db::DbError::LeaseRequired(alloc::string::String)
 pub oraclemcp_db::DbError::Pool(alloc::string::String)
+pub oraclemcp_db::DbError::Quarantined
+pub oraclemcp_db::DbError::Quarantined::message: alloc::string::String
+pub oraclemcp_db::DbError::Quarantined::outcome: oraclemcp_db::QuarantineOutcome
 pub oraclemcp_db::DbError::Query(alloc::string::String)
 pub oraclemcp_db::DbError::UnsupportedAuth(alloc::string::String)
 pub oraclemcp_db::DbError::UnsupportedFeature(alloc::string::String)
 impl oraclemcp_db::DbError
 pub fn oraclemcp_db::DbError::into_envelope(self) -> oraclemcp_error::ErrorEnvelope
+pub fn oraclemcp_db::DbError::is_uncertain_session_state(&self) -> bool
 impl core::clone::Clone for oraclemcp_db::DbError
 pub fn oraclemcp_db::DbError::clone(&self) -> oraclemcp_db::DbError
 impl core::error::Error for oraclemcp_db::DbError
@@ -832,6 +836,9 @@ pub oraclemcp_db::OracleBind::F64(f64)
 pub oraclemcp_db::OracleBind::I64(i64)
 pub oraclemcp_db::OracleBind::Null
 pub oraclemcp_db::OracleBind::String(alloc::string::String)
+impl oraclemcp_db::OracleBind
+pub const fn oraclemcp_db::OracleBind::kind(&self) -> &'static str
+pub const fn oraclemcp_db::OracleBind::redacted(&self) -> oraclemcp_db::RedactedOracleBind<'_>
 impl core::clone::Clone for oraclemcp_db::OracleBind
 pub fn oraclemcp_db::OracleBind::clone(&self) -> oraclemcp_db::OracleBind
 impl core::cmp::PartialEq for oraclemcp_db::OracleBind
@@ -906,6 +913,83 @@ pub type oraclemcp_db::OracleBind::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleBind where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleBind where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::OracleBind::vzip(self) -> V
+#[non_exhaustive] pub enum oraclemcp_db::QuarantineOutcome
+pub oraclemcp_db::QuarantineOutcome::CommitInDoubt
+pub oraclemcp_db::QuarantineOutcome::DiscardedUncommitted
+pub oraclemcp_db::QuarantineOutcome::RolledBack
+pub oraclemcp_db::QuarantineOutcome::UnknownDiscarded
+impl oraclemcp_db::QuarantineOutcome
+pub const fn oraclemcp_db::QuarantineOutcome::as_str(self) -> &'static str
+impl core::clone::Clone for oraclemcp_db::QuarantineOutcome
+pub fn oraclemcp_db::QuarantineOutcome::clone(&self) -> oraclemcp_db::QuarantineOutcome
+impl core::cmp::Eq for oraclemcp_db::QuarantineOutcome
+impl core::cmp::PartialEq for oraclemcp_db::QuarantineOutcome
+pub fn oraclemcp_db::QuarantineOutcome::eq(&self, &oraclemcp_db::QuarantineOutcome) -> bool
+impl core::fmt::Debug for oraclemcp_db::QuarantineOutcome
+pub fn oraclemcp_db::QuarantineOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_db::QuarantineOutcome
+pub fn oraclemcp_db::QuarantineOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::QuarantineOutcome
+impl core::marker::StructuralPartialEq for oraclemcp_db::QuarantineOutcome
+impl serde_core::ser::Serialize for oraclemcp_db::QuarantineOutcome
+pub fn oraclemcp_db::QuarantineOutcome::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::QuarantineOutcome
+pub fn oraclemcp_db::QuarantineOutcome::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::QuarantineOutcome
+impl core::marker::Send for oraclemcp_db::QuarantineOutcome
+impl core::marker::Sync for oraclemcp_db::QuarantineOutcome
+impl core::marker::Unpin for oraclemcp_db::QuarantineOutcome
+impl core::marker::UnsafeUnpin for oraclemcp_db::QuarantineOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::QuarantineOutcome
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::QuarantineOutcome
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::QuarantineOutcome where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::QuarantineOutcome where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::QuarantineOutcome where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::QuarantineOutcome::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::QuarantineOutcome where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::QuarantineOutcome where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::QuarantineOutcome where U: core::convert::From<T>
+pub fn oraclemcp_db::QuarantineOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::QuarantineOutcome where U: core::convert::Into<T>
+pub type oraclemcp_db::QuarantineOutcome::Error = core::convert::Infallible
+pub fn oraclemcp_db::QuarantineOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::QuarantineOutcome where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::QuarantineOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::QuarantineOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::QuarantineOutcome where T: core::clone::Clone
+pub type oraclemcp_db::QuarantineOutcome::Owned = T
+pub fn oraclemcp_db::QuarantineOutcome::clone_into(&self, &mut T)
+pub fn oraclemcp_db::QuarantineOutcome::to_owned(&self) -> T
+impl<T> alloc::string::ToString for oraclemcp_db::QuarantineOutcome where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_db::QuarantineOutcome::to_string(&self) -> alloc::string::String
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::QuarantineOutcome
+impl<T> core::any::Any for oraclemcp_db::QuarantineOutcome where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::QuarantineOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::QuarantineOutcome where T: ?core::marker::Sized
+pub fn oraclemcp_db::QuarantineOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::QuarantineOutcome where T: ?core::marker::Sized
+pub fn oraclemcp_db::QuarantineOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::QuarantineOutcome where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::QuarantineOutcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::QuarantineOutcome
+pub fn oraclemcp_db::QuarantineOutcome::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::QuarantineOutcome
+pub type oraclemcp_db::QuarantineOutcome::Init = T
+pub const oraclemcp_db::QuarantineOutcome::ALIGN: usize
+pub unsafe fn oraclemcp_db::QuarantineOutcome::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::QuarantineOutcome::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::QuarantineOutcome::drop(usize)
+pub unsafe fn oraclemcp_db::QuarantineOutcome::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::QuarantineOutcome
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::QuarantineOutcome
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::QuarantineOutcome where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::QuarantineOutcome
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::QuarantineOutcome
+impl<T> typenum::type_operators::Same for oraclemcp_db::QuarantineOutcome
+pub type oraclemcp_db::QuarantineOutcome::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::QuarantineOutcome where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::QuarantineOutcome where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::QuarantineOutcome::vzip(self) -> V
 pub enum oraclemcp_db::SearchDetailLevel
 pub oraclemcp_db::SearchDetailLevel::Full
 pub oraclemcp_db::SearchDetailLevel::Names
@@ -2245,6 +2329,7 @@ pub fn oraclemcp_db::LeaseId::vzip(self) -> V
 pub struct oraclemcp_db::LeaseInfo
 pub oraclemcp_db::LeaseInfo::agent_identity: alloc::string::String
 pub oraclemcp_db::LeaseInfo::expires_in_ms: u128
+pub oraclemcp_db::LeaseInfo::generation: u64
 pub oraclemcp_db::LeaseInfo::in_transaction: bool
 pub oraclemcp_db::LeaseInfo::lease_id: alloc::string::String
 pub oraclemcp_db::LeaseInfo::profile: alloc::string::String
@@ -2620,7 +2705,7 @@ impl core::cmp::Eq for oraclemcp_db::OracleConnectOptions
 impl core::cmp::PartialEq for oraclemcp_db::OracleConnectOptions
 pub fn oraclemcp_db::OracleConnectOptions::eq(&self, &oraclemcp_db::OracleConnectOptions) -> bool
 impl core::default::Default for oraclemcp_db::OracleConnectOptions
-pub fn oraclemcp_db::OracleConnectOptions::default() -> oraclemcp_db::OracleConnectOptions
+pub fn oraclemcp_db::OracleConnectOptions::default() -> Self
 impl core::fmt::Debug for oraclemcp_db::OracleConnectOptions
 pub fn oraclemcp_db::OracleConnectOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oraclemcp_db::OracleConnectOptions
@@ -2702,6 +2787,7 @@ pub oraclemcp_db::OracleConnectionInfo::terminal: core::option::Option<alloc::st
 impl oraclemcp_db::OracleConnectionInfo
 pub fn oraclemcp_db::OracleConnectionInfo::is_read_only_standby(&self) -> bool
 pub fn oraclemcp_db::OracleConnectionInfo::read_only_status(&self) -> (bool, core::option::Option<alloc::string::String>)
+pub const fn oraclemcp_db::OracleConnectionInfo::redacted(&self) -> oraclemcp_db::RedactedOracleConnectionInfo<'_>
 pub fn oraclemcp_db::OracleConnectionInfo::with_read_only_status(self) -> Self
 impl core::clone::Clone for oraclemcp_db::OracleConnectionInfo
 pub fn oraclemcp_db::OracleConnectionInfo::clone(&self) -> oraclemcp_db::OracleConnectionInfo
@@ -3816,6 +3902,238 @@ pub type oraclemcp_db::QueryResponse::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::QueryResponse where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::QueryResponse where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::QueryResponse::vzip(self) -> V
+pub struct oraclemcp_db::RedactedNamedOracleBinds<'a>(_)
+impl core::fmt::Debug for oraclemcp_db::RedactedNamedOracleBinds<'_>
+pub fn oraclemcp_db::RedactedNamedOracleBinds<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for oraclemcp_db::RedactedNamedOracleBinds<'_>
+pub fn oraclemcp_db::RedactedNamedOracleBinds<'_>::serialize<S>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error> where S: serde_core::ser::Serializer
+impl<'a> core::clone::Clone for oraclemcp_db::RedactedNamedOracleBinds<'a>
+pub fn oraclemcp_db::RedactedNamedOracleBinds<'a>::clone(&self) -> oraclemcp_db::RedactedNamedOracleBinds<'a>
+impl<'a> core::marker::Copy for oraclemcp_db::RedactedNamedOracleBinds<'a>
+impl<'a> core::marker::Freeze for oraclemcp_db::RedactedNamedOracleBinds<'a>
+impl<'a> core::marker::Send for oraclemcp_db::RedactedNamedOracleBinds<'a>
+impl<'a> core::marker::Sync for oraclemcp_db::RedactedNamedOracleBinds<'a>
+impl<'a> core::marker::Unpin for oraclemcp_db::RedactedNamedOracleBinds<'a>
+impl<'a> core::marker::UnsafeUnpin for oraclemcp_db::RedactedNamedOracleBinds<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::RedactedNamedOracleBinds<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for oraclemcp_db::RedactedNamedOracleBinds<'a>
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::RedactedNamedOracleBinds<'a> where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::RedactedNamedOracleBinds<'a> where T: 'a
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::RedactedNamedOracleBinds<'a> where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::RedactedNamedOracleBinds<'a> where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::RedactedNamedOracleBinds<'a> where U: core::convert::From<T>
+pub fn oraclemcp_db::RedactedNamedOracleBinds<'a>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::RedactedNamedOracleBinds<'a> where U: core::convert::Into<T>
+pub type oraclemcp_db::RedactedNamedOracleBinds<'a>::Error = core::convert::Infallible
+pub fn oraclemcp_db::RedactedNamedOracleBinds<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::RedactedNamedOracleBinds<'a> where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::RedactedNamedOracleBinds<'a>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::RedactedNamedOracleBinds<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::RedactedNamedOracleBinds<'a> where T: core::clone::Clone
+pub type oraclemcp_db::RedactedNamedOracleBinds<'a>::Owned = T
+pub fn oraclemcp_db::RedactedNamedOracleBinds<'a>::clone_into(&self, &mut T)
+pub fn oraclemcp_db::RedactedNamedOracleBinds<'a>::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::RedactedNamedOracleBinds<'a>
+impl<T> core::any::Any for oraclemcp_db::RedactedNamedOracleBinds<'a> where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::RedactedNamedOracleBinds<'a>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::RedactedNamedOracleBinds<'a> where T: ?core::marker::Sized
+pub fn oraclemcp_db::RedactedNamedOracleBinds<'a>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::RedactedNamedOracleBinds<'a> where T: ?core::marker::Sized
+pub fn oraclemcp_db::RedactedNamedOracleBinds<'a>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::RedactedNamedOracleBinds<'a> where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::RedactedNamedOracleBinds<'a>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::RedactedNamedOracleBinds<'a>
+pub fn oraclemcp_db::RedactedNamedOracleBinds<'a>::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::RedactedNamedOracleBinds<'a>
+pub type oraclemcp_db::RedactedNamedOracleBinds<'a>::Init = T
+pub const oraclemcp_db::RedactedNamedOracleBinds<'a>::ALIGN: usize
+pub unsafe fn oraclemcp_db::RedactedNamedOracleBinds<'a>::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::RedactedNamedOracleBinds<'a>::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::RedactedNamedOracleBinds<'a>::drop(usize)
+pub unsafe fn oraclemcp_db::RedactedNamedOracleBinds<'a>::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::RedactedNamedOracleBinds<'a>
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::RedactedNamedOracleBinds<'a>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::RedactedNamedOracleBinds<'a>
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::RedactedNamedOracleBinds<'a>
+impl<T> typenum::type_operators::Same for oraclemcp_db::RedactedNamedOracleBinds<'a>
+pub type oraclemcp_db::RedactedNamedOracleBinds<'a>::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::RedactedNamedOracleBinds<'a> where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::RedactedNamedOracleBinds<'a> where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::RedactedNamedOracleBinds<'a>::vzip(self) -> V
+pub struct oraclemcp_db::RedactedOracleBind<'a>(_)
+impl core::fmt::Debug for oraclemcp_db::RedactedOracleBind<'_>
+pub fn oraclemcp_db::RedactedOracleBind<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for oraclemcp_db::RedactedOracleBind<'_>
+pub fn oraclemcp_db::RedactedOracleBind<'_>::serialize<S>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error> where S: serde_core::ser::Serializer
+impl<'a> core::clone::Clone for oraclemcp_db::RedactedOracleBind<'a>
+pub fn oraclemcp_db::RedactedOracleBind<'a>::clone(&self) -> oraclemcp_db::RedactedOracleBind<'a>
+impl<'a> core::marker::Copy for oraclemcp_db::RedactedOracleBind<'a>
+impl<'a> core::marker::Freeze for oraclemcp_db::RedactedOracleBind<'a>
+impl<'a> core::marker::Send for oraclemcp_db::RedactedOracleBind<'a>
+impl<'a> core::marker::Sync for oraclemcp_db::RedactedOracleBind<'a>
+impl<'a> core::marker::Unpin for oraclemcp_db::RedactedOracleBind<'a>
+impl<'a> core::marker::UnsafeUnpin for oraclemcp_db::RedactedOracleBind<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::RedactedOracleBind<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for oraclemcp_db::RedactedOracleBind<'a>
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::RedactedOracleBind<'a> where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::RedactedOracleBind<'a> where T: 'a
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::RedactedOracleBind<'a> where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::RedactedOracleBind<'a> where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::RedactedOracleBind<'a> where U: core::convert::From<T>
+pub fn oraclemcp_db::RedactedOracleBind<'a>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::RedactedOracleBind<'a> where U: core::convert::Into<T>
+pub type oraclemcp_db::RedactedOracleBind<'a>::Error = core::convert::Infallible
+pub fn oraclemcp_db::RedactedOracleBind<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::RedactedOracleBind<'a> where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::RedactedOracleBind<'a>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::RedactedOracleBind<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::RedactedOracleBind<'a> where T: core::clone::Clone
+pub type oraclemcp_db::RedactedOracleBind<'a>::Owned = T
+pub fn oraclemcp_db::RedactedOracleBind<'a>::clone_into(&self, &mut T)
+pub fn oraclemcp_db::RedactedOracleBind<'a>::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::RedactedOracleBind<'a>
+impl<T> core::any::Any for oraclemcp_db::RedactedOracleBind<'a> where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::RedactedOracleBind<'a>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::RedactedOracleBind<'a> where T: ?core::marker::Sized
+pub fn oraclemcp_db::RedactedOracleBind<'a>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::RedactedOracleBind<'a> where T: ?core::marker::Sized
+pub fn oraclemcp_db::RedactedOracleBind<'a>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::RedactedOracleBind<'a> where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::RedactedOracleBind<'a>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::RedactedOracleBind<'a>
+pub fn oraclemcp_db::RedactedOracleBind<'a>::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::RedactedOracleBind<'a>
+pub type oraclemcp_db::RedactedOracleBind<'a>::Init = T
+pub const oraclemcp_db::RedactedOracleBind<'a>::ALIGN: usize
+pub unsafe fn oraclemcp_db::RedactedOracleBind<'a>::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::RedactedOracleBind<'a>::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::RedactedOracleBind<'a>::drop(usize)
+pub unsafe fn oraclemcp_db::RedactedOracleBind<'a>::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::RedactedOracleBind<'a>
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::RedactedOracleBind<'a>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::RedactedOracleBind<'a>
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::RedactedOracleBind<'a>
+impl<T> typenum::type_operators::Same for oraclemcp_db::RedactedOracleBind<'a>
+pub type oraclemcp_db::RedactedOracleBind<'a>::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::RedactedOracleBind<'a> where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::RedactedOracleBind<'a> where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::RedactedOracleBind<'a>::vzip(self) -> V
+pub struct oraclemcp_db::RedactedOracleBinds<'a>(_)
+impl core::fmt::Debug for oraclemcp_db::RedactedOracleBinds<'_>
+pub fn oraclemcp_db::RedactedOracleBinds<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for oraclemcp_db::RedactedOracleBinds<'_>
+pub fn oraclemcp_db::RedactedOracleBinds<'_>::serialize<S>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error> where S: serde_core::ser::Serializer
+impl<'a> core::clone::Clone for oraclemcp_db::RedactedOracleBinds<'a>
+pub fn oraclemcp_db::RedactedOracleBinds<'a>::clone(&self) -> oraclemcp_db::RedactedOracleBinds<'a>
+impl<'a> core::marker::Copy for oraclemcp_db::RedactedOracleBinds<'a>
+impl<'a> core::marker::Freeze for oraclemcp_db::RedactedOracleBinds<'a>
+impl<'a> core::marker::Send for oraclemcp_db::RedactedOracleBinds<'a>
+impl<'a> core::marker::Sync for oraclemcp_db::RedactedOracleBinds<'a>
+impl<'a> core::marker::Unpin for oraclemcp_db::RedactedOracleBinds<'a>
+impl<'a> core::marker::UnsafeUnpin for oraclemcp_db::RedactedOracleBinds<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::RedactedOracleBinds<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for oraclemcp_db::RedactedOracleBinds<'a>
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::RedactedOracleBinds<'a> where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::RedactedOracleBinds<'a> where T: 'a
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::RedactedOracleBinds<'a> where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::RedactedOracleBinds<'a> where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::RedactedOracleBinds<'a> where U: core::convert::From<T>
+pub fn oraclemcp_db::RedactedOracleBinds<'a>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::RedactedOracleBinds<'a> where U: core::convert::Into<T>
+pub type oraclemcp_db::RedactedOracleBinds<'a>::Error = core::convert::Infallible
+pub fn oraclemcp_db::RedactedOracleBinds<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::RedactedOracleBinds<'a> where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::RedactedOracleBinds<'a>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::RedactedOracleBinds<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::RedactedOracleBinds<'a> where T: core::clone::Clone
+pub type oraclemcp_db::RedactedOracleBinds<'a>::Owned = T
+pub fn oraclemcp_db::RedactedOracleBinds<'a>::clone_into(&self, &mut T)
+pub fn oraclemcp_db::RedactedOracleBinds<'a>::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::RedactedOracleBinds<'a>
+impl<T> core::any::Any for oraclemcp_db::RedactedOracleBinds<'a> where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::RedactedOracleBinds<'a>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::RedactedOracleBinds<'a> where T: ?core::marker::Sized
+pub fn oraclemcp_db::RedactedOracleBinds<'a>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::RedactedOracleBinds<'a> where T: ?core::marker::Sized
+pub fn oraclemcp_db::RedactedOracleBinds<'a>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::RedactedOracleBinds<'a> where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::RedactedOracleBinds<'a>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::RedactedOracleBinds<'a>
+pub fn oraclemcp_db::RedactedOracleBinds<'a>::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::RedactedOracleBinds<'a>
+pub type oraclemcp_db::RedactedOracleBinds<'a>::Init = T
+pub const oraclemcp_db::RedactedOracleBinds<'a>::ALIGN: usize
+pub unsafe fn oraclemcp_db::RedactedOracleBinds<'a>::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::RedactedOracleBinds<'a>::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::RedactedOracleBinds<'a>::drop(usize)
+pub unsafe fn oraclemcp_db::RedactedOracleBinds<'a>::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::RedactedOracleBinds<'a>
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::RedactedOracleBinds<'a>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::RedactedOracleBinds<'a>
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::RedactedOracleBinds<'a>
+impl<T> typenum::type_operators::Same for oraclemcp_db::RedactedOracleBinds<'a>
+pub type oraclemcp_db::RedactedOracleBinds<'a>::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::RedactedOracleBinds<'a> where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::RedactedOracleBinds<'a> where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::RedactedOracleBinds<'a>::vzip(self) -> V
+pub struct oraclemcp_db::RedactedOracleConnectionInfo<'a>(_)
+impl core::fmt::Debug for oraclemcp_db::RedactedOracleConnectionInfo<'_>
+pub fn oraclemcp_db::RedactedOracleConnectionInfo<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl serde_core::ser::Serialize for oraclemcp_db::RedactedOracleConnectionInfo<'_>
+pub fn oraclemcp_db::RedactedOracleConnectionInfo<'_>::serialize<S>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error> where S: serde_core::ser::Serializer
+impl<'a> core::clone::Clone for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+pub fn oraclemcp_db::RedactedOracleConnectionInfo<'a>::clone(&self) -> oraclemcp_db::RedactedOracleConnectionInfo<'a>
+impl<'a> core::marker::Copy for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+impl<'a> core::marker::Freeze for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+impl<'a> core::marker::Send for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+impl<'a> core::marker::Sync for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+impl<'a> core::marker::Unpin for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+impl<'a> core::marker::UnsafeUnpin for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::RedactedOracleConnectionInfo<'a> where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::RedactedOracleConnectionInfo<'a> where T: 'a
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::RedactedOracleConnectionInfo<'a> where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::RedactedOracleConnectionInfo<'a> where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::RedactedOracleConnectionInfo<'a> where U: core::convert::From<T>
+pub fn oraclemcp_db::RedactedOracleConnectionInfo<'a>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::RedactedOracleConnectionInfo<'a> where U: core::convert::Into<T>
+pub type oraclemcp_db::RedactedOracleConnectionInfo<'a>::Error = core::convert::Infallible
+pub fn oraclemcp_db::RedactedOracleConnectionInfo<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::RedactedOracleConnectionInfo<'a> where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::RedactedOracleConnectionInfo<'a>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::RedactedOracleConnectionInfo<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::RedactedOracleConnectionInfo<'a> where T: core::clone::Clone
+pub type oraclemcp_db::RedactedOracleConnectionInfo<'a>::Owned = T
+pub fn oraclemcp_db::RedactedOracleConnectionInfo<'a>::clone_into(&self, &mut T)
+pub fn oraclemcp_db::RedactedOracleConnectionInfo<'a>::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+impl<T> core::any::Any for oraclemcp_db::RedactedOracleConnectionInfo<'a> where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::RedactedOracleConnectionInfo<'a>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::RedactedOracleConnectionInfo<'a> where T: ?core::marker::Sized
+pub fn oraclemcp_db::RedactedOracleConnectionInfo<'a>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::RedactedOracleConnectionInfo<'a> where T: ?core::marker::Sized
+pub fn oraclemcp_db::RedactedOracleConnectionInfo<'a>::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::RedactedOracleConnectionInfo<'a> where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::RedactedOracleConnectionInfo<'a>::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+pub fn oraclemcp_db::RedactedOracleConnectionInfo<'a>::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+pub type oraclemcp_db::RedactedOracleConnectionInfo<'a>::Init = T
+pub const oraclemcp_db::RedactedOracleConnectionInfo<'a>::ALIGN: usize
+pub unsafe fn oraclemcp_db::RedactedOracleConnectionInfo<'a>::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::RedactedOracleConnectionInfo<'a>::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::RedactedOracleConnectionInfo<'a>::drop(usize)
+pub unsafe fn oraclemcp_db::RedactedOracleConnectionInfo<'a>::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+impl<T> typenum::type_operators::Same for oraclemcp_db::RedactedOracleConnectionInfo<'a>
+pub type oraclemcp_db::RedactedOracleConnectionInfo<'a>::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::RedactedOracleConnectionInfo<'a> where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::RedactedOracleConnectionInfo<'a> where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::RedactedOracleConnectionInfo<'a>::vzip(self) -> V
 pub struct oraclemcp_db::RustOracleConnection
 impl oraclemcp_db::RustOracleConnection
 pub async fn oraclemcp_db::RustOracleConnection::connect(&asupersync::cx::cx::Cx, oraclemcp_db::OracleConnectOptions) -> core::result::Result<Self, oraclemcp_db::DbError>
@@ -4979,6 +5297,7 @@ pub type oraclemcp_db::WritePosture::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::WritePosture where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::WritePosture where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::WritePosture::vzip(self) -> V
+pub const oraclemcp_db::DEFAULT_ORACLE_CALL_TIMEOUT: core::time::Duration
 pub trait oraclemcp_db::IamTokenSource
 pub fn oraclemcp_db::IamTokenSource::fetch(&self) -> core::result::Result<oraclemcp_db::IamToken, oraclemcp_db::OciError>
 pub trait oraclemcp_db::OracleConnection: core::marker::Send + core::marker::Sync
@@ -5079,6 +5398,8 @@ pub async fn oraclemcp_db::read_lob(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::
 pub async fn oraclemcp_db::read_query(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &[oraclemcp_db::OracleBind], oraclemcp_db::QueryCaps, usize, &oraclemcp_db::SerializeOptions) -> core::result::Result<oraclemcp_db::QueryResponse, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::read_query_named(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &[(alloc::string::String, oraclemcp_db::OracleBind)], oraclemcp_db::QueryCaps, usize, &oraclemcp_db::SerializeOptions) -> core::result::Result<oraclemcp_db::QueryResponse, oraclemcp_db::DbError>
 pub fn oraclemcp_db::recompile_with_plscope_statements(&str, &str, &str) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
+pub const fn oraclemcp_db::redacted_named_oracle_binds(&[(alloc::string::String, oraclemcp_db::OracleBind)]) -> oraclemcp_db::RedactedNamedOracleBinds<'_>
+pub const fn oraclemcp_db::redacted_oracle_binds(&[oraclemcp_db::OracleBind]) -> oraclemcp_db::RedactedOracleBinds<'_>
 pub fn oraclemcp_db::require_lease_id(core::option::Option<&str>) -> core::result::Result<&str, oraclemcp_db::DbError>
 pub fn oraclemcp_db::requirement_matrix() -> &'static [oraclemcp_db::ToolRequirement]
 pub async fn oraclemcp_db::resolve_top_sql_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, bool) -> oraclemcp_db::DiagnosticsSource

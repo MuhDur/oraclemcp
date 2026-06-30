@@ -7,11 +7,12 @@ network posture, and a start/stop/drain runbook.
 `oraclemcp` is **governed and least-privilege**: a fail-closed SQL classifier in
 front of an explicit operating-level ladder
 `READ_ONLY < READ_WRITE < DDL < ADMIN`. It is **read-only by default**, but it
-is *escalation-capable* up to `ADMIN` through a confirmation-token step-up that
-is TTL-bounded and capped by each profile's `max_level`. Every privileged action
-lands in a hash-chained, HMAC-signed audit log. Plan your deployment around that
-model: the guarantees below come from how you configure the profile ceiling and
-the database account, not from the binary being incapable of writing.
+is *escalation-capable* up to `ADMIN` through a single-use confirmation-grant
+step-up that is TTL-bounded and capped by each profile's `max_level`. Every
+privileged action lands in a hash-chained, HMAC-signed audit log. Plan your
+deployment around that model: the guarantees below come from how you configure
+the profile ceiling and the database account, not from the binary being
+incapable of writing.
 
 > See also: [`hardening.md`](hardening.md) for the security-checklist view of
 > the same controls, and the project [`README.md`](../README.md) for the full
@@ -149,6 +150,10 @@ spec:
             - --http-allowed-host
             - oraclemcp.internal
           env:
+            # Durable write intents live under $XDG_STATE_HOME/oraclemcp.
+            # Use a persistent volume for write-capable profiles so in-doubt
+            # recovery survives process restarts and pod replacement.
+            - { name: XDG_STATE_HOME, value: /var/lib/oraclemcp-state }
             # A non-loopback bind (0.0.0.0) requires this opt-in.
             - { name: ORACLEMCP_HTTP_ALLOW_REMOTE, value: "1" }
             - name: ORACLE_APP_PASSWORD
@@ -163,6 +168,8 @@ spec:
             - name: config
               mountPath: /home/nonroot/.config/oraclemcp
               readOnly: true
+            - name: state
+              mountPath: /var/lib/oraclemcp-state
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -182,6 +189,8 @@ spec:
       volumes:
         - name: config
           configMap: { name: oraclemcp-profiles }
+        - name: state
+          persistentVolumeClaim: { claimName: oraclemcp-state }
 ```
 
 Probe semantics, once the endpoints are mounted:
@@ -401,6 +410,22 @@ sketch) longer than your slowest in-flight tool call so the rollback/lease-revok
 sequence completes before `SIGKILL`. `/healthz` stays 200 while draining; the
 process stays live until step 6.
 
+If rollback, cancellation, network loss, or shutdown prevents the server from
+proving the final database outcome, that physical session is quarantined and
+never returned to reuse. Error/audit outcomes distinguish `rolled_back`,
+`discarded_uncommitted`, `commit_in_doubt`, and `unknown_discarded`; a
+`commit_in_doubt` record means the operator must verify the Oracle transaction
+state before retrying non-idempotent work. For writable deployments, committing
+tools also append durable write intents under
+`$XDG_STATE_HOME/oraclemcp/write-intents/intents.jsonl` (or
+`$HOME/.local/state/oraclemcp/...`). `commit_in_doubt` and unknown outcomes keep
+the intent unresolved, so restart refuses writable service with
+`ORACLEMCP_WRITE_INTENT_IN_DOUBT` until the database outcome is verified.
+Stateful lane close records use tool `lane_lifecycle`, SQL preview `LANE_CLOSE`,
+and hash-covered `cancel.kind` / `cancel.reason` fields such as
+`User/session_delete` for HTTP `DELETE /mcp` or `Shutdown/server_shutdown` for
+listener drain.
+
 ### 5.3.1 Connection pool and failover posture
 
 The stateless-read pool (`oraclemcp-db`, `[profiles.pool]`) is a bounded,
@@ -423,20 +448,54 @@ pure-Rust async pool — no Tokio/r2d2 boundary. Its operating posture:
   returned to the idle set, and the freed slot is decremented so a fresh session
   can replace it. A torn round trip can therefore never be reused. An idle
   connection that fails its pre-checkout liveness ping is likewise forgotten and
-  a replacement is opened. This composes with the lease layer, which
-  force-rolls-back any open transaction before dropping a session.
+  a replacement is opened. This composes with the lease layer, which drops any
+  session whose rollback/savepoint cleanup cannot be proven and records the
+  safest known quarantine outcome.
 - **Failover.** Transient connection errors (ORA-03113/03114/12170/12541/…) are
   the only retryable class and reads only — DML is never auto-retried
   (double-execute risk). RAC/ADB failover is handled by the driver/connect
   string; on a dead connection the pool discards dirty and the next checkout
   opens a fresh session against the (failed-over) listener. A read-only standby
   forces the session ceiling to `READ_ONLY` (§3.5, §5.8).
+- **Upstream `EXPIRE_TIME` status.** The pinned `oracledb` 0.5.1 stack parses
+  `EXPIRE_TIME` into `Description::expire_time`, and `TRANSPORT_CONNECT_TIMEOUT`
+  is honored for bounded connect handshakes, but rust-oracledb#14 still tracks
+  applying `EXPIRE_TIME` as TCP keepalive on established sockets. `oraclemcp`
+  does not fake that driver-owned socket option in the adapter; it relies on the
+  profile call timeout, request budget, liveness ping, and dirty-discard rules
+  above until the upstream keepalive hook lands.
 
 Checkout accounting is observable via `PoolMetrics` (`acquired`, `released`,
 `discarded`, `in_use`, `open`); `is_balanced()` asserts every acquire was
 returned clean or discarded dirty (zero leaked sessions) and `is_bounded()`
 asserts `open ≤ max_size`. These are the invariants the B3 load/soak harness
 checks (see `docs/performance-footprint.md`).
+
+Served stateful HTTP lanes have a separate N4 admission gate before the lane
+thread or lane-owned Oracle connection can be opened. The current served
+defaults are upper bounds: 8 stateful lanes per principal bucket, 64 total
+host slots, with 1 operator slot and 1 doctor/readiness slot held out of
+regular agent admission. When regular capacity is exhausted, the request returns
+the typed `AT_CAPACITY` error with `retry_after_ms`, HTTP 429, `Retry-After`,
+and a redacted capacity snapshot. The snapshot reports capacities and redacted
+subject length only; it does not echo bearer tokens, raw principals, profiles,
+connect strings, or credentials. The broader N4b work computes effective
+DB/host ceilings from live DB limits, fd limits, task limits, and memory budget.
+
+### 5.3.2 Persistent service file store
+
+Service-owned state uses the shared `oraclemcp-core` file-store primitives under
+the XDG state directory (`$XDG_STATE_HOME/oraclemcp`, or
+`$HOME/.local/state/oraclemcp`). The contract is files-first and does not use
+SQLite: every mutation requires the service lock token, writes a private temp
+file, fsyncs it, renames it into place, and fsyncs the parent directory.
+
+Future service features must not interpolate profile, principal, author, or
+proposal names into paths. Use the file-store `StoreId::content_hashed` helper
+for untrusted names and keep collection names as fixed code-owned segments.
+JSONL-style prunable stores recover by truncating a torn tail and rebuilding an
+offset index from complete lines. Retention is only for prunable data such as
+metrics snapshots; audit data is explicitly non-prunable.
 
 ### 5.4 Verify the audit trail
 
@@ -458,10 +517,15 @@ to label the active key for rotation; the default key id is `default`). When
 `~/.config/oraclemcp/audit.jsonl`. Back up and rotate this log like any other
 security record, and verify it after incident review.
 
+Audit records are additive and format-versioned. Current records carry
+`schema_version = 2`, a structured server-derived `subject`, and optional
+database-evidence fields. `audit verify` still accepts signed v1 records, so
+existing logs do not need to be rewritten.
+
 ### 5.5 Rotate credentials and keys
 
 - **DB credential:** update the secret behind `credential_ref` and restart (or
-  re-point the env var and restart). For proxy auth, rotate the *proxy*
+  re-point the `env:` / `file:` / `keyring:` reference and restart). For proxy auth, rotate the *proxy*
   credential.
 - **OAuth HS256 secret:** rotate the value behind `--oauth-hs256-secret-ref` and
   restart; tokens signed with the old secret stop verifying.
@@ -527,8 +591,8 @@ Operator setup for the destination:
   window and back the volume up like any security record.
 - **SIEM endpoint.** Use a raw/HEC-style ingest endpoint that accepts a POST body
   per event. Provision the ingest token as the secret behind
-  `siem_auth_header_ref` (an `env:`/`vault:` ref — `literal:` is rejected on
-  `protected` profiles). Set a retention policy on the SIEM index to match the
+  `siem_auth_header_ref` (for example `env:`, `file:`, or `keyring:`; `literal:`
+  is rejected on `protected` profiles). Set a retention policy on the SIEM index to match the
   WORM window.
 - **Verify the mirror after incident review**, exactly as for the local log
   (§5.4): a `BROKEN` result names the first divergent `seq`.
@@ -567,6 +631,25 @@ cargo test -p oraclemcp-db --features live-xe --test live_oracle -- --nocapture
 ORACLEMCP_LIVE_XE=1 cargo test -p oraclemcp-db --test load_soak -- --ignored --nocapture
 ```
 
+The structured e2e harness wraps the same suites and is the standard entrypoint
+for acceptance beads:
+
+```sh
+# Validate harness wiring without running cargo subcommands.
+bash scripts/e2e/run_all.sh --log --dry-run
+
+# Run all offline e2e scenarios; live Oracle scenarios skip unless explicitly gated.
+bash scripts/e2e/run_all.sh --log
+```
+
+Every script under `scripts/e2e/` accepts `--log` and emits JSON-line events to
+stderr with `event`, `phase`, `ts`, `duration_ms`, `lane`, `subject`, `sid`,
+`profile`, `level`, `grant`, and `outcome`. Command output stays on stdout. On
+failure the harness emits a `CRASHPACK=... SEED=...` replay pointer and stores
+artifacts under `target/e2e/`. Live scripts require the `ORACLEMCP_TEST_*`
+database env plus `ORACLEMCP_LIVE_XE=1`, and they refuse production-looking DSNs
+or users before cargo starts.
+
 The load/soak is gated behind `ORACLEMCP_LIVE_XE=1` (a second, explicit opt-in
 on top of the connection env) and skips with a clear message when it is unset.
 Latency thresholds and the run-recording table are in
@@ -586,6 +669,16 @@ platform archive (`.tar.gz` / `.zip`):
   (`*.sig` / `*.crt`), bound to the release workflow's OIDC identity, and
 - a [SLSA-style build provenance attestation](https://slsa.dev/) recorded in the
   repository's attestation store.
+
+The binary archive matrix is:
+
+- `oraclemcp-x86_64-unknown-linux-gnu.tar.gz`
+- `oraclemcp-x86_64-unknown-linux-musl.tar.gz`
+- `oraclemcp-aarch64-unknown-linux-gnu.tar.gz`
+- `oraclemcp-aarch64-unknown-linux-musl.tar.gz`
+- `oraclemcp-x86_64-apple-darwin.tar.gz`
+- `oraclemcp-aarch64-apple-darwin.tar.gz`
+- `oraclemcp-x86_64-pc-windows-msvc.zip`
 
 A CycloneDX 1.5 SBOM for the binary crate
 (`oraclemcp-<version>.cdx.json`, plus its own `.sig`/`.crt`) is attached to the

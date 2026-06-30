@@ -13,22 +13,26 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex as SyncMutex};
 use std::time::{Duration, Instant};
 
-use asupersync::Cx;
 use asupersync::sync::Mutex as AsyncMutex;
-use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, Auditor};
+use asupersync::{Budget, Cx};
+use oraclemcp_audit::{
+    AuditCancel, AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor,
+};
 use oraclemcp_auth::apply_oauth_scopes;
 use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::{
-    CustomToolCatalog, CustomToolExecutor, DispatchContext, DispatchFuture, ToolBody, ToolDispatch,
-    execute_custom_tool, narrow_to_read_path,
+    CustomToolCatalog, CustomToolExecutor, DEFAULT_REQUEST_TIMEOUT, DispatchCloseFuture,
+    DispatchCloseReason, DispatchContext, DispatchFuture, RequestBudget, ToolBody, ToolDispatch,
+    WriteIntent, WriteIntentDetails, WriteIntentError, WriteIntentLog, WriteIntentOutcome,
+    execute_custom_tool, narrow_to_read_path, sign_token, verify_token,
 };
 use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
-    DbError, DbmsOutput, OracleBind, OracleConnection, OracleConnectionInfo, QueryCaps,
-    SerializeOptions, compile_errors, compile_object_statements, describe_columns,
+    DbError, DbmsOutput, OracleBind, OracleConnection, OracleConnectionInfo, QuarantineOutcome,
+    QueryCaps, SerializeOptions, compile_errors, compile_object_statements, describe_columns,
     describe_constraints, describe_index, describe_trigger, describe_view, execute_immediate_audit,
     explain_plan, find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects,
     list_schemas, plscope_identifiers, plscope_statements, read_lob, read_query, read_query_named,
@@ -36,8 +40,9 @@ use oraclemcp_db::{
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
-    Classifier, ClassifierConfig, EscalationError, GuardDecision, LevelDecision, OperatingLevel,
-    SessionLevelState, StageA, stage_a,
+    Classifier, ClassifierConfig, DangerLevel, EscalationError, ExecGrantBinding, ExecGrantError,
+    ExecGrantStore, GuardDecision, LevelDecision, OperatingLevel, SessionLevelState, StageA,
+    stage_a,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -99,6 +104,8 @@ const MAX_DBMS_OUTPUT_BUFFER_BYTES: usize = 1_000_000;
 const EXECUTE_APPROVED_TOKEN_TTL_SECONDS: u64 = 300;
 /// Hard cap on remembered compatibility grants in one server process.
 const MAX_EXECUTE_APPROVED_TOKENS: usize = 128;
+/// Tamper-token scope for signed execution grant references.
+const EXECUTE_GRANT_TOKEN_SCOPE: &str = "grant:execute";
 /// Hard cap on remembered source patch previews in one server process.
 const MAX_PATCH_PREVIEWS: usize = 128;
 /// Hard cap on per-call Oracle round-trip timeout overrides.
@@ -164,14 +171,37 @@ fn default_read_only_level() -> SessionLevelState {
     SessionLevelState::new(OperatingLevel::ReadOnly, false)
 }
 
-fn profile_level(profile: &str) -> SessionLevelState {
+#[derive(Clone)]
+struct ProfileDispatchPolicy {
+    level: SessionLevelState,
+    request_timeout: Option<Duration>,
+}
+
+fn default_dispatch_policy() -> ProfileDispatchPolicy {
+    ProfileDispatchPolicy {
+        level: default_read_only_level(),
+        request_timeout: Some(DEFAULT_REQUEST_TIMEOUT),
+    }
+}
+
+fn profile_request_timeout(call_timeout_seconds: Option<u64>) -> Option<Duration> {
+    match call_timeout_seconds {
+        None => Some(DEFAULT_REQUEST_TIMEOUT),
+        Some(0) => None,
+        Some(seconds) => Some(Duration::from_secs(seconds)),
+    }
+}
+
+fn profile_dispatch_policy(profile: &str) -> ProfileDispatchPolicy {
     OracleMcpConfig::load(None)
         .ok()
         .and_then(|cfg| {
-            cfg.profile(profile)
-                .map(|profile| oraclemcp_core::session_level_state(profile, false))
+            cfg.profile(profile).map(|profile| ProfileDispatchPolicy {
+                level: oraclemcp_core::session_level_state(profile, false),
+                request_timeout: profile_request_timeout(profile.call_timeout_seconds),
+            })
         })
-        .unwrap_or_else(default_read_only_level)
+        .unwrap_or_else(default_dispatch_policy)
 }
 
 struct DispatcherState {
@@ -180,6 +210,8 @@ struct DispatcherState {
     active_profile: Option<String>,
     level: SessionLevelState,
     custom_catalog: CustomToolCatalog,
+    execute_grants: ExecGrantStore,
+    grant_generation: u64,
     execute_approved_tokens: HashMap<String, ExecuteApprovedGrant>,
     patch_previews: HashMap<String, PatchPreviewEntry>,
     /// A1: lazy read-only transaction backstop for the pinned/primary session.
@@ -187,6 +219,12 @@ struct DispatcherState {
     /// least-privilege DB user, A2). Re-asserted at the start of every read
     /// transaction; disarmed by a gated write and reset on a profile switch.
     read_only_backstop: ReadOnlyBackstop,
+}
+
+#[derive(Clone, Debug)]
+struct ConnectionQuarantine {
+    outcome: AuditOutcome,
+    message: String,
 }
 
 struct ExecuteApprovedGrant {
@@ -214,6 +252,8 @@ struct PatchPreviewEntry {
 /// and never shared across threads without serialization.
 pub struct OracleDispatcher {
     state: AsyncMutex<DispatcherState>,
+    request_timeout: SyncMutex<Option<Duration>>,
+    quarantine: SyncMutex<Option<ConnectionQuarantine>>,
     connector: Option<Arc<ProfileConnector>>,
     stateless_connector: Option<Arc<ProfileStatelessConnector>>,
     custom_loader: Option<Arc<CustomToolLoader>>,
@@ -238,6 +278,8 @@ pub struct OracleDispatcher {
     /// because the switch may change the profile-scoped custom-tool catalog (and
     /// thus the served tool set). `None` disables that signal (focused tests).
     notifications: Option<Arc<oraclemcp_core::NotificationHub>>,
+    /// Durable write-ahead idempotency ledger for committing tools (CX-C1).
+    write_intents: Option<Arc<WriteIntentLog>>,
 }
 
 impl OracleDispatcher {
@@ -267,10 +309,14 @@ impl OracleDispatcher {
                 active_profile,
                 level,
                 custom_catalog: CustomToolCatalog::default(),
+                execute_grants: ExecGrantStore::new(),
+                grant_generation: 1,
                 execute_approved_tokens: HashMap::new(),
                 patch_previews: HashMap::new(),
                 read_only_backstop: ReadOnlyBackstop::new(),
             }),
+            request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
+            quarantine: SyncMutex::new(None),
             connector: None,
             stateless_connector: None,
             custom_loader: None,
@@ -278,6 +324,7 @@ impl OracleDispatcher {
             exports: None,
             mcp_exposure: McpExposurePolicy::default(),
             notifications: None,
+            write_intents: None,
         }
     }
 
@@ -336,10 +383,14 @@ impl OracleDispatcher {
                 active_profile,
                 level,
                 custom_catalog,
+                execute_grants: ExecGrantStore::new(),
+                grant_generation: 1,
                 execute_approved_tokens: HashMap::new(),
                 patch_previews: HashMap::new(),
                 read_only_backstop: ReadOnlyBackstop::new(),
             }),
+            request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
+            quarantine: SyncMutex::new(None),
             connector: Some(connector),
             stateless_connector: stateless.connector,
             custom_loader,
@@ -347,6 +398,7 @@ impl OracleDispatcher {
             exports: None,
             mcp_exposure: McpExposurePolicy::default(),
             notifications: None,
+            write_intents: None,
         }
     }
 
@@ -383,6 +435,14 @@ impl OracleDispatcher {
         self
     }
 
+    /// Attach the shared durable write-intent ledger. The served binary opens
+    /// and recovers this once, then shares it across dispatchers and lanes.
+    #[must_use]
+    pub fn with_write_intent_log(mut self, write_intents: Arc<WriteIntentLog>) -> Self {
+        self.write_intents = Some(write_intents);
+        self
+    }
+
     /// Attach the shared export registry (E3/E3b; builder). When set, oversized
     /// `oracle_query` results are materialized as an `oracle-export://{id}`
     /// resource and returned as a `resource_link` instead of being inlined.
@@ -390,6 +450,70 @@ impl OracleDispatcher {
     pub fn with_exports(mut self, exports: Arc<oraclemcp_core::ExportRegistry>) -> Self {
         self.exports = Some(exports);
         self
+    }
+
+    /// Install the active profile's resolved request timeout.
+    ///
+    /// `None` is an explicit operator opt-out from the driver call timeout; the
+    /// request-budget layer still applies its own 30-second default.
+    #[must_use]
+    pub fn with_request_timeout(self, request_timeout: Option<Duration>) -> Self {
+        self.set_request_timeout(request_timeout)
+            .expect("request-timeout mutex is healthy during construction");
+        self
+    }
+
+    fn request_timeout(&self) -> Result<Option<Duration>, ErrorEnvelope> {
+        self.request_timeout
+            .lock()
+            .map(|guard| *guard)
+            .map_err(|err| {
+                ErrorEnvelope::new(
+                    ErrorClass::Internal,
+                    format!("request-timeout mutex lock failed: {err}"),
+                )
+            })
+    }
+
+    fn set_request_timeout(&self, request_timeout: Option<Duration>) -> Result<(), ErrorEnvelope> {
+        let mut guard = self.request_timeout.lock().map_err(|err| {
+            ErrorEnvelope::new(
+                ErrorClass::Internal,
+                format!("request-timeout mutex lock failed: {err}"),
+            )
+        })?;
+        *guard = request_timeout;
+        Ok(())
+    }
+
+    fn connection_quarantine(&self) -> Result<Option<ConnectionQuarantine>, ErrorEnvelope> {
+        self.quarantine
+            .lock()
+            .map(|guard| guard.clone())
+            .map_err(|err| {
+                ErrorEnvelope::new(
+                    ErrorClass::Internal,
+                    format!("connection-quarantine mutex lock failed: {err}"),
+                )
+            })
+    }
+
+    fn clear_connection_quarantine(&self) -> Result<(), ErrorEnvelope> {
+        let mut guard = self.quarantine.lock().map_err(|err| {
+            ErrorEnvelope::new(
+                ErrorClass::Internal,
+                format!("connection-quarantine mutex lock failed: {err}"),
+            )
+        })?;
+        *guard = None;
+        Ok(())
+    }
+
+    fn dispatch_request_budget(&self, cx: &Cx) -> Result<RequestBudget, ErrorEnvelope> {
+        let timeout = self.request_timeout()?;
+        let budget = RequestBudget::from_call_timeout(cx.now(), timeout).meet(cx.budget());
+        budget.enforce(cx).map_err(DbError::into_envelope)?;
+        Ok(budget)
     }
 }
 
@@ -746,6 +870,7 @@ fn call_timeout_duration(seconds: Option<u64>) -> Result<Option<Duration>, Error
 async fn with_call_timeout<T, Fut>(
     cx: &Cx,
     conn: &dyn OracleConnection,
+    request_budget: RequestBudget,
     timeout_seconds: Option<u64>,
     f: impl FnOnce() -> Fut,
 ) -> Result<T, ErrorEnvelope>
@@ -753,21 +878,35 @@ where
     Fut: Future<Output = Result<T, ErrorEnvelope>>,
 {
     dispatch_checkpoint(cx, "oraclemcp.dispatch.call_timeout.before")?;
-    let Some(timeout) = call_timeout_duration(timeout_seconds)? else {
-        return f().await;
+    let timeout = call_timeout_duration(timeout_seconds)?;
+    let request_budget = match timeout {
+        Some(timeout) => request_budget.meet(Budget::new().with_timeout(cx.now(), timeout)),
+        None => request_budget,
+    };
+    request_budget.enforce(cx).map_err(DbError::into_envelope)?;
+    let Some(timeout) = timeout else {
+        let result = f().await;
+        let budget_after = request_budget.enforce(cx).map_err(DbError::into_envelope);
+        return match (result, budget_after) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(err), _) => Err(err),
+            (Ok(_), Err(err)) => Err(err),
+        };
     };
     let previous = conn.call_timeout().map_err(DbError::into_envelope)?;
-    conn.set_call_timeout(Some(timeout))
+    let effective_timeout = previous.map_or(timeout, |current| current.min(timeout));
+    conn.set_call_timeout(Some(effective_timeout))
         .map_err(DbError::into_envelope)?;
     let result = f().await;
+    let budget_after = request_budget.enforce(cx).map_err(DbError::into_envelope);
     let restore = conn
         .set_call_timeout(previous)
         .map_err(DbError::into_envelope);
-    match (result, restore) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(err), Ok(())) => Err(err),
-        (Ok(_), Err(err)) => Err(err),
-        (Err(err), Err(_)) => Err(err),
+    match (result, budget_after, restore) {
+        (Ok(value), Ok(()), Ok(())) => Ok(value),
+        (Err(err), _, _) => Err(err),
+        (Ok(_), Err(err), _) => Err(err),
+        (Ok(_), Ok(()), Err(err)) => Err(err),
     }
 }
 
@@ -1065,68 +1204,166 @@ fn ensure_explain_plan_write_allowed(
     }
 }
 
-fn normalized_sql_for_confirmation(sql: &str) -> String {
-    sql.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim_end_matches(';')
-        .to_ascii_lowercase()
-}
-
-fn confirmation_key() -> &'static [u8; 32] {
-    static KEY: OnceLock<[u8; 32]> = OnceLock::new();
-    KEY.get_or_init(|| {
-        let mut key = [0u8; 32];
-        getrandom::getrandom(&mut key).expect("OS random source required for confirmation tokens");
-        key
-    })
-}
-
-fn confirmation_mac(parts: &[&[u8]]) -> String {
-    let mut message = Vec::new();
-    for part in parts {
-        message.extend_from_slice(&(part.len() as u64).to_le_bytes());
-        message.extend_from_slice(part);
-    }
-    // Use the canonical, RFC 4231 KAT-tested HMAC-SHA256 from oraclemcp-audit
-    // rather than a local reimplementation (reduces crypto-reimpl surface).
-    let digest = oraclemcp_audit::hmac_sha256(confirmation_key(), &message);
-    let mut out = String::with_capacity(16);
-    for byte in &digest[..8] {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
-}
-
-/// Constant-time check that a `supplied` confirmation/commit/step-up token
-/// matches the `expected` MAC string. These tokens are HMAC tags, so the
-/// comparison routes through `oraclemcp_audit::ct_eq` (no early-out on first
-/// mismatch) rather than a plain `==`/`!=` that would leak a timing oracle on
-/// the matching-prefix length. `None` (no token supplied) never matches; the
-/// accept/reject outcome is otherwise identical to the prior string compare
-/// (`ct_eq` already rejects length mismatches).
-fn token_matches(supplied: Option<&str>, expected: &str) -> bool {
-    match supplied {
-        Some(s) => oraclemcp_audit::ct_eq(s.as_bytes(), expected.as_bytes()),
-        None => false,
-    }
-}
-
-fn execute_confirmation_token(
-    sql: &str,
-    required_level: OperatingLevel,
+fn execute_grant_token_fields(
+    binding: &ExecGrantBinding,
     active_profile: Option<&str>,
+    required_level: OperatingLevel,
+) -> Vec<String> {
+    vec![
+        active_profile.unwrap_or("").to_owned(),
+        binding.session_id.clone(),
+        binding.lane_id.clone(),
+        binding.subject_id.clone(),
+        binding.generation.to_string(),
+        required_level.as_str().to_owned(),
+    ]
+}
+
+fn sign_execute_grant_reference(
+    raw_grant_id: &str,
+    binding: &ExecGrantBinding,
+    active_profile: Option<&str>,
+    required_level: OperatingLevel,
+) -> String {
+    let fields = execute_grant_token_fields(binding, active_profile, required_level);
+    let refs = fields.iter().map(String::as_str).collect::<Vec<_>>();
+    sign_token(EXECUTE_GRANT_TOKEN_SCOPE, raw_grant_id, &refs)
+}
+
+fn verify_execute_grant_reference(
+    token: &str,
+    binding: &ExecGrantBinding,
+    active_profile: Option<&str>,
+    required_level: OperatingLevel,
 ) -> Option<String> {
-    if required_level <= OperatingLevel::ReadOnly {
-        return None;
+    let fields = execute_grant_token_fields(binding, active_profile, required_level);
+    let refs = fields.iter().map(String::as_str).collect::<Vec<_>>();
+    verify_token(EXECUTE_GRANT_TOKEN_SCOPE, token, &refs)
+}
+
+fn issue_confirmation_grant(
+    grants: &ExecGrantStore,
+    binding: &ExecGrantBinding,
+    active_profile: Option<&str>,
+    material: &str,
+    required_level: OperatingLevel,
+) -> String {
+    let raw = grants.issue(
+        material,
+        binding.clone(),
+        required_level,
+        Duration::from_secs(EXECUTE_APPROVED_TOKEN_TTL_SECONDS),
+    );
+    sign_execute_grant_reference(&raw, binding, active_profile, required_level)
+}
+
+struct ConfirmationGrantRequest<'a> {
+    material: &'a str,
+    required_level: OperatingLevel,
+    active_profile: Option<&'a str>,
+    grants: &'a ExecGrantStore,
+    binding: &'a ExecGrantBinding,
+    confirm: Option<&'a str>,
+    challenge_message: &'static str,
+    suggested_tool: &'a str,
+    next_step: &'static str,
+}
+
+fn consume_confirmation_grant(
+    request: ConfirmationGrantRequest<'_>,
+) -> Result<String, ErrorEnvelope> {
+    let Some(confirm) = request
+        .confirm
+        .and_then(|value| non_empty_arg(Some(value.to_owned())))
+    else {
+        return Err(
+            ErrorEnvelope::new(ErrorClass::ChallengeRequired, request.challenge_message)
+                .with_suggested_tool(request.suggested_tool)
+                .with_next_step(request.next_step),
+        );
+    };
+    let raw_id = verify_execute_grant_reference(
+        &confirm,
+        request.binding,
+        request.active_profile,
+        request.required_level,
+    )
+    .ok_or_else(|| {
+        ErrorEnvelope::new(
+            ErrorClass::ChallengeRequired,
+            "confirmation grant is invalid for this statement, lane, principal, generation, or active profile",
+        )
+        .with_suggested_tool(request.suggested_tool)
+        .with_next_step(request.next_step)
+    })?;
+    request
+        .grants
+        .consume(
+            &raw_id,
+            request.material,
+            request.binding,
+            request.required_level,
+        )
+        .map(|_| raw_id)
+        .map_err(|e| confirmation_grant_error(e, request.suggested_tool, request.next_step))
+}
+
+fn confirmation_grant_error(
+    e: ExecGrantError,
+    suggested_tool: &str,
+    next_step: &'static str,
+) -> ErrorEnvelope {
+    match e {
+        ExecGrantError::Unknown => ErrorEnvelope::new(
+            ErrorClass::ChallengeRequired,
+            "confirmation grant is unknown or already used; preview again",
+        )
+        .with_suggested_tool(suggested_tool)
+        .with_next_step(next_step),
+        ExecGrantError::Expired => ErrorEnvelope::new(
+            ErrorClass::ChallengeRequired,
+            "confirmation grant expired; preview again",
+        )
+        .with_suggested_tool(suggested_tool)
+        .with_next_step(next_step),
+        ExecGrantError::DigestMismatch => ErrorEnvelope::new(
+            ErrorClass::ChallengeRequired,
+            "confirmation grant belongs to a different statement or action",
+        )
+        .with_suggested_tool(suggested_tool)
+        .with_next_step(next_step),
+        ExecGrantError::SessionMismatch => ErrorEnvelope::new(
+            ErrorClass::RuntimeStateRequired,
+            "confirmation grant belongs to a different MCP session",
+        ),
+        ExecGrantError::LaneMismatch => ErrorEnvelope::new(
+            ErrorClass::RuntimeStateRequired,
+            "confirmation grant belongs to a different dispatch lane",
+        ),
+        ExecGrantError::SubjectMismatch => ErrorEnvelope::new(
+            ErrorClass::RuntimeStateRequired,
+            "confirmation grant belongs to a different principal",
+        ),
+        ExecGrantError::GenerationMismatch { presented, granted } => ErrorEnvelope::new(
+            ErrorClass::ChallengeRequired,
+            format!(
+                "confirmation grant was minted for generation {granted}, but current generation is {presented}"
+            ),
+        )
+        .with_suggested_tool(suggested_tool)
+        .with_next_step(next_step),
+        ExecGrantError::LevelExceedsGrant { requested, granted } => ErrorEnvelope::new(
+            ErrorClass::OperatingLevelTooLow,
+            format!(
+                "requested level {} exceeds the granted level {}",
+                requested.as_str(),
+                granted.as_str()
+            ),
+        ),
+        _ => ErrorEnvelope::new(ErrorClass::ChallengeRequired, "confirmation grant rejected")
+            .with_suggested_tool(suggested_tool)
+            .with_next_step(next_step),
     }
-    let normalized = normalized_sql_for_confirmation(sql);
-    Some(confirmation_mac(&[
-        b"oraclemcp:execute-confirmation:v2",
-        active_profile.unwrap_or("").as_bytes(),
-        required_level.as_str().as_bytes(),
-        normalized.as_bytes(),
-    ]))
 }
 
 fn session_level_view(session: &SessionLevelState) -> Value {
@@ -1172,18 +1409,21 @@ fn normalized_session_level_action(invoked_as: &str, args: &SetSessionLevelArgs)
         .to_ascii_lowercase()
 }
 
-fn session_level_confirmation_token(
-    active_profile: Option<&str>,
-    target: OperatingLevel,
-    ttl_seconds: u64,
-) -> String {
-    let ttl = ttl_seconds.to_string();
-    confirmation_mac(&[
-        b"oraclemcp:session-level-confirmation:v2",
-        active_profile.unwrap_or("").as_bytes(),
-        target.as_str().as_bytes(),
-        ttl.as_bytes(),
-    ])
+fn session_level_grant_material(target: OperatingLevel, ttl_seconds: u64) -> String {
+    format!("session-level:{}:{ttl_seconds}", target.as_str())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GrantVerification {
+    Required,
+    AlreadyVerified,
+}
+
+#[derive(Clone, Copy)]
+struct SessionGrantContext<'a> {
+    active_profile: Option<&'a str>,
+    grants: &'a ExecGrantStore,
+    binding: &'a ExecGrantBinding,
 }
 
 fn session_level_gate_json(session: &SessionLevelState, target: OperatingLevel) -> Value {
@@ -1239,7 +1479,7 @@ fn session_level_gate_error(session: &SessionLevelState, target: OperatingLevel)
         LevelDecision::RequireStepUp { target } => ErrorEnvelope::new(
             ErrorClass::ChallengeRequired,
             format!(
-                "session level elevation to {} requires the confirmation token returned by oracle_set_session_level preview",
+                "session level elevation to {} requires the single-use confirmation grant returned by oracle_set_session_level preview",
                 target.as_str()
             ),
         )
@@ -1298,32 +1538,46 @@ fn session_level_response_changed(response: &Value) -> bool {
 fn set_session_level_with_scope(
     stored_session: &mut SessionLevelState,
     scoped_session: &SessionLevelState,
-    active_profile: Option<&str>,
+    grant_ctx: SessionGrantContext<'_>,
     invoked_as: &str,
     args: SetSessionLevelArgs,
     scoped: bool,
 ) -> Result<Value, ErrorEnvelope> {
     if !scoped {
-        return set_session_level(stored_session, active_profile, invoked_as, args);
+        return set_session_level(
+            stored_session,
+            grant_ctx,
+            invoked_as,
+            args,
+            GrantVerification::Required,
+        );
     }
     let mut request_session = scoped_session.clone();
     let response = set_session_level(
         &mut request_session,
-        active_profile,
+        grant_ctx,
         invoked_as,
         args.clone(),
+        GrantVerification::Required,
     )?;
     if session_level_response_changed(&response) {
-        set_session_level(stored_session, active_profile, invoked_as, args)?;
+        set_session_level(
+            stored_session,
+            grant_ctx,
+            invoked_as,
+            args,
+            GrantVerification::AlreadyVerified,
+        )?;
     }
     Ok(response)
 }
 
 fn set_session_level(
     session: &mut SessionLevelState,
-    active_profile: Option<&str>,
+    grant_ctx: SessionGrantContext<'_>,
     invoked_as: &str,
     args: SetSessionLevelArgs,
+    verification: GrantVerification,
 ) -> Result<Value, ErrorEnvelope> {
     let action = normalized_session_level_action(invoked_as, &args);
     if matches!(
@@ -1432,7 +1686,16 @@ fn set_session_level(
     }
 
     let gate = session.evaluate(Some(target));
-    let confirm = session_level_confirmation_token(active_profile, target, ttl_seconds);
+    let grant_material = session_level_grant_material(target, ttl_seconds);
+    let confirm = matches!(gate, LevelDecision::RequireStepUp { .. }).then(|| {
+        issue_confirmation_grant(
+            grant_ctx.grants,
+            grant_ctx.binding,
+            grant_ctx.active_profile,
+            &grant_material,
+            target,
+        )
+    });
     let next_actions = match gate {
         LevelDecision::Allow => json!([
             {
@@ -1448,7 +1711,7 @@ fn set_session_level(
                     "level": target,
                     "ttl_seconds": ttl_seconds,
                     "execute": true,
-                    "confirm": confirm
+                    "confirm": confirm.clone()
                 }
             },
             {
@@ -1481,7 +1744,7 @@ fn set_session_level(
             "confirmation": if matches!(gate, LevelDecision::RequireStepUp { .. }) {
                 json!({
                     "tool": invoked_as,
-                    "confirm": confirm,
+                    "confirm": confirm.clone().expect("step-up gate minted a confirmation grant"),
                     "execute": true,
                     "ttl_seconds": ttl_seconds,
                     "target_level": target,
@@ -1505,8 +1768,18 @@ fn set_session_level(
             "message": "The active session already permits this level.",
         })),
         LevelDecision::RequireStepUp { .. } => {
-            if !token_matches(args.confirm.as_deref(), &confirm) {
-                return Err(session_level_gate_error(session, target));
+            if verification == GrantVerification::Required {
+                consume_confirmation_grant(ConfirmationGrantRequest {
+                    material: &grant_material,
+                    required_level: target,
+                    active_profile: grant_ctx.active_profile,
+                    grants: grant_ctx.grants,
+                    binding: grant_ctx.binding,
+                    confirm: args.confirm.as_deref(),
+                    challenge_message: "session level elevation requires the single-use confirmation grant returned by oracle_set_session_level preview",
+                    suggested_tool: "oracle_set_session_level",
+                    next_step: "call oracle_set_session_level without execute=true, then pass confirmation.confirm as confirm",
+                })?;
             }
             session
                 .escalate_window(target, Duration::from_secs(ttl_seconds))
@@ -1536,20 +1809,19 @@ fn set_session_level(
 }
 
 fn execute_confirmation_json(
-    sql: &str,
-    decision: &GuardDecision,
+    required_level: Option<OperatingLevel>,
     gate: &LevelDecision,
-    active_profile: Option<&str>,
+    confirm: Option<&str>,
 ) -> Value {
-    let Some(required_level) = decision.required_level else {
+    let Some(required_level) = required_level else {
+        return Value::Null;
+    };
+    let Some(confirm) = confirm else {
         return Value::Null;
     };
     if required_level <= OperatingLevel::ReadOnly || !matches!(gate, LevelDecision::Allow) {
         return Value::Null;
     }
-    let Some(confirm) = execute_confirmation_token(sql, required_level, active_profile) else {
-        return Value::Null;
-    };
     json!({
         "tool": "oracle_execute",
         "confirm": confirm,
@@ -1595,7 +1867,7 @@ fn preview_next_actions(
     sql: &str,
     decision: &GuardDecision,
     gate: &LevelDecision,
-    active_profile: Option<&str>,
+    confirm: Option<&str>,
 ) -> Value {
     let mut actions: Vec<Value> = Vec::new();
     match gate {
@@ -1613,7 +1885,7 @@ fn preview_next_actions(
                     "tool": "oracle_execute",
                     "args": { "sql": sql, "binds": [], "commit": false },
                 }));
-                if let Some(confirm) = execute_confirmation_token(sql, level, active_profile) {
+                if let Some(confirm) = confirm {
                     actions.push(json!({
                         "intent": "commit",
                         "tool": "oracle_execute",
@@ -1621,8 +1893,8 @@ fn preview_next_actions(
                     }));
                 }
             }
-            Some(level) => {
-                if let Some(confirm) = execute_confirmation_token(sql, level, active_profile) {
+            Some(_) => {
+                if let Some(confirm) = confirm {
                     actions.push(json!({
                         "intent": "commit_ddl_or_admin",
                         "tool": "oracle_execute",
@@ -1740,28 +2012,25 @@ fn execute_gate_error(
     )
 }
 
-fn verify_commit_confirmation(
+fn consume_execute_confirmation(
     sql: &str,
     required_level: OperatingLevel,
     active_profile: Option<&str>,
+    grants: &ExecGrantStore,
+    binding: &ExecGrantBinding,
     confirm: Option<&str>,
-) -> Result<(), ErrorEnvelope> {
-    let expected =
-        execute_confirmation_token(sql, required_level, active_profile).ok_or_else(|| {
-            ErrorEnvelope::new(
-                ErrorClass::InvalidArguments,
-                "read-only statements do not use oracle_execute commit confirmation",
-            )
-        })?;
-    if token_matches(confirm, &expected) {
-        return Ok(());
-    }
-    Err(ErrorEnvelope::new(
-        ErrorClass::ChallengeRequired,
-        "commit requires the confirmation token from oracle_preview_sql for this exact statement and active profile",
-    )
-    .with_suggested_tool("oracle_preview_sql")
-    .with_next_step("call oracle_preview_sql with the exact sql, then pass execute_confirmation.confirm as confirm"))
+) -> Result<String, ErrorEnvelope> {
+    consume_confirmation_grant(ConfirmationGrantRequest {
+        material: sql,
+        required_level,
+        active_profile,
+        grants,
+        binding,
+        confirm,
+        challenge_message: "commit requires the execution grant from oracle_preview_sql for this exact statement, lane, principal, and active profile",
+        suggested_tool: "oracle_preview_sql",
+        next_step: "call oracle_preview_sql with the exact sql, then pass execute_confirmation.confirm as confirm",
+    })
 }
 
 fn dbms_output_limits(args: &ExecuteArgs) -> (usize, usize, u32) {
@@ -1920,17 +2189,27 @@ fn audit_error_to_envelope(e: oraclemcp_audit::AuditError) -> ErrorEnvelope {
     ErrorEnvelope::new(ErrorClass::Internal, format!("audit append failed: {e}"))
 }
 
-/// The server-controlled principal recorded as the audit `agent_identity`: the
-/// active profile name (a low-cardinality, server-controlled value), or the
-/// binary name when no profile is bound.
-fn audit_agent_identity(active_profile: Option<&str>) -> String {
+/// The server-controlled subject recorded in the audit chain: the active
+/// profile name (a low-cardinality, server-controlled value), or the binary name
+/// when no profile is bound.
+fn audit_subject(active_profile: Option<&str>) -> AuditSubject {
     active_profile
-        .map(|p| format!("profile:{p}"))
-        .unwrap_or_else(|| "oraclemcp".to_owned())
+        .map(|p| AuditSubject::new("profile", p))
+        .unwrap_or_else(|| AuditSubject::new("system", "oraclemcp"))
+}
+
+fn grant_binding_for_context(
+    state: &DispatcherState,
+    context: DispatchContext<'_>,
+) -> ExecGrantBinding {
+    let session_id = context.http_session_id().unwrap_or("process");
+    let lane_id = context.lane_id().unwrap_or(session_id);
+    let subject_id = context.principal_key().unwrap_or("process");
+    ExecGrantBinding::new(session_id, lane_id, subject_id, state.grant_generation)
 }
 
 /// The audit-sink bundle threaded through the execute-path tools: the optional
-/// out-of-band [`Auditor`] and the server-controlled `agent_identity` recorded
+/// out-of-band [`Auditor`] and the server-controlled `subject` recorded
 /// on every entry. Bundling these two always-paired values keeps the
 /// execute/create-or-replace/deploy-DDL signatures under the argument-count
 /// limit (so no `#[allow(clippy::too_many_arguments)]` is needed) without
@@ -1938,20 +2217,37 @@ fn audit_agent_identity(active_profile: Option<&str>) -> String {
 #[derive(Clone, Copy)]
 struct AuditCtx<'a> {
     auditor: Option<&'a Auditor>,
-    agent_identity: &'a str,
+    subject: &'a AuditSubject,
 }
 
-/// Build an audit draft for an execute call at a known danger level.
-fn execute_audit_draft(
-    agent_identity: &str,
+#[derive(Clone, Copy)]
+struct DbToolCtx<'a> {
+    cx: &'a Cx,
+    conn: &'a dyn OracleConnection,
+    request_budget: RequestBudget,
+    active_profile: Option<&'a str>,
+    session: &'a SessionLevelState,
+    execute_grants: &'a ExecGrantStore,
+    grant_binding: &'a ExecGrantBinding,
+    write_intents: Option<&'a WriteIntentLog>,
+    audit: AuditCtx<'a>,
+    quarantine: &'a SyncMutex<Option<ConnectionQuarantine>>,
+}
+
+/// Build an audit draft for a served committing tool at a known danger level.
+fn audit_draft(
+    subject: &AuditSubject,
+    tool: &str,
     sql: &str,
     danger_level: &str,
     rows_affected: Option<u64>,
     outcome: AuditOutcome,
 ) -> AuditEntryDraft {
     AuditEntryDraft {
-        agent_identity: agent_identity.to_owned(),
-        tool: "oracle_execute".to_owned(),
+        subject: subject.clone(),
+        db_evidence: None,
+        cancel: None,
+        tool: tool.to_owned(),
         sql: sql.to_owned(),
         danger_level: danger_level.to_owned(),
         decision: AuditDecision::Allowed,
@@ -1960,19 +2256,27 @@ fn execute_audit_draft(
     }
 }
 
+fn audit_danger_string(danger: DangerLevel) -> String {
+    serde_json::to_value(danger)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "UNKNOWN".to_owned())
+}
+
 /// Durably append one execute-path audit entry when an auditor is configured.
 /// Fail-closed: a failed append surfaces as an [`ErrorEnvelope`] so the call
 /// errors rather than proceeding un-audited. No-op when `auditor` is `None`.
 fn append_audit(
     auditor: Option<&Auditor>,
-    agent_identity: &str,
+    subject: &AuditSubject,
+    tool: &str,
     sql: &str,
     danger_level: &str,
     rows_affected: Option<u64>,
     outcome: AuditOutcome,
 ) -> Result<(), ErrorEnvelope> {
     if let Some(auditor) = auditor {
-        let draft = execute_audit_draft(agent_identity, sql, danger_level, rows_affected, outcome);
+        let draft = audit_draft(subject, tool, sql, danger_level, rows_affected, outcome);
         auditor
             .append(&draft, audit_timestamp(), true)
             .map_err(audit_error_to_envelope)?;
@@ -1980,29 +2284,164 @@ fn append_audit(
     Ok(())
 }
 
-async fn execute_sql(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    active_profile: Option<&str>,
-    session: &SessionLevelState,
-    audit: AuditCtx<'_>,
-    args: ExecuteArgs,
-) -> Result<Value, ErrorEnvelope> {
+fn close_reason_cancel(reason: DispatchCloseReason) -> AuditCancel {
+    let kind = match reason {
+        DispatchCloseReason::SessionDelete => "User",
+        DispatchCloseReason::Timeout => "Timeout",
+        DispatchCloseReason::ServerShutdown | DispatchCloseReason::RuntimeDrop => "Shutdown",
+    };
+    AuditCancel::new(kind, reason.as_str())
+}
+
+fn append_lifecycle_audit(
+    auditor: Option<&Auditor>,
+    subject: &AuditSubject,
+    reason: DispatchCloseReason,
+    outcome: AuditOutcome,
+) -> Result<(), ErrorEnvelope> {
+    if let Some(auditor) = auditor {
+        let draft = AuditEntryDraft {
+            subject: subject.clone(),
+            db_evidence: None,
+            cancel: Some(close_reason_cancel(reason)),
+            tool: "lane_lifecycle".to_owned(),
+            sql: "LANE_CLOSE".to_owned(),
+            danger_level: "LIFECYCLE".to_owned(),
+            decision: AuditDecision::Allowed,
+            rows_affected: None,
+            outcome,
+        };
+        auditor
+            .append(&draft, audit_timestamp(), true)
+            .map_err(audit_error_to_envelope)?;
+    }
+    Ok(())
+}
+
+fn write_intent_error_to_envelope(e: WriteIntentError) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::Internal,
+        format!("write-intent operation failed: {e}"),
+    )
+    .with_next_step("do not retry non-idempotent work until the durable intent log is healthy")
+}
+
+fn append_write_intent(
+    ctx: &DbToolCtx<'_>,
+    tool: &str,
+    sql: &str,
+    required_level: OperatingLevel,
+    idempotency_key_material: &str,
+) -> Result<Option<String>, ErrorEnvelope> {
+    let Some(log) = ctx.write_intents else {
+        return Ok(None);
+    };
+    let subject = ctx.audit.subject.legacy_agent_identity();
+    let intent = WriteIntent::new(WriteIntentDetails {
+        idempotency_key_material,
+        subject: &subject,
+        active_profile: ctx.active_profile,
+        tool,
+        sql,
+        required_level,
+        binding: ctx.grant_binding,
+    });
+    log.append_pending(intent)
+        .map(Some)
+        .map_err(write_intent_error_to_envelope)
+}
+
+fn resolve_write_intent(
+    ctx: &DbToolCtx<'_>,
+    intent_id: Option<&str>,
+    outcome: WriteIntentOutcome,
+) -> Result<(), ErrorEnvelope> {
+    let (Some(log), Some(intent_id)) = (ctx.write_intents, intent_id) else {
+        return Ok(());
+    };
+    log.resolve(intent_id, outcome)
+        .map_err(write_intent_error_to_envelope)
+}
+
+fn resolve_write_intent_after_db(
+    ctx: &DbToolCtx<'_>,
+    intent_id: Option<&str>,
+    outcome: WriteIntentOutcome,
+    boundary: &str,
+) -> Result<(), ErrorEnvelope> {
+    if let Err(err) = resolve_write_intent(ctx, intent_id, outcome) {
+        let message = format!(
+            "{boundary}; durable write-intent resolution failed: {}",
+            err.message
+        );
+        mark_connection_quarantined(
+            ctx.quarantine,
+            AuditOutcome::UnknownDiscarded,
+            message.clone(),
+        )?;
+        return Err(
+            quarantined_db_error(QuarantineOutcome::UnknownDiscarded, message).into_envelope(),
+        );
+    }
+    Ok(())
+}
+
+fn audit_outcome_label(outcome: AuditOutcome) -> &'static str {
+    match outcome {
+        AuditOutcome::Pending => "pending",
+        AuditOutcome::Succeeded => "succeeded",
+        AuditOutcome::Failed => "failed",
+        AuditOutcome::RolledBack => "rolled_back",
+        AuditOutcome::DiscardedUncommitted => "discarded_uncommitted",
+        AuditOutcome::CommitInDoubt => "commit_in_doubt",
+        AuditOutcome::UnknownDiscarded => "unknown_discarded",
+        _ => "unknown",
+    }
+}
+
+fn mark_connection_quarantined(
+    quarantine: &SyncMutex<Option<ConnectionQuarantine>>,
+    outcome: AuditOutcome,
+    message: impl Into<String>,
+) -> Result<(), ErrorEnvelope> {
+    let mut guard = quarantine.lock().map_err(|err| {
+        ErrorEnvelope::new(
+            ErrorClass::Internal,
+            format!("connection-quarantine mutex lock failed: {err}"),
+        )
+    })?;
+    *guard = Some(ConnectionQuarantine {
+        outcome,
+        message: message.into(),
+    });
+    Ok(())
+}
+
+fn quarantined_db_error(outcome: QuarantineOutcome, message: impl Into<String>) -> DbError {
+    DbError::Quarantined {
+        outcome,
+        message: message.into(),
+    }
+}
+
+async fn execute_sql(ctx: DbToolCtx<'_>, args: ExecuteArgs) -> Result<Value, ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
-    with_call_timeout(cx, conn, timeout_seconds, || {
-        execute_sql_inner(cx, conn, active_profile, session, audit, args)
-    })
+    with_call_timeout(
+        ctx.cx,
+        ctx.conn,
+        ctx.request_budget,
+        timeout_seconds,
+        || execute_sql_inner(ctx, args),
+    )
     .await
 }
 
-async fn execute_sql_inner(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    active_profile: Option<&str>,
-    session: &SessionLevelState,
-    audit: AuditCtx<'_>,
-    args: ExecuteArgs,
-) -> Result<Value, ErrorEnvelope> {
+async fn execute_sql_inner(ctx: DbToolCtx<'_>, args: ExecuteArgs) -> Result<Value, ErrorEnvelope> {
+    let cx = ctx.cx;
+    let conn = ctx.conn;
+    let active_profile = ctx.active_profile;
+    let session = ctx.session;
+    let audit = ctx.audit;
     let decision = DEFAULT_CLASSIFIER.classify(&args.sql);
     let gate = decision.gate(session);
     if !matches!(gate, LevelDecision::Allow) {
@@ -2032,14 +2471,18 @@ async fn execute_sql_inner(
         .with_suggested_tool("oracle_preview_sql")
         .with_next_step("call oracle_preview_sql and pass execute_confirmation.confirm to oracle_execute with commit=true"));
     }
-    if args.commit {
-        verify_commit_confirmation(
+    let commit_idempotency_key = if args.commit {
+        Some(consume_execute_confirmation(
             &args.sql,
             required_level,
             active_profile,
+            ctx.execute_grants,
+            ctx.grant_binding,
             args.confirm.as_deref(),
-        )?;
-    }
+        )?)
+    } else {
+        None
+    };
 
     let binds = args
         .binds
@@ -2065,22 +2508,33 @@ async fn execute_sql_inner(
 
     // The audited danger tier (SAFE/GUARDED/DESTRUCTIVE) as a string; reads were
     // rejected above, so this is always a Guarded/Destructive write/DDL/Admin.
-    let danger_str = serde_json::to_value(decision.danger)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "UNKNOWN".to_owned());
+    let danger_str = audit_danger_string(decision.danger);
+    let write_intent_id = match commit_idempotency_key.as_deref() {
+        Some(key) => {
+            append_write_intent(&ctx, "oracle_execute", &executed_sql, required_level, key)?
+        }
+        None => None,
+    };
 
     // fsync-before-execute (§5.13): durably log the approved statement BEFORE it
     // runs so a crash between here and the execute leaves the log written and the
     // database untouched. A failed durable append fails the call closed.
-    append_audit(
+    if let Err(err) = append_audit(
         audit.auditor,
-        audit.agent_identity,
+        audit.subject,
+        "oracle_execute",
         &executed_sql,
         &danger_str,
         None,
         AuditOutcome::Pending,
-    )?;
+    ) {
+        resolve_write_intent(
+            &ctx,
+            write_intent_id.as_deref(),
+            WriteIntentOutcome::AbortedBeforeExecute,
+        )?;
+        return Err(err);
+    }
 
     let dbms_output_limits = if args.capture_dbms_output {
         let (max_lines, max_chars, buffer_bytes) = dbms_output_limits(&args);
@@ -2094,45 +2548,127 @@ async fn execute_sql_inner(
     let rows_affected = match execute_conn(cx, conn, &executed_sql, &binds).await {
         Ok(rows) => rows,
         Err(e) => {
-            let _ = conn.rollback(cx).await;
+            let rollback = conn.rollback(cx).await;
+            let outcome = if rollback.is_ok() {
+                AuditOutcome::RolledBack
+            } else {
+                mark_connection_quarantined(
+                    ctx.quarantine,
+                    AuditOutcome::UnknownDiscarded,
+                    format!("execute failed and rollback cleanup failed: {e}"),
+                )?;
+                AuditOutcome::UnknownDiscarded
+            };
+            if e.is_uncertain_session_state() && rollback.is_ok() {
+                mark_connection_quarantined(
+                    ctx.quarantine,
+                    AuditOutcome::RolledBack,
+                    format!(
+                        "execute failed after an uncertain DB boundary; rollback succeeded: {e}"
+                    ),
+                )?;
+            }
             // Durably log the failed outcome before propagating.
             append_audit(
                 audit.auditor,
-                audit.agent_identity,
+                audit.subject,
+                "oracle_execute",
                 &executed_sql,
                 &danger_str,
                 None,
-                AuditOutcome::Failed,
+                outcome,
             )?;
+            if outcome == AuditOutcome::RolledBack {
+                resolve_write_intent_after_db(
+                    &ctx,
+                    write_intent_id.as_deref(),
+                    WriteIntentOutcome::RolledBack,
+                    "execute failed and rollback completed",
+                )?;
+            }
+            if let Err(cleanup_err) = rollback {
+                return Err(quarantined_db_error(
+                    QuarantineOutcome::UnknownDiscarded,
+                    format!("execute failed and rollback cleanup failed: {cleanup_err}"),
+                )
+                .into_envelope());
+            }
             return Err(DbError::into_envelope(e));
         }
     };
     if args.commit {
         if let Err(e) = commit_conn(cx, conn).await {
-            let _ = conn.rollback(cx).await;
+            mark_connection_quarantined(
+                ctx.quarantine,
+                AuditOutcome::CommitInDoubt,
+                format!("commit failed after {rows_affected} affected row(s): {e}"),
+            )?;
             append_audit(
                 audit.auditor,
-                audit.agent_identity,
+                audit.subject,
+                "oracle_execute",
                 &executed_sql,
                 &danger_str,
                 Some(rows_affected),
-                AuditOutcome::Failed,
+                AuditOutcome::CommitInDoubt,
             )?;
-            return Err(DbError::into_envelope(e));
+            return Err(quarantined_db_error(
+                QuarantineOutcome::CommitInDoubt,
+                format!("commit failed after {rows_affected} affected row(s): {e}"),
+            )
+            .into_envelope());
         }
     } else {
-        conn.rollback(cx).await.map_err(DbError::into_envelope)?;
+        if let Err(e) = conn.rollback(cx).await {
+            mark_connection_quarantined(
+                ctx.quarantine,
+                AuditOutcome::UnknownDiscarded,
+                format!(
+                    "rollback preview cleanup failed after {rows_affected} affected row(s): {e}"
+                ),
+            )?;
+            append_audit(
+                audit.auditor,
+                audit.subject,
+                "oracle_execute",
+                &executed_sql,
+                &danger_str,
+                Some(rows_affected),
+                AuditOutcome::UnknownDiscarded,
+            )?;
+            return Err(quarantined_db_error(
+                QuarantineOutcome::UnknownDiscarded,
+                format!(
+                    "rollback preview cleanup failed after {rows_affected} affected row(s): {e}"
+                ),
+            )
+            .into_envelope());
+        }
     }
 
     // Durably log the successful (committed or rolled-back-preview) outcome.
+    let outcome = if args.commit {
+        AuditOutcome::Succeeded
+    } else {
+        AuditOutcome::RolledBack
+    };
     append_audit(
         audit.auditor,
-        audit.agent_identity,
+        audit.subject,
+        "oracle_execute",
         &executed_sql,
         &danger_str,
         Some(rows_affected),
-        AuditOutcome::Succeeded,
+        outcome,
     )?;
+    if args.commit {
+        resolve_write_intent_after_db(
+            &ctx,
+            write_intent_id.as_deref(),
+            WriteIntentOutcome::Succeeded,
+            "commit completed",
+        )?;
+    }
     let dbms_output = match dbms_output_limits {
         Some((max_lines, max_chars)) => Some(
             read_dbms_output_conn(cx, conn, max_lines, max_chars)
@@ -2161,56 +2697,6 @@ async fn execute_sql_inner(
 
 fn normalize_compile_type_for_wire(object_type: &str) -> String {
     object_type.trim().replace('_', " ").to_ascii_uppercase()
-}
-
-fn compile_confirmation_token(
-    statements: &[String],
-    active_profile: Option<&str>,
-    owner: &str,
-    name: &str,
-    object_type: &str,
-    plscope: bool,
-) -> String {
-    let plscope_part: &[u8] = if plscope { b"plscope=1" } else { b"plscope=0" };
-    let mut parts = vec![
-        b"oraclemcp:compile-confirmation:v2".as_slice(),
-        active_profile.unwrap_or("").as_bytes(),
-        owner.as_bytes(),
-        name.as_bytes(),
-        object_type.as_bytes(),
-        plscope_part,
-    ];
-    for stmt in statements {
-        parts.push(stmt.as_bytes());
-    }
-    confirmation_mac(&parts)
-}
-
-// Shared gate-and-confirm verification for the execute-path tools that mint their
-// own confirmation token in a preview and re-check it on execute (compile, patch).
-// Callers gate first; this enforces the token round-trip with tool-specific copy.
-fn verify_token_confirmation(
-    confirm: Option<String>,
-    supplied: Option<&str>,
-    missing_token_message: &'static str,
-    challenge_message: &'static str,
-    suggested_tool: &str,
-    next_step: &'static str,
-) -> Result<(), ErrorEnvelope> {
-    let Some(expected) = confirm else {
-        return Err(ErrorEnvelope::new(
-            ErrorClass::Internal,
-            missing_token_message,
-        ));
-    };
-    if !token_matches(supplied, &expected) {
-        return Err(
-            ErrorEnvelope::new(ErrorClass::ChallengeRequired, challenge_message)
-                .with_suggested_tool(suggested_tool)
-                .with_next_step(next_step),
-        );
-    }
-    Ok(())
 }
 
 fn gate_decision_json(gate: &LevelDecision) -> (&'static str, Value, Value) {
@@ -2242,7 +2728,7 @@ fn compile_gate_error(gate: LevelDecision, session: &SessionLevelState) -> Error
         &GateErrorLabels {
             subject: "compile",
             step_up_tool: "oracle_compile_object",
-            step_up_inspect_step: "call oracle_compile_object without execute=true to inspect the required level and confirmation token",
+            step_up_inspect_step: "call oracle_compile_object without execute=true to inspect the required level and confirmation grant",
             step_up_elevation_step: "call oracle_set_session_level with level=\"DDL\" to preview a temporary elevation, or keep the profile read-only",
             ceiling_step: "choose a profile whose max_level permits DDL",
             policy_denied_message: "compile is blocked by policy",
@@ -2250,6 +2736,33 @@ fn compile_gate_error(gate: LevelDecision, session: &SessionLevelState) -> Error
         },
         None,
     )
+}
+
+fn classify_compile_statements(statements: &[String]) -> Result<DangerLevel, ErrorEnvelope> {
+    let mut danger = DangerLevel::Safe;
+    for statement in statements {
+        let decision = DEFAULT_CLASSIFIER.classify(statement);
+        let Some(required_level) = decision.required_level else {
+            return Err(ErrorEnvelope::new(
+                ErrorClass::ForbiddenStatement,
+                format!(
+                    "generated compile statement is forbidden by the SQL classifier: {}",
+                    decision.reason
+                ),
+            ));
+        };
+        if required_level > OperatingLevel::Ddl {
+            return Err(ErrorEnvelope::new(
+                ErrorClass::ForbiddenStatement,
+                format!(
+                    "generated compile statement unexpectedly requires {}; refusing",
+                    required_level.as_str()
+                ),
+            ));
+        }
+        danger = danger.max(decision.danger);
+    }
+    Ok(danger)
 }
 
 fn compile_next_actions(
@@ -2303,28 +2816,31 @@ fn compile_diagnostic_counts(errors: &[oraclemcp_db::OracleRow]) -> (usize, usiz
 }
 
 async fn compile_object(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    active_profile: Option<&str>,
-    session: &SessionLevelState,
+    ctx: DbToolCtx<'_>,
     tool_name: &str,
     args: CompileObjectArgs,
 ) -> Result<Value, ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
-    with_call_timeout(cx, conn, timeout_seconds, || {
-        compile_object_inner(cx, conn, active_profile, session, tool_name, args)
-    })
+    with_call_timeout(
+        ctx.cx,
+        ctx.conn,
+        ctx.request_budget,
+        timeout_seconds,
+        || compile_object_inner(ctx, tool_name, args),
+    )
     .await
 }
 
 async fn compile_object_inner(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    active_profile: Option<&str>,
-    session: &SessionLevelState,
+    ctx: DbToolCtx<'_>,
     tool_name: &str,
     args: CompileObjectArgs,
 ) -> Result<Value, ErrorEnvelope> {
+    let cx = ctx.cx;
+    let conn = ctx.conn;
+    let active_profile = ctx.active_profile;
+    let session = ctx.session;
+    let audit = ctx.audit;
     let object_name = required_non_empty_arg(tool_name, "name", args.name)?;
     let (owner, object_name) =
         owner_and_name_arg(cx, conn, args.owner, object_name, "name").await?;
@@ -2339,16 +2855,17 @@ async fn compile_object_inner(
             "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'".to_owned(),
         );
     }
+    let compile_danger = classify_compile_statements(&statements)?;
     let gate = session.evaluate(Some(OperatingLevel::Ddl));
     let (gate_decision, blocked_reason, step_up_target) = gate_decision_json(&gate);
+    let audited_sql = statements.join(";\n");
     let confirm = matches!(gate, LevelDecision::Allow).then(|| {
-        compile_confirmation_token(
-            &statements,
+        issue_confirmation_grant(
+            ctx.execute_grants,
+            ctx.grant_binding,
             active_profile,
-            &owner,
-            &object_name,
-            &object_type,
-            args.plscope,
+            &audited_sql,
+            OperatingLevel::Ddl,
         )
     });
 
@@ -2387,23 +2904,94 @@ async fn compile_object_inner(
     if !matches!(gate, LevelDecision::Allow) {
         return Err(compile_gate_error(gate, session));
     }
-    verify_token_confirmation(
-        confirm,
-        args.confirm.as_deref(),
-        "compile confirmation could not be generated",
-        "compile requires the confirmation token from a preview of this exact object/profile/options",
-        "oracle_compile_object",
-        "call oracle_compile_object without execute=true, then pass confirmation.confirm with execute=true",
-    )?;
+    let raw_confirm = consume_confirmation_grant(ConfirmationGrantRequest {
+        material: &audited_sql,
+        required_level: OperatingLevel::Ddl,
+        active_profile,
+        grants: ctx.execute_grants,
+        binding: ctx.grant_binding,
+        confirm: args.confirm.as_deref(),
+        challenge_message: "compile requires the single-use confirmation grant from a preview of this exact object/profile/options",
+        suggested_tool: "oracle_compile_object",
+        next_step: "call oracle_compile_object without execute=true, then pass confirmation.confirm with execute=true",
+    })?;
 
+    let danger_str = audit_danger_string(compile_danger);
+    let write_intent_id = append_write_intent(
+        &ctx,
+        tool_name,
+        &audited_sql,
+        OperatingLevel::Ddl,
+        &raw_confirm,
+    )?;
+    if let Err(err) = append_audit(
+        audit.auditor,
+        audit.subject,
+        tool_name,
+        &audited_sql,
+        &danger_str,
+        None,
+        AuditOutcome::Pending,
+    ) {
+        resolve_write_intent(
+            &ctx,
+            write_intent_id.as_deref(),
+            WriteIntentOutcome::AbortedBeforeExecute,
+        )?;
+        return Err(err);
+    }
     let mut rows_affected = Vec::with_capacity(statements.len());
     for stmt in &statements {
-        rows_affected.push(
-            execute_conn(cx, conn, stmt, &[])
-                .await
-                .map_err(DbError::into_envelope)?,
-        );
+        match execute_conn(cx, conn, stmt, &[]).await {
+            Ok(rows) => rows_affected.push(rows),
+            Err(e) => {
+                let outcome = if e.is_uncertain_session_state() {
+                    mark_connection_quarantined(
+                        ctx.quarantine,
+                        AuditOutcome::UnknownDiscarded,
+                        format!("compile execution failed after an uncertain DB boundary: {e}"),
+                    )?;
+                    AuditOutcome::UnknownDiscarded
+                } else {
+                    AuditOutcome::Failed
+                };
+                append_audit(
+                    audit.auditor,
+                    audit.subject,
+                    tool_name,
+                    &audited_sql,
+                    &danger_str,
+                    None,
+                    outcome,
+                )?;
+                if outcome == AuditOutcome::Failed {
+                    resolve_write_intent_after_db(
+                        &ctx,
+                        write_intent_id.as_deref(),
+                        WriteIntentOutcome::Failed,
+                        "compile execution failed before a commit boundary",
+                    )?;
+                }
+                return Err(DbError::into_envelope(e));
+            }
+        }
     }
+    let rows_affected_total = rows_affected.iter().copied().sum::<u64>();
+    append_audit(
+        audit.auditor,
+        audit.subject,
+        tool_name,
+        &audited_sql,
+        &danger_str,
+        Some(rows_affected_total),
+        AuditOutcome::Succeeded,
+    )?;
+    resolve_write_intent_after_db(
+        &ctx,
+        write_intent_id.as_deref(),
+        WriteIntentOutcome::Succeeded,
+        "compile execution completed",
+    )?;
     dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.before")?;
     let errors = compile_errors(cx, conn, &owner, Some(&object_name))
         .await
@@ -2933,7 +3521,7 @@ fn read_patch_preview(
                 {
                     "intent": "apply_source_patch",
                     "tool": entry.tool_name,
-                    "message": "rerun the same patch tool with execute=true and the confirmation token from its preview"
+                    "message": "rerun the same patch tool with execute=true and the confirmation grant from its preview"
                 }
             ],
         }));
@@ -2987,28 +3575,31 @@ fn read_patch_preview(
 }
 
 async fn patch_source(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    active_profile: Option<&str>,
-    session: &SessionLevelState,
+    ctx: DbToolCtx<'_>,
     tool_name: &str,
     args: PatchSourceArgs,
 ) -> Result<(Value, Option<PatchPreviewEntry>), ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
-    with_call_timeout(cx, conn, timeout_seconds, || {
-        patch_source_inner(cx, conn, active_profile, session, tool_name, args)
-    })
+    with_call_timeout(
+        ctx.cx,
+        ctx.conn,
+        ctx.request_budget,
+        timeout_seconds,
+        || patch_source_inner(ctx, tool_name, args),
+    )
     .await
 }
 
 async fn patch_source_inner(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    active_profile: Option<&str>,
-    session: &SessionLevelState,
+    ctx: DbToolCtx<'_>,
     tool_name: &str,
     args: PatchSourceArgs,
 ) -> Result<(Value, Option<PatchPreviewEntry>), ErrorEnvelope> {
+    let cx = ctx.cx;
+    let conn = ctx.conn;
+    let active_profile = ctx.active_profile;
+    let session = ctx.session;
+    let audit = ctx.audit;
     let object_name = required_non_empty_arg(tool_name, "name", args.name)?;
     let object_type = normalize_patch_object_type(tool_name, args.object_type)?;
     let old_text = required_patch_old_text(tool_name, args.old_text)?;
@@ -3054,9 +3645,13 @@ async fn patch_source_inner(
     };
     let (gate_decision, blocked_reason, step_up_target) = gate_decision_json(&gate);
     let confirm = match (patch_required_level, &gate) {
-        (Some(level), LevelDecision::Allow) => {
-            execute_confirmation_token(&patched_ddl, level, active_profile)
-        }
+        (Some(level), LevelDecision::Allow) => Some(issue_confirmation_grant(
+            ctx.execute_grants,
+            ctx.grant_binding,
+            active_profile,
+            &patched_ddl,
+            level,
+        )),
         _ => None,
     };
 
@@ -3114,26 +3709,120 @@ async fn patch_source_inner(
     if !matches!(gate, LevelDecision::Allow) {
         return Err(execute_gate_error(&decision, gate, session));
     }
-    verify_token_confirmation(
-        confirm,
-        args.confirm.as_deref(),
-        "patch confirmation could not be generated",
-        "source patch requires the confirmation token from a preview of this exact object/profile/patch",
-        tool_name,
-        "call the patch tool without execute=true, then pass confirmation.confirm with execute=true",
-    )?;
+    let required_level = patch_required_level.ok_or_else(|| {
+        ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "patch confirmation was verified without a required operating level",
+        )
+    })?;
+    let raw_confirm = consume_confirmation_grant(ConfirmationGrantRequest {
+        material: &patched_ddl,
+        required_level,
+        active_profile,
+        grants: ctx.execute_grants,
+        binding: ctx.grant_binding,
+        confirm: args.confirm.as_deref(),
+        challenge_message: "source patch requires the single-use confirmation grant from a preview of this exact object/profile/patch",
+        suggested_tool: tool_name,
+        next_step: "call the patch tool without execute=true, then pass confirmation.confirm with execute=true",
+    })?;
 
+    let danger_str = audit_danger_string(decision.danger);
+    let write_intent_id =
+        append_write_intent(&ctx, tool_name, &patched_ddl, required_level, &raw_confirm)?;
+    if let Err(err) = append_audit(
+        audit.auditor,
+        audit.subject,
+        tool_name,
+        &patched_ddl,
+        &danger_str,
+        None,
+        AuditOutcome::Pending,
+    ) {
+        resolve_write_intent(
+            &ctx,
+            write_intent_id.as_deref(),
+            WriteIntentOutcome::AbortedBeforeExecute,
+        )?;
+        return Err(err);
+    }
     let rows_affected = match execute_conn(cx, conn, &patched_ddl, &[]).await {
         Ok(rows) => rows,
         Err(e) => {
-            let _ = conn.rollback(cx).await;
+            let rollback = conn.rollback(cx).await;
+            let outcome = if rollback.is_ok() {
+                AuditOutcome::RolledBack
+            } else {
+                mark_connection_quarantined(
+                    ctx.quarantine,
+                    AuditOutcome::UnknownDiscarded,
+                    format!("patch execution failed and rollback cleanup failed: {e}"),
+                )?;
+                AuditOutcome::UnknownDiscarded
+            };
+            append_audit(
+                audit.auditor,
+                audit.subject,
+                tool_name,
+                &patched_ddl,
+                &danger_str,
+                None,
+                outcome,
+            )?;
+            if outcome == AuditOutcome::RolledBack {
+                resolve_write_intent_after_db(
+                    &ctx,
+                    write_intent_id.as_deref(),
+                    WriteIntentOutcome::RolledBack,
+                    "patch execution failed and rollback completed",
+                )?;
+            }
+            if let Err(cleanup_err) = rollback {
+                return Err(quarantined_db_error(
+                    QuarantineOutcome::UnknownDiscarded,
+                    format!("patch execution failed and rollback cleanup failed: {cleanup_err}"),
+                )
+                .into_envelope());
+            }
             return Err(DbError::into_envelope(e));
         }
     };
     if let Err(e) = commit_conn(cx, conn).await {
-        let _ = conn.rollback(cx).await;
-        return Err(DbError::into_envelope(e));
+        mark_connection_quarantined(
+            ctx.quarantine,
+            AuditOutcome::CommitInDoubt,
+            format!("patch commit failed after {rows_affected} affected row(s): {e}"),
+        )?;
+        append_audit(
+            audit.auditor,
+            audit.subject,
+            tool_name,
+            &patched_ddl,
+            &danger_str,
+            Some(rows_affected),
+            AuditOutcome::CommitInDoubt,
+        )?;
+        return Err(quarantined_db_error(
+            QuarantineOutcome::CommitInDoubt,
+            format!("patch commit failed after {rows_affected} affected row(s): {e}"),
+        )
+        .into_envelope());
     }
+    append_audit(
+        audit.auditor,
+        audit.subject,
+        tool_name,
+        &patched_ddl,
+        &danger_str,
+        Some(rows_affected),
+        AuditOutcome::Succeeded,
+    )?;
+    resolve_write_intent_after_db(
+        &ctx,
+        write_intent_id.as_deref(),
+        WriteIntentOutcome::Succeeded,
+        "patch commit completed",
+    )?;
     let include_errors = args.include_errors.unwrap_or(true);
     let errors = if include_errors {
         dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.compile_errors.before")?;
@@ -3173,42 +3862,53 @@ async fn patch_source_inner(
     ))
 }
 
-// Audit context (auditor + agent_identity) is threaded through the DDL path so
+// Audit context (auditor + subject) is threaded through the DDL path so
 // every CREATE OR REPLACE is hash-chained (A8). TODO(simplify): bundle the audit
 // context into an `AuditCtx` to drop back under the arg-count lint.
 async fn create_or_replace(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    active_profile: Option<&str>,
-    session: &SessionLevelState,
-    audit: AuditCtx<'_>,
+    ctx: DbToolCtx<'_>,
     tool_name: &str,
     args: CreateOrReplaceArgs,
 ) -> Result<Value, ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
-    with_call_timeout(cx, conn, timeout_seconds, || {
-        create_or_replace_inner(cx, conn, active_profile, session, audit, tool_name, args)
-    })
+    with_call_timeout(
+        ctx.cx,
+        ctx.conn,
+        ctx.request_budget,
+        timeout_seconds,
+        || create_or_replace_inner(ctx, tool_name, args),
+    )
     .await
 }
 
 async fn create_or_replace_inner(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    active_profile: Option<&str>,
-    session: &SessionLevelState,
-    audit: AuditCtx<'_>,
+    ctx: DbToolCtx<'_>,
     tool_name: &str,
     args: CreateOrReplaceArgs,
 ) -> Result<Value, ErrorEnvelope> {
+    let cx = ctx.cx;
+    let conn = ctx.conn;
+    let active_profile = ctx.active_profile;
+    let session = ctx.session;
     let source = create_or_replace_source_arg(tool_name, args.source_code)?;
     let decision = DEFAULT_CLASSIFIER.classify(&source);
     let gate = decision.gate(session);
     let (gate_decision, blocked_reason, step_up_target) = gate_decision_json(&gate);
     let detected = detect_create_or_replace_object(cx, conn, &source).await;
-    let confirm = match (decision.required_level, &gate) {
-        (Some(level), LevelDecision::Allow) if level >= OperatingLevel::Ddl => {
-            execute_confirmation_token(&source, level, active_profile)
+    let confirm = match (args.execute, decision.required_level, &gate) {
+        (false, Some(level), LevelDecision::Allow) if level >= OperatingLevel::Ddl => {
+            let raw = ctx.execute_grants.issue(
+                &source,
+                ctx.grant_binding.clone(),
+                level,
+                Duration::from_secs(EXECUTE_APPROVED_TOKEN_TTL_SECONDS),
+            );
+            Some(sign_execute_grant_reference(
+                &raw,
+                ctx.grant_binding,
+                active_profile,
+                level,
+            ))
         }
         _ => None,
     };
@@ -3245,11 +3945,7 @@ async fn create_or_replace_inner(
         return Err(execute_gate_error(&decision, gate, session));
     }
     let mut executed = execute_sql(
-        cx,
-        conn,
-        active_profile,
-        session,
-        audit,
+        ctx,
         ExecuteArgs {
             sql: source.clone(),
             binds: Vec::new(),
@@ -3298,29 +3994,21 @@ async fn create_or_replace_inner(
     Ok(executed)
 }
 
-async fn deploy_ddl(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    active_profile: Option<&str>,
-    session: &SessionLevelState,
-    audit: AuditCtx<'_>,
-    args: DeployDdlArgs,
-) -> Result<Value, ErrorEnvelope> {
+async fn deploy_ddl(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Value, ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
-    with_call_timeout(cx, conn, timeout_seconds, || {
-        deploy_ddl_inner(cx, conn, active_profile, session, audit, args)
-    })
+    with_call_timeout(
+        ctx.cx,
+        ctx.conn,
+        ctx.request_budget,
+        timeout_seconds,
+        || deploy_ddl_inner(ctx, args),
+    )
     .await
 }
 
-async fn deploy_ddl_inner(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    active_profile: Option<&str>,
-    session: &SessionLevelState,
-    audit: AuditCtx<'_>,
-    args: DeployDdlArgs,
-) -> Result<Value, ErrorEnvelope> {
+async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Value, ErrorEnvelope> {
+    let active_profile = ctx.active_profile;
+    let session = ctx.session;
     let ddl = required_non_empty_arg("deploy_ddl", "ddl", args.ddl)?;
     let deploy_name = non_empty_arg(args.name);
     let wait_seconds = args.wait_seconds.unwrap_or(0);
@@ -3330,11 +4018,7 @@ async fn deploy_ddl_inner(
         .starts_with("CREATE OR REPLACE ")
     {
         let mut out = create_or_replace(
-            cx,
-            conn,
-            active_profile,
-            session,
-            audit,
+            ctx,
             "deploy_ddl",
             CreateOrReplaceArgs {
                 source_code: Some(ddl),
@@ -3371,7 +4055,13 @@ async fn deploy_ddl_inner(
     }
 
     if !args.execute {
-        let mut preview = preview_sql(&ddl, session, active_profile);
+        let mut preview = preview_sql(
+            &ddl,
+            session,
+            active_profile,
+            ctx.execute_grants,
+            ctx.grant_binding,
+        );
         if let Value::Object(map) = &mut preview {
             map.insert("preview".to_owned(), json!(true));
             map.insert("applied".to_owned(), json!(false));
@@ -3400,11 +4090,7 @@ async fn deploy_ddl_inner(
     }
 
     let mut out = execute_sql(
-        cx,
-        conn,
-        active_profile,
-        session,
-        audit,
+        ctx,
         ExecuteArgs {
             sql: ddl,
             binds: Vec::new(),
@@ -3479,7 +4165,13 @@ impl CustomToolExecutor for ReadOnlyCustomToolExecutor<'_> {
     }
 }
 
-fn preview_sql(sql: &str, session: &SessionLevelState, active_profile: Option<&str>) -> Value {
+fn preview_sql(
+    sql: &str,
+    session: &SessionLevelState,
+    active_profile: Option<&str>,
+    grants: &ExecGrantStore,
+    binding: &ExecGrantBinding,
+) -> Value {
     let decision = DEFAULT_CLASSIFIER.classify(sql);
     let gate = decision.gate(session);
     let (gate_decision, blocked_reason, step_up_target) = match gate {
@@ -3503,6 +4195,24 @@ fn preview_sql(sql: &str, session: &SessionLevelState, active_profile: Option<&s
         }
         _ => ("unknown", Value::Null, Value::Null),
     };
+    let execute_confirm = match (decision.required_level, &gate) {
+        (Some(level), LevelDecision::Allow) if level > OperatingLevel::ReadOnly => {
+            grants.purge_expired();
+            let raw = grants.issue(
+                sql,
+                binding.clone(),
+                level,
+                Duration::from_secs(EXECUTE_APPROVED_TOKEN_TTL_SECONDS),
+            );
+            Some(sign_execute_grant_reference(
+                &raw,
+                binding,
+                active_profile,
+                level,
+            ))
+        }
+        _ => None,
+    };
 
     json!({
         "danger": decision.danger,
@@ -3520,8 +4230,12 @@ fn preview_sql(sql: &str, session: &SessionLevelState, active_profile: Option<&s
         "objects_affected": decision.objects_affected,
         "reason": decision.reason,
         "safe_alternative": decision.safe_alternative,
-        "execute_confirmation": execute_confirmation_json(sql, &decision, &gate, active_profile),
-        "next_actions": preview_next_actions(sql, &decision, &gate, active_profile),
+        "execute_confirmation": execute_confirmation_json(
+            decision.required_level,
+            &gate,
+            execute_confirm.as_deref(),
+        ),
+        "next_actions": preview_next_actions(sql, &decision, &gate, execute_confirm.as_deref()),
     })
 }
 
@@ -3533,7 +4247,7 @@ fn connection_info_json(
         Ok(info) => json!({
             "active_profile": active_profile,
             "connected": true,
-            "connection": info,
+            "connection": info.redacted(),
         }),
         Err(err) => {
             let mut next_actions = vec![json!({
@@ -3615,6 +4329,10 @@ impl ToolDispatch for OracleDispatcher {
         args: Value,
     ) -> DispatchFuture<'a> {
         Box::pin(async move { self.dispatch_with_cx_inner(cx, context, name, args).await })
+    }
+
+    fn close<'a>(&'a self, cx: &'a Cx, reason: DispatchCloseReason) -> DispatchCloseFuture<'a> {
+        Box::pin(async move { self.close_with_cx(reason, cx).await })
     }
 }
 
@@ -3710,6 +4428,50 @@ impl OracleDispatcher {
             })
     }
 
+    async fn close_with_cx(
+        &self,
+        reason: DispatchCloseReason,
+        cx: &Cx,
+    ) -> Result<(), ErrorEnvelope> {
+        let mut state = self.state.lock(cx).await.map_err(|_| {
+            ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
+        })?;
+        let active_profile = state.active_profile.clone();
+        let subject = audit_subject(active_profile.as_deref());
+        state.level.drop_elevation();
+        state.grant_generation = state.grant_generation.saturating_add(1);
+        state.execute_grants.clear();
+        state.execute_approved_tokens.clear();
+        state.patch_previews.clear();
+        state.read_only_backstop.reset();
+
+        let rollback_result = state.conn.rollback(cx).await;
+        let outcome = match rollback_result {
+            Ok(()) => AuditOutcome::RolledBack,
+            Err(err) => {
+                mark_connection_quarantined(
+                    &self.quarantine,
+                    AuditOutcome::UnknownDiscarded,
+                    format!(
+                        "lane close rollback failed for reason {}: {err}",
+                        reason.as_str()
+                    ),
+                )?;
+                AuditOutcome::UnknownDiscarded
+            }
+        };
+
+        append_lifecycle_audit(self.auditor.as_deref(), &subject, reason, outcome)?;
+
+        tracing::info!(
+            close_reason = reason.as_str(),
+            active_profile = active_profile.as_deref().unwrap_or(""),
+            outcome = audit_outcome_label(outcome),
+            "stateful Oracle dispatcher lifecycle cleanup completed"
+        );
+        Ok(())
+    }
+
     async fn dispatch_with_cx_inner(
         &self,
         cx: &Cx,
@@ -3717,7 +4479,7 @@ impl OracleDispatcher {
         name: &str,
         args: Value,
     ) -> Result<Value, ErrorEnvelope> {
-        dispatch_checkpoint(cx, "oraclemcp.dispatch.start")?;
+        let request_budget = self.dispatch_request_budget(cx)?;
         let tool = canonical_tool_name(name);
         if tool == "oracle_switch_profile" {
             let a: SwitchProfileArgs = parse_args(name, args)?;
@@ -3759,7 +4521,9 @@ impl OracleDispatcher {
                     connection_strategy_json(cx, stateless_conn.as_ref()).await,
                 );
             }
-            let new_level = profile_level(&profile);
+            request_budget.enforce(cx).map_err(DbError::into_envelope)?;
+            let new_policy = profile_dispatch_policy(&profile);
+            let new_level = new_policy.level;
             let new_custom_catalog = match &self.custom_loader {
                 Some(loader) => loader(Some(&profile), &new_level)?,
                 None => CustomToolCatalog::default(),
@@ -3767,13 +4531,17 @@ impl OracleDispatcher {
             let mut state = self.state.lock(cx).await.map_err(|_| {
                 ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
             })?;
+            self.set_request_timeout(new_policy.request_timeout)?;
             state.conn = new_conn;
             state.stateless_conn = new_stateless_conn;
             state.active_profile = Some(profile.clone());
             state.level = new_level;
             state.custom_catalog = new_custom_catalog;
+            state.grant_generation = state.grant_generation.saturating_add(1);
+            state.execute_grants.clear();
             state.execute_approved_tokens.clear();
             state.patch_previews.clear();
+            self.clear_connection_quarantine()?;
             // A1: the pinned session was replaced; the new session's transaction
             // is fresh, so re-assert the read-only backstop on its first read.
             state.read_only_backstop.reset();
@@ -3794,6 +4562,21 @@ impl OracleDispatcher {
             return Ok(response);
         }
 
+        if let Some(quarantine) = self.connection_quarantine()? {
+            return Err(ErrorEnvelope::new(
+                ErrorClass::RuntimeStateRequired,
+                format!(
+                    "active Oracle connection is quarantined after {}: {}",
+                    audit_outcome_label(quarantine.outcome),
+                    quarantine.message
+                ),
+            )
+            .with_next_step("switch to a fresh profile connection or restart the server")
+            .with_next_step(
+                "do not retry non-idempotent work until the database outcome is verified",
+            ));
+        }
+
         // The async mutex serializes dispatch over the single connection and is
         // safe to hold across the DB `.await`s below (the dispatch future is
         // `!Send` and never spawned cross-thread). A lock failure surfaces as an
@@ -3806,41 +4589,72 @@ impl OracleDispatcher {
         if tool == "oracle_set_session_level" {
             let a: SetSessionLevelArgs = parse_args(name, args)?;
             let active_profile = state.active_profile.clone();
+            let grant_binding = grant_binding_for_context(&state, context);
             let before = state.level.effective_level();
-            let result = set_session_level_with_scope(
-                &mut state.level,
-                &scoped_level,
-                active_profile.as_deref(),
-                name,
-                a,
-                scoped,
-            );
+            let result = {
+                let DispatcherState {
+                    level,
+                    execute_grants,
+                    ..
+                } = &mut *state;
+                set_session_level_with_scope(
+                    level,
+                    &scoped_level,
+                    SessionGrantContext {
+                        active_profile: active_profile.as_deref(),
+                        grants: execute_grants,
+                        binding: &grant_binding,
+                    },
+                    name,
+                    a,
+                    scoped,
+                )
+            };
+            let mut changed = false;
+            let after = state.level.effective_level();
+            if let Ok(value) = &result {
+                changed = value.get("changed").and_then(Value::as_bool) == Some(true);
+                if changed {
+                    state.grant_generation = state.grant_generation.saturating_add(1);
+                    state.execute_grants.clear();
+                    state.execute_approved_tokens.clear();
+                }
+            }
             // Audit a successful level INCREASE (step-up approval). De-escalation
             // and status reads are not escalations and are not chained.
-            if let (Ok(value), Some(auditor)) = (&result, self.auditor.as_deref()) {
+            if changed
+                && after > before
+                && let Some(auditor) = self.auditor.as_deref()
+            {
                 let after = state.level.effective_level();
-                let changed = value.get("changed").and_then(Value::as_bool) == Some(true);
-                if changed && after > before {
-                    let agent_identity = audit_agent_identity(active_profile.as_deref());
-                    let draft = AuditEntryDraft {
-                        agent_identity,
-                        tool: "oracle_set_session_level".to_owned(),
-                        sql: format!("ESCALATE {} -> {}", before.as_str(), after.as_str()),
-                        danger_level: after.as_str().to_owned(),
-                        decision: AuditDecision::StepUpRequired,
-                        rows_affected: None,
-                        outcome: AuditOutcome::Succeeded,
-                    };
-                    auditor
-                        .append(&draft, audit_timestamp(), true)
-                        .map_err(audit_error_to_envelope)?;
-                }
+                let subject = audit_subject(active_profile.as_deref());
+                let draft = AuditEntryDraft {
+                    subject,
+                    db_evidence: None,
+                    cancel: None,
+                    tool: "oracle_set_session_level".to_owned(),
+                    sql: format!("ESCALATE {} -> {}", before.as_str(), after.as_str()),
+                    danger_level: after.as_str().to_owned(),
+                    decision: AuditDecision::StepUpRequired,
+                    rows_affected: None,
+                    outcome: AuditOutcome::Succeeded,
+                };
+                auditor
+                    .append(&draft, audit_timestamp(), true)
+                    .map_err(audit_error_to_envelope)?;
             }
             return result;
         }
         if tool == "oracle_preview_sql" {
             let a: PreviewSqlArgs = parse_args(name, args)?;
-            let preview = preview_sql(&a.sql, &scoped_level, state.active_profile.as_deref());
+            let binding = grant_binding_for_context(&state, context);
+            let preview = preview_sql(
+                &a.sql,
+                &scoped_level,
+                state.active_profile.as_deref(),
+                &state.execute_grants,
+                &binding,
+            );
             remember_execute_approved_token(&mut state, &a.sql, &preview);
             return Ok(preview);
         }
@@ -3848,7 +4662,8 @@ impl OracleDispatcher {
             let a: ExecuteApprovedArgs = parse_args(name, args)?;
             let execute_args = execute_approved_args(&mut state, &scoped_level, a)?;
             let active_profile = state.active_profile.clone();
-            let agent_identity = audit_agent_identity(active_profile.as_deref());
+            let subject = audit_subject(active_profile.as_deref());
+            let grant_binding = grant_binding_for_context(&state, context);
             // A1: a gated write commits/rolls back the pinned session's
             // transaction, so disarm the read-only backstop before it runs (the
             // authorized write must never be refused with ORA-01456) and let the
@@ -3857,30 +4672,47 @@ impl OracleDispatcher {
             let conn: &dyn OracleConnection = state.conn.as_ref();
             let audit = AuditCtx {
                 auditor: self.auditor.as_deref(),
-                agent_identity: &agent_identity,
+                subject: &subject,
             };
-            return execute_sql(
+            let tool_ctx = DbToolCtx {
                 cx,
                 conn,
-                active_profile.as_deref(),
-                &scoped_level,
+                request_budget,
+                active_profile: active_profile.as_deref(),
+                session: &scoped_level,
+                execute_grants: &state.execute_grants,
+                grant_binding: &grant_binding,
+                write_intents: self.write_intents.as_deref(),
                 audit,
-                execute_args,
-            )
-            .await;
+                quarantine: &self.quarantine,
+            };
+            return execute_sql(tool_ctx, execute_args).await;
         }
         if tool == "deploy_ddl" {
             let a: DeployDdlArgs = parse_args(name, args)?;
             let active_profile = state.active_profile.clone();
-            let agent_identity = audit_agent_identity(active_profile.as_deref());
+            let subject = audit_subject(active_profile.as_deref());
+            let grant_binding = grant_binding_for_context(&state, context);
             // A1: see execute_approved — disarm before a gated write/DDL.
             state.read_only_backstop.disarm();
             let conn: &dyn OracleConnection = state.conn.as_ref();
             let audit = AuditCtx {
                 auditor: self.auditor.as_deref(),
-                agent_identity: &agent_identity,
+                subject: &subject,
             };
-            return deploy_ddl(cx, conn, active_profile.as_deref(), &scoped_level, audit, a).await;
+            let tool_ctx = DbToolCtx {
+                cx,
+                conn,
+                request_budget,
+                active_profile: active_profile.as_deref(),
+                session: &scoped_level,
+                execute_grants: &state.execute_grants,
+                grant_binding: &grant_binding,
+                write_intents: self.write_intents.as_deref(),
+                audit,
+                quarantine: &self.quarantine,
+            };
+            return deploy_ddl(tool_ctx, a).await;
         }
         if tool == "read_patch_preview" {
             let a: ReadPatchPreviewArgs = parse_args(name, args)?;
@@ -3959,7 +4791,14 @@ impl OracleDispatcher {
             let export_scopes = context.scope_grant().map(|grant| grant.0.clone());
             let conn: &dyn OracleConnection = state.conn.as_ref();
             return self
-                .run_prepared_query(cx, conn, active_profile, export_scopes, prepared)
+                .run_prepared_query(
+                    cx,
+                    conn,
+                    request_budget,
+                    active_profile,
+                    export_scopes,
+                    prepared,
+                )
                 .await;
         }
         let conn: &dyn OracleConnection = state.conn.as_ref();
@@ -3979,62 +4818,91 @@ impl OracleDispatcher {
             }
             "oracle_execute" => {
                 let a: ExecuteArgs = parse_args(name, args)?;
-                let agent_identity = audit_agent_identity(state.active_profile.as_deref());
+                let subject = audit_subject(state.active_profile.as_deref());
+                let grant_binding = grant_binding_for_context(&state, context);
                 let audit = AuditCtx {
                     auditor: self.auditor.as_deref(),
-                    agent_identity: &agent_identity,
+                    subject: &subject,
                 };
-                return execute_sql(
+                let tool_ctx = DbToolCtx {
                     cx,
                     conn,
-                    state.active_profile.as_deref(),
-                    &scoped_level,
+                    request_budget,
+                    active_profile: state.active_profile.as_deref(),
+                    session: &scoped_level,
+                    execute_grants: &state.execute_grants,
+                    grant_binding: &grant_binding,
+                    write_intents: self.write_intents.as_deref(),
                     audit,
-                    a,
-                )
-                .await;
+                    quarantine: &self.quarantine,
+                };
+                return execute_sql(tool_ctx, a).await;
             }
             "oracle_compile_object" => {
                 let a: CompileObjectArgs = parse_args(name, args)?;
-                return compile_object(
+                let subject = audit_subject(state.active_profile.as_deref());
+                let grant_binding = grant_binding_for_context(&state, context);
+                let audit = AuditCtx {
+                    auditor: self.auditor.as_deref(),
+                    subject: &subject,
+                };
+                let tool_ctx = DbToolCtx {
                     cx,
                     conn,
-                    state.active_profile.as_deref(),
-                    &scoped_level,
-                    name,
-                    a,
-                )
-                .await;
+                    request_budget,
+                    active_profile: state.active_profile.as_deref(),
+                    session: &scoped_level,
+                    execute_grants: &state.execute_grants,
+                    grant_binding: &grant_binding,
+                    write_intents: self.write_intents.as_deref(),
+                    audit,
+                    quarantine: &self.quarantine,
+                };
+                return compile_object(tool_ctx, name, a).await;
             }
             "oracle_create_or_replace" => {
                 let a: CreateOrReplaceArgs = parse_args(name, args)?;
-                let agent_identity = audit_agent_identity(state.active_profile.as_deref());
+                let subject = audit_subject(state.active_profile.as_deref());
+                let grant_binding = grant_binding_for_context(&state, context);
                 let audit = AuditCtx {
                     auditor: self.auditor.as_deref(),
-                    agent_identity: &agent_identity,
+                    subject: &subject,
                 };
-                return create_or_replace(
+                let tool_ctx = DbToolCtx {
                     cx,
                     conn,
-                    state.active_profile.as_deref(),
-                    &scoped_level,
+                    request_budget,
+                    active_profile: state.active_profile.as_deref(),
+                    session: &scoped_level,
+                    execute_grants: &state.execute_grants,
+                    grant_binding: &grant_binding,
+                    write_intents: self.write_intents.as_deref(),
                     audit,
-                    name,
-                    a,
-                )
-                .await;
+                    quarantine: &self.quarantine,
+                };
+                return create_or_replace(tool_ctx, name, a).await;
             }
             "oracle_patch_source" => {
                 let a: PatchSourceArgs = parse_args(name, args)?;
-                let (value, preview_entry) = patch_source(
+                let subject = audit_subject(state.active_profile.as_deref());
+                let grant_binding = grant_binding_for_context(&state, context);
+                let audit = AuditCtx {
+                    auditor: self.auditor.as_deref(),
+                    subject: &subject,
+                };
+                let tool_ctx = DbToolCtx {
                     cx,
                     conn,
-                    state.active_profile.as_deref(),
-                    &scoped_level,
-                    name,
-                    a,
-                )
-                .await?;
+                    request_budget,
+                    active_profile: state.active_profile.as_deref(),
+                    session: &scoped_level,
+                    execute_grants: &state.execute_grants,
+                    grant_binding: &grant_binding,
+                    write_intents: self.write_intents.as_deref(),
+                    audit,
+                    quarantine: &self.quarantine,
+                };
+                let (value, preview_entry) = patch_source(tool_ctx, name, a).await?;
                 if let Some(preview_entry) = preview_entry {
                     remember_patch_preview(&mut state, preview_entry);
                 }
@@ -4355,7 +5223,7 @@ impl OracleDispatcher {
                 // by default; AWR only when the Diagnostics Pack is licensed, else
                 // Statspack, else a structured-unavailable error), build the ranked
                 // SQL, and run it as a bounded read.
-                return with_call_timeout(cx, conn, timeout_seconds, || async {
+                return with_call_timeout(cx, conn, request_budget, timeout_seconds, || async {
                     let source = oraclemcp_db::resolve_top_sql_source(cx, conn, historical).await;
                     let sql = oraclemcp_db::top_sql_query(source, metric, top_n, min_pct)?;
                     let rows = conn
@@ -4381,7 +5249,7 @@ impl OracleDispatcher {
                 // any per-subcheck failure becomes a structured `skipped` finding
                 // rather than failing the whole call. Unknown subcheck names are
                 // reported, never fatal.
-                return with_call_timeout(cx, conn, timeout_seconds, || async {
+                return with_call_timeout(cx, conn, request_budget, timeout_seconds, || async {
                     let findings = oraclemcp_db::run_health(cx, conn, &request.subchecks).await;
                     let checks_run: Vec<&str> = findings
                         .iter()
@@ -4565,6 +5433,7 @@ impl OracleDispatcher {
         &self,
         cx: &Cx,
         conn: &dyn OracleConnection,
+        request_budget: RequestBudget,
         active_profile: Option<String>,
         export_scopes: Option<Vec<String>>,
         prepared: QueryPrepared,
@@ -4583,7 +5452,7 @@ impl OracleDispatcher {
         // object-safe and takes the full `&Cx`) is handed the full `cx`, the one
         // documented IO exception.
         let read_cx = narrow_to_read_path(cx);
-        with_call_timeout(cx, conn, timeout_seconds, || async {
+        with_call_timeout(cx, conn, request_budget, timeout_seconds, || async {
             dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.query.before")?;
             // The read-only gate was computed ONCE up front (classified ==
             // executed); reuse the same verdict here. `executed_sql` is the

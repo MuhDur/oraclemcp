@@ -60,7 +60,7 @@ Harnesses:
 | HTTP sessions | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
 
-Total tracked requirements: 31 MUST, 2 SHOULD, 33 tested.
+Total tracked requirements: 34 MUST, 2 SHOULD, 36 tested.
 
 ## Requirement IDs
 
@@ -97,6 +97,9 @@ Total tracked requirements: 31 MUST, 2 SHOULD, 33 tested.
 | HTTP-AUTH-004 | MUST | HTTP OAuth | Narrow, broad, and profile-protected OAuth scope ceilings are enforced at dispatch through the binary HTTP transport. |
 | HTTP-GUARD-001 | MUST | HTTP guards | A disallowed browser `Origin` is rejected with `403` before MCP dispatch. |
 | HTTP-SESSION-001 | MUST | HTTP sessions | Stateful HTTP rejects forged or unknown `mcp-session-id` values before MCP dispatch. |
+| HTTP-SESSION-002 | MUST | HTTP sessions | Stateful GET replays buffered SSE responses after `cursor` / `Last-Event-ID`; stateless DELETE returns 405 instead of a false session-close acceptance. |
+| HTTP-ROUTE-001 | MUST | HTTP routing | `/operator/v1` API routes return typed JSON 404 responses and preserve parsed query filters; they never fall through to a SPA/history HTML response. |
+| HTTP-NEG-001 | MUST | HTTP negotiation | `/mcp` POST rejects unacceptable `Accept` and unsupported `Content-Type` values before JSON-RPC dispatch. |
 | HTTPS-001 | MUST | HTTPS / mTLS | Server-only native TLS accepts a valid HTTPS handshake. |
 | HTTPS-002 | MUST | HTTPS / mTLS | Native mTLS rejects clients without a certificate and accepts a client certificate signed by the configured CA. |
 
@@ -110,6 +113,9 @@ Total tracked requirements: 31 MUST, 2 SHOULD, 33 tested.
 | HTTP-AUTH-004 | `crates/oraclemcp/tests/e2e_http_oauth.rs::binary_http_oauth_serves_metadata_and_applies_scope_ceilings` |
 | HTTP-GUARD-001 | `crates/oraclemcp/tests/e2e_http_oauth.rs::binary_http_rejects_bad_origin_and_forged_stateful_sessions`; `tests/golden/http/served_auth_scope_session_matrix.json` |
 | HTTP-SESSION-001 | `crates/oraclemcp/tests/e2e_http_oauth.rs::binary_http_rejects_bad_origin_and_forged_stateful_sessions`; `tests/golden/http/served_auth_scope_session_matrix.json` |
+| HTTP-SESSION-002 | `crates/oraclemcp-core/src/http.rs::tests::stateful_get_replays_buffered_lane_results_by_cursor`; `crates/oraclemcp-core/src/http.rs::tests::stateless_delete_is_method_not_allowed_not_false_accepted` |
+| HTTP-ROUTE-001 | `crates/oraclemcp-core/src/http.rs::tests::operator_api_routes_are_typed_json_404_and_parse_query` |
+| HTTP-NEG-001 | `crates/oraclemcp-core/src/http.rs::tests::mcp_post_enforces_accept_and_content_type_negotiation` |
 | HTTPS-001 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_accepts_tls_handshake` |
 | HTTPS-002 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_requires_client_certificate_when_mtls_is_configured` |
 

@@ -7,10 +7,10 @@ runbook detail. Cross-references point there rather than repeating procedure.
 `oraclemcp` is **governed and least-privilege**, not read-only-only: a
 fail-closed SQL classifier gates an explicit operating-level ladder
 `READ_ONLY < READ_WRITE < DDL < ADMIN`. It is read-only by default and
-escalation-capable up to `ADMIN` only through a confirmation-token step-up that
-is TTL-bounded and capped by each profile's `max_level`. Hardening is about
-configuring those bounds tightly and adding a database account that cannot write
-on its own — defense in depth.
+escalation-capable up to `ADMIN` only through a single-use confirmation-grant
+step-up that is TTL-bounded and capped by each profile's `max_level`. Hardening
+is about configuring those bounds tightly and adding a database account that
+cannot write on its own — defense in depth.
 
 ---
 
@@ -64,8 +64,9 @@ vulnerability-reporting policy and supported versions are in the repo-root
       carry a valid HMAC signature (implied by `protected = true`). The
       classifier only loads custom tools it proves are `READ_ONLY`, even on a
       higher-ceiling profile.
-- [ ] Store credentials via `credential_ref = "env:VAR"` (or a vault ref), never
-      `literal:`. Literal credentials are rejected on protected profiles.
+- [ ] Store credentials via external refs such as `credential_ref = "env:VAR"`,
+      `file:/path`, or `keyring:service/account`; keep `literal:` for local
+      development only. Literal credentials are rejected on protected profiles.
 
 ### Network / transport
 
@@ -93,6 +94,10 @@ vulnerability-reporting policy and supported versions are in the repo-root
       labeled `key_id` for rotation. Privileged actions write to a hash-chained,
       HMAC-SHA256-signed log.
 - [ ] Protect and back up the audit log; treat it as a security record.
+- [ ] For any profile that can reach `READ_WRITE` or above, mount a persistent,
+      private state directory and set `XDG_STATE_HOME` so the durable
+      write-intent log survives restarts. An unresolved intent must be treated
+      as in-doubt and verified before a writable server is restarted.
 - [ ] Periodically and after any incident, run `oraclemcp audit verify <file>`
       — it recomputes every hash link and re-checks the keyed MAC, exiting
       non-zero on tampering. See
@@ -129,8 +134,9 @@ vulnerability-reporting policy and supported versions are in the repo-root
       and [`TOOLCHAIN.md`](TOOLCHAIN.md) for the re-pin runbook.
 - [ ] Every crate is `#![forbid(unsafe_code)]` and the workspace builds with
       `panic = "unwind"` so lane-level panic containment can quarantine failed
-      DB lanes; the fail-closed classifier carries a differential cargo-fuzz
-      target. Keep `cargo deny check` green on the pinned toolchain.
+      DB lanes and audit `unknown_discarded`; the fail-closed classifier carries
+      a differential cargo-fuzz target. Keep `cargo deny check` green on the
+      pinned toolchain.
 
 ---
 

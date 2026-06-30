@@ -245,6 +245,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn budget_meet_replaces_three_timers() {
+        let now = Time::from_secs(1_000);
+        let service_root = Budget::new()
+            .with_timeout(now, Duration::from_secs(60))
+            .with_poll_quota(50_000);
+        let profile_ceiling = Budget::new()
+            .with_timeout(now, Duration::from_secs(30))
+            .with_poll_quota(10_000);
+        let per_request_deadline = Budget::new()
+            .with_timeout(now, Duration::from_secs(7))
+            .with_poll_quota(20_000);
+
+        let effective = RequestBudget::from_budget(service_root)
+            .meet(profile_ceiling)
+            .meet(per_request_deadline)
+            .budget();
+
+        assert_eq!(effective.deadline, Some(now + Duration::from_secs(7)));
+        assert_eq!(effective.poll_quota, 10_000);
+        assert_eq!(
+            effective,
+            service_root
+                .meet(profile_ceiling)
+                .meet(per_request_deadline)
+        );
+    }
+
     // A zero timeout is floored so the budget is not born exhausted at `now`.
     #[test]
     fn zero_timeout_is_floored_above_now() {

@@ -90,7 +90,7 @@ pub use catalog_extract::{
 pub use connection::{DbmsOutput, OracleConnection, RustOracleConnection};
 pub use doctor::{OracleDriverPosture, detect_oracle_driver, oracle_driver_compiled};
 pub use drcp::{DrcpConfig, SessionPurity};
-pub use error::DbError;
+pub use error::{DbError, QuarantineOutcome};
 pub use health::{
     Finding, HealthSubcheck, ParsedHealthRequest, PreflightReport, Severity, SubcheckPreflight,
     ViewTier, buffer_cache_hit_ratio_sql, detect_view_tier, disabled_constraints_sql,
@@ -133,8 +133,10 @@ pub use serialize::{
 };
 pub use standby::{StandbyStatus, detect_standby};
 pub use types::{
-    OracleBackend, OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow,
-    OracleSessionIdentity,
+    DEFAULT_ORACLE_CALL_TIMEOUT, OracleBackend, OracleBind, OracleCell, OracleConnectOptions,
+    OracleConnectionInfo, OracleRow, OracleSessionIdentity, RedactedNamedOracleBinds,
+    RedactedOracleBind, RedactedOracleBinds, RedactedOracleConnectionInfo,
+    redacted_named_oracle_binds, redacted_oracle_binds,
 };
 
 pub use pool::{OracleConnectionManager, OraclePool, PoolMetrics, PoolSettings};

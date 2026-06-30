@@ -8,6 +8,7 @@
 //! all stateful DB work is marshaled to the owning lane.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
@@ -22,13 +23,16 @@ use asupersync::channel::{
     oneshot,
 };
 use asupersync::runtime::RuntimeBuilder;
-use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, Auditor};
+use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use parking_lot::Mutex;
 use serde_json::Value;
 
-use crate::admission::DEFAULT_RETRY_AFTER_MS;
-use crate::server::{DispatchContext, DispatchFuture, OwnedDispatchContext, ToolDispatch};
+use crate::admission::{AdmissionController, AdmissionPermit, DEFAULT_RETRY_AFTER_MS};
+use crate::http::HttpSessionLifecycle;
+use crate::server::{
+    DispatchCloseReason, DispatchContext, DispatchFuture, OwnedDispatchContext, ToolDispatch,
+};
 
 /// Default number of queued dispatch commands accepted by one lane.
 pub const DEFAULT_LANE_MAILBOX_CAPACITY: usize = 64;
@@ -149,6 +153,9 @@ enum LaneCommand {
         args: Value,
         reply: oneshot::Sender<Result<Value, ErrorEnvelope>>,
     },
+    Close {
+        reason: DispatchCloseReason,
+    },
 }
 
 struct LaneRuntimeInner {
@@ -157,11 +164,14 @@ struct LaneRuntimeInner {
     status: Arc<AtomicU8>,
     sender: Mutex<Option<mpsc::Sender<LaneCommand>>>,
     join: Mutex<Option<JoinHandle<()>>>,
+    _capacity_permit: Option<AdmissionPermit>,
 }
 
 impl Drop for LaneRuntimeInner {
     fn drop(&mut self) {
-        drop(self.sender.lock().take());
+        if let Some(sender) = self.sender.lock().take() {
+            let _ = enqueue_close(&sender, DispatchCloseReason::RuntimeDrop);
+        }
         if let Some(handle) = self.join.lock().take()
             && handle.thread().id() != thread::current().id()
         {
@@ -226,6 +236,26 @@ impl LaneRuntime {
         mailbox_capacity: usize,
         panic_auditor: Option<Arc<Auditor>>,
     ) -> Self {
+        Self::spawn_with_dispatch_factory_and_capacity(
+            name,
+            lane_context,
+            factory,
+            mailbox_capacity,
+            panic_auditor,
+            None,
+        )
+    }
+
+    /// Spawn a lane while holding an admission permit for the lane lifetime.
+    #[must_use]
+    pub fn spawn_with_dispatch_factory_and_capacity(
+        name: impl Into<String>,
+        lane_context: LaneContext,
+        factory: Arc<LaneDispatchFactory>,
+        mailbox_capacity: usize,
+        panic_auditor: Option<Arc<Auditor>>,
+        capacity_permit: Option<AdmissionPermit>,
+    ) -> Self {
         let name = name.into();
         let capacity = mailbox_capacity.max(1);
         let (sender, receiver) = mpsc::channel::<LaneCommand>(capacity);
@@ -254,6 +284,7 @@ impl LaneRuntime {
                 status,
                 sender: Mutex::new(Some(sender)),
                 join: Mutex::new(Some(join)),
+                _capacity_permit: capacity_permit,
             }),
         }
     }
@@ -292,6 +323,13 @@ impl LaneRuntime {
         self.inner.generation.load(Ordering::Acquire)
     }
 
+    /// Advance the lane generation after a profile, connection, or operating
+    /// level transition. Grants bind to this value, so a stale grant minted
+    /// before the transition cannot be consumed after it.
+    pub fn bump_generation(&self) -> u64 {
+        self.inner.generation.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
     /// Current lifecycle status.
     #[must_use]
     pub fn status(&self) -> LaneRuntimeStatus {
@@ -312,6 +350,28 @@ impl LaneRuntime {
                 format!("dispatch lane {} is stopped", self.name()),
             )
         })
+    }
+
+    /// Stop accepting new commands for this lane and join its thread once the
+    /// current bounded mailbox drains. This is the N5 Streamable HTTP DELETE
+    /// hook; full dirty-session rollback is owned by the lane dispatcher/lease
+    /// layer, while this handle tears down the transport-facing lane resource.
+    pub fn close(&self) {
+        self.close_with_reason(DispatchCloseReason::SessionDelete);
+    }
+
+    /// Stop accepting new commands and ask the lane-owned dispatcher to clean
+    /// up with the supplied lifecycle reason before the lane exits.
+    pub fn close_with_reason(&self, reason: DispatchCloseReason) {
+        let sender = self.inner.sender.lock().take();
+        if let Some(sender) = sender {
+            let _ = enqueue_close(&sender, reason);
+        }
+        if let Some(handle) = self.inner.join.lock().take()
+            && handle.thread().id() != thread::current().id()
+        {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -335,6 +395,8 @@ impl ToolDispatch for LaneRuntime {
             })?;
             let sender = self.sender()?;
             let (reply_tx, mut reply_rx) = oneshot::channel();
+            let lane_generation = self.generation();
+            let context = context.with_lane_identity(self.name(), lane_generation);
             let command = LaneCommand::Dispatch {
                 context: context.to_owned_context(),
                 name: name.to_owned(),
@@ -366,9 +428,20 @@ impl ToolDispatch for LaneRuntime {
 pub struct StatefulLaneDispatch {
     factory: Arc<LaneDispatchFactory>,
     panic_auditor: Option<Arc<Auditor>>,
+    admission: Option<Arc<AdmissionController>>,
     mailbox_capacity: usize,
     next_lane_id: AtomicU64,
     lanes: Mutex<HashMap<LaneKey, LaneRuntime>>,
+}
+
+impl fmt::Debug for StatefulLaneDispatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StatefulLaneDispatch")
+            .field("mailbox_capacity", &self.mailbox_capacity)
+            .field("admission", &self.admission.is_some())
+            .field("lane_count", &self.lanes.lock().len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl StatefulLaneDispatch {
@@ -392,13 +465,25 @@ impl StatefulLaneDispatch {
         Self {
             factory,
             panic_auditor,
+            admission: None,
             mailbox_capacity: DEFAULT_LANE_MAILBOX_CAPACITY,
             next_lane_id: AtomicU64::new(1),
             lanes: Mutex::new(HashMap::new()),
         }
     }
 
-    fn resolve_lane(&self, context: DispatchContext<'_>) -> Result<LaneRuntime, ErrorEnvelope> {
+    /// Install capacity admission for new lane allocation.
+    #[must_use]
+    pub fn with_admission_controller(mut self, admission: Arc<AdmissionController>) -> Self {
+        self.admission = Some(admission);
+        self
+    }
+
+    fn resolve_lane(
+        &self,
+        cx: &Cx,
+        context: DispatchContext<'_>,
+    ) -> Result<LaneRuntime, ErrorEnvelope> {
         let session_id = context.http_session_id().ok_or_else(lease_required)?;
         let principal_key = context.principal_key().unwrap_or("anonymous-http");
         let key = LaneKey::new(session_id, principal_key);
@@ -410,6 +495,11 @@ impl StatefulLaneDispatch {
         if let Some(lane) = lanes.get(&key).cloned() {
             return Ok(lane);
         }
+        let capacity_permit = self
+            .admission
+            .as_ref()
+            .map(|admission| admission.try_admit_capacity(cx, principal_key, "stateful_lane"))
+            .transpose()?;
         let lane_number = self.next_lane_id.fetch_add(1, Ordering::SeqCst);
         let lane_id = format!("http-lane-{lane_number}");
         let lane_context = LaneContext::new(
@@ -418,20 +508,77 @@ impl StatefulLaneDispatch {
             key.principal_key.clone(),
             1,
         );
-        let lane = LaneRuntime::spawn_with_dispatch_factory(
+        let lane = LaneRuntime::spawn_with_dispatch_factory_and_capacity(
             lane_id,
             lane_context,
             Arc::clone(&self.factory),
             self.mailbox_capacity,
             self.panic_auditor.clone(),
+            capacity_permit,
         );
         lanes.insert(key, lane.clone());
         Ok(lane)
     }
 
+    /// Close and forget the lane bound to one MCP session/principal pair.
+    ///
+    /// Returns `true` when a lane existed. New requests for the same pair must
+    /// initialize a fresh MCP session because the HTTP session store is removed
+    /// by the caller before this is invoked.
+    pub fn close_session(&self, session_id: &str, principal_key: &str) -> bool {
+        let lane = self
+            .lanes
+            .lock()
+            .remove(&LaneKey::new(session_id, principal_key));
+        if let Some(lane) = lane {
+            lane.close();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Close every registered lane and return how many were present.
+    pub fn close_all_sessions(&self) -> usize {
+        let lanes: Vec<LaneRuntime> = self.lanes.lock().drain().map(|(_, lane)| lane).collect();
+        let count = lanes.len();
+        for lane in lanes {
+            lane.close_with_reason(DispatchCloseReason::ServerShutdown);
+        }
+        count
+    }
+
     #[cfg(test)]
     fn lane_count(&self) -> usize {
         self.lanes.lock().len()
+    }
+}
+
+impl HttpSessionLifecycle for StatefulLaneDispatch {
+    fn close_session(&self, session_id: &str, principal_key: &str) -> bool {
+        StatefulLaneDispatch::close_session(self, session_id, principal_key)
+    }
+
+    fn close_session_with_reason(
+        &self,
+        session_id: &str,
+        principal_key: &str,
+        reason: DispatchCloseReason,
+    ) -> bool {
+        let lane = self
+            .lanes
+            .lock()
+            .remove(&LaneKey::new(session_id, principal_key));
+        if let Some(lane) = lane {
+            lane.close_with_reason(reason);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn close_all_sessions(&self) {
+        let _ = StatefulLaneDispatch::close_all_sessions(self);
     }
 }
 
@@ -444,7 +591,7 @@ impl ToolDispatch for StatefulLaneDispatch {
         args: Value,
     ) -> DispatchFuture<'a> {
         Box::pin(async move {
-            let lane = self.resolve_lane(context)?;
+            let lane = self.resolve_lane(cx, context)?;
             lane.dispatch(cx, context, name, args).await
         })
     }
@@ -474,6 +621,23 @@ fn lane_send_error<T>(name: &str, error: SendError<T>) -> ErrorEnvelope {
             ErrorClass::RuntimeStateRequired,
             format!("dispatch lane {name} send was cancelled before admission"),
         ),
+    }
+}
+
+fn enqueue_close(
+    sender: &mpsc::Sender<LaneCommand>,
+    reason: DispatchCloseReason,
+) -> Result<(), SendError<LaneCommand>> {
+    let command = LaneCommand::Close { reason };
+    match sender.try_send(command) {
+        Ok(()) => Ok(()),
+        Err(SendError::Full(command)) => block_on_lane_bridge(async {
+            let Some(cx) = Cx::current() else {
+                return Err(SendError::Cancelled(command));
+            };
+            sender.send(&cx, command).await
+        }),
+        Err(err) => Err(err),
     }
 }
 
@@ -515,13 +679,15 @@ fn audit_lane_panic(name: &str, auditor: Option<&Auditor>) {
         return;
     };
     let draft = AuditEntryDraft {
-        agent_identity: format!("lane:{name}"),
+        subject: AuditSubject::new("lane", name),
+        db_evidence: None,
+        cancel: None,
         tool: "lane_runtime".to_owned(),
         sql: "LANE_PANIC_UNKNOWN_DISCARDED".to_owned(),
         danger_level: "UNKNOWN".to_owned(),
         decision: AuditDecision::Blocked,
         rows_affected: None,
-        outcome: AuditOutcome::Failed,
+        outcome: AuditOutcome::UnknownDiscarded,
     };
     if let Err(err) = auditor.append(&draft, audit_timestamp(), true) {
         tracing::error!(
@@ -580,6 +746,20 @@ async fn run_lane_loop_with_factory(
                     .await;
                 let _ = reply.send_blocking(result);
             }
+            LaneCommand::Close { reason } => {
+                if let Some(dispatcher) = dispatcher.as_ref()
+                    && let Err(err) = dispatcher.close(&cx, reason).await
+                {
+                    tracing::warn!(
+                        lane = %lane_context.lane_id(),
+                        close_reason = reason.as_str(),
+                        error_class = ?err.error_class,
+                        error = %err.message,
+                        "stateful lane dispatcher cleanup returned an error"
+                    );
+                }
+                break;
+            }
         }
     }
 }
@@ -603,7 +783,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc as std_mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, MemoryAuditSink, SigningKey};
     use serde_json::json;
@@ -662,6 +842,36 @@ mod tests {
             Box::pin(async move {
                 let lane_thread = thread::current().id();
                 Ok(json!({ "lane_thread": format!("{lane_thread:?}") }))
+            })
+        }
+    }
+
+    struct CloseRecordingDispatch {
+        close_reasons: Arc<Mutex<Vec<DispatchCloseReason>>>,
+    }
+
+    impl ToolDispatch for CloseRecordingDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            Box::pin(async move {
+                let lane_thread = thread::current().id();
+                Ok(json!({ "lane_thread": format!("{lane_thread:?}") }))
+            })
+        }
+
+        fn close<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            reason: DispatchCloseReason,
+        ) -> crate::server::DispatchCloseFuture<'a> {
+            Box::pin(async move {
+                self.close_reasons.lock().push(reason);
+                Ok(())
             })
         }
     }
@@ -875,6 +1085,49 @@ mod tests {
     }
 
     #[test]
+    fn idle_lane_mailbox_wakes_for_cross_thread_close() {
+        let close_reasons = Arc::new(Mutex::new(Vec::new()));
+        let lane = LaneRuntime::spawn(
+            "idle-close-wake",
+            Arc::new(CloseRecordingDispatch {
+                close_reasons: Arc::clone(&close_reasons),
+            }),
+            4,
+        );
+
+        let initialized = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs Cx");
+            lane.dispatch(&cx, DispatchContext::default(), "init", Value::Null)
+                .await
+                .expect("lane initializes and replies")
+        });
+        assert!(initialized.get("lane_thread").is_some());
+
+        let lane_for_close = lane.clone();
+        let (closed_tx, closed_rx) = std_mpsc::channel();
+        thread::spawn(move || {
+            let started = Instant::now();
+            lane_for_close.close_with_reason(DispatchCloseReason::ServerShutdown);
+            closed_tx
+                .send(started.elapsed())
+                .expect("test waits for close completion");
+        });
+
+        let elapsed = closed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("cross-thread close wakes the idle lane mailbox");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "idle lane close should not wait for an external timeout"
+        );
+        assert_eq!(lane.status(), LaneRuntimeStatus::Stopped);
+        assert_eq!(
+            close_reasons.lock().as_slice(),
+            &[DispatchCloseReason::ServerShutdown]
+        );
+    }
+
+    #[test]
     fn cancelled_lane_dispatch_never_enqueues_command() {
         let (entered_tx, entered_rx) = std_mpsc::channel();
         let lane = LaneRuntime::spawn(
@@ -984,6 +1237,157 @@ mod tests {
     }
 
     #[test]
+    fn stateful_lane_capacity_refuses_before_factory_opens_connection() {
+        let factory_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted_runs = Arc::clone(&factory_runs);
+        let factory: Arc<LaneDispatchFactory> = Arc::new(move |_cx, _lane_context| {
+            counted_runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Ok(Arc::new(EchoThreadDispatch) as Arc<dyn ToolDispatch>) })
+        });
+        let registry = StatefulLaneDispatch::with_dispatch_factory(factory, None)
+            .with_admission_controller(Arc::new(AdmissionController::with_reserved(2, 10, 1, 0)));
+
+        let first = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs Cx");
+            registry
+                .dispatch(
+                    &cx,
+                    DispatchContext::default()
+                        .with_http_session_id("session-a")
+                        .with_principal_key("principal-a"),
+                    "stateful",
+                    Value::Null,
+                )
+                .await
+                .expect("first lane admits")
+        });
+        assert!(first.get("lane_thread").is_some());
+        assert_eq!(factory_runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let err = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs Cx");
+            registry
+                .dispatch(
+                    &cx,
+                    DispatchContext::default()
+                        .with_http_session_id("session-b")
+                        .with_principal_key("principal-b"),
+                    "stateful",
+                    Value::Null,
+                )
+                .await
+                .expect_err("regular stateful lane capacity is exhausted")
+        });
+        assert_eq!(err.error_class, ErrorClass::AtCapacity);
+        assert_eq!(err.retry_after_ms, Some(DEFAULT_RETRY_AFTER_MS));
+        assert!(
+            err.message.contains("\"operator_reserved\":1"),
+            "capacity snapshot should report reserved operator slot: {err:?}"
+        );
+        assert!(
+            !err.message.contains("principal-b"),
+            "capacity snapshot must not echo raw principal keys"
+        );
+        assert_eq!(
+            factory_runs.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "capacity rejection must happen before the lane factory can open a connection"
+        );
+        assert_eq!(registry.lane_count(), 1);
+    }
+
+    #[test]
+    fn stateful_lane_close_session_releases_capacity_for_new_lane() {
+        let factory_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted_runs = Arc::clone(&factory_runs);
+        let close_reasons = Arc::new(Mutex::new(Vec::new()));
+        let recorded_reasons = Arc::clone(&close_reasons);
+        let factory: Arc<LaneDispatchFactory> = Arc::new(move |_cx, _lane_context| {
+            counted_runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let close_reasons = Arc::clone(&recorded_reasons);
+            Box::pin(async move {
+                Ok(Arc::new(CloseRecordingDispatch { close_reasons }) as Arc<dyn ToolDispatch>)
+            })
+        });
+        let admission = Arc::new(AdmissionController::with_reserved(2, 10, 1, 0));
+        let registry = StatefulLaneDispatch::with_dispatch_factory(factory, None)
+            .with_admission_controller(Arc::clone(&admission));
+
+        let first = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs Cx");
+            registry
+                .dispatch(
+                    &cx,
+                    DispatchContext::default()
+                        .with_http_session_id("session-a")
+                        .with_principal_key("principal-a"),
+                    "stateful",
+                    Value::Null,
+                )
+                .await
+                .expect("first lane admits")
+        });
+        assert!(first.get("lane_thread").is_some());
+        assert_eq!(registry.lane_count(), 1);
+        assert_eq!(admission.available_global(), 0);
+
+        assert!(
+            registry.close_session("session-a", "principal-a"),
+            "existing lane should close"
+        );
+        assert_eq!(
+            close_reasons.lock().as_slice(),
+            &[DispatchCloseReason::SessionDelete]
+        );
+        assert_eq!(registry.lane_count(), 0);
+        assert_eq!(
+            admission.available_global(),
+            admission.regular_global_cap(),
+            "closing the session drops the lane's capacity permit"
+        );
+
+        let second = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs Cx");
+            registry
+                .dispatch(
+                    &cx,
+                    DispatchContext::default()
+                        .with_http_session_id("session-b")
+                        .with_principal_key("principal-b"),
+                    "stateful",
+                    Value::Null,
+                )
+                .await
+                .expect("capacity is available for a fresh lane after close")
+        });
+        assert!(second.get("lane_thread").is_some());
+        assert_eq!(registry.lane_count(), 1);
+        assert_eq!(factory_runs.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        assert_eq!(registry.close_all_sessions(), 1);
+        assert_eq!(
+            close_reasons.lock().as_slice(),
+            &[
+                DispatchCloseReason::SessionDelete,
+                DispatchCloseReason::ServerShutdown,
+            ]
+        );
+        assert_eq!(registry.lane_count(), 0);
+        assert_eq!(admission.available_global(), admission.regular_global_cap());
+    }
+
+    #[test]
+    fn lane_generation_is_monotonic_and_observable() {
+        let lane = LaneRuntime::spawn("generation-test", Arc::new(EchoThreadDispatch), 4);
+
+        assert_eq!(lane.generation(), 1);
+        assert_eq!(lane.bump_generation(), 2);
+        assert_eq!(lane.generation(), 2);
+        assert_eq!(lane.bump_generation(), 3);
+        assert_eq!(lane.generation(), 3);
+    }
+
+    #[test]
     fn lane_panic_is_quarantined_audited_and_sibling_lane_survives() {
         let memory_sink = Arc::new(MemoryAuditSink::new());
         let auditor = Arc::new(Auditor::new(
@@ -1011,9 +1415,10 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(memory_sink.flush_count(), 1);
         assert_eq!(records[0].agent_identity, "lane:panic-test");
+        assert_eq!(records[0].subject, AuditSubject::new("lane", "panic-test"));
         assert_eq!(records[0].tool, "lane_runtime");
         assert_eq!(records[0].sql_preview, "LANE_PANIC_UNKNOWN_DISCARDED");
-        assert_eq!(records[0].outcome, AuditOutcome::Failed);
+        assert_eq!(records[0].outcome, AuditOutcome::UnknownDiscarded);
 
         let sibling_result = block_on_lane_bridge(async {
             let cx = Cx::current().expect("bridge installs Cx");

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 // Cancellation checkpoints route through the single crate-wide
 // `connection::db_checkpoint`.
 use crate::connection::{OracleConnection, db_checkpoint};
-use crate::error::DbError;
+use crate::error::{DbError, QuarantineOutcome};
 
 /// Oracle limits: MODULE ≤ 48 chars, ACTION ≤ 32 chars (`DBMS_APPLICATION_INFO`).
 const MODULE_NAME: &str = "oraclemcp";
@@ -130,6 +130,8 @@ pub struct LeaseInfo {
     pub expires_in_ms: u128,
     /// Whether an explicit transaction is open on the session.
     pub in_transaction: bool,
+    /// Monotonic lease generation assigned when this physical session is pinned.
+    pub generation: u64,
 }
 
 /// The ground-truth impact of a previewed (and rolled-back) DML.
@@ -144,6 +146,7 @@ pub struct PreviewImpact {
 struct Lease {
     profile: String,
     agent_identity: String,
+    generation: u64,
     conn: Box<dyn OracleConnection>,
     deadline: MonotonicDeadline,
     ttl: Duration,
@@ -159,18 +162,29 @@ impl Lease {
             ttl_seconds: self.ttl.as_secs(),
             expires_in_ms: self.deadline.remaining().as_millis(),
             in_transaction: self.in_transaction,
+            generation: self.generation,
         }
     }
 
     /// Force-clean on expiry/release: roll back any open transaction. Dropping
     /// the `Lease` afterwards closes the physical session (clearing all session
-    /// state and returning it). Best-effort: the session is being torn down
-    /// regardless, so a cancelled/failed rollback is swallowed.
-    async fn force_rollback(&mut self, cx: &Cx) {
+    /// state). Callers that are already tearing the lease down may ignore the
+    /// error; callers deciding whether the lease remains reusable must inspect
+    /// it and quarantine on failure.
+    async fn force_rollback(&mut self, cx: &Cx) -> Result<(), DbError> {
         if self.in_transaction {
-            let _ = self.conn.rollback(cx).await;
+            let result = self.conn.rollback(cx).await;
             self.in_transaction = false;
+            result?;
         }
+        Ok(())
+    }
+}
+
+fn quarantine_error(outcome: QuarantineOutcome, message: impl Into<String>) -> DbError {
+    DbError::Quarantined {
+        outcome,
+        message: message.into(),
     }
 }
 
@@ -184,6 +198,7 @@ impl Lease {
 pub struct LeaseManager {
     leases: Mutex<HashMap<String, Arc<AsyncMutex<Lease>>>>,
     counter: AtomicU64,
+    generation: AtomicU64,
 }
 
 impl LeaseManager {
@@ -196,6 +211,10 @@ impl LeaseManager {
     fn next_id(&self) -> LeaseId {
         let n = self.counter.fetch_add(1, Ordering::SeqCst);
         LeaseId(format!("lease-{}-{n}", std::process::id()))
+    }
+
+    fn next_generation(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     /// Acquire a lease over an already-opened connection: apply the profile's
@@ -234,6 +253,7 @@ impl LeaseManager {
         let lease = Lease {
             profile,
             agent_identity,
+            generation: self.next_generation(),
             conn,
             deadline: MonotonicDeadline::after(ttl),
             ttl,
@@ -273,7 +293,7 @@ impl LeaseManager {
         let expired = {
             let mut lease = arc.lock(cx).await.map_err(lock_err)?;
             if lease.deadline.is_expired() {
-                lease.force_rollback(cx).await;
+                let _ = lease.force_rollback(cx).await;
                 true
             } else {
                 false
@@ -301,7 +321,7 @@ impl LeaseManager {
         if let Some(arc) = self.remove(&id.0)
             && let Ok(mut lease) = arc.lock(cx).await
         {
-            lease.force_rollback(cx).await;
+            let _ = lease.force_rollback(cx).await;
             // Dropping the Arc/Lease closes the physical session.
         }
     }
@@ -317,19 +337,45 @@ impl LeaseManager {
     /// Commit the leased session's transaction.
     pub async fn commit(&self, cx: &Cx, id: &LeaseId) -> Result<(), DbError> {
         let arc = self.live_lease(cx, &id.0).await?;
-        let mut lease = arc.lock(cx).await.map_err(lock_err)?;
-        lease.conn.commit(cx).await?;
-        lease.in_transaction = false;
-        Ok(())
+        let result = {
+            let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+            match lease.conn.commit(cx).await {
+                Ok(()) => {
+                    lease.in_transaction = false;
+                    Ok(())
+                }
+                Err(err) => Err(quarantine_error(
+                    QuarantineOutcome::CommitInDoubt,
+                    format!("commit failed; lease discarded: {err}"),
+                )),
+            }
+        };
+        if result.is_err() {
+            self.remove(&id.0);
+        }
+        result
     }
 
     /// Roll back the leased session's transaction.
     pub async fn rollback(&self, cx: &Cx, id: &LeaseId) -> Result<(), DbError> {
         let arc = self.live_lease(cx, &id.0).await?;
-        let mut lease = arc.lock(cx).await.map_err(lock_err)?;
-        lease.conn.rollback(cx).await?;
-        lease.in_transaction = false;
-        Ok(())
+        let result = {
+            let mut lease = arc.lock(cx).await.map_err(lock_err)?;
+            match lease.conn.rollback(cx).await {
+                Ok(()) => {
+                    lease.in_transaction = false;
+                    Ok(())
+                }
+                Err(err) => Err(quarantine_error(
+                    QuarantineOutcome::UnknownDiscarded,
+                    format!("rollback failed; lease discarded: {err}"),
+                )),
+            }
+        };
+        if result.is_err() {
+            self.remove(&id.0);
+        }
+        result
     }
 
     /// Create a savepoint on the leased session. `name` must be a simple
@@ -370,7 +416,7 @@ impl LeaseManager {
     ) -> Result<PreviewImpact, DbError> {
         const SP: &str = "oraclemcp_preview";
         let arc = self.live_lease(cx, &id.0).await?;
-        let mut discard_lease = false;
+        let mut discard_lease = None;
         let result = {
             let mut lease = arc.lock(cx).await.map_err(lock_err)?;
             let savepoint_sql = format!("SAVEPOINT {SP}");
@@ -391,17 +437,30 @@ impl LeaseManager {
                         rolled_back: true,
                     })
                 }
+                (Err(err), Ok(_)) if err.is_uncertain_session_state() => {
+                    discard_lease = Some(QuarantineOutcome::RolledBack);
+                    Err(quarantine_error(
+                        QuarantineOutcome::RolledBack,
+                        format!(
+                            "preview failed after an uncertain DB boundary; rollback-to-savepoint succeeded and lease was discarded: {err}"
+                        ),
+                    ))
+                }
                 (Err(err), Ok(_)) => Err(err),
                 (Ok(_), Err(cleanup_err)) | (Err(_), Err(cleanup_err)) => {
-                    lease.force_rollback(cx).await;
-                    discard_lease = true;
-                    Err(DbError::Execute(format!(
-                        "preview rollback failed; lease discarded: {cleanup_err}"
-                    )))
+                    let outcome = match lease.force_rollback(cx).await {
+                        Ok(()) => QuarantineOutcome::RolledBack,
+                        Err(_) => QuarantineOutcome::UnknownDiscarded,
+                    };
+                    discard_lease = Some(outcome);
+                    Err(quarantine_error(
+                        outcome,
+                        format!("preview rollback failed; lease discarded: {cleanup_err}"),
+                    ))
                 }
             }
         };
-        if discard_lease {
+        if discard_lease.is_some() {
             self.remove(&id.0);
         }
         result
@@ -464,7 +523,7 @@ impl LeaseManager {
         for id in &expired {
             if let Some(arc) = self.remove(id) {
                 if let Ok(mut lease) = arc.lock(cx).await {
-                    lease.force_rollback(cx).await;
+                    let _ = lease.force_rollback(cx).await;
                 }
                 count += 1;
             }
@@ -488,7 +547,7 @@ impl LeaseManager {
         let count = drained.len();
         for arc in &drained {
             if let Ok(mut lease) = arc.lock(cx).await {
-                lease.force_rollback(cx).await;
+                let _ = lease.force_rollback(cx).await;
             }
         }
         count
@@ -546,6 +605,14 @@ mod tests {
     }
 
     struct RollbackToSavepointFailsConn {
+        log: Arc<Mutex<MockLog>>,
+    }
+
+    struct CommitFailsConn {
+        log: Arc<Mutex<MockLog>>,
+    }
+
+    struct RollbackFailsConn {
         log: Arc<Mutex<MockLog>>,
     }
 
@@ -670,6 +737,80 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for CommitFailsConn {
+        fn backend(&self) -> crate::types::OracleBackend {
+            crate::types::OracleBackend::RustOracle
+        }
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.log.lock().unwrap().executed.push(sql.to_owned());
+            Ok(vec![])
+        }
+        async fn execute(&self, _cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
+            let mut log = self.log.lock().unwrap();
+            log.executed.push(sql.to_owned());
+            log.executed_binds.push((sql.to_owned(), binds.to_vec()));
+            Ok(0)
+        }
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            self.log.lock().unwrap().commits += 1;
+            Err(DbError::Execute(
+                "DPY-4011: commit response lost".to_owned(),
+            ))
+        }
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            self.log.lock().unwrap().rollbacks += 1;
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for RollbackFailsConn {
+        fn backend(&self) -> crate::types::OracleBackend {
+            crate::types::OracleBackend::RustOracle
+        }
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.log.lock().unwrap().executed.push(sql.to_owned());
+            Ok(vec![])
+        }
+        async fn execute(&self, _cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
+            let mut log = self.log.lock().unwrap();
+            log.executed.push(sql.to_owned());
+            log.executed_binds.push((sql.to_owned(), binds.to_vec()));
+            Ok(0)
+        }
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            self.log.lock().unwrap().commits += 1;
+            Ok(())
+        }
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            self.log.lock().unwrap().rollbacks += 1;
+            Err(DbError::Execute("rollback socket closed".to_owned()))
+        }
+    }
+
     fn mock() -> (Box<dyn OracleConnection>, Arc<Mutex<MockLog>>) {
         let log = Arc::new(Mutex::new(MockLog::default()));
         (Box::new(MockConn { log: log.clone() }), log)
@@ -722,6 +863,29 @@ mod tests {
             let info = mgr.info(&cx, &id).await.expect("info");
             assert_eq!(info.agent_identity, "agent-claude");
             assert!(!info.in_transaction);
+        });
+    }
+
+    #[test]
+    fn acquire_assigns_monotonic_lease_generation() {
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (conn1, _log1) = mock();
+            let first = mgr
+                .acquire(&cx, "dev", "agent-a", Duration::from_secs(900), &[], conn1)
+                .await
+                .expect("first acquire");
+            let (conn2, _log2) = mock();
+            let second = mgr
+                .acquire(&cx, "dev", "agent-b", Duration::from_secs(900), &[], conn2)
+                .await
+                .expect("second acquire");
+
+            let first_info = mgr.info(&cx, &first).await.expect("first info");
+            let second_info = mgr.info(&cx, &second).await.expect("second info");
+            assert_eq!(first_info.generation, 1);
+            assert_eq!(second_info.generation, 2);
+            assert!(second_info.generation > first_info.generation);
         });
     }
 
@@ -880,6 +1044,82 @@ mod tests {
     }
 
     #[test]
+    fn commit_failure_discards_lease_as_commit_in_doubt() {
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let log = Arc::new(Mutex::new(MockLog::default()));
+            let id = mgr
+                .acquire(
+                    &cx,
+                    "dev",
+                    "a",
+                    Duration::from_secs(900),
+                    &[],
+                    Box::new(CommitFailsConn { log: log.clone() }),
+                )
+                .await
+                .expect("acquire");
+            mgr.begin_transaction(&cx, &id).await.expect("begin");
+            let err = mgr
+                .commit(&cx, &id)
+                .await
+                .expect_err("lost commit response is in doubt");
+            assert!(
+                matches!(
+                    err,
+                    DbError::Quarantined {
+                        outcome: QuarantineOutcome::CommitInDoubt,
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
+            assert_eq!(log.lock().unwrap().commits, 1);
+            assert_eq!(mgr.active_count(), 0, "in-doubt commit quarantines lease");
+            assert!(
+                mgr.info(&cx, &id).await.is_err(),
+                "quarantined lease is never reused"
+            );
+        });
+    }
+
+    #[test]
+    fn rollback_failure_discards_lease_as_unknown() {
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let log = Arc::new(Mutex::new(MockLog::default()));
+            let id = mgr
+                .acquire(
+                    &cx,
+                    "dev",
+                    "a",
+                    Duration::from_secs(900),
+                    &[],
+                    Box::new(RollbackFailsConn { log: log.clone() }),
+                )
+                .await
+                .expect("acquire");
+            mgr.begin_transaction(&cx, &id).await.expect("begin");
+            let err = mgr
+                .rollback(&cx, &id)
+                .await
+                .expect_err("rollback failure quarantines");
+            assert!(
+                matches!(
+                    err,
+                    DbError::Quarantined {
+                        outcome: QuarantineOutcome::UnknownDiscarded,
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
+            assert_eq!(log.lock().unwrap().rollbacks, 1);
+            assert_eq!(mgr.active_count(), 0, "rollback failure drops lease");
+        });
+    }
+
+    #[test]
     fn expired_lease_forces_rollback_and_is_unusable() {
         // P0-4b: monotonic TTL; on expiry, force rollback + return.
         run_with_cx(|cx| async move {
@@ -978,7 +1218,16 @@ mod tests {
                 )
                 .await
                 .expect_err("preview cancellation is surfaced");
-            assert!(matches!(err, DbError::Cancelled(_)), "{err:?}");
+            assert!(
+                matches!(
+                    err,
+                    DbError::Quarantined {
+                        outcome: QuarantineOutcome::RolledBack,
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
 
             let executed = log.lock().unwrap().executed.clone();
             assert!(
@@ -995,8 +1244,8 @@ mod tests {
             );
             assert_eq!(
                 mgr.active_count(),
-                1,
-                "successful cleanup keeps the lease usable"
+                0,
+                "B1c: a cancelled preview discards the lease even when savepoint cleanup succeeds"
             );
         });
     }
@@ -1027,7 +1276,13 @@ mod tests {
                 .await
                 .expect_err("cleanup failure is surfaced");
             assert!(
-                matches!(err, DbError::Execute(ref msg) if msg.contains("lease discarded")),
+                matches!(
+                    err,
+                    DbError::Quarantined {
+                        outcome: QuarantineOutcome::RolledBack,
+                        ..
+                    }
+                ),
                 "{err:?}"
             );
             assert_eq!(

@@ -17,14 +17,16 @@ WORKDIR /src/oraclemcp
 # ---- default builder: engine-free oraclemcp ----
 FROM builder-base AS builder
 COPY . .
-RUN cargo build --release -p oraclemcp
+RUN test -f web/dist/index.html
+RUN cargo build --release -p oraclemcp --features dashboard-bundle
 
 # ---- optional builder: oraclemcp + PL/SQL intelligence engine ----
 # The feature build resolves published plsql-intelligence crates from crates.io.
 # No sibling checkout or named BuildKit context is required.
 FROM builder-base AS builder-plsql-intelligence
 COPY . .
-RUN cargo build --release -p oraclemcp --features plsql-intelligence
+RUN test -f web/dist/index.html
+RUN cargo build --release -p oraclemcp --features dashboard-bundle,plsql-intelligence
 
 # ---- optional runtime: PL/SQL intelligence tools enabled, no DB required ----
 FROM oraclelinux:9 AS runtime-plsql-intelligence

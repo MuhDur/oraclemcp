@@ -102,7 +102,7 @@ field is unset after inheritance.
 
 | Field | Type | Default | Required | Effect |
 |---|---|---|---|---|
-| `call_timeout_seconds` | integer | none | no | Per-round-trip Oracle call timeout, in seconds. Tools exposing `timeout_seconds` can override it for one call. Bounds individual round trips, not total wall-clock. |
+| `call_timeout_seconds` | integer | `30` | no | Oracle call timeout and total request-budget ceiling, in seconds. Omit for the 30s default. Set `0` only to disable the driver call timeout deliberately; `doctor` warns. Tools exposing `timeout_seconds` can tighten the budget for one call but cannot loosen the profile ceiling. |
 | `sdu` | integer | none | no | Thin Session Data Unit request size. Validated as `512..=65535`; omit to keep the negotiated default. |
 | `login_script` | path | none | no | Path to a login script run on lease acquire. Restricted to allowlisted `ALTER SESSION SET …` parameters. |
 | `login_statements` | array of strings | none | no | Inline login statements (allowlist-validated `ALTER SESSION SET …`). |
@@ -149,7 +149,7 @@ is **separate** from DRCP server routing.
 
 | Field | Type | Default | Effect |
 |---|---|---|---|
-| `max_size` | integer | `20` | Maximum pooled connections. Must be ≥ 1. This static default is the documented ceiling; the runtime clamps to `min(configured, cpu*2+1)`. |
+| `max_size` | integer | `16` | Maximum pooled connections. Must be ≥ 1. This static default is the documented ceiling; the runtime clamps to `min(configured, cpu*2+1)`. |
 | `min_idle` | integer | `2` | Minimum idle connections kept warm. Must be ≤ `max_size`. |
 | `acquire_timeout_secs` | integer | `5` | Seconds to wait for a checkout before returning `BUSY`. Must be ≥ 1. |
 | `statement_cache_size` | integer | `50` | Per-connection statement-cache size passed to the thin driver. |
@@ -182,8 +182,9 @@ All fields default to none and are profile-local (not shown by `list_profiles`).
 Connect-time fields (`edition`, `program`, `machine`, `os_user`, `terminal`,
 `driver_name`) are applied during thin authentication; `module`, `action`,
 `client_identifier`, and `client_info` are applied post-connect through Oracle
-session APIs. `oracle_connection_info` reports the session-visible fields for
-verification.
+session APIs. `oracle_connection_info` does not expose those values by default;
+it reports allow-listed connection posture and lists present identity/topology
+fields by name in `redacted_fields`.
 
 ---
 
@@ -260,13 +261,17 @@ is enumerated as a threat with its mitigation in
 ## Credentials and secret references
 
 `credential_ref`, `wallet_password_ref`, the audit `key_ref`, and the SIEM
-`siem_auth_header_ref` are **always references, never literal secrets**, and are
-never surfaced in `list_profiles` metadata or diagnostics. Supported forms:
+`siem_auth_header_ref` are resolved through the SecretResolver seam and are
+never surfaced in `list_profiles` metadata or diagnostics. Production profiles
+should use external references; the `literal:` form is a development escape
+hatch only and is rejected when `protected = true`. Supported forms:
 
 | Form | Meaning |
 |---|---|
 | `env:VAR_NAME` | Read from the process environment at use time. |
-| `vault:path` | Resolve from a secrets backend. |
+| `file:/path/to/secret` | Read a local secret file; one trailing line ending is stripped. |
+| `keyring:account` / `keyring:service/account` | Resolve through the OS keyring adapter (`ORACLEMCP_KEYRING_COMMAND`, then platform fallback). |
+| `vault:path` | Future backend seam; fails closed unless a Vault resolver is wired. |
 | `literal:value` | **Dev-only** inline value. **Rejected** when `protected = true`. |
 
 ---
@@ -275,7 +280,7 @@ never surfaced in `list_profiles` metadata or diagnostics. Supported forms:
 
 | Mode | How to configure | Status |
 |---|---|---|
-| **Password** | `username` + `credential_ref` (an `env:`/`vault:` ref). | Supported. |
+| **Password** | `username` + `credential_ref` (for example `env:`, `file:`, `keyring:`; `literal:` dev-only). | Supported. |
 | **Wallet / TCPS (TLS/mTLS)** | `[profiles.oci]` `wallet_location` (+ `wallet_password_ref` for an encrypted wallet), `ssl_server_dn_match`, `ssl_server_cert_dn`, `use_sni`; or a `tcps://…` / TLS-descriptor `connect_string`. Auto-login `cwallet.sso`, unencrypted `ewallet.pem`, and password-protected `ewallet.p12` are all supported. | Supported. |
 | **OCI IAM database token** | `[profiles.oci]` `use_iam_token = true` (+ optional `iam_config_profile`). | **Parses, fails closed today** — see below. |
 | **Proxy** | `[profiles.proxy_auth]` `proxy_user` + `target_schema`; `credential_ref` belongs to `proxy_user`. Needs `ALTER USER <target_schema> GRANT CONNECT THROUGH <proxy_user>`. | Supported. |
@@ -311,10 +316,23 @@ This parse-but-fail-closed behavior is covered by the
 | **stdio** | Default (`oraclemcp serve`). | The parent process is the trust boundary. |
 | **Streamable HTTP** | `serve --listen <addr>` + `[http]`. | **Fails closed**: binds only with OAuth bearer enforcement or `--allow-no-auth`; a non-loopback bind requires `ORACLEMCP_HTTP_ALLOW_REMOTE=1`. `Host`/`Origin` allowlists apply. |
 
+The HTTP router serves MCP only at `/mcp` and reserves `/operator/v1` for the
+versioned operator API; product binaries may also serve the embedded operator
+dashboard outside that API prefix. In stateful mode `/mcp` POST responses are
+retained in a bounded in-process result buffer; clients can reconnect with
+`GET /mcp?cursor=…` or `Last-Event-ID` to replay buffered SSE events. If the requested cursor has
+fallen out of the retained ring, the server returns typed
+`410 stream_cursor_expired` and the client must restart the MCP session.
+Stateless `DELETE /mcp` is rejected with 405 rather than pretending a session
+was closed.
+
 `[http]` fields: `allowed_hosts`, `allowed_origins` (both default `[]`,
 loopback-only), `json_response` (default `false`), `stateful` (default `false`),
-the optional `[http.oauth]` resource-server table, and the optional `[http.tls]`
-rustls material. When OAuth is enabled, granted `oracle:*` scopes can only
+`stateful_idle_ttl_seconds` (default `900`, `0` disables idle reaping), the
+optional `[http.oauth]` resource-server table, and the optional `[http.tls]`
+rustls material. Idle stateful sessions are reaped by sending a close message to
+the owning lane; the watchdog never touches the Oracle connection from the HTTP
+thread. When OAuth is enabled, granted `oracle:*` scopes can only
 **lower** the effective ceiling, never raise it, and protected profiles stay
 `READ_ONLY`. Server-only TLS is transport encryption, not application
 authentication — `/mcp` still needs OAuth or `--allow-no-auth`. Adding

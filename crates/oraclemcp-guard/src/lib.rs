@@ -30,7 +30,7 @@ pub use classifier::{
     BatchShape, Classifier, ClassifierConfig, GuardDecision, StageA, analyze_batch, stage_a,
 };
 pub use clock::MonotonicDeadline;
-pub use exec_grant::{ExecGrantError, ExecGrantStore};
+pub use exec_grant::{ExecGrantBinding, ExecGrantError, ExecGrantStore};
 pub use levels::{
     BlockReason, DangerLevel, EscalationError, LevelDecision, OperatingLevel, SessionLevelState,
 };

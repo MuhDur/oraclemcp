@@ -63,6 +63,68 @@ impl OracleConnection for NoExecMock {
     }
 }
 
+struct ProfileEchoMock {
+    profile: String,
+    lane_id: String,
+}
+
+impl ProfileEchoMock {
+    fn new(profile: impl Into<String>, lane_id: impl Into<String>) -> Self {
+        Self {
+            profile: profile.into(),
+            lane_id: lane_id.into(),
+        }
+    }
+
+    fn schema_name(&self) -> String {
+        format!("SCHEMA_{}", self.profile.to_ascii_uppercase())
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for ProfileEchoMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            backend: Some(OracleBackend::RustOracle),
+            connection_strategy: Some("single_session".to_owned()),
+            current_schema: Some(self.schema_name()),
+            session_user: Some(format!("USER_{}", self.profile.to_ascii_uppercase())),
+            module: Some(format!("profile:{}", self.profile)),
+            action: Some(self.lane_id.clone()),
+            ..Default::default()
+        })
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        Ok(Vec::new())
+    }
+
+    async fn execute(&self, _cx: &Cx, _sql: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        panic!("profile isolation HTTP test must not reach DB execution")
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
 struct AcceptHs256;
 
 impl SignatureVerifier for AcceptHs256 {
@@ -200,6 +262,37 @@ fn per_lane_dispatcher_server(max_level: OperatingLevel) -> OracleMcpServer {
                 Box::new(NoExecMock),
                 Some("http-lane-e2e".to_owned()),
                 SessionLevelState::new(max_level, false),
+            )) as Arc<dyn ToolDispatch>)
+        })
+    });
+    OracleMcpServer::new(
+        env!("CARGO_PKG_VERSION"),
+        registry,
+        capabilities(env!("CARGO_PKG_VERSION"), true, false),
+        Arc::new(StatefulLaneDispatch::with_dispatch_factory(factory, None)),
+    )
+}
+
+fn per_lane_profile_switch_server() -> OracleMcpServer {
+    let registry = tool_registry();
+    let factory: Arc<LaneDispatchFactory> = Arc::new(move |_cx, lane_context| {
+        let lane_id = lane_context.lane_id().to_owned();
+        Box::pin(async move {
+            let connector_lane_id = lane_id.clone();
+            let connector: Arc<oraclemcp::dispatch::ProfileConnector> =
+                Arc::new(move |_cx: &Cx, profile: &str| {
+                    let profile = profile.to_owned();
+                    let lane_id = connector_lane_id.clone();
+                    Box::pin(async move {
+                        Ok(Box::new(ProfileEchoMock::new(profile, lane_id))
+                            as Box<dyn OracleConnection>)
+                    })
+                });
+            Ok(Arc::new(OracleDispatcher::new_switchable(
+                Box::new(ProfileEchoMock::new("base", lane_id)),
+                Some("base".to_owned()),
+                SessionLevelState::new(OperatingLevel::ReadWrite, false),
+                connector,
             )) as Arc<dyn ToolDispatch>)
         })
     });
@@ -672,6 +765,154 @@ fn stateful_http_lanes_keep_operating_level_isolated_per_session_and_subject() {
         json!("READ_WRITE"),
         "OAuth scope narrowing must not permanently lower the lane state"
     );
+}
+
+#[test]
+fn stateful_http_lanes_keep_profile_switches_and_connections_isolated() {
+    let mut config = oauth_config(Vec::new());
+    config.stateful = true;
+    config.single_principal_guard = None;
+    let harness = spawn_http_with_server(config, per_lane_profile_switch_server());
+    let agent_a_admin = jwt_with_scope_and_subject("oracle:admin", Some("profile-agent-a"));
+    let agent_b_admin = jwt_with_scope_and_subject("oracle:admin", Some("profile-agent-b"));
+    let session_a = stateful_initialize(harness.addr, &agent_a_admin, "n1-agent-a");
+    let session_b = stateful_initialize(harness.addr, &agent_b_admin, "n1-agent-b");
+
+    let initial_a = stateful_tool_call(
+        harness.addr,
+        &agent_a_admin,
+        &session_a,
+        "oracle_connection_info",
+        json!({}),
+    );
+    let initial_b = stateful_tool_call(
+        harness.addr,
+        &agent_b_admin,
+        &session_b,
+        "oracle_connection_info",
+        json!({}),
+    );
+    assert_eq!(
+        initial_a["result"]["structuredContent"]["active_profile"],
+        json!("base")
+    );
+    assert_eq!(
+        initial_b["result"]["structuredContent"]["active_profile"],
+        json!("base")
+    );
+    for initial in [&initial_a, &initial_b] {
+        let redacted_fields =
+            initial["result"]["structuredContent"]["connection"]["redacted_fields"]
+                .as_array()
+                .expect("redacted fields array");
+        assert!(
+            redacted_fields.contains(&json!("action")),
+            "lane action must be marked redacted, not exposed: {initial}"
+        );
+    }
+
+    let addr = harness.addr;
+    let token_a = agent_a_admin.clone();
+    let token_b = agent_b_admin.clone();
+    let switch_session_a = session_a.clone();
+    let switch_session_b = session_b.clone();
+    let switch_a = thread::spawn(move || {
+        stateful_tool_call(
+            addr,
+            &token_a,
+            &switch_session_a,
+            "oracle_switch_profile",
+            json!({ "profile": "profile_x" }),
+        )
+    });
+    let addr = harness.addr;
+    let switch_b = thread::spawn(move || {
+        stateful_tool_call(
+            addr,
+            &token_b,
+            &switch_session_b,
+            "oracle_switch_profile",
+            json!({ "profile": "profile_y" }),
+        )
+    });
+    let switched_a = switch_a
+        .join()
+        .expect("agent A profile switch thread joins");
+    let switched_b = switch_b
+        .join()
+        .expect("agent B profile switch thread joins");
+    assert_eq!(
+        switched_a["result"]["structuredContent"]["active_profile"],
+        json!("profile_x")
+    );
+    assert_eq!(
+        switched_b["result"]["structuredContent"]["active_profile"],
+        json!("profile_y")
+    );
+
+    let switched_a_again = stateful_tool_call(
+        harness.addr,
+        &agent_a_admin,
+        &session_a,
+        "oracle_switch_profile",
+        json!({ "profile": "profile_z" }),
+    );
+    assert_eq!(
+        switched_a_again["result"]["structuredContent"]["active_profile"],
+        json!("profile_z")
+    );
+
+    let info_a = stateful_tool_call(
+        harness.addr,
+        &agent_a_admin,
+        &session_a,
+        "oracle_connection_info",
+        json!({}),
+    );
+    let info_b = stateful_tool_call(
+        harness.addr,
+        &agent_b_admin,
+        &session_b,
+        "oracle_connection_info",
+        json!({}),
+    );
+    assert_eq!(
+        info_a["result"]["structuredContent"]["active_profile"],
+        json!("profile_z"),
+        "agent A sees its own later switch"
+    );
+    assert_eq!(
+        info_b["result"]["structuredContent"]["active_profile"],
+        json!("profile_y"),
+        "agent B must not move when agent A switches again"
+    );
+    for output in [&switched_a, &switched_b, &info_a, &info_b] {
+        let serialized = output.to_string();
+        for forbidden in [
+            "SCHEMA_PROFILE_X",
+            "SCHEMA_PROFILE_Y",
+            "SCHEMA_PROFILE_Z",
+            "USER_PROFILE_X",
+            "USER_PROFILE_Y",
+            "USER_PROFILE_Z",
+            "profile:",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "{forbidden} leaked in stateful lane output: {output}"
+            );
+        }
+        let redacted_fields =
+            output["result"]["structuredContent"]["connection"]["redacted_fields"]
+                .as_array()
+                .expect("redacted fields array");
+        for field in ["current_schema", "session_user", "module", "action"] {
+            assert!(
+                redacted_fields.contains(&json!(field)),
+                "{field} should be marked redacted in {output}"
+            );
+        }
+    }
 }
 
 #[test]

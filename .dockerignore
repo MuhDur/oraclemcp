@@ -3,6 +3,7 @@ target*/
 **/target/
 **/target*/
 plsql-intelligence/
+web/node_modules/
 .beads/
 .claude/
 .ntm/

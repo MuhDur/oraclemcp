@@ -201,7 +201,9 @@ impl std::error::Error for ParseError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{AuditDecision, AuditEntryDraft, AuditOutcome};
+    use crate::record::{
+        AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, compute_entry_hash_v1,
+    };
     use crate::sink::{Auditor, MemoryAuditSink};
     use std::sync::Arc;
 
@@ -211,7 +213,9 @@ mod tests {
 
     fn draft(sql: &str) -> AuditEntryDraft {
         AuditEntryDraft {
-            agent_identity: "agent".to_owned(),
+            subject: AuditSubject::new("agent", "agent"),
+            db_evidence: None,
+            cancel: None,
             tool: "oracle_execute".to_owned(),
             sql: sql.to_owned(),
             danger_level: "GUARDED".to_owned(),
@@ -333,6 +337,50 @@ mod tests {
         assert_eq!(
             verify_records(&parsed, &[key()]),
             VerifyOutcome::Ok { records: 2 }
+        );
+    }
+
+    #[test]
+    fn legacy_v1_signed_record_still_verifies() {
+        let sql = "DELETE FROM t WHERE id=1";
+        let sql_sha256 = crate::sha256_hex(sql.as_bytes());
+        let sql_preview = sql.to_owned();
+        let entry_hash = compute_entry_hash_v1(
+            1,
+            "t1",
+            "agent",
+            "oracle_execute",
+            &sql_sha256,
+            &sql_preview,
+            "GUARDED",
+            AuditDecision::Allowed,
+            None,
+            AuditOutcome::Pending,
+            GENESIS_HASH,
+        );
+        let legacy = AuditRecord {
+            schema_version: 1,
+            seq: 1,
+            timestamp: "t1".to_owned(),
+            agent_identity: "agent".to_owned(),
+            subject: AuditSubject::default(),
+            db_evidence: None,
+            cancel: None,
+            tool: "oracle_execute".to_owned(),
+            sql_sha256,
+            sql_preview,
+            danger_level: "GUARDED".to_owned(),
+            decision: AuditDecision::Allowed,
+            rows_affected: None,
+            outcome: AuditOutcome::Pending,
+            prev_hash: GENESIS_HASH.to_owned(),
+            entry_hash: entry_hash.clone(),
+            key_id: Some("k1".to_owned()),
+            signature: Some(key().sign(&entry_hash)),
+        };
+        assert_eq!(
+            verify_records(&[legacy], &[key()]),
+            VerifyOutcome::Ok { records: 1 }
         );
     }
 

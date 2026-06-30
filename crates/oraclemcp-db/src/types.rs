@@ -4,8 +4,9 @@
 //! nullable text plus the Oracle type name; the deterministic NUMBER→string /
 //! ISO-8601 / NLS serializer (P0-5) builds the precise JSON mapping on top.
 
-use std::{path::PathBuf, time::Duration};
+use std::{fmt, path::PathBuf, time::Duration};
 
+use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize};
 
 use crate::auth_adapter::AuthAdapter;
@@ -29,7 +30,7 @@ impl std::fmt::Display for OracleBackend {
 
 /// A bind value. Agent argument values are **always** bound, never interpolated
 /// into SQL text (plan §9.2 — no injection through parameters).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OracleBind {
     /// SQL NULL.
@@ -42,6 +43,157 @@ pub enum OracleBind {
     F64(f64),
     /// A boolean bind (mapped to 1/0 for pre-23ai).
     Bool(bool),
+}
+
+impl OracleBind {
+    /// The bind variant without its value. This is safe for logs, audit
+    /// metadata, telemetry, and proof bundles.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            OracleBind::Null => "null",
+            OracleBind::String(_) => "string",
+            OracleBind::I64(_) => "i64",
+            OracleBind::F64(_) => "f64",
+            OracleBind::Bool(_) => "bool",
+        }
+    }
+
+    /// Return a wrapper that serializes and formats this bind without exposing
+    /// its value.
+    #[must_use]
+    pub const fn redacted(&self) -> RedactedOracleBind<'_> {
+        RedactedOracleBind(self)
+    }
+}
+
+impl fmt::Debug for OracleBind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.redacted().fmt(f)
+    }
+}
+
+/// Redacting formatter/serializer for a single Oracle bind value.
+#[derive(Clone, Copy)]
+pub struct RedactedOracleBind<'a>(&'a OracleBind);
+
+impl fmt::Debug for RedactedOracleBind<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OracleBind")
+            .field("kind", &self.0.kind())
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Serialize for RedactedOracleBind<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("RedactedOracleBind", 2)?;
+        state.serialize_field("kind", self.0.kind())?;
+        state.serialize_field("redacted", &true)?;
+        state.end()
+    }
+}
+
+/// Redacting formatter/serializer for positional bind lists.
+#[derive(Clone, Copy)]
+pub struct RedactedOracleBinds<'a>(&'a [OracleBind]);
+
+/// Return a wrapper that serializes and formats positional binds without
+/// exposing their values.
+#[must_use]
+pub const fn redacted_oracle_binds(binds: &[OracleBind]) -> RedactedOracleBinds<'_> {
+    RedactedOracleBinds(binds)
+}
+
+impl fmt::Debug for RedactedOracleBinds<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(OracleBind::redacted))
+            .finish()
+    }
+}
+
+impl Serialize for RedactedOracleBinds<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for bind in self.0 {
+            seq.serialize_element(&bind.redacted())?;
+        }
+        seq.end()
+    }
+}
+
+/// Redacting formatter/serializer for named bind lists.
+#[derive(Clone, Copy)]
+pub struct RedactedNamedOracleBinds<'a>(&'a [(String, OracleBind)]);
+
+/// Return a wrapper that serializes and formats named binds without exposing
+/// their values.
+#[must_use]
+pub const fn redacted_named_oracle_binds(
+    binds: &[(String, OracleBind)],
+) -> RedactedNamedOracleBinds<'_> {
+    RedactedNamedOracleBinds(binds)
+}
+
+struct RedactedNamedBindEntry<'a> {
+    name: &'a str,
+    bind: &'a OracleBind,
+}
+
+impl fmt::Debug for RedactedNamedBindEntry<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OracleBind")
+            .field("name", &self.name)
+            .field("kind", &self.bind.kind())
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Serialize for RedactedNamedBindEntry<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("RedactedNamedOracleBind", 3)?;
+        state.serialize_field("name", self.name)?;
+        state.serialize_field("kind", self.bind.kind())?;
+        state.serialize_field("redacted", &true)?;
+        state.end()
+    }
+}
+
+impl fmt::Debug for RedactedNamedOracleBinds<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries(
+                self.0
+                    .iter()
+                    .map(|(name, bind)| RedactedNamedBindEntry { name, bind }),
+            )
+            .finish()
+    }
+}
+
+impl Serialize for RedactedNamedOracleBinds<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for (name, bind) in self.0 {
+            seq.serialize_element(&RedactedNamedBindEntry { name, bind })?;
+        }
+        seq.end()
+    }
 }
 
 impl From<&str> for OracleBind {
@@ -196,7 +348,7 @@ impl OracleRow {
 
 /// Describes a live connection (used by `describe`, standby detection §5.8,
 /// and `doctor`).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OracleConnectionInfo {
     /// The backend in use.
     #[serde(default)]
@@ -265,6 +417,14 @@ pub struct OracleConnectionInfo {
 }
 
 impl OracleConnectionInfo {
+    /// Return a wrapper that serializes and formats only allow-listed connection
+    /// metadata. Session identity and client topology values are represented as
+    /// redacted field names, never as values.
+    #[must_use]
+    pub const fn redacted(&self) -> RedactedOracleConnectionInfo<'_> {
+        RedactedOracleConnectionInfo(self)
+    }
+
     /// Whether this connection is a physically read-only standby (§5.8): a
     /// non-primary role or a read-only open mode.
     #[must_use]
@@ -307,6 +467,83 @@ impl OracleConnectionInfo {
         self.read_only = read_only;
         self.read_only_reason = reason;
         self
+    }
+}
+
+impl fmt::Debug for OracleConnectionInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.redacted().fmt(f)
+    }
+}
+
+/// Redacting formatter/serializer for live Oracle connection metadata.
+#[derive(Clone, Copy)]
+pub struct RedactedOracleConnectionInfo<'a>(&'a OracleConnectionInfo);
+
+type ConnectionInfoRedactionPredicate = fn(&OracleConnectionInfo) -> bool;
+type ConnectionInfoRedactionField = (&'static str, ConnectionInfoRedactionPredicate);
+
+const CONNECTION_INFO_REDACTED_FIELDS: [ConnectionInfoRedactionField; 14] = [
+    ("current_schema", |info| info.current_schema.is_some()),
+    ("current_edition", |info| info.current_edition.is_some()),
+    ("session_user", |info| info.session_user.is_some()),
+    ("current_user", |info| info.current_user.is_some()),
+    ("module", |info| info.module.is_some()),
+    ("action", |info| info.action.is_some()),
+    ("client_identifier", |info| info.client_identifier.is_some()),
+    ("client_info", |info| info.client_info.is_some()),
+    ("os_user", |info| info.os_user.is_some()),
+    ("host", |info| info.host.is_some()),
+    ("machine", |info| info.machine.is_some()),
+    ("terminal", |info| info.terminal.is_some()),
+    ("program", |info| info.program.is_some()),
+    ("client_driver", |info| info.client_driver.is_some()),
+];
+
+impl RedactedOracleConnectionInfo<'_> {
+    fn redacted_fields(&self) -> Vec<&'static str> {
+        CONNECTION_INFO_REDACTED_FIELDS
+            .iter()
+            .filter_map(|(field, has_value)| has_value(self.0).then_some(*field))
+            .collect()
+    }
+}
+
+impl fmt::Debug for RedactedOracleConnectionInfo<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let info = self.0;
+        f.debug_struct("OracleConnectionInfo")
+            .field("backend", &info.backend)
+            .field("connection_strategy", &info.connection_strategy)
+            .field("pool_open_connections", &info.pool_open_connections)
+            .field("server_version", &info.server_version)
+            .field("database_role", &info.database_role)
+            .field("open_mode", &info.open_mode)
+            .field("read_only", &info.read_only)
+            .field("read_only_reason", &info.read_only_reason)
+            .field("redacted_fields", &self.redacted_fields())
+            .finish()
+    }
+}
+
+impl Serialize for RedactedOracleConnectionInfo<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let info = self.0;
+        let redacted_fields = self.redacted_fields();
+        let mut state = serializer.serialize_struct("RedactedOracleConnectionInfo", 9)?;
+        state.serialize_field("backend", &info.backend)?;
+        state.serialize_field("connection_strategy", &info.connection_strategy)?;
+        state.serialize_field("pool_open_connections", &info.pool_open_connections)?;
+        state.serialize_field("server_version", &info.server_version)?;
+        state.serialize_field("database_role", &info.database_role)?;
+        state.serialize_field("open_mode", &info.open_mode)?;
+        state.serialize_field("read_only", &info.read_only)?;
+        state.serialize_field("read_only_reason", &info.read_only_reason)?;
+        state.serialize_field("redacted_fields", &redacted_fields)?;
+        state.end()
     }
 }
 
@@ -362,6 +599,13 @@ impl OracleSessionIdentity {
     }
 }
 
+/// Default Oracle call timeout for direct `oraclemcp-db` callers.
+///
+/// Profile-backed callers resolve the same 30-second default through
+/// `oraclemcp-core`; this shared-layer default protects consumers that build
+/// [`OracleConnectOptions`] directly with [`Default::default`].
+pub const DEFAULT_ORACLE_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Options for opening a physical Oracle connection. Credentials and
 /// profile-owned setup statements may be present transiently after secret
 /// resolution; `Debug` must never expose their values.
@@ -369,7 +613,7 @@ impl OracleSessionIdentity {
 /// `Debug` is hand-written: connect material must never reach a log or panic
 /// message in plaintext, so values render as redaction markers while preserving
 /// presence/absence.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct OracleConnectOptions {
     /// Oracle Net connect identifier (EZConnect / EZConnect-Plus / TNS alias).
     pub connect_string: String,
@@ -408,10 +652,37 @@ pub struct OracleConnectOptions {
     pub sdu: Option<u32>,
     /// Optional statement-cache size. `None` keeps the driver's default.
     pub statement_cache_size: Option<u32>,
-    /// Optional Oracle per-round-trip call timeout.
+    /// Oracle per-round-trip call timeout. Defaults to
+    /// [`DEFAULT_ORACLE_CALL_TIMEOUT`]; set `None` only for an explicit
+    /// operator-controlled opt-out.
     pub call_timeout: Option<Duration>,
     /// Extra guarded session setup statements to run after canonical NLS setup.
     pub session_statements: Vec<String>,
+}
+
+impl Default for OracleConnectOptions {
+    fn default() -> Self {
+        Self {
+            connect_string: String::new(),
+            username: None,
+            password: None,
+            auth_adapter: AuthAdapter::default(),
+            external_auth: false,
+            wallet_location: None,
+            wallet_password: None,
+            ssl_server_dn_match: None,
+            ssl_server_cert_dn: None,
+            use_sni: None,
+            use_iam_token: false,
+            iam_token: None,
+            session_identity: None,
+            app_context: Vec::new(),
+            sdu: None,
+            statement_cache_size: None,
+            call_timeout: Some(DEFAULT_ORACLE_CALL_TIMEOUT),
+            session_statements: Vec::new(),
+        }
+    }
 }
 
 impl std::fmt::Debug for OracleConnectOptions {
@@ -459,6 +730,132 @@ mod tests {
         assert_eq!(OracleBind::from("x"), OracleBind::String("x".to_owned()));
         assert_eq!(OracleBind::from(5i32), OracleBind::I64(5));
         assert_eq!(OracleBind::from(true), OracleBind::Bool(true));
+    }
+
+    #[test]
+    fn bind_debug_and_redacted_json_never_expose_values() {
+        let binds = vec![
+            OracleBind::String("n-s6-bind-secret-not-in-rendered-surfaces".to_owned()),
+            OracleBind::I64(987_654_321),
+            OracleBind::F64(12345.6789),
+            OracleBind::Bool(false),
+            OracleBind::Null,
+        ];
+        let rendered_debug = format!("{binds:?}");
+        let rendered_json = serde_json::to_string(&redacted_oracle_binds(&binds))
+            .expect("redacted positional binds serialize");
+        let named_binds = vec![("p_payload".to_owned(), binds[0].clone())];
+        let rendered_named_debug = format!("{:?}", redacted_named_oracle_binds(&named_binds));
+        let rendered_named_json = serde_json::to_string(&redacted_named_oracle_binds(&named_binds))
+            .expect("redacted named binds serialize");
+        let rendered = format!(
+            "{rendered_debug}\n{rendered_json}\n{rendered_named_debug}\n{rendered_named_json}"
+        );
+
+        for forbidden in [
+            "n-s6-bind-secret-not-in-rendered-surfaces",
+            "987654321",
+            "12345.6789",
+            "false",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "{forbidden} leaked: {rendered}"
+            );
+        }
+        for kind in ["string", "i64", "f64", "bool", "null"] {
+            assert!(rendered.contains(kind), "{kind} missing from {rendered}");
+        }
+        assert!(rendered.contains("<redacted>"));
+        assert!(rendered_json.contains("\"redacted\":true"));
+    }
+
+    #[test]
+    fn connection_info_debug_and_redacted_json_are_allowlist_first() {
+        let info = OracleConnectionInfo {
+            backend: Some(OracleBackend::RustOracle),
+            connection_strategy: Some("hybrid_pool".to_owned()),
+            pool_open_connections: Some(3),
+            server_version: Some("Oracle Database 23ai Free".to_owned()),
+            database_role: Some("PRIMARY".to_owned()),
+            open_mode: Some("READ WRITE".to_owned()),
+            read_only: false,
+            read_only_reason: None,
+            current_schema: Some("N_S6_CURRENT_SCHEMA_SECRET".to_owned()),
+            current_edition: Some("N_S6_EDITION_SECRET".to_owned()),
+            session_user: Some("N_S6_SESSION_USER_SECRET".to_owned()),
+            current_user: Some("N_S6_CURRENT_USER_SECRET".to_owned()),
+            module: Some("N_S6_MODULE_SECRET".to_owned()),
+            action: Some("N_S6_ACTION_SECRET".to_owned()),
+            client_identifier: Some("N_S6_CLIENT_IDENTIFIER_SECRET".to_owned()),
+            client_info: Some("N_S6_CLIENT_INFO_SECRET".to_owned()),
+            os_user: Some("N_S6_OS_USER_SECRET".to_owned()),
+            host: Some("N_S6_HOST_SECRET".to_owned()),
+            machine: Some("N_S6_MACHINE_SECRET".to_owned()),
+            terminal: Some("N_S6_TERMINAL_SECRET".to_owned()),
+            program: Some("N_S6_PROGRAM_SECRET".to_owned()),
+            client_driver: Some("N_S6_CLIENT_DRIVER_SECRET".to_owned()),
+        };
+        let rendered_debug = format!("{info:?}");
+        let rendered_json =
+            serde_json::to_string(&info.redacted()).expect("redacted connection info serializes");
+        let rendered = format!("{rendered_debug}\n{rendered_json}");
+
+        for forbidden in [
+            "N_S6_CURRENT_SCHEMA_SECRET",
+            "N_S6_EDITION_SECRET",
+            "N_S6_SESSION_USER_SECRET",
+            "N_S6_CURRENT_USER_SECRET",
+            "N_S6_MODULE_SECRET",
+            "N_S6_ACTION_SECRET",
+            "N_S6_CLIENT_IDENTIFIER_SECRET",
+            "N_S6_CLIENT_INFO_SECRET",
+            "N_S6_OS_USER_SECRET",
+            "N_S6_HOST_SECRET",
+            "N_S6_MACHINE_SECRET",
+            "N_S6_TERMINAL_SECRET",
+            "N_S6_PROGRAM_SECRET",
+            "N_S6_CLIENT_DRIVER_SECRET",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "{forbidden} leaked: {rendered}"
+            );
+        }
+        for allowed in [
+            "hybrid_pool",
+            "Oracle Database 23ai Free",
+            "PRIMARY",
+            "READ WRITE",
+            "pool_open_connections",
+            "read_only",
+        ] {
+            assert!(
+                rendered.contains(allowed),
+                "{allowed} missing from {rendered}"
+            );
+        }
+        for redacted_field in [
+            "current_schema",
+            "current_edition",
+            "session_user",
+            "current_user",
+            "module",
+            "action",
+            "client_identifier",
+            "client_info",
+            "os_user",
+            "host",
+            "machine",
+            "terminal",
+            "program",
+            "client_driver",
+        ] {
+            assert!(
+                rendered_json.contains(redacted_field),
+                "{redacted_field} missing from {rendered_json}"
+            );
+        }
     }
 
     #[test]
@@ -629,6 +1026,14 @@ mod tests {
         assert!(rendered.contains("sdu: None"));
         assert!(rendered.contains("session_statement_count: 0"));
         assert!(!rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn default_connect_options_bound_oracle_calls() {
+        assert_eq!(
+            OracleConnectOptions::default().call_timeout,
+            Some(DEFAULT_ORACLE_CALL_TIMEOUT)
+        );
     }
 
     #[test]

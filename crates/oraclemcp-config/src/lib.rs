@@ -195,8 +195,15 @@ impl AuditShippingConfig {
     }
 }
 
+/// Default idle TTL for stateful Streamable HTTP sessions.
+pub const DEFAULT_HTTP_STATEFUL_IDLE_TTL_SECONDS: u64 = 900;
+
+fn default_http_stateful_idle_ttl_seconds() -> u64 {
+    DEFAULT_HTTP_STATEFUL_IDLE_TTL_SECONDS
+}
+
 /// Native Streamable HTTP transport configuration.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HttpConfig {
     /// Allowed `Host` authorities beyond loopback.
@@ -207,10 +214,29 @@ pub struct HttpConfig {
     pub json_response: bool,
     /// Enable Streamable HTTP stateful session framing.
     pub stateful: bool,
+    /// Seconds before an idle stateful session is reaped. The watchdog closes
+    /// the owning lane by mailbox; it never touches the Oracle connection from
+    /// the HTTP/listener thread. `0` disables idle reaping.
+    #[serde(default = "default_http_stateful_idle_ttl_seconds")]
+    pub stateful_idle_ttl_seconds: u64,
     /// Optional OAuth 2.1 resource-server protection for `/mcp`.
     pub oauth: Option<HttpOAuthConfig>,
     /// Optional TLS material for the native HTTPS listener.
     pub tls: Option<HttpTlsConfig>,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            allowed_hosts: Vec::new(),
+            allowed_origins: Vec::new(),
+            json_response: false,
+            stateful: false,
+            stateful_idle_ttl_seconds: DEFAULT_HTTP_STATEFUL_IDLE_TTL_SECONDS,
+            oauth: None,
+            tls: None,
+        }
+    }
 }
 
 impl HttpConfig {
@@ -641,6 +667,7 @@ mod tests {
             allowed_origins = ["https://app.example.com"]
             json_response = true
             stateful = true
+            stateful_idle_ttl_seconds = 60
 
             [http.oauth]
             resource = "https://mcp.example.com/mcp"
@@ -655,6 +682,7 @@ mod tests {
 
         assert_eq!(cfg.http.allowed_hosts, vec!["mcp.example.com"]);
         assert!(cfg.http.stateful);
+        assert_eq!(cfg.http.stateful_idle_ttl_seconds, 60);
         let oauth = cfg.http.oauth.expect("oauth config");
         assert_eq!(
             oauth.resource.as_deref(),
@@ -1014,11 +1042,15 @@ mod tests {
             connect_string = "prod:1521/svc"
             username = "svc_acct"
             credential_ref = "keyring:prod"
+
+            [profiles.oci]
+            wallet_password_ref = "file:/run/secrets/prod-wallet-password"
             "#,
         )
         .expect("loads");
         let json = serde_json::to_string(&cfg.list_profiles()).expect("serialize");
         assert!(!json.contains("keyring:prod"));
+        assert!(!json.contains("/run/secrets/prod-wallet-password"));
         assert!(!json.contains("svc_acct"));
         assert!(!json.contains("prod:1521/svc"));
         assert!(!json.contains("connect_string"));

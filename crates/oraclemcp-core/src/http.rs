@@ -12,9 +12,9 @@ use std::fmt::Write as FmtWrite;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use oraclemcp_auth::{
     HttpGuardError, HttpGuardPolicy, ResourceServerConfig, SignatureVerifier, TokenError,
@@ -25,11 +25,14 @@ use rustls::{ServerConnection, StreamOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::server::{DispatchContext, OracleMcpServer};
+use crate::server::{DispatchCloseReason, DispatchContext, OracleMcpServer};
 use crate::tls::TlsServerConfig;
 
 /// The MCP endpoint path the Streamable HTTP transport is mounted at.
 pub const MCP_PATH: &str = "/mcp";
+/// The versioned operator API prefix. FN0 only installs routing and query
+/// parsing; later WP-P beads fill in the schema-first API under this prefix.
+pub const OPERATOR_API_PREFIX: &str = "/operator/v1";
 /// The RFC 9728 protected-resource-metadata well-known path.
 pub const PROTECTED_RESOURCE_METADATA_PATH: &str = "/.well-known/oauth-protected-resource";
 /// Kubernetes-style liveness probe path (D1-health). Process-up only.
@@ -38,6 +41,12 @@ pub const HEALTHZ_PATH: &str = "/healthz";
 pub const READYZ_PATH: &str = "/readyz";
 /// Prometheus metrics-scrape path (D1-health / D1-metrics).
 pub const METRICS_PATH: &str = "/metrics";
+/// Default idle TTL for stateful Streamable HTTP sessions.
+pub const DEFAULT_STATEFUL_IDLE_TTL_SECONDS: u64 = 900;
+
+const STATEFUL_IDLE_REAP_INTERVAL: Duration = Duration::from_secs(1);
+const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const STATEFUL_SESSION_COOKIE: &str = "oraclemcp_mcp_session";
 
 /// A cheap, synchronous DB-reachability check for the `/readyz` probe.
 ///
@@ -78,7 +87,7 @@ impl std::fmt::Debug for ObservabilityState {
 }
 
 /// Operator configuration for the HTTP transport.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct HttpTransportConfig {
     /// Allowed `Host` authorities beyond loopback (DNS-rebinding guard). Empty
     /// keeps the default loopback-only policy.
@@ -90,6 +99,10 @@ pub struct HttpTransportConfig {
     pub json_response: bool,
     /// Stateful session mode (SSE priming + session-bound requests).
     pub stateful: bool,
+    /// Idle timeout for stateful sessions. A zero duration disables the
+    /// watchdog. The watchdog closes stale lanes through [`HttpSessionLifecycle`]
+    /// and never touches dispatcher/connection state directly.
+    pub stateful_idle_ttl: Duration,
     /// The RFC 9728 protected-resource metadata document to serve, if OAuth is
     /// enabled (from [`oraclemcp_auth::oauth_rs::ResourceServerConfig`]).
     pub resource_metadata: Option<Value>,
@@ -100,6 +113,14 @@ pub struct HttpTransportConfig {
     /// Issued stateful Streamable HTTP session ids. Listener wrappers install a
     /// store automatically when `stateful` is true.
     pub session_store: Option<Arc<HttpSessionStore>>,
+    /// Buffered stateful Streamable HTTP responses. Listener wrappers install a
+    /// store automatically when `stateful` is true so GET can replay results by
+    /// cursor / Last-Event-ID.
+    pub result_store: Option<Arc<HttpResultStore>>,
+    /// Stateful session lifecycle hook. In served stateful mode this points at
+    /// the lane registry so HTTP DELETE can terminate the owning lane instead
+    /// of only forgetting the session id.
+    pub session_lifecycle: Option<Arc<dyn HttpSessionLifecycle>>,
     /// N8 interim guard: until per-principal lanes exist, a served HTTP process
     /// may bind to one authenticated principal only. A second principal is
     /// refused before it can touch the shared dispatcher/session state.
@@ -107,6 +128,48 @@ pub struct HttpTransportConfig {
     /// Health/metrics observability endpoints (D1; off by default — `None`
     /// fields make the corresponding route return 404 / not be advertised).
     pub observability: ObservabilityState,
+}
+
+impl Default for HttpTransportConfig {
+    fn default() -> Self {
+        Self {
+            allowed_hosts: Vec::new(),
+            allowed_origins: Vec::new(),
+            json_response: false,
+            stateful: false,
+            stateful_idle_ttl: Duration::from_secs(DEFAULT_STATEFUL_IDLE_TTL_SECONDS),
+            resource_metadata: None,
+            oauth: None,
+            session_store: None,
+            result_store: None,
+            session_lifecycle: None,
+            single_principal_guard: None,
+            observability: ObservabilityState::default(),
+        }
+    }
+}
+
+/// Lifecycle hook for stateful Streamable HTTP sessions.
+pub trait HttpSessionLifecycle: std::fmt::Debug + Send + Sync {
+    /// Close the lane/resources bound to `session_id` and `principal_key`.
+    ///
+    /// Returns `true` when a live resource was found and closed.
+    fn close_session(&self, session_id: &str, principal_key: &str) -> bool;
+
+    /// Close the lane/resources bound to a session for a specific lifecycle
+    /// reason. Implementations that do not distinguish reasons can rely on the
+    /// default adapter.
+    fn close_session_with_reason(
+        &self,
+        session_id: &str,
+        principal_key: &str,
+        _reason: DispatchCloseReason,
+    ) -> bool {
+        self.close_session(session_id, principal_key)
+    }
+
+    /// Close every live stateful session during listener shutdown.
+    fn close_all_sessions(&self) {}
 }
 
 /// OAuth 2.1 resource-server enforcement wiring for the HTTP transport (P1-9b).
@@ -165,21 +228,33 @@ impl std::fmt::Debug for OAuthEnforcement {
 /// Shared stateful Streamable HTTP session-id registry.
 #[derive(Debug, Default)]
 pub struct HttpSessionStore {
-    owners: Mutex<HashMap<String, String>>,
+    owners: Mutex<HashMap<String, HttpSessionEntry>>,
+}
+
+#[derive(Debug)]
+struct HttpSessionEntry {
+    principal_key: String,
+    last_seen: Instant,
 }
 
 impl HttpSessionStore {
     fn insert(&self, id: String, principal_key: String) {
         if let Ok(mut owners) = self.owners.lock() {
-            owners.insert(id, principal_key);
+            owners.insert(
+                id,
+                HttpSessionEntry {
+                    principal_key,
+                    last_seen: Instant::now(),
+                },
+            );
         }
     }
 
     fn principal_for(&self, id: &str) -> Option<String> {
-        self.owners
-            .lock()
-            .ok()
-            .and_then(|owners| owners.get(id).cloned())
+        let mut owners = self.owners.lock().ok()?;
+        let entry = owners.get_mut(id)?;
+        entry.last_seen = Instant::now();
+        Some(entry.principal_key.clone())
     }
 
     fn remove(&self, id: &str) -> bool {
@@ -187,6 +262,198 @@ impl HttpSessionStore {
             .lock()
             .is_ok_and(|mut owners| owners.remove(id).is_some())
     }
+
+    fn reap_idle(&self, idle_ttl: Duration) -> Vec<(String, String)> {
+        if idle_ttl.is_zero() {
+            return Vec::new();
+        }
+        self.reap_idle_at(idle_ttl, Instant::now())
+    }
+
+    fn reap_idle_at(&self, idle_ttl: Duration, now: Instant) -> Vec<(String, String)> {
+        let Ok(mut owners) = self.owners.lock() else {
+            return Vec::new();
+        };
+        let expired: Vec<String> = owners
+            .iter()
+            .filter(|(_, entry)| now.duration_since(entry.last_seen) >= idle_ttl)
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        expired
+            .into_iter()
+            .filter_map(|session_id| {
+                owners
+                    .remove(&session_id)
+                    .map(|entry| (session_id, entry.principal_key))
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn force_idle_for_test(&self, id: &str, idle_for: Duration) {
+        let Ok(mut owners) = self.owners.lock() else {
+            return;
+        };
+        if let Some(entry) = owners.get_mut(id) {
+            let now = Instant::now();
+            entry.last_seen = now.checked_sub(idle_for).unwrap_or(now);
+        }
+    }
+}
+
+const MAX_BUFFERED_MCP_EVENTS_PER_SESSION: usize = 128;
+
+/// Stateful Streamable HTTP result buffer.
+///
+/// POST still returns a response for compatible clients, but every stateful
+/// JSON-RPC response is also retained here under the MCP session id. GET can
+/// then replay responses after a cursor, which is the substrate later streaming
+/// and disconnect/resume work builds on.
+#[derive(Debug, Default)]
+pub struct HttpResultStore {
+    state: Mutex<HttpResultStoreState>,
+    changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct HttpResultStoreState {
+    sessions: HashMap<String, Vec<HttpBufferedEvent>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HttpBufferedEvent {
+    id: String,
+    event: Option<&'static str>,
+    data: Value,
+}
+
+impl HttpBufferedEvent {
+    fn data(id: String, data: Value) -> Self {
+        Self {
+            id,
+            event: None,
+            data,
+        }
+    }
+
+    fn gap(id: String, requested_cursor: Option<&str>, oldest_event_id: &str) -> Self {
+        Self {
+            id,
+            event: Some("stream-gap"),
+            data: json!({
+                "type": "stream_gap",
+                "message": "one or more Streamable HTTP events were dropped before this resume point",
+                "requested_last_event_id": requested_cursor.unwrap_or(""),
+                "oldest_event_id": oldest_event_id,
+                "next_step": "continue from the retained events in this stream; restart the MCP session if the missing range is required",
+            }),
+        }
+    }
+}
+
+impl HttpResultStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn ensure_session(&self, session_id: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            state.sessions.entry(session_id.to_owned()).or_default();
+        }
+    }
+
+    fn append_response(&self, session_id: &str, data: Value) -> String {
+        let Ok(mut state) = self.state.lock() else {
+            return "1/0".to_owned();
+        };
+        let events = state.sessions.entry(session_id.to_owned()).or_default();
+        let next_seq = events
+            .last()
+            .and_then(|event| stream_event_sequence(&event.id))
+            .unwrap_or(0)
+            .saturating_add(1);
+        let id = format!("{next_seq}/0");
+        events.push(HttpBufferedEvent::data(id.clone(), data));
+        if events.len() > MAX_BUFFERED_MCP_EVENTS_PER_SESSION {
+            let overflow = events.len() - MAX_BUFFERED_MCP_EVENTS_PER_SESSION;
+            events.drain(..overflow);
+        }
+        drop(state);
+        self.changed.notify_all();
+        id
+    }
+
+    fn events_after(
+        &self,
+        session_id: &str,
+        cursor: Option<&str>,
+        gap_on_expired_cursor: bool,
+    ) -> Result<Vec<HttpBufferedEvent>, HttpResponse> {
+        let after_seq = parse_stream_cursor(cursor)?;
+        let Ok(state) = self.state.lock() else {
+            return Ok(Vec::new());
+        };
+        let Some(events) = state.sessions.get(session_id) else {
+            return Ok(Vec::new());
+        };
+        events_after_sequence(events, after_seq, cursor, gap_on_expired_cursor)
+    }
+
+    fn wait_events_after(
+        &self,
+        session_id: &str,
+        after_seq: u64,
+        timeout: Duration,
+    ) -> HttpResultWait {
+        let Ok(mut state) = self.state.lock() else {
+            return HttpResultWait::Closed;
+        };
+        loop {
+            let Some(events) = state.sessions.get(session_id) else {
+                return HttpResultWait::Closed;
+            };
+            let cursor = format!("{after_seq}/0");
+            match events_after_sequence(events, after_seq, Some(&cursor), true) {
+                Ok(events) if !events.is_empty() => return HttpResultWait::Events(events),
+                Ok(_) => {}
+                Err(_) => return HttpResultWait::Closed,
+            }
+            let Ok((next_state, wait)) = self.changed.wait_timeout(state, timeout) else {
+                return HttpResultWait::Closed;
+            };
+            state = next_state;
+            if wait.timed_out() {
+                return HttpResultWait::Timeout;
+            }
+        }
+    }
+
+    fn remove_session(&self, session_id: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            let removed = state.sessions.remove(session_id).is_some();
+            drop(state);
+            if removed {
+                self.changed.notify_all();
+            }
+        }
+    }
+
+    fn close_all(&self) {
+        if let Ok(mut state) = self.state.lock()
+            && !state.sessions.is_empty()
+        {
+            state.sessions.clear();
+            drop(state);
+            self.changed.notify_all();
+        }
+    }
+}
+
+enum HttpResultWait {
+    Events(Vec<HttpBufferedEvent>),
+    Closed,
+    Timeout,
 }
 
 #[cfg(test)]
@@ -232,6 +499,24 @@ mod tests {
         }
     }
 
+    struct AtCapacityDispatch;
+    impl ToolDispatch for AtCapacityDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            Box::pin(async {
+                Err(
+                    ErrorEnvelope::new(ErrorClass::AtCapacity, "stateful lane capacity exhausted")
+                        .with_retry_after_ms(250),
+                )
+            })
+        }
+    }
+
     struct ScopeEchoDispatch;
     impl ToolDispatch for ScopeEchoDispatch {
         fn dispatch<'a>(
@@ -253,6 +538,25 @@ mod tests {
                     "scopes": scopes,
                     "session_id": session_id,
                     "principal_key": principal_key,
+                }))
+            })
+        }
+    }
+
+    struct LaneThreadDispatch;
+    impl ToolDispatch for LaneThreadDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            let tool = name.to_owned();
+            Box::pin(async move {
+                Ok(serde_json::json!({
+                    "tool": tool,
+                    "thread": format!("{:?}", std::thread::current().id()),
                 }))
             })
         }
@@ -305,6 +609,25 @@ mod tests {
         OracleMcpServer::new("0.1.0", ToolRegistry::new(), report, Arc::new(BusyDispatch))
     }
 
+    fn at_capacity_server() -> OracleMcpServer {
+        let report = CapabilitiesReport::new(
+            "0.1.0",
+            vec![],
+            OperatingLevel::ReadOnly,
+            FeatureTiers {
+                live_db: false,
+                engine: true,
+                http_transport: true,
+            },
+        );
+        OracleMcpServer::new(
+            "0.1.0",
+            ToolRegistry::new(),
+            report,
+            Arc::new(AtCapacityDispatch),
+        )
+    }
+
     fn init_body() -> Value {
         serde_json::json!({
             "jsonrpc":"2.0",
@@ -336,6 +659,485 @@ mod tests {
     }
 
     #[test]
+    fn request_target_preserves_and_decodes_query_string() {
+        let request = HttpRequest::new(
+            "GET",
+            "/mcp?cursor=1%2F0&status=active+lane&status=blocked",
+            [("host", "127.0.0.1")],
+            Vec::new(),
+        );
+
+        assert_eq!(request.path, MCP_PATH);
+        assert_eq!(
+            request.query_string.as_deref(),
+            Some("cursor=1%2F0&status=active+lane&status=blocked")
+        );
+        assert_eq!(request.query_param("cursor"), Some("1/0"));
+        let statuses: Vec<&str> = request.query_values("status").collect();
+        assert_eq!(statuses, vec!["active lane", "blocked"]);
+    }
+
+    #[test]
+    fn operator_api_routes_are_typed_json_404_and_parse_query() {
+        let response = handle_http_request(
+            &test_server(),
+            &HttpTransportConfig::default(),
+            HttpRequest::new(
+                "GET",
+                "/operator/v1/sessions?cursor=4%2F0&status=active&profile=prod",
+                [("host", "127.0.0.1"), ("accept", "application/json")],
+                Vec::new(),
+            ),
+        );
+
+        assert_eq!(response.status, 404);
+        assert_eq!(response.header("content-type"), Some("application/json"));
+        let body = response_json(&response);
+        assert_eq!(body["error"], serde_json::json!("operator_route_not_found"));
+        assert_eq!(body["query"]["cursor"], serde_json::json!("4/0"));
+        assert_eq!(
+            body["query"]["filters"]["status"],
+            serde_json::json!("active")
+        );
+        assert_eq!(
+            body["query"]["filters"]["profile"],
+            serde_json::json!("prod")
+        );
+
+        let bad_host = handle_http_request(
+            &test_server(),
+            &HttpTransportConfig::default(),
+            HttpRequest::new(
+                "GET",
+                "/operator/v1/sessions",
+                [("host", "attacker.example"), ("accept", "application/json")],
+                Vec::new(),
+            ),
+        );
+        assert_eq!(bad_host.status, 403);
+    }
+
+    #[cfg(not(feature = "dashboard-bundle"))]
+    #[test]
+    fn dashboard_bundle_is_absent_from_default_build() {
+        let response = handle_http_request(
+            &test_server(),
+            &HttpTransportConfig::default(),
+            HttpRequest::new(
+                "GET",
+                "/",
+                [("host", "127.0.0.1"), ("accept", "text/html")],
+                Vec::new(),
+            ),
+        );
+
+        assert_eq!(response.status, 404);
+    }
+
+    #[cfg(feature = "dashboard-bundle")]
+    #[test]
+    fn dashboard_bundle_serves_html_without_api_fallback() {
+        let response = handle_http_request(
+            &test_server(),
+            &HttpTransportConfig::default(),
+            HttpRequest::new(
+                "GET",
+                "/",
+                [("host", "127.0.0.1"), ("accept", "text/html")],
+                Vec::new(),
+            ),
+        );
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.header("content-type"),
+            Some("text/html; charset=utf-8")
+        );
+        assert_eq!(response.header("x-content-type-options"), Some("nosniff"));
+        let html = String::from_utf8(response.body).expect("dashboard html is UTF-8");
+        assert!(html.contains("oraclemcp"));
+
+        let api = handle_http_request(
+            &test_server(),
+            &HttpTransportConfig::default(),
+            HttpRequest::new(
+                "GET",
+                "/operator/v1/sessions",
+                [("host", "127.0.0.1"), ("accept", "text/html")],
+                Vec::new(),
+            ),
+        );
+        assert_eq!(api.status, 406);
+    }
+
+    #[test]
+    fn mcp_post_enforces_accept_and_content_type_negotiation() {
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            ..Default::default()
+        };
+        let unacceptable = HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("content-type", "application/json"),
+                ("accept", "text/html"),
+            ],
+            init_body().to_string().into_bytes(),
+        );
+        let unacceptable = handle_http_request(&test_server(), &cfg, unacceptable);
+        assert_eq!(unacceptable.status, 406);
+
+        let wrong_content_type = HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("content-type", "text/plain"),
+                ("accept", "application/json"),
+            ],
+            init_body().to_string().into_bytes(),
+        );
+        let wrong_content_type = handle_http_request(&test_server(), &cfg, wrong_content_type);
+        assert_eq!(wrong_content_type.status, 415);
+    }
+
+    #[test]
+    fn stateless_delete_is_method_not_allowed_not_false_accepted() {
+        let response = handle_http_request(
+            &test_server(),
+            &HttpTransportConfig::default(),
+            HttpRequest::new("DELETE", MCP_PATH, [("host", "127.0.0.1")], Vec::new()),
+        );
+
+        assert_eq!(response.status, 405);
+        assert_eq!(response.header("allow"), Some("POST"));
+    }
+
+    #[test]
+    fn stateful_get_replays_buffered_lane_results_by_cursor() {
+        let result_store = Arc::new(HttpResultStore::new());
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            stateful: true,
+            session_store: Some(Arc::new(HttpSessionStore::default())),
+            result_store: Some(Arc::clone(&result_store)),
+            ..Default::default()
+        };
+        let lane: Arc<dyn ToolDispatch> = Arc::new(crate::lane::LaneRuntime::spawn(
+            "http-buffer-test",
+            Arc::new(LaneThreadDispatch),
+            4,
+        ));
+        let server = OracleMcpServer::new(
+            "0.1.0",
+            ToolRegistry::new(),
+            CapabilitiesReport::new(
+                "0.1.0",
+                vec![],
+                OperatingLevel::ReadOnly,
+                FeatureTiers {
+                    live_db: false,
+                    engine: true,
+                    http_transport: true,
+                },
+            ),
+            lane,
+        );
+
+        let caller_thread = format!("{:?}", std::thread::current().id());
+        let init = handle_http_request(&server, &cfg, post(&init_body()));
+        let session_id = init
+            .header("mcp-session-id")
+            .expect("stateful init session id");
+        let call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": { "name": "oracle_query", "arguments": { "sql": "SELECT 1 FROM dual" } }
+        });
+        let post = HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("content-type", "application/json"),
+                ("accept", "application/json, text/event-stream"),
+                ("mcp-session-id", session_id),
+            ],
+            call.to_string().into_bytes(),
+        );
+        let post = handle_http_request(&server, &cfg, post);
+        assert_eq!(post.status, 200);
+        let post_body = String::from_utf8(post.body).expect("SSE utf-8");
+        assert!(post_body.contains("id: 1/0"));
+        assert!(
+            !post_body.contains(&caller_thread),
+            "tool body must run on the lane thread, not the HTTP caller thread"
+        );
+
+        let replay = HttpRequest::new(
+            "GET",
+            "/mcp?cursor=0",
+            [
+                ("host", "127.0.0.1"),
+                ("accept", "text/event-stream"),
+                ("mcp-session-id", session_id),
+            ],
+            Vec::new(),
+        );
+        let replay = handle_http_request(&server, &cfg, replay);
+        assert_eq!(replay.status, 200);
+        assert_eq!(replay.header("content-type"), Some("text/event-stream"));
+        let replay_body = String::from_utf8(replay.body).expect("SSE utf-8");
+        assert!(replay_body.contains("id: 1/0"));
+        assert!(replay_body.contains("\"id\":9"));
+        assert!(replay_body.contains("\"tool\":\"oracle_query\""));
+
+        let after = HttpRequest::new(
+            "GET",
+            "/mcp?cursor=1/0",
+            [
+                ("host", "127.0.0.1"),
+                ("accept", "text/event-stream"),
+                ("mcp-session-id", session_id),
+            ],
+            Vec::new(),
+        );
+        let after = handle_http_request(&server, &cfg, after);
+        let after_body = String::from_utf8(after.body).expect("SSE utf-8");
+        assert!(
+            !after_body.contains("\"id\":9"),
+            "cursor after the buffered event must not replay it again"
+        );
+    }
+
+    #[test]
+    fn stateful_get_reports_typed_expiry_when_cursor_falls_out_of_ring() {
+        let session_store = Arc::new(HttpSessionStore::default());
+        let result_store = Arc::new(HttpResultStore::new());
+        let session_id = "expired-cursor-session";
+        session_store.insert(session_id.to_owned(), "anonymous-http".to_owned());
+        for i in 0..=MAX_BUFFERED_MCP_EVENTS_PER_SESSION {
+            result_store.append_response(session_id, serde_json::json!({ "seq": i }));
+        }
+        let cfg = HttpTransportConfig {
+            stateful: true,
+            session_store: Some(session_store),
+            result_store: Some(result_store),
+            ..Default::default()
+        };
+
+        let response = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                "/mcp?cursor=0",
+                [
+                    ("host", "127.0.0.1"),
+                    ("accept", "text/event-stream"),
+                    ("mcp-session-id", session_id),
+                ],
+                Vec::new(),
+            ),
+        );
+
+        assert_eq!(response.status, 410);
+        let body: Value = serde_json::from_slice(&response.body).expect("json expiry body");
+        assert_eq!(body["error"], serde_json::json!("stream_cursor_expired"));
+        assert_eq!(body["oldest_event_id"], serde_json::json!("2/0"));
+        assert!(
+            body["next_step"]
+                .as_str()
+                .is_some_and(|message| message.contains("restart the MCP session"))
+        );
+    }
+
+    #[test]
+    fn stateful_get_last_event_id_reports_gap_marker_for_slow_consumer() {
+        let session_store = Arc::new(HttpSessionStore::default());
+        let result_store = Arc::new(HttpResultStore::new());
+        let session_id = "slow-consumer-session";
+        session_store.insert(session_id.to_owned(), "anonymous-http".to_owned());
+        for i in 0..=MAX_BUFFERED_MCP_EVENTS_PER_SESSION {
+            result_store.append_response(session_id, serde_json::json!({ "seq": i }));
+        }
+        let cfg = HttpTransportConfig {
+            stateful: true,
+            session_store: Some(session_store),
+            result_store: Some(result_store),
+            ..Default::default()
+        };
+
+        let response = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                MCP_PATH,
+                [
+                    ("host", "127.0.0.1"),
+                    ("accept", "text/event-stream"),
+                    ("mcp-session-id", session_id),
+                    ("last-event-id", "0/0"),
+                ],
+                Vec::new(),
+            ),
+        );
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.header("content-type"), Some("text/event-stream"));
+        let body = String::from_utf8(response.body).expect("SSE utf-8");
+        assert!(body.contains("event: stream-gap"));
+        assert!(body.contains("id: 1/gap"));
+        assert!(body.contains("\"type\":\"stream_gap\""));
+        assert!(body.contains("\"oldest_event_id\":\"2/0\""));
+        assert!(body.contains("\"seq\":128"));
+    }
+
+    #[test]
+    fn served_stateful_get_streams_chunked_sse_until_session_closes() {
+        fn read_until(stream: &mut TcpStream, raw: &mut Vec<u8>, needle: &[u8]) {
+            let mut buf = [0_u8; 512];
+            while !raw.windows(needle.len()).any(|window| window == needle) {
+                let n = stream
+                    .read(&mut buf)
+                    .expect("streaming SSE response remains readable");
+                assert_ne!(n, 0, "streaming SSE response ended before expected data");
+                raw.extend_from_slice(&buf[..n]);
+            }
+        }
+
+        let session_store = Arc::new(HttpSessionStore::default());
+        let result_store = Arc::new(HttpResultStore::new());
+        let session_id = "served-stream-session";
+        session_store.insert(session_id.to_owned(), "anonymous-http".to_owned());
+        result_store.ensure_session(session_id);
+        let config = HttpTransportConfig {
+            stateful: true,
+            session_store: Some(Arc::clone(&session_store)),
+            result_store: Some(Arc::clone(&result_store)),
+            ..Default::default()
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind streaming test listener");
+        let addr = listener.local_addr().expect("streaming listener address");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_shutdown = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || {
+            serve_http_until(listener, test_server(), &config, thread_shutdown)
+                .expect("streaming HTTP listener exits cleanly");
+        });
+
+        let mut stream = TcpStream::connect(addr).expect("connect to streaming listener");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set streaming read timeout");
+        let request = format!(
+            "GET {MCP_PATH} HTTP/1.1\r\nhost: 127.0.0.1\r\naccept: text/event-stream\r\nmcp-session-id: {session_id}\r\ncontent-length: 0\r\n\r\n"
+        );
+        stream
+            .write_all(request.as_bytes())
+            .expect("write streaming GET");
+
+        let mut raw = Vec::new();
+        read_until(&mut stream, &mut raw, b"\r\n\r\n");
+        let text = String::from_utf8_lossy(&raw);
+        let head = text
+            .split_once("\r\n\r\n")
+            .map(|(head, _)| head)
+            .expect("streaming HTTP response head");
+        assert!(head.contains("transfer-encoding: chunked"));
+        assert!(!head.contains("content-length:"));
+
+        result_store.append_response(session_id, serde_json::json!({ "seq": 1 }));
+        read_until(&mut stream, &mut raw, b"\"seq\":1");
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.contains("content-type: text/event-stream"));
+        assert!(text.contains("id: 1/0"));
+
+        result_store.remove_session(session_id);
+        shutdown.store(true, Ordering::SeqCst);
+        drop(stream);
+        handle.join().expect("streaming listener thread joins");
+    }
+
+    #[test]
+    fn stateful_idle_reaper_closes_by_timeout_and_clears_buffers() {
+        #[derive(Debug, Default)]
+        struct RecordingLifecycle {
+            closed: std::sync::Mutex<Vec<(String, String, DispatchCloseReason)>>,
+        }
+
+        impl HttpSessionLifecycle for RecordingLifecycle {
+            fn close_session(&self, session_id: &str, principal_key: &str) -> bool {
+                self.close_session_with_reason(
+                    session_id,
+                    principal_key,
+                    DispatchCloseReason::SessionDelete,
+                )
+            }
+
+            fn close_session_with_reason(
+                &self,
+                session_id: &str,
+                principal_key: &str,
+                reason: DispatchCloseReason,
+            ) -> bool {
+                self.closed.lock().expect("test lifecycle mutex").push((
+                    session_id.to_owned(),
+                    principal_key.to_owned(),
+                    reason,
+                ));
+                true
+            }
+        }
+
+        let session_store = Arc::new(HttpSessionStore::default());
+        let result_store = Arc::new(HttpResultStore::new());
+        let lifecycle = Arc::new(RecordingLifecycle::default());
+        let session_id = "idle-session";
+        session_store.insert(session_id.to_owned(), "principal-a".to_owned());
+        result_store.append_response(session_id, serde_json::json!({ "stale": true }));
+        session_store.force_idle_for_test(session_id, Duration::from_secs(901));
+        let cfg = HttpTransportConfig {
+            stateful: true,
+            stateful_idle_ttl: Duration::from_secs(900),
+            session_store: Some(Arc::clone(&session_store)),
+            result_store: Some(Arc::clone(&result_store)),
+            session_lifecycle: Some(lifecycle.clone()),
+            ..Default::default()
+        };
+
+        assert_eq!(reap_idle_stateful_sessions(&cfg), 1);
+        assert!(session_store.principal_for(session_id).is_none());
+        assert!(
+            result_store
+                .events_after(session_id, None, false)
+                .expect("removed session has no buffered events")
+                .is_empty()
+        );
+        assert_eq!(
+            lifecycle
+                .closed
+                .lock()
+                .expect("test lifecycle mutex")
+                .as_slice(),
+            &[(
+                session_id.to_owned(),
+                "principal-a".to_owned(),
+                DispatchCloseReason::Timeout
+            )]
+        );
+        assert_eq!(
+            reap_idle_stateful_sessions(&cfg),
+            0,
+            "reaping the same idle session is idempotent"
+        );
+    }
+
+    #[test]
     fn busy_tool_result_is_http_429_backpressure() {
         let cfg = HttpTransportConfig {
             json_response: true,
@@ -358,6 +1160,36 @@ mod tests {
         assert_eq!(
             body["result"]["structuredContent"]["error_class"],
             serde_json::json!("BUSY")
+        );
+        assert_eq!(
+            body["result"]["structuredContent"]["retry_after_ms"],
+            serde_json::json!(250)
+        );
+    }
+
+    #[test]
+    fn at_capacity_tool_result_is_http_429_backpressure() {
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            ..Default::default()
+        };
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "oracle_query",
+                "arguments": { "sql": "SELECT 1 FROM dual" }
+            }
+        });
+        let response = handle_http_request(&at_capacity_server(), &cfg, post(&body));
+
+        assert_eq!(response.status, 429);
+        assert_eq!(response.header("retry-after"), Some("1"));
+        let body = response_json(&response);
+        assert_eq!(
+            body["result"]["structuredContent"]["error_class"],
+            serde_json::json!("AT_CAPACITY")
         );
         assert_eq!(
             body["result"]["structuredContent"]["retry_after_ms"],
@@ -588,11 +1420,165 @@ mod tests {
     }
 
     #[test]
-    fn stateful_requests_require_a_known_session_id_after_initialize() {
+    fn stateful_initialize_sets_strict_session_cookie() {
         let cfg = HttpTransportConfig {
             json_response: true,
             stateful: true,
             session_store: Some(Arc::new(HttpSessionStore::default())),
+            result_store: Some(Arc::new(HttpResultStore::new())),
+            ..Default::default()
+        };
+        let response = handle_http_request(&test_server(), &cfg, post(&init_body()));
+        let session_id = response
+            .header("mcp-session-id")
+            .expect("initialize returns mcp-session-id");
+        let cookie = response
+            .header("set-cookie")
+            .expect("initialize returns EventSource session cookie");
+        assert!(cookie.starts_with(&format!("{STATEFUL_SESSION_COOKIE}={session_id};")));
+        assert!(cookie.contains("Path=/mcp"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+    }
+
+    #[test]
+    fn oauth_stateful_get_accepts_strict_cookie_with_origin_only() {
+        let session_store = Arc::new(HttpSessionStore::default());
+        let result_store = Arc::new(HttpResultStore::new());
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            stateful: true,
+            allowed_origins: vec!["https://app.example".to_owned()],
+            oauth: Some(Arc::new(OAuthEnforcement {
+                config: ResourceServerConfig {
+                    resource: "https://oraclemcp.example/mcp".to_owned(),
+                    allowed_issuers: vec!["https://idp.example".to_owned()],
+                    authorization_servers: vec!["https://idp.example".to_owned()],
+                    required_scopes: vec![],
+                },
+                verifier: Arc::new(AcceptHs256),
+                metadata_url: "https://oraclemcp.example/.well-known/oauth-protected-resource"
+                    .to_owned(),
+            })),
+            session_store: Some(Arc::clone(&session_store)),
+            result_store: Some(Arc::clone(&result_store)),
+            ..Default::default()
+        };
+        let token = format!("Bearer {}", jwt_with_scope("oracle:read"));
+        let init = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "POST",
+                MCP_PATH,
+                [
+                    ("host", "127.0.0.1"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json, text/event-stream"),
+                    ("origin", "https://app.example"),
+                    ("authorization", token.as_str()),
+                ],
+                init_body().to_string().into_bytes(),
+            ),
+        );
+        assert_eq!(init.status, 200);
+        let session_id = init
+            .header("mcp-session-id")
+            .expect("initialize returns mcp-session-id");
+        let cookie_pair = init
+            .header("set-cookie")
+            .and_then(|cookie| cookie.split(';').next())
+            .expect("initialize returns cookie pair")
+            .to_owned();
+        result_store.append_response(session_id, serde_json::json!({ "seq": 1 }));
+
+        let cookie_get = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                MCP_PATH,
+                [
+                    ("host", "127.0.0.1"),
+                    ("accept", "text/event-stream"),
+                    ("origin", "https://app.example"),
+                    ("cookie", cookie_pair.as_str()),
+                    ("last-event-id", "0/0"),
+                ],
+                Vec::new(),
+            ),
+        );
+        assert_eq!(cookie_get.status, 200);
+        let body = String::from_utf8(cookie_get.body).expect("SSE utf-8");
+        assert!(body.contains("id: 1/0"));
+        assert!(body.contains("\"seq\":1"));
+
+        let missing_origin = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                MCP_PATH,
+                [
+                    ("host", "127.0.0.1"),
+                    ("accept", "text/event-stream"),
+                    ("cookie", cookie_pair.as_str()),
+                ],
+                Vec::new(),
+            ),
+        );
+        assert_eq!(missing_origin.status, 403);
+        assert_eq!(
+            String::from_utf8_lossy(&missing_origin.body),
+            "Missing Origin header for cookie-authenticated SSE"
+        );
+
+        let header_only_without_bearer = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                MCP_PATH,
+                [
+                    ("host", "127.0.0.1"),
+                    ("accept", "text/event-stream"),
+                    ("origin", "https://app.example"),
+                    ("mcp-session-id", session_id),
+                ],
+                Vec::new(),
+            ),
+        );
+        assert_eq!(header_only_without_bearer.status, 401);
+        assert!(
+            header_only_without_bearer
+                .header("www-authenticate")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn stateful_requests_require_a_known_session_id_after_initialize() {
+        #[derive(Debug, Default)]
+        struct RecordingLifecycle {
+            closed: std::sync::Mutex<Vec<(String, String)>>,
+        }
+
+        impl HttpSessionLifecycle for RecordingLifecycle {
+            fn close_session(&self, session_id: &str, principal_key: &str) -> bool {
+                self.closed
+                    .lock()
+                    .expect("test lifecycle mutex")
+                    .push((session_id.to_owned(), principal_key.to_owned()));
+                true
+            }
+        }
+
+        let lifecycle = Arc::new(RecordingLifecycle::default());
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            stateful: true,
+            session_store: Some(Arc::new(HttpSessionStore::default())),
+            session_lifecycle: Some(lifecycle.clone()),
             ..Default::default()
         };
         let init = handle_http_request(&test_server(), &cfg, post(&init_body()));
@@ -669,6 +1655,15 @@ mod tests {
         );
         let deleted = handle_http_request(&test_server(), &cfg, delete);
         assert_eq!(deleted.status, 202);
+        assert_eq!(
+            lifecycle
+                .closed
+                .lock()
+                .expect("test lifecycle mutex")
+                .as_slice(),
+            &[(session_id.clone(), "anonymous-http".to_owned())],
+            "DELETE must close the lane/resource bound to the session"
+        );
 
         let stale = HttpRequest::new(
             "POST",
@@ -866,17 +1861,38 @@ mod tests {
 
     #[test]
     fn serve_http_until_stops_accepting_and_drains_worker() {
+        #[derive(Debug)]
+        struct ShutdownLifecycle {
+            closed_all: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl HttpSessionLifecycle for ShutdownLifecycle {
+            fn close_session(&self, _session_id: &str, _principal_key: &str) -> bool {
+                false
+            }
+
+            fn close_all_sessions(&self) {
+                self.closed_all
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback test listener");
         let addr = listener.local_addr().expect("listener has local addr");
         let shutdown = Arc::new(AtomicBool::new(false));
         let server_shutdown = Arc::clone(&shutdown);
+        let closed_all = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_closed_all = Arc::clone(&closed_all);
         let handle = std::thread::spawn(move || {
             serve_http_until(
                 listener,
                 test_server(),
                 &HttpTransportConfig {
                     json_response: true,
-                    stateful: false,
+                    stateful: true,
+                    session_lifecycle: Some(Arc::new(ShutdownLifecycle {
+                        closed_all: server_closed_all,
+                    })),
                     ..Default::default()
                 },
                 server_shutdown,
@@ -901,6 +1917,11 @@ mod tests {
         stream.read_to_string(&mut response).expect("read response");
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         handle.join().expect("server thread joins after draining");
+        assert_eq!(
+            closed_all.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "stateful listener shutdown closes all lane sessions after worker drain"
+        );
     }
 
     fn self_signed_cert() -> (Vec<u8>, Vec<u8>) {
@@ -1254,6 +2275,8 @@ struct ValidatedOAuthRequest {
 pub struct HttpRequest {
     pub method: String,
     pub path: String,
+    pub query_string: Option<String>,
+    pub query: Vec<(String, String)>,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
@@ -1272,13 +2295,16 @@ impl HttpRequest {
         V: Into<String>,
         B: Into<Vec<u8>>,
     {
+        let (path, query_string, query) = split_request_target(&path.into());
         let headers = headers
             .into_iter()
             .map(|(name, value)| (name.into().to_ascii_lowercase(), value.into()))
             .collect();
         Self {
             method: method.into().to_ascii_uppercase(),
-            path: path.into(),
+            path,
+            query_string,
+            query,
             headers,
             body: body.into(),
         }
@@ -1292,6 +2318,85 @@ impl HttpRequest {
             .find(|(candidate, _)| candidate == &name)
             .map(|(_, value)| value.as_str())
     }
+
+    #[must_use]
+    pub fn query_param(&self, name: &str) -> Option<&str> {
+        self.query
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    pub fn query_values<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.query.iter().filter_map(move |(candidate, value)| {
+            if candidate == name {
+                Some(value.as_str())
+            } else {
+                None
+            }
+        })
+    }
+}
+
+fn split_request_target(target: &str) -> (String, Option<String>, Vec<(String, String)>) {
+    let (path, query_string) = target
+        .split_once('?')
+        .map_or((target, None), |(path, query)| {
+            (path, Some(query.to_owned()))
+        });
+    let query = query_string
+        .as_deref()
+        .map(parse_query_string)
+        .unwrap_or_default();
+    (path.to_owned(), query_string, query)
+}
+
+fn parse_query_string(query: &str) -> Vec<(String, String)> {
+    query
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let (name, value) = part.split_once('=').unwrap_or((part, ""));
+            (percent_decode_query(name), percent_decode_query(value))
+        })
+        .collect()
+}
+
+fn percent_decode_query(input: &str) -> String {
+    fn hex(value: u8) -> Option<u8> {
+        match value {
+            b'0'..=b'9' => Some(value - b'0'),
+            b'a'..=b'f' => Some(value - b'a' + 10),
+            b'A'..=b'F' => Some(value - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let mut out = Vec::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// A native HTTP response used by the listener and by protocol tests.
@@ -1443,6 +2548,46 @@ fn stateful_principal_key(principal_key: Option<&str>) -> &str {
     principal_key.unwrap_or("anonymous-http")
 }
 
+fn stateful_session_cookie(request: &HttpRequest) -> Option<&str> {
+    request
+        .header("cookie")
+        .and_then(|cookie| cookie_value(cookie, STATEFUL_SESSION_COOKIE))
+}
+
+fn cookie_value<'a>(cookie: &'a str, name: &str) -> Option<&'a str> {
+    cookie.split(';').find_map(|part| {
+        let (candidate, value) = part.trim().split_once('=')?;
+        (candidate == name && !value.is_empty()).then_some(value)
+    })
+}
+
+fn stateful_session_id(request: &HttpRequest, allow_cookie: bool) -> Option<&str> {
+    request.header("mcp-session-id").or_else(|| {
+        allow_cookie
+            .then(|| stateful_session_cookie(request))
+            .flatten()
+    })
+}
+
+fn stateful_session_cookie_header(session_id: &str) -> String {
+    format!("{STATEFUL_SESSION_COOKIE}={session_id}; Path={MCP_PATH}; HttpOnly; SameSite=Strict")
+}
+
+fn cookie_get_requires_origin(request: &HttpRequest) -> Option<HttpResponse> {
+    if request.method == "GET"
+        && request.path == MCP_PATH
+        && stateful_session_cookie(request).is_some()
+        && request.header("origin").is_none()
+    {
+        return Some(HttpResponse {
+            status: 403,
+            headers: vec![],
+            body: b"Missing Origin header for cookie-authenticated SSE".to_vec(),
+        });
+    }
+    None
+}
+
 fn enforce_single_principal(
     config: &HttpTransportConfig,
     validated_oauth: Option<&ValidatedOAuthRequest>,
@@ -1465,6 +2610,31 @@ fn single_principal_conflict_response() -> HttpResponse {
             "next_step": "start a separate oraclemcp process for the second principal, or wait for the per-principal LaneRuntime release",
         }),
     )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HttpRoute {
+    ProtectedResourceMetadata,
+    Observability,
+    Mcp,
+    OperatorApi,
+    NotFound,
+}
+
+fn route_for(path: &str) -> HttpRoute {
+    match path {
+        PROTECTED_RESOURCE_METADATA_PATH => HttpRoute::ProtectedResourceMetadata,
+        HEALTHZ_PATH | READYZ_PATH | METRICS_PATH => HttpRoute::Observability,
+        MCP_PATH => HttpRoute::Mcp,
+        OPERATOR_API_PREFIX => HttpRoute::OperatorApi,
+        _ if path
+            .strip_prefix(OPERATOR_API_PREFIX)
+            .is_some_and(|suffix| suffix.starts_with('/')) =>
+        {
+            HttpRoute::OperatorApi
+        }
+        _ => HttpRoute::NotFound,
+    }
 }
 
 fn guard_http_request(config: &HttpTransportConfig, request: &HttpRequest) -> Option<HttpResponse> {
@@ -1491,6 +2661,20 @@ fn guard_http_request(config: &HttpTransportConfig, request: &HttpRequest) -> Op
     }
 }
 
+enum HttpExchange {
+    Buffered(HttpResponse),
+    SseStream(HttpSseStream),
+}
+
+impl HttpExchange {
+    fn into_buffered_response(self) -> HttpResponse {
+        match self {
+            Self::Buffered(response) => response,
+            Self::SseStream(stream) => stream.into_buffered_response(),
+        }
+    }
+}
+
 /// Handle one parsed native HTTP request.
 #[must_use]
 pub fn handle_http_request(
@@ -1498,37 +2682,80 @@ pub fn handle_http_request(
     config: &HttpTransportConfig,
     request: HttpRequest,
 ) -> HttpResponse {
-    if request.path == PROTECTED_RESOURCE_METADATA_PATH && request.method == "GET" {
-        return match &config.resource_metadata {
-            Some(meta) => json_response(200, meta),
-            None => empty_response(404),
-        };
-    }
-    // D1-health: liveness / readiness / metrics probes. Served before OAuth and
-    // the Host/Origin guard — these are infra endpoints for load balancers and
-    // Prometheus, not the MCP surface, and must answer even while the DB is down
-    // or the bearer config is absent. They carry no secrets and no DB data.
-    if let Some(response) = handle_observability_route(&config.observability, &request) {
-        return response;
-    }
-    if request.path != MCP_PATH {
-        return empty_response(404);
+    handle_http_exchange(server, config, request, false).into_buffered_response()
+}
+
+fn handle_http_exchange(
+    server: &OracleMcpServer,
+    config: &HttpTransportConfig,
+    request: HttpRequest,
+    allow_streaming_get: bool,
+) -> HttpExchange {
+    match route_for(&request.path) {
+        HttpRoute::ProtectedResourceMetadata => {
+            if request.method != "GET" {
+                return HttpExchange::Buffered(empty_response(405).with_header("allow", "GET"));
+            }
+            return HttpExchange::Buffered(match &config.resource_metadata {
+                Some(meta) => json_response(200, meta),
+                None => empty_response(404),
+            });
+        }
+        // D1-health: liveness / readiness / metrics probes. Served before OAuth
+        // and the Host/Origin guard — these are infra endpoints for load
+        // balancers and Prometheus, not the MCP surface, and must answer even
+        // while the DB is down or the bearer config is absent. They carry no
+        // secrets and no DB data.
+        HttpRoute::Observability => {
+            return HttpExchange::Buffered(
+                handle_observability_route(&config.observability, &request)
+                    .unwrap_or_else(|| empty_response(404)),
+            );
+        }
+        HttpRoute::OperatorApi => {
+            if let Some(response) = guard_http_request(config, &request) {
+                return HttpExchange::Buffered(response);
+            }
+            if !accepts_media(request.header("accept"), "application/json") {
+                return HttpExchange::Buffered(empty_response(406));
+            }
+            if let Some(enforcement) = &config.oauth
+                && let Err(response) = validate_oauth_request(&request, enforcement)
+            {
+                return HttpExchange::Buffered(response);
+            }
+            return HttpExchange::Buffered(handle_operator_api_route(&request));
+        }
+        HttpRoute::NotFound => {
+            return HttpExchange::Buffered(
+                handle_dashboard_route(config, &request).unwrap_or_else(|| empty_response(404)),
+            );
+        }
+        HttpRoute::Mcp => {}
     }
     if let Some(response) = guard_http_request(config, &request) {
-        return response;
+        return HttpExchange::Buffered(response);
     }
     if request.body.len() > MAX_BODY_BYTES {
-        return empty_response(413);
+        return HttpExchange::Buffered(empty_response(413));
     }
+    if let Some(response) = cookie_get_requires_origin(&request) {
+        return HttpExchange::Buffered(response);
+    }
+    let cookie_authenticated_get = request.method == "GET"
+        && config.stateful
+        && request.header("authorization").is_none()
+        && stateful_session_cookie(&request).is_some();
     let validated_oauth = match &config.oauth {
         Some(enforcement) => match validate_oauth_request(&request, enforcement) {
             Ok(validated) => Some(validated),
-            Err(response) => return response,
+            Err(_) if cookie_authenticated_get => None,
+            Err(response) => return HttpExchange::Buffered(response),
         },
         None => None,
     };
     if let Some(response) = enforce_single_principal(config, validated_oauth.as_ref()) {
-        return response;
+        return HttpExchange::Buffered(response);
     }
     let scope_grant = validated_oauth
         .as_ref()
@@ -1537,11 +2764,94 @@ pub fn handle_http_request(
         .as_ref()
         .map(|validated| validated.principal_key.as_str());
     match request.method.as_str() {
-        "DELETE" => handle_mcp_delete(config, &request, stateful_principal_key(principal_key)),
-        "POST" => handle_mcp_post(server, config, &request, scope_grant, principal_key),
-        "GET" => empty_response(405).with_header("allow", "POST, DELETE"),
-        _ => empty_response(405).with_header("allow", "GET, POST, DELETE"),
+        "GET" => handle_mcp_get(config, &request, principal_key, allow_streaming_get),
+        "DELETE" => HttpExchange::Buffered(handle_mcp_delete(
+            config,
+            &request,
+            stateful_principal_key(principal_key),
+        )),
+        "POST" => HttpExchange::Buffered(handle_mcp_post(
+            server,
+            config,
+            &request,
+            scope_grant,
+            principal_key,
+        )),
+        _ => HttpExchange::Buffered(empty_response(405).with_header(
+            "allow",
+            if config.stateful {
+                "GET, POST, DELETE"
+            } else {
+                "POST"
+            },
+        )),
     }
+}
+
+fn handle_operator_api_route(request: &HttpRequest) -> HttpResponse {
+    if request.method != "GET" {
+        return empty_response(405).with_header("allow", "GET");
+    }
+    let filters: serde_json::Map<String, Value> = request
+        .query
+        .iter()
+        .filter(|(name, _)| name != "cursor")
+        .map(|(name, value)| (name.clone(), Value::String(value.clone())))
+        .collect();
+    json_response(
+        404,
+        &json!({
+            "error": "operator_route_not_found",
+            "message": "operator API route is not served yet",
+            "path": request.path,
+            "query": {
+                "cursor": request.query_param("cursor"),
+                "filters": filters,
+            },
+        }),
+    )
+}
+
+fn handle_dashboard_route(
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+) -> Option<HttpResponse> {
+    if !matches!(request.method.as_str(), "GET" | "HEAD") {
+        return None;
+    }
+    if dashboard_html_fallback_path(&request.path)
+        && !accepts_media(request.header("accept"), "text/html")
+    {
+        return None;
+    }
+    if let Some(response) = guard_http_request(config, request) {
+        return Some(response);
+    }
+    let asset = crate::dashboard_bundle::dashboard_asset_for(&request.path)?;
+    let body = if request.method == "HEAD" {
+        Vec::new()
+    } else {
+        asset.body
+    };
+    Some(HttpResponse {
+        status: 200,
+        headers: vec![
+            ("content-type".to_owned(), asset.content_type.to_owned()),
+            ("cache-control".to_owned(), asset.cache_control.to_owned()),
+            ("x-content-type-options".to_owned(), "nosniff".to_owned()),
+        ],
+        body,
+    })
+}
+
+fn dashboard_html_fallback_path(path: &str) -> bool {
+    let path = path.trim_start_matches('/');
+    path.is_empty()
+        || path == "index.html"
+        || !path
+            .rsplit('/')
+            .next()
+            .is_some_and(|part| part.contains('.'))
 }
 
 /// Route the D1 observability endpoints. Returns `None` when the path is not an
@@ -1610,23 +2920,71 @@ fn handle_observability_route(
     }
 }
 
+fn handle_mcp_get(
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+    principal_key: Option<&str>,
+    allow_streaming: bool,
+) -> HttpExchange {
+    if !config.stateful {
+        return HttpExchange::Buffered(empty_response(405).with_header("allow", "POST"));
+    }
+    if !accepts_media(request.header("accept"), "text/event-stream") {
+        return HttpExchange::Buffered(empty_response(406));
+    }
+    let session = match validate_stateful_session(config, request, principal_key, true) {
+        Ok(session) => session,
+        Err(response) => return HttpExchange::Buffered(response),
+    };
+    let session_id = session.session_id;
+    let cursor = request
+        .query_param("cursor")
+        .or_else(|| request.header("last-event-id"));
+    let gap_on_expired_cursor =
+        request.query_param("cursor").is_none() && request.header("last-event-id").is_some();
+    let Some(store) = config.result_store.as_ref() else {
+        return HttpExchange::Buffered(buffered_sse_response(&[]));
+    };
+    store.ensure_session(session_id);
+    let events = match store.events_after(session_id, cursor, gap_on_expired_cursor) {
+        Ok(events) => events,
+        Err(response) => return HttpExchange::Buffered(response),
+    };
+    if allow_streaming {
+        return HttpExchange::SseStream(HttpSseStream::new(
+            Arc::clone(store),
+            session_id.to_owned(),
+            parse_stream_cursor(cursor).unwrap_or(0),
+            events,
+        ));
+    }
+    HttpExchange::Buffered(buffered_sse_response(&events))
+}
+
 fn handle_mcp_delete(
     config: &HttpTransportConfig,
     request: &HttpRequest,
     principal_key: &str,
 ) -> HttpResponse {
     if config.stateful {
-        return match validate_stateful_session(config, request, principal_key) {
-            Ok(session_id) => {
+        return match validate_stateful_session(config, request, Some(principal_key), false) {
+            Ok(session) => {
+                let session_id = session.session_id;
                 if let Some(store) = &config.session_store {
                     store.remove(session_id);
+                }
+                if let Some(store) = &config.result_store {
+                    store.remove_session(session_id);
+                }
+                if let Some(lifecycle) = &config.session_lifecycle {
+                    lifecycle.close_session(session_id, &session.principal_key);
                 }
                 empty_response(202)
             }
             Err(response) => response,
         };
     }
-    empty_response(202)
+    empty_response(405).with_header("allow", "POST")
 }
 
 fn handle_mcp_post(
@@ -1636,6 +2994,19 @@ fn handle_mcp_post(
     scope_grant: Option<&ScopeGrant>,
     principal_key: Option<&str>,
 ) -> HttpResponse {
+    if !content_type_is_json(request) {
+        return empty_response(415);
+    }
+    if !accepts_media(
+        request.header("accept"),
+        if config.stateful {
+            "text/event-stream"
+        } else {
+            "application/json"
+        },
+    ) {
+        return empty_response(406);
+    }
     let session_principal_key = stateful_principal_key(principal_key);
     let parsed = match serde_json::from_slice::<Value>(&request.body) {
         Ok(value) => value,
@@ -1651,8 +3022,8 @@ fn handle_mcp_post(
         if method.as_deref() == Some("initialize") {
             Some(new_session_id())
         } else {
-            match validate_stateful_session(config, request, session_principal_key) {
-                Ok(session_id) => Some(session_id.to_owned()),
+            match validate_stateful_session(config, request, Some(session_principal_key), false) {
+                Ok(session) => Some(session.session_id.to_owned()),
                 Err(response) => return response,
             }
         }
@@ -1677,12 +3048,23 @@ fn handle_mcp_post(
         return json_response(429, &response).with_header("retry-after", &retry_after);
     }
     if config.stateful {
+        let response_event_id = if method.as_deref() == Some("initialize") {
+            None
+        } else {
+            http_session_id.as_deref().and_then(|session_id| {
+                config
+                    .result_store
+                    .as_ref()
+                    .map(|store| store.append_response(session_id, response.clone()))
+            })
+        };
         return sse_response(
             config,
             method.as_deref(),
             response,
             http_session_id,
             session_principal_key,
+            response_event_id.as_deref(),
         );
     }
     json_response(200, &response)
@@ -1698,7 +3080,8 @@ fn jsonrpc_busy_retry_after_ms(response: &Value) -> Option<u64> {
         return None;
     }
     let structured = result.get("structuredContent")?;
-    if structured.get("error_class").and_then(Value::as_str) != Some("BUSY") {
+    let error_class = structured.get("error_class").and_then(Value::as_str);
+    if !matches!(error_class, Some("BUSY" | "AT_CAPACITY")) {
         return None;
     }
     Some(
@@ -1713,12 +3096,47 @@ fn retry_after_header_seconds(ms: u64) -> String {
     (ms.saturating_add(999) / 1000).max(1).to_string()
 }
 
+fn content_type_is_json(request: &HttpRequest) -> bool {
+    request.header("content-type").is_some_and(|value| {
+        value
+            .split(';')
+            .next()
+            .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/json"))
+    })
+}
+
+fn accepts_media(header: Option<&str>, required: &str) -> bool {
+    let Some(header) = header else {
+        return true;
+    };
+    let Some((required_type, required_subtype)) = required.split_once('/') else {
+        return false;
+    };
+    header.split(',').any(|range| {
+        let media = range.split(';').next().unwrap_or("").trim();
+        if media == "*/*" {
+            return true;
+        }
+        let Some((media_type, media_subtype)) = media.split_once('/') else {
+            return false;
+        };
+        (media_type == "*" || media_type.eq_ignore_ascii_case(required_type))
+            && (media_subtype == "*" || media_subtype.eq_ignore_ascii_case(required_subtype))
+    })
+}
+
+struct ValidatedStatefulSession<'a> {
+    session_id: &'a str,
+    principal_key: String,
+}
+
 fn validate_stateful_session<'a>(
     config: &HttpTransportConfig,
     request: &'a HttpRequest,
-    principal_key: &str,
-) -> Result<&'a str, HttpResponse> {
-    let Some(session_id) = request.header("mcp-session-id") else {
+    expected_principal_key: Option<&str>,
+    allow_cookie: bool,
+) -> Result<ValidatedStatefulSession<'a>, HttpResponse> {
+    let Some(session_id) = stateful_session_id(request, allow_cookie) else {
         return Err(HttpResponse {
             status: 400,
             headers: vec![],
@@ -1730,7 +3148,12 @@ fn validate_stateful_session<'a>(
         .as_ref()
         .and_then(|store| store.principal_for(session_id));
     match owner.as_deref() {
-        Some(owner) if owner == principal_key => Ok(session_id),
+        Some(owner) if expected_principal_key.is_none_or(|expected| owner == expected) => {
+            Ok(ValidatedStatefulSession {
+                session_id,
+                principal_key: owner.to_owned(),
+            })
+        }
         Some(_) => Err(HttpResponse {
             status: 403,
             headers: vec![],
@@ -1778,21 +3201,179 @@ impl HttpResponse {
     }
 }
 
+fn stream_event_sequence(id: &str) -> Option<u64> {
+    id.split('/').next()?.parse().ok()
+}
+
+fn parse_stream_cursor(cursor: Option<&str>) -> Result<u64, HttpResponse> {
+    match cursor {
+        Some(cursor) if !cursor.trim().is_empty() => {
+            stream_event_sequence(cursor).ok_or_else(|| {
+                json_response(
+                    400,
+                    &json!({
+                        "error": "invalid_stream_cursor",
+                        "message": "cursor must be a Streamable HTTP event id such as 1 or 1/0",
+                    }),
+                )
+            })
+        }
+        _ => Ok(0),
+    }
+}
+
+fn events_after_sequence(
+    events: &[HttpBufferedEvent],
+    after_seq: u64,
+    cursor: Option<&str>,
+    gap_on_expired_cursor: bool,
+) -> Result<Vec<HttpBufferedEvent>, HttpResponse> {
+    if let Some(oldest_event) = events.first()
+        && let Some(oldest_seq) = stream_event_sequence(&oldest_event.id)
+        && after_seq < oldest_seq.saturating_sub(1)
+    {
+        if !gap_on_expired_cursor {
+            return Err(json_response(
+                410,
+                &json!({
+                    "error": "stream_cursor_expired",
+                    "message": "requested Streamable HTTP cursor is older than the retained event buffer",
+                    "cursor": cursor.unwrap_or(""),
+                    "oldest_event_id": oldest_event.id,
+                    "next_step": "restart the MCP session; the missing event range is no longer available for replay",
+                }),
+            ));
+        }
+        let mut resumed = Vec::with_capacity(events.len().saturating_add(1));
+        resumed.push(HttpBufferedEvent::gap(
+            format!("{}/gap", oldest_seq.saturating_sub(1)),
+            cursor,
+            &oldest_event.id,
+        ));
+        resumed.extend(events.iter().cloned());
+        return Ok(resumed);
+    }
+    Ok(events
+        .iter()
+        .filter(|event| stream_event_sequence(&event.id).is_some_and(|seq| seq > after_seq))
+        .cloned()
+        .collect())
+}
+
+struct HttpSseStream {
+    store: Arc<HttpResultStore>,
+    session_id: String,
+    after_seq: u64,
+    initial_events: Vec<HttpBufferedEvent>,
+}
+
+impl HttpSseStream {
+    fn new(
+        store: Arc<HttpResultStore>,
+        session_id: String,
+        after_seq: u64,
+        initial_events: Vec<HttpBufferedEvent>,
+    ) -> Self {
+        Self {
+            store,
+            session_id,
+            after_seq,
+            initial_events,
+        }
+    }
+
+    fn into_buffered_response(self) -> HttpResponse {
+        buffered_sse_response(&self.initial_events)
+    }
+
+    fn write_to(mut self, stream: &mut impl Write) -> std::io::Result<()> {
+        write_streaming_sse_headers(stream)?;
+        write_chunked_sse_event(stream, None, Some("0/0"), Some(3000), Some(&Value::Null))?;
+        let initial_events = std::mem::take(&mut self.initial_events);
+        for event in initial_events {
+            self.write_buffered_event(stream, &event)?;
+        }
+        loop {
+            match self.store.wait_events_after(
+                &self.session_id,
+                self.after_seq,
+                SSE_KEEPALIVE_INTERVAL,
+            ) {
+                HttpResultWait::Events(events) => {
+                    for event in events {
+                        self.write_buffered_event(stream, &event)?;
+                    }
+                }
+                HttpResultWait::Timeout => write_chunked_sse_comment(stream, "keepalive")?,
+                HttpResultWait::Closed => break,
+            }
+        }
+        write_final_chunk(stream)
+    }
+
+    fn write_buffered_event(
+        &mut self,
+        stream: &mut impl Write,
+        event: &HttpBufferedEvent,
+    ) -> std::io::Result<()> {
+        write_chunked_sse_event(
+            stream,
+            event.event,
+            Some(&event.id),
+            None,
+            Some(&event.data),
+        )?;
+        if let Some(seq) = stream_event_sequence(&event.id) {
+            self.after_seq = self.after_seq.max(seq);
+        }
+        Ok(())
+    }
+}
+
+fn buffered_sse_response(events: &[HttpBufferedEvent]) -> HttpResponse {
+    let mut body = Vec::new();
+    write_sse_event(&mut body, None, Some("0/0"), Some(3000), Some(&Value::Null));
+    for event in events {
+        write_sse_event(
+            &mut body,
+            event.event,
+            Some(&event.id),
+            None,
+            Some(&event.data),
+        );
+    }
+    HttpResponse {
+        status: 200,
+        headers: vec![
+            ("content-type".to_owned(), "text/event-stream".to_owned()),
+            ("cache-control".to_owned(), "no-cache".to_owned()),
+        ],
+        body,
+    }
+}
+
 fn sse_response(
     config: &HttpTransportConfig,
     method: Option<&str>,
     response: Value,
     initialized_session_id: Option<String>,
     principal_key: &str,
+    response_event_id: Option<&str>,
 ) -> HttpResponse {
     let mut body = Vec::new();
     let session_id = if method == Some("initialize") {
-        write_sse_event(&mut body, Some("0"), Some(3000), Some(&Value::Null));
-        write_sse_event(&mut body, None, None, Some(&response));
+        write_sse_event(&mut body, None, Some("0"), Some(3000), Some(&Value::Null));
+        write_sse_event(&mut body, None, None, None, Some(&response));
         initialized_session_id.or_else(|| Some(new_session_id()))
     } else {
-        write_sse_event(&mut body, Some("0/0"), Some(3000), Some(&Value::Null));
-        write_sse_event(&mut body, Some("1/0"), None, Some(&response));
+        write_sse_event(&mut body, None, Some("0/0"), Some(3000), Some(&Value::Null));
+        write_sse_event(
+            &mut body,
+            None,
+            Some(response_event_id.unwrap_or("1/0")),
+            None,
+            Some(&response),
+        );
         None
     };
     let mut headers = vec![
@@ -1803,7 +3384,14 @@ fn sse_response(
         if let Some(store) = &config.session_store {
             store.insert(session_id.clone(), principal_key.to_owned());
         }
-        headers.push(("mcp-session-id".to_owned(), session_id));
+        if let Some(store) = &config.result_store {
+            store.ensure_session(&session_id);
+        }
+        headers.push(("mcp-session-id".to_owned(), session_id.clone()));
+        headers.push((
+            "set-cookie".to_owned(),
+            stateful_session_cookie_header(&session_id),
+        ));
     }
     HttpResponse {
         status: 200,
@@ -1812,7 +3400,16 @@ fn sse_response(
     }
 }
 
-fn write_sse_event(body: &mut Vec<u8>, id: Option<&str>, retry: Option<u64>, data: Option<&Value>) {
+fn write_sse_event(
+    body: &mut Vec<u8>,
+    event: Option<&str>,
+    id: Option<&str>,
+    retry: Option<u64>,
+    data: Option<&Value>,
+) {
+    if let Some(event) = event {
+        body.extend_from_slice(format!("event: {event}\n").as_bytes());
+    }
     if let Some(id) = id {
         body.extend_from_slice(format!("id: {id}\n").as_bytes());
     }
@@ -1833,6 +3430,47 @@ fn write_sse_event(body: &mut Vec<u8>, id: Option<&str>, retry: Option<u64>, dat
         }
     }
     body.push(b'\n');
+}
+
+fn write_streaming_sse_headers(stream: &mut impl Write) -> std::io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 200 {}\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\ntransfer-encoding: chunked\r\nconnection: close\r\nx-accel-buffering: no\r\n\r\n",
+        reason_phrase(200)
+    )?;
+    stream.flush()
+}
+
+fn write_chunked_sse_event(
+    stream: &mut impl Write,
+    event: Option<&str>,
+    id: Option<&str>,
+    retry: Option<u64>,
+    data: Option<&Value>,
+) -> std::io::Result<()> {
+    let mut body = Vec::new();
+    write_sse_event(&mut body, event, id, retry, data);
+    write_chunked_bytes(stream, &body)
+}
+
+fn write_chunked_sse_comment(stream: &mut impl Write, comment: &str) -> std::io::Result<()> {
+    let mut body = Vec::with_capacity(comment.len().saturating_add(4));
+    body.extend_from_slice(b": ");
+    body.extend_from_slice(comment.as_bytes());
+    body.extend_from_slice(b"\n\n");
+    write_chunked_bytes(stream, &body)
+}
+
+fn write_chunked_bytes(stream: &mut impl Write, bytes: &[u8]) -> std::io::Result<()> {
+    write!(stream, "{:x}\r\n", bytes.len())?;
+    stream.write_all(bytes)?;
+    stream.write_all(b"\r\n")?;
+    stream.flush()
+}
+
+fn write_final_chunk(stream: &mut impl Write) -> std::io::Result<()> {
+    stream.write_all(b"0\r\n\r\n")?;
+    stream.flush()
 }
 
 fn new_session_id() -> String {
@@ -1894,8 +3532,13 @@ pub fn serve_http_until(
 ) -> std::io::Result<()> {
     listener.set_nonblocking(true)?;
     let config = Arc::new(listener_config(config));
+    let mut last_idle_reap = Instant::now();
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
     while !shutdown.load(Ordering::SeqCst) {
+        if last_idle_reap.elapsed() >= STATEFUL_IDLE_REAP_INTERVAL {
+            reap_idle_stateful_sessions(&config);
+            last_idle_reap = Instant::now();
+        }
         match listener.accept() {
             Ok((stream, _addr)) => {
                 let server = server.clone();
@@ -1912,6 +3555,7 @@ pub fn serve_http_until(
             Err(e) => return Err(e),
         }
     }
+    close_stateful_sessions_for_shutdown(&config);
     for worker in workers {
         let _ = worker.join();
     }
@@ -1949,8 +3593,13 @@ pub fn serve_https_until(
 ) -> std::io::Result<()> {
     listener.set_nonblocking(true)?;
     let config = Arc::new(listener_config(config));
+    let mut last_idle_reap = Instant::now();
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
     while !shutdown.load(Ordering::SeqCst) {
+        if last_idle_reap.elapsed() >= STATEFUL_IDLE_REAP_INTERVAL {
+            reap_idle_stateful_sessions(&config);
+            last_idle_reap = Instant::now();
+        }
         match listener.accept() {
             Ok((stream, _addr)) => {
                 let server = server.clone();
@@ -1968,6 +3617,7 @@ pub fn serve_https_until(
             Err(e) => return Err(e),
         }
     }
+    close_stateful_sessions_for_shutdown(&config);
     for worker in workers {
         let _ = worker.join();
     }
@@ -1979,7 +3629,43 @@ fn listener_config(config: &HttpTransportConfig) -> HttpTransportConfig {
     if config.stateful && config.session_store.is_none() {
         config.session_store = Some(Arc::new(HttpSessionStore::default()));
     }
+    if config.stateful && config.result_store.is_none() {
+        config.result_store = Some(Arc::new(HttpResultStore::new()));
+    }
     config
+}
+
+fn close_stateful_sessions_for_shutdown(config: &HttpTransportConfig) {
+    if let Some(lifecycle) = &config.session_lifecycle {
+        lifecycle.close_all_sessions();
+    }
+    if let Some(result_store) = &config.result_store {
+        result_store.close_all();
+    }
+}
+
+fn reap_idle_stateful_sessions(config: &HttpTransportConfig) -> usize {
+    if !config.stateful || config.stateful_idle_ttl.is_zero() {
+        return 0;
+    }
+    let Some(session_store) = &config.session_store else {
+        return 0;
+    };
+    let expired = session_store.reap_idle(config.stateful_idle_ttl);
+    let count = expired.len();
+    for (session_id, principal_key) in expired {
+        if let Some(result_store) = &config.result_store {
+            result_store.remove_session(&session_id);
+        }
+        if let Some(lifecycle) = &config.session_lifecycle {
+            lifecycle.close_session_with_reason(
+                &session_id,
+                &principal_key,
+                DispatchCloseReason::Timeout,
+            );
+        }
+    }
+    count
 }
 
 fn handle_connection(
@@ -2015,17 +3701,22 @@ fn handle_stream(
     server: &OracleMcpServer,
     config: &HttpTransportConfig,
 ) -> std::io::Result<()> {
-    let response = match read_http_request(stream) {
-        Ok(Some(request)) => handle_http_request(server, config, request),
+    let exchange = match read_http_request(stream) {
+        Ok(Some(request)) => handle_http_exchange(server, config, request, true),
         Ok(None) => return Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => HttpResponse {
-            status: 400,
-            headers: vec![],
-            body: e.to_string().into_bytes(),
-        },
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            HttpExchange::Buffered(HttpResponse {
+                status: 400,
+                headers: vec![],
+                body: e.to_string().into_bytes(),
+            })
+        }
         Err(e) => return Err(e),
     };
-    write_http_response(stream, &response)
+    match exchange {
+        HttpExchange::Buffered(response) => write_http_response(stream, &response),
+        HttpExchange::SseStream(response) => response.write_to(stream),
+    }
 }
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -2079,12 +3770,7 @@ fn read_http_request(stream: &mut impl Read) -> std::io::Result<Option<HttpReque
         };
         headers.push((name.trim().to_owned(), value.trim().to_owned()));
     }
-    let mut request = HttpRequest::new(
-        method,
-        target.split('?').next().unwrap_or(target),
-        headers,
-        Vec::new(),
-    );
+    let mut request = HttpRequest::new(method, target, headers, Vec::new());
     let content_length = request
         .header("content-length")
         .map(str::parse::<usize>)
@@ -2153,7 +3839,9 @@ fn reason_phrase(status: u16) -> &'static str {
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        406 => "Not Acceptable",
         413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
         _ => "OK",
     }
 }

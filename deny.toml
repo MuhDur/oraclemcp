@@ -71,6 +71,9 @@ allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"]
 [bans]
 multiple-versions = "allow"
 wildcards = "allow"
+# rust-embed is intentionally allowed only with `default-features = false` in
+# Cargo.toml. Do not enable its web-framework helper features: actix/axum/poem/
+# rocket/salvo/warp variants pull runtimes that violate the native-boundary lint.
 
 [sources]
 unknown-registry = "deny"

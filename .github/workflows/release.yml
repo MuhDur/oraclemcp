@@ -16,14 +16,40 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: nightly-2026-05-11
+  NODE_VERSION: 22.17.0
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  web-build:
+    name: web bundle (npm ci + vite build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run check
+        working-directory: web
+      - run: bash scripts/dashboard_bundle_check.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
+          if-no-files-found: error
+
   checks:
     name: release gates
+    needs: web-build
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -31,6 +57,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -45,54 +80,91 @@ jobs:
 
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy -p oraclemcp-core --all-targets --features dashboard-bundle -- -D warnings
+      - run: cargo clippy -p oraclemcp --all-targets --features dashboard-bundle -- -D warnings
       - run: cargo test --workspace --all-targets
+      - run: cargo test -p oraclemcp-core --features dashboard-bundle dashboard
       - run: cargo test --workspace --doc
       - run: cargo doc --workspace --no-deps
       - run: bash scripts/oraclemcp_boundary_lint.sh
       - run: bash scripts/sensitive_data_lint.sh
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check
-      - run: cargo build -p oraclemcp
+      - run: cargo deny --features oraclemcp/dashboard-bundle,oraclemcp-core/dashboard-bundle check
+      - run: cargo build -p oraclemcp --features dashboard-bundle
       # Cargo verifies a packaged workspace crate by resolving its rewritten
       # path dependencies from crates.io. For a fresh tag, sibling crates are
       # not all on crates.io yet, so package assembly is checked here and
       # per-crate packaged verification runs in dependency order immediately
       # before each publish in scripts/publish_crates.sh.
       - run: cargo package --workspace --locked --no-verify
+      - run: bash scripts/dashboard_bundle_check.sh --check-crates
 
   pinned-nightly:
     name: build on pinned nightly
+    needs: web-build
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
+      - run: cargo build -p oraclemcp --features dashboard-bundle
 
   build:
     name: build ${{ matrix.target }}
-    needs: [checks, pinned-nightly]
+    needs: [checks, pinned-nightly, web-build]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-musl }
-          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu }
-          - { os: macos-latest,   target: x86_64-apple-darwin }
-          - { os: macos-latest,   target: aarch64-apple-darwin }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            build_tool: cargo
+            binary_limit_bytes: 32000000
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            build_tool: cargo
+            binary_limit_bytes: 32000000
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            build_tool: cargo
+            binary_limit_bytes: 32000000
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            build_tool: cargo-zigbuild
+            binary_limit_bytes: 32000000
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            build_tool: cargo
+            binary_limit_bytes: 32000000
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            build_tool: cargo
+            binary_limit_bytes: 32000000
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            build_tool: cargo
+            binary_limit_bytes: 40000000
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -101,10 +173,23 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Install Zig (aarch64 musl)
+        if: matrix.build_tool == 'cargo-zigbuild'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+
+      - name: Install cargo-zigbuild (aarch64 musl)
+        if: matrix.build_tool == 'cargo-zigbuild'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
       - name: Install cross linkers (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
+          sudo apt-get install -y binutils file
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
             sudo apt-get install -y musl-tools
           fi
@@ -114,7 +199,51 @@ jobs:
           fi
 
       - name: Build
-        run: cargo build --release -p oraclemcp --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.build_tool }}" = "cargo-zigbuild" ]; then
+            cargo zigbuild --release -p oraclemcp --features dashboard-bundle --target "${{ matrix.target }}"
+          else
+            cargo build --release -p oraclemcp --features dashboard-bundle --target "${{ matrix.target }}"
+          fi
+
+      - name: Check binary size and musl static linkage
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            bin="target/${{ matrix.target }}/release/oraclemcp.exe"
+          else
+            bin="target/${{ matrix.target }}/release/oraclemcp"
+          fi
+          if [ ! -f "$bin" ]; then
+            echo "missing release binary: $bin" >&2
+            exit 1
+          fi
+          size="$(wc -c < "$bin" | tr -d '[:space:]')"
+          limit="${{ matrix.binary_limit_bytes }}"
+          echo "binary=$bin"
+          echo "target=${{ matrix.target }}"
+          echo "size_bytes=$size"
+          echo "budget_bytes=$limit"
+          if [ "$size" -gt "$limit" ]; then
+            echo "release binary exceeds size budget for ${{ matrix.target }}: $size > $limit bytes" >&2
+            exit 1
+          fi
+          case "${{ matrix.target }}" in
+            *-unknown-linux-musl)
+              file "$bin"
+              if readelf -l "$bin" | grep -q 'INTERP'; then
+                echo "musl release binary has a dynamic interpreter" >&2
+                exit 1
+              fi
+              if readelf -d "$bin" 2>/dev/null | grep -q '(NEEDED)'; then
+                echo "musl release binary has dynamic library dependencies" >&2
+                exit 1
+              fi
+              ;;
+          esac
 
       - name: Package (unix)
         if: runner.os != 'Windows'
@@ -271,7 +400,7 @@ jobs:
 
   docker:
     name: publish GHCR image
-    needs: release
+    needs: [release, web-build]
     if: >-
       ${{
         always() &&
@@ -292,6 +421,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
       - name: Resolve Docker tags
         id: tags
         shell: bash

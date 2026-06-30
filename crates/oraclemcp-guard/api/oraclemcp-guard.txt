@@ -309,10 +309,15 @@ pub mod oraclemcp_guard::exec_grant
 #[non_exhaustive] pub enum oraclemcp_guard::exec_grant::ExecGrantError
 pub oraclemcp_guard::exec_grant::ExecGrantError::DigestMismatch
 pub oraclemcp_guard::exec_grant::ExecGrantError::Expired
+pub oraclemcp_guard::exec_grant::ExecGrantError::GenerationMismatch
+pub oraclemcp_guard::exec_grant::ExecGrantError::GenerationMismatch::granted: u64
+pub oraclemcp_guard::exec_grant::ExecGrantError::GenerationMismatch::presented: u64
+pub oraclemcp_guard::exec_grant::ExecGrantError::LaneMismatch
 pub oraclemcp_guard::exec_grant::ExecGrantError::LevelExceedsGrant
 pub oraclemcp_guard::exec_grant::ExecGrantError::LevelExceedsGrant::granted: oraclemcp_guard::levels::OperatingLevel
 pub oraclemcp_guard::exec_grant::ExecGrantError::LevelExceedsGrant::requested: oraclemcp_guard::levels::OperatingLevel
 pub oraclemcp_guard::exec_grant::ExecGrantError::SessionMismatch
+pub oraclemcp_guard::exec_grant::ExecGrantError::SubjectMismatch
 pub oraclemcp_guard::exec_grant::ExecGrantError::Unknown
 impl core::clone::Clone for oraclemcp_guard::exec_grant::ExecGrantError
 pub fn oraclemcp_guard::exec_grant::ExecGrantError::clone(&self) -> oraclemcp_guard::exec_grant::ExecGrantError
@@ -354,10 +359,57 @@ impl<T> core::convert::From<T> for oraclemcp_guard::exec_grant::ExecGrantError
 pub fn oraclemcp_guard::exec_grant::ExecGrantError::from(T) -> T
 impl<T> typenum::type_operators::Same for oraclemcp_guard::exec_grant::ExecGrantError
 pub type oraclemcp_guard::exec_grant::ExecGrantError::Output = T
+pub struct oraclemcp_guard::exec_grant::ExecGrantBinding
+pub oraclemcp_guard::exec_grant::ExecGrantBinding::generation: u64
+pub oraclemcp_guard::exec_grant::ExecGrantBinding::lane_id: alloc::string::String
+pub oraclemcp_guard::exec_grant::ExecGrantBinding::session_id: alloc::string::String
+pub oraclemcp_guard::exec_grant::ExecGrantBinding::subject_id: alloc::string::String
+impl oraclemcp_guard::exec_grant::ExecGrantBinding
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, u64) -> Self
+impl core::clone::Clone for oraclemcp_guard::exec_grant::ExecGrantBinding
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::clone(&self) -> oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::cmp::Eq for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::cmp::PartialEq for oraclemcp_guard::exec_grant::ExecGrantBinding
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::eq(&self, &oraclemcp_guard::exec_grant::ExecGrantBinding) -> bool
+impl core::fmt::Debug for oraclemcp_guard::exec_grant::ExecGrantBinding
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::marker::Freeze for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::marker::Send for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::marker::Sync for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::marker::Unpin for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::marker::UnsafeUnpin for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::exec_grant::ExecGrantBinding where U: core::convert::From<T>
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::exec_grant::ExecGrantBinding where U: core::convert::Into<T>
+pub type oraclemcp_guard::exec_grant::ExecGrantBinding::Error = core::convert::Infallible
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::exec_grant::ExecGrantBinding where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::exec_grant::ExecGrantBinding::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::exec_grant::ExecGrantBinding where T: core::clone::Clone
+pub type oraclemcp_guard::exec_grant::ExecGrantBinding::Owned = T
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::exec_grant::ExecGrantBinding where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::exec_grant::ExecGrantBinding where T: ?core::marker::Sized
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::exec_grant::ExecGrantBinding where T: ?core::marker::Sized
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::exec_grant::ExecGrantBinding where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::exec_grant::ExecGrantBinding::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::exec_grant::ExecGrantBinding
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::exec_grant::ExecGrantBinding
+pub type oraclemcp_guard::exec_grant::ExecGrantBinding::Output = T
 pub struct oraclemcp_guard::exec_grant::ExecGrantStore
 impl oraclemcp_guard::exec_grant::ExecGrantStore
-pub fn oraclemcp_guard::exec_grant::ExecGrantStore::consume(&self, &str, &str, &str, oraclemcp_guard::levels::OperatingLevel) -> core::result::Result<oraclemcp_guard::levels::OperatingLevel, oraclemcp_guard::exec_grant::ExecGrantError>
-pub fn oraclemcp_guard::exec_grant::ExecGrantStore::issue(&self, &str, impl core::convert::Into<alloc::string::String>, oraclemcp_guard::levels::OperatingLevel, core::time::Duration) -> alloc::string::String
+pub fn oraclemcp_guard::exec_grant::ExecGrantStore::clear(&self)
+pub fn oraclemcp_guard::exec_grant::ExecGrantStore::consume(&self, &str, &str, &oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel) -> core::result::Result<oraclemcp_guard::levels::OperatingLevel, oraclemcp_guard::exec_grant::ExecGrantError>
+pub fn oraclemcp_guard::exec_grant::ExecGrantStore::issue(&self, &str, oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel, core::time::Duration) -> alloc::string::String
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::new() -> Self
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::purge_expired(&self) -> usize
 impl core::default::Default for oraclemcp_guard::exec_grant::ExecGrantStore
@@ -1782,10 +1834,15 @@ pub type oraclemcp_guard::levels::EscalationError::Output = T
 #[non_exhaustive] pub enum oraclemcp_guard::ExecGrantError
 pub oraclemcp_guard::ExecGrantError::DigestMismatch
 pub oraclemcp_guard::ExecGrantError::Expired
+pub oraclemcp_guard::ExecGrantError::GenerationMismatch
+pub oraclemcp_guard::ExecGrantError::GenerationMismatch::granted: u64
+pub oraclemcp_guard::ExecGrantError::GenerationMismatch::presented: u64
+pub oraclemcp_guard::ExecGrantError::LaneMismatch
 pub oraclemcp_guard::ExecGrantError::LevelExceedsGrant
 pub oraclemcp_guard::ExecGrantError::LevelExceedsGrant::granted: oraclemcp_guard::levels::OperatingLevel
 pub oraclemcp_guard::ExecGrantError::LevelExceedsGrant::requested: oraclemcp_guard::levels::OperatingLevel
 pub oraclemcp_guard::ExecGrantError::SessionMismatch
+pub oraclemcp_guard::ExecGrantError::SubjectMismatch
 pub oraclemcp_guard::ExecGrantError::Unknown
 impl core::clone::Clone for oraclemcp_guard::exec_grant::ExecGrantError
 pub fn oraclemcp_guard::exec_grant::ExecGrantError::clone(&self) -> oraclemcp_guard::exec_grant::ExecGrantError
@@ -2370,10 +2427,57 @@ impl<T> core::convert::From<T> for oraclemcp_guard::classifier::ClassifierConfig
 pub fn oraclemcp_guard::classifier::ClassifierConfig::from(T) -> T
 impl<T> typenum::type_operators::Same for oraclemcp_guard::classifier::ClassifierConfig
 pub type oraclemcp_guard::classifier::ClassifierConfig::Output = T
+pub struct oraclemcp_guard::ExecGrantBinding
+pub oraclemcp_guard::ExecGrantBinding::generation: u64
+pub oraclemcp_guard::ExecGrantBinding::lane_id: alloc::string::String
+pub oraclemcp_guard::ExecGrantBinding::session_id: alloc::string::String
+pub oraclemcp_guard::ExecGrantBinding::subject_id: alloc::string::String
+impl oraclemcp_guard::exec_grant::ExecGrantBinding
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, u64) -> Self
+impl core::clone::Clone for oraclemcp_guard::exec_grant::ExecGrantBinding
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::clone(&self) -> oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::cmp::Eq for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::cmp::PartialEq for oraclemcp_guard::exec_grant::ExecGrantBinding
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::eq(&self, &oraclemcp_guard::exec_grant::ExecGrantBinding) -> bool
+impl core::fmt::Debug for oraclemcp_guard::exec_grant::ExecGrantBinding
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::marker::Freeze for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::marker::Send for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::marker::Sync for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::marker::Unpin for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::marker::UnsafeUnpin for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::exec_grant::ExecGrantBinding
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::exec_grant::ExecGrantBinding where U: core::convert::From<T>
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::exec_grant::ExecGrantBinding where U: core::convert::Into<T>
+pub type oraclemcp_guard::exec_grant::ExecGrantBinding::Error = core::convert::Infallible
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::exec_grant::ExecGrantBinding where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::exec_grant::ExecGrantBinding::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::exec_grant::ExecGrantBinding where T: core::clone::Clone
+pub type oraclemcp_guard::exec_grant::ExecGrantBinding::Owned = T
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_guard::exec_grant::ExecGrantBinding where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::exec_grant::ExecGrantBinding where T: ?core::marker::Sized
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::exec_grant::ExecGrantBinding where T: ?core::marker::Sized
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::exec_grant::ExecGrantBinding where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::exec_grant::ExecGrantBinding::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::exec_grant::ExecGrantBinding
+pub fn oraclemcp_guard::exec_grant::ExecGrantBinding::from(T) -> T
+impl<T> typenum::type_operators::Same for oraclemcp_guard::exec_grant::ExecGrantBinding
+pub type oraclemcp_guard::exec_grant::ExecGrantBinding::Output = T
 pub struct oraclemcp_guard::ExecGrantStore
 impl oraclemcp_guard::exec_grant::ExecGrantStore
-pub fn oraclemcp_guard::exec_grant::ExecGrantStore::consume(&self, &str, &str, &str, oraclemcp_guard::levels::OperatingLevel) -> core::result::Result<oraclemcp_guard::levels::OperatingLevel, oraclemcp_guard::exec_grant::ExecGrantError>
-pub fn oraclemcp_guard::exec_grant::ExecGrantStore::issue(&self, &str, impl core::convert::Into<alloc::string::String>, oraclemcp_guard::levels::OperatingLevel, core::time::Duration) -> alloc::string::String
+pub fn oraclemcp_guard::exec_grant::ExecGrantStore::clear(&self)
+pub fn oraclemcp_guard::exec_grant::ExecGrantStore::consume(&self, &str, &str, &oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel) -> core::result::Result<oraclemcp_guard::levels::OperatingLevel, oraclemcp_guard::exec_grant::ExecGrantError>
+pub fn oraclemcp_guard::exec_grant::ExecGrantStore::issue(&self, &str, oraclemcp_guard::exec_grant::ExecGrantBinding, oraclemcp_guard::levels::OperatingLevel, core::time::Duration) -> alloc::string::String
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::new() -> Self
 pub fn oraclemcp_guard::exec_grant::ExecGrantStore::purge_expired(&self) -> usize
 impl core::default::Default for oraclemcp_guard::exec_grant::ExecGrantStore

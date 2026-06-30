@@ -6,11 +6,13 @@ use super::*;
 use crate::registry::tool_names;
 use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
-use oraclemcp_core::{DispatchContext, ScopeGrant};
+use oraclemcp_core::{DispatchCloseReason, DispatchContext, ScopeGrant};
 use oraclemcp_db::{OracleBackend, OracleCell, OracleRow};
+use std::path::{Path, PathBuf};
 use std::sync::Barrier;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn run_with_current_cx(f: impl FnOnce(&Cx)) {
     let runtime = RuntimeBuilder::current_thread()
@@ -54,6 +56,30 @@ fn ddl_level() -> SessionLevelState {
         .set_current_level(OperatingLevel::Ddl)
         .expect("ddl is within ceiling");
     level
+}
+
+fn preview_confirm(dispatcher: &OracleDispatcher, sql: &str) -> String {
+    dispatcher
+        .dispatch("oracle_preview_sql", json!({ "sql": sql }))
+        .expect("preview")
+        .pointer("/execute_confirmation/confirm")
+        .and_then(Value::as_str)
+        .expect("preview minted execute grant")
+        .to_owned()
+}
+
+fn write_intent_root(name: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_nanos();
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/dispatch-write-intent-tests")
+        .join(format!("{name}-{}-{stamp}", std::process::id()))
+}
+
+fn write_intent_log(name: &str) -> Arc<WriteIntentLog> {
+    Arc::new(WriteIntentLog::open(write_intent_root(name)).expect("write-intent log"))
 }
 
 fn scope_grant(scope: &str) -> ScopeGrant {
@@ -494,6 +520,15 @@ struct CancelAfterExecuteMock {
     state: Arc<ExecState>,
 }
 
+struct CommitInDoubtMock {
+    state: Arc<ExecState>,
+}
+
+struct IntentObservingExecMock {
+    state: Arc<ExecState>,
+    intents: Arc<WriteIntentLog>,
+}
+
 #[async_trait::async_trait(?Send)]
 impl OracleConnection for CancelAfterExecuteMock {
     fn backend(&self) -> OracleBackend {
@@ -550,6 +585,112 @@ impl ExecRecordingMock {
             state,
             rows_affected: 3,
         }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for IntentObservingExecMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            backend: Some(OracleBackend::RustOracle),
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        Ok(Vec::new())
+    }
+
+    async fn execute(&self, _cx: &Cx, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
+        let unresolved = self.intents.unresolved().expect("intent snapshot");
+        assert_eq!(
+            unresolved.len(),
+            1,
+            "pending write intent must be durable before DB execute"
+        );
+        assert_eq!(unresolved[0].tool, "oracle_execute");
+        assert_eq!(unresolved[0].subject, "profile:dev");
+        assert_eq!(unresolved[0].lane, "process");
+        assert!(unresolved[0].sql_sha256.starts_with("sha256:"));
+        self.state
+            .executed
+            .lock()
+            .expect("exec mutex")
+            .push((sql.to_owned(), b.to_vec()));
+        Ok(3)
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.state.commits.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.state.rollbacks.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for CommitInDoubtMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            backend: Some(OracleBackend::RustOracle),
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        Ok(Vec::new())
+    }
+
+    async fn execute(&self, _cx: &Cx, sql: &str, b: &[OracleBind]) -> Result<u64, DbError> {
+        self.state
+            .executed
+            .lock()
+            .expect("exec mutex")
+            .push((sql.to_owned(), b.to_vec()));
+        Ok(3)
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.state.commits.fetch_add(1, Ordering::SeqCst);
+        Err(DbError::Execute(
+            "DPY-4011: commit response lost".to_owned(),
+        ))
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.state.rollbacks.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -770,9 +911,7 @@ fn args_for(name: &str) -> Value {
         "query" => json!({ "sql": "SELECT 1 FROM dual" }),
         "execute_approved" => {
             let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
-            let confirm = execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("dev"))
-                .expect("confirm");
-            json!({ "sql": sql, "token": confirm })
+            json!({ "sql": sql, "token": "preview-issued-confirmation-placeholder" })
         }
         "compile_object" => json!({ "object_type": "PACKAGE", "object_name": "EMP_API" }),
         "compile_with_warnings" => {
@@ -824,8 +963,15 @@ fn every_registry_tool_routes_and_deserializes_offline() {
                 Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
             }),
         );
+        let args = if name == "execute_approved" {
+            let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+            let token = preview_confirm(&dispatcher, sql);
+            json!({ "token": token })
+        } else {
+            args_for(name)
+        };
         let out = dispatcher
-            .dispatch(name, args_for(name))
+            .dispatch(name, args)
             .unwrap_or_else(|e| panic!("{name} should route + succeed offline: {e:?}"));
         assert!(out.is_object(), "{name} returns a JSON object");
     }
@@ -878,14 +1024,30 @@ fn connection_info_reports_the_active_profile() {
         .expect("connection info");
     assert_eq!(out["active_profile"], json!("dev"));
     assert_eq!(out["connected"], json!(true));
-    assert_eq!(out["connection"]["module"], json!("oraclemcp-test"));
-    assert_eq!(out["connection"]["client_identifier"], json!("agent"));
-    assert_eq!(out["connection"]["program"], json!("oraclemcp"));
-    assert_eq!(
-        out["connection"]["client_driver"],
-        json!("oraclemcp-driver")
-    );
+    assert_eq!(out["connection"].get("module"), None);
+    assert_eq!(out["connection"].get("client_identifier"), None);
+    assert_eq!(out["connection"].get("program"), None);
+    assert_eq!(out["connection"].get("client_driver"), None);
+    let redacted_fields = out["connection"]["redacted_fields"]
+        .as_array()
+        .expect("redacted fields array");
+    for field in ["module", "client_identifier", "program", "client_driver"] {
+        assert!(
+            redacted_fields.contains(&json!(field)),
+            "{field} should be marked redacted in {out}"
+        );
+    }
     assert_eq!(out["connection"]["read_only"], json!(false));
+    let serialized = out.to_string();
+    for forbidden in [
+        "oraclemcp-test",
+        "agent",
+        "operator",
+        "workstation",
+        "oraclemcp-driver",
+    ] {
+        assert!(!serialized.contains(forbidden), "{forbidden} leaked: {out}");
+    }
 }
 
 #[test]
@@ -1777,7 +1939,7 @@ fn patch_source_execute_refetches_and_uses_create_or_replace_gate() {
         .expect("patch preview succeeds");
     let confirm = preview["confirmation"]["confirm"]
         .as_str()
-        .expect("confirm token")
+        .expect("confirm grant")
         .to_owned();
     let mut execute_args = preview_args;
     execute_args["execute"] = json!(true);
@@ -2026,6 +2188,27 @@ fn query_binds_are_accepted_and_typed() {
 }
 
 #[test]
+fn query_bind_values_do_not_echo_to_protocol_output() {
+    let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+    let out = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({
+                "sql": "SELECT * FROM t WHERE payload = :1 AND id = :2",
+                "binds": ["n-s6-bind-secret-not-in-rendered-surfaces", 42424242],
+            }),
+        )
+        .expect("binds accepted");
+    let serialized = out.to_string();
+    for forbidden in ["n-s6-bind-secret-not-in-rendered-surfaces", "42424242"] {
+        assert!(
+            !serialized.contains(forbidden),
+            "{forbidden} leaked in query output: {out}"
+        );
+    }
+}
+
+#[test]
 fn query_accepts_page_and_width_compatibility_args() {
     let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
     let out = dispatcher
@@ -2158,6 +2341,208 @@ impl OracleConnection for TouchCountingMock {
         self.counts.rollback.fetch_add(1, Ordering::SeqCst);
         panic!("guard-before-I/O test must not roll back")
     }
+}
+
+struct LifecycleCleanupMock {
+    rollbacks: Arc<AtomicUsize>,
+    executes: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for LifecycleCleanupMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            backend: Some(OracleBackend::RustOracle),
+            connection_strategy: Some("single_session".to_owned()),
+            pool_open_connections: None,
+            server_version: None,
+            database_role: None,
+            open_mode: None,
+            read_only: false,
+            read_only_reason: None,
+            current_schema: Some("APP".to_owned()),
+            current_edition: None,
+            session_user: Some("APP".to_owned()),
+            current_user: Some("APP".to_owned()),
+            module: None,
+            action: None,
+            client_identifier: None,
+            client_info: None,
+            os_user: None,
+            host: None,
+            machine: None,
+            terminal: None,
+            program: None,
+            client_driver: None,
+        })
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        Ok(Vec::new())
+    }
+
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        self.executes.fetch_add(1, Ordering::SeqCst);
+        panic!("stale lifecycle grant must fail before database execute")
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        panic!("stale lifecycle grant must fail before commit")
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.rollbacks.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn close_dispatcher_for_test(
+    dispatcher: &OracleDispatcher,
+    reason: DispatchCloseReason,
+) -> Result<(), ErrorEnvelope> {
+    RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds")
+        .block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            ToolDispatch::close(dispatcher, &cx, reason).await
+        })
+}
+
+#[test]
+fn lifecycle_close_rolls_back_and_revokes_execution_grants() {
+    use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, MemoryAuditSink, SigningKey};
+
+    struct SharedSink(Arc<MemoryAuditSink>);
+    impl AuditSink for SharedSink {
+        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            self.0.append(record)
+        }
+
+        fn flush(&self) -> Result<(), AuditError> {
+            self.0.flush()
+        }
+    }
+
+    let rollbacks = Arc::new(AtomicUsize::new(0));
+    let executes = Arc::new(AtomicUsize::new(0));
+    let sink = Arc::new(MemoryAuditSink::new());
+    let auditor = Arc::new(oraclemcp_audit::Auditor::new(
+        Box::new(SharedSink(sink.clone())),
+        SigningKey::new("test-key", b"lifecycle-close-test-key".to_vec()),
+    ));
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(LifecycleCleanupMock {
+            rollbacks: Arc::clone(&rollbacks),
+            executes: Arc::clone(&executes),
+        }),
+        Some("dev".to_owned()),
+        read_write_level(),
+    )
+    .with_auditor(auditor);
+    let sql = "UPDATE employees SET salary = salary WHERE employee_id = 1";
+    let confirm = preview_confirm(&dispatcher, sql);
+
+    close_dispatcher_for_test(&dispatcher, DispatchCloseReason::SessionDelete)
+        .expect("lifecycle cleanup succeeds");
+
+    assert_eq!(rollbacks.load(Ordering::SeqCst), 1);
+    let records = sink.records();
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record.tool, "lane_lifecycle");
+    assert_eq!(record.sql_preview, "LANE_CLOSE");
+    assert_eq!(
+        record.cancel.as_ref().map(|c| c.kind.as_str()),
+        Some("User")
+    );
+    assert_eq!(
+        record.cancel.as_ref().map(|c| c.reason.as_str()),
+        Some("session_delete")
+    );
+    assert!(record.hash_is_valid());
+    let err = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": sql, "commit": true, "confirm": confirm }),
+        )
+        .expect_err("old grant must be rejected after lifecycle close");
+    assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+    assert!(
+        err.message.contains("generation"),
+        "stale grant should fail as lane-generation-bound: {}",
+        err.message
+    );
+    assert_eq!(
+        executes.load(Ordering::SeqCst),
+        0,
+        "revoked grant must fail before database execute"
+    );
+}
+
+#[test]
+fn lifecycle_timeout_close_audits_timeout_reason() {
+    use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, MemoryAuditSink, SigningKey};
+
+    struct SharedSink(Arc<MemoryAuditSink>);
+    impl AuditSink for SharedSink {
+        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            self.0.append(record)
+        }
+
+        fn flush(&self) -> Result<(), AuditError> {
+            self.0.flush()
+        }
+    }
+
+    let rollbacks = Arc::new(AtomicUsize::new(0));
+    let executes = Arc::new(AtomicUsize::new(0));
+    let sink = Arc::new(MemoryAuditSink::new());
+    let auditor = Arc::new(oraclemcp_audit::Auditor::new(
+        Box::new(SharedSink(sink.clone())),
+        SigningKey::new("test-key", b"lifecycle-timeout-test-key".to_vec()),
+    ));
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(LifecycleCleanupMock {
+            rollbacks: Arc::clone(&rollbacks),
+            executes,
+        }),
+        Some("dev".to_owned()),
+        read_write_level(),
+    )
+    .with_auditor(auditor);
+
+    close_dispatcher_for_test(&dispatcher, DispatchCloseReason::Timeout)
+        .expect("timeout lifecycle cleanup succeeds");
+
+    assert_eq!(rollbacks.load(Ordering::SeqCst), 1);
+    let records = sink.records();
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record.tool, "lane_lifecycle");
+    assert_eq!(record.sql_preview, "LANE_CLOSE");
+    assert_eq!(
+        record.cancel.as_ref().map(|c| c.kind.as_str()),
+        Some("Timeout")
+    );
+    assert_eq!(
+        record.cancel.as_ref().map(|c| c.reason.as_str()),
+        Some("idle_timeout")
+    );
+    assert!(record.hash_is_valid());
 }
 
 #[test]
@@ -2397,7 +2782,7 @@ fn create_or_replace_execute_applies_and_reports_compile_errors() {
         .expect("alias previews");
     let confirm = preview["confirmation"]["confirm"]
         .as_str()
-        .expect("confirm token");
+        .expect("confirm grant");
 
     let out = dispatcher
         .dispatch(
@@ -2564,7 +2949,7 @@ fn set_session_level_requires_confirmation_to_apply() {
         .expect("preview supplies token");
     let confirm = preview["confirmation"]["confirm"]
         .as_str()
-        .expect("confirm token");
+        .expect("confirm grant");
     let applied = dispatcher
         .dispatch(
             "oracle_set_session_level",
@@ -2780,7 +3165,7 @@ fn write_compatibility_aliases_share_session_level_gate() {
     assert_eq!(preview["confirmation"]["tool"], json!("enable_writes"));
     let confirm = preview["confirmation"]["confirm"]
         .as_str()
-        .expect("confirm token");
+        .expect("confirm grant");
 
     let applied = dispatcher
         .dispatch(
@@ -2829,12 +3214,12 @@ fn preview_sql_includes_execute_confirmation_for_allowed_write() {
         preview["execute_confirmation"]["required_level"],
         json!("READ_WRITE")
     );
-    assert_eq!(
-        preview["execute_confirmation"]["confirm"]
-            .as_str()
-            .expect("token")
-            .len(),
-        16
+    let confirm = preview["execute_confirmation"]["confirm"]
+        .as_str()
+        .expect("token");
+    assert!(
+        confirm.starts_with("xgrant-") && confirm.contains('.'),
+        "confirm should be an opaque signed grant reference: {confirm}"
     );
     assert_eq!(
         preview["next_actions"][0]["intent"],
@@ -2850,58 +3235,92 @@ fn preview_sql_includes_execute_confirmation_for_allowed_write() {
 }
 
 #[test]
-fn confirmation_tokens_are_stable_hex_and_domain_separated() {
+fn confirmation_grants_are_opaque_non_deterministic_references() {
     let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
-    let execute = execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("dev"))
-        .expect("write token");
-    let execute_normalized = execute_confirmation_token(
-        "  UPDATE   employees SET name = name WHERE employee_id = 100; ",
-        OperatingLevel::ReadWrite,
-        Some("dev"),
-    )
-    .expect("write token");
-    assert_eq!(execute, execute_normalized);
-
-    let other_profile = execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("prod"))
-        .expect("write token");
-    let session = session_level_confirmation_token(Some("dev"), OperatingLevel::ReadWrite, 60);
-    let compile = compile_confirmation_token(
-        &["ALTER PACKAGE APP.EMP_API COMPILE".to_owned()],
-        Some("dev"),
-        "APP",
-        "EMP_API",
-        "PACKAGE",
-        false,
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::new(ExecState::default()))),
+        Some("dev".to_owned()),
+        read_write_level(),
     );
-
-    for token in [&execute, &other_profile, &session, &compile] {
-        assert_eq!(token.len(), 16);
-        assert!(token.chars().all(|ch| ch.is_ascii_hexdigit()));
+    let first = preview_confirm(&dispatcher, sql);
+    let second = preview_confirm(&dispatcher, sql);
+    assert_ne!(
+        first, second,
+        "same statement previews mint distinct single-use grant references"
+    );
+    for confirm in [&first, &second] {
+        assert!(
+            confirm.starts_with("xgrant-") && confirm.contains('.'),
+            "confirm should be an opaque signed grant reference: {confirm}"
+        );
+        assert_ne!(
+            confirm.len(),
+            16,
+            "legacy deterministic 16-hex confirmation MAC must stay retired"
+        );
     }
-    assert_ne!(execute, other_profile);
-    assert_ne!(execute, session);
-    assert_ne!(execute, compile);
-    assert_ne!(session, compile);
 }
 
 #[test]
-fn confirmation_mac_uses_canonical_hmac() {
-    // The confirmation MAC was deduplicated onto the canonical, KAT-tested
-    // oraclemcp_audit::hmac_sha256. Lock the byte output for a fixed key/message
-    // so any future drift from the standard HMAC-SHA256 is caught. This is the
-    // exact algorithm the (now-removed) private reimplementation computed.
-    let key = b"confirmation-key-fixture-0123456";
-    let msg = b"oracle_query|dev|READ_WRITE";
-    let mac = oraclemcp_audit::hmac_sha256(key, msg);
-    // RFC 2104 HMAC-SHA256(key, msg) — independently reproducible via the hex
-    // helper, which must agree with the raw-bytes form byte-for-byte. The hex
-    // helper prefixes `hmac-sha256:` to name the algorithm; strip it to compare.
-    let expected = oraclemcp_audit::hmac_sha256_hex(key, msg);
-    let expected_hex = expected
-        .strip_prefix("hmac-sha256:")
-        .expect("algorithm prefix");
-    let got: String = mac.iter().map(|b| format!("{b:02x}")).collect();
-    assert_eq!(got, expected_hex);
+fn session_level_grant_is_lane_bound_and_not_recomputable() {
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(NoExecMock),
+        Some("dev".to_owned()),
+        SessionLevelState::new(OperatingLevel::ReadWrite, false),
+    );
+    let lane_a = DispatchContext::default()
+        .with_http_session_id("sess-a")
+        .with_principal_key("oauth:user-a")
+        .with_lane_identity("lane-a", 1);
+    let lane_b = DispatchContext::default()
+        .with_http_session_id("sess-a")
+        .with_principal_key("oauth:user-a")
+        .with_lane_identity("lane-b", 1);
+
+    let preview = dispatcher
+        .dispatch_with_context(
+            "oracle_set_session_level",
+            json!({ "level": "READ_WRITE", "ttl_seconds": 60 }),
+            lane_a,
+        )
+        .expect("lane a previews elevation");
+    let confirm = preview["confirmation"]["confirm"]
+        .as_str()
+        .expect("session-level grant")
+        .to_owned();
+    assert!(
+        confirm.starts_with("xgrant-") && confirm.contains('.'),
+        "session-level confirm should be an opaque signed grant reference: {confirm}"
+    );
+
+    let err = dispatcher
+        .dispatch_with_context(
+            "oracle_set_session_level",
+            json!({
+                "level": "READ_WRITE",
+                "ttl_seconds": 60,
+                "execute": true,
+                "confirm": confirm.clone(),
+            }),
+            lane_b,
+        )
+        .expect_err("a different lane cannot consume lane a's grant");
+    assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+
+    let applied = dispatcher
+        .dispatch_with_context(
+            "oracle_set_session_level",
+            json!({
+                "level": "READ_WRITE",
+                "ttl_seconds": 60,
+                "execute": true,
+                "confirm": confirm,
+            }),
+            lane_a,
+        )
+        .expect("lane a can still consume its grant");
+    assert_eq!(applied["changed"], json!(true));
+    assert_eq!(applied["session"]["current_level"], json!("READ_WRITE"));
 }
 
 #[test]
@@ -2954,6 +3373,34 @@ fn query_timeout_override_is_restored_after_call() {
     assert_eq!(out["row_count"], json!(0));
     let timeouts = state.call_timeout_sets.lock().expect("timeout sets mutex");
     assert_eq!(timeouts.as_slice(), &[Some(Duration::from_secs(17)), None]);
+}
+
+#[test]
+fn query_timeout_override_cannot_widen_profile_timeout() {
+    let state = Arc::new(ExecState::default());
+    *state.current_call_timeout.lock().expect("timeout mutex") = Some(Duration::from_secs(10));
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        Some("dev".to_owned()),
+        default_read_only_level(),
+    )
+    .with_request_timeout(Some(Duration::from_secs(10)));
+
+    let out = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({
+                "sql": "SELECT 1 AS id FROM dual",
+                "timeout_seconds": 17
+            }),
+        )
+        .expect("query with timeout");
+    assert_eq!(out["row_count"], json!(0));
+    let timeouts = state.call_timeout_sets.lock().expect("timeout sets mutex");
+    assert_eq!(
+        timeouts.as_slice(),
+        &[Some(Duration::from_secs(10)), Some(Duration::from_secs(10))]
+    );
 }
 
 #[test]
@@ -3121,6 +3568,212 @@ fn execute_commit_with_preview_confirmation_commits() {
 }
 
 #[test]
+fn execute_commit_writes_intent_before_db_execute_and_resolves_after_commit() {
+    let state = Arc::new(ExecState::default());
+    let intents = write_intent_log("execute-before-db");
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(IntentObservingExecMock {
+            state: state.clone(),
+            intents: intents.clone(),
+        }),
+        Some("dev".to_owned()),
+        read_write_level(),
+    )
+    .with_write_intent_log(intents.clone());
+    let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+    let confirm = preview_confirm(&dispatcher, sql);
+
+    let out = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": sql, "commit": true, "confirm": confirm }),
+        )
+        .expect("execute commit");
+    assert_eq!(out["committed"], json!(true));
+    assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+    assert_eq!(state.commits.load(Ordering::SeqCst), 1);
+    assert!(
+        intents.unresolved().expect("intent snapshot").is_empty(),
+        "successful commit resolves the durable intent"
+    );
+}
+
+#[test]
+fn execute_grant_is_lane_bound_and_not_consumed_by_wrong_lane() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+    let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+    let lane_a = DispatchContext::default()
+        .with_http_session_id("sess-a")
+        .with_principal_key("oauth:user-a")
+        .with_lane_identity("lane-a", 1);
+    let lane_b = DispatchContext::default()
+        .with_http_session_id("sess-a")
+        .with_principal_key("oauth:user-a")
+        .with_lane_identity("lane-b", 1);
+    let preview = dispatcher
+        .dispatch_with_context("oracle_preview_sql", json!({ "sql": sql }), lane_a)
+        .expect("preview on lane a");
+    let confirm = preview["execute_confirmation"]["confirm"]
+        .as_str()
+        .expect("grant")
+        .to_owned();
+
+    let err = dispatcher
+        .dispatch_with_context(
+            "oracle_execute",
+            json!({ "sql": sql, "commit": true, "confirm": confirm.clone() }),
+            lane_b,
+        )
+        .expect_err("lane b cannot consume lane a grant");
+    assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+    assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
+
+    let out = dispatcher
+        .dispatch_with_context(
+            "oracle_execute",
+            json!({ "sql": sql, "commit": true, "confirm": confirm }),
+            lane_a,
+        )
+        .expect("lane a still consumes the grant");
+    assert_eq!(out["committed"], json!(true));
+    assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+}
+
+#[test]
+fn execute_grant_is_invalid_after_session_level_generation_change() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+    let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+    let stale_confirm = preview_confirm(&dispatcher, sql);
+
+    dispatcher
+        .dispatch("oracle_set_session_level", json!({ "action": "drop" }))
+        .expect("drop to read-only");
+    let preview = dispatcher
+        .dispatch(
+            "oracle_set_session_level",
+            json!({ "level": "READ_WRITE", "ttl_seconds": 60 }),
+        )
+        .expect("preview re-elevation");
+    let level_confirm = preview["confirmation"]["confirm"]
+        .as_str()
+        .expect("level confirmation");
+    dispatcher
+        .dispatch(
+            "oracle_set_session_level",
+            json!({ "level": "READ_WRITE", "ttl_seconds": 60, "execute": true, "confirm": level_confirm }),
+        )
+        .expect("re-elevate to read/write");
+
+    let err = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": sql, "commit": true, "confirm": stale_confirm }),
+        )
+        .expect_err("old grant was minted for an earlier generation");
+    assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+    assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
+}
+
+#[test]
+fn execute_commit_in_doubt_audits_and_quarantines_dispatcher() {
+    use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, MemoryAuditSink, SigningKey};
+
+    struct SharedSink(Arc<MemoryAuditSink>);
+    impl AuditSink for SharedSink {
+        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            self.0.append(record)
+        }
+
+        fn flush(&self) -> Result<(), AuditError> {
+            self.0.flush()
+        }
+    }
+
+    let state = Arc::new(ExecState::default());
+    let sink = Arc::new(MemoryAuditSink::new());
+    let auditor = Arc::new(oraclemcp_audit::Auditor::new(
+        Box::new(SharedSink(sink.clone())),
+        SigningKey::new("test-key", b"commit-in-doubt-test-key".to_vec()),
+    ));
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(CommitInDoubtMock {
+            state: state.clone(),
+        }),
+        Some("dev".to_owned()),
+        read_write_level(),
+    )
+    .with_auditor(auditor);
+    let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+    let confirm = preview_confirm(&dispatcher, sql);
+
+    let err = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": sql, "commit": true, "confirmation_token": confirm }),
+        )
+        .expect_err("lost commit response is in doubt");
+    assert_eq!(err.error_class, ErrorClass::ConnectionFailed);
+    assert!(err.message.contains("commit_in_doubt"), "{}", err.message);
+    assert_eq!(state.commits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        state.rollbacks.load(Ordering::SeqCst),
+        0,
+        "commit-in-doubt must not pretend rollback resolved the outcome"
+    );
+
+    let records = sink.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].outcome, AuditOutcome::Pending);
+    assert_eq!(records[1].outcome, AuditOutcome::CommitInDoubt);
+
+    let later = dispatcher
+        .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+        .expect_err("quarantined dispatcher refuses later calls");
+    assert_eq!(later.error_class, ErrorClass::RuntimeStateRequired);
+    assert!(later.message.contains("quarantined"), "{}", later.message);
+}
+
+#[test]
+fn execute_commit_in_doubt_leaves_durable_intent_unresolved() {
+    let state = Arc::new(ExecState::default());
+    let intents = write_intent_log("commit-in-doubt");
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(CommitInDoubtMock {
+            state: state.clone(),
+        }),
+        Some("dev".to_owned()),
+        read_write_level(),
+    )
+    .with_write_intent_log(intents.clone());
+    let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+    let confirm = preview_confirm(&dispatcher, sql);
+
+    let err = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": sql, "commit": true, "confirm": confirm }),
+        )
+        .expect_err("commit response loss is in doubt");
+    assert_eq!(err.error_class, ErrorClass::ConnectionFailed);
+    assert_eq!(state.commits.load(Ordering::SeqCst), 1);
+
+    let unresolved = intents.unresolved().expect("intent snapshot");
+    assert_eq!(unresolved.len(), 1);
+    assert_eq!(unresolved[0].tool, "oracle_execute");
+    assert_eq!(unresolved[0].subject, "profile:dev");
+}
+
+#[test]
 fn execute_approved_replays_preview_token_once() {
     let state = Arc::new(ExecState::default());
     let dispatcher = OracleDispatcher::new_with_profile_level(
@@ -3216,7 +3869,7 @@ fn execute_approved_preview_token_race_allows_exactly_one_success() {
 }
 
 #[test]
-fn execute_approved_accepts_stateless_sql_and_token() {
+fn execute_approved_accepts_sql_and_preview_token() {
     let state = Arc::new(ExecState::default());
     let dispatcher = OracleDispatcher::new_with_profile_level(
         Box::new(ExecRecordingMock::new(state.clone())),
@@ -3224,8 +3877,7 @@ fn execute_approved_accepts_stateless_sql_and_token() {
         read_write_level(),
     );
     let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
-    let token =
-        execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("dev")).expect("confirm");
+    let token = preview_confirm(&dispatcher, sql);
 
     let out = dispatcher
         .dispatch(
@@ -3248,8 +3900,7 @@ fn execute_approved_rejects_file_output_without_executing() {
         read_write_level(),
     );
     let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
-    let token =
-        execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("dev")).expect("confirm");
+    let token = "unused-before-save-output-validation";
 
     let err = dispatcher
         .dispatch(
@@ -3641,8 +4292,7 @@ fn cancellation_after_mutating_execute_rolls_back_dirty_session() {
         read_write_level(),
     );
     let sql = "UPDATE employees SET salary = salary WHERE employee_id = 100";
-    let confirm =
-        execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("dev")).expect("confirm");
+    let confirm = preview_confirm(&dispatcher, sql);
 
     run_with_current_cx(|cx| {
         let err = dispatcher
@@ -3712,8 +4362,16 @@ mod audit_wiring {
     }
 
     fn dispatcher_with(level: SessionLevelState, auditor: Arc<Auditor>) -> OracleDispatcher {
+        dispatcher_with_conn(Box::new(OneRowMock), level, auditor)
+    }
+
+    fn dispatcher_with_conn(
+        conn: Box<dyn OracleConnection>,
+        level: SessionLevelState,
+        auditor: Arc<Auditor>,
+    ) -> OracleDispatcher {
         OracleDispatcher::new_switchable(
-            Box::new(OneRowMock),
+            conn,
             Some("dev".to_owned()),
             level,
             Arc::new(|_cx, _profile| {
@@ -3723,13 +4381,27 @@ mod audit_wiring {
         .with_auditor(auditor)
     }
 
+    struct FailingSink;
+    impl AuditSink for FailingSink {
+        fn append(&self, _r: &AuditRecord) -> Result<(), AuditError> {
+            Err(AuditError::Io("test audit sink failure".to_owned()))
+        }
+        fn flush(&self) -> Result<(), AuditError> {
+            Ok(())
+        }
+    }
+
+    fn failing_auditor() -> Arc<Auditor> {
+        let key = SigningKey::new("test-key", b"0123456789abcdef0123456789abcdef".to_vec());
+        Arc::new(Auditor::new(Box::new(FailingSink), key))
+    }
+
     #[test]
     fn served_write_appends_pending_then_signed_outcome() {
         let (auditor, sink) = auditor_with_sink();
         let dispatcher = dispatcher_with(ddl_level(), auditor);
         let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
-        let confirm = execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("dev"))
-            .expect("confirm token");
+        let confirm = preview_confirm(&dispatcher, sql);
         let out = dispatcher
             .dispatch("execute_approved", json!({ "sql": sql, "token": confirm }))
             .expect("write dispatches");
@@ -3771,8 +4443,16 @@ mod audit_wiring {
     fn session_level_escalation_is_audited() {
         let (auditor, sink) = auditor_with_sink();
         let dispatcher = dispatcher_with(escalatable_read_only(), auditor);
-        // A preview mints the confirmation token; apply (execute=true) escalates.
-        let confirm = session_level_confirmation_token(Some("dev"), OperatingLevel::ReadWrite, 60);
+        // A preview mints the single-use confirmation grant; apply escalates.
+        let preview = dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({ "level": "READ_WRITE", "ttl_seconds": 60 }),
+            )
+            .expect("preview elevation");
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("confirm grant");
         let out = dispatcher
             .dispatch(
                 "oracle_set_session_level",
@@ -3791,6 +4471,166 @@ mod audit_wiring {
         assert_eq!(recs[0].tool, "oracle_set_session_level");
         assert_eq!(recs[0].outcome, AuditOutcome::Succeeded);
         assert!(recs[0].signature.is_some(), "escalation record is signed");
+    }
+
+    #[test]
+    fn compile_object_execute_is_audited_pending_then_signed_outcome() {
+        let (auditor, sink) = auditor_with_sink();
+        let state = Arc::new(ExecState::default());
+        let dispatcher = dispatcher_with_conn(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            ddl_level(),
+            auditor,
+        );
+        let preview = dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({ "object_type": "PACKAGE", "name": "EMP_API" }),
+            )
+            .expect("compile preview");
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("confirm grant");
+
+        let out = dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({
+                    "object_type": "PACKAGE",
+                    "name": "EMP_API",
+                    "execute": true,
+                    "confirm": confirm,
+                }),
+            )
+            .expect("compile executes");
+        assert_eq!(out["compiled"], json!(true));
+
+        let recs = sink.records();
+        assert_eq!(recs.len(), 2, "compile logs Pending then outcome");
+        assert_eq!(recs[0].tool, "oracle_compile_object");
+        assert_eq!(recs[0].outcome, AuditOutcome::Pending);
+        assert_eq!(recs[1].outcome, AuditOutcome::Succeeded);
+        assert_eq!(recs[1].prev_hash, recs[0].entry_hash);
+        assert!(recs[0].signature.is_some());
+        assert!(
+            recs[0]
+                .sql_preview
+                .contains("ALTER PACKAGE APP.EMP_API COMPILE")
+        );
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+    }
+
+    #[test]
+    fn patch_source_execute_is_audited_pending_then_signed_outcome() {
+        let (auditor, sink) = auditor_with_sink();
+        let state = Arc::new(ExecState::default());
+        let dispatcher = dispatcher_with_conn(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            ddl_level(),
+            auditor,
+        );
+        let preview_args = json!({
+            "owner": "APP",
+            "name": "EMP_API",
+            "object_type": "PACKAGE_BODY",
+            "old_text": "NULL",
+            "new_text": "1",
+        });
+        let preview = dispatcher
+            .dispatch("oracle_patch_source", preview_args.clone())
+            .expect("patch preview");
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("confirm grant")
+            .to_owned();
+        let mut execute_args = preview_args;
+        execute_args["execute"] = json!(true);
+        execute_args["confirm"] = json!(confirm);
+
+        let out = dispatcher
+            .dispatch("oracle_patch_source", execute_args)
+            .expect("patch executes");
+        assert_eq!(out["applied"], json!(true));
+
+        let recs = sink.records();
+        assert_eq!(recs.len(), 2, "patch logs Pending then outcome");
+        assert_eq!(recs[0].tool, "oracle_patch_source");
+        assert_eq!(recs[0].outcome, AuditOutcome::Pending);
+        assert_eq!(recs[1].outcome, AuditOutcome::Succeeded);
+        assert_eq!(recs[1].prev_hash, recs[0].entry_hash);
+        assert!(recs[0].signature.is_some());
+        assert!(
+            recs[0]
+                .sql_preview
+                .contains("CREATE OR REPLACE PACKAGE BODY")
+        );
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+    }
+
+    #[test]
+    fn audit_write_failure_refuses_compile_before_db_execute() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = dispatcher_with_conn(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            ddl_level(),
+            failing_auditor(),
+        );
+        let preview = dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({ "object_type": "PACKAGE", "name": "EMP_API" }),
+            )
+            .expect("compile preview");
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("confirm grant");
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({
+                    "object_type": "PACKAGE",
+                    "name": "EMP_API",
+                    "execute": true,
+                    "confirm": confirm,
+                }),
+            )
+            .expect_err("audit failure refuses compile");
+        assert_eq!(err.error_class, ErrorClass::Internal);
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
+    }
+
+    #[test]
+    fn audit_write_failure_refuses_patch_before_db_execute() {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = dispatcher_with_conn(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            ddl_level(),
+            failing_auditor(),
+        );
+        let preview_args = json!({
+            "owner": "APP",
+            "name": "EMP_API",
+            "object_type": "PACKAGE_BODY",
+            "old_text": "NULL",
+            "new_text": "1",
+        });
+        let preview = dispatcher
+            .dispatch("oracle_patch_source", preview_args.clone())
+            .expect("patch preview");
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("confirm grant")
+            .to_owned();
+        let mut execute_args = preview_args;
+        execute_args["execute"] = json!(true);
+        execute_args["confirm"] = json!(confirm);
+
+        let err = dispatcher
+            .dispatch("oracle_patch_source", execute_args)
+            .expect_err("audit failure refuses patch");
+        assert_eq!(err.error_class, ErrorClass::Internal);
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
     }
 }
 
@@ -4129,8 +4969,7 @@ mod read_only_backstop_wiring {
         // and the executed log must NOT contain a SET TRANSACTION READ ONLY
         // immediately gating it.
         let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
-        let confirm = execute_confirmation_token(sql, OperatingLevel::ReadWrite, Some("dev"))
-            .expect("confirm token");
+        let confirm = preview_confirm(&dispatcher, sql);
         let out = dispatcher
             .dispatch(
                 "oracle_execute",

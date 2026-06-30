@@ -9,6 +9,10 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+dashboard-bundle = ["dep:rust-embed"]
+
 [dependencies]
 oraclemcp-error = { path = "../oraclemcp-error", version = "0.4.1" }
 oraclemcp-config = { path = "../oraclemcp-config", version = "0.4.1" }
@@ -21,6 +25,7 @@ asupersync.workspace = true
 async-trait.workspace = true
 getrandom = "0.2"
 parking_lot.workspace = true
+rust-embed = { workspace = true, optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde.workspace = true
 serde_json.workspace = true

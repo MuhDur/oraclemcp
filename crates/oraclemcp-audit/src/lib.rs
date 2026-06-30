@@ -20,7 +20,8 @@ mod verify;
 
 pub use hmac::{ct_eq, hmac_sha256, hmac_sha256_hex};
 pub use record::{
-    AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord, GENESIS_HASH, SigningKey, sha256_hex,
+    AUDIT_SCHEMA_VERSION, AuditCancel, AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord,
+    AuditSubject, DbEvidence, GENESIS_HASH, SigningKey, sha256_hex,
 };
 pub use shipping::{
     ShippingAuditSink, ShippingError, ShippingForwarder, WormFileForwarder, cef_line, syslog_line,

@@ -4,6 +4,7 @@ pub fn oraclemcp_error::fuzzy::enrich_oracle_error(&str, core::option::Option<&s
 pub fn oraclemcp_error::fuzzy::fuzzy_suggest(&str, &[&str], usize) -> alloc::vec::Vec<alloc::string::String>
 pub fn oraclemcp_error::fuzzy::levenshtein(&str, &str) -> usize
 #[non_exhaustive] pub enum oraclemcp_error::ErrorClass
+pub oraclemcp_error::ErrorClass::AtCapacity
 pub oraclemcp_error::ErrorClass::Busy
 pub oraclemcp_error::ErrorClass::ChallengeRequired
 pub oraclemcp_error::ErrorClass::ConnectionFailed

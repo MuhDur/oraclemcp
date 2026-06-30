@@ -9,6 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: nightly-2026-05-11
+  NODE_VERSION: 22.17.0
 
 permissions:
   contents: read
@@ -18,6 +19,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  web-build:
+    name: web bundle (npm ci + vite build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run check
+        working-directory: web
+      - run: bash scripts/dashboard_bundle_check.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
+          if-no-files-found: error
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
@@ -33,31 +58,44 @@ jobs:
 
   clippy:
     name: clippy (-D warnings)
+    needs: web-build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy -p oraclemcp-core --all-targets --features dashboard-bundle -- -D warnings
+      - run: cargo clippy -p oraclemcp --all-targets --features dashboard-bundle -- -D warnings
 
   test:
     name: cargo test
+    needs: web-build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --doc
+      - run: cargo test -p oraclemcp-core --features dashboard-bundle dashboard
 
   # The thin-native line is pinned to nightly because asupersync requires
   # nightly-only language features (oracledb 0.5.1 is stable-clean). This is a
@@ -65,16 +103,22 @@ jobs:
   # failures stay obvious.
   pinned-nightly:
     name: build on pinned nightly
+    needs: web-build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
+      - run: cargo build -p oraclemcp --features dashboard-bundle
 
   # Multi-nightly early-warning (bead D4 / WP-D). ADVISORY ONLY — NOT a required
   # gate. The pinned nightly above is the gate; this job builds and tests against
@@ -183,11 +227,21 @@ jobs:
 
   release-metadata:
     name: release metadata sync
+    needs: web-build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -205,21 +259,27 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check
+      - run: cargo deny --features oraclemcp/dashboard-bundle,oraclemcp-core/dashboard-bundle check
 
   # The flagship artifact is the thin-db binary. Build-only — live connectivity
   # is covered by the env-gated `live-xe` tests, not run here.
   thin-db:
     name: build thin driver
+    needs: web-build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p oraclemcp
+      - run: cargo build -p oraclemcp --features dashboard-bundle
 
   # No deployment-specific identifiers or secrets may reach the public repo.
   # Generic heuristics run here; operators add a site denylist locally via

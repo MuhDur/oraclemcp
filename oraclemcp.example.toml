@@ -13,9 +13,11 @@
 # validates it through the real loader, so it can never silently rot.
 #
 # SECRETS: credential_ref / wallet_password_ref / key_ref / *_secret_ref values
-# are ALWAYS references, never literal secrets. Use `env:VAR_NAME` (read from the
-# process environment) or `vault:path` (a secrets backend). A dev-only
-# `literal:value` form exists but is REJECTED on a `protected = true` profile.
+# resolve through the SecretResolver seam and never appear in metadata. Use
+# `env:VAR_NAME`, `file:/path/to/secret`, or `keyring:service/account` for local
+# and production secrets. `vault:path` is a future backend seam that fails closed
+# unless wired. A dev-only `literal:value` form exists but is REJECTED on a
+# `protected = true` profile.
 
 # Config schema version this build understands. Default: 1. A config declaring a
 # higher version than the build supports is rejected (forward-incompatible)
@@ -42,6 +44,8 @@ allowed_origins = ["https://client.example.com"]
 json_response = true
 # Enable Streamable HTTP stateful session framing. Default: false.
 stateful = false
+# Idle TTL for stateful sessions, in seconds. Default: 900. Set 0 to disable.
+stateful_idle_ttl_seconds = 900
 
 # [http.oauth] — OAuth 2.1 resource-server protection for /mcp. Optional;
 # omit for an unauthenticated dev listener (which then requires --allow-no-auth).
@@ -78,7 +82,7 @@ hs256_secret_ref = "env:ORACLEMCP_OAUTH_HS256_SECRET"
 [audit]
 # Audit log file path. Default: ~/.config/oraclemcp/audit.jsonl when unset.
 path = "/var/log/oraclemcp/audit.jsonl"
-# Secret reference for the HMAC signing key (`env:`/`vault:`/dev-only `literal:`).
+# Secret reference for the HMAC signing key (`env:`/`file:`/`keyring:`/dev-only `literal:`).
 # Default: none.
 key_ref = "env:ORACLEMCP_AUDIT_KEY"
 # Label for the active signing key, recorded per record so keys can rotate while
@@ -133,8 +137,10 @@ require_signed_tools = true
 # `prod_admin` profile below for the opt-out (= false). This is a
 # visibility/scoping convenience, NOT an access control.
 mcp_exposed = true
-# Optional per-round-trip Oracle call timeout, in seconds. Default: none (driver
-# default). Tool calls exposing `timeout_seconds` can override it for one call.
+# Optional Oracle call timeout and total request-budget ceiling, in seconds.
+# Default: 30 when omitted. Set 0 only to disable the driver call timeout
+# deliberately; doctor warns. Tool calls exposing `timeout_seconds` can tighten
+# it for one call.
 call_timeout_seconds = 30
 # Optional thin Session Data Unit request size. Default: none (negotiated).
 # Validated as 512..=65535 bytes.
@@ -187,7 +193,7 @@ purity = "reuse"
 # [profiles.pool] — local client-side pool for stateless catalog/metadata reads.
 # Optional; omit to keep the pinned-main-session-only strategy.
 # [profiles.pool]
-# max_size = 4                  # Default: 20 (also the documented ceiling; clamped to min(configured, cpu*2+1))
+# max_size = 4                  # Default: 16 (also the documented ceiling; clamped to min(configured, cpu*2+1))
 # min_idle = 1                  # Default: 2. Must be <= max_size.
 # acquire_timeout_secs = 5      # Default: 5. Must be >= 1.
 # statement_cache_size = 50     # Default: 50.
@@ -250,7 +256,7 @@ name = "prod_admin"
 description = "Privileged production target — operator/CLI only, hidden from the agent"
 connect_string = "prod-db.internal:1521/PRODPDB1"
 username = "MCP_ADMIN"
-credential_ref = "vault:oraclemcp/prod_admin"
+credential_ref = "keyring:oraclemcp/prod_admin"
 # Opt out of MCP exposure. DEFAULT IS true (exposed); this explicit `false`
 # hides ONLY this profile from the agent. The others stay exposed.
 mcp_exposed = false

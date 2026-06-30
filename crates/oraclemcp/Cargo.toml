@@ -37,6 +37,9 @@ plsql-intelligence = [
 # turns on the same DB-backed coverage; without it the live tests are compiled
 # out and the deterministic coverage still runs green offline.
 live-xe = ["oraclemcp-db/live-xe"]
+# Embed the operator dashboard bundle that CI/release builds under web/dist.
+# Default/cargo-install builds stay Node-free and omit the bundle.
+dashboard-bundle = ["oraclemcp-core/dashboard-bundle"]
 
 [dependencies]
 oraclemcp-core = { path = "../oraclemcp-core", version = "0.4.1" }

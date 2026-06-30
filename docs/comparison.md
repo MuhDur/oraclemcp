@@ -89,9 +89,11 @@ genai-toolbox leaves to which tools the author wires up.
 Elevating above the current level is **just-in-time**: a preview returns the
 target level, a gate decision, and a confirmation token; a second call with that
 token opens a **TTL-bounded** window (default 900s, max 3600s). DML rolls back by
-default; commits and DDL/Admin require the preview's confirmation token. There is
+default; commits and DDL/Admin require the preview's execution grant. There is
 no persistent "writes enabled" mode — capability is granted for a bounded window
-and a confirmed statement, then it lapses.
+and a confirmed statement, then it lapses. Committing tools also append a
+durable write-ahead intent before DB execution; unresolved in-doubt intents
+refuse writable restart instead of silently allowing re-execution.
 
 ### 4. Audited and tamper-evident (A8)
 

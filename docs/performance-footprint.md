@@ -229,6 +229,51 @@ passed.
 | Pool accounting balanced | yes (every per-client `PoolMetrics::is_balanced`) | `live-xe` |
 | Clean drain | yes (offline soak asserts force-rollback + zero held leases) | `live-xe` |
 
+## Phase-0 Lane Capacity Spike (CX-I6)
+
+CX-I6 measures the WP-N stateful lane shape before N4b finalizes shipped
+capacity defaults. The live harness is:
+
+```text
+ORACLEMCP_LIVE_XE=1 \
+ORACLEMCP_TEST_DSN=localhost:1521/FREEPDB1 \
+ORACLEMCP_TEST_USER=... ORACLEMCP_TEST_PASSWORD=... \
+ORACLEMCP_PHASE0_LANES=16 \
+ORACLEMCP_PHASE0_PROBES_PER_LANE=4 \
+cargo test -p oraclemcp-core --test phase0_capacity -- --ignored --nocapture
+```
+
+The 2026-06-30 dev-host run is recorded in
+`tests/artifacts/perf/20260630-cx-i6-phase0-capacity/RESULTS.md`. It ran against
+a local Oracle FREE 23ai container and printed only redaction-safe JSON
+measurement data.
+
+| Metric | Value |
+|---|---:|
+| Lane-owned Oracle sessions opened | 16 |
+| Probe samples | 64 |
+| p50 / p95 / p99 / max | 1203 us / 1427 us / 1464 us / 2090 us |
+| Process threads before -> warmed | 2 -> 34 |
+| Observed process-thread delta | 32 = 2.00 per lane |
+| File descriptors before -> warmed | 4 -> 68 |
+| Observed fd delta | 64 = 4.00 per lane |
+| Soft max processes | 32768 |
+| Soft open files | 1048576 |
+| Soft stack limit | 8388608 bytes |
+| Derived finite safe-global-lane floor | 16375 |
+| Candidate global 64 supported on this host | yes |
+
+Interpretation: this validates the Appendix A.11 budgeting assumption for the
+current lane bridge on this host: each stateful lane costs one dedicated lane
+thread plus one current-thread runtime worker. The finite process/fd limits
+leave substantial headroom for the N4 upper-bound defaults now wired into the
+served path: 16 stateless read connections per profile, 8 stateful lanes per
+principal bucket, and 64 total host slots with operator/doctor reserve kept out
+of regular agent admission. cgroup pids and memory limits were unavailable and
+therefore recorded as unknown rather than guessed. This section is evidence for
+N4/N4b; N4b still owns live effective-cap computation from DB/session, fd, task,
+and memory limits.
+
 ## Scope Limits
 
 Live Oracle connect/query latency was not measured in this run. No Oracle

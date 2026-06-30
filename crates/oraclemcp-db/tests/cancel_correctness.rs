@@ -27,7 +27,7 @@ use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
     DbError, LeaseManager, OracleBackend, OracleBind, OracleConnection, OracleConnectionInfo,
-    OracleRow,
+    OracleRow, QuarantineOutcome,
 };
 
 /// Run an async body on a fresh current-thread runtime with an installed `Cx`.
@@ -158,11 +158,16 @@ fn cancelled_preview_discards_session_dirty_never_commits() {
             )
             .await
             .expect_err("a cancelled preview must surface an error, never a silent success");
-        // The error is the timeout-class cancellation OR the lease-discarded
-        // signal — both are correct dirty-discard outcomes; neither is a commit.
+        // The error is the structured quarantine signal; B1c requires the
+        // cancelled DB boundary to discard the lease even when cleanup runs.
         assert!(
-            matches!(err, DbError::Cancelled(_))
-                || matches!(err, DbError::Execute(ref m) if m.contains("lease discarded")),
+            matches!(
+                err,
+                DbError::Quarantined {
+                    outcome: QuarantineOutcome::RolledBack | QuarantineOutcome::UnknownDiscarded,
+                    ..
+                }
+            ),
             "unexpected error for a cancelled preview: {err:?}"
         );
         assert_eq!(state.commits.load(Ordering::SeqCst), 0, "no torn commit");

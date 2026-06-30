@@ -79,7 +79,7 @@ pub struct PoolSettings {
 impl Default for PoolSettings {
     fn default() -> Self {
         PoolSettings {
-            max_size: 20,
+            max_size: 16,
             min_idle: 2,
             acquire_timeout_secs: 5,
             statement_cache_size: 50,
@@ -113,11 +113,11 @@ impl PoolSettings {
     ///
     /// `max_size` is clamped to `min(configured, cpu * 2 + 1)` — the configured
     /// value is the documented ceiling, and the CPU-derived figure keeps a
-    /// large configured ceiling (e.g. the default 20) from over-provisioning
+    /// large configured ceiling (e.g. the default 16) from over-provisioning
     /// sessions on a small host. `min_idle` is then clamped to the resolved
     /// `max_size`, and every field is forced into its valid range so a
     /// hand-rolled `PoolSettings` can never build a degenerate pool. The static
-    /// config default (`max_size = 20`) remains the ceiling; this is where the
+    /// config default (`max_size = 16`) remains the ceiling; this is where the
     /// CPU-derived sizing the config doc-comment promises is actually applied.
     #[must_use]
     pub fn resolved(self) -> Self {
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     fn pool_settings_defaults() {
         let s = PoolSettings::default();
-        assert_eq!(s.max_size, 20);
+        assert_eq!(s.max_size, 16);
         assert_eq!(s.min_idle, 2);
         assert_eq!(s.acquire_timeout_secs, 5);
         assert_eq!(s.statement_cache_size, 50);
@@ -579,15 +579,15 @@ mod tests {
         assert_eq!(cpu_derived_ceiling(1), 3);
         assert_eq!(cpu_derived_ceiling(4), 9);
         assert_eq!(cpu_derived_ceiling(8), 17);
-        // The default config ceiling (20) is reached at cpu>=10 (cpu*2+1>=21).
-        assert!(cpu_derived_ceiling(10) > 20);
+        // The default config ceiling (16) is reached at cpu>=8 (cpu*2+1>=17).
+        assert!(cpu_derived_ceiling(8) > 16);
         // Saturating: no overflow at the u32 edge.
         assert_eq!(cpu_derived_ceiling(u32::MAX), u32::MAX);
     }
 
     #[test]
     fn resolved_clamps_max_size_to_cpu_ceiling() {
-        // On a small host (1 cpu => ceiling 3) the default max_size=20 is
+        // On a small host (1 cpu => ceiling 3) the default max_size=16 is
         // clamped DOWN to 3 — the cpu-derived sizing the config promises.
         let resolved = PoolSettings::default().resolved_for_cpus(1);
         assert_eq!(resolved.max_size, 3, "max_size clamped to cpu*2+1");
@@ -709,6 +709,42 @@ mod tests {
         assert_eq!(state.in_use, 0);
         // Accounting balances: 1 acquired == 0 released + 1 discarded.
         assert_eq!(state.acquired, state.released + state.discarded);
+    }
+
+    #[test]
+    fn dirty_discard_no_pool_return() {
+        let settings = PoolSettings {
+            max_size: 2,
+            min_idle: 0,
+            acquire_timeout_secs: 1,
+            statement_cache_size: 50,
+        };
+        let pool = OraclePool::for_test_at_open_count(settings, 2);
+        {
+            let mut state = pool.state.lock().expect("pool state lock");
+            state.in_use = 1;
+            state.acquired = 1;
+            assert_eq!(state.open_count, pool.settings.max_size);
+            assert_eq!(state.idle.len(), 0);
+
+            let return_to_idle = record_checkin(&mut state, true);
+            assert!(!return_to_idle, "dirty connection is dropped, not pooled");
+            assert_eq!(state.idle.len(), 0, "dirty connection never reaches idle");
+            assert_eq!(state.discarded, 1);
+            assert_eq!(state.released, 0);
+            assert_eq!(state.open_count, pool.settings.max_size - 1);
+            assert_eq!(state.in_use, 0);
+        }
+
+        assert!(
+            pool.reserve_new_connection().expect("replacement slot"),
+            "dirty discard frees capacity only for a fresh connection"
+        );
+        let metrics = pool.metrics();
+        assert!(metrics.is_balanced());
+        assert!(metrics.is_bounded());
+        assert_eq!(metrics.open, metrics.max_size);
+        assert_eq!(metrics.idle, 0, "replacement was reserved, not reused idle");
     }
 
     #[test]

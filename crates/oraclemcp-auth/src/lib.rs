@@ -21,7 +21,10 @@ pub use oauth_rs::{
     Hs256Verifier, ResourceServerConfig, SignatureVerifier, TokenError, extract_bearer,
 };
 pub use scope::{apply_oauth_scopes, scope_to_level, scopes_ceiling};
-pub use secrets::{Secret, SecretError, SecretRef, resolve_secret};
+pub use secrets::{
+    EnvLookupSecretResolver, Secret, SecretError, SecretRef, SecretResolver, SystemSecretResolver,
+    resolve_secret, resolve_secret_with,
+};
 pub use stepup_delivery::{
     ChallengeRequired, ElicitationRequest, SelectorChoice, to_challenge_required, to_elicitation,
 };

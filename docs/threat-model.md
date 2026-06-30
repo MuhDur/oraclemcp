@@ -8,8 +8,8 @@ below names a file path you can run.
 
 `oraclemcp` is **governed and least-privilege**: a fail-closed SQL classifier
 gates an explicit operating-level ladder (`READ_ONLY < READ_WRITE < DDL <
-ADMIN`), read-only by default and escalation-capable only through a
-confirmation-token step-up bounded by each profile's ceiling. The model below
+ADMIN`), read-only by default and escalation-capable only through a single-use
+confirmation-grant step-up bounded by each profile's ceiling. The model below
 assumes the *agent driving the server is semi-trusted* — it may emit a statement
 it believes is a read which, through injection or its own error, expresses a
 write or an escalation. The defender's job is defense in depth so no single
@@ -84,13 +84,13 @@ allowlist validator never over-accepts. See
 read-only-standby profile is elevated.
 
 *Mitigation.* The operating-level ladder is capped by each profile's `max_level`;
-escalation requires a TTL-bounded confirmation token (no out-of-band device 2FA);
+escalation requires a TTL-bounded single-use confirmation grant (no out-of-band device 2FA);
 `protected` profiles are pinned at `READ_ONLY`; OAuth scopes can only *lower* the
 effective ceiling; A9 capability narrowing reduces the surface to the read path.
 A1's least-privilege DB account is the backstop ([ADR 0004](adr/0004-governed-operating-level-ladder.md)).
 
 *Evidence (green; CI):*
-- `crates/oraclemcp-guard/tests/token_security.rs` — confirmation-token
+- `crates/oraclemcp-guard/tests/token_security.rs` — confirmation-grant
   security (TTL, single-use, binding).
 - `crates/oraclemcp-db/tests/privilege_degradation.rs` — degrade-on-loss-of-
   privilege behavior.
@@ -122,8 +122,10 @@ back.
 
 *Mitigation.* Structured cancellation through the asupersync `Cx`; on
 shutdown/lease-drain every open transaction is force-rolled-back; preview DML is
-`SAVEPOINT → DML → ROLLBACK TO SAVEPOINT` and never commits. The audit record is
-fsynced **before** execute (at-least-once log, at-most-once execute).
+`SAVEPOINT → DML → ROLLBACK TO SAVEPOINT` and never commits. Served committing
+tools (`oracle_execute`, `oracle_compile_object`, `oracle_create_or_replace`,
+`oracle_patch_source`) append the audit record before database mutation and fail
+closed if that durable append fails (at-least-once log, at-most-once execute).
 
 *Evidence (green; CI):*
 - `crates/oraclemcp-db/tests/cancel_correctness.rs` — B1 cancel correctness.
@@ -131,6 +133,12 @@ fsynced **before** execute (at-least-once log, at-most-once execute).
   — chaos/cancel-under-load (no torn commit, clean drain).
 - `crates/oraclemcp-db/tests/load_soak.rs` — the offline net-load + shutdown soak
   asserting zero-leaked-sessions / clean-drain / bounded / no-torn-commit.
+- `crates/oraclemcp/src/dispatch/tests.rs::audit_wiring` — served
+  execute/compile/patch dispatch appends Pending then signed outcome, and audit
+  write failure refuses compile/patch before DB execution.
+- `crates/oraclemcp/src/dispatch/tests.rs::lifecycle_close_rolls_back_and_revokes_execution_grants`
+  — lane close rolls back, revokes stale execution grants, and records a
+  hash-covered structured close reason.
 
 ### T5 — Audit forgery / repudiation (T, R; asset A3)
 
@@ -161,9 +169,12 @@ independent destination ([ADR 0003](adr/0003-keyed-mac-audit-chain.md)).
 an OTLP export, or an agent-facing error.
 
 *Mitigation.* The audit record stores only the SQL **SHA-256 + a truncated
-preview**, never bind values. Telemetry redaction drops sensitive keys and
+preview**, never bind values. `OracleBind` and `OracleConnectionInfo` have
+redacting `Debug` implementations plus explicit redacted serializers for
+audit/proof/log/protocol surfaces. Telemetry redaction drops sensitive keys and
 redacts secret-shaped values before export. Secrets are resolved from
-`env:`/`vault:` refs (dev-only `literal:` is rejected on `protected` profiles).
+`env:`/`file:`/`keyring:` refs (dev-only `literal:` is rejected on `protected` profiles;
+`vault:` is a future fail-closed backend seam).
 `SigningKey` redacts its bytes in `Debug`.
 
 *Evidence (green; CI):*
@@ -171,6 +182,8 @@ redacts secret-shaped values before export. Secrets are resolved from
   `crates/oraclemcp-telemetry/src/otlp/logs.rs`
   (`secret_attributes_are_dropped_and_bodies_redacted`).
 - `scripts/sensitive_data_lint.sh` — repo-level sensitive-data lint.
+- `crates/oraclemcp-db/src/types.rs` — redaction newtypes and sentinel tests for
+  bind values plus connection identity/topology fields.
 - `crates/oraclemcp-audit/src/record.rs` —
   `record_hashes_and_previews_without_storing_sql_verbatim`.
 

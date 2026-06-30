@@ -22,9 +22,11 @@ pub mod capabilities;
 pub mod capability;
 pub mod connect;
 pub mod custom_tools;
+mod dashboard_bundle;
 pub mod doctor;
 pub mod export;
 pub mod fence;
+pub mod file_store;
 pub mod http;
 pub mod init_token;
 pub mod lane;
@@ -36,6 +38,7 @@ pub mod request_budget;
 pub mod resilience;
 pub mod resources;
 pub mod server;
+pub mod service_app;
 pub mod session_tool;
 pub mod shutdown;
 pub mod subscriptions;
@@ -43,6 +46,7 @@ pub mod tamper_token;
 pub mod tls;
 pub mod tools;
 pub mod trace;
+pub mod write_intent;
 
 pub use request_budget::{
     CLEANUP_POLL_QUOTA, DEFAULT_REQUEST_POLL_QUOTA, DEFAULT_REQUEST_TIMEOUT, RequestBudget,
@@ -51,7 +55,8 @@ pub use resilience::{
     CircuitBreaker, CircuitState, RetryPolicy, is_transient_error, run_with_timeout,
 };
 pub use server::{
-    CAPABILITIES_TOOL, DispatchContext, DispatchFuture, OracleMcpServer, ToolDispatch,
+    CAPABILITIES_TOOL, DispatchCloseFuture, DispatchCloseReason, DispatchContext, DispatchFuture,
+    OracleMcpServer, ToolDispatch,
 };
 pub use shutdown::{CancelOutcome, ShutdownCoordinator, install_panic_hook};
 
@@ -78,11 +83,15 @@ pub use doctor::{
 pub use export::{
     ExportAccess, ExportContents, ExportFormat, ExportHandle, ExportRegistry, export_uri,
 };
+pub use file_store::{
+    FileStore, FileStoreError, JsonlIndex, JsonlRecord, PruneReport, RecoveryReport,
+    RetentionClass, ServiceLock, StoreId,
+};
 pub use http::{
-    HEALTHZ_PATH, HttpRequest, HttpResponse, HttpTransportConfig, MCP_PATH, METRICS_PATH,
-    OAuthEnforcement, ObservabilityState, PROTECTED_RESOURCE_METADATA_PATH, READYZ_PATH,
-    ReadinessProbe, ScopeGrant, handle_http_request, serve_http, serve_http_until, serve_https,
-    serve_https_until,
+    HEALTHZ_PATH, HttpRequest, HttpResponse, HttpResultStore, HttpSessionLifecycle,
+    HttpTransportConfig, MCP_PATH, METRICS_PATH, OAuthEnforcement, OPERATOR_API_PREFIX,
+    ObservabilityState, PROTECTED_RESOURCE_METADATA_PATH, READYZ_PATH, ReadinessProbe, ScopeGrant,
+    handle_http_request, serve_http, serve_http_until, serve_https, serve_https_until,
 };
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
 pub use lane::{
@@ -99,12 +108,22 @@ pub use resources::{
     PromptArg, PromptDef, PromptMessage, ResourceContents, ResourceProvider, ResourceTemplate,
     ResourceUri, prompt_catalog, read_resource, render_prompt, resource_templates,
 };
+pub use service_app::{
+    SERVICE_APP_NAME, SERVICE_CHILD_AUDIT_CHAIN_WRITER, SERVICE_CHILD_DASHBOARD_API,
+    SERVICE_CHILD_LANE_REGISTRY_SUPERVISOR, SERVICE_CHILD_METRICS_HEALTH_COLLECTOR,
+    SERVICE_CHILD_TRANSPORT, ServiceAppChild, ServiceAppRuntime, ServiceAppStartError,
+    ServiceAppStopError, ServiceTransport, oraclemcp_service_app_spec, service_app_start_order,
+    start_oraclemcp_service_app, start_oraclemcp_service_app_with_transport,
+};
 pub use session_tool::{LeaseAcquirer, SessionAction, SessionDeps, oracle_session};
 pub use subscriptions::{PollingSource, SubscribeSource, SubscriptionHub, SubscriptionRegistry};
 pub use tamper_token::{sign_token, verify_token};
 pub use tls::{TlsError, TlsMaterial, TlsServerConfig, build_server_config, requires_mtls};
 pub use tools::{ToolDescriptor, ToolRegistry, ToolTier};
 pub use trace::TraceContext;
+pub use write_intent::{
+    WriteIntent, WriteIntentDetails, WriteIntentError, WriteIntentLog, WriteIntentOutcome,
+};
 
 /// Re-export the shared agent-facing error envelope.
 pub use oraclemcp_error as error;

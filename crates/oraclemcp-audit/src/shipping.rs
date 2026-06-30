@@ -265,6 +265,10 @@ pub fn cef_line(record: &AuditRecord) -> String {
     let mut ext = String::new();
     push_cef_kv(&mut ext, "rt", &record.timestamp);
     push_cef_kv(&mut ext, "suser", &record.agent_identity);
+    push_cef_kv(&mut ext, "cs2Label", "subjectKind");
+    push_cef_kv(&mut ext, "cs2", &record.subject.kind);
+    push_cef_kv(&mut ext, "cs3Label", "subjectStableId");
+    push_cef_kv(&mut ext, "cs3", &record.subject.stable_id);
     push_cef_kv(&mut ext, "cs1Label", "auditSeq");
     push_cef_kv(&mut ext, "cs1", &record.seq.to_string());
     push_cef_kv(&mut ext, "act", &format!("{:?}", record.decision));
@@ -305,6 +309,8 @@ pub fn syslog_line(record: &AuditRecord) -> String {
     let pri = u16::from(FACILITY_LOCAL0) * 8 + u16::from(severity);
     let mut sd = String::from("[oraclemcp@0");
     push_sd_param(&mut sd, "seq", &record.seq.to_string());
+    push_sd_param(&mut sd, "subjectKind", &record.subject.kind);
+    push_sd_param(&mut sd, "subjectStableId", &record.subject.stable_id);
     push_sd_param(&mut sd, "decision", &format!("{:?}", record.decision));
     push_sd_param(&mut sd, "outcome", &format!("{:?}", record.outcome));
     push_sd_param(&mut sd, "danger", &record.danger_level);
@@ -333,7 +339,13 @@ fn cef_severity(record: &AuditRecord) -> u8 {
     use crate::record::{AuditDecision, AuditOutcome};
     match (record.decision, record.outcome) {
         (AuditDecision::Blocked, _) => 8,
-        (_, AuditOutcome::Failed) => 6,
+        (
+            _,
+            AuditOutcome::Failed
+            | AuditOutcome::DiscardedUncommitted
+            | AuditOutcome::CommitInDoubt
+            | AuditOutcome::UnknownDiscarded,
+        ) => 6,
         (AuditDecision::StepUpRequired, _) => 5,
         _ => match record.danger_level.as_str() {
             "DESTRUCTIVE" => 7,
@@ -347,10 +359,16 @@ fn cef_severity(record: &AuditRecord) -> u8 {
 fn syslog_severity(record: &AuditRecord) -> u8 {
     use crate::record::{AuditDecision, AuditOutcome};
     match (record.decision, record.outcome) {
-        (AuditDecision::Blocked, _) => 4,        // warning
-        (_, AuditOutcome::Failed) => 3,          // error
+        (AuditDecision::Blocked, _) => 4, // warning
+        (
+            _,
+            AuditOutcome::Failed
+            | AuditOutcome::DiscardedUncommitted
+            | AuditOutcome::CommitInDoubt
+            | AuditOutcome::UnknownDiscarded,
+        ) => 3, // error
         (AuditDecision::StepUpRequired, _) => 5, // notice
-        _ => 6,                                  // informational
+        _ => 6,                           // informational
     }
 }
 
@@ -406,7 +424,7 @@ fn push_sd_param(sd: &mut String, key: &str, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{AuditDecision, AuditEntryDraft, AuditOutcome, SigningKey};
+    use crate::record::{AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, SigningKey};
     use crate::sink::{Auditor, MemoryAuditSink};
     use crate::verify::{VerifyOutcome, parse_jsonl, verify_records};
     use std::sync::Arc;
@@ -417,7 +435,9 @@ mod tests {
 
     fn draft(sql: &str, danger: &str) -> AuditEntryDraft {
         AuditEntryDraft {
-            agent_identity: "agent-1".to_owned(),
+            subject: AuditSubject::new("agent", "agent-1"),
+            db_evidence: None,
+            cancel: None,
             tool: "oracle_execute".to_owned(),
             sql: sql.to_owned(),
             danger_level: danger.to_owned(),

@@ -67,17 +67,16 @@ impl FileAuditSink {
 
 impl AuditSink for FileAuditSink {
     fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
-        let line = serde_json::to_string(record).map_err(|e| AuditError::Io(e.to_string()))?;
-        let mut f = self.file.lock().expect("audit file mutex poisoned");
-        f.write_all(line.as_bytes())
-            .map_err(|e| AuditError::Io(e.to_string()))?;
-        f.write_all(b"\n")
+        let mut line = serde_json::to_vec(record).map_err(|e| AuditError::Io(e.to_string()))?;
+        line.push(b'\n');
+        let mut f = self.file.lock().map_err(|_| AuditError::Poisoned)?;
+        f.write_all(&line)
             .map_err(|e| AuditError::Io(e.to_string()))?;
         Ok(())
     }
 
     fn flush(&self) -> Result<(), AuditError> {
-        let f = self.file.lock().expect("audit file mutex poisoned");
+        let f = self.file.lock().map_err(|_| AuditError::Poisoned)?;
         // fsync: the bytes are durably on disk before we return.
         f.sync_all().map_err(|e| AuditError::Io(e.to_string()))
     }
@@ -101,24 +100,30 @@ impl MemoryAuditSink {
     /// A snapshot of appended records.
     #[must_use]
     pub fn records(&self) -> Vec<AuditRecord> {
-        self.records.lock().expect("poisoned").clone()
+        self.records
+            .lock()
+            .expect("memory audit sink poisoned")
+            .clone()
     }
 
     /// How many times `flush` was called.
     #[must_use]
     pub fn flush_count(&self) -> usize {
-        *self.flushes.lock().expect("poisoned")
+        *self.flushes.lock().expect("memory audit sink poisoned")
     }
 }
 
 impl AuditSink for MemoryAuditSink {
     fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
-        self.records.lock().expect("poisoned").push(record.clone());
+        self.records
+            .lock()
+            .map_err(|_| AuditError::Poisoned)?
+            .push(record.clone());
         Ok(())
     }
 
     fn flush(&self) -> Result<(), AuditError> {
-        *self.flushes.lock().expect("poisoned") += 1;
+        *self.flushes.lock().map_err(|_| AuditError::Poisoned)? += 1;
         Ok(())
     }
 }
@@ -173,7 +178,7 @@ impl Auditor {
         timestamp: String,
         durable: bool,
     ) -> Result<AuditRecord, AuditError> {
-        let mut state = self.state.lock().expect("audit state poisoned");
+        let mut state = self.state.lock().map_err(|_| AuditError::Poisoned)?;
         // Fail closed: once a durable flush has failed, the head of the on-disk
         // byte stream holds a record that was written but not fsynced. Issuing
         // any further record would either reuse that seq (forking the chain) or
@@ -210,8 +215,9 @@ impl Auditor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{AuditDecision, AuditOutcome};
+    use crate::record::{AuditDecision, AuditOutcome, AuditSubject};
     use std::sync::Arc;
+    use std::thread;
 
     fn test_key() -> SigningKey {
         SigningKey::new("test", b"sink-test-key".to_vec())
@@ -219,7 +225,9 @@ mod tests {
 
     fn draft(sql: &str, danger: &str) -> AuditEntryDraft {
         AuditEntryDraft {
-            agent_identity: "agent".to_owned(),
+            subject: AuditSubject::new("agent", "agent"),
+            db_evidence: None,
+            cancel: None,
             tool: "oracle_query".to_owned(),
             sql: sql.to_owned(),
             danger_level: danger.to_owned(),
@@ -366,6 +374,43 @@ mod tests {
         seqs.sort_unstable();
         seqs.dedup();
         assert_eq!(seqs.len(), before, "no duplicate seq in the audit stream");
+    }
+
+    #[test]
+    fn concurrent_appends_keep_one_valid_chain() {
+        let sink = Arc::new(MemoryAuditSink::new());
+        let auditor = Arc::new(Auditor::new(Box::new(SharedSink(sink.clone())), test_key()));
+        let threads = 8;
+        let per_thread = 16;
+        let mut handles = Vec::new();
+        for thread_id in 0..threads {
+            let auditor = Arc::clone(&auditor);
+            handles.push(thread::spawn(move || {
+                for i in 0..per_thread {
+                    auditor
+                        .append(
+                            &draft(
+                                &format!("DELETE FROM t WHERE thread_id={thread_id} AND n={i}"),
+                                "GUARDED",
+                            ),
+                            format!("t{thread_id}-{i}"),
+                            true,
+                        )
+                        .expect("concurrent append");
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("append thread joins");
+        }
+        let records = sink.records();
+        assert_eq!(records.len(), threads * per_thread);
+        assert_eq!(
+            crate::verify_records(&records, &[test_key()]),
+            crate::VerifyOutcome::Ok {
+                records: threads * per_thread
+            }
+        );
     }
 
     // A sink that forwards to a shared Arc<MemoryAuditSink> (so the test keeps a

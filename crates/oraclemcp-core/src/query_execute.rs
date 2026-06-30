@@ -13,9 +13,9 @@
 //! In P1 this executes the approved statement *without* the execute-in-savepoint
 //! ground-truth preview — that is P2-3.
 
-use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, Auditor};
+use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
-use oraclemcp_guard::{ExecGrantError, ExecGrantStore, OperatingLevel};
+use oraclemcp_guard::{ExecGrantBinding, ExecGrantError, ExecGrantStore, OperatingLevel};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -35,6 +35,12 @@ pub struct ExecuteParams {
     pub sql: String,
     /// The session the grant was issued to.
     pub session_id: String,
+    /// The server-assigned lane id the grant was issued to.
+    pub lane_id: String,
+    /// The verified, server-derived subject id the grant was issued to.
+    pub subject_id: String,
+    /// The lane/profile/level generation captured when the grant was issued.
+    pub generation: u64,
     /// The operating level the caller asserts it needs (≤ granted). Defaults to
     /// `READ_WRITE` (the common DML case) when omitted.
     #[serde(default)]
@@ -77,6 +83,21 @@ fn grant_error_to_envelope(e: ExecGrantError) -> ErrorEnvelope {
             ErrorClass::RuntimeStateRequired,
             "execution grant belongs to a different session",
         ),
+        ExecGrantError::LaneMismatch => ErrorEnvelope::new(
+            ErrorClass::RuntimeStateRequired,
+            "execution grant belongs to a different lane",
+        ),
+        ExecGrantError::SubjectMismatch => ErrorEnvelope::new(
+            ErrorClass::RuntimeStateRequired,
+            "execution grant belongs to a different subject",
+        ),
+        ExecGrantError::GenerationMismatch { presented, granted } => ErrorEnvelope::new(
+            ErrorClass::ChallengeRequired,
+            format!(
+                "execution grant was minted for generation {granted}, but current generation is {presented}"
+            ),
+        )
+        .with_next_step("preview the statement again on the current lane/profile generation"),
         ExecGrantError::LevelExceedsGrant { requested, granted } => ErrorEnvelope::new(
             ErrorClass::OperatingLevelTooLow,
             format!(
@@ -108,15 +129,24 @@ pub fn oracle_query_execute(
     let requested = parse_level(params.requested_level.as_deref())?;
 
     // 1) Consume the grant: single-use, digest, session, level, expiry.
+    let binding = ExecGrantBinding::new(
+        params.session_id.clone(),
+        params.lane_id.clone(),
+        params.subject_id.clone(),
+        params.generation,
+    );
     let granted = grants
-        .consume(&params.token, &params.sql, &params.session_id, requested)
+        .consume(&params.token, &params.sql, &binding, requested)
         .map_err(grant_error_to_envelope)?;
 
     // 2) fsync-before-execute: durably log the approved statement BEFORE it runs,
     //    so a crash between here and the execute leaves the log written and the
     //    database untouched.
+    let subject = AuditSubject::new("agent", agent_identity);
     let pre = AuditEntryDraft {
-        agent_identity: agent_identity.to_owned(),
+        subject: subject.clone(),
+        db_evidence: None,
+        cancel: None,
         tool: "oracle_query_execute".to_owned(),
         sql: params.sql.clone(),
         danger_level: granted.as_str().to_owned(),
@@ -137,7 +167,9 @@ pub fn oracle_query_execute(
         Err(_) => (AuditOutcome::Failed, None),
     };
     let post = AuditEntryDraft {
-        agent_identity: agent_identity.to_owned(),
+        subject,
+        db_evidence: None,
+        cancel: None,
         tool: "oracle_query_execute".to_owned(),
         sql: params.sql.clone(),
         danger_level: granted.as_str().to_owned(),
@@ -230,11 +262,18 @@ mod tests {
 
     const SQL: &str = "UPDATE orders SET status='X' WHERE id=42";
 
+    fn binding() -> ExecGrantBinding {
+        ExecGrantBinding::new("sess-1", "lane-1", "subject-1", 1)
+    }
+
     fn params(token: &str, sql: &str, level: Option<&str>) -> ExecuteParams {
         ExecuteParams {
             token: token.to_owned(),
             sql: sql.to_owned(),
             session_id: "sess-1".to_owned(),
+            lane_id: "lane-1".to_owned(),
+            subject_id: "subject-1".to_owned(),
+            generation: 1,
             requested_level: level.map(str::to_owned),
         }
     }
@@ -244,7 +283,7 @@ mod tests {
         let grants = ExecGrantStore::new();
         let tok = grants.issue(
             SQL,
-            "sess-1",
+            binding(),
             OperatingLevel::ReadWrite,
             Duration::from_secs(60),
         );
@@ -293,7 +332,7 @@ mod tests {
         let grants = ExecGrantStore::new();
         let tok = grants.issue(
             SQL,
-            "sess-1",
+            binding(),
             OperatingLevel::ReadWrite,
             Duration::from_secs(60),
         );
@@ -317,11 +356,47 @@ mod tests {
     }
 
     #[test]
+    fn stale_generation_does_not_execute() {
+        let grants = ExecGrantStore::new();
+        let tok = grants.issue(
+            SQL,
+            binding(),
+            OperatingLevel::ReadWrite,
+            Duration::from_secs(60),
+        );
+        let (aud, sink) = auditor();
+        let exec = MockExecutor::ok(1);
+        let mut stale = params(&tok, SQL, Some("READ_WRITE"));
+        stale.generation = 2;
+
+        let err = oracle_query_execute(&grants, &aud, &exec, "a", &stale, clock())
+            .expect_err("stale generation rejected");
+        assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+        assert_eq!(exec.call_count(), 0);
+        assert!(
+            sink.records().is_empty(),
+            "no audit before a rejected stale-generation grant"
+        );
+
+        let out = oracle_query_execute(
+            &grants,
+            &aud,
+            &exec,
+            "a",
+            &params(&tok, SQL, Some("READ_WRITE")),
+            clock(),
+        )
+        .expect("correct generation still consumes the grant");
+        assert_eq!(out["executed"], json!(true));
+        assert_eq!(exec.call_count(), 1);
+    }
+
+    #[test]
     fn requesting_above_grant_is_rejected() {
         let grants = ExecGrantStore::new();
         let tok = grants.issue(
             "DROP TABLE t",
-            "sess-1",
+            binding(),
             OperatingLevel::ReadWrite,
             Duration::from_secs(60),
         );
@@ -345,7 +420,7 @@ mod tests {
         let grants = ExecGrantStore::new();
         let tok = grants.issue(
             SQL,
-            "sess-1",
+            binding(),
             OperatingLevel::ReadWrite,
             Duration::from_secs(60),
         );

@@ -311,7 +311,9 @@ mod driver {
         },
     };
     use std::fmt::Display;
+    use std::future::Future;
     use std::sync::Mutex as SyncMutex;
+    use std::time::Duration;
 
     const FETCH_BATCH_ROWS: u32 = 512;
 
@@ -782,10 +784,24 @@ mod driver {
             && cursor_id != 0
             && columns_require_define(&columns)
         {
-            let fetched = inner
-                .define_and_fetch_rows_with_columns(cx, cursor_id, FETCH_BATCH_ROWS, &columns, None)
-                .await
-                .map_err(|err| DbError::Query(sanitize_driver_error(err, opts)))?;
+            let fetch_result = bounded_fetch_batch(
+                timeout_ms,
+                inner.define_and_fetch_rows_with_columns(
+                    cx,
+                    cursor_id,
+                    FETCH_BATCH_ROWS,
+                    &columns,
+                    None,
+                ),
+            )
+            .await;
+            let fetched = match resolve_fetch_batch(cx, inner, fetch_result, opts).await {
+                Ok(fetched) => fetched,
+                Err(err) => {
+                    inner.release_cursor(cursor_id);
+                    return Err(err);
+                }
+            };
             if !fetched.columns.is_empty() {
                 columns = fetched.columns.clone();
             }
@@ -794,28 +810,38 @@ mod driver {
             result.more_rows = fetched.more_rows;
         }
         while has_parent_result && result.more_rows && cursor_id != 0 {
-            let fetched = if columns_require_define(&columns) {
-                inner
-                    .define_and_fetch_rows_with_columns(
+            let fetch_result = if columns_require_define(&columns) {
+                bounded_fetch_batch(
+                    timeout_ms,
+                    inner.define_and_fetch_rows_with_columns(
                         cx,
                         cursor_id,
                         FETCH_BATCH_ROWS,
                         &columns,
                         previous_row.as_deref(),
-                    )
-                    .await
+                    ),
+                )
+                .await
             } else {
-                inner
-                    .fetch_rows_with_columns(
+                bounded_fetch_batch(
+                    timeout_ms,
+                    inner.fetch_rows_with_columns(
                         cx,
                         cursor_id,
                         FETCH_BATCH_ROWS,
                         &columns,
                         previous_row.as_deref(),
-                    )
-                    .await
-            }
-            .map_err(|err| DbError::Query(sanitize_driver_error(err, opts)))?;
+                    ),
+                )
+                .await
+            };
+            let fetched = match resolve_fetch_batch(cx, inner, fetch_result, opts).await {
+                Ok(fetched) => fetched,
+                Err(err) => {
+                    inner.release_cursor(cursor_id);
+                    return Err(err);
+                }
+            };
             if !fetched.columns.is_empty() {
                 columns = fetched.columns.clone();
             }
@@ -851,6 +877,61 @@ mod driver {
             inner.release_cursor(cursor_id);
         }
         Ok(converted)
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub(super) enum FetchBatchError<E> {
+        Driver(E),
+        Timeout(u32),
+    }
+
+    pub(super) async fn bounded_fetch_batch<T, E, Fut>(
+        timeout_ms: Option<u32>,
+        future: Fut,
+    ) -> Result<T, FetchBatchError<E>>
+    where
+        Fut: Future<Output = Result<T, E>>,
+    {
+        let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
+            return future.await.map_err(FetchBatchError::Driver);
+        };
+        match asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            Duration::from_millis(u64::from(timeout_ms)),
+            future,
+        )
+        .await
+        {
+            Ok(result) => result.map_err(FetchBatchError::Driver),
+            Err(_) => Err(FetchBatchError::Timeout(timeout_ms)),
+        }
+    }
+
+    async fn resolve_fetch_batch<T>(
+        cx: &Cx,
+        inner: &mut oracledb::Connection,
+        result: Result<T, FetchBatchError<oracledb::Error>>,
+        opts: &OracleConnectOptions,
+    ) -> Result<T, DbError> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(FetchBatchError::Driver(err)) => {
+                Err(DbError::Query(sanitize_driver_error(err, opts)))
+            }
+            Err(FetchBatchError::Timeout(timeout_ms)) => match inner.cancel(cx).await {
+                Ok(()) => Err(fetch_batch_call_timeout(timeout_ms)),
+                Err(err) => Err(DbError::Query(format!(
+                    "fetch loop: call timeout of {timeout_ms} ms exceeded; recovery failed: {}",
+                    sanitize_driver_error(err, opts)
+                ))),
+            },
+        }
+    }
+
+    pub(super) fn fetch_batch_call_timeout(timeout_ms: u32) -> DbError {
+        DbError::Query(format!(
+            "fetch loop: call timeout of {timeout_ms} ms exceeded"
+        ))
     }
 
     fn columns_require_define(columns: &[ColumnMetadata]) -> bool {
@@ -1387,6 +1468,103 @@ mod driver {
                     .execute_raw(&cx, "SELECT 1 AS n FROM dual", 1, &[], ExecuteOptions::default(), None)
                     .await
                     .expect("connection remains usable after cursor fetch failure");
+                let n = probe.rows[0][0]
+                    .as_ref()
+                    .and_then(QueryValue::as_i64)
+                    .expect("numeric probe cell");
+                assert_eq!(n, 1);
+            });
+        }
+
+        #[cfg(feature = "live-xe")]
+        #[test]
+        fn live_fetch_loop_is_bounded_per_batch() {
+            use asupersync::runtime::RuntimeBuilder;
+            let Some(opts) = live_opts_from_env() else {
+                eprintln!(
+                    "[live-xe] SKIP live_fetch_loop_is_bounded_per_batch: set ORACLEMCP_TEST_*"
+                );
+                return;
+            };
+            let reactor = asupersync::runtime::reactor::create_reactor().expect("native reactor");
+            let runtime = RuntimeBuilder::current_thread()
+                .with_reactor(reactor)
+                .build()
+                .expect("current-thread runtime");
+            runtime.block_on(async {
+                let cx = asupersync::Cx::current().expect("block_on installs a current Cx");
+                let mut inner = match oracledb::Connection::connect(
+                    &cx,
+                    to_connect_options(&opts).expect("connect options"),
+                )
+                .await
+                {
+                    Ok(conn) => conn,
+                    Err(err) => {
+                        eprintln!(
+                            "[live-xe] SKIP live_fetch_loop_is_bounded_per_batch: no reachable Oracle ({})",
+                            sanitize_driver_error(err, &opts)
+                        );
+                        return;
+                    }
+                };
+                let pipe = format!(
+                    "ORACLEMCP_FETCH_TIMEOUT_{}_{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |duration| duration.as_nanos())
+                );
+                let sql = format!(
+                    "SELECT CASE WHEN level = 1 THEN 0 ELSE DBMS_PIPE.RECEIVE_MESSAGE('{pipe}', 2) END AS status \
+                     FROM dual CONNECT BY level <= 2"
+                );
+                let result = match inner
+                    .execute_raw(&cx, &sql, 1, &[], ExecuteOptions::default(), None)
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(err) => {
+                        eprintln!(
+                            "[live-xe] SKIP live_fetch_loop_is_bounded_per_batch: DBMS_PIPE unavailable or query rejected ({})",
+                            sanitize_driver_error(err, &opts)
+                        );
+                        return;
+                    }
+                };
+                if !result.more_rows || result.cursor_id == 0 {
+                    eprintln!(
+                        "[live-xe] SKIP live_fetch_loop_is_bounded_per_batch: fixture query did not produce a continuation fetch"
+                    );
+                    return;
+                }
+
+                let err = collect_all_rows(
+                    &cx,
+                    &mut inner,
+                    result,
+                    &opts,
+                    &SerializeOptions::default(),
+                    Some(10),
+                )
+                .await
+                .expect_err("slow continuation fetch must time out");
+                assert!(
+                    err.to_string().contains("call timeout"),
+                    "unexpected fetch-loop error: {err}"
+                );
+
+                let probe = inner
+                    .execute_raw(
+                        &cx,
+                        "SELECT 1 AS n FROM dual",
+                        1,
+                        &[],
+                        ExecuteOptions::default(),
+                        None,
+                    )
+                    .await
+                    .expect("connection remains usable after fetch timeout recovery");
                 let n = probe.rows[0][0]
                     .as_ref()
                     .and_then(QueryValue::as_i64)
@@ -2050,7 +2228,11 @@ mod driver {
         }
 
         async fn rollback(&self, cx: &Cx) -> Result<(), DbError> {
-            super::db_checkpoint(cx, "oracle_db.rollback.before")?;
+            // Rollback is cleanup. Do not add an adapter-level pre-checkpoint
+            // here: a cancellation observed after DML must not make this layer
+            // skip cleanup before the driver even sees the rollback request.
+            // The wire round trip remains bounded by the connection's
+            // configured Oracle call timeout.
             let mut inner = self.lock_inner(cx).await?;
             inner
                 .rollback(cx)
@@ -2108,6 +2290,36 @@ mod tests {
             driver::prefetch_rows_for_statement("DECLARE rc SYS_REFCURSOR; BEGIN NULL; END;"),
             0
         );
+    }
+
+    #[test]
+    fn fetch_loop_is_bounded_per_batch() {
+        fn block_on_without_runtime<F: std::future::Future>(future: F) -> F::Output {
+            let waker = std::task::Waker::noop().clone();
+            let mut cx = std::task::Context::from_waker(&waker);
+            let mut future = std::pin::pin!(future);
+            loop {
+                match future.as_mut().poll(&mut cx) {
+                    std::task::Poll::Ready(output) => return output,
+                    std::task::Poll::Pending => std::thread::sleep(Duration::from_millis(1)),
+                }
+            }
+        }
+
+        let err = block_on_without_runtime(driver::bounded_fetch_batch(
+            Some(1),
+            std::future::pending::<Result<(), ()>>(),
+        ));
+
+        assert_eq!(err, Err(driver::FetchBatchError::Timeout(1)));
+    }
+
+    #[test]
+    fn fetch_loop_timeout_is_uncertain_session_state() {
+        let err = driver::fetch_batch_call_timeout(25);
+
+        assert!(err.is_uncertain_session_state(), "{err}");
+        assert!(err.to_string().contains("call timeout of 25 ms exceeded"));
     }
 
     #[test]
@@ -2531,6 +2743,86 @@ mod driver_seam {
                 out.push(path);
             }
         }
+    }
+
+    fn string_field(line: &str, field: &str) -> Option<String> {
+        let trimmed = line.trim();
+        let rest = trimmed.strip_prefix(field)?.trim_start();
+        let value = rest.strip_prefix('=')?.trim_start();
+        let value = value.strip_prefix('"')?;
+        let (value, _) = value.split_once('"')?;
+        Some(value.to_owned())
+    }
+
+    fn lock_package_versions(lock: &str, package: &str) -> Vec<String> {
+        let mut versions = Vec::new();
+        let mut current_name: Option<String> = None;
+        let mut current_version: Option<String> = None;
+
+        for line in lock.lines().chain(std::iter::once("[[package]]")) {
+            if line.trim() == "[[package]]" {
+                if current_name.as_deref() == Some(package)
+                    && let Some(version) = current_version.take()
+                {
+                    versions.push(version);
+                }
+                current_name = None;
+                current_version = None;
+                continue;
+            }
+            if current_name.is_none() {
+                current_name = string_field(line, "name");
+            }
+            if current_version.is_none() {
+                current_version = string_field(line, "version");
+            }
+        }
+
+        versions
+    }
+
+    #[test]
+    fn pin_is_0_5_1_and_seam_intact() {
+        let root = workspace_root();
+        let manifest =
+            std::fs::read_to_string(root.join("Cargo.toml")).expect("read workspace Cargo.toml");
+        assert!(
+            manifest.contains(r#"oracledb = { version = "=0.5.1", default-features = false }"#),
+            "workspace Cargo.toml must keep the oracledb dependency exactly pinned at =0.5.1"
+        );
+
+        let lock = std::fs::read_to_string(root.join("Cargo.lock")).expect("read Cargo.lock");
+        assert_eq!(
+            lock_package_versions(&lock, "oracledb"),
+            vec!["0.5.1".to_owned()],
+            "Cargo.lock must resolve exactly one oracledb package at 0.5.1"
+        );
+        assert_eq!(
+            lock_package_versions(&lock, "oracledb-protocol"),
+            vec!["0.5.1".to_owned()],
+            "Cargo.lock must resolve the matching oracledb-protocol 0.5.1 package"
+        );
+
+        assert_eq!(
+            ADAPTER_ALLOWLIST,
+            ["crates/oraclemcp-db/src/connection.rs"],
+            "the driver adapter seam must remain a single source file"
+        );
+    }
+
+    #[test]
+    fn upstream_expire_time_gap_is_parse_visible() {
+        let descriptor = oracledb::protocol::net::EasyConnect::parse_descriptor(
+            "dbhost:1521/FREEPDB1?expire_time=7&transport_connect_timeout=2.5",
+        )
+        .expect("extended Easy Connect string should parse");
+        let desc = descriptor.first_description();
+
+        assert_eq!(
+            desc.expire_time, 7,
+            "rust-oracledb#14 remains an upstream runtime keepalive wiring issue, not a parser loss"
+        );
+        assert!((desc.tcp_connect_timeout - 2.5).abs() < 1e-9);
     }
 
     /// True iff `line` names the DRIVER crate path `oracledb::` (and not the

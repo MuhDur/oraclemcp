@@ -39,12 +39,12 @@ pub struct PoolConfig {
 
 impl Default for PoolConfig {
     fn default() -> Self {
-        // Plan §10: max_size = min(cpu*2+1, 20), min_idle 2, acquire 5s,
+        // N4: max_size = min(cpu*2+1, 16), min_idle 2, acquire 5s,
         // statement_cache >= 50. This static default is the documented CEILING;
         // the cpu-derived clamp (min(configured, cpu*2+1)) is applied at pool
         // construction by `oraclemcp_db::PoolSettings::resolved` (B4).
         PoolConfig {
-            max_size: 20,
+            max_size: 16,
             min_idle: 2,
             acquire_timeout_secs: 5,
             statement_cache_size: 50,
@@ -1068,7 +1068,7 @@ mod tests {
         )
         .expect("defaulted pool profile");
         let pool = cfg.profiles[0].pool.as_ref().expect("default pool");
-        assert_eq!(pool.max_size, 20);
+        assert_eq!(pool.max_size, 16);
         assert_eq!(pool.min_idle, 2);
         assert_eq!(pool.acquire_timeout_secs, 5);
         assert_eq!(pool.statement_cache_size, 50);
@@ -1282,12 +1282,12 @@ mod tests {
     fn metadata_omits_secret_reference() {
         let mut prof = p("prod");
         prof.connect_string = Some("prod:1521/svc".to_owned());
-        prof.credential_ref = Some("keyring:prod".to_owned());
+        prof.credential_ref = Some("keyring:oraclemcp/prod".to_owned());
         prof.username = Some("svc_acct".to_owned());
         prof.sdu = Some(32_768);
         prof.oci = Some(OciConfig {
             wallet_location: Some("/wallets/prod".into()),
-            wallet_password_ref: Some("env:WALLET_PASSWORD".to_owned()),
+            wallet_password_ref: Some("file:/run/secrets/prod-wallet-password".to_owned()),
             ssl_server_dn_match: Some(true),
             ssl_server_cert_dn: Some("CN=prod-db".to_owned()),
             use_sni: Some(true),
@@ -1324,11 +1324,11 @@ mod tests {
         let meta = prof.metadata();
         let json = serde_json::to_string(&meta).expect("serialize");
         assert!(
-            !json.contains("keyring:prod"),
+            !json.contains("keyring:oraclemcp/prod"),
             "credential_ref leaked into metadata"
         );
         assert!(
-            !json.contains("WALLET_PASSWORD")
+            !json.contains("/run/secrets/prod-wallet-password")
                 && !json.contains("/wallets/prod")
                 && !json.contains("CN=prod-db"),
             "OCI wallet/TLS material leaked into metadata"

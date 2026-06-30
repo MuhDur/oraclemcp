@@ -13,6 +13,8 @@
 //! In-MCP, the live-state subset is mirrored by `oracle_capabilities` (an agent
 //! can call it); `doctor` is the CLI mode.
 
+use std::time::Duration;
+
 use asupersync::Cx;
 use oraclemcp_db::{
     DiagnosticsSource, OracleConnection, canonical_nls_statements, detect_oracle_driver,
@@ -125,6 +127,11 @@ pub struct DoctorContext<'a> {
     /// Runtime connection strategy label, such as `single_session` or
     /// `hybrid_pool`. This is non-secret operator-facing metadata.
     pub connection_strategy: Option<String>,
+    /// Whether a profile was resolved far enough to know its timeout posture.
+    pub call_timeout_resolved: bool,
+    /// Resolved Oracle call timeout. `None` with `call_timeout_resolved = true`
+    /// means the profile explicitly disabled the driver call timeout.
+    pub call_timeout: Option<Duration>,
     /// Whether a proxy / least-privilege connect user is configured (A2).
     pub proxy_user: bool,
     /// Exact setup values that must never appear in doctor output.
@@ -227,6 +234,7 @@ pub async fn run_doctor(cx: &Cx, ctx: &DoctorContext<'_>) -> DoctorReport {
         check_virtual_tools(),
         check_dba_suite_preflight(cx, ctx).await,
         check_write_posture(cx, ctx).await,
+        check_call_timeout(ctx),
     ];
     DoctorReport { checks }
 }
@@ -802,6 +810,39 @@ async fn check_write_posture(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     }
 }
 
+fn check_call_timeout(ctx: &DoctorContext<'_>) -> CheckResult {
+    const ID: u8 = 12;
+    const NAME: &str = "Call timeout";
+
+    if !ctx.call_timeout_resolved {
+        return CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Skip,
+            "no profile resolved — direct oraclemcp-db callers still default to a 30s call timeout",
+        );
+    }
+
+    match ctx.call_timeout {
+        Some(timeout) if !timeout.is_zero() => CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Pass,
+            format!(
+                "Oracle call timeout is {}s; request budget uses the same profile ceiling",
+                timeout.as_secs()
+            ),
+        ),
+        Some(_) | None => CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Warn,
+            "Oracle call timeout is disabled; a driver round trip can wait indefinitely",
+        )
+        .with_fix("remove call_timeout_seconds = 0 or set it to a positive value such as 30"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -896,9 +937,9 @@ mod tests {
     }
 
     #[test]
-    fn report_has_eleven_checks_and_classifier_self_test_passes() {
+    fn report_has_twelve_checks_and_classifier_self_test_passes() {
         let report = doctor(&DoctorContext::default());
-        assert_eq!(report.checks.len(), 11);
+        assert_eq!(report.checks.len(), 12);
         let selftest = report.checks.iter().find(|c| c.id == 8).unwrap();
         assert_eq!(selftest.status, CheckStatus::Pass, "{}", selftest.detail);
     }
@@ -907,8 +948,9 @@ mod tests {
     fn offline_skips_live_checks_and_does_not_fail() {
         let report = doctor(&DoctorContext::default());
         // Connectivity, role/standby, privilege-tier, snapshot, the DBA-suite
-        // preflight (10), and write posture (11) all skip offline.
-        for id in [3u8, 4, 6, 7, 10, 11] {
+        // preflight (10), write posture (11), and call-timeout posture (12)
+        // all skip offline/no-profile.
+        for id in [3u8, 4, 6, 7, 10, 11, 12] {
             let c = report.checks.iter().find(|c| c.id == id).unwrap();
             assert_eq!(
                 c.status,
@@ -922,6 +964,38 @@ mod tests {
         // No live check should FAIL purely because we are offline.
         assert!(!report.any_failed());
         assert_eq!(report.exit_code(), 0);
+    }
+
+    #[test]
+    fn disabled_call_timeout_warns() {
+        let ctx = DoctorContext {
+            call_timeout_resolved: true,
+            call_timeout: None,
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let timeout = report.checks.iter().find(|c| c.id == 12).unwrap();
+        assert_eq!(timeout.status, CheckStatus::Warn, "{}", timeout.detail);
+        assert!(timeout.detail.contains("disabled"));
+        assert!(
+            timeout
+                .fix
+                .as_deref()
+                .unwrap_or_default()
+                .contains("call_timeout_seconds")
+        );
+    }
+
+    #[test]
+    fn positive_call_timeout_passes() {
+        let ctx = DoctorContext {
+            call_timeout_resolved: true,
+            call_timeout: Some(Duration::from_secs(30)),
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let timeout = report.checks.iter().find(|c| c.id == 12).unwrap();
+        assert_eq!(timeout.status, CheckStatus::Pass, "{}", timeout.detail);
     }
 
     #[test]
@@ -1094,7 +1168,7 @@ mod tests {
         assert!(text.contains("oraclemcp doctor"));
         assert!(text.contains("Classifier self-test"));
         let j = report.to_json();
-        assert_eq!(j["checks"].as_array().unwrap().len(), 11);
+        assert_eq!(j["checks"].as_array().unwrap().len(), 12);
         assert_eq!(j["exit_code"], json!(0));
     }
 
