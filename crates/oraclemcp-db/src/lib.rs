@@ -128,8 +128,8 @@ pub use schema_diff::{
     migration_plan,
 };
 pub use serialize::{
-    OracleMetadataCacheKey, SerializeOptions, TypeRepr, base64_encode, canonical_nls_statements,
-    canonicalize_datetime, classify_type, serialize_cell, serialize_row,
+    OracleMetadataCacheKey, SerializeOptions, StructuredDecodeCaps, TypeRepr, base64_encode,
+    canonical_nls_statements, canonicalize_datetime, classify_type, serialize_cell, serialize_row,
 };
 pub use standby::{StandbyStatus, detect_standby};
 pub use types::{

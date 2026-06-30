@@ -32,11 +32,12 @@ use oraclemcp_core::{
 use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
     DbError, DbmsOutput, OracleBind, OracleConnection, OracleConnectionInfo, QuarantineOutcome,
-    QueryCaps, SerializeOptions, compile_errors, compile_object_statements, describe_columns,
-    describe_constraints, describe_index, describe_trigger, describe_view, execute_immediate_audit,
-    explain_plan, find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects,
-    list_schemas, plscope_identifiers, plscope_statements, read_lob, read_query, read_query_named,
-    sample_rows, search_objects, search_source, serialize_row,
+    QueryCaps, SerializeOptions, StructuredDecodeCaps, compile_errors, compile_object_statements,
+    describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
+    execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl, get_source,
+    get_sources_by_name, list_objects, list_schemas, plscope_identifiers, plscope_statements,
+    read_lob, read_query, read_query_named, sample_rows, search_objects, search_source,
+    serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
@@ -86,6 +87,14 @@ const MAX_QUERY_EXPORT_ROWS: usize = 100_000;
 const MAX_QUERY_TEXT_CHARS: usize = 1_000_000;
 /// Hard cap on BLOB bytes materialized by a single query cell.
 const MAX_QUERY_BLOB_BYTES: usize = 5 * 1024 * 1024;
+/// Hard cap on direct entries decoded from one structured ARRAY/JSON node.
+const MAX_QUERY_STRUCTURED_ROWS: usize = StructuredDecodeCaps::DEEP.max_rows;
+/// Hard cap on structured nodes decoded from one structured cell.
+const MAX_QUERY_STRUCTURED_CELLS: usize = StructuredDecodeCaps::DEEP.max_cells;
+/// Hard cap on compact JSON bytes decoded from one structured node.
+const MAX_QUERY_STRUCTURED_BYTES: usize = StructuredDecodeCaps::DEEP.max_bytes;
+/// Hard cap on structured ARRAY/JSON recursion depth.
+const MAX_QUERY_STRUCTURED_DEPTH: usize = StructuredDecodeCaps::DEEP.max_depth;
 /// Default temporary session elevation window for `oracle_set_session_level`.
 const DEFAULT_SESSION_LEVEL_TTL_SECONDS: u64 = 900;
 /// Hard cap for one temporary session elevation window.
@@ -643,7 +652,40 @@ fn query_serialize_options_from_args(args: &QueryArgs) -> SerializeOptions {
             .max_blob_bytes
             .unwrap_or(defaults.max_blob_bytes)
             .clamp(1, MAX_QUERY_BLOB_BYTES),
+        structured_decode_caps: query_structured_decode_caps_from_args(args),
         ..defaults
+    }
+}
+
+fn query_structured_decode_caps_from_args(args: &QueryArgs) -> StructuredDecodeCaps {
+    let defaults = if args.deep_decode {
+        StructuredDecodeCaps::deep()
+    } else {
+        StructuredDecodeCaps::default()
+    };
+    let ceiling = if args.deep_decode {
+        StructuredDecodeCaps::deep()
+    } else {
+        StructuredDecodeCaps::default()
+    };
+
+    StructuredDecodeCaps {
+        max_rows: args
+            .max_structured_rows
+            .unwrap_or(defaults.max_rows)
+            .clamp(1, ceiling.max_rows.min(MAX_QUERY_STRUCTURED_ROWS)),
+        max_cells: args
+            .max_structured_cells
+            .unwrap_or(defaults.max_cells)
+            .clamp(1, ceiling.max_cells.min(MAX_QUERY_STRUCTURED_CELLS)),
+        max_bytes: args
+            .max_structured_bytes
+            .unwrap_or(defaults.max_bytes)
+            .clamp(1, ceiling.max_bytes.min(MAX_QUERY_STRUCTURED_BYTES)),
+        max_depth: args
+            .max_structured_depth
+            .unwrap_or(defaults.max_depth)
+            .clamp(1, ceiling.max_depth.min(MAX_QUERY_STRUCTURED_DEPTH)),
     }
 }
 

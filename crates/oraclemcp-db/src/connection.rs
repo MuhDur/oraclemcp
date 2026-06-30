@@ -288,7 +288,7 @@ mod driver {
     use super::{DbmsOutput, RustOracleConnection};
     use crate::auth_adapter::AuthAdapter;
     use crate::error::DbError;
-    use crate::serialize::SerializeOptions;
+    use crate::serialize::{SerializeOptions, StructuredDecodeCaps, json_byte_len};
     use crate::types::{
         OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleNestedResult,
         OracleRow, OracleSessionIdentity,
@@ -1133,84 +1133,279 @@ mod driver {
                     };
                     return materialize_lob_cell(oracle_type, &value, limits, &mut read_lob);
                 }
-                Some(QueryValue::Vector(value)) => {
-                    OracleCell::structured(oracle_type, structured_vector(&value))
-                }
+                Some(QueryValue::Vector(value)) => OracleCell::structured(
+                    oracle_type,
+                    structured_vector_with_caps(&value, serialize_opts.structured_decode_caps),
+                ),
                 Some(QueryValue::Json(value)) => OracleCell::structured(
                     oracle_type,
-                    json!({ "kind": "json", "value": structured_oson_value(&value) }),
+                    structured_json_value(&value, serialize_opts.structured_decode_caps),
                 ),
-                Some(QueryValue::Array(values)) => {
-                    OracleCell::structured(oracle_type, structured_array(&values))
-                }
+                Some(QueryValue::Array(values)) => OracleCell::structured(
+                    oracle_type,
+                    structured_array_with_caps(&values, serialize_opts.structured_decode_caps),
+                ),
                 // `QueryValue` is `#[non_exhaustive]` as of oracledb 0.5.x. Every wire
                 // value kind that exists today is handled explicitly above; this arm
                 // fails SAFE on any future kind with a clearly-marked, non-silent
                 // placeholder — never a silent wrong value (cf. the NUMBER→string
                 // invariant). Unreachable against the current driver.
-                Some(value) => OracleCell::structured(oracle_type, structured_query_value(&value)),
+                Some(value) => OracleCell::structured(
+                    oracle_type,
+                    structured_query_value_with_caps(&value, serialize_opts.structured_decode_caps),
+                ),
             };
             Ok(cell)
         })
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct StructuredDecodeBudget {
+        caps: StructuredDecodeCaps,
+        cells: usize,
+    }
+
+    impl StructuredDecodeBudget {
+        fn new(caps: StructuredDecodeCaps) -> Self {
+            Self { caps, cells: 0 }
+        }
+
+        fn enter(&mut self, kind: &str, depth: usize) -> Result<(), Value> {
+            if depth > self.caps.max_depth {
+                return Err(structured_decode_cap_marker(
+                    kind,
+                    "depth",
+                    self.caps.max_depth,
+                ));
+            }
+            if self.cells >= self.caps.max_cells {
+                return Err(structured_decode_cap_marker(
+                    kind,
+                    "cell",
+                    self.caps.max_cells,
+                ));
+            }
+            self.cells += 1;
+            Ok(())
+        }
+
+        fn reserve_cells(&mut self, kind: &str, additional: usize) -> Result<(), Value> {
+            if additional > self.caps.max_cells.saturating_sub(self.cells) {
+                return Err(structured_decode_cap_marker(
+                    kind,
+                    "cell",
+                    self.caps.max_cells,
+                ));
+            }
+            self.cells += additional;
+            Ok(())
+        }
+
+        fn check_rows(&self, kind: &str, rows: usize) -> Result<(), Value> {
+            if rows > self.caps.max_rows {
+                Err(structured_decode_cap_marker(
+                    kind,
+                    "row",
+                    self.caps.max_rows,
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn check_bytes(&self, kind: &str, value: Value) -> Value {
+            if json_byte_len(&value) > self.caps.max_bytes {
+                structured_decode_cap_marker(kind, "byte", self.caps.max_bytes)
+            } else {
+                value
+            }
+        }
+
+        fn check_raw_bytes(&self, kind: &str, byte_len: usize) -> Result<(), Value> {
+            if byte_len > self.caps.max_bytes {
+                Err(structured_decode_cap_marker(
+                    kind,
+                    "byte",
+                    self.caps.max_bytes,
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(test)]
     fn structured_array(values: &[Option<QueryValue>]) -> Value {
-        json!({
+        structured_array_with_caps(values, StructuredDecodeCaps::DEFAULT)
+    }
+
+    fn structured_array_with_caps(
+        values: &[Option<QueryValue>],
+        caps: StructuredDecodeCaps,
+    ) -> Value {
+        let mut budget = StructuredDecodeBudget::new(caps);
+        structured_array_with_budget(values, &mut budget, 0)
+    }
+
+    fn structured_array_with_budget(
+        values: &[Option<QueryValue>],
+        budget: &mut StructuredDecodeBudget,
+        depth: usize,
+    ) -> Value {
+        if let Err(marker) = budget.enter("Array", depth) {
+            return marker;
+        }
+        if let Err(marker) = budget.check_rows("Array", values.len()) {
+            return marker;
+        }
+        let value = json!({
             "kind": "array",
             "items": values
                 .iter()
-                .map(|value| structured_optional_query_value(value.as_ref()))
+                .map(|value| structured_optional_query_value_with_budget(value.as_ref(), budget, depth + 1))
                 .collect::<Vec<_>>()
+        });
+        budget.check_bytes("Array", value)
+    }
+
+    fn structured_optional_query_value_with_budget(
+        value: Option<&QueryValue>,
+        budget: &mut StructuredDecodeBudget,
+        depth: usize,
+    ) -> Value {
+        value.map_or(Value::Null, |value| {
+            structured_query_value_with_budget(value, budget, depth)
         })
     }
 
-    fn structured_optional_query_value(value: Option<&QueryValue>) -> Value {
-        value.map_or(Value::Null, structured_query_value)
+    fn structured_query_value_with_caps(value: &QueryValue, caps: StructuredDecodeCaps) -> Value {
+        let mut budget = StructuredDecodeBudget::new(caps);
+        structured_query_value_with_budget(value, &mut budget, 0)
     }
 
-    fn structured_query_value(value: &QueryValue) -> Value {
+    fn structured_query_value_with_budget(
+        value: &QueryValue,
+        budget: &mut StructuredDecodeBudget,
+        depth: usize,
+    ) -> Value {
         match value {
-            QueryValue::Text(text) => json!({ "kind": "text", "value": text }),
-            QueryValue::TextRaw { bytes, csfrm } => json!({
-                "kind": "text_raw",
-                "encoding": "hex",
-                "data": hex_encode(bytes),
-                "byte_length": bytes.len(),
-                "csfrm": csfrm
-            }),
-            QueryValue::Raw(bytes) => json!({
-                "kind": "raw",
-                "encoding": "hex",
-                "data": hex_encode(bytes),
-                "byte_length": bytes.len()
-            }),
-            QueryValue::Rowid(text) => json!({ "kind": "rowid", "value": text }),
-            QueryValue::BinaryDouble(text) => json!({ "kind": "binary_double", "value": text }),
+            QueryValue::Text(text) => {
+                if let Err(marker) = budget.enter("Text", depth) {
+                    return marker;
+                }
+                if let Err(marker) = budget.check_raw_bytes("Text", text.len()) {
+                    return marker;
+                }
+                budget.check_bytes("Text", json!({ "kind": "text", "value": text }))
+            }
+            QueryValue::TextRaw { bytes, csfrm } => {
+                if let Err(marker) = budget.enter("TextRaw", depth) {
+                    return marker;
+                }
+                if let Err(marker) = budget.check_raw_bytes("TextRaw", bytes.len()) {
+                    return marker;
+                }
+                budget.check_bytes(
+                    "TextRaw",
+                    json!({
+                        "kind": "text_raw",
+                        "encoding": "hex",
+                        "data": hex_encode(bytes),
+                        "byte_length": bytes.len(),
+                        "csfrm": csfrm
+                    }),
+                )
+            }
+            QueryValue::Raw(bytes) => {
+                if let Err(marker) = budget.enter("Raw", depth) {
+                    return marker;
+                }
+                if let Err(marker) = budget.check_raw_bytes("Raw", bytes.len()) {
+                    return marker;
+                }
+                budget.check_bytes(
+                    "Raw",
+                    json!({
+                        "kind": "raw",
+                        "encoding": "hex",
+                        "data": hex_encode(bytes),
+                        "byte_length": bytes.len()
+                    }),
+                )
+            }
+            QueryValue::Rowid(text) => {
+                if let Err(marker) = budget.enter("Rowid", depth) {
+                    return marker;
+                }
+                if let Err(marker) = budget.check_raw_bytes("Rowid", text.len()) {
+                    return marker;
+                }
+                budget.check_bytes("Rowid", json!({ "kind": "rowid", "value": text }))
+            }
+            QueryValue::BinaryDouble(text) => {
+                if let Err(marker) = budget.enter("BinaryDouble", depth) {
+                    return marker;
+                }
+                if let Err(marker) = budget.check_raw_bytes("BinaryDouble", text.len()) {
+                    return marker;
+                }
+                budget.check_bytes(
+                    "BinaryDouble",
+                    json!({ "kind": "binary_double", "value": text }),
+                )
+            }
             QueryValue::IntervalDS {
                 days,
                 hours,
                 minutes,
                 seconds,
                 fseconds,
-            } => json!({
-                "kind": "interval_ds",
-                "value": format!("{days} {hours:02}:{minutes:02}:{seconds:02}.{fseconds:09}"),
-                "days": days,
-                "hours": hours,
-                "minutes": minutes,
-                "seconds": seconds,
-                "fseconds": fseconds
-            }),
-            QueryValue::IntervalYM { years, months } => json!({
-                "kind": "interval_ym",
-                "value": format!("{years}-{months}"),
-                "years": years,
-                "months": months
-            }),
-            QueryValue::Number(number) => {
-                json!({ "kind": "number", "value": number.to_canonical_string() })
+            } => {
+                if let Err(marker) = budget.enter("IntervalDS", depth) {
+                    return marker;
+                }
+                budget.check_bytes(
+                    "IntervalDS",
+                    json!({
+                        "kind": "interval_ds",
+                        "value": format!("{days} {hours:02}:{minutes:02}:{seconds:02}.{fseconds:09}"),
+                        "days": days,
+                        "hours": hours,
+                        "minutes": minutes,
+                        "seconds": seconds,
+                        "fseconds": fseconds
+                    }),
+                )
             }
-            QueryValue::Boolean(value) => json!({ "kind": "boolean", "value": value }),
+            QueryValue::IntervalYM { years, months } => {
+                if let Err(marker) = budget.enter("IntervalYM", depth) {
+                    return marker;
+                }
+                budget.check_bytes(
+                    "IntervalYM",
+                    json!({
+                        "kind": "interval_ym",
+                        "value": format!("{years}-{months}"),
+                        "years": years,
+                        "months": months
+                    }),
+                )
+            }
+            QueryValue::Number(number) => {
+                if let Err(marker) = budget.enter("Number", depth) {
+                    return marker;
+                }
+                budget.check_bytes(
+                    "Number",
+                    json!({ "kind": "number", "value": number.to_canonical_string() }),
+                )
+            }
+            QueryValue::Boolean(value) => {
+                if let Err(marker) = budget.enter("Boolean", depth) {
+                    return marker;
+                }
+                budget.check_bytes("Boolean", json!({ "kind": "boolean", "value": value }))
+            }
             QueryValue::DateTime {
                 year,
                 month,
@@ -1219,25 +1414,33 @@ mod driver {
                 minute,
                 second,
                 nanosecond,
-            } => json!({
-                "kind": "datetime",
-                "value": format_datetime(
-                    *year,
-                    *month,
-                    *day,
-                    *hour,
-                    *minute,
-                    *second,
-                    *nanosecond
-                ),
-                "year": year,
-                "month": month,
-                "day": day,
-                "hour": hour,
-                "minute": minute,
-                "second": second,
-                "nanosecond": nanosecond
-            }),
+            } => {
+                if let Err(marker) = budget.enter("DateTime", depth) {
+                    return marker;
+                }
+                budget.check_bytes(
+                    "DateTime",
+                    json!({
+                        "kind": "datetime",
+                        "value": format_datetime(
+                            *year,
+                            *month,
+                            *day,
+                            *hour,
+                            *minute,
+                            *second,
+                            *nanosecond
+                        ),
+                        "year": year,
+                        "month": month,
+                        "day": day,
+                        "hour": hour,
+                        "minute": minute,
+                        "second": second,
+                        "nanosecond": nanosecond
+                    }),
+                )
+            }
             QueryValue::TimestampTz {
                 year,
                 month,
@@ -1247,58 +1450,162 @@ mod driver {
                 second,
                 nanosecond,
                 offset_minutes,
-            } => json!({
-                "kind": "timestamp_tz",
-                "value": format_timestamp_tz(
-                    *year,
-                    *month,
-                    *day,
-                    *hour,
-                    *minute,
-                    *second,
-                    *nanosecond,
-                    *offset_minutes
-                ),
-                "year": year,
-                "month": month,
-                "day": day,
-                "hour": hour,
-                "minute": minute,
-                "second": second,
-                "nanosecond": nanosecond,
-                "offset_minutes": offset_minutes
-            }),
-            QueryValue::Vector(vector) => structured_vector(vector),
+            } => {
+                if let Err(marker) = budget.enter("TimestampTz", depth) {
+                    return marker;
+                }
+                budget.check_bytes(
+                    "TimestampTz",
+                    json!({
+                        "kind": "timestamp_tz",
+                        "value": format_timestamp_tz(
+                            *year,
+                            *month,
+                            *day,
+                            *hour,
+                            *minute,
+                            *second,
+                            *nanosecond,
+                            *offset_minutes
+                        ),
+                        "year": year,
+                        "month": month,
+                        "day": day,
+                        "hour": hour,
+                        "minute": minute,
+                        "second": second,
+                        "nanosecond": nanosecond,
+                        "offset_minutes": offset_minutes
+                    }),
+                )
+            }
+            QueryValue::Vector(vector) => structured_vector_with_budget(vector, budget, depth),
             QueryValue::Json(value) => {
-                json!({ "kind": "json", "value": structured_oson_value(value) })
+                if let Err(marker) = budget.enter("Json", depth) {
+                    return marker;
+                }
+                let decoded = structured_oson_value_with_budget(value, budget, depth + 1);
+                budget.check_bytes("Json", json!({ "kind": "json", "value": decoded }))
             }
-            QueryValue::Array(values) => structured_array(values),
-            QueryValue::Object(value) => structured_object_marker(value),
+            QueryValue::Array(values) => structured_array_with_budget(values, budget, depth),
+            QueryValue::Object(value) => {
+                if let Err(marker) = budget.enter("Object", depth) {
+                    return marker;
+                }
+                budget.check_bytes("Object", structured_object_marker(value))
+            }
             QueryValue::Cursor(_) | QueryValue::Lob(_) => {
-                structured_unsupported(value.variant_name())
+                if let Err(marker) = budget.enter(value.variant_name(), depth) {
+                    return marker;
+                }
+                budget.check_bytes(
+                    value.variant_name(),
+                    structured_unsupported(value.variant_name()),
+                )
             }
-            _ => structured_unsupported(value.variant_name()),
+            _ => {
+                if let Err(marker) = budget.enter(value.variant_name(), depth) {
+                    return marker;
+                }
+                budget.check_bytes(
+                    value.variant_name(),
+                    structured_unsupported(value.variant_name()),
+                )
+            }
         }
     }
 
+    fn structured_json_value(value: &OsonValue, caps: StructuredDecodeCaps) -> Value {
+        let mut budget = StructuredDecodeBudget::new(caps);
+        if let Err(marker) = budget.enter("Json", 0) {
+            return marker;
+        }
+        let decoded = structured_oson_value_with_budget(value, &mut budget, 1);
+        budget.check_bytes("Json", json!({ "kind": "json", "value": decoded }))
+    }
+
+    #[cfg(test)]
     fn structured_oson_value(value: &OsonValue) -> Value {
+        structured_oson_value_with_caps(value, StructuredDecodeCaps::DEFAULT)
+    }
+
+    #[cfg(test)]
+    fn structured_oson_value_with_caps(value: &OsonValue, caps: StructuredDecodeCaps) -> Value {
+        let mut budget = StructuredDecodeBudget::new(caps);
+        structured_oson_value_with_budget(value, &mut budget, 0)
+    }
+
+    fn structured_oson_value_with_budget(
+        value: &OsonValue,
+        budget: &mut StructuredDecodeBudget,
+        depth: usize,
+    ) -> Value {
         match value {
-            OsonValue::Null => json!({ "kind": "null" }),
-            OsonValue::Bool(value) => json!({ "kind": "boolean", "value": value }),
-            OsonValue::Number(text) => json!({ "kind": "number", "value": text }),
+            OsonValue::Null => {
+                if let Err(marker) = budget.enter("Null", depth) {
+                    return marker;
+                }
+                budget.check_bytes("Null", json!({ "kind": "null" }))
+            }
+            OsonValue::Bool(value) => {
+                if let Err(marker) = budget.enter("Boolean", depth) {
+                    return marker;
+                }
+                budget.check_bytes("Boolean", json!({ "kind": "boolean", "value": value }))
+            }
+            OsonValue::Number(text) => {
+                if let Err(marker) = budget.enter("Number", depth) {
+                    return marker;
+                }
+                if let Err(marker) = budget.check_raw_bytes("Number", text.len()) {
+                    return marker;
+                }
+                budget.check_bytes("Number", json!({ "kind": "number", "value": text }))
+            }
             OsonValue::BinaryFloat(value) => {
-                json!({ "kind": "binary_float", "value": json_number_or_string(f64::from(*value)) })
+                if let Err(marker) = budget.enter("BinaryFloat", depth) {
+                    return marker;
+                }
+                budget.check_bytes(
+                    "BinaryFloat",
+                    json!({ "kind": "binary_float", "value": json_number_or_string(f64::from(*value)) }),
+                )
             }
             OsonValue::BinaryDouble(value) => {
-                json!({ "kind": "binary_double", "value": json_number_or_string(*value) })
+                if let Err(marker) = budget.enter("BinaryDouble", depth) {
+                    return marker;
+                }
+                budget.check_bytes(
+                    "BinaryDouble",
+                    json!({ "kind": "binary_double", "value": json_number_or_string(*value) }),
+                )
             }
-            OsonValue::String(text) => json!({ "kind": "string", "value": text }),
-            OsonValue::Raw(bytes) => json!({
-                "kind": "raw",
-                "encoding": "hex",
-                "data": hex_encode(bytes),
-                "byte_length": bytes.len()
-            }),
+            OsonValue::String(text) => {
+                if let Err(marker) = budget.enter("String", depth) {
+                    return marker;
+                }
+                if let Err(marker) = budget.check_raw_bytes("String", text.len()) {
+                    return marker;
+                }
+                budget.check_bytes("String", json!({ "kind": "string", "value": text }))
+            }
+            OsonValue::Raw(bytes) => {
+                if let Err(marker) = budget.enter("Raw", depth) {
+                    return marker;
+                }
+                if let Err(marker) = budget.check_raw_bytes("Raw", bytes.len()) {
+                    return marker;
+                }
+                budget.check_bytes(
+                    "Raw",
+                    json!({
+                        "kind": "raw",
+                        "encoding": "hex",
+                        "data": hex_encode(bytes),
+                        "byte_length": bytes.len()
+                    }),
+                )
+            }
             OsonValue::DateTime {
                 year,
                 month,
@@ -1307,59 +1614,117 @@ mod driver {
                 minute,
                 second,
                 nanosecond,
-            } => json!({
-                "kind": "datetime",
-                "value": format_datetime(
-                    *year,
-                    *month,
-                    *day,
-                    *hour,
-                    *minute,
-                    *second,
-                    *nanosecond
-                ),
-                "year": year,
-                "month": month,
-                "day": day,
-                "hour": hour,
-                "minute": minute,
-                "second": second,
-                "nanosecond": nanosecond
-            }),
+            } => {
+                if let Err(marker) = budget.enter("DateTime", depth) {
+                    return marker;
+                }
+                budget.check_bytes(
+                    "DateTime",
+                    json!({
+                        "kind": "datetime",
+                        "value": format_datetime(
+                            *year,
+                            *month,
+                            *day,
+                            *hour,
+                            *minute,
+                            *second,
+                            *nanosecond
+                        ),
+                        "year": year,
+                        "month": month,
+                        "day": day,
+                        "hour": hour,
+                        "minute": minute,
+                        "second": second,
+                        "nanosecond": nanosecond
+                    }),
+                )
+            }
             OsonValue::IntervalDS {
                 days,
                 hours,
                 minutes,
                 seconds,
                 fseconds,
-            } => json!({
-                "kind": "interval_ds",
-                "value": format!("P{days}DT{hours}H{minutes}M{seconds}.{fseconds:09}S"),
-                "days": days,
-                "hours": hours,
-                "minutes": minutes,
-                "seconds": seconds,
-                "fseconds": fseconds
-            }),
-            OsonValue::Vector(vector) => structured_vector(vector),
-            OsonValue::Array(items) => json!({
-                "kind": "array",
-                "items": items.iter().map(structured_oson_value).collect::<Vec<_>>()
-            }),
-            OsonValue::Object(entries) => json!({
-                "kind": "object",
-                "entries": entries
-                    .iter()
-                    .map(|(key, value)| {
-                        json!({ "key": key, "value": structured_oson_value(value) })
-                    })
-                    .collect::<Vec<_>>()
-            }),
+            } => {
+                if let Err(marker) = budget.enter("IntervalDS", depth) {
+                    return marker;
+                }
+                budget.check_bytes(
+                    "IntervalDS",
+                    json!({
+                        "kind": "interval_ds",
+                        "value": format!("P{days}DT{hours}H{minutes}M{seconds}.{fseconds:09}S"),
+                        "days": days,
+                        "hours": hours,
+                        "minutes": minutes,
+                        "seconds": seconds,
+                        "fseconds": fseconds
+                    }),
+                )
+            }
+            OsonValue::Vector(vector) => structured_vector_with_budget(vector, budget, depth),
+            OsonValue::Array(items) => {
+                if let Err(marker) = budget.enter("Array", depth) {
+                    return marker;
+                }
+                if let Err(marker) = budget.check_rows("Array", items.len()) {
+                    return marker;
+                }
+                let value = json!({
+                    "kind": "array",
+                    "items": items
+                        .iter()
+                        .map(|value| structured_oson_value_with_budget(value, budget, depth + 1))
+                        .collect::<Vec<_>>()
+                });
+                budget.check_bytes("Array", value)
+            }
+            OsonValue::Object(entries) => {
+                if let Err(marker) = budget.enter("Object", depth) {
+                    return marker;
+                }
+                if let Err(marker) = budget.check_rows("Object", entries.len()) {
+                    return marker;
+                }
+                let value = json!({
+                    "kind": "object",
+                    "entries": entries
+                        .iter()
+                        .map(|(key, value)| {
+                            json!({ "key": key, "value": structured_oson_value_with_budget(value, budget, depth + 1) })
+                        })
+                        .collect::<Vec<_>>()
+                });
+                budget.check_bytes("Object", value)
+            }
         }
     }
 
+    #[cfg(test)]
     fn structured_vector(vector: &Vector) -> Value {
-        match vector {
+        let mut budget = StructuredDecodeBudget::new(StructuredDecodeCaps::DEFAULT);
+        structured_vector_with_budget(vector, &mut budget, 0)
+    }
+
+    fn structured_vector_with_caps(vector: &Vector, caps: StructuredDecodeCaps) -> Value {
+        let mut budget = StructuredDecodeBudget::new(caps);
+        structured_vector_with_budget(vector, &mut budget, 0)
+    }
+
+    fn structured_vector_with_budget(
+        vector: &Vector,
+        budget: &mut StructuredDecodeBudget,
+        depth: usize,
+    ) -> Value {
+        if let Err(marker) = budget.enter("Vector", depth) {
+            return marker;
+        }
+        if let Err(marker) = budget.reserve_cells("Vector", vector_value_count(vector)) {
+            return marker;
+        }
+        let value = match vector {
             Vector::Dense(values) => {
                 let (format, values) = structured_vector_values(values);
                 json!({
@@ -1384,7 +1749,31 @@ mod driver {
                     "values": values
                 })
             }
+        };
+        budget.check_bytes("Vector", value)
+    }
+
+    fn vector_value_count(vector: &Vector) -> usize {
+        match vector {
+            Vector::Dense(values) | Vector::Sparse { values, .. } => match values {
+                VectorValues::Float32(values) => values.len(),
+                VectorValues::Float64(values) => values.len(),
+                VectorValues::Int8(values) => values.len(),
+                VectorValues::Binary(values) => values.len(),
+            },
         }
+    }
+
+    fn structured_decode_cap_marker(kind: &str, cap: &str, limit: usize) -> Value {
+        json!({
+            "kind": "unsupported",
+            "unsupported": "oracle_value",
+            "oracle_value_kind": kind,
+            "value": null,
+            "warning": format!(
+                "Oracle value exceeded structured {cap} decode cap ({limit}); set deep_decode=true or lower selectivity to inspect more"
+            )
+        })
     }
 
     fn structured_vector_values(values: &VectorValues) -> (&'static str, Value) {
@@ -1814,6 +2203,103 @@ mod driver {
                 structured_array(&[]),
                 json!({ "kind": "array", "items": [] })
             );
+        }
+
+        fn assert_structured_cap_marker(
+            value: &Value,
+            oracle_value_kind: &str,
+            cap: &str,
+            limit: usize,
+        ) {
+            assert_eq!(value["kind"], json!("unsupported"));
+            assert_eq!(value["unsupported"], json!("oracle_value"));
+            assert_eq!(value["oracle_value_kind"], json!(oracle_value_kind));
+            assert_eq!(value["value"], Value::Null);
+            let warning = value["warning"]
+                .as_str()
+                .expect("cap marker warning is text");
+            assert!(
+                warning.contains(&format!("structured {cap} decode cap ({limit})")),
+                "unexpected cap warning: {warning}"
+            );
+        }
+
+        #[test]
+        fn structured_decode_caps_enforce_rows_and_cells_at_boundary() {
+            let values = [
+                Some(QueryValue::Boolean(true)),
+                Some(QueryValue::Boolean(false)),
+            ];
+
+            let row_capped =
+                structured_array_with_caps(&values, StructuredDecodeCaps::new(1, 10, 1_000, 8));
+            assert_structured_cap_marker(&row_capped, "Array", "row", 1);
+
+            let row_exact =
+                structured_array_with_caps(&values, StructuredDecodeCaps::new(2, 10, 1_000, 8));
+            assert_eq!(row_exact["items"].as_array().expect("array items").len(), 2);
+
+            let cell_capped =
+                structured_array_with_caps(&values, StructuredDecodeCaps::new(2, 2, 1_000, 8));
+            assert_eq!(
+                cell_capped["items"][0],
+                json!({ "kind": "boolean", "value": true })
+            );
+            assert_structured_cap_marker(&cell_capped["items"][1], "Boolean", "cell", 2);
+
+            let cell_exact =
+                structured_array_with_caps(&values, StructuredDecodeCaps::new(2, 3, 1_000, 8));
+            assert_eq!(
+                cell_exact,
+                json!({
+                    "kind": "array",
+                    "items": [
+                        { "kind": "boolean", "value": true },
+                        { "kind": "boolean", "value": false }
+                    ]
+                })
+            );
+        }
+
+        #[test]
+        fn structured_decode_caps_enforce_depth_and_bytes_at_boundary() {
+            let nested = [Some(QueryValue::Array(vec![Some(QueryValue::Boolean(
+                true,
+            ))]))];
+
+            let depth_capped =
+                structured_array_with_caps(&nested, StructuredDecodeCaps::new(10, 10, 1_000, 1));
+            assert_structured_cap_marker(
+                &depth_capped["items"][0]["items"][0],
+                "Boolean",
+                "depth",
+                1,
+            );
+
+            let depth_exact =
+                structured_array_with_caps(&nested, StructuredDecodeCaps::new(10, 10, 1_000, 2));
+            assert_eq!(
+                depth_exact["items"][0]["items"][0],
+                json!({ "kind": "boolean", "value": true })
+            );
+
+            let text = OsonValue::String("abcdef".to_owned());
+            let full = structured_oson_value_with_caps(
+                &text,
+                StructuredDecodeCaps::new(10, 10, usize::MAX, 8),
+            );
+            let full_len = crate::serialize::json_byte_len(&full);
+            let byte_capped = structured_oson_value_with_caps(
+                &text,
+                StructuredDecodeCaps::new(10, 10, full_len - 1, 8),
+            );
+            assert_structured_cap_marker(&byte_capped, "String", "byte", full_len - 1);
+
+            let byte_exact = structured_oson_value_with_caps(
+                &text,
+                StructuredDecodeCaps::new(10, 10, full_len, 8),
+            );
+            assert_eq!(byte_exact, full);
         }
 
         #[test]

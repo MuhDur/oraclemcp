@@ -2220,6 +2220,11 @@ fn query_accepts_page_and_width_compatibility_args() {
                 "max_col_width": 3,
                 "max_lob_chars": 4,
                 "max_result_bytes": 4096,
+                "deep_decode": true,
+                "max_structured_rows": 2000,
+                "max_structured_cells": 20000,
+                "max_structured_bytes": 2097152,
+                "max_structured_depth": 12,
                 "numbers_as_float": false
             }),
         )
@@ -2229,6 +2234,47 @@ fn query_accepts_page_and_width_compatibility_args() {
     assert_eq!(out["rows"][0]["OBJECT_NAME"]["truncated"], json!(true));
     assert_eq!(out["rows"][0]["LOB_VALUE"]["value"], json!("larg"));
     assert_eq!(out["rows"][0]["LOB_VALUE"]["truncated"], json!(true));
+}
+
+#[test]
+fn query_structured_decode_caps_require_deep_decode_for_larger_limits() {
+    let safe_args: QueryArgs = serde_json::from_value(json!({
+        "sql": "SELECT json_col FROM t",
+        "max_structured_rows": StructuredDecodeCaps::DEEP.max_rows,
+        "max_structured_cells": StructuredDecodeCaps::DEEP.max_cells,
+        "max_structured_bytes": StructuredDecodeCaps::DEEP.max_bytes,
+        "max_structured_depth": StructuredDecodeCaps::DEEP.max_depth
+    }))
+    .expect("query args parse");
+    assert_eq!(
+        query_serialize_options_from_args(&safe_args).structured_decode_caps,
+        StructuredDecodeCaps::default(),
+        "larger structured caps require deep_decode=true"
+    );
+
+    let deep_args: QueryArgs = serde_json::from_value(json!({
+        "sql": "SELECT json_col FROM t",
+        "deep_decode": true
+    }))
+    .expect("query args parse");
+    assert_eq!(
+        query_serialize_options_from_args(&deep_args).structured_decode_caps,
+        StructuredDecodeCaps::deep()
+    );
+
+    let lowered_args: QueryArgs = serde_json::from_value(json!({
+        "sql": "SELECT json_col FROM t",
+        "deep_decode": true,
+        "max_structured_rows": 2,
+        "max_structured_cells": 3,
+        "max_structured_bytes": 128,
+        "max_structured_depth": 4
+    }))
+    .expect("query args parse");
+    assert_eq!(
+        query_serialize_options_from_args(&lowered_args).structured_decode_caps,
+        StructuredDecodeCaps::new(2, 3, 128, 4)
+    );
 }
 
 #[test]

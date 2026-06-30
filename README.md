@@ -646,7 +646,11 @@ gate remain the enforcement boundary.
 `oracle_query`/`query` and `oracle_explain_plan` also advertise
 `outputSchema` for their `structuredContent`; the query schema keeps Oracle
 `NUMBER` cells as strings by default unless the caller explicitly opts into
-`numbers_as_float=true`.
+`numbers_as_float=true`. Structured ARRAY/JSON/VECTOR cells use safe
+row/cell/byte/depth decode caps by default; set `deep_decode=true` to opt into
+larger capped limits, with `max_structured_rows`, `max_structured_cells`,
+`max_structured_bytes`, and `max_structured_depth` available for narrower
+per-call budgets.
 
 ### MCP resources
 

@@ -60,6 +60,72 @@ pub fn canonical_nls_statements() -> Vec<&'static str> {
     ]
 }
 
+/// Row, cell, byte, and depth limits for structured Oracle value decoding.
+///
+/// These caps apply before a driver-side ARRAY/JSON/VECTOR value is expanded
+/// into the public [`OracleCell::structured`] JSON payload. When a cap is hit,
+/// the serializer emits the existing explicit unsupported marker instead of
+/// silently flattening or dumping an unbounded value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StructuredDecodeCaps {
+    /// Maximum direct entries decoded for one array/object-like structured node.
+    pub max_rows: usize,
+    /// Maximum structured value nodes decoded across one cell.
+    pub max_cells: usize,
+    /// Maximum compact JSON bytes decoded for one structured node.
+    pub max_bytes: usize,
+    /// Maximum recursion depth decoded inside one structured cell. The root is
+    /// depth zero.
+    pub max_depth: usize,
+}
+
+impl StructuredDecodeCaps {
+    /// Safe default caps used by `oracle_query` unless the caller opts into
+    /// deeper structured decoding.
+    pub const DEFAULT: Self = Self {
+        max_rows: 1_000,
+        max_cells: 10_000,
+        max_bytes: 1_048_576,
+        max_depth: 8,
+    };
+
+    /// Larger non-default caps used when a caller sets `deep_decode=true`.
+    pub const DEEP: Self = Self {
+        max_rows: 10_000,
+        max_cells: 100_000,
+        max_bytes: 5 * 1024 * 1024,
+        max_depth: 32,
+    };
+
+    /// Construct an explicit cap set.
+    #[must_use]
+    pub const fn new(
+        max_rows: usize,
+        max_cells: usize,
+        max_bytes: usize,
+        max_depth: usize,
+    ) -> Self {
+        Self {
+            max_rows,
+            max_cells,
+            max_bytes,
+            max_depth,
+        }
+    }
+
+    /// Return the larger, non-default deep decode cap set.
+    #[must_use]
+    pub const fn deep() -> Self {
+        Self::DEEP
+    }
+}
+
+impl Default for StructuredDecodeCaps {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// Options governing serialization.
 #[derive(Clone, Copy, Debug)]
 pub struct SerializeOptions {
@@ -81,6 +147,8 @@ pub struct SerializeOptions {
     pub max_nested_cursor_bytes: usize,
     /// Max nested cursor depth. A top-level REF CURSOR cell is depth 0.
     pub max_nested_cursor_depth: usize,
+    /// Decode caps for structured Oracle ARRAY/JSON/VECTOR cells.
+    pub structured_decode_caps: StructuredDecodeCaps,
 }
 
 impl Default for SerializeOptions {
@@ -94,6 +162,7 @@ impl Default for SerializeOptions {
             max_nested_cursor_cells: 1_000,
             max_nested_cursor_bytes: 1_048_576,
             max_nested_cursor_depth: 2,
+            structured_decode_caps: StructuredDecodeCaps::DEFAULT,
         }
     }
 }

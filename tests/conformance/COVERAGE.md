@@ -63,9 +63,9 @@ Harnesses:
 | HTTP guards | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTP sessions | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
-| Oracle structured cells | 5 | 0 | 5 | 5 | 0 | 100% |
+| Oracle structured cells | 6 | 0 | 6 | 6 | 0 | 100% |
 
-Total tracked requirements: 39 MUST, 2 SHOULD, 41 tested.
+Total tracked requirements: 40 MUST, 2 SHOULD, 42 tested.
 
 ## Requirement IDs
 
@@ -112,6 +112,7 @@ Total tracked requirements: 39 MUST, 2 SHOULD, 41 tested.
 | DB-SER-003 | MUST | Oracle structured cells | Structured payloads serialize verbatim rather than flattening through text. |
 | DB-SER-004 | MUST | Oracle structured cells | Legacy silent-flattening shapes are rejected by the schema contract test. |
 | DB-SER-005 | MUST | Oracle structured cells | `OracleCell::structured` carries the structured contract version, the published schema declares it, and metadata cache keys include it. |
+| DB-SER-006 | MUST | Oracle structured cells | Structured ARRAY/JSON/VECTOR decode is capped by row, cell, byte, and depth budgets; larger query budgets require `deep_decode=true`. |
 
 ## HTTP Proof Map
 

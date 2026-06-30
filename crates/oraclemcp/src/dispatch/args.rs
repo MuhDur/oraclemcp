@@ -25,6 +25,16 @@ pub(super) struct QueryArgs {
     #[serde(default)]
     pub(super) numbers_as_float: Option<bool>,
     #[serde(default)]
+    pub(super) deep_decode: bool,
+    #[serde(default)]
+    pub(super) max_structured_rows: Option<usize>,
+    #[serde(default)]
+    pub(super) max_structured_cells: Option<usize>,
+    #[serde(default)]
+    pub(super) max_structured_bytes: Option<usize>,
+    #[serde(default)]
+    pub(super) max_structured_depth: Option<usize>,
+    #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
     /// E3/E3b: when true, materialize the (bounded) full result as an
     /// `oracle-export://{id}` resource and return a `resource_link` instead of

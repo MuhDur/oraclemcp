@@ -190,6 +190,10 @@
                   "description": "Opaque pagination cursor from a prior truncated page.",
                   "type": "string"
                 },
+                "deep_decode": {
+                  "description": "Opt into larger capped ARRAY/JSON/VECTOR structured decode limits. Default false keeps safe caps.",
+                  "type": "boolean"
+                },
                 "limit": {
                   "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows.",
                   "maximum": 5000,
@@ -223,6 +227,30 @@
                 "max_rows": {
                   "description": "Maximum rows in this page (default 200, hard cap 5000).",
                   "maximum": 5000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_structured_bytes": {
+                  "description": "Maximum compact JSON bytes decoded from one structured node. Values above the safe default require deep_decode=true.",
+                  "maximum": 5242880,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_structured_cells": {
+                  "description": "Maximum structured value nodes decoded from one structured cell. Values above the safe default require deep_decode=true.",
+                  "maximum": 100000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_structured_depth": {
+                  "description": "Maximum ARRAY/JSON recursion depth decoded inside one structured cell. Values above the safe default require deep_decode=true.",
+                  "maximum": 32,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_structured_rows": {
+                  "description": "Maximum direct entries decoded from one structured ARRAY/JSON node. Values above the safe default require deep_decode=true.",
+                  "maximum": 10000,
                   "minimum": 1,
                   "type": "integer"
                 },
@@ -1511,6 +1539,10 @@
                   "description": "Opaque pagination cursor from a prior truncated page.",
                   "type": "string"
                 },
+                "deep_decode": {
+                  "description": "Opt into larger capped ARRAY/JSON/VECTOR structured decode limits. Default false keeps safe caps.",
+                  "type": "boolean"
+                },
                 "export": {
                   "description": "When true, materialize the bounded full result as an oracle-export://{id} resource and return a resource_link instead of inlining rows.",
                   "type": "boolean"
@@ -1556,6 +1588,30 @@
                 "max_rows": {
                   "description": "Maximum rows in this page (default 200, hard cap 5000).",
                   "maximum": 5000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_structured_bytes": {
+                  "description": "Maximum compact JSON bytes decoded from one structured node. Values above the safe default require deep_decode=true.",
+                  "maximum": 5242880,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_structured_cells": {
+                  "description": "Maximum structured value nodes decoded from one structured cell. Values above the safe default require deep_decode=true.",
+                  "maximum": 100000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_structured_depth": {
+                  "description": "Maximum ARRAY/JSON recursion depth decoded inside one structured cell. Values above the safe default require deep_decode=true.",
+                  "maximum": 32,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_structured_rows": {
+                  "description": "Maximum direct entries decoded from one structured ARRAY/JSON node. Values above the safe default require deep_decode=true.",
+                  "maximum": 10000,
                   "minimum": 1,
                   "type": "integer"
                 },

@@ -4720,6 +4720,7 @@ pub oraclemcp_db::SerializeOptions::max_nested_cursor_depth: usize
 pub oraclemcp_db::SerializeOptions::max_nested_cursor_rows: usize
 pub oraclemcp_db::SerializeOptions::max_text_chars: core::option::Option<usize>
 pub oraclemcp_db::SerializeOptions::numbers_as_float: bool
+pub oraclemcp_db::SerializeOptions::structured_decode_caps: oraclemcp_db::StructuredDecodeCaps
 impl core::clone::Clone for oraclemcp_db::SerializeOptions
 pub fn oraclemcp_db::SerializeOptions::clone(&self) -> oraclemcp_db::SerializeOptions
 impl core::default::Default for oraclemcp_db::SerializeOptions
@@ -4921,6 +4922,79 @@ pub type oraclemcp_db::StandbyStatus::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::StandbyStatus where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::StandbyStatus where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::StandbyStatus::vzip(self) -> V
+pub struct oraclemcp_db::StructuredDecodeCaps
+pub oraclemcp_db::StructuredDecodeCaps::max_bytes: usize
+pub oraclemcp_db::StructuredDecodeCaps::max_cells: usize
+pub oraclemcp_db::StructuredDecodeCaps::max_depth: usize
+pub oraclemcp_db::StructuredDecodeCaps::max_rows: usize
+impl oraclemcp_db::StructuredDecodeCaps
+pub const oraclemcp_db::StructuredDecodeCaps::DEEP: Self
+pub const oraclemcp_db::StructuredDecodeCaps::DEFAULT: Self
+pub const fn oraclemcp_db::StructuredDecodeCaps::deep() -> Self
+pub const fn oraclemcp_db::StructuredDecodeCaps::new(usize, usize, usize, usize) -> Self
+impl core::clone::Clone for oraclemcp_db::StructuredDecodeCaps
+pub fn oraclemcp_db::StructuredDecodeCaps::clone(&self) -> oraclemcp_db::StructuredDecodeCaps
+impl core::cmp::Eq for oraclemcp_db::StructuredDecodeCaps
+impl core::cmp::PartialEq for oraclemcp_db::StructuredDecodeCaps
+pub fn oraclemcp_db::StructuredDecodeCaps::eq(&self, &oraclemcp_db::StructuredDecodeCaps) -> bool
+impl core::default::Default for oraclemcp_db::StructuredDecodeCaps
+pub fn oraclemcp_db::StructuredDecodeCaps::default() -> Self
+impl core::fmt::Debug for oraclemcp_db::StructuredDecodeCaps
+pub fn oraclemcp_db::StructuredDecodeCaps::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::StructuredDecodeCaps
+impl core::marker::StructuralPartialEq for oraclemcp_db::StructuredDecodeCaps
+impl core::marker::Freeze for oraclemcp_db::StructuredDecodeCaps
+impl core::marker::Send for oraclemcp_db::StructuredDecodeCaps
+impl core::marker::Sync for oraclemcp_db::StructuredDecodeCaps
+impl core::marker::Unpin for oraclemcp_db::StructuredDecodeCaps
+impl core::marker::UnsafeUnpin for oraclemcp_db::StructuredDecodeCaps
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::StructuredDecodeCaps
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::StructuredDecodeCaps
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::StructuredDecodeCaps where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::StructuredDecodeCaps where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::StructuredDecodeCaps where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::StructuredDecodeCaps::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::StructuredDecodeCaps where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::StructuredDecodeCaps where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::StructuredDecodeCaps where U: core::convert::From<T>
+pub fn oraclemcp_db::StructuredDecodeCaps::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::StructuredDecodeCaps where U: core::convert::Into<T>
+pub type oraclemcp_db::StructuredDecodeCaps::Error = core::convert::Infallible
+pub fn oraclemcp_db::StructuredDecodeCaps::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::StructuredDecodeCaps where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::StructuredDecodeCaps::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::StructuredDecodeCaps::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::StructuredDecodeCaps where T: core::clone::Clone
+pub type oraclemcp_db::StructuredDecodeCaps::Owned = T
+pub fn oraclemcp_db::StructuredDecodeCaps::clone_into(&self, &mut T)
+pub fn oraclemcp_db::StructuredDecodeCaps::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::StructuredDecodeCaps
+impl<T> core::any::Any for oraclemcp_db::StructuredDecodeCaps where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::StructuredDecodeCaps::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::StructuredDecodeCaps where T: ?core::marker::Sized
+pub fn oraclemcp_db::StructuredDecodeCaps::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::StructuredDecodeCaps where T: ?core::marker::Sized
+pub fn oraclemcp_db::StructuredDecodeCaps::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::StructuredDecodeCaps where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::StructuredDecodeCaps::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::StructuredDecodeCaps
+pub fn oraclemcp_db::StructuredDecodeCaps::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::StructuredDecodeCaps
+pub type oraclemcp_db::StructuredDecodeCaps::Init = T
+pub const oraclemcp_db::StructuredDecodeCaps::ALIGN: usize
+pub unsafe fn oraclemcp_db::StructuredDecodeCaps::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::StructuredDecodeCaps::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::StructuredDecodeCaps::drop(usize)
+pub unsafe fn oraclemcp_db::StructuredDecodeCaps::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::StructuredDecodeCaps
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::StructuredDecodeCaps
+impl<T> tracing::instrument::Instrument for oraclemcp_db::StructuredDecodeCaps
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::StructuredDecodeCaps
+impl<T> typenum::type_operators::Same for oraclemcp_db::StructuredDecodeCaps
+pub type oraclemcp_db::StructuredDecodeCaps::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::StructuredDecodeCaps where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::StructuredDecodeCaps where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::StructuredDecodeCaps::vzip(self) -> V
 pub struct oraclemcp_db::SubcheckPreflight
 pub oraclemcp_db::SubcheckPreflight::status: alloc::string::String
 pub oraclemcp_db::SubcheckPreflight::subcheck: oraclemcp_db::HealthSubcheck
