@@ -6,7 +6,10 @@
 
 use std::collections::BTreeSet;
 
-use oraclemcp_db::{OracleCell, SerializeOptions, serialize_cell};
+use oraclemcp_db::{
+    ORACLE_CELL_STRUCTURED_CONTRACT_VERSION, OracleCell, OracleMetadataCacheKey, SerializeOptions,
+    serialize_cell,
+};
 use serde_json::{Map, Value, json};
 
 #[path = "../../../tests/golden/support.rs"]
@@ -156,6 +159,10 @@ fn published_schema_parses_and_declares_structured_variants() {
         schema["$id"],
         json!("https://github.com/MuhDur/oraclemcp/schemas/oracle-cell-structured.schema.json")
     );
+    assert_eq!(
+        schema["x-oraclemcp-contract-version"],
+        json!(ORACLE_CELL_STRUCTURED_CONTRACT_VERSION)
+    );
 
     let defs = schema["$defs"].as_object().expect("$defs object");
     for required in [
@@ -180,6 +187,39 @@ fn published_schema_parses_and_declares_structured_variants() {
     assert!(
         one_of.len() >= 20,
         "structuredCell should cover scalar, JSON, vector, array, and unsupported variants"
+    );
+}
+
+#[test]
+fn serialization_contract_version_present_and_consumed() {
+    let cell = OracleCell::structured("JSON", json!({ "kind": "null" }));
+    assert_eq!(
+        cell.structured_contract_version,
+        Some(ORACLE_CELL_STRUCTURED_CONTRACT_VERSION)
+    );
+
+    let key = OracleMetadataCacheKey::new("db-sha256:abc", "agent_ro", "APP", "HR");
+    assert_eq!(
+        key.serialization_contract_version,
+        ORACLE_CELL_STRUCTURED_CONTRACT_VERSION
+    );
+
+    let bumped = OracleMetadataCacheKey::with_serialization_contract_version(
+        "db-sha256:abc",
+        "agent_ro",
+        "APP",
+        "HR",
+        ORACLE_CELL_STRUCTURED_CONTRACT_VERSION + 1,
+    );
+    assert_ne!(
+        key, bumped,
+        "W7 metadata cache identity must change with the serialization contract"
+    );
+
+    let rendered_key = serde_json::to_value(&key).expect("cache key serializes");
+    assert_eq!(
+        rendered_key["serialization_contract_version"],
+        json!(ORACLE_CELL_STRUCTURED_CONTRACT_VERSION)
     );
 }
 

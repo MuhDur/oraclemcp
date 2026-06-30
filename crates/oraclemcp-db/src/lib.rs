@@ -128,15 +128,15 @@ pub use schema_diff::{
     migration_plan,
 };
 pub use serialize::{
-    SerializeOptions, TypeRepr, base64_encode, canonical_nls_statements, canonicalize_datetime,
-    classify_type, serialize_cell, serialize_row,
+    OracleMetadataCacheKey, SerializeOptions, TypeRepr, base64_encode, canonical_nls_statements,
+    canonicalize_datetime, classify_type, serialize_cell, serialize_row,
 };
 pub use standby::{StandbyStatus, detect_standby};
 pub use types::{
-    DEFAULT_ORACLE_CALL_TIMEOUT, OracleBackend, OracleBind, OracleCell, OracleConnectOptions,
-    OracleConnectionInfo, OracleRow, OracleSessionIdentity, RedactedNamedOracleBinds,
-    RedactedOracleBind, RedactedOracleBinds, RedactedOracleConnectionInfo,
-    redacted_named_oracle_binds, redacted_oracle_binds,
+    DEFAULT_ORACLE_CALL_TIMEOUT, ORACLE_CELL_STRUCTURED_CONTRACT_VERSION, OracleBackend,
+    OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow,
+    OracleSessionIdentity, RedactedNamedOracleBinds, RedactedOracleBind, RedactedOracleBinds,
+    RedactedOracleConnectionInfo, redacted_named_oracle_binds, redacted_oracle_binds,
 };
 
 pub use pool::{OracleConnectionManager, OraclePool, PoolMetrics, PoolSettings};

@@ -19,7 +19,9 @@ are scrubbed to `[SESSION_ID]`; the remaining values are expected to be stable.
 `oracle-cell-structured/*.json` fixtures freeze the synthetic
 `OracleCell::structured` payload examples covered by
 `schemas/oracle-cell-structured.schema.json`. They were generated from the
-repository-pinned `oraclemcp-db` serializer and contain no database data.
+repository-pinned `oraclemcp-db` serializer and contain no database data. The
+schema's `x-oraclemcp-contract-version` must match
+`ORACLE_CELL_STRUCTURED_CONTRACT_VERSION`.
 
 All inputs are synthetic. The stdio init token strings, OAuth metadata, JWT
 verifier key, database user/schema names, SQL text, hostnames, and Oracle error

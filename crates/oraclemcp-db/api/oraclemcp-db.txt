@@ -2618,6 +2618,7 @@ pub oraclemcp_db::OracleCell::nested_result: core::option::Option<alloc::boxed::
 pub oraclemcp_db::OracleCell::oracle_type: alloc::string::String
 pub oraclemcp_db::OracleCell::source_length: core::option::Option<usize>
 pub oraclemcp_db::OracleCell::structured: core::option::Option<serde_json::value::Value>
+pub oraclemcp_db::OracleCell::structured_contract_version: core::option::Option<u16>
 pub oraclemcp_db::OracleCell::value: core::option::Option<alloc::string::String>
 impl oraclemcp_db::OracleCell
 pub fn oraclemcp_db::OracleCell::binary(impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>) -> Self
@@ -2996,6 +2997,82 @@ pub type oraclemcp_db::OracleDriverPosture::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleDriverPosture where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleDriverPosture where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::OracleDriverPosture::vzip(self) -> V
+pub struct oraclemcp_db::OracleMetadataCacheKey
+pub oraclemcp_db::OracleMetadataCacheKey::db_fingerprint: alloc::string::String
+pub oraclemcp_db::OracleMetadataCacheKey::profile: alloc::string::String
+pub oraclemcp_db::OracleMetadataCacheKey::serialization_contract_version: u16
+pub oraclemcp_db::OracleMetadataCacheKey::user: alloc::string::String
+pub oraclemcp_db::OracleMetadataCacheKey::visible_schema: alloc::string::String
+impl oraclemcp_db::OracleMetadataCacheKey
+pub fn oraclemcp_db::OracleMetadataCacheKey::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oraclemcp_db::OracleMetadataCacheKey::with_serialization_contract_version(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, u16) -> Self
+impl core::clone::Clone for oraclemcp_db::OracleMetadataCacheKey
+pub fn oraclemcp_db::OracleMetadataCacheKey::clone(&self) -> oraclemcp_db::OracleMetadataCacheKey
+impl core::cmp::Eq for oraclemcp_db::OracleMetadataCacheKey
+impl core::cmp::PartialEq for oraclemcp_db::OracleMetadataCacheKey
+pub fn oraclemcp_db::OracleMetadataCacheKey::eq(&self, &oraclemcp_db::OracleMetadataCacheKey) -> bool
+impl core::fmt::Debug for oraclemcp_db::OracleMetadataCacheKey
+pub fn oraclemcp_db::OracleMetadataCacheKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_db::OracleMetadataCacheKey
+pub fn oraclemcp_db::OracleMetadataCacheKey::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_db::OracleMetadataCacheKey
+impl serde_core::ser::Serialize for oraclemcp_db::OracleMetadataCacheKey
+pub fn oraclemcp_db::OracleMetadataCacheKey::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::OracleMetadataCacheKey
+pub fn oraclemcp_db::OracleMetadataCacheKey::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::OracleMetadataCacheKey
+impl core::marker::Send for oraclemcp_db::OracleMetadataCacheKey
+impl core::marker::Sync for oraclemcp_db::OracleMetadataCacheKey
+impl core::marker::Unpin for oraclemcp_db::OracleMetadataCacheKey
+impl core::marker::UnsafeUnpin for oraclemcp_db::OracleMetadataCacheKey
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OracleMetadataCacheKey
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OracleMetadataCacheKey
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OracleMetadataCacheKey where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OracleMetadataCacheKey where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::OracleMetadataCacheKey where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::OracleMetadataCacheKey::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OracleMetadataCacheKey where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OracleMetadataCacheKey where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OracleMetadataCacheKey where U: core::convert::From<T>
+pub fn oraclemcp_db::OracleMetadataCacheKey::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OracleMetadataCacheKey where U: core::convert::Into<T>
+pub type oraclemcp_db::OracleMetadataCacheKey::Error = core::convert::Infallible
+pub fn oraclemcp_db::OracleMetadataCacheKey::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OracleMetadataCacheKey where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OracleMetadataCacheKey::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OracleMetadataCacheKey::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::OracleMetadataCacheKey where T: core::clone::Clone
+pub type oraclemcp_db::OracleMetadataCacheKey::Owned = T
+pub fn oraclemcp_db::OracleMetadataCacheKey::clone_into(&self, &mut T)
+pub fn oraclemcp_db::OracleMetadataCacheKey::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OracleMetadataCacheKey
+impl<T> core::any::Any for oraclemcp_db::OracleMetadataCacheKey where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OracleMetadataCacheKey::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OracleMetadataCacheKey where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleMetadataCacheKey::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OracleMetadataCacheKey where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleMetadataCacheKey::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::OracleMetadataCacheKey where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::OracleMetadataCacheKey::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::OracleMetadataCacheKey
+pub fn oraclemcp_db::OracleMetadataCacheKey::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::OracleMetadataCacheKey
+pub type oraclemcp_db::OracleMetadataCacheKey::Init = T
+pub const oraclemcp_db::OracleMetadataCacheKey::ALIGN: usize
+pub unsafe fn oraclemcp_db::OracleMetadataCacheKey::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::OracleMetadataCacheKey::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::OracleMetadataCacheKey::drop(usize)
+pub unsafe fn oraclemcp_db::OracleMetadataCacheKey::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::OracleMetadataCacheKey
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleMetadataCacheKey
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::OracleMetadataCacheKey where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleMetadataCacheKey
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleMetadataCacheKey
+impl<T> typenum::type_operators::Same for oraclemcp_db::OracleMetadataCacheKey
+pub type oraclemcp_db::OracleMetadataCacheKey::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleMetadataCacheKey where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleMetadataCacheKey where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OracleMetadataCacheKey::vzip(self) -> V
 pub struct oraclemcp_db::OraclePool
 impl oraclemcp_db::OraclePool
 pub async fn oraclemcp_db::OraclePool::connect(&asupersync::cx::cx::Cx, oraclemcp_db::OracleConnectOptions, oraclemcp_db::PoolSettings) -> core::result::Result<Self, oraclemcp_db::DbError>
@@ -5309,6 +5386,7 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::WritePosture where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::WritePosture::vzip(self) -> V
 pub const oraclemcp_db::DEFAULT_ORACLE_CALL_TIMEOUT: core::time::Duration
+pub const oraclemcp_db::ORACLE_CELL_STRUCTURED_CONTRACT_VERSION: u16
 pub trait oraclemcp_db::IamTokenSource
 pub fn oraclemcp_db::IamTokenSource::fetch(&self) -> core::result::Result<oraclemcp_db::IamToken, oraclemcp_db::OciError>
 pub trait oraclemcp_db::OracleConnection: core::marker::Send + core::marker::Sync

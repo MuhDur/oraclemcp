@@ -63,9 +63,9 @@ Harnesses:
 | HTTP guards | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTP sessions | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
-| Oracle structured cells | 4 | 0 | 4 | 4 | 0 | 100% |
+| Oracle structured cells | 5 | 0 | 5 | 5 | 0 | 100% |
 
-Total tracked requirements: 38 MUST, 2 SHOULD, 40 tested.
+Total tracked requirements: 39 MUST, 2 SHOULD, 41 tested.
 
 ## Requirement IDs
 
@@ -111,6 +111,7 @@ Total tracked requirements: 38 MUST, 2 SHOULD, 40 tested.
 | DB-SER-002 | MUST | Oracle structured cells | Golden fixtures for ARRAY/JSON/VECTOR/TSTZ, OSON scalars, object/UDT unsupported, and generic unsupported parse and match the serializer output. |
 | DB-SER-003 | MUST | Oracle structured cells | Structured payloads serialize verbatim rather than flattening through text. |
 | DB-SER-004 | MUST | Oracle structured cells | Legacy silent-flattening shapes are rejected by the schema contract test. |
+| DB-SER-005 | MUST | Oracle structured cells | `OracleCell::structured` carries the structured contract version, the published schema declares it, and metadata cache keys include it. |
 
 ## HTTP Proof Map
 

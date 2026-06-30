@@ -248,6 +248,12 @@ impl From<bool> for OracleBind {
     }
 }
 
+/// Current contract version for structured [`OracleCell`] payloads.
+///
+/// Cache keys for metadata/schema consumers include this value so a structured
+/// serialization shape bump invalidates stale cached views deterministically.
+pub const ORACLE_CELL_STRUCTURED_CONTRACT_VERSION: u16 = 1;
+
 /// A single result cell: the Oracle column type name plus its value rendered as
 /// nullable text (the canonical JSON mapping is applied by the P0-5 serializer).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,6 +270,10 @@ pub struct OracleCell {
     /// serializer emits this value verbatim instead of flattening through text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured: Option<Value>,
+    /// Contract version of the structured payload, present only when
+    /// [`OracleCell::structured`] constructs the cell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_contract_version: Option<u16>,
     /// Internal full-source length hint for bounded LOB reads: characters for
     /// CLOB/NCLOB text, bytes for binary LOBs. It is folded into serialized
     /// truncation metadata instead of exposed directly.
@@ -283,6 +293,7 @@ impl OracleCell {
             value,
             bytes: None,
             structured: None,
+            structured_contract_version: None,
             source_length: None,
             nested_result: None,
         }
@@ -296,6 +307,7 @@ impl OracleCell {
             value: None,
             bytes: Some(bytes),
             structured: None,
+            structured_contract_version: None,
             source_length: None,
             nested_result: None,
         }
@@ -309,6 +321,7 @@ impl OracleCell {
             value: None,
             bytes: None,
             structured: Some(value),
+            structured_contract_version: Some(ORACLE_CELL_STRUCTURED_CONTRACT_VERSION),
             source_length: None,
             nested_result: None,
         }
@@ -322,6 +335,7 @@ impl OracleCell {
             value: None,
             bytes: None,
             structured: None,
+            structured_contract_version: None,
             source_length: None,
             nested_result: Some(Box::new(result)),
         }

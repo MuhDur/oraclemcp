@@ -16,9 +16,10 @@
 
 use std::io::{self, Write};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::types::{OracleCell, OracleRow};
+use crate::types::{ORACLE_CELL_STRUCTURED_CONTRACT_VERSION, OracleCell, OracleRow};
 
 /// A sink that tallies bytes without buffering, so the page byte cap can measure
 /// a serialized row in one streaming pass instead of allocating a throwaway
@@ -93,6 +94,68 @@ impl Default for SerializeOptions {
             max_nested_cursor_cells: 1_000,
             max_nested_cursor_bytes: 1_048_576,
             max_nested_cursor_depth: 2,
+        }
+    }
+}
+
+/// Stable cache key for schema/object metadata that embeds serialized Oracle
+/// values.
+///
+/// The dashboard/object explorer cache is intentionally keyed by the database
+/// identity, the effective profile/user/schema visibility boundary, and the
+/// structured serialization contract version. A future shape bump changes this
+/// key even if the database metadata itself is unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OracleMetadataCacheKey {
+    /// Stable fingerprint of the database identity.
+    pub db_fingerprint: String,
+    /// Connection profile whose visibility rules produced the metadata.
+    pub profile: String,
+    /// Effective Oracle user for the metadata view.
+    pub user: String,
+    /// Visible schema whose objects are cached.
+    pub visible_schema: String,
+    /// Structured OracleCell serialization contract version.
+    pub serialization_contract_version: u16,
+}
+
+impl OracleMetadataCacheKey {
+    /// Build a cache key using the current structured serialization contract.
+    #[must_use]
+    pub fn new(
+        db_fingerprint: impl Into<String>,
+        profile: impl Into<String>,
+        user: impl Into<String>,
+        visible_schema: impl Into<String>,
+    ) -> Self {
+        Self::with_serialization_contract_version(
+            db_fingerprint,
+            profile,
+            user,
+            visible_schema,
+            ORACLE_CELL_STRUCTURED_CONTRACT_VERSION,
+        )
+    }
+
+    /// Build a cache key with an explicit contract version.
+    ///
+    /// This constructor exists for tests and migrations that need to prove a
+    /// version bump invalidates cache identity without changing any other
+    /// dimension.
+    #[must_use]
+    pub fn with_serialization_contract_version(
+        db_fingerprint: impl Into<String>,
+        profile: impl Into<String>,
+        user: impl Into<String>,
+        visible_schema: impl Into<String>,
+        serialization_contract_version: u16,
+    ) -> Self {
+        OracleMetadataCacheKey {
+            db_fingerprint: db_fingerprint.into(),
+            profile: profile.into(),
+            user: user.into(),
+            visible_schema: visible_schema.into(),
+            serialization_contract_version,
         }
     }
 }
@@ -564,6 +627,33 @@ mod tests {
                     "items": [1, true, null, { "nested": "ok" }]
                 }
             })
+        );
+    }
+
+    #[test]
+    fn structured_contract_version_tags_cell_and_cache_key() {
+        let cell = OracleCell::structured("JSON", json!({"kind": "null"}));
+        assert_eq!(
+            cell.structured_contract_version,
+            Some(ORACLE_CELL_STRUCTURED_CONTRACT_VERSION)
+        );
+
+        let key = OracleMetadataCacheKey::new("db-sha256:abc", "agent_ro", "APP", "HR");
+        assert_eq!(
+            key.serialization_contract_version,
+            ORACLE_CELL_STRUCTURED_CONTRACT_VERSION
+        );
+
+        let bumped = OracleMetadataCacheKey::with_serialization_contract_version(
+            "db-sha256:abc",
+            "agent_ro",
+            "APP",
+            "HR",
+            ORACLE_CELL_STRUCTURED_CONTRACT_VERSION + 1,
+        );
+        assert_ne!(
+            key, bumped,
+            "a contract bump must invalidate metadata cache identity"
         );
     }
 
