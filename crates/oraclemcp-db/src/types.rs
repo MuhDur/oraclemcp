@@ -8,6 +8,7 @@ use std::{fmt, path::PathBuf, time::Duration};
 
 use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::auth_adapter::AuthAdapter;
 
@@ -259,6 +260,10 @@ pub struct OracleCell {
     /// serializer base64-encodes these. `None` for text/NULL cells.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes: Option<Vec<u8>>,
+    /// Structured JSON payload for typed non-scalar values. When present, the
+    /// serializer emits this value verbatim instead of flattening through text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<Value>,
     /// Internal full-source length hint for bounded LOB reads: characters for
     /// CLOB/NCLOB text, bytes for binary LOBs. It is folded into serialized
     /// truncation metadata instead of exposed directly.
@@ -277,6 +282,7 @@ impl OracleCell {
             oracle_type: oracle_type.into(),
             value,
             bytes: None,
+            structured: None,
             source_length: None,
             nested_result: None,
         }
@@ -289,6 +295,20 @@ impl OracleCell {
             oracle_type: oracle_type.into(),
             value: None,
             bytes: Some(bytes),
+            structured: None,
+            source_length: None,
+            nested_result: None,
+        }
+    }
+
+    /// Construct a cell carrying a structured JSON representation.
+    #[must_use]
+    pub fn structured(oracle_type: impl Into<String>, value: Value) -> Self {
+        OracleCell {
+            oracle_type: oracle_type.into(),
+            value: None,
+            bytes: None,
+            structured: Some(value),
             source_length: None,
             nested_result: None,
         }
@@ -301,6 +321,7 @@ impl OracleCell {
             oracle_type: oracle_type.into(),
             value: None,
             bytes: None,
+            structured: None,
             source_length: None,
             nested_result: Some(Box::new(result)),
         }

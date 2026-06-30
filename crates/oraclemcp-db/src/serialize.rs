@@ -254,6 +254,9 @@ fn serialize_cell_classified(cell: &OracleCell, col: ColumnRepr, opts: &Serializ
     if let Some(nested) = &cell.nested_result {
         return serialize_nested_result(nested, opts);
     }
+    if let Some(structured) = &cell.structured {
+        return structured.clone();
+    }
     // Binary columns carrying raw bytes always base64 (with a cap).
     if let Some(bytes) = &cell.bytes {
         let byte_length = cell.source_length.unwrap_or(bytes.len());
@@ -540,6 +543,28 @@ mod tests {
         let v = serialize_cell(&c, &opts);
         assert_eq!(v["byte_length"], json!(5));
         assert_eq!(v["truncated"], json!(true));
+    }
+
+    #[test]
+    fn structured_carrier_serializes_verbatim() {
+        let c = OracleCell::structured(
+            "JSON",
+            json!({
+                "kind": "json",
+                "value": {
+                    "items": [1, true, null, { "nested": "ok" }]
+                }
+            }),
+        );
+        assert_eq!(
+            serialize_cell(&c, &SerializeOptions::default()),
+            json!({
+                "kind": "json",
+                "value": {
+                    "items": [1, true, null, { "nested": "ok" }]
+                }
+            })
+        );
     }
 
     #[test]

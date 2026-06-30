@@ -2617,11 +2617,13 @@ pub oraclemcp_db::OracleCell::bytes: core::option::Option<alloc::vec::Vec<u8>>
 pub oraclemcp_db::OracleCell::nested_result: core::option::Option<alloc::boxed::Box<oraclemcp_db::types::OracleNestedResult>>
 pub oraclemcp_db::OracleCell::oracle_type: alloc::string::String
 pub oraclemcp_db::OracleCell::source_length: core::option::Option<usize>
+pub oraclemcp_db::OracleCell::structured: core::option::Option<serde_json::value::Value>
 pub oraclemcp_db::OracleCell::value: core::option::Option<alloc::string::String>
 impl oraclemcp_db::OracleCell
 pub fn oraclemcp_db::OracleCell::binary(impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>) -> Self
 pub fn oraclemcp_db::OracleCell::nested_result(impl core::convert::Into<alloc::string::String>, oraclemcp_db::types::OracleNestedResult) -> Self
 pub fn oraclemcp_db::OracleCell::new(impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
+pub fn oraclemcp_db::OracleCell::structured(impl core::convert::Into<alloc::string::String>, serde_json::value::Value) -> Self
 pub fn oraclemcp_db::OracleCell::text(&self) -> core::option::Option<&str>
 pub fn oraclemcp_db::OracleCell::with_source_length(self, usize) -> Self
 impl core::clone::Clone for oraclemcp_db::OracleCell

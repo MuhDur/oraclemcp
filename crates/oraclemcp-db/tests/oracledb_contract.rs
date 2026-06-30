@@ -441,6 +441,37 @@ fn contract_type_unsupported_is_explicit_marker_never_silent() {
 }
 
 #[test]
+fn contract_type_structured_carrier_serializes_verbatim() {
+    // Non-scalar values that the adapter materializes structurally must not
+    // flatten through lossy debug/text rendering before serialization.
+    let v = serialize_cell(
+        &OracleCell::structured(
+            "JSON",
+            json!({
+                "kind": "json",
+                "value": {
+                    "customer": 42,
+                    "flags": [true, false],
+                    "nested": { "status": "active" }
+                }
+            }),
+        ),
+        &SerializeOptions::default(),
+    );
+    assert_eq!(
+        v,
+        json!({
+            "kind": "json",
+            "value": {
+                "customer": 42,
+                "flags": [true, false],
+                "nested": { "status": "active" }
+            }
+        })
+    );
+}
+
+#[test]
 fn contract_row_serializes_as_named_object() {
     // A whole row serializes to a JSON object keyed by column name, each value
     // following its per-type contract above.
