@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::{Budget, Cx};
 use oraclemcp_audit::{
-    AuditCancel, AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor,
+    AuditCancel, AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor, DbEvidence,
 };
 use oraclemcp_auth::apply_oauth_scopes;
 use oraclemcp_config::OracleMcpConfig;
@@ -272,6 +272,10 @@ pub struct OracleDispatcher {
     /// (`oracle_execute`/`execute_approved`) and every `oracle_set_session_level`
     /// escalation appends a record here.
     auditor: Option<Arc<Auditor>>,
+    /// Server-derived subject used when a request has no transport principal
+    /// (stdio/direct dispatch) and for lifecycle records that do not carry a
+    /// request context.
+    default_audit_subject: AuditSubject,
     /// Shared store for materialized large-result exports (E3). When set,
     /// oversized `oracle_query` results are exported to `oracle-export://{id}`
     /// and a `resource_link` is returned instead of inlining (E3b). `None`
@@ -330,6 +334,7 @@ impl OracleDispatcher {
             stateless_connector: None,
             custom_loader: None,
             auditor: None,
+            default_audit_subject: process_audit_subject(),
             exports: None,
             mcp_exposure: McpExposurePolicy::default(),
             notifications: None,
@@ -404,6 +409,7 @@ impl OracleDispatcher {
             stateless_connector: stateless.connector,
             custom_loader,
             auditor: None,
+            default_audit_subject: process_audit_subject(),
             exports: None,
             mcp_exposure: McpExposurePolicy::default(),
             notifications: None,
@@ -441,6 +447,14 @@ impl OracleDispatcher {
     #[must_use]
     pub fn with_auditor(mut self, auditor: Arc<Auditor>) -> Self {
         self.auditor = Some(auditor);
+        self
+    }
+
+    /// Install the server-derived subject used for lifecycle records and
+    /// request contexts without an explicit transport principal.
+    #[must_use]
+    pub fn with_default_audit_subject(mut self, subject: AuditSubject) -> Self {
+        self.default_audit_subject = subject;
         self
     }
 
@@ -2231,13 +2245,35 @@ fn audit_error_to_envelope(e: oraclemcp_audit::AuditError) -> ErrorEnvelope {
     ErrorEnvelope::new(ErrorClass::Internal, format!("audit append failed: {e}"))
 }
 
-/// The server-controlled subject recorded in the audit chain: the active
-/// profile name (a low-cardinality, server-controlled value), or the binary name
-/// when no profile is bound.
-fn audit_subject(active_profile: Option<&str>) -> AuditSubject {
-    active_profile
-        .map(|p| AuditSubject::new("profile", p))
-        .unwrap_or_else(|| AuditSubject::new("system", "oraclemcp"))
+fn process_audit_subject() -> AuditSubject {
+    AuditSubject::new("process", "stdio").with_authn_method("process")
+}
+
+fn audit_subject_from_principal_key(principal_key: &str) -> AuditSubject {
+    if principal_key == "anonymous-http" {
+        return AuditSubject::new("anonymous-http", "server-derived").with_authn_method("none");
+    }
+    let (kind, stable_id) = principal_key
+        .split_once(':')
+        .filter(|(kind, stable_id)| !kind.is_empty() && !stable_id.is_empty())
+        .unwrap_or(("principal", principal_key));
+    let authn_method = match kind {
+        "oauth" => "oauth",
+        "mtls" | "cert" => "mtls",
+        "process" => "process",
+        _ => "server",
+    };
+    AuditSubject::new(kind, stable_id).with_authn_method(authn_method)
+}
+
+/// The server-controlled subject recorded in the audit chain. Transports attach
+/// a validated, redacted principal key; stdio/direct calls use the dispatcher
+/// fallback. Tool arguments are deliberately ignored.
+fn audit_subject(context: DispatchContext<'_>, fallback: &AuditSubject) -> AuditSubject {
+    context
+        .principal_key()
+        .map(audit_subject_from_principal_key)
+        .unwrap_or_else(|| fallback.clone())
 }
 
 fn grant_binding_for_context(
@@ -2263,6 +2299,13 @@ struct AuditCtx<'a> {
 }
 
 #[derive(Clone, Copy)]
+struct AuditEntryCtx<'a> {
+    auditor: Option<&'a Auditor>,
+    subject: &'a AuditSubject,
+    db_evidence: Option<&'a DbEvidence>,
+}
+
+#[derive(Clone, Copy)]
 struct DbToolCtx<'a> {
     cx: &'a Cx,
     conn: &'a dyn OracleConnection,
@@ -2278,7 +2321,7 @@ struct DbToolCtx<'a> {
 
 /// Build an audit draft for a served committing tool at a known danger level.
 fn audit_draft(
-    subject: &AuditSubject,
+    ctx: AuditEntryCtx<'_>,
     tool: &str,
     sql: &str,
     danger_level: &str,
@@ -2286,8 +2329,8 @@ fn audit_draft(
     outcome: AuditOutcome,
 ) -> AuditEntryDraft {
     AuditEntryDraft {
-        subject: subject.clone(),
-        db_evidence: None,
+        subject: ctx.subject.clone(),
+        db_evidence: ctx.db_evidence.cloned(),
         cancel: None,
         tool: tool.to_owned(),
         sql: sql.to_owned(),
@@ -2295,6 +2338,42 @@ fn audit_draft(
         decision: AuditDecision::Allowed,
         rows_affected,
         outcome,
+    }
+}
+
+fn present(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+fn db_evidence_from_connection_info(info: OracleConnectionInfo) -> DbEvidence {
+    DbEvidence {
+        availability: Some("captured".to_owned()),
+        db_unique_name: present(info.db_unique_name),
+        service_name: present(info.service_name),
+        instance_name: present(info.instance_name),
+        session_user: present(info.session_user),
+        current_user: present(info.current_user),
+        proxy_user: present(info.proxy_user),
+        current_schema: present(info.current_schema),
+        sid: present(info.sid),
+        serial_number: present(info.serial_number),
+        client_identifier: present(info.client_identifier),
+        module: present(info.module),
+        action: present(info.action),
+        database_role: present(info.database_role),
+        open_mode: present(info.open_mode),
+    }
+}
+
+async fn collect_audit_db_evidence(
+    cx: &Cx,
+    auditor: Option<&Auditor>,
+    conn: &dyn OracleConnection,
+) -> Option<DbEvidence> {
+    auditor?;
+    match conn.describe(cx).await {
+        Ok(info) => Some(db_evidence_from_connection_info(info)),
+        Err(_) => Some(DbEvidence::unavailable("describe_failed")),
     }
 }
 
@@ -2309,16 +2388,15 @@ fn audit_danger_string(danger: DangerLevel) -> String {
 /// Fail-closed: a failed append surfaces as an [`ErrorEnvelope`] so the call
 /// errors rather than proceeding un-audited. No-op when `auditor` is `None`.
 fn append_audit(
-    auditor: Option<&Auditor>,
-    subject: &AuditSubject,
+    ctx: AuditEntryCtx<'_>,
     tool: &str,
     sql: &str,
     danger_level: &str,
     rows_affected: Option<u64>,
     outcome: AuditOutcome,
 ) -> Result<(), ErrorEnvelope> {
-    if let Some(auditor) = auditor {
-        let draft = audit_draft(subject, tool, sql, danger_level, rows_affected, outcome);
+    if let Some(auditor) = ctx.auditor {
+        let draft = audit_draft(ctx, tool, sql, danger_level, rows_affected, outcome);
         auditor
             .append(&draft, audit_timestamp(), true)
             .map_err(audit_error_to_envelope)?;
@@ -2338,13 +2416,14 @@ fn close_reason_cancel(reason: DispatchCloseReason) -> AuditCancel {
 fn append_lifecycle_audit(
     auditor: Option<&Auditor>,
     subject: &AuditSubject,
+    db_evidence: Option<&DbEvidence>,
     reason: DispatchCloseReason,
     outcome: AuditOutcome,
 ) -> Result<(), ErrorEnvelope> {
     if let Some(auditor) = auditor {
         let draft = AuditEntryDraft {
             subject: subject.clone(),
-            db_evidence: None,
+            db_evidence: db_evidence.cloned(),
             cancel: Some(close_reason_cancel(reason)),
             tool: "lane_lifecycle".to_owned(),
             sql: "LANE_CLOSE".to_owned(),
@@ -2557,13 +2636,18 @@ async fn execute_sql_inner(ctx: DbToolCtx<'_>, args: ExecuteArgs) -> Result<Valu
         }
         None => None,
     };
+    let db_evidence = collect_audit_db_evidence(cx, audit.auditor, conn).await;
+    let audit_entry = AuditEntryCtx {
+        auditor: audit.auditor,
+        subject: audit.subject,
+        db_evidence: db_evidence.as_ref(),
+    };
 
     // fsync-before-execute (§5.13): durably log the approved statement BEFORE it
     // runs so a crash between here and the execute leaves the log written and the
     // database untouched. A failed durable append fails the call closed.
     if let Err(err) = append_audit(
-        audit.auditor,
-        audit.subject,
+        audit_entry,
         "oracle_execute",
         &executed_sql,
         &danger_str,
@@ -2612,8 +2696,7 @@ async fn execute_sql_inner(ctx: DbToolCtx<'_>, args: ExecuteArgs) -> Result<Valu
             }
             // Durably log the failed outcome before propagating.
             append_audit(
-                audit.auditor,
-                audit.subject,
+                audit_entry,
                 "oracle_execute",
                 &executed_sql,
                 &danger_str,
@@ -2646,8 +2729,7 @@ async fn execute_sql_inner(ctx: DbToolCtx<'_>, args: ExecuteArgs) -> Result<Valu
                 format!("commit failed after {rows_affected} affected row(s): {e}"),
             )?;
             append_audit(
-                audit.auditor,
-                audit.subject,
+                audit_entry,
                 "oracle_execute",
                 &executed_sql,
                 &danger_str,
@@ -2670,8 +2752,7 @@ async fn execute_sql_inner(ctx: DbToolCtx<'_>, args: ExecuteArgs) -> Result<Valu
                 ),
             )?;
             append_audit(
-                audit.auditor,
-                audit.subject,
+                audit_entry,
                 "oracle_execute",
                 &executed_sql,
                 &danger_str,
@@ -2695,8 +2776,7 @@ async fn execute_sql_inner(ctx: DbToolCtx<'_>, args: ExecuteArgs) -> Result<Valu
         AuditOutcome::RolledBack
     };
     append_audit(
-        audit.auditor,
-        audit.subject,
+        audit_entry,
         "oracle_execute",
         &executed_sql,
         &danger_str,
@@ -2966,9 +3046,14 @@ async fn compile_object_inner(
         OperatingLevel::Ddl,
         &raw_confirm,
     )?;
+    let db_evidence = collect_audit_db_evidence(cx, audit.auditor, conn).await;
+    let audit_entry = AuditEntryCtx {
+        auditor: audit.auditor,
+        subject: audit.subject,
+        db_evidence: db_evidence.as_ref(),
+    };
     if let Err(err) = append_audit(
-        audit.auditor,
-        audit.subject,
+        audit_entry,
         tool_name,
         &audited_sql,
         &danger_str,
@@ -2998,8 +3083,7 @@ async fn compile_object_inner(
                     AuditOutcome::Failed
                 };
                 append_audit(
-                    audit.auditor,
-                    audit.subject,
+                    audit_entry,
                     tool_name,
                     &audited_sql,
                     &danger_str,
@@ -3020,8 +3104,7 @@ async fn compile_object_inner(
     }
     let rows_affected_total = rows_affected.iter().copied().sum::<u64>();
     append_audit(
-        audit.auditor,
-        audit.subject,
+        audit_entry,
         tool_name,
         &audited_sql,
         &danger_str,
@@ -3772,9 +3855,14 @@ async fn patch_source_inner(
     let danger_str = audit_danger_string(decision.danger);
     let write_intent_id =
         append_write_intent(&ctx, tool_name, &patched_ddl, required_level, &raw_confirm)?;
+    let db_evidence = collect_audit_db_evidence(cx, audit.auditor, conn).await;
+    let audit_entry = AuditEntryCtx {
+        auditor: audit.auditor,
+        subject: audit.subject,
+        db_evidence: db_evidence.as_ref(),
+    };
     if let Err(err) = append_audit(
-        audit.auditor,
-        audit.subject,
+        audit_entry,
         tool_name,
         &patched_ddl,
         &danger_str,
@@ -3803,8 +3891,7 @@ async fn patch_source_inner(
                 AuditOutcome::UnknownDiscarded
             };
             append_audit(
-                audit.auditor,
-                audit.subject,
+                audit_entry,
                 tool_name,
                 &patched_ddl,
                 &danger_str,
@@ -3836,8 +3923,7 @@ async fn patch_source_inner(
             format!("patch commit failed after {rows_affected} affected row(s): {e}"),
         )?;
         append_audit(
-            audit.auditor,
-            audit.subject,
+            audit_entry,
             tool_name,
             &patched_ddl,
             &danger_str,
@@ -3851,8 +3937,7 @@ async fn patch_source_inner(
         .into_envelope());
     }
     append_audit(
-        audit.auditor,
-        audit.subject,
+        audit_entry,
         tool_name,
         &patched_ddl,
         &danger_str,
@@ -4479,7 +4564,7 @@ impl OracleDispatcher {
             ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
         })?;
         let active_profile = state.active_profile.clone();
-        let subject = audit_subject(active_profile.as_deref());
+        let subject = self.default_audit_subject.clone();
         state.level.drop_elevation();
         state.grant_generation = state.grant_generation.saturating_add(1);
         state.execute_grants.clear();
@@ -4487,6 +4572,8 @@ impl OracleDispatcher {
         state.patch_previews.clear();
         state.read_only_backstop.reset();
 
+        let db_evidence =
+            collect_audit_db_evidence(cx, self.auditor.as_deref(), state.conn.as_ref()).await;
         let rollback_result = state.conn.rollback(cx).await;
         let outcome = match rollback_result {
             Ok(()) => AuditOutcome::RolledBack,
@@ -4503,7 +4590,13 @@ impl OracleDispatcher {
             }
         };
 
-        append_lifecycle_audit(self.auditor.as_deref(), &subject, reason, outcome)?;
+        append_lifecycle_audit(
+            self.auditor.as_deref(),
+            &subject,
+            db_evidence.as_ref(),
+            reason,
+            outcome,
+        )?;
 
         tracing::info!(
             close_reason = reason.as_str(),
@@ -4626,6 +4719,7 @@ impl OracleDispatcher {
         let mut state = self.state.lock(cx).await.map_err(|_| {
             ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
         })?;
+        let request_subject = audit_subject(context, &self.default_audit_subject);
         let scoped_level = scoped_session_level(&state.level, context);
         let scoped = context.scope_grant().is_some();
         if tool == "oracle_set_session_level" {
@@ -4669,10 +4763,12 @@ impl OracleDispatcher {
                 && let Some(auditor) = self.auditor.as_deref()
             {
                 let after = state.level.effective_level();
-                let subject = audit_subject(active_profile.as_deref());
+                let subject = request_subject.clone();
+                let db_evidence =
+                    collect_audit_db_evidence(cx, Some(auditor), state.conn.as_ref()).await;
                 let draft = AuditEntryDraft {
                     subject,
-                    db_evidence: None,
+                    db_evidence,
                     cancel: None,
                     tool: "oracle_set_session_level".to_owned(),
                     sql: format!("ESCALATE {} -> {}", before.as_str(), after.as_str()),
@@ -4704,7 +4800,7 @@ impl OracleDispatcher {
             let a: ExecuteApprovedArgs = parse_args(name, args)?;
             let execute_args = execute_approved_args(&mut state, &scoped_level, a)?;
             let active_profile = state.active_profile.clone();
-            let subject = audit_subject(active_profile.as_deref());
+            let subject = request_subject.clone();
             let grant_binding = grant_binding_for_context(&state, context);
             // A1: a gated write commits/rolls back the pinned session's
             // transaction, so disarm the read-only backstop before it runs (the
@@ -4733,7 +4829,7 @@ impl OracleDispatcher {
         if tool == "deploy_ddl" {
             let a: DeployDdlArgs = parse_args(name, args)?;
             let active_profile = state.active_profile.clone();
-            let subject = audit_subject(active_profile.as_deref());
+            let subject = request_subject.clone();
             let grant_binding = grant_binding_for_context(&state, context);
             // A1: see execute_approved — disarm before a gated write/DDL.
             state.read_only_backstop.disarm();
@@ -4860,7 +4956,7 @@ impl OracleDispatcher {
             }
             "oracle_execute" => {
                 let a: ExecuteArgs = parse_args(name, args)?;
-                let subject = audit_subject(state.active_profile.as_deref());
+                let subject = request_subject.clone();
                 let grant_binding = grant_binding_for_context(&state, context);
                 let audit = AuditCtx {
                     auditor: self.auditor.as_deref(),
@@ -4882,7 +4978,7 @@ impl OracleDispatcher {
             }
             "oracle_compile_object" => {
                 let a: CompileObjectArgs = parse_args(name, args)?;
-                let subject = audit_subject(state.active_profile.as_deref());
+                let subject = request_subject.clone();
                 let grant_binding = grant_binding_for_context(&state, context);
                 let audit = AuditCtx {
                     auditor: self.auditor.as_deref(),
@@ -4904,7 +5000,7 @@ impl OracleDispatcher {
             }
             "oracle_create_or_replace" => {
                 let a: CreateOrReplaceArgs = parse_args(name, args)?;
-                let subject = audit_subject(state.active_profile.as_deref());
+                let subject = request_subject.clone();
                 let grant_binding = grant_binding_for_context(&state, context);
                 let audit = AuditCtx {
                     auditor: self.auditor.as_deref(),
@@ -4926,7 +5022,7 @@ impl OracleDispatcher {
             }
             "oracle_patch_source" => {
                 let a: PatchSourceArgs = parse_args(name, args)?;
-                let subject = audit_subject(state.active_profile.as_deref());
+                let subject = request_subject.clone();
                 let grant_binding = grant_binding_for_context(&state, context);
                 let audit = AuditCtx {
                     auditor: self.auditor.as_deref(),

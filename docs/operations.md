@@ -518,8 +518,8 @@ to label the active key for rotation; the default key id is `default`). When
 security record, and verify it after incident review.
 
 Audit records are additive and format-versioned. Current records carry
-`schema_version = 2`, a structured server-derived `subject`, and optional
-database-evidence fields. `audit verify` still accepts signed v1 records, so
+`schema_version = 3`, a structured server-derived `subject`, and optional
+database-evidence fields. `audit verify` still accepts signed v1/v2 records, so
 existing logs do not need to be rewritten.
 
 ### 5.5 Rotate credentials and keys

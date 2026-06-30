@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::hmac::{ct_eq, hmac_sha256_hex};
 
 /// Current on-disk audit record schema.
-pub const AUDIT_SCHEMA_VERSION: u16 = 2;
+pub const AUDIT_SCHEMA_VERSION: u16 = 3;
 
 /// The guard decision being audited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,15 +135,38 @@ impl Default for AuditSubject {
 /// Optional database-observed evidence attached to an audit record.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DbEvidence {
+    /// `captured` when live evidence was available, or a stable
+    /// `db_evidence_unavailable:*` marker when the server could not read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability: Option<String>,
+    /// Redacted database fingerprint: `V$DATABASE.DB_UNIQUE_NAME`, when visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_unique_name: Option<String>,
+    /// Redacted service name for the current session, when visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
+    /// Redacted instance name for the current session, when visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_name: Option<String>,
     /// Oracle session user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_user: Option<String>,
     /// Oracle current user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_user: Option<String>,
+    /// Oracle proxy user (`SYS_CONTEXT('USERENV','PROXY_USER')`), when proxy
+    /// authentication is in effect and visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_user: Option<String>,
     /// Oracle current schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_schema: Option<String>,
+    /// Current Oracle session id (`V$SESSION.SID`), when visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
+    /// Current Oracle session serial number (`V$SESSION.SERIAL#`), when visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<String>,
     /// Oracle `CLIENT_IDENTIFIER`, if set by the served session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_identifier: Option<String>,
@@ -159,6 +182,19 @@ pub struct DbEvidence {
     /// Database open mode from `V$DATABASE`, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_mode: Option<String>,
+}
+
+impl DbEvidence {
+    /// Build a stable marker for cases where DB evidence was attempted but not
+    /// available. The reason must be operator-safe; never put driver messages or
+    /// connection material here.
+    #[must_use]
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            availability: Some(format!("db_evidence_unavailable:{}", reason.into())),
+            ..Self::default()
+        }
+    }
 }
 
 /// Optional structured cancellation/lifecycle reason attached to an audit
@@ -334,7 +370,7 @@ impl AuditRecord {
         let sql_sha256 = sha256_hex(draft.sql.as_bytes());
         let sql_preview: String = draft.sql.chars().take(PREVIEW_LEN).collect();
         let agent_identity = draft.subject.legacy_agent_identity();
-        let entry_hash = compute_entry_hash_v2(
+        let entry_hash = compute_entry_hash_v3(
             seq,
             &timestamp,
             &agent_identity,
@@ -392,7 +428,7 @@ impl AuditRecord {
                 self.outcome,
                 &self.prev_hash,
             )
-        } else {
+        } else if self.schema_version == 2 {
             compute_entry_hash_v2(
                 self.seq,
                 &self.timestamp,
@@ -409,6 +445,25 @@ impl AuditRecord {
                 self.outcome,
                 &self.prev_hash,
             )
+        } else if self.schema_version == 3 {
+            compute_entry_hash_v3(
+                self.seq,
+                &self.timestamp,
+                &self.agent_identity,
+                &self.subject,
+                self.db_evidence.as_ref(),
+                self.cancel.as_ref(),
+                &self.tool,
+                &self.sql_sha256,
+                &self.sql_preview,
+                &self.danger_level,
+                self.decision,
+                self.rows_affected,
+                self.outcome,
+                &self.prev_hash,
+            )
+        } else {
+            return false;
         };
         recomputed == self.entry_hash
     }
@@ -491,7 +546,7 @@ fn hash_subject(hasher: &mut Sha256, subject: &AuditSubject) {
     hash_opt_str(hasher, subject.thumbprint.as_deref());
 }
 
-fn hash_db_evidence(hasher: &mut Sha256, evidence: Option<&DbEvidence>) {
+fn hash_db_evidence_v2(hasher: &mut Sha256, evidence: Option<&DbEvidence>) {
     let Some(evidence) = evidence else {
         hasher.update([0]);
         return;
@@ -500,6 +555,29 @@ fn hash_db_evidence(hasher: &mut Sha256, evidence: Option<&DbEvidence>) {
     hash_opt_str(hasher, evidence.session_user.as_deref());
     hash_opt_str(hasher, evidence.current_user.as_deref());
     hash_opt_str(hasher, evidence.current_schema.as_deref());
+    hash_opt_str(hasher, evidence.client_identifier.as_deref());
+    hash_opt_str(hasher, evidence.module.as_deref());
+    hash_opt_str(hasher, evidence.action.as_deref());
+    hash_opt_str(hasher, evidence.database_role.as_deref());
+    hash_opt_str(hasher, evidence.open_mode.as_deref());
+}
+
+fn hash_db_evidence_v3(hasher: &mut Sha256, evidence: Option<&DbEvidence>) {
+    let Some(evidence) = evidence else {
+        hasher.update([0]);
+        return;
+    };
+    hasher.update([1]);
+    hash_opt_str(hasher, evidence.availability.as_deref());
+    hash_opt_str(hasher, evidence.db_unique_name.as_deref());
+    hash_opt_str(hasher, evidence.service_name.as_deref());
+    hash_opt_str(hasher, evidence.instance_name.as_deref());
+    hash_opt_str(hasher, evidence.session_user.as_deref());
+    hash_opt_str(hasher, evidence.current_user.as_deref());
+    hash_opt_str(hasher, evidence.proxy_user.as_deref());
+    hash_opt_str(hasher, evidence.current_schema.as_deref());
+    hash_opt_str(hasher, evidence.sid.as_deref());
+    hash_opt_str(hasher, evidence.serial_number.as_deref());
     hash_opt_str(hasher, evidence.client_identifier.as_deref());
     hash_opt_str(hasher, evidence.module.as_deref());
     hash_opt_str(hasher, evidence.action.as_deref());
@@ -537,7 +615,7 @@ fn compute_entry_hash_v2(
     prev_hash: &str,
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(AUDIT_SCHEMA_VERSION.to_be_bytes());
+    hasher.update(2_u16.to_be_bytes());
     hasher.update(seq.to_be_bytes());
     for field in [
         timestamp,
@@ -550,7 +628,56 @@ fn compute_entry_hash_v2(
         hash_str(&mut hasher, field);
     }
     hash_subject(&mut hasher, subject);
-    hash_db_evidence(&mut hasher, db_evidence);
+    hash_db_evidence_v2(&mut hasher, db_evidence);
+    hash_cancel(&mut hasher, cancel);
+    hasher.update(format!("{decision:?}").as_bytes());
+    hasher.update(rows_affected.unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(format!("{outcome:?}").as_bytes());
+    hasher.update(prev_hash.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(7 + digest.len() * 2);
+    out.push_str("sha256:");
+    for b in digest {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+/// Deterministically hash a v3 entry's seq + content + prev_hash. Schema 3
+/// extends v2 DB evidence; verification keeps v2 hashing intact for existing
+/// logs.
+#[allow(clippy::too_many_arguments)]
+fn compute_entry_hash_v3(
+    seq: u64,
+    timestamp: &str,
+    agent_identity: &str,
+    subject: &AuditSubject,
+    db_evidence: Option<&DbEvidence>,
+    cancel: Option<&AuditCancel>,
+    tool: &str,
+    sql_sha256: &str,
+    sql_preview: &str,
+    danger_level: &str,
+    decision: AuditDecision,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+    prev_hash: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(3_u16.to_be_bytes());
+    hasher.update(seq.to_be_bytes());
+    for field in [
+        timestamp,
+        agent_identity,
+        tool,
+        sql_sha256,
+        sql_preview,
+        danger_level,
+    ] {
+        hash_str(&mut hasher, field);
+    }
+    hash_subject(&mut hasher, subject);
+    hash_db_evidence_v3(&mut hasher, db_evidence);
     hash_cancel(&mut hasher, cancel);
     hasher.update(format!("{decision:?}").as_bytes());
     hasher.update(rows_affected.unwrap_or(u64::MAX).to_be_bytes());
@@ -611,8 +738,15 @@ mod tests {
     fn db_evidence_is_hash_covered() {
         let mut d = draft();
         d.db_evidence = Some(DbEvidence {
+            availability: Some("captured".to_owned()),
+            db_unique_name: Some("ORCL23A".to_owned()),
+            service_name: Some("freepdb1".to_owned()),
+            instance_name: Some("free".to_owned()),
             session_user: Some("APP_USER".to_owned()),
+            proxy_user: Some("MCP_PROXY".to_owned()),
             current_schema: Some("APP".to_owned()),
+            sid: Some("123".to_owned()),
+            serial_number: Some("456".to_owned()),
             client_identifier: Some("agent-a".to_owned()),
             ..DbEvidence::default()
         });
@@ -628,6 +762,60 @@ mod tests {
         assert!(
             !r.hash_is_valid(),
             "tampered DB evidence must fail verification"
+        );
+    }
+
+    #[test]
+    fn schema2_db_evidence_hash_still_verifies() {
+        let mut d = draft();
+        d.db_evidence = Some(DbEvidence {
+            session_user: Some("APP_USER".to_owned()),
+            current_schema: Some("APP".to_owned()),
+            client_identifier: Some("agent-a".to_owned()),
+            ..DbEvidence::default()
+        });
+        let sql_sha256 = sha256_hex(d.sql.as_bytes());
+        let sql_preview = d.sql.chars().take(PREVIEW_LEN).collect::<String>();
+        let agent_identity = d.subject.legacy_agent_identity();
+        let mut r = AuditRecord {
+            schema_version: 2,
+            seq: 1,
+            timestamp: "2026-06-01T00:00:00Z".to_owned(),
+            agent_identity,
+            subject: d.subject.clone(),
+            db_evidence: d.db_evidence.clone(),
+            cancel: None,
+            tool: d.tool.clone(),
+            sql_sha256,
+            sql_preview,
+            danger_level: d.danger_level.clone(),
+            decision: d.decision,
+            rows_affected: d.rows_affected,
+            outcome: d.outcome,
+            prev_hash: GENESIS_HASH.to_owned(),
+            entry_hash: String::new(),
+            key_id: None,
+            signature: None,
+        };
+        r.entry_hash = compute_entry_hash_v2(
+            r.seq,
+            &r.timestamp,
+            &r.agent_identity,
+            &r.subject,
+            r.db_evidence.as_ref(),
+            r.cancel.as_ref(),
+            &r.tool,
+            &r.sql_sha256,
+            &r.sql_preview,
+            &r.danger_level,
+            r.decision,
+            r.rows_affected,
+            r.outcome,
+            &r.prev_hash,
+        );
+        assert!(
+            r.hash_is_valid(),
+            "schema-2 records must keep verifying after schema-3 evidence expansion"
         );
     }
 
@@ -661,6 +849,22 @@ mod tests {
         assert!(r.hash_is_valid());
         r.danger_level = "SAFE".to_owned(); // someone downgrades the record
         assert!(!r.hash_is_valid(), "tampered record must fail verification");
+    }
+
+    #[test]
+    fn unknown_schema_version_does_not_reuse_v3_hash() {
+        let mut r = AuditRecord::chained_unsigned(
+            &draft(),
+            1,
+            GENESIS_HASH,
+            "2026-06-01T00:00:00Z".to_owned(),
+        );
+        assert!(r.hash_is_valid());
+        r.schema_version = 99;
+        assert!(
+            !r.hash_is_valid(),
+            "unknown schema versions must not verify as schema 3"
+        );
     }
 
     #[test]
@@ -742,7 +946,7 @@ mod tests {
         // Forge the operator-legible field and recompute the (unkeyed) hash so
         // the bare-hash check would pass — but leave the old MAC in place.
         forged.sql_preview = "SELECT 1".to_owned();
-        forged.entry_hash = compute_entry_hash_v2(
+        forged.entry_hash = compute_entry_hash_v3(
             forged.seq,
             &forged.timestamp,
             &forged.agent_identity,

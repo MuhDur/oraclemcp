@@ -122,7 +122,7 @@ pub fn oracle_query_execute(
     grants: &ExecGrantStore,
     auditor: &Auditor,
     executor: &dyn StatementExecutor,
-    agent_identity: &str,
+    server_subject: &AuditSubject,
     params: &ExecuteParams,
     mut now: impl FnMut() -> String,
 ) -> Result<Value, ErrorEnvelope> {
@@ -142,7 +142,7 @@ pub fn oracle_query_execute(
     // 2) fsync-before-execute: durably log the approved statement BEFORE it runs,
     //    so a crash between here and the execute leaves the log written and the
     //    database untouched.
-    let subject = AuditSubject::new("agent", agent_identity);
+    let subject = server_subject.clone();
     let pre = AuditEntryDraft {
         subject: subject.clone(),
         db_evidence: None,
@@ -278,6 +278,10 @@ mod tests {
         }
     }
 
+    fn subject() -> AuditSubject {
+        AuditSubject::new("oauth", "subject-1").with_authn_method("oauth")
+    }
+
     #[test]
     fn valid_grant_executes_once_and_audits_pre_and_post() {
         let grants = ExecGrantStore::new();
@@ -294,7 +298,7 @@ mod tests {
             &grants,
             &aud,
             &exec,
-            "agent-A",
+            &subject(),
             &params(&tok, SQL, Some("READ_WRITE")),
             clock(),
         )
@@ -318,7 +322,7 @@ mod tests {
             &grants,
             &aud,
             &exec,
-            "agent-A",
+            &subject(),
             &params(&tok, SQL, Some("READ_WRITE")),
             clock(),
         )
@@ -342,7 +346,7 @@ mod tests {
             &grants,
             &aud,
             &exec,
-            "a",
+            &subject(),
             &params(&tok, "DROP TABLE orders", None),
             clock(),
         )
@@ -369,7 +373,7 @@ mod tests {
         let mut stale = params(&tok, SQL, Some("READ_WRITE"));
         stale.generation = 2;
 
-        let err = oracle_query_execute(&grants, &aud, &exec, "a", &stale, clock())
+        let err = oracle_query_execute(&grants, &aud, &exec, &subject(), &stale, clock())
             .expect_err("stale generation rejected");
         assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
         assert_eq!(exec.call_count(), 0);
@@ -382,7 +386,7 @@ mod tests {
             &grants,
             &aud,
             &exec,
-            "a",
+            &subject(),
             &params(&tok, SQL, Some("READ_WRITE")),
             clock(),
         )
@@ -406,7 +410,7 @@ mod tests {
             &grants,
             &aud,
             &exec,
-            "a",
+            &subject(),
             &params(&tok, "DROP TABLE t", Some("DDL")),
             clock(),
         )
@@ -426,9 +430,15 @@ mod tests {
         );
         let (aud, sink) = auditor();
         let exec = MockExecutor::fail();
-        let err =
-            oracle_query_execute(&grants, &aud, &exec, "a", &params(&tok, SQL, None), clock())
-                .expect_err("executor failed");
+        let err = oracle_query_execute(
+            &grants,
+            &aud,
+            &exec,
+            &subject(),
+            &params(&tok, SQL, None),
+            clock(),
+        )
+        .expect_err("executor failed");
         assert_eq!(err.error_class, ErrorClass::Internal);
         let recs = sink.records();
         assert_eq!(recs.len(), 2);

@@ -3018,7 +3018,12 @@ fn handle_mcp_post(
     if let Some(session_id) = http_session_id.as_deref() {
         context = context.with_http_session_id(session_id);
     }
-    if let Some(principal_key) = principal_key {
+    let dispatch_principal_key = if config.stateful {
+        Some(session_principal_key)
+    } else {
+        principal_key
+    };
+    if let Some(principal_key) = dispatch_principal_key {
         context = context.with_principal_key(principal_key);
     }
     let response = server.handle_jsonrpc_request_with_context(parsed, None, context);

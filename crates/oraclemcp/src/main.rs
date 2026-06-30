@@ -38,8 +38,8 @@ use oraclemcp::dispatch::{
 };
 use oraclemcp::registry;
 use oraclemcp_audit::{
-    AuditSink, Auditor, FileAuditSink, ShippingAuditSink, ShippingForwarder, SigningKey,
-    WormFileForwarder,
+    AuditSink, AuditSubject, Auditor, FileAuditSink, ShippingAuditSink, ShippingForwarder,
+    SigningKey, WormFileForwarder,
 };
 use oraclemcp_auth::{
     Hs256Verifier, ResourceServerConfig, SecretError, SecretResolver, SystemSecretResolver,
@@ -1128,6 +1128,23 @@ fn build_oracle_dispatcher(
     dispatcher
 }
 
+fn audit_subject_from_principal_key(principal_key: &str) -> AuditSubject {
+    if principal_key == "anonymous-http" {
+        return AuditSubject::new("anonymous-http", "server-derived").with_authn_method("none");
+    }
+    let (kind, stable_id) = principal_key
+        .split_once(':')
+        .filter(|(kind, stable_id)| !kind.is_empty() && !stable_id.is_empty())
+        .unwrap_or(("principal", principal_key));
+    let authn_method = match kind {
+        "oauth" => "oauth",
+        "mtls" | "cert" => "mtls",
+        "process" => "process",
+        _ => "server",
+    };
+    AuditSubject::new(kind, stable_id).with_authn_method(authn_method)
+}
+
 async fn open_lane_runtime_connections(
     cx: &Cx,
     active_profile: Option<&str>,
@@ -1169,8 +1186,9 @@ async fn open_lane_runtime_connections(
 }
 
 fn stateful_lane_factory(wiring: DispatcherWiring) -> Arc<LaneDispatchFactory> {
-    Arc::new(move |cx: &Cx, _lane_context: &LaneContext| {
+    Arc::new(move |cx: &Cx, lane_context: &LaneContext| {
         let wiring = wiring.clone();
+        let principal_key = lane_context.principal_key().to_owned();
         Box::pin(async move {
             let connections = open_lane_runtime_connections(
                 cx,
@@ -1180,7 +1198,8 @@ fn stateful_lane_factory(wiring: DispatcherWiring) -> Arc<LaneDispatchFactory> {
             .await
             .map_err(DbError::into_envelope)?;
             let dispatcher =
-                build_oracle_dispatcher(connections.session, connections.stateless, &wiring);
+                build_oracle_dispatcher(connections.session, connections.stateless, &wiring)
+                    .with_default_audit_subject(audit_subject_from_principal_key(&principal_key));
             Ok(Arc::new(dispatcher) as Arc<dyn ToolDispatch>)
         })
     })

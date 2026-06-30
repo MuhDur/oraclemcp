@@ -105,12 +105,18 @@ impl OracleConnection for OneRowMock {
             server_version: Some("23.0.0".to_owned()),
             database_role: Some("PRIMARY".to_owned()),
             open_mode: Some("READ WRITE".to_owned()),
+            db_unique_name: Some("ORCL23A".to_owned()),
+            service_name: Some("freepdb1".to_owned()),
+            instance_name: Some("free".to_owned()),
             read_only: false,
             read_only_reason: None,
             current_schema: Some("APP".to_owned()),
             current_edition: Some("ORA$BASE".to_owned()),
             session_user: Some("APP".to_owned()),
             current_user: Some("APP".to_owned()),
+            proxy_user: None,
+            sid: Some("101".to_owned()),
+            serial_number: Some("202".to_owned()),
             module: Some("oraclemcp-test".to_owned()),
             action: None,
             client_identifier: Some("agent".to_owned()),
@@ -367,7 +373,20 @@ impl OracleConnection for SourceLookupMock {
     async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
+            database_role: Some("PRIMARY".to_owned()),
+            open_mode: Some("READ WRITE".to_owned()),
+            db_unique_name: Some("ORCL23A".to_owned()),
+            service_name: Some("freepdb1".to_owned()),
+            instance_name: Some("free".to_owned()),
             current_schema: Some("APP".to_owned()),
+            session_user: Some("APP".to_owned()),
+            current_user: Some("APP".to_owned()),
+            proxy_user: Some("MCP_PROXY".to_owned()),
+            sid: Some("101".to_owned()),
+            serial_number: Some("202".to_owned()),
+            module: Some("oraclemcp-test".to_owned()),
+            action: Some("execute".to_owned()),
+            client_identifier: Some("oauth-subject".to_owned()),
             ..Default::default()
         })
     }
@@ -542,7 +561,20 @@ impl OracleConnection for CancelAfterExecuteMock {
     async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
+            database_role: Some("PRIMARY".to_owned()),
+            open_mode: Some("READ WRITE".to_owned()),
+            db_unique_name: Some("ORCL23A".to_owned()),
+            service_name: Some("freepdb1".to_owned()),
+            instance_name: Some("free".to_owned()),
             current_schema: Some("APP".to_owned()),
+            session_user: Some("APP".to_owned()),
+            current_user: Some("APP".to_owned()),
+            proxy_user: Some("MCP_PROXY".to_owned()),
+            sid: Some("101".to_owned()),
+            serial_number: Some("202".to_owned()),
+            module: Some("oraclemcp-test".to_owned()),
+            action: Some("execute".to_owned()),
+            client_identifier: Some("oauth-subject".to_owned()),
             ..Default::default()
         })
     }
@@ -623,7 +655,7 @@ impl OracleConnection for IntentObservingExecMock {
             "pending write intent must be durable before DB execute"
         );
         assert_eq!(unresolved[0].tool, "oracle_execute");
-        assert_eq!(unresolved[0].subject, "profile:dev");
+        assert_eq!(unresolved[0].subject, "process:stdio");
         assert_eq!(unresolved[0].lane, "process");
         assert!(unresolved[0].sql_sha256.starts_with("sha256:"));
         self.state
@@ -707,7 +739,20 @@ impl OracleConnection for ExecRecordingMock {
     async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
+            database_role: Some("PRIMARY".to_owned()),
+            open_mode: Some("READ WRITE".to_owned()),
+            db_unique_name: Some("ORCL23A".to_owned()),
+            service_name: Some("freepdb1".to_owned()),
+            instance_name: Some("free".to_owned()),
             current_schema: Some("APP".to_owned()),
+            session_user: Some("APP".to_owned()),
+            current_user: Some("APP".to_owned()),
+            proxy_user: Some("MCP_PROXY".to_owned()),
+            sid: Some("101".to_owned()),
+            serial_number: Some("202".to_owned()),
+            module: Some("oraclemcp-test".to_owned()),
+            action: Some("execute".to_owned()),
+            client_identifier: Some("oauth-subject".to_owned()),
             ..Default::default()
         })
     }
@@ -2412,12 +2457,18 @@ impl OracleConnection for LifecycleCleanupMock {
             server_version: None,
             database_role: None,
             open_mode: None,
+            db_unique_name: None,
+            service_name: None,
+            instance_name: None,
             read_only: false,
             read_only_reason: None,
             current_schema: Some("APP".to_owned()),
             current_edition: None,
             session_user: Some("APP".to_owned()),
             current_user: Some("APP".to_owned()),
+            proxy_user: None,
+            sid: None,
+            serial_number: None,
             module: None,
             action: None,
             client_identifier: None,
@@ -3816,7 +3867,7 @@ fn execute_commit_in_doubt_leaves_durable_intent_unresolved() {
     let unresolved = intents.unresolved().expect("intent snapshot");
     assert_eq!(unresolved.len(), 1);
     assert_eq!(unresolved[0].tool, "oracle_execute");
-    assert_eq!(unresolved[0].subject, "profile:dev");
+    assert_eq!(unresolved[0].subject, "process:stdio");
 }
 
 #[test]
@@ -4378,7 +4429,7 @@ fn cancellation_after_mutating_execute_rolls_back_dirty_session() {
 mod audit_wiring {
     use super::*;
     use oraclemcp_audit::{
-        AuditError, AuditOutcome, AuditRecord, AuditSink, MemoryAuditSink, SigningKey,
+        AuditError, AuditOutcome, AuditRecord, AuditSink, AuditSubject, MemoryAuditSink, SigningKey,
     };
     use std::sync::Arc;
 
@@ -4442,6 +4493,29 @@ mod audit_wiring {
         Arc::new(Auditor::new(Box::new(FailingSink), key))
     }
 
+    fn preview_confirm_with_context(
+        dispatcher: &OracleDispatcher,
+        context: DispatchContext<'_>,
+        sql: &str,
+    ) -> String {
+        dispatcher
+            .dispatch_with_context(
+                "oracle_preview_sql",
+                json!({
+                    "sql": sql,
+                    "agent_identity": "attacker",
+                    "operator_name": "HumanOperator",
+                    "label": "spoofed",
+                }),
+                context,
+            )
+            .expect("preview")
+            .pointer("/execute_confirmation/confirm")
+            .and_then(Value::as_str)
+            .expect("preview minted execute grant")
+            .to_owned()
+    }
+
     #[test]
     fn served_write_appends_pending_then_signed_outcome() {
         let (auditor, sink) = auditor_with_sink();
@@ -4470,6 +4544,62 @@ mod audit_wiring {
         assert_eq!(recs[1].key_id.as_deref(), Some("test-key"));
         // The SQL bytes are never stored verbatim — only the digest + preview.
         assert!(recs[1].sql_sha256.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn caller_supplied_identity_cannot_change_audit_subject_or_db_evidence() {
+        let (auditor, sink) = auditor_with_sink();
+        let state = Arc::new(ExecState::default());
+        let dispatcher = dispatcher_with_conn(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            ddl_level(),
+            auditor,
+        );
+        let context = DispatchContext::default()
+            .with_http_session_id("mcp-session-1")
+            .with_principal_key("oauth:subject-hash")
+            .with_lane_identity("lane-1", 7);
+        let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+        let confirm = preview_confirm_with_context(&dispatcher, context, sql);
+
+        dispatcher
+            .dispatch_with_context(
+                "execute_approved",
+                json!({
+                    "token": confirm,
+                    "agent_identity": "attacker",
+                    "operator_name": "HumanOperator",
+                    "label": "spoofed",
+                }),
+                context,
+            )
+            .expect("write dispatches");
+
+        let recs = sink.records();
+        assert_eq!(recs.len(), 2);
+        let expected_subject =
+            AuditSubject::new("oauth", "subject-hash").with_authn_method("oauth");
+        for rec in &recs {
+            assert_eq!(rec.subject, expected_subject);
+            assert_eq!(rec.agent_identity, "oauth:subject-hash");
+            assert!(
+                !rec.agent_identity.contains("attacker")
+                    && !rec.agent_identity.contains("HumanOperator")
+                    && !rec.agent_identity.contains("spoofed")
+            );
+            let evidence = rec.db_evidence.as_ref().expect("DB evidence captured");
+            assert_eq!(evidence.availability.as_deref(), Some("captured"));
+            assert_eq!(evidence.db_unique_name.as_deref(), Some("ORCL23A"));
+            assert_eq!(evidence.service_name.as_deref(), Some("freepdb1"));
+            assert_eq!(evidence.instance_name.as_deref(), Some("free"));
+            assert_eq!(evidence.session_user.as_deref(), Some("APP"));
+            assert_eq!(evidence.proxy_user.as_deref(), Some("MCP_PROXY"));
+            assert_eq!(evidence.sid.as_deref(), Some("101"));
+            assert_eq!(evidence.serial_number.as_deref(), Some("202"));
+            assert_eq!(evidence.client_identifier.as_deref(), Some("oauth-subject"));
+            assert_eq!(evidence.module.as_deref(), Some("oraclemcp-test"));
+            assert_eq!(evidence.action.as_deref(), Some("execute"));
+        }
     }
 
     #[test]

@@ -3030,11 +3030,21 @@ mod driver {
                 info.server_version = r.text("VERSION_FULL").map(str::to_owned);
             }
             if let Some(r) = self
-                .query_first_row(cx, "SELECT database_role, open_mode FROM v$database")
+                .query_first_row(
+                    cx,
+                    "SELECT database_role, open_mode, db_unique_name FROM v$database",
+                )
                 .await
             {
                 info.database_role = r.text("DATABASE_ROLE").map(str::to_owned);
                 info.open_mode = r.text("OPEN_MODE").map(str::to_owned);
+                info.db_unique_name = r.text("DB_UNIQUE_NAME").map(str::to_owned);
+            }
+            if let Some(r) = self
+                .query_first_row(cx, "SELECT instance_name FROM v$instance")
+                .await
+            {
+                info.instance_name = r.text("INSTANCE_NAME").map(str::to_owned);
             }
             if let Some(r) = self
                 .query_first_row(
@@ -3044,6 +3054,9 @@ mod driver {
                     SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME') AS current_edition, \
                     SYS_CONTEXT('USERENV','SESSION_USER') AS session_user, \
                     SYS_CONTEXT('USERENV','CURRENT_USER') AS current_user, \
+                    SYS_CONTEXT('USERENV','PROXY_USER') AS proxy_user, \
+                    SYS_CONTEXT('USERENV','SID') AS sid, \
+                    SYS_CONTEXT('USERENV','SERVICE_NAME') AS service_name, \
                     SYS_CONTEXT('USERENV','MODULE') AS module, \
                     SYS_CONTEXT('USERENV','ACTION') AS session_action, \
                     SYS_CONTEXT('USERENV','CLIENT_IDENTIFIER') AS client_identifier, \
@@ -3059,6 +3072,9 @@ mod driver {
                 info.current_edition = r.text("CURRENT_EDITION").map(str::to_owned);
                 info.session_user = r.text("SESSION_USER").map(str::to_owned);
                 info.current_user = r.text("CURRENT_USER").map(str::to_owned);
+                info.proxy_user = r.text("PROXY_USER").map(str::to_owned);
+                info.sid = r.text("SID").map(str::to_owned);
+                info.service_name = r.text("SERVICE_NAME").map(str::to_owned);
                 info.module = r.text("MODULE").map(str::to_owned);
                 info.action = r.text("SESSION_ACTION").map(str::to_owned);
                 info.client_identifier = r.text("CLIENT_IDENTIFIER").map(str::to_owned);
@@ -3070,13 +3086,19 @@ mod driver {
             if let Some(r) = self
                 .query_first_row(
                     cx,
-                    "SELECT osuser, machine, terminal, program \
+                    "SELECT sid, serial# AS serial_number, service_name, osuser, machine, terminal, program \
                  FROM v$session \
                  WHERE sid = TO_NUMBER(SYS_CONTEXT('USERENV','SID')) \
                  FETCH FIRST 1 ROWS ONLY",
                 )
                 .await
             {
+                info.sid = r.text("SID").map(str::to_owned).or_else(|| info.sid.take());
+                info.serial_number = r.text("SERIAL_NUMBER").map(str::to_owned);
+                info.service_name = r
+                    .text("SERVICE_NAME")
+                    .map(str::to_owned)
+                    .or_else(|| info.service_name.take());
                 info.os_user = r
                     .text("OSUSER")
                     .map(str::to_owned)

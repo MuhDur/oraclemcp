@@ -16,6 +16,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   truncation/cap markers. The default agent-facing caps remain conservative;
   larger catalog extraction must opt into `deep_decode` and explicit structured
   row/cell/byte/depth caps.
+- Audit records now write `schema_version = 3` when they include expanded
+  server-derived subject and DB evidence fields. Existing signed v1/v2 audit
+  logs continue to verify; no log rewrite is required.
 
 ## [0.4.1] — 2026-06-29
 

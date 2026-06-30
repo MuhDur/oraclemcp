@@ -2784,17 +2784,23 @@ pub oraclemcp_db::OracleConnectionInfo::current_edition: core::option::Option<al
 pub oraclemcp_db::OracleConnectionInfo::current_schema: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectionInfo::current_user: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectionInfo::database_role: core::option::Option<alloc::string::String>
+pub oraclemcp_db::OracleConnectionInfo::db_unique_name: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectionInfo::host: core::option::Option<alloc::string::String>
+pub oraclemcp_db::OracleConnectionInfo::instance_name: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectionInfo::machine: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectionInfo::module: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectionInfo::open_mode: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectionInfo::os_user: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectionInfo::pool_open_connections: core::option::Option<u32>
 pub oraclemcp_db::OracleConnectionInfo::program: core::option::Option<alloc::string::String>
+pub oraclemcp_db::OracleConnectionInfo::proxy_user: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectionInfo::read_only: bool
 pub oraclemcp_db::OracleConnectionInfo::read_only_reason: core::option::Option<alloc::string::String>
+pub oraclemcp_db::OracleConnectionInfo::serial_number: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectionInfo::server_version: core::option::Option<alloc::string::String>
+pub oraclemcp_db::OracleConnectionInfo::service_name: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectionInfo::session_user: core::option::Option<alloc::string::String>
+pub oraclemcp_db::OracleConnectionInfo::sid: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectionInfo::terminal: core::option::Option<alloc::string::String>
 impl oraclemcp_db::OracleConnectionInfo
 pub fn oraclemcp_db::OracleConnectionInfo::is_read_only_standby(&self) -> bool

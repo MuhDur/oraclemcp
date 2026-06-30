@@ -420,6 +420,15 @@ pub struct OracleConnectionInfo {
     pub database_role: Option<String>,
     /// `V$DATABASE.OPEN_MODE` (e.g. `READ WRITE`, `READ ONLY`).
     pub open_mode: Option<String>,
+    /// `V$DATABASE.DB_UNIQUE_NAME`, when visible.
+    #[serde(default)]
+    pub db_unique_name: Option<String>,
+    /// Current service name, when visible.
+    #[serde(default)]
+    pub service_name: Option<String>,
+    /// Current instance name, when visible.
+    #[serde(default)]
+    pub instance_name: Option<String>,
     /// Derived from `database_role` / `open_mode`: true when the database role
     /// or open mode indicates a physically read-only target. This does not
     /// describe profile ceilings or user grants.
@@ -439,6 +448,16 @@ pub struct OracleConnectionInfo {
     /// Oracle current user (`SYS_CONTEXT('USERENV','CURRENT_USER')`).
     #[serde(default)]
     pub current_user: Option<String>,
+    /// Oracle proxy user (`SYS_CONTEXT('USERENV','PROXY_USER')`), when proxy
+    /// authentication is in effect.
+    #[serde(default)]
+    pub proxy_user: Option<String>,
+    /// Current Oracle session id (`V$SESSION.SID`), when visible.
+    #[serde(default)]
+    pub sid: Option<String>,
+    /// Current Oracle session serial number (`V$SESSION.SERIAL#`), when visible.
+    #[serde(default)]
+    pub serial_number: Option<String>,
     /// Oracle module (`SYS_CONTEXT('USERENV','MODULE')`).
     #[serde(default)]
     pub module: Option<String>,
@@ -538,11 +557,17 @@ pub struct RedactedOracleConnectionInfo<'a>(&'a OracleConnectionInfo);
 type ConnectionInfoRedactionPredicate = fn(&OracleConnectionInfo) -> bool;
 type ConnectionInfoRedactionField = (&'static str, ConnectionInfoRedactionPredicate);
 
-const CONNECTION_INFO_REDACTED_FIELDS: [ConnectionInfoRedactionField; 14] = [
+const CONNECTION_INFO_REDACTED_FIELDS: [ConnectionInfoRedactionField; 20] = [
+    ("db_unique_name", |info| info.db_unique_name.is_some()),
+    ("service_name", |info| info.service_name.is_some()),
+    ("instance_name", |info| info.instance_name.is_some()),
     ("current_schema", |info| info.current_schema.is_some()),
     ("current_edition", |info| info.current_edition.is_some()),
     ("session_user", |info| info.session_user.is_some()),
     ("current_user", |info| info.current_user.is_some()),
+    ("proxy_user", |info| info.proxy_user.is_some()),
+    ("sid", |info| info.sid.is_some()),
+    ("serial_number", |info| info.serial_number.is_some()),
     ("module", |info| info.module.is_some()),
     ("action", |info| info.action.is_some()),
     ("client_identifier", |info| info.client_identifier.is_some()),
@@ -846,12 +871,18 @@ mod tests {
             server_version: Some("Oracle Database 23ai Free".to_owned()),
             database_role: Some("PRIMARY".to_owned()),
             open_mode: Some("READ WRITE".to_owned()),
+            db_unique_name: Some("N_S6_DB_UNIQUE_NAME_SECRET".to_owned()),
+            service_name: Some("N_S6_SERVICE_NAME_SECRET".to_owned()),
+            instance_name: Some("N_S6_INSTANCE_NAME_SECRET".to_owned()),
             read_only: false,
             read_only_reason: None,
             current_schema: Some("N_S6_CURRENT_SCHEMA_SECRET".to_owned()),
             current_edition: Some("N_S6_EDITION_SECRET".to_owned()),
             session_user: Some("N_S6_SESSION_USER_SECRET".to_owned()),
             current_user: Some("N_S6_CURRENT_USER_SECRET".to_owned()),
+            proxy_user: Some("N_S6_PROXY_USER_SECRET".to_owned()),
+            sid: Some("N_S6_SID_SECRET".to_owned()),
+            serial_number: Some("N_S6_SERIAL_NUMBER_SECRET".to_owned()),
             module: Some("N_S6_MODULE_SECRET".to_owned()),
             action: Some("N_S6_ACTION_SECRET".to_owned()),
             client_identifier: Some("N_S6_CLIENT_IDENTIFIER_SECRET".to_owned()),
@@ -873,6 +904,12 @@ mod tests {
             "N_S6_EDITION_SECRET",
             "N_S6_SESSION_USER_SECRET",
             "N_S6_CURRENT_USER_SECRET",
+            "N_S6_PROXY_USER_SECRET",
+            "N_S6_SID_SECRET",
+            "N_S6_SERIAL_NUMBER_SECRET",
+            "N_S6_DB_UNIQUE_NAME_SECRET",
+            "N_S6_SERVICE_NAME_SECRET",
+            "N_S6_INSTANCE_NAME_SECRET",
             "N_S6_MODULE_SECRET",
             "N_S6_ACTION_SECRET",
             "N_S6_CLIENT_IDENTIFIER_SECRET",
@@ -903,10 +940,16 @@ mod tests {
             );
         }
         for redacted_field in [
+            "db_unique_name",
+            "service_name",
+            "instance_name",
             "current_schema",
             "current_edition",
             "session_user",
             "current_user",
+            "proxy_user",
+            "sid",
+            "serial_number",
             "module",
             "action",
             "client_identifier",
