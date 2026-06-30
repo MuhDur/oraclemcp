@@ -472,6 +472,71 @@ fn contract_type_structured_carrier_serializes_verbatim() {
 }
 
 #[test]
+fn contract_type_structured_carrier_round_trips_array_json_vector_tstz() {
+    // The C1 carrier is intentionally typed rather than raw JSON: it preserves
+    // Oracle scalar identity for arrays, OSON, vectors, and nested TSTZ values.
+    let structured = json!({
+        "kind": "array",
+        "items": [
+            {
+                "kind": "json",
+                "value": {
+                    "kind": "object",
+                    "entries": [
+                        {
+                            "key": "wide_number",
+                            "value": {
+                                "kind": "number",
+                                "value": "99999999999999999999999999999999999999"
+                            }
+                        },
+                        {
+                            "key": "raw",
+                            "value": {
+                                "kind": "raw",
+                                "encoding": "hex",
+                                "data": "deadbeef",
+                                "byte_length": 4
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "kind": "vector",
+                "storage": "sparse",
+                "format": "float64",
+                "num_dimensions": 4,
+                "indices": [0, 3],
+                "values": [1.0, -1.5]
+            },
+            {
+                "kind": "timestamp_tz",
+                "value": "2026-06-29 12:34:56.987654321 -05:30",
+                "year": 2026,
+                "month": 6,
+                "day": 29,
+                "hour": 12,
+                "minute": 34,
+                "second": 56,
+                "nanosecond": 987654321,
+                "offset_minutes": -330
+            }
+        ]
+    });
+
+    let rendered = serialize_cell(
+        &OracleCell::structured("TABLE OF ANYDATA", structured.clone()),
+        &SerializeOptions::default(),
+    );
+    assert_eq!(rendered, structured);
+
+    let encoded = serde_json::to_string(&rendered).expect("structured cell serializes");
+    let decoded: Value = serde_json::from_str(&encoded).expect("structured cell parses");
+    assert_eq!(decoded, structured);
+}
+
+#[test]
 fn contract_row_serializes_as_named_object() {
     // A whole row serializes to a JSON object keyed by column name, each value
     // following its per-type contract above.

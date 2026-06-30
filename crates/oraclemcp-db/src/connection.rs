@@ -298,6 +298,7 @@ mod driver {
     use oracledb::protocol::thin::{CursorValue, LobValue};
     use oracledb::protocol::{
         ClientIdentity,
+        oson::OsonValue,
         thin::{
             BindValue, CS_FORM_IMPLICIT, ColumnMetadata, ExecuteOptions, ORA_TYPE_NUM_BFILE,
             ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_FLOAT, ORA_TYPE_NUM_BINARY_INTEGER,
@@ -309,7 +310,9 @@ mod driver {
             ORA_TYPE_NUM_UROWID, ORA_TYPE_NUM_VARCHAR, ORA_TYPE_NUM_VECTOR, QueryResult,
             QueryValue, decode_lob_text,
         },
+        vector::{Vector, VectorValues},
     };
+    use serde_json::{Number, Value, json};
     use std::fmt::Display;
     use std::future::Future;
     use std::sync::Mutex as SyncMutex;
@@ -1131,15 +1134,15 @@ mod driver {
                     return materialize_lob_cell(oracle_type, &value, limits, &mut read_lob);
                 }
                 Some(QueryValue::Vector(value)) => {
-                    OracleCell::new(oracle_type, Some(format!("{value:?}")))
+                    OracleCell::structured(oracle_type, structured_vector(&value))
                 }
-                Some(QueryValue::Json(value)) => {
-                    OracleCell::new(oracle_type, Some(format!("{value:?}")))
-                }
-                Some(QueryValue::Array(values)) => OracleCell::new(
+                Some(QueryValue::Json(value)) => OracleCell::structured(
                     oracle_type,
-                    Some(format!("<unsupported ARRAY len={}>", values.len())),
+                    json!({ "kind": "json", "value": structured_oson_value(&value) }),
                 ),
+                Some(QueryValue::Array(values)) => {
+                    OracleCell::structured(oracle_type, structured_array(&values))
+                }
                 // `QueryValue` is `#[non_exhaustive]` as of oracledb 0.5.x. Every wire
                 // value kind that exists today is handled explicitly above; this arm
                 // fails SAFE on any future kind with a clearly-marked, non-silent
@@ -1152,6 +1155,292 @@ mod driver {
             };
             Ok(cell)
         })
+    }
+
+    fn structured_array(values: &[Option<QueryValue>]) -> Value {
+        json!({
+            "kind": "array",
+            "items": values
+                .iter()
+                .map(|value| structured_optional_query_value(value.as_ref()))
+                .collect::<Vec<_>>()
+        })
+    }
+
+    fn structured_optional_query_value(value: Option<&QueryValue>) -> Value {
+        value.map_or(Value::Null, structured_query_value)
+    }
+
+    fn structured_query_value(value: &QueryValue) -> Value {
+        match value {
+            QueryValue::Text(text) => json!({ "kind": "text", "value": text }),
+            QueryValue::TextRaw { bytes, csfrm } => json!({
+                "kind": "text_raw",
+                "encoding": "hex",
+                "data": hex_encode(bytes),
+                "byte_length": bytes.len(),
+                "csfrm": csfrm
+            }),
+            QueryValue::Raw(bytes) => json!({
+                "kind": "raw",
+                "encoding": "hex",
+                "data": hex_encode(bytes),
+                "byte_length": bytes.len()
+            }),
+            QueryValue::Rowid(text) => json!({ "kind": "rowid", "value": text }),
+            QueryValue::BinaryDouble(text) => json!({ "kind": "binary_double", "value": text }),
+            QueryValue::IntervalDS {
+                days,
+                hours,
+                minutes,
+                seconds,
+                fseconds,
+            } => json!({
+                "kind": "interval_ds",
+                "value": format!("{days} {hours:02}:{minutes:02}:{seconds:02}.{fseconds:09}"),
+                "days": days,
+                "hours": hours,
+                "minutes": minutes,
+                "seconds": seconds,
+                "fseconds": fseconds
+            }),
+            QueryValue::IntervalYM { years, months } => json!({
+                "kind": "interval_ym",
+                "value": format!("{years}-{months}"),
+                "years": years,
+                "months": months
+            }),
+            QueryValue::Number(number) => {
+                json!({ "kind": "number", "value": number.to_canonical_string() })
+            }
+            QueryValue::Boolean(value) => json!({ "kind": "boolean", "value": value }),
+            QueryValue::DateTime {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+            } => json!({
+                "kind": "datetime",
+                "value": format_datetime(
+                    *year,
+                    *month,
+                    *day,
+                    *hour,
+                    *minute,
+                    *second,
+                    *nanosecond
+                ),
+                "year": year,
+                "month": month,
+                "day": day,
+                "hour": hour,
+                "minute": minute,
+                "second": second,
+                "nanosecond": nanosecond
+            }),
+            QueryValue::TimestampTz {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+                offset_minutes,
+            } => json!({
+                "kind": "timestamp_tz",
+                "value": format_timestamp_tz(
+                    *year,
+                    *month,
+                    *day,
+                    *hour,
+                    *minute,
+                    *second,
+                    *nanosecond,
+                    *offset_minutes
+                ),
+                "year": year,
+                "month": month,
+                "day": day,
+                "hour": hour,
+                "minute": minute,
+                "second": second,
+                "nanosecond": nanosecond,
+                "offset_minutes": offset_minutes
+            }),
+            QueryValue::Vector(vector) => structured_vector(vector),
+            QueryValue::Json(value) => {
+                json!({ "kind": "json", "value": structured_oson_value(value) })
+            }
+            QueryValue::Array(values) => structured_array(values),
+            QueryValue::Cursor(_) | QueryValue::Object(_) | QueryValue::Lob(_) => {
+                structured_unsupported(value.variant_name())
+            }
+            _ => structured_unsupported(value.variant_name()),
+        }
+    }
+
+    fn structured_oson_value(value: &OsonValue) -> Value {
+        match value {
+            OsonValue::Null => json!({ "kind": "null" }),
+            OsonValue::Bool(value) => json!({ "kind": "boolean", "value": value }),
+            OsonValue::Number(text) => json!({ "kind": "number", "value": text }),
+            OsonValue::BinaryFloat(value) => {
+                json!({ "kind": "binary_float", "value": json_number_or_string(f64::from(*value)) })
+            }
+            OsonValue::BinaryDouble(value) => {
+                json!({ "kind": "binary_double", "value": json_number_or_string(*value) })
+            }
+            OsonValue::String(text) => json!({ "kind": "string", "value": text }),
+            OsonValue::Raw(bytes) => json!({
+                "kind": "raw",
+                "encoding": "hex",
+                "data": hex_encode(bytes),
+                "byte_length": bytes.len()
+            }),
+            OsonValue::DateTime {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+            } => json!({
+                "kind": "datetime",
+                "value": format_datetime(
+                    *year,
+                    *month,
+                    *day,
+                    *hour,
+                    *minute,
+                    *second,
+                    *nanosecond
+                ),
+                "year": year,
+                "month": month,
+                "day": day,
+                "hour": hour,
+                "minute": minute,
+                "second": second,
+                "nanosecond": nanosecond
+            }),
+            OsonValue::IntervalDS {
+                days,
+                hours,
+                minutes,
+                seconds,
+                fseconds,
+            } => json!({
+                "kind": "interval_ds",
+                "value": format!("P{days}DT{hours}H{minutes}M{seconds}.{fseconds:09}S"),
+                "days": days,
+                "hours": hours,
+                "minutes": minutes,
+                "seconds": seconds,
+                "fseconds": fseconds
+            }),
+            OsonValue::Vector(vector) => structured_vector(vector),
+            OsonValue::Array(items) => json!({
+                "kind": "array",
+                "items": items.iter().map(structured_oson_value).collect::<Vec<_>>()
+            }),
+            OsonValue::Object(entries) => json!({
+                "kind": "object",
+                "entries": entries
+                    .iter()
+                    .map(|(key, value)| {
+                        json!({ "key": key, "value": structured_oson_value(value) })
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        }
+    }
+
+    fn structured_vector(vector: &Vector) -> Value {
+        match vector {
+            Vector::Dense(values) => {
+                let (format, values) = structured_vector_values(values);
+                json!({
+                    "kind": "vector",
+                    "storage": "dense",
+                    "format": format,
+                    "values": values
+                })
+            }
+            Vector::Sparse {
+                num_dimensions,
+                indices,
+                values,
+            } => {
+                let (format, values) = structured_vector_values(values);
+                json!({
+                    "kind": "vector",
+                    "storage": "sparse",
+                    "format": format,
+                    "num_dimensions": num_dimensions,
+                    "indices": indices,
+                    "values": values
+                })
+            }
+        }
+    }
+
+    fn structured_vector_values(values: &VectorValues) -> (&'static str, Value) {
+        match values {
+            VectorValues::Float32(values) => (
+                "float32",
+                Value::Array(
+                    values
+                        .iter()
+                        .map(|value| json_number_or_string(f64::from(*value)))
+                        .collect(),
+                ),
+            ),
+            VectorValues::Float64(values) => (
+                "float64",
+                Value::Array(
+                    values
+                        .iter()
+                        .map(|value| json_number_or_string(*value))
+                        .collect(),
+                ),
+            ),
+            VectorValues::Int8(values) => (
+                "int8",
+                Value::Array(values.iter().map(|value| json!(*value)).collect()),
+            ),
+            VectorValues::Binary(values) => (
+                "binary",
+                Value::Array(values.iter().map(|value| json!(*value)).collect()),
+            ),
+        }
+    }
+
+    fn structured_unsupported(kind: &str) -> Value {
+        json!({
+            "kind": "unsupported",
+            "oracle_value_kind": kind,
+            "value": Value::Null,
+            "warning": "Oracle value kind is not structurally serialized yet"
+        })
+    }
+
+    fn json_number_or_string(value: f64) -> Value {
+        Number::from_f64(value).map_or_else(|| Value::String(value.to_string()), Value::Number)
+    }
+
+    fn hex_encode(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        out
     }
 
     fn implicit_resultsets_to_row<'a>(
@@ -1388,7 +1677,11 @@ mod driver {
     mod lob_tests {
         use super::*;
         use crate::serialize::serialize_cell;
-        use oracledb::protocol::thin::{CS_FORM_IMPLICIT, ORA_TYPE_NUM_RAW};
+        use oracledb::protocol::{
+            oson::OsonValue,
+            thin::{CS_FORM_IMPLICIT, ORA_TYPE_NUM_RAW},
+            vector::{Vector, VectorValues},
+        };
         use serde_json::json;
 
         fn lob(ora_type_num: u8, size: u64) -> LobValue {
@@ -1450,6 +1743,185 @@ mod driver {
             assert!(matches!(&ordered[1], BindValue::Number(value) if value == "2"));
             assert!(matches!(&ordered[2], BindValue::Text(value) if value == "three"));
             assert!(matches!(&ordered[3], BindValue::Text(value) if value == "tail"));
+        }
+
+        #[test]
+        fn structured_array_round_trips_nested_values_without_lossy_text() {
+            let value = structured_array(&[
+                None,
+                Some(QueryValue::number_from_text(
+                    "99999999999999999999999999999999999999",
+                    true,
+                )),
+                Some(QueryValue::TimestampTz {
+                    year: 2026,
+                    month: 6,
+                    day: 29,
+                    hour: 12,
+                    minute: 34,
+                    second: 56,
+                    nanosecond: 987_654_321,
+                    offset_minutes: -330,
+                }),
+                Some(QueryValue::Array(vec![Some(QueryValue::Boolean(true))])),
+            ]);
+            let expected = json!({
+                "kind": "array",
+                "items": [
+                    null,
+                    {
+                        "kind": "number",
+                        "value": "99999999999999999999999999999999999999"
+                    },
+                    {
+                        "kind": "timestamp_tz",
+                        "value": "2026-06-29 12:34:56.987654321 -05:30",
+                        "year": 2026,
+                        "month": 6,
+                        "day": 29,
+                        "hour": 12,
+                        "minute": 34,
+                        "second": 56,
+                        "nanosecond": 987654321,
+                        "offset_minutes": -330
+                    },
+                    {
+                        "kind": "array",
+                        "items": [{ "kind": "boolean", "value": true }]
+                    }
+                ]
+            });
+
+            assert_eq!(value, expected);
+            let encoded = serde_json::to_string(&value).expect("structured array serializes");
+            let decoded: serde_json::Value =
+                serde_json::from_str(&encoded).expect("structured array parses");
+            assert_eq!(decoded, expected);
+            assert_eq!(
+                structured_array(&[]),
+                json!({ "kind": "array", "items": [] })
+            );
+        }
+
+        #[test]
+        fn structured_oson_keeps_non_json_scalars_typed() {
+            let value = structured_oson_value(&OsonValue::Object(vec![
+                (
+                    "wide_number".to_owned(),
+                    OsonValue::Number("1.234567890123456789".to_owned()),
+                ),
+                ("raw".to_owned(), OsonValue::Raw(vec![0xde, 0xad])),
+                (
+                    "when".to_owned(),
+                    OsonValue::DateTime {
+                        year: 2026,
+                        month: 6,
+                        day: 30,
+                        hour: 21,
+                        minute: 24,
+                        second: 5,
+                        nanosecond: 123_456_789,
+                    },
+                ),
+                (
+                    "embedded_vector".to_owned(),
+                    OsonValue::Vector(Vector::Dense(VectorValues::Int8(vec![-1, 0, 127]))),
+                ),
+            ]));
+
+            assert_eq!(
+                value,
+                json!({
+                    "kind": "object",
+                    "entries": [
+                        {
+                            "key": "wide_number",
+                            "value": {
+                                "kind": "number",
+                                "value": "1.234567890123456789"
+                            }
+                        },
+                        {
+                            "key": "raw",
+                            "value": {
+                                "kind": "raw",
+                                "encoding": "hex",
+                                "data": "dead",
+                                "byte_length": 2
+                            }
+                        },
+                        {
+                            "key": "when",
+                            "value": {
+                                "kind": "datetime",
+                                "value": "2026-06-30 21:24:05.123456789",
+                                "year": 2026,
+                                "month": 6,
+                                "day": 30,
+                                "hour": 21,
+                                "minute": 24,
+                                "second": 5,
+                                "nanosecond": 123456789
+                            }
+                        },
+                        {
+                            "key": "embedded_vector",
+                            "value": {
+                                "kind": "vector",
+                                "storage": "dense",
+                                "format": "int8",
+                                "values": [-1, 0, 127]
+                            }
+                        }
+                    ]
+                })
+            );
+        }
+
+        #[test]
+        fn structured_vector_covers_dense_sparse_and_binary_formats() {
+            assert_eq!(
+                structured_vector(&Vector::Dense(VectorValues::Float32(vec![1.25, -2.5]))),
+                json!({
+                    "kind": "vector",
+                    "storage": "dense",
+                    "format": "float32",
+                    "values": [1.25, -2.5]
+                })
+            );
+            assert_eq!(
+                structured_vector(&Vector::Dense(VectorValues::Float64(vec![3.5, 4.25]))),
+                json!({
+                    "kind": "vector",
+                    "storage": "dense",
+                    "format": "float64",
+                    "values": [3.5, 4.25]
+                })
+            );
+            assert_eq!(
+                structured_vector(&Vector::Dense(VectorValues::Binary(vec![0xaa, 0x55]))),
+                json!({
+                    "kind": "vector",
+                    "storage": "dense",
+                    "format": "binary",
+                    "values": [170, 85]
+                })
+            );
+            assert_eq!(
+                structured_vector(&Vector::Sparse {
+                    num_dimensions: 4,
+                    indices: vec![0, 3],
+                    values: VectorValues::Float64(vec![1.0, -1.5]),
+                }),
+                json!({
+                    "kind": "vector",
+                    "storage": "sparse",
+                    "format": "float64",
+                    "num_dimensions": 4,
+                    "indices": [0, 3],
+                    "values": [1.0, -1.5]
+                })
+            );
         }
 
         #[cfg(feature = "live-xe")]

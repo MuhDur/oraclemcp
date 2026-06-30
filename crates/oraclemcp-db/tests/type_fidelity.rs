@@ -76,6 +76,60 @@ fn float_types() {
 }
 
 #[test]
+fn structured_carrier_round_trips_array_json_vector_tstz_shape() {
+    let structured = json!({
+        "kind": "array",
+        "items": [
+            {
+                "kind": "json",
+                "value": {
+                    "kind": "object",
+                    "entries": [
+                        {
+                            "key": "wide_number",
+                            "value": {
+                                "kind": "number",
+                                "value": "99999999999999999999999999999999999999"
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "kind": "vector",
+                "storage": "sparse",
+                "format": "float64",
+                "num_dimensions": 4,
+                "indices": [0, 3],
+                "values": [1.0, -1.5]
+            },
+            {
+                "kind": "timestamp_tz",
+                "value": "2026-06-29 12:34:56.987654321 -05:30",
+                "year": 2026,
+                "month": 6,
+                "day": 29,
+                "hour": 12,
+                "minute": 34,
+                "second": 56,
+                "nanosecond": 987654321,
+                "offset_minutes": -330
+            }
+        ]
+    });
+
+    let rendered = serialize_cell(
+        &OracleCell::structured("TABLE OF ANYDATA", structured.clone()),
+        &SerializeOptions::default(),
+    );
+    assert_eq!(rendered, structured);
+
+    let encoded = serde_json::to_string(&rendered).expect("structured cell serializes");
+    let decoded: Value = serde_json::from_str(&encoded).expect("structured cell parses");
+    assert_eq!(decoded, structured);
+}
+
+#[test]
 fn character_types_are_strings() {
     assert_eq!(ser("VARCHAR2(50)", "hello"), json!("hello"));
     assert_eq!(ser("CHAR(3)", "abc"), json!("abc"));
