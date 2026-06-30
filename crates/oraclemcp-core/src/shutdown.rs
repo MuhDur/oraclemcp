@@ -6,8 +6,9 @@
 //! (only transient connection errors are). On SIGTERM: flip `/readyz` to
 //! draining, stop accepting work, roll back in-flight transactions, revoke
 //! leases, drain the pool, flush exporters, then exit. Crash safety is
-//! `panic = "abort"` (workspace `[profile.release]`) + a panic hook that logs
-//! through `tracing` first.
+//! `panic = "unwind"` (workspace `[profile.release]`) plus lane-level panic
+//! containment for DB work; the process-wide panic hook logs through `tracing`
+//! before the unwind continues.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -94,12 +95,12 @@ impl ShutdownCoordinator {
     }
 }
 
-/// Install a panic hook that logs through `tracing` before the `panic = "abort"`
-/// runtime aborts the process (crash safety, §5.7). Call once at startup.
+/// Install a panic hook that logs through `tracing` before unwind/containment
+/// proceeds (crash safety, §5.7). Call once at startup.
 pub fn install_panic_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        tracing::error!(panic = %info, "oraclemcp panic — aborting");
+        tracing::error!(panic = %info, "oraclemcp panic observed");
         prev(info);
     }));
 }

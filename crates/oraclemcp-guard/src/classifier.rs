@@ -766,12 +766,11 @@ fn user_defined_calls(sql: &str) -> Vec<ObjectRef> {
             }
             // `is_qualified` was established above with `matches!(toks[i - 3],
             // Token::Word(_))`, so the schema word is present in correct logic.
-            // Fail closed rather than `unreachable!()`: under `panic = "abort"` a
-            // reached panic would crash the process instead of refusing. If the
-            // token state ever diverges, fall back to a schema-less qualified
-            // call — the routine is STILL pushed (over-detection only adds
-            // Guarded), so an unexpected state refuses by flagging rather than
-            // aborting and never fail-opens to Safe.
+            // Fail closed rather than `unreachable!()`: if the token state ever
+            // diverges, fall back to a schema-less qualified call. The routine
+            // is STILL pushed (over-detection only adds Guarded), so an
+            // unexpected state refuses by flagging rather than unwinding out of
+            // classification or fail-opening to Safe.
             let (schema, fname) = if is_qualified {
                 match toks[i - 3] {
                     Token::Word(s) => (Some(s.value.clone()), name.value.clone()),
@@ -2314,10 +2313,10 @@ mod tests {
         // one that extracts the schema word from `toks[i - 3]`) must keep
         // surfacing the call as a Guarded routine candidate. The schema-word
         // extraction was hardened from `unreachable!()` to a fail-closed
-        // fallback (under `panic = "abort"` a reached panic would crash rather
-        // than refuse); the fallback still PUSHES the call, so an unexpected
-        // token state flags Guarded rather than fail-opening to Safe. Default
-        // oracle (Unknown purity) ⇒ a qualified UDF call is Guarded.
+        // fallback; the fallback still PUSHES the call, so an unexpected token
+        // state flags Guarded rather than unwinding out of classification or
+        // fail-opening to Safe. Default oracle (Unknown purity) ⇒ a qualified
+        // UDF call is Guarded.
         let d = classify("SELECT billing.weird_udf(x) FROM dual");
         assert_eq!(d.danger, DangerLevel::Guarded);
         assert!(

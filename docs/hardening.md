@@ -128,8 +128,9 @@ vulnerability-reporting policy and supported versions are in the repo-root
       [`operations.md` §1](operations.md#1-the-pinned-nightly-toolchain-is-build-time-only),
       and [`TOOLCHAIN.md`](TOOLCHAIN.md) for the re-pin runbook.
 - [ ] Every crate is `#![forbid(unsafe_code)]` and the workspace builds with
-      `panic = "abort"`; the fail-closed classifier carries a differential
-      cargo-fuzz target. Keep `cargo deny check` green on the pinned toolchain.
+      `panic = "unwind"` so lane-level panic containment can quarantine failed
+      DB lanes; the fail-closed classifier carries a differential cargo-fuzz
+      target. Keep `cargo deny check` green on the pinned toolchain.
 
 ---
 

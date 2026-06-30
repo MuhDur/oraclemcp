@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use asupersync::Cx;
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use oraclemcp::dispatch::{OracleDispatcher, StatelessReadStrategy};
+use oraclemcp::dispatch::{McpExposurePolicy, OracleDispatcher, StatelessReadStrategy};
 use oraclemcp::registry;
 use oraclemcp_audit::{
     AuditSink, Auditor, FileAuditSink, ShippingAuditSink, ShippingForwarder, SigningKey,
@@ -40,11 +40,13 @@ use oraclemcp_audit::{
 };
 use oraclemcp_auth::{Hs256Verifier, ResourceServerConfig, SecretError, resolve_secret};
 use oraclemcp_config::{AuditConfig, HttpConfig, HttpTlsConfig, OracleMcpConfig};
+use oraclemcp_core::http::SinglePrincipalGuard;
 use oraclemcp_core::{
-    CapabilitiesReport, CustomToolCatalog, CustomToolDef, DoctorContext, FeatureTiers,
-    HttpTransportConfig, MCP_PATH, OAuthEnforcement, ObservabilityState, OracleMcpServer,
-    PROTECTED_RESOURCE_METADATA_PATH, ShutdownCoordinator, SiemFormat, SiemHttpForwarder,
-    StdioAuthPolicy, TlsMaterial, TlsServerConfig, build_server_config, load_tools,
+    CapabilitiesReport, CustomToolCatalog, CustomToolDef, DoctorContext, ExportRegistry,
+    FeatureTiers, HttpTransportConfig, LaneContext, LaneDispatchFactory, LaneRuntime, MCP_PATH,
+    OAuthEnforcement, ObservabilityState, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH,
+    ShutdownCoordinator, SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy,
+    TlsMaterial, TlsServerConfig, ToolDispatch, build_server_config, load_tools,
     load_tools_for_profile, parse_tools_file, requires_mtls, run_doctor, serve_http_until,
     serve_https_until, sign,
 };
@@ -985,13 +987,112 @@ impl ShippingForwarder for TeeForwarder {
     }
 }
 
+#[derive(Clone)]
+struct DispatcherWiring {
+    active_profile: Option<String>,
+    level: SessionLevelState,
+    custom_catalog: CustomToolCatalog,
+    exposure: McpExposurePolicy,
+    auditor: Option<Arc<Auditor>>,
+    exports: Arc<ExportRegistry>,
+    notifications: Arc<oraclemcp_core::NotificationHub>,
+}
+
+fn build_oracle_dispatcher(
+    conn: Box<dyn OracleConnection>,
+    stateless_conn: Option<Box<dyn OracleConnection>>,
+    wiring: &DispatcherWiring,
+) -> OracleDispatcher {
+    let mut dispatcher = OracleDispatcher::new_switchable_with_custom_tools_and_stateless(
+        conn,
+        wiring.active_profile.clone(),
+        wiring.level.clone(),
+        Arc::new(connect_profile),
+        StatelessReadStrategy::new(stateless_conn, Some(Arc::new(connect_profile_stateless))),
+        wiring.custom_catalog.clone(),
+        Some(Arc::new(load_custom_catalog_for_profile)),
+    )
+    .with_mcp_exposure(wiring.exposure.clone())
+    .with_exports(Arc::clone(&wiring.exports))
+    .with_notifications(Arc::clone(&wiring.notifications));
+    if let Some(auditor) = &wiring.auditor {
+        dispatcher = dispatcher.with_auditor(Arc::clone(auditor));
+    }
+    dispatcher
+}
+
+async fn open_lane_runtime_connections(
+    cx: &Cx,
+    active_profile: Option<&str>,
+) -> Result<RuntimeConnections, DbError> {
+    match active_profile {
+        Some(profile) => {
+            let Some(resolved) = resolve_profile_options(Some(profile))? else {
+                return Err(DbError::UnsupportedAuth(format!(
+                    "connection profile `{profile}` not found"
+                )));
+            };
+            match try_open_runtime_connections(cx, resolved).await {
+                Ok(connections) => Ok(connections),
+                Err(e) => {
+                    tracing::warn!(error = %e, "no live connection for lane; live tools will return a structured error envelope");
+                    Ok(RuntimeConnections {
+                        session: Box::new(stub::StubConnection::new(e)),
+                        stateless: None,
+                    })
+                }
+            }
+        }
+        None => {
+            let session = match try_open_connection(cx, OracleConnectOptions::default()).await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    tracing::warn!(error = %e, "no live connection for lane; live tools will return a structured error envelope");
+                    Box::new(stub::StubConnection::new(e)) as Box<dyn OracleConnection>
+                }
+            };
+            Ok(RuntimeConnections {
+                session,
+                stateless: None,
+            })
+        }
+    }
+}
+
+fn stateful_lane_factory(wiring: DispatcherWiring) -> Arc<LaneDispatchFactory> {
+    Arc::new(move |cx: &Cx, _lane_context: &LaneContext| {
+        let wiring = wiring.clone();
+        Box::pin(async move {
+            let connections = open_lane_runtime_connections(cx, wiring.active_profile.as_deref())
+                .await
+                .map_err(DbError::into_envelope)?;
+            let dispatcher =
+                build_oracle_dispatcher(connections.session, connections.stateless, &wiring);
+            Ok(Arc::new(dispatcher) as Arc<dyn ToolDispatch>)
+        })
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServerTransportMode {
+    Stdio,
+    HttpStateless,
+    HttpStateful,
+}
+
+impl ServerTransportMode {
+    fn is_http(self) -> bool {
+        !matches!(self, Self::Stdio)
+    }
+}
+
 /// Build the server from the registry + capabilities + dispatcher over `conn`.
 fn build_server(
     conn: Box<dyn OracleConnection>,
     stateless_conn: Option<Box<dyn OracleConnection>>,
     active_profile: Option<String>,
     level: SessionLevelState,
-    http: bool,
+    transport: ServerTransportMode,
     custom_catalog: CustomToolCatalog,
     auditor: Option<Arc<Auditor>>,
 ) -> OracleMcpServer {
@@ -1005,17 +1106,8 @@ fn build_server(
         FeatureTiers {
             live_db: LIVE_DB,
             engine: cfg!(feature = "plsql-intelligence"),
-            http_transport: http,
+            http_transport: transport.is_http(),
         },
-    );
-    let mut dispatcher = OracleDispatcher::new_switchable_with_custom_tools_and_stateless(
-        conn,
-        active_profile,
-        level,
-        Arc::new(connect_profile),
-        StatelessReadStrategy::new(stateless_conn, Some(Arc::new(connect_profile_stateless))),
-        custom_catalog,
-        Some(Arc::new(load_custom_catalog_for_profile)),
     );
     // E5 connection-scope isolation: per-profile opt-out — every profile is
     // reachable by the served surface (switch/list/search/complete) unless it
@@ -1029,21 +1121,44 @@ fn build_server(
         }
         Err(_) => oraclemcp::dispatch::McpExposurePolicy::AllowList(HashSet::new()),
     };
-    dispatcher = dispatcher.with_mcp_exposure(exposure);
-    if let Some(auditor) = auditor {
-        dispatcher = dispatcher.with_auditor(auditor);
-    }
     // E3/E3b: the dispatcher (which mints exports for oversized oracle_query
     // results) and the server (which serves them over resources/read) share the
     // SAME export registry.
-    let exports = Arc::new(oraclemcp_core::ExportRegistry::new());
-    dispatcher = dispatcher.with_exports(Arc::clone(&exports));
+    let exports = Arc::new(ExportRegistry::new());
     // E6: the dispatcher (which enqueues tools/list_changed on a profile switch)
     // and the server (which brackets long tool calls with progress and flushes
     // the queue) share the SAME notification hub.
     let notifications = Arc::new(oraclemcp_core::NotificationHub::new());
-    dispatcher = dispatcher.with_notifications(Arc::clone(&notifications));
-    OracleMcpServer::with_exports(version, registry, caps, Arc::new(dispatcher), exports)
+    let wiring = DispatcherWiring {
+        active_profile,
+        level,
+        custom_catalog,
+        exposure,
+        auditor,
+        exports: Arc::clone(&exports),
+        notifications: Arc::clone(&notifications),
+    };
+    let dispatcher: Arc<dyn ToolDispatch> = if transport.is_http() {
+        if matches!(transport, ServerTransportMode::HttpStateful) {
+            Arc::new(StatefulLaneDispatch::with_dispatch_factory(
+                stateful_lane_factory(wiring.clone()),
+                wiring.auditor.clone(),
+            ))
+        } else {
+            let dispatcher = build_oracle_dispatcher(conn, stateless_conn, &wiring);
+            let lane: Arc<dyn ToolDispatch> =
+                Arc::new(LaneRuntime::spawn_default_with_panic_auditor(
+                    "served-http-stateless",
+                    Arc::new(dispatcher),
+                    wiring.auditor.clone(),
+                ));
+            lane
+        }
+    } else {
+        let dispatcher = build_oracle_dispatcher(conn, stateless_conn, &wiring);
+        Arc::new(dispatcher)
+    };
+    OracleMcpServer::with_exports(version, registry, caps, dispatcher, exports)
         .with_notifications(notifications)
 }
 
@@ -1219,6 +1334,7 @@ fn http_transport_config_from_merged(
             resource_metadata,
             oauth,
             session_store: None,
+            single_principal_guard: Some(SinglePrincipalGuard::new()),
             // Observability is wired in run_serve (HealthState/Metrics/probe).
             observability: ObservabilityState::default(),
         },
@@ -1387,7 +1503,7 @@ fn run_serve(
                 connections.stateless,
                 active_profile,
                 level,
-                false,
+                ServerTransportMode::Stdio,
                 custom_catalog,
                 auditor,
             );
@@ -1402,7 +1518,7 @@ fn run_serve(
         }
         // ── Streamable HTTP transport (--listen) ───────────────────────────
         Some(addr) => {
-            let resolved_http = match resolve_http_transport_config(&http, &level) {
+            let mut resolved_http = match resolve_http_transport_config(&http, &level) {
                 Ok(cfg) => cfg,
                 Err((code, message)) => {
                     emit_status_error(robot_json, code, &message);
@@ -1455,12 +1571,20 @@ fn run_serve(
                      TLS-terminating authenticated proxy, or use stdio."
                 );
             }
+            let http_stateful = resolved_http.transport.stateful;
+            if http_stateful {
+                resolved_http.transport.single_principal_guard = None;
+            }
             let server = build_server(
                 connections.session,
                 connections.stateless,
                 active_profile,
                 level,
-                true,
+                if http_stateful {
+                    ServerTransportMode::HttpStateful
+                } else {
+                    ServerTransportMode::HttpStateless
+                },
                 custom_catalog,
                 auditor,
             );
@@ -2582,6 +2706,7 @@ mod tests {
         );
         assert!(cfg.transport.json_response);
         assert!(cfg.transport.stateful);
+        assert!(cfg.transport.single_principal_guard.is_some());
         assert!(cfg.tls.is_none());
     }
 
@@ -3131,7 +3256,7 @@ mod tests {
             None,
             None,
             default_read_only_level(),
-            false,
+            ServerTransportMode::Stdio,
             CustomToolCatalog::default(),
             None,
         );

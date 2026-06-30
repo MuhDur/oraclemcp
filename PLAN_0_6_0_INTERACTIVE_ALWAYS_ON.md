@@ -1783,7 +1783,7 @@ design-gap directives are captured here (like §4-AS/§4-SK) to fold at beading.
   real **Oracle sessions, fds, systemd `TasksMax`, per-thread stack memory, and tail latency**;
   the shipped defaults must cite that measurement. **Bead → WP-N (Phase-0) / DoD.**
 - **CX-I7 (Phase-0 panic-isolation prototype — release-blocker).** D12 reverses `panic=abort`
-  (Cargo.toml still aborts today). **Directive:** prototype `catch_unwind` + Drop + quarantine +
+  to `panic=unwind`. **Directive:** prototype `catch_unwind` + Drop + quarantine +
   audit around the lane `block_on` loop and **prove** containment (a lane panic doesn't abort
   siblings; the conn is dropped/quarantined; `unknown_discarded` is audited) **before** relying on
   it. **Bead → WP-N (Phase-0) / DoD.**
@@ -1837,8 +1837,8 @@ model:** the fail-closed **guard already ships (0.4.1)**, and plsql-intelligence
 **designed seam** into it.*
 
 ### 4-GT.1 Gap 1 — oraclemcp ground-truth (refreshed against the moved repo)
-- **Version = 0.4.1** (all crates); **`oracledb = "=0.5.1"` already pinned**; `panic = "abort"`
-  today (D12 changes it). So **§0/§1 "0.4.0 → upgrade to 0.5.1" was stale** — fixed.
+- **Version = 0.4.1** (all crates); **`oracledb = "=0.5.1"` already pinned**; `panic = "unwind"`
+  is now the CX-I7 lane-containment profile. So **§0/§1 "0.4.0 → upgrade to 0.5.1" was stale** — fixed.
 - **The fail-closed core is SHIPPED** in **`crates/oraclemcp-guard`**: `classifier.rs` (104 KB),
   `levels.rs` (the `OperatingLevel` ladder + `DangerLevel`), `purity.rs` (3-valued purity),
   `policy.rs` (schema policy), `stepup.rs` (confirm-token step-up), `token.rs` (`AllowOnceStore`

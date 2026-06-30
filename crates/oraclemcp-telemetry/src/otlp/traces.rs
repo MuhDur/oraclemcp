@@ -571,7 +571,8 @@ mod tests {
     fn non_ascii_traceparent_is_rejected_not_panicking() {
         // A multi-byte UTF-8 char makes the byte length equal the expected hex
         // length while landing a byte-index slice off a char boundary. The parse
-        // must return None, never panic (panic=abort would be a DoS).
+        // must return None, never panic (a traceparent parse failure must not
+        // unwind out of telemetry).
         // "é" is 2 bytes (0xC3 0xA9): a 16-char trace-id field built from 8 of
         // them is 16 bytes long — the old length-only guard would slice into it.
         let trace_id = "é".repeat(8); // 16 bytes, 8 chars

@@ -14,6 +14,7 @@ than treating it as permanent.
 | [0004](0004-governed-operating-level-ladder.md) | Governed operating-level ladder with confirmation-gated escalation | Accepted |
 | [0005](0005-awr-diagnostics-license-gating.md) | AWR / Diagnostics-Pack license gating (never invoke a paid pack unlicensed) | Accepted |
 | [0006](0006-oraclemcp-db-canonical-foundation.md) | `oraclemcp-db` is the canonical shared driver foundation; converge `plsql-mcp` onto it | Accepted |
+| [0007](0007-phase0-lane-bridge.md) | Phase-0 lane bridge for non-Send Oracle sessions | Accepted |
 
 These records describe *why*, not *how*. For the runtime behavior they govern,
 see the [`README.md`](../../README.md) safety model and

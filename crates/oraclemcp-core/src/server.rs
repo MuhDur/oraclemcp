@@ -11,7 +11,6 @@ use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 use asupersync::Cx;
-use asupersync::runtime::{Runtime, RuntimeBuilder};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use serde_json::{Map, Value, json};
 
@@ -42,18 +41,18 @@ const SERVER_INSTRUCTIONS: &str = "Call oracle_capabilities first to discover to
 /// Boxed tool-dispatch future. This keeps [`ToolDispatch`] object-safe while
 /// making runtime context explicit at the server boundary.
 ///
-/// The future is intentionally NOT `Send` (B1): tool dispatch runs on ONE
-/// current-thread Asupersync runtime (`dispatch_runtime`, below) and is only
-/// ever driven by `block_on` on that thread — it is never spawned across OS
-/// threads. Dropping the `Send` bound lets the dispatcher hold an Asupersync
-/// `Mutex` guard (which is `!Send`) across the `.await` of a native-async DB
-/// round trip, which is the whole point of the async migration.
+/// The future is intentionally NOT `Send` (B1): the DB-backed dispatcher can
+/// hold an Asupersync `Mutex` guard (which is `!Send`) across a native-async DB
+/// round trip. Served stateful dispatch is marshaled through [`crate::lane`] so
+/// the real dispatcher is polled on its owning lane thread.
 pub type DispatchFuture<'a> = Pin<Box<dyn Future<Output = Result<Value, ErrorEnvelope>> + 'a>>;
 
 /// Per-request authorization context supplied by transports.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DispatchContext<'a> {
     scope_grant: Option<&'a crate::http::ScopeGrant>,
+    http_session_id: Option<&'a str>,
+    principal_key: Option<&'a str>,
 }
 
 impl<'a> DispatchContext<'a> {
@@ -62,13 +61,72 @@ impl<'a> DispatchContext<'a> {
     pub fn with_scope_grant(scope_grant: &'a crate::http::ScopeGrant) -> Self {
         Self {
             scope_grant: Some(scope_grant),
+            ..Self::default()
         }
+    }
+
+    /// Attach the Streamable HTTP session id that scoped this request.
+    #[must_use]
+    pub fn with_http_session_id(mut self, session_id: &'a str) -> Self {
+        self.http_session_id = Some(session_id);
+        self
+    }
+
+    /// Attach a server-derived, redacted principal key for this request.
+    #[must_use]
+    pub fn with_principal_key(mut self, principal_key: &'a str) -> Self {
+        self.principal_key = Some(principal_key);
+        self
     }
 
     /// The validated OAuth scopes for this request, if any.
     #[must_use]
     pub fn scope_grant(self) -> Option<&'a crate::http::ScopeGrant> {
         self.scope_grant
+    }
+
+    /// The Streamable HTTP session id for this request, if any.
+    #[must_use]
+    pub fn http_session_id(self) -> Option<&'a str> {
+        self.http_session_id
+    }
+
+    /// The validated, redacted principal key for this request, if any.
+    #[must_use]
+    pub fn principal_key(self) -> Option<&'a str> {
+        self.principal_key
+    }
+
+    /// Clone request-local borrowed authorization into a mailbox-safe context.
+    #[must_use]
+    pub fn to_owned_context(self) -> OwnedDispatchContext {
+        OwnedDispatchContext {
+            scope_grant: self.scope_grant.cloned(),
+            http_session_id: self.http_session_id.map(str::to_owned),
+            principal_key: self.principal_key.map(str::to_owned),
+        }
+    }
+}
+
+/// Owned transport authorization context used when a dispatch crosses a lane
+/// mailbox. The stored values are already validated and redacted where needed;
+/// no raw bearer token or unverified identity material is carried here.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OwnedDispatchContext {
+    scope_grant: Option<crate::http::ScopeGrant>,
+    http_session_id: Option<String>,
+    principal_key: Option<String>,
+}
+
+impl OwnedDispatchContext {
+    /// Borrow this owned context for the existing dispatcher contract.
+    #[must_use]
+    pub fn as_dispatch_context(&self) -> DispatchContext<'_> {
+        DispatchContext {
+            scope_grant: self.scope_grant.as_ref(),
+            http_session_id: self.http_session_id.as_deref(),
+            principal_key: self.principal_key.as_deref(),
+        }
     }
 }
 
@@ -95,7 +153,6 @@ pub struct OracleMcpServer {
     tools_list_result_json: Arc<OnceLock<Value>>,
     capabilities: Arc<CapabilitiesReport>,
     dispatcher: Arc<dyn ToolDispatch>,
-    dispatch_runtime: Arc<Runtime>,
     /// In-process store of materialized large-result exports (E3). Shared with
     /// the dispatcher so `oracle_query`'s oversized arm (E3b) can register an
     /// export the server then serves over `resources/read`.
@@ -142,15 +199,6 @@ impl OracleMcpServer {
         dispatcher: Arc<dyn ToolDispatch>,
         exports: Arc<crate::export::ExportRegistry>,
     ) -> Self {
-        // The per-call DB path runs the async `oracledb` driver on this runtime,
-        // so it needs a reactor to drive socket I/O — without one the first real
-        // round trip hangs (release-gre.16).
-        let dispatch_reactor = asupersync::runtime::reactor::create_reactor()
-            .expect("Asupersync native reactor builds for MCP dispatch");
-        let dispatch_runtime = RuntimeBuilder::current_thread()
-            .with_reactor(dispatch_reactor)
-            .build()
-            .expect("Asupersync current-thread runtime builds for MCP dispatch");
         let registry = Arc::new(registry);
         OracleMcpServer {
             version: version.into(),
@@ -159,7 +207,6 @@ impl OracleMcpServer {
             tools_list_result_json: Arc::new(OnceLock::new()),
             capabilities: Arc::new(capabilities),
             dispatcher,
-            dispatch_runtime: Arc::new(dispatch_runtime),
             exports,
             subscriptions: Arc::new(crate::subscriptions::SubscriptionHub::unsupported()),
             notifications: Arc::new(crate::notifications::NotificationHub::new()),
@@ -411,15 +458,14 @@ impl OracleMcpServer {
         self.run_tool_json_with_cx(cx, name, args).await
     }
 
-    /// Run a tool through the server-owned Asupersync runtime. Native blocking
-    /// transports use this to keep request handling synchronous without Tokio.
+    /// Run a tool through the lane bridge. Native blocking transports use this
+    /// to keep request handling synchronous without owning dispatcher state.
     #[must_use]
     pub fn run_tool_blocking(&self, name: String, args: Value) -> Value {
         self.run_tool_blocking_with_context(DispatchContext::default(), name, args)
     }
 
-    /// Run a tool through the server-owned Asupersync runtime with transport
-    /// authorization context.
+    /// Run a tool through the lane bridge with transport authorization context.
     #[must_use]
     pub fn run_tool_blocking_with_context(
         &self,
@@ -427,7 +473,7 @@ impl OracleMcpServer {
         name: String,
         args: Value,
     ) -> Value {
-        self.dispatch_runtime.block_on(async {
+        crate::lane::block_on_lane_bridge(async {
             let Some(cx) = Cx::current() else {
                 let envelope = ErrorEnvelope::new(
                     ErrorClass::RuntimeStateRequired,
@@ -1651,10 +1697,7 @@ mod tests {
     }
 
     fn run_tool_json(server: &OracleMcpServer, name: &str, args: Value) -> Value {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .expect("test runtime builds");
-        runtime.block_on(async {
+        crate::lane::block_on_lane_bridge(async {
             let cx = Cx::current().expect("block_on installs a request Cx");
             server.run_tool_with_cx(&cx, name.to_owned(), args).await
         })
@@ -1873,10 +1916,7 @@ mod tests {
     #[test]
     fn run_tool_with_cx_dispatches_without_runtime_bridge() {
         let s = server();
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .expect("test runtime builds");
-        let ok = runtime.block_on(async {
+        let ok = crate::lane::block_on_lane_bridge(async {
             let cx = Cx::current().expect("block_on installs a request Cx");
             s.run_tool_with_cx(&cx, "oracle_query".to_owned(), serde_json::json!({}))
                 .await
@@ -1917,11 +1957,7 @@ mod tests {
                 calls: calls.clone(),
             }),
         );
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .expect("test runtime builds");
-
-        let response = runtime.block_on(async {
+        let response = crate::lane::block_on_lane_bridge(async {
             let cx = Cx::current().expect("block_on installs a request Cx");
             cx.set_cancel_requested(true);
             s.run_tool_with_cx(&cx, "oracle_query".to_owned(), serde_json::json!({}))

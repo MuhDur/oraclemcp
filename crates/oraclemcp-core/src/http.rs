@@ -7,7 +7,8 @@
 //! validation. It deliberately does not depend on a web framework or ambient
 //! async runtime.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::fmt::Write as FmtWrite;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +23,7 @@ use oraclemcp_auth::{
 use oraclemcp_telemetry::{HealthState, Metrics};
 use rustls::{ServerConnection, StreamOwned};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::server::{DispatchContext, OracleMcpServer};
 use crate::tls::TlsServerConfig;
@@ -98,6 +100,10 @@ pub struct HttpTransportConfig {
     /// Issued stateful Streamable HTTP session ids. Listener wrappers install a
     /// store automatically when `stateful` is true.
     pub session_store: Option<Arc<HttpSessionStore>>,
+    /// N8 interim guard: until per-principal lanes exist, a served HTTP process
+    /// may bind to one authenticated principal only. A second principal is
+    /// refused before it can touch the shared dispatcher/session state.
+    pub single_principal_guard: Option<SinglePrincipalGuard>,
     /// Health/metrics observability endpoints (D1; off by default — `None`
     /// fields make the corresponding route return 404 / not be advertised).
     pub observability: ObservabilityState,
@@ -115,6 +121,36 @@ pub struct OAuthEnforcement {
     pub metadata_url: String,
 }
 
+/// Interim single-principal admission guard for the pre-lane HTTP server.
+///
+/// The guard stores only a derived, redacted key. It never stores a bearer token
+/// or raw JWT claim value.
+#[derive(Clone, Debug, Default)]
+pub struct SinglePrincipalGuard {
+    active_principal_key: Arc<Mutex<Option<String>>>,
+}
+
+impl SinglePrincipalGuard {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn admit(&self, candidate_key: &str) -> Result<(), ()> {
+        let Ok(mut active) = self.active_principal_key.lock() else {
+            return Err(());
+        };
+        match active.as_deref() {
+            None => {
+                *active = Some(candidate_key.to_owned());
+                Ok(())
+            }
+            Some(current) if current == candidate_key => Ok(()),
+            Some(_) => Err(()),
+        }
+    }
+}
+
 impl std::fmt::Debug for OAuthEnforcement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The verifier may hold a secret; never print it.
@@ -129,22 +165,27 @@ impl std::fmt::Debug for OAuthEnforcement {
 /// Shared stateful Streamable HTTP session-id registry.
 #[derive(Debug, Default)]
 pub struct HttpSessionStore {
-    ids: Mutex<HashSet<String>>,
+    owners: Mutex<HashMap<String, String>>,
 }
 
 impl HttpSessionStore {
-    fn insert(&self, id: String) {
-        if let Ok(mut ids) = self.ids.lock() {
-            ids.insert(id);
+    fn insert(&self, id: String, principal_key: String) {
+        if let Ok(mut owners) = self.owners.lock() {
+            owners.insert(id, principal_key);
         }
     }
 
-    fn contains(&self, id: &str) -> bool {
-        self.ids.lock().is_ok_and(|ids| ids.contains(id))
+    fn principal_for(&self, id: &str) -> Option<String> {
+        self.owners
+            .lock()
+            .ok()
+            .and_then(|owners| owners.get(id).cloned())
     }
 
     fn remove(&self, id: &str) -> bool {
-        self.ids.lock().is_ok_and(|mut ids| ids.remove(id))
+        self.owners
+            .lock()
+            .is_ok_and(|mut owners| owners.remove(id).is_some())
     }
 }
 
@@ -155,6 +196,7 @@ mod tests {
     use crate::server::{DispatchContext, DispatchFuture, ToolDispatch};
     use crate::tools::ToolRegistry;
     use asupersync::Cx;
+    use oraclemcp_error::{ErrorClass, ErrorEnvelope};
     use oraclemcp_guard::OperatingLevel;
     use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -172,6 +214,24 @@ mod tests {
         }
     }
 
+    struct BusyDispatch;
+    impl ToolDispatch for BusyDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            Box::pin(async {
+                Err(
+                    ErrorEnvelope::new(ErrorClass::Busy, "test lane mailbox is full")
+                        .with_retry_after_ms(250),
+                )
+            })
+        }
+    }
+
     struct ScopeEchoDispatch;
     impl ToolDispatch for ScopeEchoDispatch {
         fn dispatch<'a>(
@@ -185,7 +245,16 @@ mod tests {
                 .scope_grant()
                 .map(|grant| grant.0.clone())
                 .unwrap_or_default();
-            Box::pin(async move { Ok(serde_json::json!({ "tool": name, "scopes": scopes })) })
+            let session_id = context.http_session_id().map(str::to_owned);
+            let principal_key = context.principal_key().map(str::to_owned);
+            Box::pin(async move {
+                Ok(serde_json::json!({
+                    "tool": name,
+                    "scopes": scopes,
+                    "session_id": session_id,
+                    "principal_key": principal_key,
+                }))
+            })
         }
     }
 
@@ -222,6 +291,20 @@ mod tests {
         )
     }
 
+    fn busy_server() -> OracleMcpServer {
+        let report = CapabilitiesReport::new(
+            "0.1.0",
+            vec![],
+            OperatingLevel::ReadOnly,
+            FeatureTiers {
+                live_db: false,
+                engine: true,
+                http_transport: true,
+            },
+        );
+        OracleMcpServer::new("0.1.0", ToolRegistry::new(), report, Arc::new(BusyDispatch))
+    }
+
     fn init_body() -> Value {
         serde_json::json!({
             "jsonrpc":"2.0",
@@ -250,6 +333,36 @@ mod tests {
 
     fn response_json(response: &HttpResponse) -> Value {
         serde_json::from_slice(&response.body).expect("response body is JSON")
+    }
+
+    #[test]
+    fn busy_tool_result_is_http_429_backpressure() {
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            ..Default::default()
+        };
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "oracle_query",
+                "arguments": { "sql": "SELECT 1 FROM dual" }
+            }
+        });
+        let response = handle_http_request(&busy_server(), &cfg, post(&body));
+
+        assert_eq!(response.status, 429);
+        assert_eq!(response.header("retry-after"), Some("1"));
+        let body = response_json(&response);
+        assert_eq!(
+            body["result"]["structuredContent"]["error_class"],
+            serde_json::json!("BUSY")
+        );
+        assert_eq!(
+            body["result"]["structuredContent"]["retry_after_ms"],
+            serde_json::json!(250)
+        );
     }
 
     // ---- D1-health: /healthz, /readyz, /metrics ----------------------------
@@ -535,9 +648,14 @@ mod tests {
         );
         let valid = handle_http_request(&scope_echo_server(), &cfg, valid);
         assert_eq!(valid.status, 200);
+        let valid_body = String::from_utf8_lossy(&valid.body);
         assert!(
-            String::from_utf8_lossy(&valid.body).contains("\"tool\":\"oracle_preview_sql\""),
+            valid_body.contains("\"tool\":\"oracle_preview_sql\""),
             "valid session id reaches dispatch"
+        );
+        assert!(
+            valid_body.contains(&format!("\"session_id\":\"{session_id}\"")),
+            "valid stateful request carries its MCP session id into dispatch: {valid_body}"
         );
 
         let delete = HttpRequest::new(
@@ -1012,7 +1130,10 @@ mod tests {
         );
         let grant = validate_oauth_request(&request, &enforcement)
             .expect("valid narrowly-scoped bearer is admitted");
-        assert_eq!(grant, ScopeGrant(vec!["oracle:read".to_owned()]));
+        assert_eq!(
+            grant.scope_grant,
+            ScopeGrant(vec!["oracle:read".to_owned()])
+        );
     }
 
     #[test]
@@ -1101,6 +1222,14 @@ mod tests {
             body["result"]["structuredContent"]["scopes"],
             serde_json::json!(["oracle:read"])
         );
+        let principal_key = body["result"]["structuredContent"]["principal_key"]
+            .as_str()
+            .expect("OAuth dispatch context carries a redacted principal key");
+        assert!(principal_key.starts_with("oauth:"));
+        assert!(
+            !principal_key.contains("oracle:read"),
+            "principal key must be derived/redacted, not a raw claim or bearer token"
+        );
     }
 }
 
@@ -1113,6 +1242,12 @@ mod tests {
 /// permanently narrows later requests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScopeGrant(pub Vec<String>);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ValidatedOAuthRequest {
+    scope_grant: ScopeGrant,
+    principal_key: String,
+}
 
 /// A parsed native HTTP request. Header names are stored lowercase.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1196,40 +1331,140 @@ fn token_error_status(e: Option<&TokenError>) -> u16 {
 fn validate_oauth_request(
     request: &HttpRequest,
     enforcement: &OAuthEnforcement,
-) -> Result<ScopeGrant, HttpResponse> {
+) -> Result<ValidatedOAuthRequest, HttpResponse> {
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let decision = match extract_bearer(request.header("authorization")) {
-        Ok(token) => enforcement
-            .config
-            .validate(token, enforcement.verifier.as_ref(), now_unix)
-            .map_err(Some),
-        Err(_) => Err(None),
+    let token = match extract_bearer(request.header("authorization")) {
+        Ok(token) => token,
+        Err(_) => return Err(oauth_error_response(enforcement, None)),
     };
-    decision.map(ScopeGrant).map_err(|err| {
-        let challenge = enforcement.config.www_authenticate(
-            &enforcement.metadata_url,
-            err.as_ref().map(token_error_code),
-        );
-        let status = token_error_status(err.as_ref());
-        HttpResponse {
-            status,
-            headers: vec![
-                (
-                    "content-type".to_owned(),
-                    "text/plain; charset=utf-8".to_owned(),
-                ),
-                ("www-authenticate".to_owned(), challenge),
-            ],
-            body: if status == 403 {
-                b"forbidden".to_vec()
-            } else {
-                b"unauthorized".to_vec()
-            },
+    enforcement
+        .config
+        .validate(token, enforcement.verifier.as_ref(), now_unix)
+        .map(|scopes| ValidatedOAuthRequest {
+            scope_grant: ScopeGrant(scopes),
+            principal_key: oauth_principal_key_from_validated_token(token),
+        })
+        .map_err(|err| oauth_error_response(enforcement, Some(err)))
+}
+
+fn oauth_error_response(enforcement: &OAuthEnforcement, err: Option<TokenError>) -> HttpResponse {
+    let challenge = enforcement.config.www_authenticate(
+        &enforcement.metadata_url,
+        err.as_ref().map(token_error_code),
+    );
+    let status = token_error_status(err.as_ref());
+    HttpResponse {
+        status,
+        headers: vec![
+            (
+                "content-type".to_owned(),
+                "text/plain; charset=utf-8".to_owned(),
+            ),
+            ("www-authenticate".to_owned(), challenge),
+        ],
+        body: if status == 403 {
+            b"forbidden".to_vec()
+        } else {
+            b"unauthorized".to_vec()
+        },
+    }
+}
+
+fn oauth_principal_key_from_validated_token(token: &str) -> String {
+    let stable_material = jwt_claims_unverified(token)
+        .and_then(|claims| {
+            let issuer = claims.get("iss").and_then(Value::as_str)?;
+            ["sub", "client_id", "azp"].iter().find_map(|claim| {
+                claims
+                    .get(*claim)
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| format!("iss={issuer}\n{claim}={value}"))
+            })
+        })
+        .unwrap_or_else(|| format!("token={}", sha256_hex(token.as_bytes())));
+    format!("oauth:{}", sha256_hex(stable_material.as_bytes()))
+}
+
+fn jwt_claims_unverified(token: &str) -> Option<Value> {
+    let mut parts = token.split('.');
+    let _header = parts.next()?;
+    let payload = parts.next()?;
+    let _signature = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    serde_json::from_slice(&base64url_decode(payload)?).ok()
+}
+
+fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'-' => Some(62),
+            b'_' => Some(63),
+            _ => None,
         }
-    })
+    }
+
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf = 0_u32;
+    let mut bits = 0_u32;
+    for &c in input.as_bytes() {
+        if c == b'=' {
+            continue;
+        }
+        let v = u32::from(val(c)?);
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+fn sha256_hex(input: &[u8]) -> String {
+    let digest = Sha256::digest(input);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+fn stateful_principal_key(principal_key: Option<&str>) -> &str {
+    principal_key.unwrap_or("anonymous-http")
+}
+
+fn enforce_single_principal(
+    config: &HttpTransportConfig,
+    validated_oauth: Option<&ValidatedOAuthRequest>,
+) -> Option<HttpResponse> {
+    let guard = config.single_principal_guard.as_ref()?;
+    let key =
+        stateful_principal_key(validated_oauth.map(|validated| validated.principal_key.as_str()));
+    guard
+        .admit(key)
+        .err()
+        .map(|()| single_principal_conflict_response())
+}
+
+fn single_principal_conflict_response() -> HttpResponse {
+    json_response(
+        409,
+        &json!({
+            "error": "single_principal_active",
+            "message": "this pre-lane HTTP server is already bound to another principal",
+            "next_step": "start a separate oraclemcp process for the second principal, or wait for the per-principal LaneRuntime release",
+        }),
+    )
 }
 
 fn guard_http_request(config: &HttpTransportConfig, request: &HttpRequest) -> Option<HttpResponse> {
@@ -1285,16 +1520,25 @@ pub fn handle_http_request(
     if request.body.len() > MAX_BODY_BYTES {
         return empty_response(413);
     }
-    let scope_grant = match &config.oauth {
+    let validated_oauth = match &config.oauth {
         Some(enforcement) => match validate_oauth_request(&request, enforcement) {
-            Ok(grant) => Some(grant),
+            Ok(validated) => Some(validated),
             Err(response) => return response,
         },
         None => None,
     };
+    if let Some(response) = enforce_single_principal(config, validated_oauth.as_ref()) {
+        return response;
+    }
+    let scope_grant = validated_oauth
+        .as_ref()
+        .map(|validated| &validated.scope_grant);
+    let principal_key = validated_oauth
+        .as_ref()
+        .map(|validated| validated.principal_key.as_str());
     match request.method.as_str() {
-        "DELETE" => handle_mcp_delete(config, &request),
-        "POST" => handle_mcp_post(server, config, &request, scope_grant.as_ref()),
+        "DELETE" => handle_mcp_delete(config, &request, stateful_principal_key(principal_key)),
+        "POST" => handle_mcp_post(server, config, &request, scope_grant, principal_key),
         "GET" => empty_response(405).with_header("allow", "POST, DELETE"),
         _ => empty_response(405).with_header("allow", "GET, POST, DELETE"),
     }
@@ -1366,9 +1610,13 @@ fn handle_observability_route(
     }
 }
 
-fn handle_mcp_delete(config: &HttpTransportConfig, request: &HttpRequest) -> HttpResponse {
+fn handle_mcp_delete(
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+    principal_key: &str,
+) -> HttpResponse {
     if config.stateful {
-        return match validate_stateful_session(config, request) {
+        return match validate_stateful_session(config, request, principal_key) {
             Ok(session_id) => {
                 if let Some(store) = &config.session_store {
                     store.remove(session_id);
@@ -1386,7 +1634,9 @@ fn handle_mcp_post(
     config: &HttpTransportConfig,
     request: &HttpRequest,
     scope_grant: Option<&ScopeGrant>,
+    principal_key: Option<&str>,
 ) -> HttpResponse {
+    let session_principal_key = stateful_principal_key(principal_key);
     let parsed = match serde_json::from_slice::<Value>(&request.body) {
         Ok(value) => value,
         Err(_) => {
@@ -1397,28 +1647,76 @@ fn handle_mcp_post(
         .get("method")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    if config.stateful
-        && method.as_deref() != Some("initialize")
-        && let Err(response) = validate_stateful_session(config, request)
-    {
-        return response;
-    }
-    let context = scope_grant
+    let http_session_id = if config.stateful {
+        if method.as_deref() == Some("initialize") {
+            Some(new_session_id())
+        } else {
+            match validate_stateful_session(config, request, session_principal_key) {
+                Ok(session_id) => Some(session_id.to_owned()),
+                Err(response) => return response,
+            }
+        }
+    } else {
+        None
+    };
+    let mut context = scope_grant
         .map(DispatchContext::with_scope_grant)
         .unwrap_or_default();
+    if let Some(session_id) = http_session_id.as_deref() {
+        context = context.with_http_session_id(session_id);
+    }
+    if let Some(principal_key) = principal_key {
+        context = context.with_principal_key(principal_key);
+    }
     let response = server.handle_jsonrpc_request_with_context(parsed, None, context);
     let Some(response) = response else {
         return empty_response(202);
     };
+    if let Some(retry_after_ms) = jsonrpc_busy_retry_after_ms(&response) {
+        let retry_after = retry_after_header_seconds(retry_after_ms);
+        return json_response(429, &response).with_header("retry-after", &retry_after);
+    }
     if config.stateful {
-        return sse_response(config, method.as_deref(), response);
+        return sse_response(
+            config,
+            method.as_deref(),
+            response,
+            http_session_id,
+            session_principal_key,
+        );
     }
     json_response(200, &response)
+}
+
+fn jsonrpc_busy_retry_after_ms(response: &Value) -> Option<u64> {
+    let result = response.get("result")?;
+    if !result
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let structured = result.get("structuredContent")?;
+    if structured.get("error_class").and_then(Value::as_str) != Some("BUSY") {
+        return None;
+    }
+    Some(
+        structured
+            .get("retry_after_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(crate::admission::DEFAULT_RETRY_AFTER_MS),
+    )
+}
+
+fn retry_after_header_seconds(ms: u64) -> String {
+    (ms.saturating_add(999) / 1000).max(1).to_string()
 }
 
 fn validate_stateful_session<'a>(
     config: &HttpTransportConfig,
     request: &'a HttpRequest,
+    principal_key: &str,
 ) -> Result<&'a str, HttpResponse> {
     let Some(session_id) = request.header("mcp-session-id") else {
         return Err(HttpResponse {
@@ -1427,18 +1725,22 @@ fn validate_stateful_session<'a>(
             body: b"Missing mcp-session-id".to_vec(),
         });
     };
-    let known = config
+    let owner = config
         .session_store
         .as_ref()
-        .is_some_and(|store| store.contains(session_id));
-    if known {
-        Ok(session_id)
-    } else {
-        Err(HttpResponse {
+        .and_then(|store| store.principal_for(session_id));
+    match owner.as_deref() {
+        Some(owner) if owner == principal_key => Ok(session_id),
+        Some(_) => Err(HttpResponse {
+            status: 403,
+            headers: vec![],
+            body: b"mcp-session-id is bound to another principal".to_vec(),
+        }),
+        None => Err(HttpResponse {
             status: 404,
             headers: vec![],
             body: b"Unknown mcp-session-id".to_vec(),
-        })
+        }),
     }
 }
 
@@ -1480,12 +1782,14 @@ fn sse_response(
     config: &HttpTransportConfig,
     method: Option<&str>,
     response: Value,
+    initialized_session_id: Option<String>,
+    principal_key: &str,
 ) -> HttpResponse {
     let mut body = Vec::new();
     let session_id = if method == Some("initialize") {
         write_sse_event(&mut body, Some("0"), Some(3000), Some(&Value::Null));
         write_sse_event(&mut body, None, None, Some(&response));
-        Some(new_session_id())
+        initialized_session_id.or_else(|| Some(new_session_id()))
     } else {
         write_sse_event(&mut body, Some("0/0"), Some(3000), Some(&Value::Null));
         write_sse_event(&mut body, Some("1/0"), None, Some(&response));
@@ -1497,7 +1801,7 @@ fn sse_response(
     ];
     if let Some(session_id) = session_id {
         if let Some(store) = &config.session_store {
-            store.insert(session_id.clone());
+            store.insert(session_id.clone(), principal_key.to_owned());
         }
         headers.push(("mcp-session-id".to_owned(), session_id));
     }
