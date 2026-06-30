@@ -19,7 +19,8 @@
 //! subscription we cannot honor.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 
 /// Per-URI subscriber registry. Cheap, in-process; one per server.
 #[derive(Default)]
@@ -38,7 +39,6 @@ impl SubscriptionRegistry {
     pub fn subscribe(&self, client: &str, uri: &str) {
         self.by_uri
             .lock()
-            .expect("poisoned")
             .entry(uri.to_owned())
             .or_default()
             .insert(client.to_owned());
@@ -47,7 +47,7 @@ impl SubscriptionRegistry {
     /// Unsubscribe `client` from `uri`. Idempotent; drops the URI entry when its
     /// last subscriber leaves.
     pub fn unsubscribe(&self, client: &str, uri: &str) {
-        let mut map = self.by_uri.lock().expect("poisoned");
+        let mut map = self.by_uri.lock();
         if let Some(set) = map.get_mut(uri) {
             set.remove(client);
             if set.is_empty() {
@@ -58,7 +58,7 @@ impl SubscriptionRegistry {
 
     /// Drop all of `client`'s subscriptions (on disconnect).
     pub fn unsubscribe_all(&self, client: &str) {
-        let mut map = self.by_uri.lock().expect("poisoned");
+        let mut map = self.by_uri.lock();
         map.retain(|_, set| {
             set.remove(client);
             !set.is_empty()
@@ -69,7 +69,7 @@ impl SubscriptionRegistry {
     /// hub to know which resources to fingerprint.
     #[must_use]
     pub fn subscribed_uris(&self) -> Vec<String> {
-        let map = self.by_uri.lock().expect("poisoned");
+        let map = self.by_uri.lock();
         let mut out: Vec<String> = map.keys().cloned().collect();
         out.sort();
         out
@@ -78,7 +78,7 @@ impl SubscriptionRegistry {
     /// The clients to notify for `uri` (sorted, deduped).
     #[must_use]
     pub fn subscribers_of(&self, uri: &str) -> Vec<String> {
-        let map = self.by_uri.lock().expect("poisoned");
+        let map = self.by_uri.lock();
         let mut out: Vec<String> = map
             .get(uri)
             .map(|s| s.iter().cloned().collect())
@@ -92,7 +92,6 @@ impl SubscriptionRegistry {
     pub fn is_subscribed(&self, client: &str, uri: &str) -> bool {
         self.by_uri
             .lock()
-            .expect("poisoned")
             .get(uri)
             .is_some_and(|s| s.contains(client))
     }
@@ -195,10 +194,7 @@ impl SubscriptionHub {
         if let SubscribeSource::Polling(source) = &self.source
             && let Some(fp) = source.poll(uri)
         {
-            self.fingerprints
-                .lock()
-                .expect("poisoned")
-                .insert(uri.to_owned(), fp);
+            self.fingerprints.lock().insert(uri.to_owned(), fp);
         }
         true
     }
@@ -222,7 +218,7 @@ impl SubscriptionHub {
         };
         let uris = self.registry.subscribed_uris();
         let mut changed = Vec::new();
-        let mut fingerprints = self.fingerprints.lock().expect("poisoned");
+        let mut fingerprints = self.fingerprints.lock();
         for uri in uris {
             let Some(current) = source.poll(&uri) else {
                 continue;
@@ -238,7 +234,7 @@ impl SubscriptionHub {
             }
         }
         drop(fingerprints);
-        let mut pending = self.pending.lock().expect("poisoned");
+        let mut pending = self.pending.lock();
         for uri in &changed {
             pending.push_back(uri.clone());
         }
@@ -252,16 +248,13 @@ impl SubscriptionHub {
         if self.registry.subscribers_of(uri).is_empty() {
             return;
         }
-        self.pending
-            .lock()
-            .expect("poisoned")
-            .push_back(uri.to_owned());
+        self.pending.lock().push_back(uri.to_owned());
     }
 
     /// Drain queued `resources/updated` URIs (the transport turns each into a
     /// `notifications/resources/updated` JSON-RPC notification).
     pub fn drain_pending(&self) -> Vec<String> {
-        let mut pending = self.pending.lock().expect("poisoned");
+        let mut pending = self.pending.lock();
         pending.drain(..).collect()
     }
 
@@ -331,13 +324,12 @@ mod tests {
         fn set(&self, uri: &str, fp: &str) {
             self.fingerprints
                 .lock()
-                .unwrap()
                 .insert(uri.to_owned(), fp.to_owned());
         }
     }
     impl PollingSource for ScriptedSource {
         fn poll(&self, uri: &str) -> Option<String> {
-            self.fingerprints.lock().unwrap().get(uri).cloned()
+            self.fingerprints.lock().get(uri).cloned()
         }
     }
 

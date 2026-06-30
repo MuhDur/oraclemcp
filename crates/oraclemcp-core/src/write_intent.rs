@@ -9,10 +9,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use oraclemcp_guard::{ExecGrantBinding, OperatingLevel};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -41,9 +41,6 @@ pub enum WriteIntentError {
     /// A terminal outcome was requested for an unknown intent id.
     #[error("unknown write intent: {0}")]
     Unknown(String),
-    /// The in-memory unresolved map was poisoned by a panicking caller.
-    #[error("write-intent lock poisoned")]
-    Poisoned,
 }
 
 /// A terminal write-intent outcome that makes retry safe from the ledger's
@@ -264,19 +261,13 @@ impl WriteIntentLog {
 
     /// Return a snapshot of unresolved intents recovered or appended so far.
     pub fn unresolved(&self) -> Result<Vec<WriteIntent>, WriteIntentError> {
-        let guard = self
-            .unresolved
-            .lock()
-            .map_err(|_| WriteIntentError::Poisoned)?;
+        let guard = self.unresolved.lock();
         Ok(guard.values().cloned().collect())
     }
 
     /// Append a pending intent and fsync before returning.
     pub fn append_pending(&self, intent: WriteIntent) -> Result<String, WriteIntentError> {
-        let mut guard = self
-            .unresolved
-            .lock()
-            .map_err(|_| WriteIntentError::Poisoned)?;
+        let mut guard = self.unresolved.lock();
         if guard.contains_key(&intent.intent_id) {
             return Err(WriteIntentError::Duplicate(intent.intent_id));
         }
@@ -294,10 +285,7 @@ impl WriteIntentLog {
         intent_id: &str,
         outcome: WriteIntentOutcome,
     ) -> Result<(), WriteIntentError> {
-        let mut guard = self
-            .unresolved
-            .lock()
-            .map_err(|_| WriteIntentError::Poisoned)?;
+        let mut guard = self.unresolved.lock();
         let intent = guard
             .get(intent_id)
             .cloned()

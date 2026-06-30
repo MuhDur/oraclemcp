@@ -20,10 +20,10 @@
 //! a database.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
+use parking_lot::Mutex;
 
 use crate::tamper_token::{sign_token, verify_token};
 
@@ -198,7 +198,7 @@ impl ExportRegistry {
         };
         let byte_size = body.len();
 
-        let mut inner = self.inner.lock().expect("export registry poisoned");
+        let mut inner = self.inner.lock();
         inner.sweep_expired();
         inner.seq = inner.seq.wrapping_add(1);
         // The id body is `exp-<seq>`; the tamper-evident MAC over the access
@@ -246,7 +246,7 @@ impl ExportRegistry {
             return Err(export_access_denied());
         }
 
-        let mut inner = self.inner.lock().expect("export registry poisoned");
+        let mut inner = self.inner.lock();
         inner.sweep_expired();
         let Some(entry) = inner.by_id.get(id) else {
             return Err(export_not_found());
@@ -268,7 +268,7 @@ impl ExportRegistry {
     /// Number of live (non-expired-at-last-sweep) exports. Test/observability.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.lock().expect("poisoned").by_id.len()
+        self.inner.lock().by_id.len()
     }
 
     /// Whether the registry holds no exports.

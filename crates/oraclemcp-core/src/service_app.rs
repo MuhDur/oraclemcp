@@ -383,6 +383,7 @@ pub fn start_oraclemcp_service_app(
         .build()
         .map_err(ServiceAppStartError::RuntimeBuild)?;
 
+    // block-on-boundary: service AppSpec bootstrap on its owning runtime.
     runtime.block_on(async move {
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
@@ -455,6 +456,7 @@ pub fn start_oraclemcp_service_app_with_transport(
         Arc::clone(&transport_join),
     );
 
+    // block-on-boundary: service AppSpec bootstrap with transport child.
     runtime.block_on(async move {
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);

@@ -6,10 +6,10 @@
 //! risk, §5.7). A misclassification here is fail-safe — when in doubt, do not
 //! retry.
 
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use asupersync::time::{timeout as asupersync_timeout, wall_now};
+use parking_lot::Mutex;
 
 /// Transient, retryable Oracle/network error codes (§10). Anything else
 /// (ORA-00942 object-not-found, ORA-01403 no-data, syntax, privilege) is NOT
@@ -121,7 +121,7 @@ impl CircuitBreaker {
     /// resolves via the next `on_success` (closes) or `on_failure` (re-opens).
     #[must_use]
     pub fn allow_request(&self) -> bool {
-        let mut inner = self.inner.lock().expect("circuit mutex poisoned");
+        let mut inner = self.inner.lock();
         match inner.state {
             CircuitState::Closed => true,
             // Already half-open: admit only if no probe is outstanding. The
@@ -154,7 +154,7 @@ impl CircuitBreaker {
     /// Record a success: resets the failure count and closes the circuit. A
     /// HalfOpen probe that succeeds resolves here, clearing the probe flag.
     pub fn on_success(&self) {
-        let mut inner = self.inner.lock().expect("circuit mutex poisoned");
+        let mut inner = self.inner.lock();
         inner.consecutive_failures = 0;
         inner.state = CircuitState::Closed;
         inner.opened_at = None;
@@ -166,7 +166,7 @@ impl CircuitBreaker {
     /// the probe flag and re-opening the circuit (the cooldown must elapse again
     /// before the next single probe is admitted).
     pub fn on_failure(&self) {
-        let mut inner = self.inner.lock().expect("circuit mutex poisoned");
+        let mut inner = self.inner.lock();
         inner.consecutive_failures += 1;
         let trip = inner.state == CircuitState::HalfOpen
             || inner.consecutive_failures >= self.failure_threshold;
@@ -180,7 +180,7 @@ impl CircuitBreaker {
     /// The current state (for metrics / tests).
     #[must_use]
     pub fn state(&self) -> CircuitState {
-        self.inner.lock().expect("circuit mutex poisoned").state
+        self.inner.lock().state
     }
 }
 

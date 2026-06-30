@@ -657,6 +657,7 @@ fn run_lane_thread_with_factory(
             .build()
             .expect("Asupersync current-thread runtime builds for lane dispatch");
         status.store(STATUS_RUNNING, Ordering::Release);
+        // block-on-boundary: sanctioned lane runtime on a dedicated OS thread.
         runtime.block_on(run_lane_loop_with_factory(receiver, lane_context, factory));
     }));
     match outcome {
@@ -777,6 +778,7 @@ where
         .with_reactor(reactor)
         .build()
         .expect("Asupersync current-thread runtime builds for lane bridge")
+        // block-on-boundary: synchronous transport/test bridge into a lane future.
         .block_on(future)
 }
 

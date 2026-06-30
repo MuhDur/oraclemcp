@@ -128,6 +128,7 @@ fn probe_once(connection: &dyn OracleConnection) -> bool {
         tracing::warn!("oraclemcp-readyz: could not build probe runtime; /readyz stays not-ready");
         return false;
     };
+    // block-on-boundary: one-shot readiness probe runtime on the pinger thread.
     runtime.block_on(async {
         let cx = Cx::current().expect("block_on installs a probe Cx");
         match asupersync::time::timeout(cx.now(), PROBE_TIMEOUT, connection.ping(&cx)).await {

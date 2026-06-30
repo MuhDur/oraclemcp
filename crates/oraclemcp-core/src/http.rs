@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,6 +21,7 @@ use oraclemcp_auth::{
     extract_bearer,
 };
 use oraclemcp_telemetry::{HealthState, Metrics};
+use parking_lot::{Condvar, Mutex};
 use rustls::{ServerConnection, StreamOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -200,9 +201,7 @@ impl SinglePrincipalGuard {
     }
 
     fn admit(&self, candidate_key: &str) -> Result<(), ()> {
-        let Ok(mut active) = self.active_principal_key.lock() else {
-            return Err(());
-        };
+        let mut active = self.active_principal_key.lock();
         match active.as_deref() {
             None => {
                 *active = Some(candidate_key.to_owned());
@@ -239,28 +238,24 @@ struct HttpSessionEntry {
 
 impl HttpSessionStore {
     fn insert(&self, id: String, principal_key: String) {
-        if let Ok(mut owners) = self.owners.lock() {
-            owners.insert(
-                id,
-                HttpSessionEntry {
-                    principal_key,
-                    last_seen: Instant::now(),
-                },
-            );
-        }
+        self.owners.lock().insert(
+            id,
+            HttpSessionEntry {
+                principal_key,
+                last_seen: Instant::now(),
+            },
+        );
     }
 
     fn principal_for(&self, id: &str) -> Option<String> {
-        let mut owners = self.owners.lock().ok()?;
+        let mut owners = self.owners.lock();
         let entry = owners.get_mut(id)?;
         entry.last_seen = Instant::now();
         Some(entry.principal_key.clone())
     }
 
     fn remove(&self, id: &str) -> bool {
-        self.owners
-            .lock()
-            .is_ok_and(|mut owners| owners.remove(id).is_some())
+        self.owners.lock().remove(id).is_some()
     }
 
     fn reap_idle(&self, idle_ttl: Duration) -> Vec<(String, String)> {
@@ -271,9 +266,7 @@ impl HttpSessionStore {
     }
 
     fn reap_idle_at(&self, idle_ttl: Duration, now: Instant) -> Vec<(String, String)> {
-        let Ok(mut owners) = self.owners.lock() else {
-            return Vec::new();
-        };
+        let mut owners = self.owners.lock();
         let expired: Vec<String> = owners
             .iter()
             .filter(|(_, entry)| now.duration_since(entry.last_seen) >= idle_ttl)
@@ -291,9 +284,7 @@ impl HttpSessionStore {
 
     #[cfg(test)]
     fn force_idle_for_test(&self, id: &str, idle_for: Duration) {
-        let Ok(mut owners) = self.owners.lock() else {
-            return;
-        };
+        let mut owners = self.owners.lock();
         if let Some(entry) = owners.get_mut(id) {
             let now = Instant::now();
             entry.last_seen = now.checked_sub(idle_for).unwrap_or(now);
@@ -358,15 +349,15 @@ impl HttpResultStore {
     }
 
     fn ensure_session(&self, session_id: &str) {
-        if let Ok(mut state) = self.state.lock() {
-            state.sessions.entry(session_id.to_owned()).or_default();
-        }
+        self.state
+            .lock()
+            .sessions
+            .entry(session_id.to_owned())
+            .or_default();
     }
 
     fn append_response(&self, session_id: &str, data: Value) -> String {
-        let Ok(mut state) = self.state.lock() else {
-            return "1/0".to_owned();
-        };
+        let mut state = self.state.lock();
         let events = state.sessions.entry(session_id.to_owned()).or_default();
         let next_seq = events
             .last()
@@ -391,9 +382,7 @@ impl HttpResultStore {
         gap_on_expired_cursor: bool,
     ) -> Result<Vec<HttpBufferedEvent>, HttpResponse> {
         let after_seq = parse_stream_cursor(cursor)?;
-        let Ok(state) = self.state.lock() else {
-            return Ok(Vec::new());
-        };
+        let state = self.state.lock();
         let Some(events) = state.sessions.get(session_id) else {
             return Ok(Vec::new());
         };
@@ -406,9 +395,7 @@ impl HttpResultStore {
         after_seq: u64,
         timeout: Duration,
     ) -> HttpResultWait {
-        let Ok(mut state) = self.state.lock() else {
-            return HttpResultWait::Closed;
-        };
+        let mut state = self.state.lock();
         loop {
             let Some(events) = state.sessions.get(session_id) else {
                 return HttpResultWait::Closed;
@@ -419,10 +406,7 @@ impl HttpResultStore {
                 Ok(_) => {}
                 Err(_) => return HttpResultWait::Closed,
             }
-            let Ok((next_state, wait)) = self.changed.wait_timeout(state, timeout) else {
-                return HttpResultWait::Closed;
-            };
-            state = next_state;
+            let wait = self.changed.wait_for(&mut state, timeout);
             if wait.timed_out() {
                 return HttpResultWait::Timeout;
             }
@@ -430,19 +414,17 @@ impl HttpResultStore {
     }
 
     fn remove_session(&self, session_id: &str) {
-        if let Ok(mut state) = self.state.lock() {
-            let removed = state.sessions.remove(session_id).is_some();
-            drop(state);
-            if removed {
-                self.changed.notify_all();
-            }
+        let mut state = self.state.lock();
+        let removed = state.sessions.remove(session_id).is_some();
+        drop(state);
+        if removed {
+            self.changed.notify_all();
         }
     }
 
     fn close_all(&self) {
-        if let Ok(mut state) = self.state.lock()
-            && !state.sessions.is_empty()
-        {
+        let mut state = self.state.lock();
+        if !state.sessions.is_empty() {
             state.sessions.clear();
             drop(state);
             self.changed.notify_all();

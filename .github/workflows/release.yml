@@ -82,11 +82,17 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy -p oraclemcp-core --all-targets --features dashboard-bundle -- -D warnings
       - run: cargo clippy -p oraclemcp --all-targets --features dashboard-bundle -- -D warnings
-      - run: cargo test --workspace --all-targets
+      - name: cargo test --workspace --all-targets
+        run: |
+          set -euo pipefail
+          mkdir -p target/ci-logs
+          cargo test --workspace --all-targets 2>&1 | tee target/ci-logs/cargo-test.log
+      - run: bash scripts/oraclemcp_concurrency_lint.sh --test-output target/ci-logs/cargo-test.log
       - run: cargo test -p oraclemcp-core --features dashboard-bundle dashboard
       - run: cargo test --workspace --doc
       - run: cargo doc --workspace --no-deps
       - run: bash scripts/oraclemcp_boundary_lint.sh
+      - run: bash scripts/oraclemcp_concurrency_lint.sh
       - run: bash scripts/sensitive_data_lint.sh
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check

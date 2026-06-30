@@ -8,10 +8,10 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
+use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -44,9 +44,6 @@ pub enum FileStoreError {
     /// Audit data is never pruned by retention.
     #[error("audit data is not prunable")]
     AuditNotPrunable,
-    /// An internal mutex was poisoned by a panicking writer.
-    #[error("file-store lock poisoned")]
-    Poisoned,
     /// A JSONL append record must be one complete line without embedded line
     /// terminators.
     #[error("invalid jsonl record: embedded line terminator")]
@@ -244,10 +241,7 @@ impl FileStore {
         bytes: &[u8],
     ) -> Result<PathBuf> {
         lock.assert_for(self)?;
-        let _guard = self
-            .mutation_gate
-            .lock()
-            .map_err(|_| FileStoreError::Poisoned)?;
+        let _guard = self.mutation_gate.lock();
         let dir = self.collection_dir(collection)?;
         let final_path = self.path_for(collection, id, extension)?;
         let tmp_path = self.tmp_path(&dir, id, extension);
@@ -273,10 +267,7 @@ impl FileStore {
         id: &StoreId,
     ) -> Result<RecoveryReport> {
         lock.assert_for(self)?;
-        let _guard = self
-            .mutation_gate
-            .lock()
-            .map_err(|_| FileStoreError::Poisoned)?;
+        let _guard = self.mutation_gate.lock();
         let dir = self.collection_dir(collection)?;
         let path = self.path_for(collection, id, "jsonl")?;
         if !path.exists() {
@@ -327,10 +318,7 @@ impl FileStore {
         if record.iter().any(|b| *b == b'\n' || *b == b'\r') {
             return Err(FileStoreError::InvalidJsonlRecord);
         }
-        let _guard = self
-            .mutation_gate
-            .lock()
-            .map_err(|_| FileStoreError::Poisoned)?;
+        let _guard = self.mutation_gate.lock();
         let dir = self.collection_dir(collection)?;
         let path = self.path_for(collection, id, "jsonl")?;
         let created = !path.exists();
@@ -359,10 +347,7 @@ impl FileStore {
         if class == RetentionClass::Audit {
             return Err(FileStoreError::AuditNotPrunable);
         }
-        let _guard = self
-            .mutation_gate
-            .lock()
-            .map_err(|_| FileStoreError::Poisoned)?;
+        let _guard = self.mutation_gate.lock();
         let dir = self.collection_dir(collection)?;
         let mut entries = Vec::new();
         for entry in fs::read_dir(&dir).map_err(|e| FileStoreError::Io(e.to_string()))? {

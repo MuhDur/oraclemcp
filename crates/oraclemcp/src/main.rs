@@ -538,6 +538,7 @@ where
         .with_reactor(reactor)
         .build()
         .expect("Asupersync current-thread runtime builds for connection setup");
+    // block-on-boundary: rare startup connection setup, not a per-call DB path.
     runtime.block_on(async move {
         let cx = Cx::current().expect("block_on installs a current Cx");
         f(cx).await

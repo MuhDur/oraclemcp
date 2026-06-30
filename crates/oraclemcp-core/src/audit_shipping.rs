@@ -154,6 +154,7 @@ impl SiemHttpForwarder {
         )];
         headers.extend(self.headers.iter().cloned());
 
+        // block-on-boundary: dedicated audit-forwarder runtime after local fsync.
         runtime.block_on(async move {
             let cx = Cx::current().expect("asupersync block_on installs a current Cx");
             let client = HttpClient::new();

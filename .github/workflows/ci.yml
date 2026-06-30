@@ -93,7 +93,12 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-targets
+      - name: cargo test --workspace --all-targets
+        run: |
+          set -euo pipefail
+          mkdir -p target/ci-logs
+          cargo test --workspace --all-targets 2>&1 | tee target/ci-logs/cargo-test.log
+      - run: bash scripts/oraclemcp_concurrency_lint.sh --test-output target/ci-logs/cargo-test.log
       - run: cargo test --workspace --doc
       - run: cargo test -p oraclemcp-core --features dashboard-bundle dashboard
 
@@ -189,6 +194,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - run: bash scripts/oraclemcp_boundary_lint.sh
       - run: bash scripts/oraclemcp_driver_seam_lint.sh
+      - run: bash scripts/oraclemcp_concurrency_lint.sh
       - run: bash scripts/oraclemcp_honesty_grep.sh
 
   # Public-API lock (B5; ADR-0002 mirror). oraclemcp-db is the canonical shared

@@ -22,8 +22,8 @@
 //! [`crate::subscriptions::SubscriptionHub::drain_pending`].
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
 
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 /// A bounded queue of server-initiated JSON-RPC notification objects (E6). The
@@ -68,7 +68,7 @@ impl NotificationHub {
     /// Push a fully-formed JSON-RPC notification object, dropping the oldest
     /// when the queue is full (advisory delivery; see the type docs).
     fn push(&self, notification: Value) {
-        let mut pending = self.pending.lock().expect("poisoned");
+        let mut pending = self.pending.lock();
         while pending.len() >= self.capacity {
             pending.pop_front();
         }
@@ -117,14 +117,14 @@ impl NotificationHub {
     /// one-shot drain like the subscription hub's.
     #[must_use]
     pub fn drain(&self) -> Vec<Value> {
-        let mut pending = self.pending.lock().expect("poisoned");
+        let mut pending = self.pending.lock();
         pending.drain(..).collect()
     }
 
     /// Whether anything is queued (introspection/tests).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.pending.lock().expect("poisoned").is_empty()
+        self.pending.lock().is_empty()
     }
 }
 
