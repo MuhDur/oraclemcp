@@ -148,6 +148,173 @@ pub type oraclemcp_db::AuthAdapterError::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::AuthAdapterError where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::AuthAdapterError where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::AuthAdapterError::vzip(self) -> V
+pub enum oraclemcp_db::CatalogRowSetName
+pub oraclemcp_db::CatalogRowSetName::ColumnComments
+pub oraclemcp_db::CatalogRowSetName::Columns
+pub oraclemcp_db::CatalogRowSetName::Constraints
+pub oraclemcp_db::CatalogRowSetName::DatabaseLinks
+pub oraclemcp_db::CatalogRowSetName::Dependencies
+pub oraclemcp_db::CatalogRowSetName::EditioningViews
+pub oraclemcp_db::CatalogRowSetName::Editions
+pub oraclemcp_db::CatalogRowSetName::Grants
+pub oraclemcp_db::CatalogRowSetName::Indexes
+pub oraclemcp_db::CatalogRowSetName::MaterializedViews
+pub oraclemcp_db::CatalogRowSetName::Objects
+pub oraclemcp_db::CatalogRowSetName::PlScopeAvailability
+pub oraclemcp_db::CatalogRowSetName::PlScopeIdentifiers
+pub oraclemcp_db::CatalogRowSetName::RoutineArguments
+pub oraclemcp_db::CatalogRowSetName::Routines
+pub oraclemcp_db::CatalogRowSetName::Sequences
+pub oraclemcp_db::CatalogRowSetName::Synonyms
+pub oraclemcp_db::CatalogRowSetName::TableComments
+pub oraclemcp_db::CatalogRowSetName::Triggers
+pub oraclemcp_db::CatalogRowSetName::TypeAttributes
+pub oraclemcp_db::CatalogRowSetName::Users
+pub oraclemcp_db::CatalogRowSetName::Views
+pub oraclemcp_db::CatalogRowSetName::VpdPolicies
+impl oraclemcp_db::CatalogRowSetName
+pub const oraclemcp_db::CatalogRowSetName::CORE: &'static [oraclemcp_db::CatalogRowSetName]
+pub const oraclemcp_db::CatalogRowSetName::PLSCOPE: &'static [oraclemcp_db::CatalogRowSetName]
+pub fn oraclemcp_db::CatalogRowSetName::as_str(self) -> &'static str
+impl core::clone::Clone for oraclemcp_db::CatalogRowSetName
+pub fn oraclemcp_db::CatalogRowSetName::clone(&self) -> oraclemcp_db::CatalogRowSetName
+impl core::cmp::Eq for oraclemcp_db::CatalogRowSetName
+impl core::cmp::PartialEq for oraclemcp_db::CatalogRowSetName
+pub fn oraclemcp_db::CatalogRowSetName::eq(&self, &oraclemcp_db::CatalogRowSetName) -> bool
+impl core::fmt::Debug for oraclemcp_db::CatalogRowSetName
+pub fn oraclemcp_db::CatalogRowSetName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_db::CatalogRowSetName
+pub fn oraclemcp_db::CatalogRowSetName::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for oraclemcp_db::CatalogRowSetName
+impl core::marker::StructuralPartialEq for oraclemcp_db::CatalogRowSetName
+impl serde_core::ser::Serialize for oraclemcp_db::CatalogRowSetName
+pub fn oraclemcp_db::CatalogRowSetName::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::CatalogRowSetName
+pub fn oraclemcp_db::CatalogRowSetName::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::CatalogRowSetName
+impl core::marker::Send for oraclemcp_db::CatalogRowSetName
+impl core::marker::Sync for oraclemcp_db::CatalogRowSetName
+impl core::marker::Unpin for oraclemcp_db::CatalogRowSetName
+impl core::marker::UnsafeUnpin for oraclemcp_db::CatalogRowSetName
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::CatalogRowSetName
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::CatalogRowSetName
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::CatalogRowSetName where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::CatalogRowSetName where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::CatalogRowSetName where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CatalogRowSetName::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::CatalogRowSetName where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::CatalogRowSetName where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::CatalogRowSetName where U: core::convert::From<T>
+pub fn oraclemcp_db::CatalogRowSetName::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::CatalogRowSetName where U: core::convert::Into<T>
+pub type oraclemcp_db::CatalogRowSetName::Error = core::convert::Infallible
+pub fn oraclemcp_db::CatalogRowSetName::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::CatalogRowSetName where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::CatalogRowSetName::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::CatalogRowSetName::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::CatalogRowSetName where T: core::clone::Clone
+pub type oraclemcp_db::CatalogRowSetName::Owned = T
+pub fn oraclemcp_db::CatalogRowSetName::clone_into(&self, &mut T)
+pub fn oraclemcp_db::CatalogRowSetName::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::CatalogRowSetName
+impl<T> core::any::Any for oraclemcp_db::CatalogRowSetName where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::CatalogRowSetName::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::CatalogRowSetName where T: ?core::marker::Sized
+pub fn oraclemcp_db::CatalogRowSetName::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::CatalogRowSetName where T: ?core::marker::Sized
+pub fn oraclemcp_db::CatalogRowSetName::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::CatalogRowSetName where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::CatalogRowSetName::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::CatalogRowSetName
+pub fn oraclemcp_db::CatalogRowSetName::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::CatalogRowSetName
+pub type oraclemcp_db::CatalogRowSetName::Init = T
+pub const oraclemcp_db::CatalogRowSetName::ALIGN: usize
+pub unsafe fn oraclemcp_db::CatalogRowSetName::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::CatalogRowSetName::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::CatalogRowSetName::drop(usize)
+pub unsafe fn oraclemcp_db::CatalogRowSetName::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::CatalogRowSetName
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::CatalogRowSetName
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::CatalogRowSetName where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::CatalogRowSetName
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::CatalogRowSetName
+impl<T> typenum::type_operators::Same for oraclemcp_db::CatalogRowSetName
+pub type oraclemcp_db::CatalogRowSetName::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CatalogRowSetName where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CatalogRowSetName where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::CatalogRowSetName::vzip(self) -> V
+pub enum oraclemcp_db::CatalogSchemaFilter
+pub oraclemcp_db::CatalogSchemaFilter::CurrentSchema
+pub oraclemcp_db::CatalogSchemaFilter::Named(alloc::string::String)
+impl oraclemcp_db::CatalogSchemaFilter
+pub fn oraclemcp_db::CatalogSchemaFilter::current_schema() -> Self
+pub fn oraclemcp_db::CatalogSchemaFilter::named(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::clone::Clone for oraclemcp_db::CatalogSchemaFilter
+pub fn oraclemcp_db::CatalogSchemaFilter::clone(&self) -> oraclemcp_db::CatalogSchemaFilter
+impl core::cmp::Eq for oraclemcp_db::CatalogSchemaFilter
+impl core::cmp::PartialEq for oraclemcp_db::CatalogSchemaFilter
+pub fn oraclemcp_db::CatalogSchemaFilter::eq(&self, &oraclemcp_db::CatalogSchemaFilter) -> bool
+impl core::fmt::Debug for oraclemcp_db::CatalogSchemaFilter
+pub fn oraclemcp_db::CatalogSchemaFilter::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::CatalogSchemaFilter
+impl serde_core::ser::Serialize for oraclemcp_db::CatalogSchemaFilter
+pub fn oraclemcp_db::CatalogSchemaFilter::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::CatalogSchemaFilter
+pub fn oraclemcp_db::CatalogSchemaFilter::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::CatalogSchemaFilter
+impl core::marker::Send for oraclemcp_db::CatalogSchemaFilter
+impl core::marker::Sync for oraclemcp_db::CatalogSchemaFilter
+impl core::marker::Unpin for oraclemcp_db::CatalogSchemaFilter
+impl core::marker::UnsafeUnpin for oraclemcp_db::CatalogSchemaFilter
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::CatalogSchemaFilter
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::CatalogSchemaFilter
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::CatalogSchemaFilter where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::CatalogSchemaFilter where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::CatalogSchemaFilter where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CatalogSchemaFilter::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::CatalogSchemaFilter where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::CatalogSchemaFilter where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::CatalogSchemaFilter where U: core::convert::From<T>
+pub fn oraclemcp_db::CatalogSchemaFilter::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::CatalogSchemaFilter where U: core::convert::Into<T>
+pub type oraclemcp_db::CatalogSchemaFilter::Error = core::convert::Infallible
+pub fn oraclemcp_db::CatalogSchemaFilter::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::CatalogSchemaFilter where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::CatalogSchemaFilter::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::CatalogSchemaFilter::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::CatalogSchemaFilter where T: core::clone::Clone
+pub type oraclemcp_db::CatalogSchemaFilter::Owned = T
+pub fn oraclemcp_db::CatalogSchemaFilter::clone_into(&self, &mut T)
+pub fn oraclemcp_db::CatalogSchemaFilter::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::CatalogSchemaFilter
+impl<T> core::any::Any for oraclemcp_db::CatalogSchemaFilter where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::CatalogSchemaFilter::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::CatalogSchemaFilter where T: ?core::marker::Sized
+pub fn oraclemcp_db::CatalogSchemaFilter::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::CatalogSchemaFilter where T: ?core::marker::Sized
+pub fn oraclemcp_db::CatalogSchemaFilter::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::CatalogSchemaFilter where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::CatalogSchemaFilter::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::CatalogSchemaFilter
+pub fn oraclemcp_db::CatalogSchemaFilter::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::CatalogSchemaFilter
+pub type oraclemcp_db::CatalogSchemaFilter::Init = T
+pub const oraclemcp_db::CatalogSchemaFilter::ALIGN: usize
+pub unsafe fn oraclemcp_db::CatalogSchemaFilter::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::CatalogSchemaFilter::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::CatalogSchemaFilter::drop(usize)
+pub unsafe fn oraclemcp_db::CatalogSchemaFilter::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::CatalogSchemaFilter
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::CatalogSchemaFilter
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::CatalogSchemaFilter where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::CatalogSchemaFilter
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::CatalogSchemaFilter
+impl<T> typenum::type_operators::Same for oraclemcp_db::CatalogSchemaFilter
+pub type oraclemcp_db::CatalogSchemaFilter::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CatalogSchemaFilter where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CatalogSchemaFilter where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::CatalogSchemaFilter::vzip(self) -> V
 pub enum oraclemcp_db::ChangeKind
 pub oraclemcp_db::ChangeKind::Added
 pub oraclemcp_db::ChangeKind::Changed
@@ -1305,6 +1472,289 @@ pub type oraclemcp_db::AdbConnectInfo::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::AdbConnectInfo where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::AdbConnectInfo where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::AdbConnectInfo::vzip(self) -> V
+pub struct oraclemcp_db::CatalogExtractReport
+pub oraclemcp_db::CatalogExtractReport::batches: alloc::vec::Vec<oraclemcp_db::CatalogRowBatch>
+pub oraclemcp_db::CatalogExtractReport::schema_names: alloc::vec::Vec<alloc::string::String>
+pub oraclemcp_db::CatalogExtractReport::warnings: alloc::vec::Vec<oraclemcp_db::CatalogExtractWarning>
+impl core::clone::Clone for oraclemcp_db::CatalogExtractReport
+pub fn oraclemcp_db::CatalogExtractReport::clone(&self) -> oraclemcp_db::CatalogExtractReport
+impl core::cmp::Eq for oraclemcp_db::CatalogExtractReport
+impl core::cmp::PartialEq for oraclemcp_db::CatalogExtractReport
+pub fn oraclemcp_db::CatalogExtractReport::eq(&self, &oraclemcp_db::CatalogExtractReport) -> bool
+impl core::default::Default for oraclemcp_db::CatalogExtractReport
+pub fn oraclemcp_db::CatalogExtractReport::default() -> oraclemcp_db::CatalogExtractReport
+impl core::fmt::Debug for oraclemcp_db::CatalogExtractReport
+pub fn oraclemcp_db::CatalogExtractReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::CatalogExtractReport
+impl serde_core::ser::Serialize for oraclemcp_db::CatalogExtractReport
+pub fn oraclemcp_db::CatalogExtractReport::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::CatalogExtractReport
+pub fn oraclemcp_db::CatalogExtractReport::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::CatalogExtractReport
+impl core::marker::Send for oraclemcp_db::CatalogExtractReport
+impl core::marker::Sync for oraclemcp_db::CatalogExtractReport
+impl core::marker::Unpin for oraclemcp_db::CatalogExtractReport
+impl core::marker::UnsafeUnpin for oraclemcp_db::CatalogExtractReport
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::CatalogExtractReport
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::CatalogExtractReport
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::CatalogExtractReport where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::CatalogExtractReport where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::CatalogExtractReport where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CatalogExtractReport::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::CatalogExtractReport where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::CatalogExtractReport where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::CatalogExtractReport where U: core::convert::From<T>
+pub fn oraclemcp_db::CatalogExtractReport::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::CatalogExtractReport where U: core::convert::Into<T>
+pub type oraclemcp_db::CatalogExtractReport::Error = core::convert::Infallible
+pub fn oraclemcp_db::CatalogExtractReport::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::CatalogExtractReport where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::CatalogExtractReport::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::CatalogExtractReport::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::CatalogExtractReport where T: core::clone::Clone
+pub type oraclemcp_db::CatalogExtractReport::Owned = T
+pub fn oraclemcp_db::CatalogExtractReport::clone_into(&self, &mut T)
+pub fn oraclemcp_db::CatalogExtractReport::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::CatalogExtractReport
+impl<T> core::any::Any for oraclemcp_db::CatalogExtractReport where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::CatalogExtractReport::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::CatalogExtractReport where T: ?core::marker::Sized
+pub fn oraclemcp_db::CatalogExtractReport::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::CatalogExtractReport where T: ?core::marker::Sized
+pub fn oraclemcp_db::CatalogExtractReport::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::CatalogExtractReport where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::CatalogExtractReport::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::CatalogExtractReport
+pub fn oraclemcp_db::CatalogExtractReport::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::CatalogExtractReport
+pub type oraclemcp_db::CatalogExtractReport::Init = T
+pub const oraclemcp_db::CatalogExtractReport::ALIGN: usize
+pub unsafe fn oraclemcp_db::CatalogExtractReport::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::CatalogExtractReport::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::CatalogExtractReport::drop(usize)
+pub unsafe fn oraclemcp_db::CatalogExtractReport::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::CatalogExtractReport
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::CatalogExtractReport
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::CatalogExtractReport where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::CatalogExtractReport
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::CatalogExtractReport
+impl<T> typenum::type_operators::Same for oraclemcp_db::CatalogExtractReport
+pub type oraclemcp_db::CatalogExtractReport::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CatalogExtractReport where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CatalogExtractReport where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::CatalogExtractReport::vzip(self) -> V
+pub struct oraclemcp_db::CatalogExtractRequest
+pub oraclemcp_db::CatalogExtractRequest::include_plscope: bool
+pub oraclemcp_db::CatalogExtractRequest::schema_filters: alloc::vec::Vec<oraclemcp_db::CatalogSchemaFilter>
+impl oraclemcp_db::CatalogExtractRequest
+pub fn oraclemcp_db::CatalogExtractRequest::for_current_schema() -> Self
+pub fn oraclemcp_db::CatalogExtractRequest::for_named_schemas<I, S>(I) -> Self where I: core::iter::traits::collect::IntoIterator<Item = S>, S: core::convert::Into<alloc::string::String>
+pub fn oraclemcp_db::CatalogExtractRequest::with_plscope(self, bool) -> Self
+impl core::clone::Clone for oraclemcp_db::CatalogExtractRequest
+pub fn oraclemcp_db::CatalogExtractRequest::clone(&self) -> oraclemcp_db::CatalogExtractRequest
+impl core::cmp::Eq for oraclemcp_db::CatalogExtractRequest
+impl core::cmp::PartialEq for oraclemcp_db::CatalogExtractRequest
+pub fn oraclemcp_db::CatalogExtractRequest::eq(&self, &oraclemcp_db::CatalogExtractRequest) -> bool
+impl core::default::Default for oraclemcp_db::CatalogExtractRequest
+pub fn oraclemcp_db::CatalogExtractRequest::default() -> Self
+impl core::fmt::Debug for oraclemcp_db::CatalogExtractRequest
+pub fn oraclemcp_db::CatalogExtractRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::CatalogExtractRequest
+impl serde_core::ser::Serialize for oraclemcp_db::CatalogExtractRequest
+pub fn oraclemcp_db::CatalogExtractRequest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::CatalogExtractRequest
+pub fn oraclemcp_db::CatalogExtractRequest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::CatalogExtractRequest
+impl core::marker::Send for oraclemcp_db::CatalogExtractRequest
+impl core::marker::Sync for oraclemcp_db::CatalogExtractRequest
+impl core::marker::Unpin for oraclemcp_db::CatalogExtractRequest
+impl core::marker::UnsafeUnpin for oraclemcp_db::CatalogExtractRequest
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::CatalogExtractRequest
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::CatalogExtractRequest
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::CatalogExtractRequest where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::CatalogExtractRequest where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::CatalogExtractRequest where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CatalogExtractRequest::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::CatalogExtractRequest where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::CatalogExtractRequest where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::CatalogExtractRequest where U: core::convert::From<T>
+pub fn oraclemcp_db::CatalogExtractRequest::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::CatalogExtractRequest where U: core::convert::Into<T>
+pub type oraclemcp_db::CatalogExtractRequest::Error = core::convert::Infallible
+pub fn oraclemcp_db::CatalogExtractRequest::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::CatalogExtractRequest where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::CatalogExtractRequest::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::CatalogExtractRequest::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::CatalogExtractRequest where T: core::clone::Clone
+pub type oraclemcp_db::CatalogExtractRequest::Owned = T
+pub fn oraclemcp_db::CatalogExtractRequest::clone_into(&self, &mut T)
+pub fn oraclemcp_db::CatalogExtractRequest::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::CatalogExtractRequest
+impl<T> core::any::Any for oraclemcp_db::CatalogExtractRequest where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::CatalogExtractRequest::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::CatalogExtractRequest where T: ?core::marker::Sized
+pub fn oraclemcp_db::CatalogExtractRequest::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::CatalogExtractRequest where T: ?core::marker::Sized
+pub fn oraclemcp_db::CatalogExtractRequest::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::CatalogExtractRequest where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::CatalogExtractRequest::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::CatalogExtractRequest
+pub fn oraclemcp_db::CatalogExtractRequest::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::CatalogExtractRequest
+pub type oraclemcp_db::CatalogExtractRequest::Init = T
+pub const oraclemcp_db::CatalogExtractRequest::ALIGN: usize
+pub unsafe fn oraclemcp_db::CatalogExtractRequest::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::CatalogExtractRequest::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::CatalogExtractRequest::drop(usize)
+pub unsafe fn oraclemcp_db::CatalogExtractRequest::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::CatalogExtractRequest
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::CatalogExtractRequest
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::CatalogExtractRequest where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::CatalogExtractRequest
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::CatalogExtractRequest
+impl<T> typenum::type_operators::Same for oraclemcp_db::CatalogExtractRequest
+pub type oraclemcp_db::CatalogExtractRequest::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CatalogExtractRequest where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CatalogExtractRequest where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::CatalogExtractRequest::vzip(self) -> V
+pub struct oraclemcp_db::CatalogExtractWarning
+pub oraclemcp_db::CatalogExtractWarning::code: alloc::string::String
+pub oraclemcp_db::CatalogExtractWarning::message: alloc::string::String
+pub oraclemcp_db::CatalogExtractWarning::remediation: core::option::Option<alloc::string::String>
+pub oraclemcp_db::CatalogExtractWarning::row_set: oraclemcp_db::CatalogRowSetName
+impl core::clone::Clone for oraclemcp_db::CatalogExtractWarning
+pub fn oraclemcp_db::CatalogExtractWarning::clone(&self) -> oraclemcp_db::CatalogExtractWarning
+impl core::cmp::Eq for oraclemcp_db::CatalogExtractWarning
+impl core::cmp::PartialEq for oraclemcp_db::CatalogExtractWarning
+pub fn oraclemcp_db::CatalogExtractWarning::eq(&self, &oraclemcp_db::CatalogExtractWarning) -> bool
+impl core::fmt::Debug for oraclemcp_db::CatalogExtractWarning
+pub fn oraclemcp_db::CatalogExtractWarning::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::CatalogExtractWarning
+impl serde_core::ser::Serialize for oraclemcp_db::CatalogExtractWarning
+pub fn oraclemcp_db::CatalogExtractWarning::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::CatalogExtractWarning
+pub fn oraclemcp_db::CatalogExtractWarning::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::CatalogExtractWarning
+impl core::marker::Send for oraclemcp_db::CatalogExtractWarning
+impl core::marker::Sync for oraclemcp_db::CatalogExtractWarning
+impl core::marker::Unpin for oraclemcp_db::CatalogExtractWarning
+impl core::marker::UnsafeUnpin for oraclemcp_db::CatalogExtractWarning
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::CatalogExtractWarning
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::CatalogExtractWarning
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::CatalogExtractWarning where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::CatalogExtractWarning where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::CatalogExtractWarning where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CatalogExtractWarning::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::CatalogExtractWarning where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::CatalogExtractWarning where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::CatalogExtractWarning where U: core::convert::From<T>
+pub fn oraclemcp_db::CatalogExtractWarning::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::CatalogExtractWarning where U: core::convert::Into<T>
+pub type oraclemcp_db::CatalogExtractWarning::Error = core::convert::Infallible
+pub fn oraclemcp_db::CatalogExtractWarning::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::CatalogExtractWarning where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::CatalogExtractWarning::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::CatalogExtractWarning::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::CatalogExtractWarning where T: core::clone::Clone
+pub type oraclemcp_db::CatalogExtractWarning::Owned = T
+pub fn oraclemcp_db::CatalogExtractWarning::clone_into(&self, &mut T)
+pub fn oraclemcp_db::CatalogExtractWarning::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::CatalogExtractWarning
+impl<T> core::any::Any for oraclemcp_db::CatalogExtractWarning where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::CatalogExtractWarning::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::CatalogExtractWarning where T: ?core::marker::Sized
+pub fn oraclemcp_db::CatalogExtractWarning::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::CatalogExtractWarning where T: ?core::marker::Sized
+pub fn oraclemcp_db::CatalogExtractWarning::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::CatalogExtractWarning where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::CatalogExtractWarning::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::CatalogExtractWarning
+pub fn oraclemcp_db::CatalogExtractWarning::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::CatalogExtractWarning
+pub type oraclemcp_db::CatalogExtractWarning::Init = T
+pub const oraclemcp_db::CatalogExtractWarning::ALIGN: usize
+pub unsafe fn oraclemcp_db::CatalogExtractWarning::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::CatalogExtractWarning::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::CatalogExtractWarning::drop(usize)
+pub unsafe fn oraclemcp_db::CatalogExtractWarning::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::CatalogExtractWarning
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::CatalogExtractWarning
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::CatalogExtractWarning where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::CatalogExtractWarning
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::CatalogExtractWarning
+impl<T> typenum::type_operators::Same for oraclemcp_db::CatalogExtractWarning
+pub type oraclemcp_db::CatalogExtractWarning::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CatalogExtractWarning where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CatalogExtractWarning where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::CatalogExtractWarning::vzip(self) -> V
+pub struct oraclemcp_db::CatalogRowBatch
+pub oraclemcp_db::CatalogRowBatch::row_set: oraclemcp_db::CatalogRowSetName
+pub oraclemcp_db::CatalogRowBatch::rows: alloc::vec::Vec<oraclemcp_db::OracleRow>
+impl core::clone::Clone for oraclemcp_db::CatalogRowBatch
+pub fn oraclemcp_db::CatalogRowBatch::clone(&self) -> oraclemcp_db::CatalogRowBatch
+impl core::cmp::Eq for oraclemcp_db::CatalogRowBatch
+impl core::cmp::PartialEq for oraclemcp_db::CatalogRowBatch
+pub fn oraclemcp_db::CatalogRowBatch::eq(&self, &oraclemcp_db::CatalogRowBatch) -> bool
+impl core::fmt::Debug for oraclemcp_db::CatalogRowBatch
+pub fn oraclemcp_db::CatalogRowBatch::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::CatalogRowBatch
+impl serde_core::ser::Serialize for oraclemcp_db::CatalogRowBatch
+pub fn oraclemcp_db::CatalogRowBatch::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::CatalogRowBatch
+pub fn oraclemcp_db::CatalogRowBatch::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::CatalogRowBatch
+impl core::marker::Send for oraclemcp_db::CatalogRowBatch
+impl core::marker::Sync for oraclemcp_db::CatalogRowBatch
+impl core::marker::Unpin for oraclemcp_db::CatalogRowBatch
+impl core::marker::UnsafeUnpin for oraclemcp_db::CatalogRowBatch
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::CatalogRowBatch
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::CatalogRowBatch
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::CatalogRowBatch where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::CatalogRowBatch where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::CatalogRowBatch where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::CatalogRowBatch::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::CatalogRowBatch where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::CatalogRowBatch where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::CatalogRowBatch where U: core::convert::From<T>
+pub fn oraclemcp_db::CatalogRowBatch::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::CatalogRowBatch where U: core::convert::Into<T>
+pub type oraclemcp_db::CatalogRowBatch::Error = core::convert::Infallible
+pub fn oraclemcp_db::CatalogRowBatch::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::CatalogRowBatch where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::CatalogRowBatch::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::CatalogRowBatch::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::CatalogRowBatch where T: core::clone::Clone
+pub type oraclemcp_db::CatalogRowBatch::Owned = T
+pub fn oraclemcp_db::CatalogRowBatch::clone_into(&self, &mut T)
+pub fn oraclemcp_db::CatalogRowBatch::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::CatalogRowBatch
+impl<T> core::any::Any for oraclemcp_db::CatalogRowBatch where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::CatalogRowBatch::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::CatalogRowBatch where T: ?core::marker::Sized
+pub fn oraclemcp_db::CatalogRowBatch::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::CatalogRowBatch where T: ?core::marker::Sized
+pub fn oraclemcp_db::CatalogRowBatch::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::CatalogRowBatch where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::CatalogRowBatch::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::CatalogRowBatch
+pub fn oraclemcp_db::CatalogRowBatch::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::CatalogRowBatch
+pub type oraclemcp_db::CatalogRowBatch::Init = T
+pub const oraclemcp_db::CatalogRowBatch::ALIGN: usize
+pub unsafe fn oraclemcp_db::CatalogRowBatch::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::CatalogRowBatch::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::CatalogRowBatch::drop(usize)
+pub unsafe fn oraclemcp_db::CatalogRowBatch::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::CatalogRowBatch
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::CatalogRowBatch
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::CatalogRowBatch where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::CatalogRowBatch
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::CatalogRowBatch
+impl<T> typenum::type_operators::Same for oraclemcp_db::CatalogRowBatch
+pub type oraclemcp_db::CatalogRowBatch::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::CatalogRowBatch where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CatalogRowBatch where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::CatalogRowBatch::vzip(self) -> V
 pub struct oraclemcp_db::CloudStatus
 pub oraclemcp_db::CloudStatus::autonomous: bool
 pub oraclemcp_db::CloudStatus::mode: alloc::string::String
@@ -4583,6 +5033,7 @@ pub fn oraclemcp_db::base64_encode(&[u8]) -> alloc::string::String
 pub fn oraclemcp_db::buffer_cache_hit_ratio_sql() -> (&'static str, alloc::string::String)
 pub fn oraclemcp_db::canonical_nls_statements() -> alloc::vec::Vec<&'static str>
 pub fn oraclemcp_db::canonicalize_datetime(&str) -> alloc::string::String
+pub fn oraclemcp_db::catalog_extract_rowsets(bool) -> alloc::vec::Vec<oraclemcp_db::CatalogRowSetName>
 pub fn oraclemcp_db::classify_type(&str) -> oraclemcp_db::TypeRepr
 pub fn oraclemcp_db::classify_wallet(&std::path::Path, &[alloc::string::String], core::option::Option<&str>) -> core::result::Result<oraclemcp_db::WalletContents, oraclemcp_db::OciError>
 pub fn oraclemcp_db::compare_schemas(&oraclemcp_db::SchemaSnapshot, &oraclemcp_db::SchemaSnapshot) -> oraclemcp_db::SchemaDiff
@@ -4604,6 +5055,7 @@ pub fn oraclemcp_db::discover_wallet(&std::path::Path) -> core::result::Result<o
 pub fn oraclemcp_db::ensure_fresh_token(core::option::Option<&oraclemcp_db::IamToken>, &dyn oraclemcp_db::IamTokenSource, i64, i64) -> core::result::Result<oraclemcp_db::IamToken, oraclemcp_db::OciError>
 pub fn oraclemcp_db::execute_immediate_audit(&[oraclemcp_db::PlscopeStatement]) -> alloc::vec::Vec<i64>
 pub async fn oraclemcp_db::explain_plan(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, bool) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::extract_catalog_rowsets<C: oraclemcp_db::OracleConnection + ?core::marker::Sized>(&asupersync::cx::cx::Cx, &C, &oraclemcp_db::CatalogExtractRequest) -> core::result::Result<oraclemcp_db::CatalogExtractReport, oraclemcp_db::DbError>
 pub fn oraclemcp_db::find_unused_declarations(&[oraclemcp_db::PlscopeIdentifier]) -> alloc::vec::Vec<alloc::string::String>
 pub async fn oraclemcp_db::get_ddl(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, &str) -> core::result::Result<core::option::Option<alloc::string::String>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::get_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, &str, usize) -> core::result::Result<oraclemcp_db::SourceText, oraclemcp_db::DbError>
