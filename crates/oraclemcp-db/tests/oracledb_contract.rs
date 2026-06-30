@@ -382,6 +382,13 @@ fn contract_type_dates_are_iso_8601_and_nls_invariant() {
         ser("TIMESTAMP(6)", "2026-06-01 12:00:00.123456"),
         json!("2026-06-01T12:00:00.123456")
     );
+    assert_eq!(
+        ser(
+            "TIMESTAMP(9) WITH TIME ZONE",
+            "2026-06-29 12:34:56.987654321 -05:30"
+        ),
+        json!("2026-06-29T12:34:56.987654321-05:30")
+    );
     // Already-ISO input yields the identical canonical output.
     assert_eq!(
         ser("DATE", "2026-06-01T12:00:00"),
@@ -505,18 +512,28 @@ fn contract_bind_variants_are_forwarded_as_typed_binds() {
         OracleBind::I64(-7),
         OracleBind::F64(2.5),
         OracleBind::Bool(true),
+        OracleBind::TimestampTz {
+            year: 2026,
+            month: 6,
+            day: 29,
+            hour: 12,
+            minute: 34,
+            second: 56,
+            nanosecond: 987_654_321,
+            offset_minutes: -330,
+        },
     ];
     let c = &conn;
     let b = &binds;
     run_with_cx(|cx| async move {
-        c.query_rows(&cx, "SELECT :1,:2,:3,:4,:5 FROM dual", b)
+        c.query_rows(&cx, "SELECT :1,:2,:3,:4,:5,:6 FROM dual", b)
             .await
             .expect("query");
     });
     assert_eq!(
         conn.calls(),
         vec![Call::Query {
-            sql: "SELECT :1,:2,:3,:4,:5 FROM dual".to_owned(),
+            sql: "SELECT :1,:2,:3,:4,:5,:6 FROM dual".to_owned(),
             binds,
         }]
     );

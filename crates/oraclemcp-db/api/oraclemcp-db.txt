@@ -836,6 +836,15 @@ pub oraclemcp_db::OracleBind::F64(f64)
 pub oraclemcp_db::OracleBind::I64(i64)
 pub oraclemcp_db::OracleBind::Null
 pub oraclemcp_db::OracleBind::String(alloc::string::String)
+pub oraclemcp_db::OracleBind::TimestampTz
+pub oraclemcp_db::OracleBind::TimestampTz::day: u8
+pub oraclemcp_db::OracleBind::TimestampTz::hour: u8
+pub oraclemcp_db::OracleBind::TimestampTz::minute: u8
+pub oraclemcp_db::OracleBind::TimestampTz::month: u8
+pub oraclemcp_db::OracleBind::TimestampTz::nanosecond: u32
+pub oraclemcp_db::OracleBind::TimestampTz::offset_minutes: i32
+pub oraclemcp_db::OracleBind::TimestampTz::second: u8
+pub oraclemcp_db::OracleBind::TimestampTz::year: i32
 impl oraclemcp_db::OracleBind
 pub const fn oraclemcp_db::OracleBind::kind(&self) -> &'static str
 pub const fn oraclemcp_db::OracleBind::redacted(&self) -> oraclemcp_db::RedactedOracleBind<'_>

@@ -713,6 +713,52 @@ fn live_type_fidelity_number_string_and_iso_date() {
 }
 
 #[test]
+fn live_tstz_bind_fetch_preserves_numeric_offset() {
+    run_with_cx(|cx| async move {
+        let Some(conn) = connect_or_skip(
+            &cx,
+            "live_tstz_bind_fetch_preserves_numeric_offset",
+            test_opts(),
+        )
+        .await
+        else {
+            return;
+        };
+        let expected = "2026-06-29T12:34:56.987654321-05:30";
+        let rows = conn
+            .query_rows(
+                &cx,
+                "SELECT :1 AS tstz_value FROM dual",
+                &[OracleBind::TimestampTz {
+                    year: 2026,
+                    month: 6,
+                    day: 29,
+                    hour: 12,
+                    minute: 34,
+                    second: 56,
+                    nanosecond: 987_654_321,
+                    offset_minutes: -330,
+                }],
+            )
+            .await
+            .expect("TSTZ bind/fetch query");
+        let v = serialize_row(&rows[0], &SerializeOptions::default());
+        eprintln!(
+            "{}",
+            json!({
+                "suite": "live_oracle",
+                "test": "live_tstz_bind_fetch_preserves_numeric_offset",
+                "phase": "assert",
+                "event": "tstz_bind_fetch",
+                "expected": expected,
+                "actual": v["TSTZ_VALUE"],
+            })
+        );
+        assert_eq!(v["TSTZ_VALUE"], json!(expected));
+    });
+}
+
+#[test]
 fn live_query_materializes_lob_locators_with_caps() {
     run_with_cx(|cx| async move {
         let opts = test_opts();

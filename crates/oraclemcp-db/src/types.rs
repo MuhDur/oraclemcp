@@ -43,6 +43,25 @@ pub enum OracleBind {
     F64(f64),
     /// A boolean bind (mapped to 1/0 for pre-23ai).
     Bool(bool),
+    /// `TIMESTAMP WITH TIME ZONE`, preserving the numeric UTC offset.
+    TimestampTz {
+        /// Calendar year.
+        year: i32,
+        /// Calendar month, 1-12.
+        month: u8,
+        /// Calendar day, 1-31.
+        day: u8,
+        /// Hour, 0-23.
+        hour: u8,
+        /// Minute, 0-59.
+        minute: u8,
+        /// Second, 0-59.
+        second: u8,
+        /// Fractional second in nanoseconds.
+        nanosecond: u32,
+        /// UTC offset in minutes, e.g. `-330` for `-05:30`.
+        offset_minutes: i32,
+    },
 }
 
 impl OracleBind {
@@ -56,6 +75,7 @@ impl OracleBind {
             OracleBind::I64(_) => "i64",
             OracleBind::F64(_) => "f64",
             OracleBind::Bool(_) => "bool",
+            OracleBind::TimestampTz { .. } => "timestamp_tz",
         }
     }
 
@@ -739,6 +759,16 @@ mod tests {
             OracleBind::I64(987_654_321),
             OracleBind::F64(12345.6789),
             OracleBind::Bool(false),
+            OracleBind::TimestampTz {
+                year: 2026,
+                month: 6,
+                day: 29,
+                hour: 12,
+                minute: 34,
+                second: 56,
+                nanosecond: 987_654_321,
+                offset_minutes: -330,
+            },
             OracleBind::Null,
         ];
         let rendered_debug = format!("{binds:?}");
@@ -757,13 +787,15 @@ mod tests {
             "987654321",
             "12345.6789",
             "false",
+            "2026",
+            "-330",
         ] {
             assert!(
                 !rendered.contains(forbidden),
                 "{forbidden} leaked: {rendered}"
             );
         }
-        for kind in ["string", "i64", "f64", "bool", "null"] {
+        for kind in ["string", "i64", "f64", "bool", "timestamp_tz", "null"] {
             assert!(rendered.contains(kind), "{kind} missing from {rendered}");
         }
         assert!(rendered.contains("<redacted>"));

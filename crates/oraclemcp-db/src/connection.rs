@@ -597,6 +597,25 @@ mod driver {
             OracleBind::I64(value) => BindValue::Number(value.to_string()),
             OracleBind::F64(value) => BindValue::BinaryDouble(*value),
             OracleBind::Bool(value) => BindValue::Number(if *value { "1" } else { "0" }.to_owned()),
+            OracleBind::TimestampTz {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+                offset_minutes,
+            } => BindValue::TimestampTz {
+                year: *year,
+                month: *month,
+                day: *day,
+                hour: *hour,
+                minute: *minute,
+                second: *second,
+                nanosecond: *nanosecond,
+                offset_minutes: *offset_minutes,
+            },
         }
     }
 
@@ -1027,6 +1046,28 @@ mod driver {
                     oracle_type,
                     Some(format_datetime(
                         year, month, day, hour, minute, second, nanosecond,
+                    )),
+                ),
+                Some(QueryValue::TimestampTz {
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    nanosecond,
+                    offset_minutes,
+                }) => OracleCell::new(
+                    oracle_type,
+                    Some(format_timestamp_tz(
+                        year,
+                        month,
+                        day,
+                        hour,
+                        minute,
+                        second,
+                        nanosecond,
+                        offset_minutes,
                     )),
                 ),
                 Some(QueryValue::IntervalDS {
@@ -1754,6 +1795,18 @@ mod driver {
                 "unsupported LOB subtype must fail before reading locator data"
             );
         }
+
+        #[test]
+        fn timestamp_tz_formatter_preserves_numeric_offset() {
+            assert_eq!(
+                super::format_timestamp_tz(2026, 6, 29, 12, 34, 56, 987_654_321, -330),
+                "2026-06-29 12:34:56.987654321 -05:30"
+            );
+            assert_eq!(
+                super::format_timestamp_tz(2026, 6, 29, 12, 34, 56, 0, 345),
+                "2026-06-29 12:34:56 +05:45"
+            );
+        }
     }
 
     fn format_datetime(
@@ -1772,6 +1825,27 @@ mod driver {
                 "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{nanosecond:09}"
             )
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn format_timestamp_tz(
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        nanosecond: u32,
+        offset_minutes: i32,
+    ) -> String {
+        let sign = if offset_minutes < 0 { '-' } else { '+' };
+        let offset_abs = i64::from(offset_minutes).abs();
+        let offset_hours = offset_abs / 60;
+        let offset_mins = offset_abs % 60;
+        format!(
+            "{} {sign}{offset_hours:02}:{offset_mins:02}",
+            format_datetime(year, month, day, hour, minute, second, nanosecond)
+        )
     }
 
     fn oracle_type_name(meta: &ColumnMetadata) -> String {
