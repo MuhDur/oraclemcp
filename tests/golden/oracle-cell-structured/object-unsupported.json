@@ -1,0 +1,10 @@
+{
+  "kind": "unsupported",
+  "oracle_value_kind": "Object",
+  "packed_byte_length": 4,
+  "schema": "HR",
+  "type_name": "ADDRESS_T",
+  "unsupported": "oracle_object",
+  "value": null,
+  "warning": "Oracle object/UDT values are not decoded by default"
+}

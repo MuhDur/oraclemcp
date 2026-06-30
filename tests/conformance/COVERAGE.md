@@ -34,6 +34,10 @@ Harnesses:
   `crates/oraclemcp/src/dispatch/tests.rs::e5_*`,
   `crates/oraclemcp-core/tests/mcp_conformance.rs::completion_complete_for_profile_honors_e5_exposure`
 - Binary transport test: `crates/oraclemcp/tests/e2e_http_oauth.rs`
+- Oracle structured-cell serialization schema and fixtures:
+  `schemas/oracle-cell-structured.schema.json`,
+  `crates/oraclemcp-db/tests/structured_schema_golden.rs`, and
+  `tests/golden/oracle-cell-structured/*.json`
 - Native listener TLS tests: `crates/oraclemcp-core/src/http.rs`
 - Transports under test:
   - stdio: `OracleMcpServer::serve_stdio_with_io`
@@ -59,8 +63,9 @@ Harnesses:
 | HTTP guards | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTP sessions | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
+| Oracle structured cells | 4 | 0 | 4 | 4 | 0 | 100% |
 
-Total tracked requirements: 34 MUST, 2 SHOULD, 36 tested.
+Total tracked requirements: 38 MUST, 2 SHOULD, 40 tested.
 
 ## Requirement IDs
 
@@ -102,6 +107,10 @@ Total tracked requirements: 34 MUST, 2 SHOULD, 36 tested.
 | HTTP-NEG-001 | MUST | HTTP negotiation | `/mcp` POST rejects unacceptable `Accept` and unsupported `Content-Type` values before JSON-RPC dispatch. |
 | HTTPS-001 | MUST | HTTPS / mTLS | Server-only native TLS accepts a valid HTTPS handshake. |
 | HTTPS-002 | MUST | HTTPS / mTLS | Native mTLS rejects clients without a certificate and accepts a client certificate signed by the configured CA. |
+| DB-SER-001 | MUST | Oracle structured cells | A published JSON Schema exists for `OracleCell::structured` and declares ARRAY, JSON/OSON, VECTOR, TSTZ, object marker, and generic unsupported variants. |
+| DB-SER-002 | MUST | Oracle structured cells | Golden fixtures for ARRAY/JSON/VECTOR/TSTZ, OSON scalars, object/UDT unsupported, and generic unsupported parse and match the serializer output. |
+| DB-SER-003 | MUST | Oracle structured cells | Structured payloads serialize verbatim rather than flattening through text. |
+| DB-SER-004 | MUST | Oracle structured cells | Legacy silent-flattening shapes are rejected by the schema contract test. |
 
 ## HTTP Proof Map
 

@@ -1,0 +1,56 @@
+{
+  "items": [
+    null,
+    {
+      "kind": "json",
+      "value": {
+        "entries": [
+          {
+            "key": "wide_number",
+            "value": {
+              "kind": "number",
+              "value": "99999999999999999999999999999999999999"
+            }
+          },
+          {
+            "key": "raw",
+            "value": {
+              "byte_length": 4,
+              "data": "deadbeef",
+              "encoding": "hex",
+              "kind": "raw"
+            }
+          }
+        ],
+        "kind": "object"
+      }
+    },
+    {
+      "format": "float64",
+      "indices": [
+        0,
+        3
+      ],
+      "kind": "vector",
+      "num_dimensions": 4,
+      "storage": "sparse",
+      "values": [
+        1.0,
+        -1.5
+      ]
+    },
+    {
+      "day": 29,
+      "hour": 12,
+      "kind": "timestamp_tz",
+      "minute": 34,
+      "month": 6,
+      "nanosecond": 987654321,
+      "offset_minutes": -330,
+      "second": 56,
+      "value": "2026-06-29 12:34:56.987654321 -05:30",
+      "year": 2026
+    }
+  ],
+  "kind": "array"
+}

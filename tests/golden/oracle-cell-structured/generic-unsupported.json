@@ -1,0 +1,7 @@
+{
+  "kind": "unsupported",
+  "oracle_value_kind": "Cursor",
+  "unsupported": "oracle_value",
+  "value": null,
+  "warning": "Oracle value kind is not structurally serialized yet"
+}

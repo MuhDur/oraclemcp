@@ -1,0 +1,320 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MuhDur/oraclemcp/schemas/oracle-cell-structured.schema.json",
+  "title": "oraclemcp OracleCell.structured payload",
+  "description": "Version 1 schema for structured OracleCell JSON payloads emitted by oraclemcp-db. Scalar NUMBER remains lossless text where Oracle precision requires it; unsupported Oracle object/UDT values are explicit markers.",
+  "oneOf": [
+    { "$ref": "#/$defs/structuredCell" }
+  ],
+  "$defs": {
+    "structuredCell": {
+      "oneOf": [
+        { "$ref": "#/$defs/sqlArray" },
+        { "$ref": "#/$defs/jsonWrapper" },
+        { "$ref": "#/$defs/vectorDense" },
+        { "$ref": "#/$defs/vectorSparse" },
+        { "$ref": "#/$defs/osonObject" },
+        { "$ref": "#/$defs/text" },
+        { "$ref": "#/$defs/textRaw" },
+        { "$ref": "#/$defs/raw" },
+        { "$ref": "#/$defs/rowid" },
+        { "$ref": "#/$defs/string" },
+        { "$ref": "#/$defs/number" },
+        { "$ref": "#/$defs/binaryFloat" },
+        { "$ref": "#/$defs/binaryDouble" },
+        { "$ref": "#/$defs/boolean" },
+        { "$ref": "#/$defs/null" },
+        { "$ref": "#/$defs/datetime" },
+        { "$ref": "#/$defs/timestampTz" },
+        { "$ref": "#/$defs/intervalDs" },
+        { "$ref": "#/$defs/intervalYm" },
+        { "$ref": "#/$defs/unsupportedObject" },
+        { "$ref": "#/$defs/unsupportedOracleValue" }
+      ]
+    },
+    "sqlArrayItem": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/structuredCell" }
+      ]
+    },
+    "sqlArray": {
+      "type": "object",
+      "required": ["kind", "items"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "array" },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/sqlArrayItem" }
+        }
+      }
+    },
+    "jsonWrapper": {
+      "type": "object",
+      "required": ["kind", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "json" },
+        "value": { "$ref": "#/$defs/structuredCell" }
+      }
+    },
+    "vectorDense": {
+      "type": "object",
+      "required": ["kind", "storage", "format", "values"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "vector" },
+        "storage": { "const": "dense" },
+        "format": { "$ref": "#/$defs/vectorFormat" },
+        "values": { "$ref": "#/$defs/vectorValues" }
+      }
+    },
+    "vectorSparse": {
+      "type": "object",
+      "required": ["kind", "storage", "format", "num_dimensions", "indices", "values"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "vector" },
+        "storage": { "const": "sparse" },
+        "format": { "$ref": "#/$defs/vectorFormat" },
+        "num_dimensions": { "type": "integer", "minimum": 0 },
+        "indices": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "values": { "$ref": "#/$defs/vectorValues" }
+      }
+    },
+    "vectorFormat": {
+      "enum": ["float32", "float64", "int8", "binary"]
+    },
+    "vectorValues": {
+      "type": "array",
+      "items": {
+        "type": ["number", "string"]
+      }
+    },
+    "osonObject": {
+      "type": "object",
+      "required": ["kind", "entries"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "object" },
+        "entries": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/objectEntry" }
+        }
+      }
+    },
+    "objectEntry": {
+      "type": "object",
+      "required": ["key", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string" },
+        "value": { "$ref": "#/$defs/structuredCell" }
+      }
+    },
+    "text": {
+      "type": "object",
+      "required": ["kind", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "text" },
+        "value": { "type": "string" }
+      }
+    },
+    "string": {
+      "type": "object",
+      "required": ["kind", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "string" },
+        "value": { "type": "string" }
+      }
+    },
+    "textRaw": {
+      "type": "object",
+      "required": ["kind", "encoding", "data", "byte_length", "csfrm"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "text_raw" },
+        "encoding": { "const": "hex" },
+        "data": { "$ref": "#/$defs/hexText" },
+        "byte_length": { "$ref": "#/$defs/byteLength" },
+        "csfrm": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "raw": {
+      "type": "object",
+      "required": ["kind", "encoding", "data", "byte_length"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "raw" },
+        "encoding": { "const": "hex" },
+        "data": { "$ref": "#/$defs/hexText" },
+        "byte_length": { "$ref": "#/$defs/byteLength" }
+      }
+    },
+    "rowid": {
+      "type": "object",
+      "required": ["kind", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "rowid" },
+        "value": { "type": "string" }
+      }
+    },
+    "number": {
+      "type": "object",
+      "required": ["kind", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "number" },
+        "value": { "type": "string" }
+      }
+    },
+    "binaryFloat": {
+      "type": "object",
+      "required": ["kind", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "binary_float" },
+        "value": { "$ref": "#/$defs/jsonNumberOrString" }
+      }
+    },
+    "binaryDouble": {
+      "type": "object",
+      "required": ["kind", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "binary_double" },
+        "value": { "$ref": "#/$defs/jsonNumberOrString" }
+      }
+    },
+    "boolean": {
+      "type": "object",
+      "required": ["kind", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "boolean" },
+        "value": { "type": "boolean" }
+      }
+    },
+    "null": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "null" }
+      }
+    },
+    "datetime": {
+      "type": "object",
+      "required": ["kind", "value", "year", "month", "day", "hour", "minute", "second", "nanosecond"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "datetime" },
+        "value": { "type": "string" },
+        "year": { "type": "integer" },
+        "month": { "type": "integer", "minimum": 1, "maximum": 12 },
+        "day": { "type": "integer", "minimum": 1, "maximum": 31 },
+        "hour": { "type": "integer", "minimum": 0, "maximum": 23 },
+        "minute": { "type": "integer", "minimum": 0, "maximum": 59 },
+        "second": { "type": "integer", "minimum": 0, "maximum": 60 },
+        "nanosecond": { "type": "integer", "minimum": 0, "maximum": 999999999 }
+      }
+    },
+    "timestampTz": {
+      "type": "object",
+      "required": ["kind", "value", "year", "month", "day", "hour", "minute", "second", "nanosecond", "offset_minutes"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "timestamp_tz" },
+        "value": { "type": "string" },
+        "year": { "type": "integer" },
+        "month": { "type": "integer", "minimum": 1, "maximum": 12 },
+        "day": { "type": "integer", "minimum": 1, "maximum": 31 },
+        "hour": { "type": "integer", "minimum": 0, "maximum": 23 },
+        "minute": { "type": "integer", "minimum": 0, "maximum": 59 },
+        "second": { "type": "integer", "minimum": 0, "maximum": 60 },
+        "nanosecond": { "type": "integer", "minimum": 0, "maximum": 999999999 },
+        "offset_minutes": { "type": "integer", "minimum": -840, "maximum": 840 }
+      }
+    },
+    "intervalDs": {
+      "type": "object",
+      "required": ["kind", "value", "days", "hours", "minutes", "seconds", "fseconds"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "interval_ds" },
+        "value": { "type": "string" },
+        "days": { "type": "integer" },
+        "hours": { "type": "integer" },
+        "minutes": { "type": "integer" },
+        "seconds": { "type": "integer" },
+        "fseconds": { "type": "integer", "minimum": 0, "maximum": 999999999 }
+      }
+    },
+    "intervalYm": {
+      "type": "object",
+      "required": ["kind", "value", "years", "months"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "interval_ym" },
+        "value": { "type": "string" },
+        "years": { "type": "integer" },
+        "months": { "type": "integer" }
+      }
+    },
+    "unsupportedObject": {
+      "type": "object",
+      "required": ["kind", "unsupported", "oracle_value_kind", "schema", "type_name", "packed_byte_length", "value", "warning"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "unsupported" },
+        "unsupported": { "const": "oracle_object" },
+        "oracle_value_kind": { "const": "Object" },
+        "schema": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ]
+        },
+        "type_name": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ]
+        },
+        "packed_byte_length": { "$ref": "#/$defs/byteLength" },
+        "value": { "type": "null" },
+        "warning": { "type": "string" }
+      }
+    },
+    "unsupportedOracleValue": {
+      "type": "object",
+      "required": ["kind", "unsupported", "oracle_value_kind", "value", "warning"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "unsupported" },
+        "unsupported": { "const": "oracle_value" },
+        "oracle_value_kind": { "type": "string" },
+        "value": { "type": "null" },
+        "warning": { "type": "string" }
+      }
+    },
+    "hexText": {
+      "type": "string",
+      "pattern": "^[0-9a-f]*$"
+    },
+    "byteLength": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "jsonNumberOrString": {
+      "type": ["number", "string"]
+    }
+  }
+}
