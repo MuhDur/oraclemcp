@@ -93,9 +93,8 @@ radius tools still need a configured profile.
 # Published by the manual Docker workflow with variant=plsql-intelligence.
 docker run -i --rm ghcr.io/muhdur/oraclemcp:<version>-plsql-intelligence --json info
 
-# Local build from sibling checkouts.
+# Local feature build; PL/SQL engine crates resolve from crates.io.
 docker buildx build \
-  --build-context plsql-intelligence=../plsql-intelligence \
   --target runtime-plsql-intelligence \
   -t oraclemcp:plsql-intelligence .
 docker run -i --rm oraclemcp:plsql-intelligence --json info

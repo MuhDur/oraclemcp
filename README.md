@@ -87,11 +87,10 @@ docker run -i --rm ghcr.io/muhdur/oraclemcp:<version>-plsql-intelligence --json 
 docker run -i --rm ghcr.io/muhdur/oraclemcp:<version>-plsql-intelligence capabilities
 ```
 
-Local feature-image builds need the sibling `plsql-intelligence` checkout:
+Local feature-image builds resolve the PL/SQL engine crates from crates.io:
 
 ```sh
 docker buildx build \
-  --build-context plsql-intelligence=../plsql-intelligence \
   --target runtime-plsql-intelligence \
   -t oraclemcp:plsql-intelligence .
 docker run -i --rm oraclemcp:plsql-intelligence --json info

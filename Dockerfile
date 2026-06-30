@@ -17,21 +17,13 @@ WORKDIR /src/oraclemcp
 # ---- default builder: engine-free oraclemcp ----
 FROM builder-base AS builder
 COPY . .
-# Optional path dependencies in crates/oraclemcp/Cargo.toml still need their
-# sibling manifests during the pre-0.7.0 plsql-intelligence bridge. The default
-# image does not compile those crates, but Cargo must be able to read them.
-COPY --from=plsql-intelligence . /src/plsql-intelligence
 RUN cargo build --release -p oraclemcp
 
 # ---- optional builder: oraclemcp + PL/SQL intelligence engine ----
-# Requires BuildKit and the same named context used by the default builder:
-#   docker buildx build \
-#     --build-context plsql-intelligence=../plsql-intelligence \
-#     --target runtime-plsql-intelligence \
-#     -f Dockerfile .
+# The feature build resolves published plsql-intelligence crates from crates.io.
+# No sibling checkout or named BuildKit context is required.
 FROM builder-base AS builder-plsql-intelligence
 COPY . .
-COPY --from=plsql-intelligence . /src/plsql-intelligence
 RUN cargo build --release -p oraclemcp --features plsql-intelligence
 
 # ---- optional runtime: PL/SQL intelligence tools enabled, no DB required ----

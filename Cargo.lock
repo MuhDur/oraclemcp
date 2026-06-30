@@ -1990,9 +1990,10 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "plsql-catalog"
-version = "0.1.2"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7e99a387914330b1d0d043e7b18555cb78d463b76e2520bcf77f8152da6703c"
 dependencies = [
- "async-trait",
  "chrono",
  "plsql-core",
  "plsql-output",
@@ -2005,9 +2006,10 @@ dependencies = [
 
 [[package]]
 name = "plsql-cicd"
-version = "0.6.2"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c506cbb3f5a233888ad82d9687374181d0d6409a863e24dce6aa9c83858f9408"
 dependencies = [
- "async-trait",
  "clap",
  "getrandom 0.3.4",
  "plsql-catalog",
@@ -2025,7 +2027,9 @@ dependencies = [
 
 [[package]]
 name = "plsql-core"
-version = "0.1.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6bc9adb3626c5cbc6a6a56b5b7173e359020bd0a9de6ef9af5d18ebd63ae263"
 dependencies = [
  "miette",
  "serde",
@@ -2035,7 +2039,9 @@ dependencies = [
 
 [[package]]
 name = "plsql-depgraph"
-version = "0.6.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9f679fca0d446e88fb72e59878e12a03f2f8d82c5c32db2d52e55d6773295f8"
 dependencies = [
  "clap",
  "miette",
@@ -2051,7 +2057,9 @@ dependencies = [
 
 [[package]]
 name = "plsql-doc"
-version = "0.1.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1aa0d30008c54efe546a4b5dfbf00f1c229ca95fa53928051702b0080eb6cb2"
 dependencies = [
  "plsql-core",
  "serde",
@@ -2059,7 +2067,9 @@ dependencies = [
 
 [[package]]
 name = "plsql-engine"
-version = "0.1.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "401526cafbfe24df0c06398aad945118cc57f83700b9e3eb7cd252921892006b"
 dependencies = [
  "clap",
  "miette",
@@ -2081,7 +2091,9 @@ dependencies = [
 
 [[package]]
 name = "plsql-ir"
-version = "0.1.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0758466c427ef6f70c2ff8af3aa4351d31023d99dada2be542102cbe00709ab9"
 dependencies = [
  "plsql-catalog",
  "plsql-core",
@@ -2095,7 +2107,9 @@ dependencies = [
 
 [[package]]
 name = "plsql-lineage"
-version = "0.1.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e514a6e639dc98b66090374d229c97378179a68f2e2e48cebd416ef6c6a06e28"
 dependencies = [
  "plsql-catalog",
  "plsql-core",
@@ -2109,7 +2123,9 @@ dependencies = [
 
 [[package]]
 name = "plsql-output"
-version = "0.1.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e3a371cb8f030ddf1b01bf63cd84d7ce422c402aa9c4d4ef22bdf0b2a75c30e"
 dependencies = [
  "plsql-core",
  "serde",
@@ -2119,7 +2135,9 @@ dependencies = [
 
 [[package]]
 name = "plsql-parser"
-version = "0.1.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "771c50498204193c1a7b20139b2ae81dafe08aa2de73bd35dfbb81c42c29d576"
 dependencies = [
  "plsql-core",
  "serde",
@@ -2129,7 +2147,9 @@ dependencies = [
 
 [[package]]
 name = "plsql-parser-antlr"
-version = "0.1.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94f76de11615ef1ddc3e6e6edb54a32c553d431c5d88497060e66966b7b16042"
 dependencies = [
  "antlr-rust",
  "plsql-core",
@@ -2138,7 +2158,9 @@ dependencies = [
 
 [[package]]
 name = "plsql-privileges"
-version = "0.1.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1263e1bb46942a46954c98bf73286cef9ac13fc6cef2ab4baa5a3eab1bb77aed"
 dependencies = [
  "plsql-catalog",
  "plsql-core",
@@ -2150,7 +2172,9 @@ dependencies = [
 
 [[package]]
 name = "plsql-project"
-version = "0.1.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d5fa9b65c308e696cae3efa78d8e3ae7b51457af3bb9881d1a653d6033eac21"
 dependencies = [
  "plsql-core",
  "serde",
@@ -2161,14 +2185,18 @@ dependencies = [
 
 [[package]]
 name = "plsql-render"
-version = "0.1.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35c55fe41aa3d013aa87337764cdefdc2dfe7fa5e464e895cefb60f89cbb1f8d"
 dependencies = [
  "tracing",
 ]
 
 [[package]]
 name = "plsql-sast"
-version = "0.1.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a4eb0f4173c1c4498020880da7012c11e7aadd3749f20c5b385348cf1d4a75b"
 dependencies = [
  "plsql-core",
  "plsql-ir",
@@ -2179,7 +2207,9 @@ dependencies = [
 
 [[package]]
 name = "plsql-store"
-version = "0.1.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ffdc5f042907afedc82457840f31f828bb4e54a0d063fdbb9fc66df4bd900fb"
 dependencies = [
  "rusqlite",
  "serde",
@@ -2191,7 +2221,9 @@ dependencies = [
 
 [[package]]
 name = "plsql-symbols"
-version = "0.1.0"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c82ac9a236aee24e09901d285695ba1951b5689c75b1ca946669e074892a9160"
 dependencies = [
  "plsql-core",
  "plsql-ir",

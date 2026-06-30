@@ -94,13 +94,6 @@ jobs:
           RELEASE_TAG: v${{ steps.ver.outputs.v }}
         run: bash scripts/release_preflight.sh
 
-      - name: Check out plsql-intelligence engine context
-        uses: actions/checkout@v6
-        with:
-          repository: MuhDur/plsql-intelligence
-          path: plsql-intelligence
-          persist-credentials: false
-
       - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
@@ -118,8 +111,6 @@ jobs:
           target: ${{ steps.ver.outputs.target }}
           push: true
           tags: ${{ steps.ver.outputs.tags }}
-          build-contexts: |
-            plsql-intelligence=./plsql-intelligence
           # SLSA provenance + SBOM baked into the manifest, matching release.yml.
           provenance: mode=max
           sbom: true
