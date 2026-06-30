@@ -37,6 +37,8 @@ use oraclemcp_guard::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::server::DispatchContext;
+
 /// Default elevation-window TTL granted on a step-up approval (§6.6).
 pub const ESCALATION_WINDOW: Duration = Duration::from_secs(900);
 /// Default step-up challenge TTL.
@@ -45,25 +47,24 @@ pub const CHALLENGE_TTL: Duration = Duration::from_secs(900);
 /// Opens a connection and acquires a lease engine/DB-side. Injected so the
 /// router stays engine-free (the one-way boundary) and unit-testable.
 pub trait LeaseAcquirer: Send + Sync {
-    /// Acquire a lease for `profile`/`agent_identity` with `ttl`; return its id.
+    /// Acquire a lease for `profile` and a server-derived subject identity with
+    /// `ttl`; return its id.
     fn acquire(
         &self,
         profile: &str,
-        agent_identity: &str,
+        server_subject_stable_id: &str,
         ttl: Duration,
     ) -> Result<String, ErrorEnvelope>;
 }
 
 /// `oracle_session` arguments — one flat object discriminated by `action`.
 #[derive(Debug, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionAction {
     /// Acquire a session lease (opens + pins a physical session).
     LeaseAcquire {
         /// The connection profile to lease.
         profile: String,
-        /// The calling agent's identity (stamped for auditing).
-        agent_identity: String,
         /// Lease TTL; defaults to the server's lease TTL when omitted.
         #[serde(default)]
         ttl_seconds: Option<u64>,
@@ -206,17 +207,25 @@ fn apply_window(
 /// and each lease call is `.await`-ed.
 pub async fn oracle_session(
     cx: &Cx,
+    context: DispatchContext<'_>,
     action: SessionAction,
     deps: &mut SessionDeps<'_>,
 ) -> Result<Value, ErrorEnvelope> {
     match action {
         SessionAction::LeaseAcquire {
             profile,
-            agent_identity,
             ttl_seconds,
         } => {
             let ttl = Duration::from_secs(ttl_seconds.unwrap_or(deps.default_ttl_seconds));
-            let lease_id = deps.acquirer.acquire(&profile, &agent_identity, ttl)?;
+            let server_subject_stable_id = context.principal_key().ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorClass::PolicyDenied,
+                    "lease_acquire requires a server-derived subject identity",
+                )
+            })?;
+            let lease_id = deps
+                .acquirer
+                .acquire(&profile, server_subject_stable_id, ttl)?;
             Ok(json!({
                 "action": "lease_acquire",
                 "lease_id": lease_id,
@@ -389,6 +398,8 @@ fn resolution_to_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
     use oraclemcp_guard::StepUpOption;
 
     struct OkAcquirer;
@@ -396,9 +407,27 @@ mod tests {
         fn acquire(
             &self,
             profile: &str,
-            _id: &str,
+            _server_subject_stable_id: &str,
             _ttl: Duration,
         ) -> Result<String, ErrorEnvelope> {
+            Ok(format!("lease-for-{profile}"))
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingAcquirer {
+        last_identity: Mutex<Option<String>>,
+    }
+
+    impl LeaseAcquirer for RecordingAcquirer {
+        fn acquire(
+            &self,
+            profile: &str,
+            server_subject_stable_id: &str,
+            _ttl: Duration,
+        ) -> Result<String, ErrorEnvelope> {
+            *self.last_identity.lock().expect("identity lock") =
+                Some(server_subject_stable_id.to_owned());
             Ok(format!("lease-for-{profile}"))
         }
     }
@@ -426,12 +455,24 @@ mod tests {
     /// Run `oracle_session` on a fresh current-thread runtime with an installed
     /// `Cx` (the lease actions are now async).
     fn sess(action: SessionAction, deps: &mut SessionDeps<'_>) -> Result<Value, ErrorEnvelope> {
+        sess_with_context(
+            DispatchContext::default().with_principal_key("server-subject"),
+            action,
+            deps,
+        )
+    }
+
+    fn sess_with_context(
+        context: DispatchContext<'_>,
+        action: SessionAction,
+        deps: &mut SessionDeps<'_>,
+    ) -> Result<Value, ErrorEnvelope> {
         let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("current-thread runtime");
         runtime.block_on(async {
             let cx = Cx::current().expect("block_on installs a current Cx");
-            oracle_session(&cx, action, deps).await
+            oracle_session(&cx, context, action, deps).await
         })
     }
 
@@ -443,12 +484,56 @@ mod tests {
         let acq = OkAcquirer;
         let mut d = deps(&leases, &mut level, &stepup, &acq);
         let out = sess(
-            parse(r#"{"action":"lease_acquire","profile":"dev","agent_identity":"a"}"#),
+            parse(r#"{"action":"lease_acquire","profile":"dev"}"#),
             &mut d,
         )
         .expect("acquire ok");
         assert_eq!(out["lease_id"], json!("lease-for-dev"));
         assert_eq!(out["ttl_seconds"], json!(300));
+    }
+
+    #[test]
+    fn lease_acquire_uses_server_derived_subject_not_tool_args() {
+        assert!(
+            serde_json::from_str::<SessionAction>(
+                r#"{"action":"lease_acquire","profile":"dev","agent_identity":"attacker"}"#
+            )
+            .is_err(),
+            "caller-supplied agent_identity must not be accepted"
+        );
+
+        let leases = LeaseManager::new();
+        let mut level = SessionLevelState::new(OperatingLevel::ReadWrite, false);
+        let stepup = StepUpRegistry::new();
+        let acq = RecordingAcquirer::default();
+        let mut d = deps(&leases, &mut level, &stepup, &acq);
+        let out = sess_with_context(
+            DispatchContext::default().with_principal_key("oauth:subject-hash"),
+            parse(r#"{"action":"lease_acquire","profile":"dev"}"#),
+            &mut d,
+        )
+        .expect("acquire ok");
+        assert_eq!(out["lease_id"], json!("lease-for-dev"));
+        assert_eq!(
+            acq.last_identity.lock().expect("identity lock").as_deref(),
+            Some("oauth:subject-hash")
+        );
+    }
+
+    #[test]
+    fn lease_acquire_requires_server_derived_subject() {
+        let leases = LeaseManager::new();
+        let mut level = SessionLevelState::new(OperatingLevel::ReadWrite, false);
+        let stepup = StepUpRegistry::new();
+        let acq = OkAcquirer;
+        let mut d = deps(&leases, &mut level, &stepup, &acq);
+        let err = sess_with_context(
+            DispatchContext::default(),
+            parse(r#"{"action":"lease_acquire","profile":"dev"}"#),
+            &mut d,
+        )
+        .expect_err("missing server subject is fail-closed");
+        assert_eq!(err.error_class, ErrorClass::PolicyDenied);
     }
 
     #[test]

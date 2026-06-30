@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use asupersync::Cx;
 use asupersync::sync::Mutex as AsyncMutex;
-use oraclemcp_guard::MonotonicDeadline;
+use oraclemcp_guard::{MonotonicDeadline, is_allowed_alter_session};
 use serde::{Deserialize, Serialize};
 
 // Cancellation checkpoints route through the single crate-wide
@@ -479,16 +479,20 @@ impl LeaseManager {
     }
 
     /// Apply an `ALTER SESSION` statement on the leased session (the
-    /// `oracle_session` `set_session` action body, P1-SESS). The caller MUST
-    /// have validated `statement` against the guard's allowlist
-    /// (`oraclemcp_guard::is_allowed_alter_session`) first — this layer does not
-    /// import the guard (one-way boundary) and only enforces the lease binding.
+    /// `oracle_session` `set_session` action body, P1-SESS). This layer
+    /// re-checks the guard allowlist so no caller can bypass the router and run
+    /// arbitrary session state changes on a pinned lease.
     pub async fn apply_session_statement(
         &self,
         cx: &Cx,
         id: &LeaseId,
         statement: &str,
     ) -> Result<(), DbError> {
+        if !is_allowed_alter_session(statement) {
+            return Err(DbError::UnsupportedFeature(format!(
+                "ALTER SESSION not on the allowlist: {statement:?}"
+            )));
+        }
         let arc = self.live_lease(cx, &id.0).await?;
         let lease = arc.lock(cx).await.map_err(lock_err)?;
         lease.conn.execute(cx, statement, &[]).await?;
@@ -1173,6 +1177,44 @@ mod tests {
             assert!(mgr.savepoint(&cx, &id, "sp1").await.is_ok());
             assert!(mgr.savepoint(&cx, &id, "sp1; DROP TABLE t").await.is_err());
             assert!(mgr.savepoint(&cx, &id, "1bad").await.is_err());
+        });
+    }
+
+    #[test]
+    fn apply_session_statement_rechecks_alter_session_allowlist() {
+        run_with_cx(|cx| async move {
+            let mgr = LeaseManager::new();
+            let (conn, log) = mock();
+            let id = mgr
+                .acquire(&cx, "dev", "a", Duration::from_secs(900), &[], conn)
+                .await
+                .expect("acquire");
+
+            let err = mgr
+                .apply_session_statement(&cx, &id, "ALTER SESSION SET CONTAINER = CDB$ROOT")
+                .await
+                .expect_err("forbidden alter session must be rejected in lease layer");
+            assert!(matches!(err, DbError::UnsupportedFeature(_)), "{err:?}");
+            assert!(
+                !log.lock()
+                    .unwrap()
+                    .executed
+                    .iter()
+                    .any(|sql| sql.contains("CONTAINER = CDB$ROOT")),
+                "forbidden statement must not reach the database"
+            );
+
+            mgr.apply_session_statement(&cx, &id, "ALTER SESSION SET CURRENT_SCHEMA = HR")
+                .await
+                .expect("allowlisted alter session");
+            assert!(
+                log.lock()
+                    .unwrap()
+                    .executed
+                    .iter()
+                    .any(|sql| sql.contains("CURRENT_SCHEMA = HR")),
+                "allowlisted statement reaches the pinned session"
+            );
         });
     }
 
