@@ -522,6 +522,13 @@ Audit records are additive and format-versioned. Current records carry
 database-evidence fields. `audit verify` still accepts signed v1/v2 records, so
 existing logs do not need to be rewritten.
 
+The `/operator/v1` API is gated above ordinary MCP subjects. An OAuth/mTLS
+principal is an operator only when its server-derived subject key appears in
+`[http.operator].allowed_subjects`; otherwise only the unauthenticated loopback
+local-owner path is accepted by default. Authorized operator API actions append
+to the same signed audit chain before routing, and fail closed if no audit sink
+is configured.
+
 ### 5.5 Rotate credentials and keys
 
 - **DB credential:** update the secret behind `credential_ref` and restart (or

@@ -51,9 +51,9 @@ use oraclemcp_core::{
     AdmissionController, CapabilitiesReport, CustomToolCatalog, CustomToolDef, DoctorContext,
     ExportRegistry, FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext,
     LaneDispatchFactory, LaneRuntime, MCP_PATH, OAuthEnforcement, ObservabilityState,
-    OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport, ShutdownCoordinator,
-    SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial,
-    TlsServerConfig, ToolDispatch, WriteIntentLog, build_server_config, load_tools,
+    OperatorAuthorityPolicy, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport,
+    ShutdownCoordinator, SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy,
+    TlsMaterial, TlsServerConfig, ToolDispatch, WriteIntentLog, build_server_config, load_tools,
     load_tools_for_profile, parse_tools_file, requires_mtls, run_doctor, sign,
     start_oraclemcp_service_app_with_transport,
 };
@@ -1400,6 +1400,15 @@ fn default_oauth_metadata_url(resource: &str) -> String {
     format!("{base}{PROTECTED_RESOURCE_METADATA_PATH}")
 }
 
+fn local_operator_stable_id() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "process-owner".to_owned())
+}
+
 #[derive(Clone, Debug)]
 struct ResolvedHttpTransportConfig {
     transport: HttpTransportConfig,
@@ -1507,6 +1516,17 @@ fn http_transport_config_from_merged(
             result_store: None,
             session_lifecycle: None,
             single_principal_guard: Some(SinglePrincipalGuard::new()),
+            operator_authority: OperatorAuthorityPolicy {
+                allow_loopback_owner: http.operator.allow_loopback_owner,
+                local_owner_stable_id: local_operator_stable_id(),
+                allowed_subjects: http
+                    .operator
+                    .allowed_subjects
+                    .into_iter()
+                    .map(|subject| subject.trim().to_owned())
+                    .collect(),
+            },
+            operator_auditor: None,
             // Observability is wired in run_serve (HealthState/Metrics/probe).
             observability: ObservabilityState::default(),
         },
@@ -1782,7 +1802,7 @@ fn run_serve(
                         ServerTransportMode::HttpStateless
                     },
                     custom_catalog,
-                    auditor,
+                    auditor: auditor.clone(),
                     write_intents,
                     secret_resolver: Arc::clone(&secret_resolver),
                     request_timeout,
@@ -1793,6 +1813,7 @@ fn run_serve(
                 mut transport, tls, ..
             } = resolved_http;
             transport.session_lifecycle = built.session_lifecycle;
+            transport.operator_auditor = auditor;
 
             // ── D1 observability wiring (health + metrics + graceful drain) ──
             let version = env!("CARGO_PKG_VERSION");

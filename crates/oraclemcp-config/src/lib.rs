@@ -223,6 +223,8 @@ pub struct HttpConfig {
     pub oauth: Option<HttpOAuthConfig>,
     /// Optional TLS material for the native HTTPS listener.
     pub tls: Option<HttpTlsConfig>,
+    /// Operator-authority policy for `/operator/v1`.
+    pub operator: HttpOperatorConfig,
 }
 
 impl Default for HttpConfig {
@@ -235,6 +237,7 @@ impl Default for HttpConfig {
             stateful_idle_ttl_seconds: DEFAULT_HTTP_STATEFUL_IDLE_TTL_SECONDS,
             oauth: None,
             tls: None,
+            operator: HttpOperatorConfig::default(),
         }
     }
 }
@@ -249,6 +252,54 @@ impl HttpConfig {
         }
         if let Some(tls) = &self.tls {
             tls.validate()?;
+        }
+        self.operator.validate()?;
+        Ok(())
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Operator-authority policy for the native HTTP operator API.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HttpOperatorConfig {
+    /// Allow unauthenticated loopback requests from the local process owner to
+    /// act as the single local operator. Authenticated principals still require
+    /// an explicit `allowed_subjects` entry.
+    #[serde(default = "default_true")]
+    pub allow_loopback_owner: bool,
+    /// Server-derived principal keys allowed to act as operator, such as
+    /// `oauth:<stable-hash>` or `mtls:<certificate-fingerprint>`.
+    pub allowed_subjects: Vec<String>,
+}
+
+impl Default for HttpOperatorConfig {
+    fn default() -> Self {
+        Self {
+            allow_loopback_owner: true,
+            allowed_subjects: Vec::new(),
+        }
+    }
+}
+
+impl HttpOperatorConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        for subject in &self.allowed_subjects {
+            let Some((kind, stable_id)) = subject.split_once(':') else {
+                return Err(ConfigError::InvalidOperator {
+                    field: "http.operator.allowed_subjects",
+                    reason: "entries must be server-derived keys like oauth:<stable-id> or mtls:<fingerprint>",
+                });
+            };
+            if kind.trim().is_empty() || stable_id.trim().is_empty() {
+                return Err(ConfigError::InvalidOperator {
+                    field: "http.operator.allowed_subjects",
+                    reason: "entries must have non-empty kind and stable id",
+                });
+            }
         }
         Ok(())
     }
@@ -632,6 +683,14 @@ pub enum ConfigError {
         /// Validation failure.
         reason: &'static str,
     },
+    /// Operator-authority configuration is malformed.
+    #[error("invalid {field}: {reason}")]
+    InvalidOperator {
+        /// Field name.
+        field: &'static str,
+        /// Validation failure.
+        reason: &'static str,
+    },
     /// Audit-log shipping configuration is malformed (bead D2).
     #[error("invalid audit.shipping: {reason}")]
     InvalidAuditShipping {
@@ -689,6 +748,43 @@ mod tests {
             Some("https://mcp.example.com/mcp")
         );
         assert_eq!(oauth.required_scopes, vec!["oracle:read"]);
+    }
+
+    #[test]
+    fn http_operator_config_loads_and_validates() {
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [http.operator]
+            allow_loopback_owner = false
+            allowed_subjects = ["oauth:subject-hash", "mtls:cert-fingerprint"]
+            "#,
+        )
+        .expect("operator config loads");
+
+        assert!(!cfg.http.operator.allow_loopback_owner);
+        assert_eq!(
+            cfg.http.operator.allowed_subjects,
+            vec!["oauth:subject-hash", "mtls:cert-fingerprint"]
+        );
+    }
+
+    #[test]
+    fn malformed_http_operator_subject_is_rejected() {
+        let err = OracleMcpConfig::from_toml_str(
+            r#"
+            [http.operator]
+            allowed_subjects = ["not-a-server-derived-key"]
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ConfigError::InvalidOperator {
+                field: "http.operator.allowed_subjects",
+                ..
+            }
+        ));
     }
 
     #[test]

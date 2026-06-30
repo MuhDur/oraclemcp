@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor};
 use oraclemcp_auth::{
     HttpGuardError, HttpGuardPolicy, ResourceServerConfig, SignatureVerifier, TokenError,
     extract_bearer,
@@ -26,6 +27,7 @@ use rustls::{ServerConnection, StreamOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::admin_auth::OperatorAuthorityPolicy;
 use crate::server::{DispatchCloseReason, DispatchContext, OracleMcpServer};
 use crate::tls::TlsServerConfig;
 
@@ -88,7 +90,7 @@ impl std::fmt::Debug for ObservabilityState {
 }
 
 /// Operator configuration for the HTTP transport.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HttpTransportConfig {
     /// Allowed `Host` authorities beyond loopback (DNS-rebinding guard). Empty
     /// keeps the default loopback-only policy.
@@ -126,9 +128,39 @@ pub struct HttpTransportConfig {
     /// may bind to one authenticated principal only. A second principal is
     /// refused before it can touch the shared dispatcher/session state.
     pub single_principal_guard: Option<SinglePrincipalGuard>,
+    /// D17 operator-authority policy for `/operator/v1`. Ordinary authenticated
+    /// subjects are not operators unless this policy authorizes them.
+    pub operator_authority: OperatorAuthorityPolicy,
+    /// Audit sink for authorized operator API actions. If unset, operator API
+    /// actions fail closed rather than running unaudited.
+    pub operator_auditor: Option<Arc<Auditor>>,
     /// Health/metrics observability endpoints (D1; off by default — `None`
     /// fields make the corresponding route return 404 / not be advertised).
     pub observability: ObservabilityState,
+}
+
+impl std::fmt::Debug for HttpTransportConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpTransportConfig")
+            .field("allowed_hosts", &self.allowed_hosts)
+            .field("allowed_origins", &self.allowed_origins)
+            .field("json_response", &self.json_response)
+            .field("stateful", &self.stateful)
+            .field("stateful_idle_ttl", &self.stateful_idle_ttl)
+            .field("resource_metadata", &self.resource_metadata.is_some())
+            .field("oauth", &self.oauth.is_some())
+            .field("session_store", &self.session_store.is_some())
+            .field("result_store", &self.result_store.is_some())
+            .field("session_lifecycle", &self.session_lifecycle.is_some())
+            .field(
+                "single_principal_guard",
+                &self.single_principal_guard.is_some(),
+            )
+            .field("operator_authority", &self.operator_authority)
+            .field("operator_auditor", &self.operator_auditor.is_some())
+            .field("observability", &self.observability)
+            .finish()
+    }
 }
 
 impl Default for HttpTransportConfig {
@@ -145,6 +177,8 @@ impl Default for HttpTransportConfig {
             result_store: None,
             session_lifecycle: None,
             single_principal_guard: None,
+            operator_authority: OperatorAuthorityPolicy::default(),
+            operator_auditor: None,
             observability: ObservabilityState::default(),
         }
     }
@@ -640,6 +674,27 @@ mod tests {
         serde_json::from_slice(&response.body).expect("response body is JSON")
     }
 
+    fn operator_auditor() -> (Arc<Auditor>, Arc<oraclemcp_audit::MemoryAuditSink>) {
+        struct SharedSink(Arc<oraclemcp_audit::MemoryAuditSink>);
+        impl oraclemcp_audit::AuditSink for SharedSink {
+            fn append(
+                &self,
+                record: &oraclemcp_audit::AuditRecord,
+            ) -> Result<(), oraclemcp_audit::AuditError> {
+                self.0.append(record)
+            }
+
+            fn flush(&self) -> Result<(), oraclemcp_audit::AuditError> {
+                self.0.flush()
+            }
+        }
+
+        let sink = Arc::new(oraclemcp_audit::MemoryAuditSink::default());
+        let key = oraclemcp_audit::SigningKey::new("operator-test", b"operator-key".to_vec());
+        let auditor = Arc::new(Auditor::new(Box::new(SharedSink(Arc::clone(&sink))), key));
+        (auditor, sink)
+    }
+
     #[test]
     fn request_target_preserves_and_decodes_query_string() {
         let request = HttpRequest::new(
@@ -661,15 +716,21 @@ mod tests {
 
     #[test]
     fn operator_api_routes_are_typed_json_404_and_parse_query() {
+        let (auditor, sink) = operator_auditor();
+        let cfg = HttpTransportConfig {
+            operator_auditor: Some(auditor),
+            ..Default::default()
+        };
         let response = handle_http_request(
             &test_server(),
-            &HttpTransportConfig::default(),
+            &cfg,
             HttpRequest::new(
                 "GET",
                 "/operator/v1/sessions?cursor=4%2F0&status=active&profile=prod",
                 [("host", "127.0.0.1"), ("accept", "application/json")],
                 Vec::new(),
-            ),
+            )
+            .with_peer_loopback(true),
         );
 
         assert_eq!(response.status, 404);
@@ -685,16 +746,25 @@ mod tests {
             body["query"]["filters"]["profile"],
             serde_json::json!("prod")
         );
+        let records = sink.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].tool, "operator_api");
+        assert_eq!(records[0].sql_preview, "GET /operator/v1/sessions");
+        assert_eq!(
+            records[0].subject,
+            AuditSubject::new("local-owner", "process-owner").with_authn_method("loopback")
+        );
 
         let bad_host = handle_http_request(
             &test_server(),
-            &HttpTransportConfig::default(),
+            &cfg,
             HttpRequest::new(
                 "GET",
                 "/operator/v1/sessions",
                 [("host", "attacker.example"), ("accept", "application/json")],
                 Vec::new(),
-            ),
+            )
+            .with_peer_loopback(true),
         );
         assert_eq!(bad_host.status, 403);
     }
@@ -2106,6 +2176,20 @@ mod tests {
         format!("{header}.{payload}.{}", b64url(b"sig"))
     }
 
+    fn accepting_oauth_enforcement(required_scopes: Vec<String>) -> Arc<OAuthEnforcement> {
+        Arc::new(OAuthEnforcement {
+            config: ResourceServerConfig {
+                resource: "https://oraclemcp.example/mcp".to_owned(),
+                allowed_issuers: vec!["https://idp.example".to_owned()],
+                authorization_servers: vec!["https://idp.example".to_owned()],
+                required_scopes,
+            },
+            verifier: Arc::new(AcceptHs256),
+            metadata_url: "https://oraclemcp.example/.well-known/oauth-protected-resource"
+                .to_owned(),
+        })
+    }
+
     #[test]
     fn oauth_scope_is_captured_for_dispatch_enforcement() {
         let enforcement = OAuthEnforcement {
@@ -2234,6 +2318,69 @@ mod tests {
             "principal key must be derived/redacted, not a raw claim or bearer token"
         );
     }
+
+    #[test]
+    fn scoped_principal_cannot_act_as_operator_without_allowlist_and_operator_action_is_audited() {
+        let token = jwt_with_scope("oracle:read");
+        let principal_key = oauth_principal_key_from_validated_token(&token);
+        let (auditor, sink) = operator_auditor();
+        let denied_cfg = HttpTransportConfig {
+            oauth: Some(accepting_oauth_enforcement(Vec::new())),
+            operator_auditor: Some(Arc::clone(&auditor)),
+            operator_authority: OperatorAuthorityPolicy {
+                allow_loopback_owner: true,
+                local_owner_stable_id: "process-owner".to_owned(),
+                allowed_subjects: Vec::new(),
+            },
+            ..Default::default()
+        };
+        let request = || {
+            HttpRequest::new(
+                "GET",
+                "/operator/v1/sessions?force=true",
+                [
+                    ("host", "127.0.0.1"),
+                    ("accept", "application/json"),
+                    ("authorization", &format!("Bearer {token}")),
+                ],
+                Vec::new(),
+            )
+            .with_peer_loopback(true)
+        };
+
+        let denied = handle_http_request(&test_server(), &denied_cfg, request());
+        assert_eq!(denied.status, 403);
+        let denied_body = response_json(&denied);
+        assert_eq!(
+            denied_body["error"],
+            serde_json::json!("operator_authority_required")
+        );
+        assert!(
+            sink.records().is_empty(),
+            "denied scoped-principal attempt is not an operator action"
+        );
+
+        let allowed_cfg = HttpTransportConfig {
+            operator_authority: OperatorAuthorityPolicy {
+                allow_loopback_owner: false,
+                local_owner_stable_id: "process-owner".to_owned(),
+                allowed_subjects: vec![principal_key.clone()],
+            },
+            ..denied_cfg
+        };
+        let allowed = handle_http_request(&test_server(), &allowed_cfg, request());
+        assert_eq!(allowed.status, 404);
+        let records = sink.records();
+        assert_eq!(records.len(), 1);
+        let (_, stable_id) = principal_key.split_once(':').expect("principal key");
+        assert_eq!(
+            records[0].subject,
+            AuditSubject::new("oauth", stable_id).with_authn_method("oauth")
+        );
+        assert_eq!(records[0].tool, "operator_api");
+        assert_eq!(records[0].sql_preview, "GET /operator/v1/sessions");
+        assert!(!records[0].sql_preview.contains("force=true"));
+    }
 }
 
 /// The OAuth scopes a validated request carries.
@@ -2261,6 +2408,7 @@ pub struct HttpRequest {
     pub query: Vec<(String, String)>,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    pub peer_is_loopback: bool,
 }
 
 impl HttpRequest {
@@ -2289,7 +2437,16 @@ impl HttpRequest {
             query,
             headers,
             body: body.into(),
+            peer_is_loopback: false,
         }
+    }
+
+    /// Attach server-observed peer locality. Tests and embedders that construct
+    /// requests directly must set this explicitly when modeling loopback.
+    #[must_use]
+    pub fn with_peer_loopback(mut self, peer_is_loopback: bool) -> Self {
+        self.peer_is_loopback = peer_is_loopback;
+        self
     }
 
     #[must_use]
@@ -2701,9 +2858,23 @@ fn handle_http_exchange(
             if !accepts_media(request.header("accept"), "application/json") {
                 return HttpExchange::Buffered(empty_response(406));
             }
-            if let Some(enforcement) = &config.oauth
-                && let Err(response) = validate_oauth_request(&request, enforcement)
-            {
+            let validated_oauth = match &config.oauth {
+                Some(enforcement) => match validate_oauth_request(&request, enforcement) {
+                    Ok(validated) => Some(validated),
+                    Err(response) => return HttpExchange::Buffered(response),
+                },
+                None => None,
+            };
+            let principal_key = validated_oauth
+                .as_ref()
+                .map(|validated| validated.principal_key.as_str());
+            let Some(operator_subject) = config
+                .operator_authority
+                .authorize(principal_key, request.peer_is_loopback)
+            else {
+                return HttpExchange::Buffered(operator_authority_required_response());
+            };
+            if let Err(response) = append_operator_audit(config, &operator_subject, &request) {
                 return HttpExchange::Buffered(response);
             }
             return HttpExchange::Buffered(handle_operator_api_route(&request));
@@ -2768,6 +2939,71 @@ fn handle_http_exchange(
             },
         )),
     }
+}
+
+fn operator_authority_required_response() -> HttpResponse {
+    json_response(
+        403,
+        &json!({
+            "error": "operator_authority_required",
+            "message": "operator API requires server-derived operator authority",
+            "next_step": "use the local loopback owner path or configure http.operator.allowed_subjects",
+        }),
+    )
+}
+
+fn operator_audit_required_response() -> HttpResponse {
+    json_response(
+        503,
+        &json!({
+            "error": "operator_audit_required",
+            "message": "operator API actions require a configured audit chain",
+            "next_step": "set [audit].key_ref or keep /operator/v1 disabled",
+        }),
+    )
+}
+
+fn operator_audit_failed_response() -> HttpResponse {
+    json_response(
+        500,
+        &json!({
+            "error": "operator_audit_failed",
+            "message": "operator API audit append failed; action refused",
+        }),
+    )
+}
+
+fn audit_timestamp() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("unix:{secs}")
+}
+
+fn append_operator_audit(
+    config: &HttpTransportConfig,
+    subject: &AuditSubject,
+    request: &HttpRequest,
+) -> Result<(), HttpResponse> {
+    let Some(auditor) = &config.operator_auditor else {
+        return Err(operator_audit_required_response());
+    };
+    let draft = AuditEntryDraft {
+        subject: subject.clone(),
+        db_evidence: None,
+        cancel: None,
+        tool: "operator_api".to_owned(),
+        sql: format!("{} {}", request.method, request.path),
+        danger_level: "OPERATOR".to_owned(),
+        decision: AuditDecision::Allowed,
+        rows_affected: None,
+        outcome: AuditOutcome::Succeeded,
+    };
+    auditor
+        .append(&draft, audit_timestamp(), true)
+        .map(|_| ())
+        .map_err(|_| operator_audit_failed_response())
 }
 
 fn handle_operator_api_route(request: &HttpRequest) -> HttpResponse {
@@ -3662,7 +3898,11 @@ fn handle_connection(
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT))?;
     stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT))?;
-    handle_stream(&mut stream, server, config)
+    let peer_is_loopback = stream
+        .peer_addr()
+        .map(|addr| addr.ip().is_loopback())
+        .unwrap_or(false);
+    handle_stream(&mut stream, server, config, peer_is_loopback)
 }
 
 fn handle_tls_connection(
@@ -3676,8 +3916,12 @@ fn handle_tls_connection(
     let connection = ServerConnection::new(tls).map_err(|e| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("TLS setup: {e}"))
     })?;
+    let peer_is_loopback = stream
+        .peer_addr()
+        .map(|addr| addr.ip().is_loopback())
+        .unwrap_or(false);
     let mut stream = StreamOwned::new(connection, stream);
-    let result = handle_stream(&mut stream, server, config);
+    let result = handle_stream(&mut stream, server, config, peer_is_loopback);
     stream.conn.send_close_notify();
     let _ = stream.flush();
     result
@@ -3687,9 +3931,15 @@ fn handle_stream(
     stream: &mut (impl Read + Write),
     server: &OracleMcpServer,
     config: &HttpTransportConfig,
+    peer_is_loopback: bool,
 ) -> std::io::Result<()> {
     let exchange = match read_http_request(stream) {
-        Ok(Some(request)) => handle_http_exchange(server, config, request, true),
+        Ok(Some(request)) => handle_http_exchange(
+            server,
+            config,
+            request.with_peer_loopback(peer_is_loopback),
+            true,
+        ),
         Ok(None) => return Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
             HttpExchange::Buffered(HttpResponse {

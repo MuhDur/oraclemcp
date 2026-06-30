@@ -60,7 +60,10 @@ pub use server::{
 };
 pub use shutdown::{CancelOutcome, ShutdownCoordinator, install_panic_hook};
 
-pub use admin_auth::{AdminAssertionVerifier, AdminAuthError, AdminAuthPolicy};
+pub use admin_auth::{
+    AdminAssertionVerifier, AdminAuthError, AdminAuthPolicy, OperatorAuthorityPolicy,
+    audit_subject_from_principal_key,
+};
 pub use admission::{AdmissionController, AdmissionPermit};
 pub use audit_shipping::{SiemFormat, SiemHttpForwarder};
 pub use capabilities::{

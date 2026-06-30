@@ -19,6 +19,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Audit records now write `schema_version = 3` when they include expanded
   server-derived subject and DB evidence fields. Existing signed v1/v2 audit
   logs continue to verify; no log rewrite is required.
+- The reserved `/operator/v1` API now requires server-derived operator authority
+  from `[http.operator]` or the loopback local-owner default, and authorized
+  operator actions require the signed audit chain before routing.
 
 ## [0.4.1] — 2026-06-29
 
