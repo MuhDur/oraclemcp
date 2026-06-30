@@ -438,6 +438,35 @@ fn contract_type_unsupported_is_explicit_marker_never_silent() {
     assert_eq!(v["unsupported"], json!("SDO_GEOMETRY"));
     assert_eq!(v["value"], Value::Null);
     assert!(v["warning"].is_string());
+
+    // Driver ObjectValue/UDT payloads are carried as typed unsupported markers
+    // with object identity and byte length, not as dumped packed bytes.
+    let object = serialize_cell(
+        &OracleCell::structured(
+            "HR.ADDRESS_T",
+            json!({
+                "kind": "unsupported",
+                "unsupported": "oracle_object",
+                "oracle_value_kind": "Object",
+                "schema": "HR",
+                "type_name": "ADDRESS_T",
+                "packed_byte_length": 4,
+                "value": null,
+                "warning": "Oracle object/UDT values are not decoded by default"
+            }),
+        ),
+        &SerializeOptions::default(),
+    );
+    assert_eq!(object["unsupported"], json!("oracle_object"));
+    assert_eq!(object["schema"], json!("HR"));
+    assert_eq!(object["type_name"], json!("ADDRESS_T"));
+    assert_eq!(object["packed_byte_length"], json!(4));
+    assert_eq!(object["value"], Value::Null);
+    assert!(object["warning"].is_string());
+    assert!(
+        !object.to_string().contains("deadbeef"),
+        "packed object bytes must not leak through the public marker"
+    );
 }
 
 #[test]

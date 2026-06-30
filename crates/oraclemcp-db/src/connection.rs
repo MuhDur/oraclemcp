@@ -295,7 +295,7 @@ mod driver {
     };
     use asupersync::Cx;
     use asupersync::sync::Mutex as AsyncMutex;
-    use oracledb::protocol::thin::{CursorValue, LobValue};
+    use oracledb::protocol::thin::{CursorValue, LobValue, ObjectValue};
     use oracledb::protocol::{
         ClientIdentity,
         oson::OsonValue,
@@ -1102,7 +1102,7 @@ mod driver {
                     .await;
                 }
                 Some(QueryValue::Object(value)) => {
-                    OracleCell::binary(oracle_type, value.packed_data)
+                    OracleCell::structured(oracle_type, structured_object_marker(&value))
                 }
                 Some(QueryValue::Lob(value)) => {
                     let limits = LobReadLimits::from(serialize_opts);
@@ -1148,10 +1148,7 @@ mod driver {
                 // fails SAFE on any future kind with a clearly-marked, non-silent
                 // placeholder — never a silent wrong value (cf. the NUMBER→string
                 // invariant). Unreachable against the current driver.
-                Some(_) => OracleCell::new(
-                    oracle_type,
-                    Some("<unsupported Oracle value kind>".to_owned()),
-                ),
+                Some(value) => OracleCell::structured(oracle_type, structured_query_value(&value)),
             };
             Ok(cell)
         })
@@ -1276,7 +1273,8 @@ mod driver {
                 json!({ "kind": "json", "value": structured_oson_value(value) })
             }
             QueryValue::Array(values) => structured_array(values),
-            QueryValue::Cursor(_) | QueryValue::Object(_) | QueryValue::Lob(_) => {
+            QueryValue::Object(value) => structured_object_marker(value),
+            QueryValue::Cursor(_) | QueryValue::Lob(_) => {
                 structured_unsupported(value.variant_name())
             }
             _ => structured_unsupported(value.variant_name()),
@@ -1423,9 +1421,23 @@ mod driver {
     fn structured_unsupported(kind: &str) -> Value {
         json!({
             "kind": "unsupported",
+            "unsupported": "oracle_value",
             "oracle_value_kind": kind,
-            "value": Value::Null,
+            "value": null,
             "warning": "Oracle value kind is not structurally serialized yet"
+        })
+    }
+
+    fn structured_object_marker(value: &ObjectValue) -> Value {
+        json!({
+            "kind": "unsupported",
+            "unsupported": "oracle_object",
+            "oracle_value_kind": "Object",
+            "schema": value.schema.as_deref(),
+            "type_name": value.type_name.as_deref(),
+            "packed_byte_length": value.packed_data.len(),
+            "value": null,
+            "warning": "Oracle object/UDT values are not decoded by default"
         })
     }
 
@@ -1679,9 +1691,10 @@ mod driver {
         use crate::serialize::serialize_cell;
         use oracledb::protocol::{
             oson::OsonValue,
-            thin::{CS_FORM_IMPLICIT, ORA_TYPE_NUM_RAW},
+            thin::{CS_FORM_IMPLICIT, ORA_TYPE_NUM_RAW, image_begin, image_finalize},
             vector::{Vector, VectorValues},
         };
+        use oracledb::{CollectionElement, ObjectAttribute, ObjectType, decode_object};
         use serde_json::json;
 
         fn lob(ora_type_num: u8, size: u64) -> LobValue {
@@ -1921,6 +1934,87 @@ mod driver {
                     "indices": [0, 3],
                     "values": [1.0, -1.5]
                 })
+            );
+        }
+
+        #[test]
+        fn object_value_marker_preserves_identity_without_packed_bytes() {
+            let object = ObjectValue {
+                schema: Some("HR".to_owned()),
+                type_name: Some("ADDRESS_T".to_owned()),
+                packed_data: vec![0xde, 0xad, 0xbe, 0xef],
+            };
+            let marker = structured_object_marker(&object);
+            let expected = json!({
+                "kind": "unsupported",
+                "unsupported": "oracle_object",
+                "oracle_value_kind": "Object",
+                "schema": "HR",
+                "type_name": "ADDRESS_T",
+                "packed_byte_length": 4,
+                "value": null,
+                "warning": "Oracle object/UDT values are not decoded by default"
+            });
+            assert_eq!(marker, expected);
+            assert!(
+                !marker.to_string().contains("deadbeef"),
+                "packed object bytes must not be dumped into the public marker"
+            );
+
+            let nested = structured_array(&[Some(QueryValue::Object(Box::new(object)))]);
+            assert_eq!(nested["items"][0], expected);
+        }
+
+        #[test]
+        fn decode_object_reports_nested_shapes_as_unsupported_feature() {
+            let mut image = image_begin(false);
+            image_finalize(&mut image).expect("object image finalizes");
+            let value = ObjectValue {
+                schema: Some("HR".to_owned()),
+                type_name: Some("OUTER_T".to_owned()),
+                packed_data: image,
+            };
+            let object_type = ObjectType {
+                schema: "HR".to_owned(),
+                name: "OUTER_T".to_owned(),
+                attributes: vec![ObjectAttribute {
+                    name: "CHILD".to_owned(),
+                    type_name: "CHILD_T".to_owned(),
+                    type_owner: Some("HR".to_owned()),
+                }],
+                collection_element: None,
+            };
+            let err = decode_object(&value, &object_type)
+                .expect_err("nested object attributes are intentionally unsupported");
+            assert!(
+                err.to_string()
+                    .contains("nested object/collection attribute is not decodable yet"),
+                "unexpected error: {err}"
+            );
+
+            let mut image = image_begin(true);
+            image_finalize(&mut image).expect("collection image finalizes");
+            let value = ObjectValue {
+                schema: Some("HR".to_owned()),
+                type_name: Some("CHILD_TAB".to_owned()),
+                packed_data: image,
+            };
+            let collection_type = ObjectType {
+                schema: "HR".to_owned(),
+                name: "CHILD_TAB".to_owned(),
+                attributes: Vec::new(),
+                collection_element: Some(CollectionElement {
+                    type_name: "CHILD_T".to_owned(),
+                    type_owner: Some("HR".to_owned()),
+                }),
+            };
+            let err = decode_object(&value, &collection_type)
+                .expect_err("nested collection elements are intentionally unsupported");
+            assert!(
+                err.to_string().contains(
+                    "collection of nested object/collection elements is not decodable yet"
+                ),
+                "unexpected error: {err}"
             );
         }
 
