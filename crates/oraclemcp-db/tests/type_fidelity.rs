@@ -33,6 +33,18 @@ fn number_is_lossless_string_by_default() {
 }
 
 #[test]
+fn number_boundary_values_include_negative_scale() {
+    assert_eq!(
+        ser("NUMBER(38,-2)", "1234567890123456789012345678901234567800"),
+        json!("1234567890123456789012345678901234567800")
+    );
+    assert_eq!(
+        ser("NUMBER(38,-2)", "-1234567890123456789012345678901234567800"),
+        json!("-1234567890123456789012345678901234567800")
+    );
+}
+
+#[test]
 fn numbers_as_float_opt_in_is_lossy_number() {
     let opts = SerializeOptions {
         numbers_as_float: true,
@@ -72,6 +84,23 @@ fn float_types() {
     assert_eq!(
         ser("FLOAT", "12345678901234567890"),
         json!("12345678901234567890")
+    );
+}
+
+#[test]
+fn binary_double_edge_values_are_explicit() {
+    assert_eq!(ser("BINARY_DOUBLE", "NaN"), json!("NaN"));
+    assert_eq!(ser("BINARY_DOUBLE", "inf"), json!("inf"));
+    assert_eq!(ser("BINARY_DOUBLE", "-inf"), json!("-inf"));
+
+    let neg_zero = ser("BINARY_DOUBLE", "-0.0");
+    let value = neg_zero
+        .as_f64()
+        .expect("negative zero should remain a JSON number");
+    assert_eq!(value, 0.0);
+    assert!(
+        value.is_sign_negative(),
+        "BINARY_DOUBLE -0.0 must preserve the IEEE sign"
     );
 }
 
@@ -170,6 +199,20 @@ fn date_and_timestamp_are_iso_8601() {
         ),
         json!("2026-06-29T12:34:56.987654321-05:30")
     );
+    assert_eq!(
+        ser(
+            "TIMESTAMP(9) WITH TIME ZONE",
+            "2026-06-29 23:59:59.123456789 +14:00"
+        ),
+        json!("2026-06-29T23:59:59.123456789+14:00")
+    );
+    assert_eq!(
+        ser(
+            "TIMESTAMP(9) WITH TIME ZONE",
+            "2026-06-29 00:00:00.000000001 -14:00"
+        ),
+        json!("2026-06-29T00:00:00.000000001-14:00")
+    );
 }
 
 #[test]
@@ -198,6 +241,62 @@ fn blob_binary_is_base64_with_length() {
 }
 
 #[test]
+fn blob_base64_boundary_lengths_cover_modulo_classes() {
+    for (bytes, expected) in [
+        (vec![], ""),
+        (vec![1], "AQ=="),
+        (vec![1, 2], "AQI="),
+        (vec![1, 2, 3], "AQID"),
+        (vec![1, 2, 3, 4], "AQIDBA=="),
+    ] {
+        let v = serialize_cell(
+            &OracleCell::binary("BLOB", bytes.clone()),
+            &SerializeOptions::default(),
+        );
+        assert_eq!(v["encoding"], json!("base64"));
+        assert_eq!(v["data"], json!(expected));
+        assert_eq!(v["byte_length"], json!(bytes.len()));
+        assert_eq!(v["truncated"], json!(false));
+    }
+}
+
+#[test]
+fn lob_caps_cover_exact_boundary_and_cap_plus_one() {
+    let clob_opts = SerializeOptions {
+        max_lob_chars: 5,
+        ..Default::default()
+    };
+    assert_eq!(
+        serialize_cell(
+            &OracleCell::new("CLOB", Some("abcde".to_owned())),
+            &clob_opts
+        ),
+        json!("abcde")
+    );
+    let clob_plus_one = serialize_cell(
+        &OracleCell::new("CLOB", Some("abcdef".to_owned())),
+        &clob_opts,
+    );
+    assert_eq!(clob_plus_one["value"], json!("abcde"));
+    assert_eq!(clob_plus_one["truncated"], json!(true));
+    assert_eq!(clob_plus_one["char_length"], json!(6));
+
+    let blob_opts = SerializeOptions {
+        max_blob_bytes: 3,
+        ..Default::default()
+    };
+    let exact = serialize_cell(&OracleCell::binary("BLOB", vec![1, 2, 3]), &blob_opts);
+    assert_eq!(exact["data"], json!("AQID"));
+    assert_eq!(exact["byte_length"], json!(3));
+    assert_eq!(exact["truncated"], json!(false));
+
+    let plus_one = serialize_cell(&OracleCell::binary("BLOB", vec![1, 2, 3, 4]), &blob_opts);
+    assert_eq!(plus_one["data"], json!("AQID"));
+    assert_eq!(plus_one["byte_length"], json!(4));
+    assert_eq!(plus_one["truncated"], json!(true));
+}
+
+#[test]
 fn clob_truncates_with_flag() {
     let opts = SerializeOptions {
         max_lob_chars: 5,
@@ -216,16 +315,29 @@ fn clob_truncates_with_flag() {
 fn null_is_json_null_for_every_type() {
     for t in [
         "NUMBER",
+        "BINARY_DOUBLE",
         "VARCHAR2(10)",
         "DATE",
         "TIMESTAMP(6)",
+        "TIMESTAMP(9) WITH TIME ZONE",
         "RAW(4)",
         "CLOB",
         "BLOB",
+        "INTERVAL YEAR(2) TO MONTH",
+        "INTERVAL DAY(2) TO SECOND(9)",
     ] {
         let v = serialize_cell(&OracleCell::new(t, None), &SerializeOptions::default());
         assert_eq!(v, Value::Null, "NULL {t} should be JSON null");
     }
+}
+
+#[test]
+fn interval_boundary_values_are_text_not_reinterpreted() {
+    assert_eq!(
+        ser("INTERVAL DAY(2) TO SECOND(9)", "+01 02:03:04.123456789"),
+        json!("+01 02:03:04.123456789")
+    );
+    assert_eq!(ser("INTERVAL YEAR(2) TO MONTH", "-01-11"), json!("-01-11"));
 }
 
 #[test]
