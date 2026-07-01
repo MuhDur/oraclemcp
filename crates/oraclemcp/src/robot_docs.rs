@@ -6,8 +6,11 @@
 
 pub(crate) fn setup_profiles_template(profile: &str, credential_env: &str) -> String {
     format!(
-        r#"schema_version = 1
+        r#"schema_version = 2
 default_profile = "{profile}"
+
+[http]
+dashboard_workbench = false
 
 [[profiles]]
 name = "{profile}"
@@ -19,6 +22,7 @@ max_level = "READ_ONLY"
 default_level = "READ_ONLY"
 protected = true
 require_signed_tools = true
+dashboard_ddl_workbench = false
 call_timeout_seconds = 30
 sdu = 32768
 login_statements = [
@@ -151,7 +155,7 @@ pub(crate) fn cli_exit_codes_json() -> serde_json::Value {
         {
             "code": 4,
             "name": "doctor_fix_refused",
-            "meaning": "doctor --fix refused an out-of-scope repair target such as Oracle state, audit chain, classifier, or profile ceiling"
+            "meaning": "doctor --fix refused an unsafe or out-of-scope repair target such as Oracle state, audit-chain rewrite/merge, classifier, or profile ceiling"
         }
     ])
 }
@@ -551,7 +555,7 @@ Output contract
 
 CLI contract
 - Binary names: oraclemcp and the short argv0-aware alias om.
-- Exit codes: 0 success; 1 process/transport failure after startup; 2 invalid invocation, config/auth error, failed doctor check, or startup safety block; 3 service-manager state/failure; 4 doctor --fix refused an out-of-scope repair.
+- Exit codes: 0 success; 1 process/transport failure after startup; 2 invalid invocation, config/auth error, failed doctor check, or startup safety block; 3 service-manager state/failure; 4 doctor --fix refused an unsafe/out-of-scope repair.
 - Dangerous host operations are flag-gated: service install/restart/uninstall require --dry-run for preview or --yes to execute.
 - No command prompts interactively; missing consent exits non-zero and names the safe preview command.
 

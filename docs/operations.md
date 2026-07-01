@@ -572,13 +572,23 @@ recompute-without-key forgery. Configure the log under `[audit]` in your config
 (`path`, `key_ref` as a secret-ref like `env:ORACLEMCP_AUDIT_KEY`, and `key_id`
 to label the active key for rotation; the default key id is `default`). When
 `[audit].path` is unset, the binary writes to
-`~/.config/oraclemcp/audit.jsonl`. Back up and rotate this log like any other
-security record, and verify it after incident review.
+`$XDG_STATE_HOME/oraclemcp/audit/audit.jsonl`, or
+`$HOME/.local/state/oraclemcp/audit/audit.jsonl` when `XDG_STATE_HOME` is unset.
+Back up and rotate this log like any other security record, and verify it after
+incident review.
 
 Audit records are additive and format-versioned. Current records carry
 `schema_version = 3`, a structured server-derived `subject`, and optional
 database-evidence fields. `audit verify` still accepts signed v1/v2 records, so
 existing logs do not need to be rewritten.
+
+For a 0.4.x layout that still has the default audit log at
+`~/.config/oraclemcp/audit.jsonl`, `oraclemcp doctor` reports the legacy layout.
+`oraclemcp doctor --fix` copies that JSONL byte-for-byte into the XDG state
+audit path when the current target is absent, writes a backup artifact first,
+and leaves the legacy source untouched. If both legacy and current audit chains
+exist with different bytes, doctor refuses to merge them; verify the chains
+manually and set `[audit].path` explicitly if you need a non-default location.
 
 The `/operator/v1` API is gated above ordinary MCP subjects. An OAuth/mTLS
 principal is an operator only when its server-derived subject key, such as

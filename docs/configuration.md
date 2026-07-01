@@ -54,7 +54,8 @@ Parsing is **strict and fail-fast**:
   server fails to start on an invalid config rather than discovering a problem
   mid-session).
 - **Forward-incompatible versions rejected** — a config declaring a
-  `schema_version` higher than the build supports is rejected.
+  `schema_version` higher than the build supports is rejected. Schema `1`
+  configs remain valid; schema `2` adds only default-safe fields.
 
 ---
 
@@ -62,8 +63,9 @@ Parsing is **strict and fail-fast**:
 
 | Field | Type | Default | Effect |
 |---|---|---|---|
-| `schema_version` | integer | `1` | Config schema version this build understands. A higher value than the build supports is rejected (forward-incompatible). |
+| `schema_version` | integer | `2` | Config schema version this build understands. A higher value than the build supports is rejected (forward-incompatible). Version `1` configs still load; version `2` adds only default-safe fields. |
 | `default_profile` | string | none | Profile used when the launcher does not pass `serve --profile <name>`. Must name a defined profile. With no `default_profile` and exactly one profile, that sole profile is used. |
+| `monitor_profile` | string | none | Optional least-privilege profile for fleet-wide database observability such as `v$session` and DB evidence. Must name a defined profile. When unset, operator views degrade to self-lane/local telemetry. |
 | `[http]` | table | stdio-only | Native Streamable HTTP transport (see [Transports](#transports)). |
 | `[audit]` | table | safe defaults | Out-of-band signed audit log (see [`operations.md`](operations.md) §5.4–§5.6). |
 | `[[profiles]]` | array of tables | `[]` | Named Oracle connection profiles (see below). |
@@ -97,6 +99,7 @@ field is unset after inheritance.
 | `require_signed_tools` | bool | `false` | no | Require a valid HMAC signature for every operator-defined custom tool loaded with this profile. A `protected` profile implies this even when unset. |
 | `read_only_standby` | bool | `false` | no | Mark the target as a read-only standby (Active Data Guard): forces `READ_ONLY` regardless of `max_level`. |
 | `mcp_exposed` | bool | `true` | no | E5 per-profile MCP exposure (opt-out). See [The `mcp_exposed` opt-out](#the-mcp_exposed-opt-out). |
+| `dashboard_ddl_workbench` | bool | `false` | no | Browser dashboard DDL/Admin apply opt-in for this profile. Still capped by `max_level`, `protected`, `read_only_standby`, confirmation, rollback, and audit controls. |
 
 ### Session and routing
 
@@ -344,13 +347,16 @@ The dashboard Workbench uses those same action routes. It forwards classify
 requests to `oracle_preview_sql`, read execution to `oracle_query`, and guarded
 DML to `oracle_execute`; it does not expose a PTY, SQLcl shell, or alternate SQL
 path. Browser-originated DDL/Admin apply is release-gated in this line: DDL can
-be previewed, but applying it through the dashboard is rejected before MCP
-dispatch until a future profile-level dashboard DDL opt-in is added.
+be previewed, and applying it through the dashboard requires both
+`[http].dashboard_workbench = true` and `dashboard_ddl_workbench = true` on the
+active profile. Those flags do not raise the profile ceiling or bypass
+confirmation, rollback, idempotency, or audit.
 
 `[http]` fields: `allowed_hosts`, `allowed_origins` (both default `[]`,
 loopback-only), `json_response` (default `false`), `stateful` (default `false`),
-`stateful_idle_ttl_seconds` (default `900`, `0` disables idle reaping), the
-optional `[http.oauth]` resource-server table, the `[http.mtls]` client
+`stateful_idle_ttl_seconds` (default `900`, `0` disables idle reaping),
+`dashboard_workbench` (default `false`), the optional `[http.oauth]`
+resource-server table, the `[http.mtls]` client
 fingerprint registry, the optional `[http.tls]` rustls material, and the
 `[http.operator]` operator-authority table. Idle
 stateful sessions are reaped by sending a close message to the owning lane; the

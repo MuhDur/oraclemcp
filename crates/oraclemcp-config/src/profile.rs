@@ -521,6 +521,11 @@ pub struct ConnectionProfile {
     /// profile can do is `max_level`/`protected`/DB privileges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_exposed: Option<bool>,
+    /// Browser dashboard DDL/Admin apply opt-in. This is still capped by
+    /// `max_level`, protected/read-only rules, and the normal confirmation +
+    /// audit path; it only removes the browser-specific release gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard_ddl_workbench: Option<bool>,
     /// Optional per-connection Oracle session identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_identity: Option<SessionIdentityConfig>,
@@ -568,6 +573,7 @@ impl std::fmt::Debug for ConnectionProfile {
             .field("protected", &self.protected)
             .field("require_signed_tools", &self.require_signed_tools)
             .field("read_only_standby", &self.read_only_standby)
+            .field("dashboard_ddl_workbench", &self.dashboard_ddl_workbench)
             .field("session_identity", &self.session_identity)
             .field("pool", &self.pool)
             .field("oci", &self.oci)
@@ -621,6 +627,12 @@ impl ConnectionProfile {
         self.mcp_exposed.unwrap_or(true)
     }
 
+    /// Whether this profile opts into browser-originated DDL/Admin apply.
+    #[must_use]
+    pub fn dashboard_ddl_workbench(&self) -> bool {
+        self.dashboard_ddl_workbench.unwrap_or(false)
+    }
+
     /// The effective pool settings (defaults applied).
     #[must_use]
     pub fn pool(&self) -> PoolConfig {
@@ -652,6 +664,7 @@ impl ConnectionProfile {
             require_signed_tools,
             read_only_standby,
             mcp_exposed,
+            dashboard_ddl_workbench,
             session_identity,
             pool,
             oci,
@@ -680,6 +693,7 @@ impl ConnectionProfile {
             require_signed_tools: self.require_signed_tools(),
             read_only_standby: self.read_only_standby(),
             mcp_exposed: self.mcp_exposed(),
+            dashboard_ddl_workbench: self.dashboard_ddl_workbench(),
         }
     }
 
@@ -762,6 +776,9 @@ pub struct ProfileMetadata {
     /// (E5). The CLI shows this for every profile; the served `oracle_list_profiles`
     /// only ever returns profiles where this is `true`.
     pub mcp_exposed: bool,
+    /// Whether this profile opts into browser-originated DDL/Admin apply. The
+    /// operating-level ceiling and protected/read-only invariants still apply.
+    pub dashboard_ddl_workbench: bool,
 }
 
 /// Resolve `base` inheritance across all profiles, in place. Detects unknown
@@ -834,6 +851,7 @@ mod tests {
             require_signed_tools: None,
             read_only_standby: None,
             mcp_exposed: None,
+            dashboard_ddl_workbench: None,
             session_identity: None,
             pool: None,
             oci: None,

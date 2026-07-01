@@ -32,12 +32,14 @@ fn example_config_parses_and_validates() {
         .unwrap_or_else(|e| panic!("example config must parse + validate, got: {e}"));
 
     // Sanity-anchor the worked example so a future edit that guts it is noticed.
-    assert_eq!(cfg.schema_version, 1);
+    assert_eq!(cfg.schema_version, 2);
     assert_eq!(cfg.default_profile.as_deref(), Some("dev_ro"));
+    assert!(!cfg.http.dashboard_workbench);
 
     // The exposed read-only profile is the default-open case.
     let dev = cfg.profile("dev_ro").expect("dev_ro profile present");
     assert!(dev.mcp_exposed(), "dev_ro is exposed by default");
+    assert!(!dev.dashboard_ddl_workbench());
     assert_eq!(dev.max_level(), OperatingLevel::ReadOnly);
     assert!(cfg.is_mcp_exposed("dev_ro"));
 

@@ -19,15 +19,20 @@
 # unless wired. A dev-only `literal:value` form exists but is REJECTED on a
 # `protected = true` profile.
 
-# Config schema version this build understands. Default: 1. A config declaring a
+# Config schema version this build understands. Default: 2. A config declaring a
 # higher version than the build supports is rejected (forward-incompatible)
 # rather than silently mis-read.
-schema_version = 1
+schema_version = 2
 
 # Optional profile name used when the launcher does not pass `serve --profile
 # <name>`. Default: none. Must name a profile defined below. With no
 # default_profile and exactly one profile, that sole profile is used.
 default_profile = "dev_ro"
+
+# Optional least-privilege profile for fleet-wide database observability such as
+# v$session and DB evidence. Default: none; operator views degrade to self-lane
+# or local telemetry.
+# monitor_profile = "monitor_ro"
 
 # ---------------------------------------------------------------------------
 # [http] — native Streamable HTTP transport. Optional; omit entirely for the
@@ -46,6 +51,10 @@ json_response = true
 stateful = false
 # Idle TTL for stateful sessions, in seconds. Default: 900. Set 0 to disable.
 stateful_idle_ttl_seconds = 900
+# Release gate for the browser Safe SQL Workbench. Default: false. Even when
+# enabled, all SQL still routes through the normal classifier, profile ceiling,
+# confirmation-token, rollback/audit, and idempotency path.
+dashboard_workbench = false
 # The embedded browser dashboard still requires local pairing even on loopback:
 # run `oraclemcp dashboard` to mint a 60s one-time ticket that becomes an
 # HttpOnly SameSite=Strict cookie. Dashboard POSTs require CSRF + action tickets.
@@ -83,7 +92,8 @@ hs256_secret_ref = "env:ORACLEMCP_OAUTH_HS256_SECRET"
 # and §5.6 for verification and WORM/SIEM shipping.
 # ---------------------------------------------------------------------------
 [audit]
-# Audit log file path. Default: ~/.config/oraclemcp/audit.jsonl when unset.
+# Audit log file path. Default: $XDG_STATE_HOME/oraclemcp/audit/audit.jsonl
+# when unset, or $HOME/.local/state/oraclemcp/audit/audit.jsonl without XDG_STATE_HOME.
 path = "/var/log/oraclemcp/audit.jsonl"
 # Secret reference for the HMAC signing key (`env:`/`file:`/`keyring:`/dev-only `literal:`).
 # Default: none.
@@ -118,8 +128,9 @@ description = "Read-only development database"
 connect_string = "localhost:1521/FREEPDB1"
 # Oracle username. Default: none (none for wallet / OS-auth / OCI-IAM).
 username = "APP_READONLY"
-# Reference to the credential in a secrets backend. NEVER a literal secret; never
-# surfaced in list_profiles metadata. Default: none.
+# Reference to the credential in a secrets backend. Use env:, file:, keyring:,
+# or future vault: for production; literal: is dev-only and rejected when
+# protected = true. Never surfaced in list_profiles metadata. Default: none.
 credential_ref = "env:ORACLE_APP_PASSWORD"
 # Per-target operating-level ceiling: READ_ONLY < READ_WRITE < DDL < ADMIN.
 # Default: READ_ONLY. This is the immutable cap; session elevation can never exceed it.
@@ -140,6 +151,10 @@ require_signed_tools = true
 # `prod_admin` profile below for the opt-out (= false). This is a
 # visibility/scoping convenience, NOT an access control.
 mcp_exposed = true
+# Browser dashboard DDL/Admin apply opt-in. Default: false. This never raises
+# max_level and never bypasses protected/read-only, preview/confirm, rollback,
+# or audit requirements.
+dashboard_ddl_workbench = false
 # Optional Oracle call timeout and total request-budget ceiling, in seconds.
 # Default: 30 when omitted. Set 0 only to disable the driver call timeout
 # deliberately; doctor warns. Tool calls exposing `timeout_seconds` can tighten
@@ -172,7 +187,9 @@ trusted_session_statements = [
 # cwallet.sso / standalone ewallet.p12 as structured wallet diagnostics.
 # Default: none.
 wallet_location = "/etc/oracle/wallet"
-# Secret reference for an encrypted-wallet password. NEVER a literal. Default: none.
+# Secret reference for an encrypted-wallet password. Use env:, file:, keyring:,
+# or future vault: for production; literal: is dev-only and rejected when
+# protected = true. Default: none.
 wallet_password_ref = "env:WALLET_PASSWORD"
 # Override server-certificate DN matching (ssl_server_dn_match). Default: none (driver default).
 ssl_server_dn_match = true

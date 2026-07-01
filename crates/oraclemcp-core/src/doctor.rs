@@ -13,7 +13,10 @@
 //! In-MCP, the live-state subset is mirrored by `oracle_capabilities` (an agent
 //! can call it); `doctor` is the CLI mode.
 
-use std::time::Duration;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use asupersync::Cx;
 use oraclemcp_db::{
@@ -27,6 +30,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::service_app::ServiceAppDoctorSnapshot;
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 /// A single check's outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -56,7 +62,7 @@ impl CheckStatus {
 /// One diagnostic check result.
 #[derive(Clone, Debug, Serialize)]
 pub struct CheckResult {
-    /// Stable check number (1..=11).
+    /// Stable check number.
     pub id: u8,
     /// Short check name.
     pub name: String,
@@ -359,12 +365,42 @@ pub struct DoctorFixMutation {
     pub undo: String,
 }
 
+/// Filesystem layout inputs for the 0.4.x -> 0.6.0 service-state migration.
+///
+/// The legacy audit file was under the config directory. The current default
+/// keeps durable service state under `$XDG_STATE_HOME/oraclemcp`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DoctorStateLayout {
+    /// Legacy default audit JSONL path (`~/.config/oraclemcp/audit.jsonl`).
+    pub legacy_audit_path: PathBuf,
+    /// Current default audit JSONL path under the XDG state file store.
+    pub current_audit_path: PathBuf,
+    /// Directory where doctor writes backup artifacts before migration writes.
+    pub migration_backup_dir: PathBuf,
+    /// True when `[audit].path` is explicitly configured; doctor must not
+    /// override an operator-owned audit location.
+    pub audit_path_configured: bool,
+}
+
+/// Safe, scoped migration plan for a legacy audit JSONL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DoctorLegacyStateMigrationPlan {
+    /// Legacy source. It is copied, never rewritten or deleted.
+    pub legacy_audit_path: PathBuf,
+    /// Current target. It must not already exist.
+    pub current_audit_path: PathBuf,
+    /// Backup artifact written before the target is created.
+    pub backup_path: PathBuf,
+}
+
 /// Overall `doctor --fix` outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DoctorFixOutcome {
     /// No fixable mutation or refusal was produced.
     Noop,
+    /// One or more scoped service-local mutations were applied.
+    Applied,
     /// One or more blockers remain, but there is no scoped repair plan.
     UnresolvedFindings,
     /// One or more findings had fixes, but every candidate was out of scope.
@@ -433,6 +469,8 @@ pub struct DoctorContext<'a> {
     pub service_health: Option<ServiceAppDoctorSnapshot>,
     /// Service-manager resource caps snapshot.
     pub service_unit_caps: Option<DoctorServiceUnitCaps>,
+    /// Service-state layout paths used to detect 0.4.x legacy files.
+    pub state_layout: Option<DoctorStateLayout>,
     /// Exact setup values that must never appear in doctor output.
     pub sensitive_values: Vec<String>,
 }
@@ -603,9 +641,27 @@ impl DoctorReport {
         self
     }
 
+    /// Attach a `doctor --fix` policy report with already-applied scoped
+    /// service-local mutations.
+    #[must_use]
+    pub fn with_fix_report_mutations(mut self, mutations: Vec<DoctorFixMutation>) -> Self {
+        self.fix = Some(self.plan_fix_report_with_mutations(mutations));
+        self
+    }
+
     /// Build the `doctor --fix` policy report without mutating anything.
     #[must_use]
     pub fn plan_fix_report(&self) -> DoctorFixReport {
+        self.plan_fix_report_with_mutations(Vec::new())
+    }
+
+    /// Build the `doctor --fix` policy report, including scoped mutations the
+    /// caller already applied through the doctor migration helper.
+    #[must_use]
+    pub fn plan_fix_report_with_mutations(
+        &self,
+        mutations: Vec<DoctorFixMutation>,
+    ) -> DoctorFixReport {
         let refusals = self
             .checks
             .iter()
@@ -617,6 +673,8 @@ impl DoctorReport {
         let outcome = if refusals.is_empty() {
             if self.any_failed() {
                 DoctorFixOutcome::UnresolvedFindings
+            } else if !mutations.is_empty() {
+                DoctorFixOutcome::Applied
             } else {
                 DoctorFixOutcome::Noop
             }
@@ -625,6 +683,7 @@ impl DoctorReport {
         };
         let exit_code = match outcome {
             DoctorFixOutcome::Noop => 0,
+            DoctorFixOutcome::Applied => 0,
             DoctorFixOutcome::UnresolvedFindings => 2,
             DoctorFixOutcome::RefusedOutOfScope => 4,
         };
@@ -634,7 +693,7 @@ impl DoctorReport {
             exit_code,
             policy: doctor_fix_policy(),
             refusals,
-            mutations: Vec::new(),
+            mutations,
         }
     }
 }
@@ -654,6 +713,194 @@ fn doctor_fix_policy() -> DoctorFixPolicy {
     }
 }
 
+enum LegacyStateLayoutObservation {
+    Current,
+    ExplicitAuditPath,
+    LegacyAuditOnly,
+    LegacyAndCurrentAuditIdentical,
+    LegacyAndCurrentAudit,
+    Unsafe(String),
+}
+
+fn inspect_legacy_state_layout(layout: &DoctorStateLayout) -> LegacyStateLayoutObservation {
+    if layout.audit_path_configured {
+        return LegacyStateLayoutObservation::ExplicitAuditPath;
+    }
+
+    let legacy = match regular_file_status(&layout.legacy_audit_path) {
+        Ok(status) => status,
+        Err(reason) => return LegacyStateLayoutObservation::Unsafe(reason),
+    };
+    let current = match regular_file_status(&layout.current_audit_path) {
+        Ok(status) => status,
+        Err(reason) => return LegacyStateLayoutObservation::Unsafe(reason),
+    };
+
+    match (legacy, current) {
+        (false, _) => LegacyStateLayoutObservation::Current,
+        (true, false) => LegacyStateLayoutObservation::LegacyAuditOnly,
+        (true, true) => {
+            match audit_files_match(&layout.legacy_audit_path, &layout.current_audit_path) {
+                Ok(true) => LegacyStateLayoutObservation::LegacyAndCurrentAuditIdentical,
+                Ok(false) => LegacyStateLayoutObservation::LegacyAndCurrentAudit,
+                Err(reason) => LegacyStateLayoutObservation::Unsafe(reason),
+            }
+        }
+    }
+}
+
+fn audit_files_match(left: &Path, right: &Path) -> Result<bool, String> {
+    let left = fs::read(left).map_err(|e| format!("failed to read {}: {e}", left.display()))?;
+    let right = fs::read(right).map_err(|e| format!("failed to read {}: {e}", right.display()))?;
+    Ok(left == right)
+}
+
+fn regular_file_status(path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(format!("{} is a symlink", path.display()))
+        }
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(format!("{} is not a regular file", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Apply the scoped 0.4.x -> 0.6.0 legacy audit-layout migration.
+///
+/// The migration copies the legacy audit JSONL byte-for-byte into the current
+/// XDG state audit path when and only when the current target is absent. The
+/// legacy file is never rewritten or removed, and an identical backup artifact
+/// is written before the current target is created.
+pub fn apply_legacy_state_migration(
+    layout: Option<&DoctorStateLayout>,
+) -> Result<Option<DoctorFixMutation>, String> {
+    let Some(layout) = layout else {
+        return Ok(None);
+    };
+    match inspect_legacy_state_layout(layout) {
+        LegacyStateLayoutObservation::LegacyAuditOnly => {}
+        LegacyStateLayoutObservation::Current
+        | LegacyStateLayoutObservation::LegacyAndCurrentAuditIdentical
+        | LegacyStateLayoutObservation::ExplicitAuditPath => return Ok(None),
+        LegacyStateLayoutObservation::LegacyAndCurrentAudit => {
+            return Err(format!(
+                "both legacy audit {} and current audit {} exist; refusing to merge append-only audit chains",
+                layout.legacy_audit_path.display(),
+                layout.current_audit_path.display()
+            ));
+        }
+        LegacyStateLayoutObservation::Unsafe(reason) => return Err(reason),
+    }
+
+    let bytes = fs::read(&layout.legacy_audit_path)
+        .map_err(|e| format!("failed to read legacy audit JSONL: {e}"))?;
+    ensure_private_dir(&layout.migration_backup_dir)?;
+    let backup_path = layout.migration_backup_dir.join(format!(
+        "legacy-audit-jsonl.{}.backup",
+        doctor_migration_timestamp_suffix()
+    ));
+    write_new_private_file(&backup_path, &bytes)?;
+    write_new_atomic_file(&layout.current_audit_path, &bytes)?;
+    Ok(Some(DoctorFixMutation {
+        id: "legacy_state_audit_jsonl_migration",
+        target: "service_local_state",
+        backup: backup_path.display().to_string(),
+        undo: format!(
+            "legacy source preserved at {}; restore {} from backup {} if rollback is required",
+            layout.legacy_audit_path.display(),
+            layout.current_audit_path.display(),
+            backup_path.display()
+        ),
+    }))
+}
+
+fn doctor_migration_timestamp_suffix() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}-{:09}", now.as_secs(), now.subsec_nanos())
+}
+
+fn ensure_private_dir(path: &Path) -> Result<(), String> {
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && (metadata.file_type().is_symlink() || !metadata.is_dir())
+    {
+        return Err(format!("{} is not a safe directory", path.display()));
+    }
+    fs::create_dir_all(path).map_err(|e| format!("failed to create {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|e| {
+            format!(
+                "failed to set private permissions on {}: {e}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn write_new_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        ensure_private_dir(parent)?;
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("failed to create {}: {e}", path.display()))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    if let Some(parent) = path.parent() {
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+fn write_new_atomic_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    match regular_file_status(path) {
+        Ok(true) => return Err(format!("{} already exists", path.display())),
+        Ok(false) => {}
+        Err(reason) => return Err(reason),
+    }
+    if let Some(parent) = path.parent() {
+        ensure_private_dir(parent)?;
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("invalid migration target {}", path.display()))?;
+    let tmp_path = parent.join(format!(
+        ".{file_name}.tmp.{}.{}",
+        std::process::id(),
+        doctor_migration_timestamp_suffix()
+    ));
+    write_new_private_file(&tmp_path, bytes)?;
+    fs::rename(&tmp_path, path)
+        .map_err(|e| format!("failed to install {}: {e}", path.display()))?;
+    sync_dir(parent)
+}
+
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> Result<(), String> {
+    fs::File::open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|e| format!("failed to fsync {}: {e}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
 fn fix_refusal_for_check(check: &CheckResult) -> DoctorFixRefusal {
     let (target, scope, reason) = match check.id {
         3 | 10 | 11 => (
@@ -670,6 +917,11 @@ fn fix_refusal_for_check(check: &CheckResult) -> DoctorFixRefusal {
             "classifier",
             "classifier",
             "doctor --fix never rewrites the classifier; classifier regressions require code review",
+        ),
+        13 => (
+            "service_local_state",
+            "service_local_state",
+            "doctor --fix only copies byte-identical legacy audit JSONL into an absent current state path; it refuses symlinks and divergent audit chains",
         ),
         _ => (
             "operator_config",
@@ -718,6 +970,7 @@ pub async fn run_doctor(cx: &Cx, ctx: &DoctorContext<'_>) -> DoctorReport {
         check_virtual_tools(),
         check_dba_suite_preflight(cx, ctx).await,
         check_write_posture(cx, ctx).await,
+        check_state_layout(ctx),
         check_call_timeout(ctx),
     ];
     DoctorReport {
@@ -1432,6 +1685,83 @@ async fn check_write_posture(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     }
 }
 
+fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
+    const ID: u8 = 13;
+    const NAME: &str = "State layout";
+
+    let Some(layout) = ctx.state_layout.as_ref() else {
+        return CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Skip,
+            "state directory could not be resolved in this environment",
+        );
+    };
+
+    match inspect_legacy_state_layout(layout) {
+        LegacyStateLayoutObservation::Current => CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Pass,
+            format!(
+                "current XDG state layout is in use; audit default is {}",
+                layout.current_audit_path.display()
+            ),
+        ),
+        LegacyStateLayoutObservation::LegacyAndCurrentAuditIdentical => CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Pass,
+            format!(
+                "legacy audit JSONL remains at {} and matches current state audit {}; no merge needed",
+                layout.legacy_audit_path.display(),
+                layout.current_audit_path.display()
+            ),
+        ),
+        LegacyStateLayoutObservation::ExplicitAuditPath => CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Pass,
+            "explicit [audit].path configured; automatic default-path migration is not needed",
+        ),
+        LegacyStateLayoutObservation::LegacyAuditOnly => CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Warn,
+            format!(
+                "legacy audit JSONL exists at {}; current state audit path {} is absent",
+                layout.legacy_audit_path.display(),
+                layout.current_audit_path.display()
+            ),
+        )
+        .with_fix(
+            "run oraclemcp doctor --fix to copy the legacy audit JSONL into the XDG state directory; the legacy file is left untouched",
+        ),
+        LegacyStateLayoutObservation::LegacyAndCurrentAudit => CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Warn,
+            format!(
+                "legacy audit {} and current audit {} both exist; automatic merge is refused",
+                layout.legacy_audit_path.display(),
+                layout.current_audit_path.display()
+            ),
+        )
+        .with_fix(
+            "verify both audit chains manually; doctor --fix refuses to merge divergent append-only audit logs",
+        ),
+        LegacyStateLayoutObservation::Unsafe(reason) => CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Warn,
+            format!("state layout requires manual review: {reason}"),
+        )
+        .with_fix(
+            "repair the filesystem layout manually; doctor --fix refuses symlinks and non-regular audit paths",
+        ),
+    }
+}
+
 fn check_call_timeout(ctx: &DoctorContext<'_>) -> CheckResult {
     const ID: u8 = 12;
     const NAME: &str = "Call timeout";
@@ -1518,6 +1848,26 @@ mod tests {
         })
     }
 
+    fn doctor_tmp_dir(name: &str) -> std::path::PathBuf {
+        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("../../target/tmp/oraclemcp-core-doctor-tests");
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        path.push(format!("{}-{}-{name}", std::process::id(), nanos));
+        std::fs::create_dir_all(&path).expect("test temp dir exists");
+        path
+    }
+
+    fn check_by_id(report: &DoctorReport, id: u8) -> &CheckResult {
+        report
+            .checks
+            .iter()
+            .find(|check| check.id == id)
+            .expect("check present")
+    }
+
     struct LiveMock;
     #[async_trait::async_trait(?Send)]
     impl OracleConnection for LiveMock {
@@ -1595,9 +1945,9 @@ mod tests {
     }
 
     #[test]
-    fn report_has_twelve_checks_and_classifier_self_test_passes() {
+    fn report_has_thirteen_checks_and_classifier_self_test_passes() {
         let report = doctor(&DoctorContext::default());
-        assert_eq!(report.checks.len(), 12);
+        assert_eq!(report.checks.len(), 13);
         let selftest = report.checks.iter().find(|c| c.id == 8).unwrap();
         assert_eq!(selftest.status, CheckStatus::Pass, "{}", selftest.detail);
     }
@@ -1934,7 +2284,7 @@ mod tests {
         assert!(text.contains("oraclemcp doctor"));
         assert!(text.contains("Classifier self-test"));
         let j = report.to_json();
-        assert_eq!(j["checks"].as_array().unwrap().len(), 12);
+        assert_eq!(j["checks"].as_array().unwrap().len(), 13);
         assert_eq!(j["exit_code"], json!(0));
     }
 
@@ -2484,9 +2834,8 @@ mod tests {
             );
             assert!(
                 fix.mutations.is_empty(),
-                "{name}: current doctor --fix must not mutate. Add a corrupt -> \
-                 doctor --fix -> healthy -> undo byte-identical fixture before \
-                 enabling a DoctorFixMutation."
+                "{name}: this fixture is not a scoped service-local migration; \
+                 unsafe or unfixture-backed doctor --fix mutations must stay disabled"
             );
             for target in expected_targets {
                 assert!(
@@ -2496,6 +2845,66 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn legacy_state_layout_detects_and_migrates_audit_jsonl_once() {
+        let root = doctor_tmp_dir("legacy-state-migration");
+        let legacy = root.join("config").join("audit.jsonl");
+        let current = root.join("state").join("audit").join("audit.jsonl");
+        let backups = root.join("state").join("doctor-migrations").join("backups");
+        std::fs::create_dir_all(legacy.parent().expect("legacy parent"))
+            .expect("legacy parent exists");
+        let audit_jsonl = br#"{"schema_version":1,"seq":1}
+"#;
+        std::fs::write(&legacy, audit_jsonl).expect("seed legacy audit");
+        let layout = DoctorStateLayout {
+            legacy_audit_path: legacy.clone(),
+            current_audit_path: current.clone(),
+            migration_backup_dir: backups,
+            audit_path_configured: false,
+        };
+
+        let report = doctor(&DoctorContext {
+            state_layout: Some(layout.clone()),
+            ..DoctorContext::default()
+        });
+        let check = check_by_id(&report, 13);
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check
+                .fix
+                .as_deref()
+                .is_some_and(|fix| fix.contains("doctor --fix"))
+        );
+
+        let mutation = apply_legacy_state_migration(Some(&layout))
+            .expect("migration succeeds")
+            .expect("migration applied");
+        assert_eq!(mutation.id, "legacy_state_audit_jsonl_migration");
+        assert_eq!(std::fs::read(&legacy).expect("read legacy"), audit_jsonl);
+        assert_eq!(std::fs::read(&current).expect("read current"), audit_jsonl);
+        assert_eq!(
+            std::fs::read(&mutation.backup).expect("read backup"),
+            audit_jsonl
+        );
+
+        let rerun = doctor(&DoctorContext {
+            state_layout: Some(layout.clone()),
+            ..DoctorContext::default()
+        })
+        .with_fix_report_mutations(vec![mutation]);
+        assert_eq!(check_by_id(&rerun, 13).status, CheckStatus::Pass);
+        let fix = rerun.fix.as_ref().expect("fix report");
+        assert_eq!(fix.outcome, DoctorFixOutcome::Applied);
+        assert_eq!(fix.exit_code, 0);
+        assert_eq!(fix.mutations.len(), 1);
+        assert!(
+            apply_legacy_state_migration(Some(&layout))
+                .expect("second migration is noop")
+                .is_none(),
+            "migration must be idempotent after the byte-identical copy exists"
+        );
     }
 
     /// A2 — a read-only (least-privilege) principal: the write-posture check (11)

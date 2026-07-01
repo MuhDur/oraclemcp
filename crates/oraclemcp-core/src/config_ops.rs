@@ -490,6 +490,7 @@ fn rollback_id_for(report: &ConfigApplyReport) -> String {
 struct RedactedConfigSnapshot {
     schema_version: u32,
     default_profile: Option<String>,
+    monitor_profile: Option<String>,
     http: RedactedHttpSnapshot,
     audit: RedactedAuditSnapshot,
     profiles: Vec<ProfileMetadata>,
@@ -510,6 +511,7 @@ struct RedactedHttpSnapshot {
     mtls_required: bool,
     operator_loopback_owner: bool,
     operator_allowed_subject_count: usize,
+    dashboard_workbench: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -531,6 +533,7 @@ fn redacted_snapshot(config: &OracleMcpConfig) -> RedactedConfigSnapshot {
     RedactedConfigSnapshot {
         schema_version: config.schema_version,
         default_profile: config.default_profile.clone(),
+        monitor_profile: config.monitor_profile.clone(),
         http: RedactedHttpSnapshot {
             allowed_hosts_count: config.http.allowed_hosts.len(),
             allowed_origins_count: config.http.allowed_origins.len(),
@@ -546,6 +549,7 @@ fn redacted_snapshot(config: &OracleMcpConfig) -> RedactedConfigSnapshot {
             mtls_required: tls.is_some_and(|value| value.client_ca_path.is_some()),
             operator_loopback_owner: config.http.operator.allow_loopback_owner,
             operator_allowed_subject_count: config.http.operator.allowed_subjects.len(),
+            dashboard_workbench: config.http.dashboard_workbench,
         },
         audit: RedactedAuditSnapshot {
             path_configured: config.audit.path.is_some(),

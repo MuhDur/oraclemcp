@@ -57,16 +57,16 @@ use oraclemcp_core::{
     ClientCredentialLifecycle, ClientCredentialStore, ConfigOpsBackend, ConfigOpsService,
     ConfigReloadApplier, ConfigReloadApplyReport, CustomToolCatalog, CustomToolDef, DashboardAuth,
     DispatchCloseReason, DispatchContext, DispatchFuture, DispatchOutcome, DoctorAuthCapabilities,
-    DoctorAuthModeKind, DoctorContext, DoctorLevelCaps, DoctorProfileCaps, ExportRegistry,
-    FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext, LaneDispatchFactory,
-    LaneRuntime, MCP_PATH, McpSurfaceDetail, McpSurfaceFuture, MtlsClientRegistry,
-    OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy, OracleMcpServer,
-    PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport, ShutdownCoordinator, SiemFormat,
-    SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial, TlsServerConfig,
-    ToolDispatch, WriteIntentLog, build_server_config, default_dashboard_ticket_dir, load_tools,
-    load_tools_for_profile, mint_dashboard_pairing_ticket, operator_subject_id_hash,
-    parse_tools_file, requires_mtls, run_doctor, service_app_doctor_snapshot, sign,
-    start_oraclemcp_service_app_with_transport,
+    DoctorAuthModeKind, DoctorContext, DoctorLevelCaps, DoctorProfileCaps, DoctorStateLayout,
+    ExportRegistry, FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext,
+    LaneDispatchFactory, LaneRuntime, MCP_PATH, McpSurfaceDetail, McpSurfaceFuture,
+    MtlsClientRegistry, OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy,
+    OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport, ShutdownCoordinator,
+    SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial,
+    TlsServerConfig, ToolDispatch, WriteIntentLog, apply_legacy_state_migration,
+    build_server_config, default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
+    mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file, requires_mtls,
+    run_doctor, service_app_doctor_snapshot, sign, start_oraclemcp_service_app_with_transport,
 };
 use oraclemcp_db::{
     DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
@@ -974,13 +974,34 @@ fn load_custom_catalog_for_profile(
     Ok(CustomToolCatalog::new(loaded))
 }
 
-/// The safe default audit-log path under the config home, used when
+/// The current safe default audit-log path under the XDG state home, used when
 /// `[audit].path` is not configured but an auditor is required.
 fn default_audit_path() -> PathBuf {
+    if let Ok(state_dir) = oraclemcp_core::FileStore::default_state_dir() {
+        return state_dir.join("audit").join("audit.jsonl");
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".local/state/oraclemcp/audit/audit.jsonl"))
+        .unwrap_or_else(|| PathBuf::from("oraclemcp-audit.jsonl"))
+}
+
+/// The legacy 0.4.x default audit path under the config home.
+fn legacy_audit_path() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .map(|home| home.join(".config/oraclemcp/audit.jsonl"))
-        .unwrap_or_else(|| PathBuf::from("oraclemcp-audit.jsonl"))
+}
+
+fn doctor_state_layout(audit_path_configured: bool) -> Option<DoctorStateLayout> {
+    let legacy_audit_path = legacy_audit_path()?;
+    let state_dir = oraclemcp_core::FileStore::default_state_dir().ok()?;
+    Some(DoctorStateLayout {
+        legacy_audit_path,
+        current_audit_path: default_audit_path(),
+        migration_backup_dir: state_dir.join("doctor-migrations").join("backups"),
+        audit_path_configured,
+    })
 }
 
 /// Resolve the audit signing key: prefer the config `[audit].key_ref` secret,
@@ -3493,6 +3514,8 @@ fn profiles_json(cfg: &OracleMcpConfig) -> serde_json::Value {
                 "protected": profile.protected,
                 "require_signed_tools": profile.require_signed_tools,
                 "read_only_standby": profile.read_only_standby,
+                "mcp_exposed": profile.mcp_exposed,
+                "dashboard_ddl_workbench": profile.dashboard_ddl_workbench,
             })
         })
         .collect::<Vec<_>>();
@@ -3829,6 +3852,12 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
     }
 }
 
+fn doctor_audit_path_configured() -> bool {
+    OracleMcpConfig::load(None)
+        .map(|config| config.audit.path.is_some())
+        .unwrap_or(false)
+}
+
 fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileContext {
     let wallet_location = resolved
         .opts
@@ -3887,6 +3916,15 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
     // Offline by default: profile metadata inspection does not resolve secrets
     // or open Oracle. --online is the explicit live-connect boundary.
     let profile_ctx = doctor_profile_context(profile.as_deref(), online);
+    let state_layout = doctor_state_layout(doctor_audit_path_configured());
+    let mut fix_mutations = Vec::new();
+    if fix {
+        match apply_legacy_state_migration(state_layout.as_ref()) {
+            Ok(Some(mutation)) => fix_mutations.push(mutation),
+            Ok(None) => {}
+            Err(e) => eprintln!("doctor --fix legacy state migration refused: {e}"),
+        }
+    }
     let ctx = DoctorContext {
         conn: profile_ctx.conn.as_deref(),
         connection_error: profile_ctx.connection_error,
@@ -3903,11 +3941,12 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
         auth_capabilities: profile_ctx.auth_capabilities,
         service_health: service_app_doctor_snapshot().ok(),
         service_unit_caps: service_lifecycle::doctor_service_unit_caps(),
+        state_layout,
         sensitive_values: profile_ctx.sensitive_values,
     };
     let mut report = block_on_connect(|cx| async move { run_doctor(&cx, &ctx).await });
     if fix {
-        report = report.with_fix_report();
+        report = report.with_fix_report_mutations(fix_mutations);
     }
     let exit_code = doctor_process_exit_code(&report);
     if robot_json {
@@ -4860,6 +4899,7 @@ mod tests {
             max_level = "READ_ONLY"
             default_level = "READ_ONLY"
             require_signed_tools = true
+            dashboard_ddl_workbench = true
             sdu = 32768
 
             [profiles.oci]
@@ -4892,6 +4932,10 @@ mod tests {
         assert_eq!(out["profiles"][0]["is_default"], serde_json::json!(true));
         assert_eq!(
             out["profiles"][0]["require_signed_tools"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            out["profiles"][0]["dashboard_ddl_workbench"],
             serde_json::json!(true)
         );
         let serialized = serde_json::to_string(&out).expect("json");

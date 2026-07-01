@@ -30,7 +30,7 @@ pub use profile::{
 /// The config schema version this build understands. A config declaring a
 /// higher version is rejected (forward-incompatible) rather than silently
 /// mis-read.
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 2;
 
 /// Default environment-variable prefix for config overrides.
 pub const ENV_PREFIX: &str = "ORACLEMCP_";
@@ -66,6 +66,11 @@ pub struct OracleMcpConfig {
     /// `serve --profile <name>`. This keeps multi-client MCP config small.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_profile: Option<String>,
+    /// Optional least-privilege profile used for fleet-wide database
+    /// observability such as `v$session` and DB evidence. When unset, the
+    /// operator surface degrades to self-lane/local telemetry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_profile: Option<String>,
     /// Native Streamable HTTP transport configuration.
     #[serde(default)]
     pub http: HttpConfig,
@@ -82,6 +87,7 @@ impl Default for OracleMcpConfig {
         OracleMcpConfig {
             schema_version: SUPPORTED_SCHEMA_VERSION,
             default_profile: None,
+            monitor_profile: None,
             http: HttpConfig::default(),
             audit: AuditConfig::default(),
             profiles: Vec::new(),
@@ -94,17 +100,18 @@ impl Default for OracleMcpConfig {
 /// The audit log is an append-only, hash-chained, HMAC-SHA256-signed JSONL file
 /// written out-of-band of the Oracle session. `path` is where it lives;
 /// `key_ref` is a secret-ref (mirrors `wallet_password_ref`: `env:VAR`,
-/// `vault:...`, or dev-only `literal:`) for the keyed MAC; `key_id` labels the
-/// active key for rotation. When unset, the binary picks a safe default path
-/// and fails closed at startup if an operating level above ReadOnly is
-/// reachable without a configured key.
+/// `file:/path`, `keyring:service/account`, future `vault:...`, or dev-only
+/// `literal:`) for the keyed MAC; `key_id` labels the active key for rotation.
+/// When unset, the binary picks a safe default path and fails closed at startup
+/// if an operating level above ReadOnly is reachable without a configured key.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AuditConfig {
     /// Append-only audit log file path. When `None`, the binary chooses a safe
-    /// default under the config home.
+    /// default under the XDG state home.
     pub path: Option<PathBuf>,
-    /// Secret reference for the HMAC signing key (`env:`/`vault:`/`literal:`).
+    /// Secret reference for the HMAC signing key
+    /// (`env:`/`file:`/`keyring:`/future `vault:`/dev-only `literal:`).
     pub key_ref: Option<String>,
     /// Identifier of the active signing key, recorded in each record so the key
     /// can be rotated while old records keep verifying. Defaults to `default`.
@@ -144,7 +151,8 @@ pub struct AuditShippingConfig {
     /// SIEM wire format: `json` (default), `cef`, or `syslog`.
     pub siem_format: Option<String>,
     /// Secret reference for an outbound SIEM auth header value
-    /// (`env:`/`vault:`/`literal:`), e.g. a Splunk HEC token.
+    /// (`env:`/`file:`/`keyring:`/future `vault:`/dev-only `literal:`), e.g. a
+    /// Splunk HEC token.
     pub siem_auth_header_ref: Option<String>,
     /// Header name for the SIEM auth value. Defaults to `Authorization`.
     pub siem_auth_header_name: Option<String>,
@@ -230,6 +238,10 @@ pub struct HttpConfig {
     pub tls: Option<HttpTlsConfig>,
     /// Operator-authority policy for `/operator/v1`.
     pub operator: HttpOperatorConfig,
+    /// Release gate for the browser Safe SQL Workbench. The workbench remains
+    /// disabled unless this is explicitly enabled and the runtime profile
+    /// ceiling still admits the requested operation.
+    pub dashboard_workbench: bool,
 }
 
 impl Default for HttpConfig {
@@ -244,6 +256,7 @@ impl Default for HttpConfig {
             mtls: HttpMtlsConfig::default(),
             tls: None,
             operator: HttpOperatorConfig::default(),
+            dashboard_workbench: false,
         }
     }
 }
@@ -524,6 +537,13 @@ impl OracleMcpConfig {
                 default_profile.to_owned(),
             ));
         }
+        if let Some(monitor_profile) = self.monitor_profile.as_deref()
+            && !self.profiles.iter().any(|p| p.name == monitor_profile)
+        {
+            return Err(ConfigError::UnknownMonitorProfile(
+                monitor_profile.to_owned(),
+            ));
+        }
         for prof in &self.profiles {
             match prof.connect_string.as_deref() {
                 Some(s) if !s.trim().is_empty() => {}
@@ -669,7 +689,7 @@ pub struct ReloadProfileDecision {
 /// This plan is deliberately conservative: profile changes that can affect the
 /// Oracle connection, session setup, pool, served exposure, or operating-level
 /// ceiling drain the profile. Cosmetic discovery metadata may be retained.
-/// HTTP/audit/default-profile changes are not hot-applied by the current
+/// HTTP/audit/default-profile/monitor-profile changes are not hot-applied by the current
 /// service process; callers should reject those reloads and ask for restart
 /// rather than silently mutating live state.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -695,6 +715,9 @@ impl ConfigReloadPlan {
         }
         if current.default_profile != next.default_profile {
             restart_required.push("default_profile changed");
+        }
+        if current.monitor_profile != next.monitor_profile {
+            restart_required.push("monitor_profile changed");
         }
 
         let current_profiles = profile_map(current);
@@ -782,6 +805,7 @@ fn profile_hot_reload_compatible(before: &ConnectionProfile, after: &ConnectionP
         && before.require_signed_tools == after.require_signed_tools
         && before.read_only_standby == after.read_only_standby
         && before.mcp_exposed == after.mcp_exposed
+        && before.dashboard_ddl_workbench == after.dashboard_ddl_workbench
         && before.session_identity == after.session_identity
         && before.pool == after.pool
         && before.oci == after.oci
@@ -812,6 +836,9 @@ pub enum ConfigError {
     /// The configured default profile does not exist.
     #[error("default_profile references unknown profile `{0}`")]
     UnknownDefaultProfile(String),
+    /// The configured monitor profile does not exist.
+    #[error("monitor_profile references unknown profile `{0}`")]
+    UnknownMonitorProfile(String),
     /// The config declares a newer schema than this build supports.
     #[error("unsupported config schema_version {found}; this build supports {supported}")]
     UnsupportedSchemaVersion {
@@ -925,6 +952,71 @@ mod tests {
         assert_eq!(cfg.schema_version, SUPPORTED_SCHEMA_VERSION);
         assert_eq!(cfg.http, HttpConfig::default());
         assert!(cfg.profiles.is_empty());
+    }
+
+    #[test]
+    fn legacy_schema_v1_config_still_loads_after_v2_additive_fields() {
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            schema_version = 1
+
+            [[profiles]]
+            name = "prod"
+            connect_string = "prod:1521/svc"
+            "#,
+        )
+        .expect("schema v1 config loads");
+
+        assert_eq!(cfg.schema_version, 1);
+        assert!(!cfg.http.dashboard_workbench);
+        assert!(cfg.monitor_profile.is_none());
+        assert!(!cfg.profiles[0].dashboard_ddl_workbench());
+    }
+
+    #[test]
+    fn schema_v2_dashboard_and_monitor_fields_load_and_validate() {
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            schema_version = 2
+            default_profile = "app_ro"
+            monitor_profile = "monitor_ro"
+
+            [http]
+            dashboard_workbench = true
+
+            [[profiles]]
+            name = "app_ro"
+            connect_string = "app:1521/svc"
+            dashboard_ddl_workbench = true
+
+            [[profiles]]
+            name = "monitor_ro"
+            connect_string = "monitor:1521/svc"
+            mcp_exposed = false
+            "#,
+        )
+        .expect("schema v2 config loads");
+
+        assert_eq!(cfg.schema_version, SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(cfg.monitor_profile.as_deref(), Some("monitor_ro"));
+        assert!(cfg.http.dashboard_workbench);
+        assert!(cfg.profile("app_ro").unwrap().dashboard_ddl_workbench());
+    }
+
+    #[test]
+    fn unknown_monitor_profile_is_rejected() {
+        let err = OracleMcpConfig::from_toml_str(
+            r#"
+            monitor_profile = "missing"
+
+            [[profiles]]
+            name = "prod"
+            connect_string = "prod:1521/svc"
+            "#,
+        )
+        .expect_err("unknown monitor profile rejected");
+
+        assert!(matches!(err, ConfigError::UnknownMonitorProfile(name) if name == "missing"));
     }
 
     #[test]

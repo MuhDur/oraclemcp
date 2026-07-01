@@ -261,14 +261,17 @@ Connection profiles are resolved from layered configuration (`oraclemcp-config`)
 For live database access, create `~/.config/oraclemcp/profiles.toml`:
 
 ```toml
-schema_version = 1
+schema_version = 2
 default_profile = "dev_ro"
+# Optional least-privilege profile for fleet-wide DB observability.
+# monitor_profile = "monitor_ro"
 
 [http]
 allowed_hosts = ["127.0.0.1:7070"]
 allowed_origins = ["https://client.example.com"]
 json_response = true
 stateful = false
+dashboard_workbench = false
 
 [http.oauth]
 resource = "http://127.0.0.1:7070/mcp"
@@ -295,6 +298,7 @@ credential_ref = "env:ORACLE_APP_PASSWORD"
 max_level = "READ_ONLY"
 default_level = "READ_ONLY"
 require_signed_tools = true
+dashboard_ddl_workbench = false
 # Optional Oracle call timeout and request-budget ceiling. Omit for the 30s
 # default; set 0 only to opt out deliberately. Tool calls can tighten it with
 # timeout_seconds where advertised.
@@ -916,7 +920,10 @@ privilege, or **warns** (naming the offending privileges) when it can write. The
 same check reports the wallet mode truth table: `ewallet.pem` is supported in
 the default build, while `cwallet.sso` and standalone `ewallet.p12` produce
 structured wallet diagnostics. `doctor --fix`
-never changes Oracle, the audit hash-chain, the SQL classifier, or a profile
+may copy the legacy `~/.config/oraclemcp/audit.jsonl` default audit log into
+the XDG state audit path when the current target is absent, leaving the legacy
+file untouched and recording a backup artifact. It never changes Oracle, rewrites
+or merges the audit hash-chain, edits the SQL classifier, or raises a profile
 `max_level`; those findings are detect-only and refused with exit 4.
 
 ## Architecture
