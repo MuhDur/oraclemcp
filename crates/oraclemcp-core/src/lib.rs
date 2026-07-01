@@ -57,7 +57,7 @@ pub use resilience::{
 };
 pub use server::{
     CAPABILITIES_TOOL, DispatchCloseFuture, DispatchCloseReason, DispatchContext, DispatchFuture,
-    OracleMcpServer, ToolDispatch,
+    DispatchOutcome, OracleMcpServer, ToolDispatch,
 };
 pub use shutdown::{CancelOutcome, ShutdownCoordinator, install_panic_hook};
 

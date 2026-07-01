@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-use asupersync::Cx;
+use asupersync::{Cx, Outcome};
 use oraclemcp_auth::{ResourceServerConfig, SignatureVerifier};
 use oraclemcp_core::OracleMcpServer;
 use oraclemcp_core::capabilities::{CapabilitiesReport, FeatureTiers};
@@ -40,7 +40,7 @@ impl ToolDispatch for EchoDispatch {
             if let Some(grant) = context.scope_grant() {
                 result["scopes"] = json!(grant.0);
             }
-            Ok(result)
+            Outcome::Ok(result)
         })
     }
 }

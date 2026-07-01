@@ -17,12 +17,12 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use asupersync::Cx;
 use asupersync::channel::{
     mpsc::{self, SendError},
     oneshot,
 };
 use asupersync::runtime::RuntimeBuilder;
+use asupersync::{CancelReason, Cx, Outcome, PanicPayload};
 use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use parking_lot::Mutex;
@@ -32,7 +32,8 @@ use crate::admission::{AdmissionController, AdmissionPermit, DEFAULT_RETRY_AFTER
 use crate::http::{HttpLaneBinding, HttpLaneSnapshot, HttpSessionLifecycle};
 use crate::operator_protocol::operator_subject_id_hash;
 use crate::server::{
-    DispatchCloseReason, DispatchContext, DispatchFuture, OwnedDispatchContext, ToolDispatch,
+    DispatchCloseReason, DispatchContext, DispatchFuture, DispatchOutcome, OwnedDispatchContext,
+    ToolDispatch,
 };
 
 /// Default number of queued dispatch commands accepted by one lane.
@@ -163,7 +164,7 @@ enum LaneCommand {
         context: OwnedDispatchContext,
         name: String,
         args: Value,
-        reply: oneshot::Sender<Result<Value, ErrorEnvelope>>,
+        reply: oneshot::Sender<DispatchOutcome>,
     },
     Close {
         reason: DispatchCloseReason,
@@ -396,16 +397,19 @@ impl ToolDispatch for LaneRuntime {
         args: Value,
     ) -> DispatchFuture<'a> {
         Box::pin(async move {
-            cx.checkpoint().map_err(|err| {
-                ErrorEnvelope::new(
-                    ErrorClass::Timeout,
-                    format!(
-                        "dispatch lane {} send cancelled before admission: {err}",
-                        self.name()
-                    ),
-                )
-            })?;
-            let sender = self.sender()?;
+            if cx.checkpoint().is_err() {
+                return Outcome::Cancelled(cancel_reason_from_cx(
+                    cx,
+                    "dispatch lane send cancelled before admission",
+                ));
+            }
+            let sender = match self.sender() {
+                Ok(sender) => sender,
+                Err(_) if self.status() == LaneRuntimeStatus::Quarantined => {
+                    return Outcome::Panicked(lane_panic_payload(self.name()));
+                }
+                Err(err) => return Outcome::Err(err),
+            };
             let (reply_tx, mut reply_rx) = oneshot::channel();
             let lane_generation = self.generation();
             let context = context.with_lane_identity(self.name(), lane_generation);
@@ -415,18 +419,27 @@ impl ToolDispatch for LaneRuntime {
                 args,
                 reply: reply_tx,
             };
-            let permit = sender
-                .try_reserve()
-                .map_err(|error| lane_send_error(self.name(), error))?;
-            permit
-                .try_send(command)
-                .map_err(|error| lane_send_error(self.name(), error))?;
-            reply_rx.recv(cx).await.map_err(|_| {
-                ErrorEnvelope::new(
+            let permit = match sender.try_reserve() {
+                Ok(permit) => permit,
+                Err(error) => return lane_send_error_outcome(self.name(), error, cx),
+            };
+            if let Err(error) = permit.try_send(command) {
+                return lane_send_error_outcome(self.name(), error, cx);
+            }
+            match reply_rx.recv(cx).await {
+                Ok(outcome) => outcome,
+                Err(oneshot::RecvError::Cancelled) => Outcome::Cancelled(cancel_reason_from_cx(
+                    cx,
+                    "dispatch lane receive cancelled before reply",
+                )),
+                Err(oneshot::RecvError::Closed) => {
+                    Outcome::Panicked(lane_panic_payload(self.name()))
+                }
+                Err(_) => Outcome::Err(ErrorEnvelope::new(
                     ErrorClass::RuntimeStateRequired,
                     format!("dispatch lane {} stopped before replying", self.name()),
-                )
-            })?
+                )),
+            }
         })
     }
 }
@@ -660,6 +673,25 @@ fn lane_send_error<T>(name: &str, error: SendError<T>) -> ErrorEnvelope {
     }
 }
 
+fn lane_send_error_outcome<T>(name: &str, error: SendError<T>, cx: &Cx) -> DispatchOutcome {
+    match error {
+        SendError::Cancelled(_) => Outcome::Cancelled(cancel_reason_from_cx(
+            cx,
+            "dispatch lane send cancelled before admission",
+        )),
+        other => Outcome::Err(lane_send_error(name, other)),
+    }
+}
+
+fn cancel_reason_from_cx(cx: &Cx, fallback: &'static str) -> CancelReason {
+    cx.cancel_reason()
+        .unwrap_or_else(|| CancelReason::user(fallback))
+}
+
+fn lane_panic_payload(name: &str) -> PanicPayload {
+    PanicPayload::new(format!("dispatch lane {name} panicked before replying"))
+}
+
 fn enqueue_close(
     sender: &mpsc::Sender<LaneCommand>,
     reason: DispatchCloseReason,
@@ -770,7 +802,7 @@ async fn run_lane_loop_with_factory(
                     match factory(&cx, &lane_context).await {
                         Ok(created) => dispatcher = Some(created),
                         Err(err) => {
-                            let _ = reply.send_blocking(Err(err));
+                            let _ = reply.send_blocking(Outcome::Err(err));
                             continue;
                         }
                     }
@@ -862,7 +894,7 @@ mod tests {
                     .lock()
                     .recv()
                     .expect("test coordinator releases blocked lane");
-                Ok(json!({ "lane_thread": format!("{lane_thread:?}") }))
+                Outcome::Ok(json!({ "lane_thread": format!("{lane_thread:?}") }))
             })
         }
     }
@@ -879,7 +911,7 @@ mod tests {
         ) -> DispatchFuture<'a> {
             Box::pin(async move {
                 let lane_thread = thread::current().id();
-                Ok(json!({ "lane_thread": format!("{lane_thread:?}") }))
+                Outcome::Ok(json!({ "lane_thread": format!("{lane_thread:?}") }))
             })
         }
     }
@@ -898,7 +930,7 @@ mod tests {
         ) -> DispatchFuture<'a> {
             Box::pin(async move {
                 let lane_thread = thread::current().id();
-                Ok(json!({ "lane_thread": format!("{lane_thread:?}") }))
+                Outcome::Ok(json!({ "lane_thread": format!("{lane_thread:?}") }))
             })
         }
 
@@ -930,7 +962,7 @@ mod tests {
                 self.entered
                     .send(())
                     .expect("test observes unexpected lane entry");
-                Ok(json!({ "entered": true }))
+                Outcome::Ok(json!({ "entered": true }))
             })
         }
     }
@@ -947,7 +979,7 @@ mod tests {
         ) -> DispatchFuture<'a> {
             Box::pin(async move {
                 let lane_thread = thread::current().id();
-                Ok(json!({
+                Outcome::Ok(json!({
                     "lane_thread": format!("{lane_thread:?}"),
                     "session_id": context.http_session_id(),
                     "principal_key": context.principal_key(),
@@ -1176,15 +1208,17 @@ mod tests {
             1,
         );
 
-        let err = block_on_lane_bridge(async {
+        let outcome = block_on_lane_bridge(async {
             let cx = Cx::current().expect("bridge installs Cx");
             cx.set_cancel_requested(true);
             lane.dispatch(&cx, DispatchContext::default(), "cancelled", Value::Null)
                 .await
-                .expect_err("pre-cancelled request is rejected before lane admission")
         });
 
-        assert_eq!(err.error_class, ErrorClass::Timeout);
+        assert!(
+            matches!(outcome, Outcome::Cancelled(_)),
+            "pre-cancelled request is preserved as Outcome::Cancelled"
+        );
         assert!(
             entered_rx.recv_timeout(Duration::from_millis(50)).is_err(),
             "cancelled caller must not enqueue work onto the lane"
@@ -1439,14 +1473,16 @@ mod tests {
         );
         let sibling = LaneRuntime::spawn("panic-sibling", Arc::new(EchoThreadDispatch), 4);
 
-        let err = block_on_lane_bridge(async {
+        let outcome = block_on_lane_bridge(async {
             let cx = Cx::current().expect("bridge installs Cx");
             panicking
                 .dispatch(&cx, DispatchContext::default(), "panic", Value::Null)
                 .await
-                .expect_err("panicked lane returns a structured error to caller")
         });
-        assert_eq!(err.error_class, ErrorClass::RuntimeStateRequired);
+        assert!(
+            matches!(outcome, Outcome::Panicked(_)),
+            "panicked lane returns Outcome::Panicked to caller"
+        );
         wait_for_quarantine(&panicking);
 
         let records = memory_sink.records();
@@ -1473,13 +1509,15 @@ mod tests {
             "sibling lane returned its thread id"
         );
 
-        let quarantined_err = block_on_lane_bridge(async {
+        let quarantined_outcome = block_on_lane_bridge(async {
             let cx = Cx::current().expect("bridge installs Cx");
             panicking
                 .dispatch(&cx, DispatchContext::default(), "again", Value::Null)
                 .await
-                .expect_err("quarantined lane refuses later dispatch")
         });
-        assert!(quarantined_err.message.contains("quarantined"));
+        assert!(
+            matches!(quarantined_outcome, Outcome::Panicked(_)),
+            "quarantined lane refuses later dispatch as Outcome::Panicked"
+        );
     }
 }

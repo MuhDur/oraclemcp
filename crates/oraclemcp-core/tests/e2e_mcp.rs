@@ -14,7 +14,7 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use asupersync::Cx;
+use asupersync::{Cx, Outcome};
 use oraclemcp_core::OracleMcpServer;
 use oraclemcp_core::capabilities::{CapabilitiesReport, FeatureTiers};
 use oraclemcp_core::http::{HttpRequest, HttpTransportConfig, MCP_PATH, handle_http_request};
@@ -35,7 +35,7 @@ impl ToolDispatch for EchoDispatch {
         name: &'a str,
         _args: Value,
     ) -> DispatchFuture<'a> {
-        Box::pin(async move { Ok(json!({ "tool": name, "ok": true })) })
+        Box::pin(async move { Outcome::Ok(json!({ "tool": name, "ok": true })) })
     }
 }
 

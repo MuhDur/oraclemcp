@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use asupersync::Outcome;
 use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor};
 use oraclemcp_auth::{
     HttpGuardError, HttpGuardPolicy, ResourceServerConfig, SignatureVerifier, TokenError,
@@ -771,7 +772,7 @@ mod tests {
     use crate::capabilities::{CapabilitiesReport, FeatureTiers};
     use crate::server::{DispatchContext, DispatchFuture, ToolDispatch};
     use crate::tools::ToolRegistry;
-    use asupersync::Cx;
+    use asupersync::{CancelReason, Cx, PanicPayload};
     use oraclemcp_error::{ErrorClass, ErrorEnvelope};
     use oraclemcp_guard::OperatingLevel;
     use rustls::pki_types::pem::PemObject;
@@ -787,7 +788,7 @@ mod tests {
             _name: &'a str,
             _args: Value,
         ) -> DispatchFuture<'a> {
-            Box::pin(async { Ok(serde_json::json!({})) })
+            Box::pin(async { Outcome::Ok(serde_json::json!({})) })
         }
     }
 
@@ -801,7 +802,7 @@ mod tests {
             _args: Value,
         ) -> DispatchFuture<'a> {
             Box::pin(async {
-                Err(
+                Outcome::Err(
                     ErrorEnvelope::new(ErrorClass::Busy, "test lane mailbox is full")
                         .with_retry_after_ms(250),
                 )
@@ -819,11 +820,37 @@ mod tests {
             _args: Value,
         ) -> DispatchFuture<'a> {
             Box::pin(async {
-                Err(
+                Outcome::Err(
                     ErrorEnvelope::new(ErrorClass::AtCapacity, "stateful lane capacity exhausted")
                         .with_retry_after_ms(250),
                 )
             })
+        }
+    }
+
+    struct CancelledDispatch;
+    impl ToolDispatch for CancelledDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            Box::pin(async { Outcome::Cancelled(CancelReason::timeout()) })
+        }
+    }
+
+    struct PanickedDispatch;
+    impl ToolDispatch for PanickedDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            Box::pin(async { Outcome::Panicked(PanicPayload::new("test panic")) })
         }
     }
 
@@ -843,7 +870,7 @@ mod tests {
             let session_id = context.http_session_id().map(str::to_owned);
             let principal_key = context.principal_key().map(str::to_owned);
             Box::pin(async move {
-                Ok(serde_json::json!({
+                Outcome::Ok(serde_json::json!({
                     "tool": name,
                     "scopes": scopes,
                     "session_id": session_id,
@@ -864,7 +891,7 @@ mod tests {
         ) -> DispatchFuture<'a> {
             let tool = name.to_owned();
             Box::pin(async move {
-                Ok(serde_json::json!({
+                Outcome::Ok(serde_json::json!({
                     "tool": tool,
                     "thread": format!("{:?}", std::thread::current().id()),
                 }))
@@ -887,7 +914,7 @@ mod tests {
             let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst) + 1;
             let tool = name.to_owned();
             Box::pin(async move {
-                Ok(serde_json::json!({
+                Outcome::Ok(serde_json::json!({
                     "tool": tool,
                     "call": call,
                     "args": args,
@@ -964,6 +991,14 @@ mod tests {
             report,
             Arc::new(AtCapacityDispatch),
         )
+    }
+
+    fn cancelled_server() -> OracleMcpServer {
+        server_with_dispatch(Arc::new(CancelledDispatch))
+    }
+
+    fn panicked_server() -> OracleMcpServer {
+        server_with_dispatch(Arc::new(PanickedDispatch))
     }
 
     fn init_body() -> Value {
@@ -2065,6 +2100,54 @@ mod tests {
             body["result"]["structuredContent"]["retry_after_ms"],
             serde_json::json!(250)
         );
+    }
+
+    #[test]
+    fn cancelled_dispatch_outcome_is_http_499() {
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            ..Default::default()
+        };
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "oracle_query",
+                "arguments": { "sql": "SELECT 1 FROM dual" }
+            }
+        });
+        let response = handle_http_request(&cancelled_server(), &cfg, post(&body));
+
+        assert_eq!(response.status, 499);
+        let body = response_json(&response);
+        assert_eq!(body["outcome"], serde_json::json!("cancelled"));
+        assert_eq!(body["cancel_kind"], serde_json::json!("Timeout"));
+        assert!(body.get("result").is_none());
+    }
+
+    #[test]
+    fn panicked_dispatch_outcome_is_http_500() {
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            ..Default::default()
+        };
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "oracle_query",
+                "arguments": { "sql": "SELECT 1 FROM dual" }
+            }
+        });
+        let response = handle_http_request(&panicked_server(), &cfg, post(&body));
+
+        assert_eq!(response.status, 500);
+        let body = response_json(&response);
+        assert_eq!(body["outcome"], serde_json::json!("panicked"));
+        assert_eq!(body["error"], serde_json::json!("request_panicked"));
+        assert!(body.get("result").is_none());
     }
 
     // ---- D1-health: /healthz, /readyz, /metrics ----------------------------
@@ -4895,9 +4978,13 @@ fn handle_mcp_post(
     if let Some(principal_key) = dispatch_principal_key {
         context = context.with_principal_key(principal_key);
     }
-    let response = server.handle_jsonrpc_request_with_context(parsed, None, context);
-    let Some(response) = response else {
-        return empty_response(202);
+    let outcome = server.handle_jsonrpc_request_with_context_outcome(parsed, None, context);
+    let response = match outcome {
+        Outcome::Ok(Some(response)) => response,
+        Outcome::Ok(None) => return empty_response(202),
+        Outcome::Err(error) => error.into_response(),
+        Outcome::Cancelled(reason) => return dispatch_cancelled_response(&reason),
+        Outcome::Panicked(payload) => return dispatch_panicked_response(&payload),
     };
     if let Some(retry_after_ms) = jsonrpc_busy_retry_after_ms(&response) {
         let retry_after = retry_after_header_seconds(retry_after_ms);
@@ -4924,6 +5011,38 @@ fn handle_mcp_post(
         );
     }
     json_response(200, &response)
+}
+
+fn dispatch_cancelled_response(reason: &asupersync::CancelReason) -> HttpResponse {
+    tracing::info!(
+        outcome = "cancelled",
+        cancel_kind = reason.kind.as_str(),
+        "MCP request cancelled before dispatch completion"
+    );
+    json_response(
+        499,
+        &json!({
+            "error": "request_cancelled",
+            "outcome": "cancelled",
+            "cancel_kind": reason.kind.as_str(),
+            "message": reason.to_string(),
+        }),
+    )
+}
+
+fn dispatch_panicked_response(_payload: &asupersync::PanicPayload) -> HttpResponse {
+    tracing::error!(
+        outcome = "panicked",
+        "MCP request dispatch panicked; lane supervision has quarantined any affected lane"
+    );
+    json_response(
+        500,
+        &json!({
+            "error": "request_panicked",
+            "outcome": "panicked",
+            "message": "tool dispatch panicked; the owning lane must be inspected before retry",
+        }),
+    )
 }
 
 fn jsonrpc_busy_retry_after_ms(response: &Value) -> Option<u64> {

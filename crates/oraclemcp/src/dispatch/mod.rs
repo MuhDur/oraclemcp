@@ -17,7 +17,7 @@ use std::sync::{Arc, LazyLock, Mutex as SyncMutex};
 use std::time::{Duration, Instant};
 
 use asupersync::sync::Mutex as AsyncMutex;
-use asupersync::{Budget, Cx};
+use asupersync::{Budget, CancelReason, Cx, Outcome};
 use oraclemcp_audit::{
     AuditCancel, AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor, DbEvidence,
 };
@@ -4455,7 +4455,19 @@ impl ToolDispatch for OracleDispatcher {
         name: &'a str,
         args: Value,
     ) -> DispatchFuture<'a> {
-        Box::pin(async move { self.dispatch_with_cx_inner(cx, context, name, args).await })
+        Box::pin(async move {
+            if cx.checkpoint().is_err() {
+                return Outcome::Cancelled(
+                    cx.cancel_reason().unwrap_or_else(CancelReason::timeout),
+                );
+            }
+            let result = self.dispatch_with_cx_inner(cx, context, name, args).await;
+            if cx.is_cancel_requested() {
+                Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(CancelReason::timeout))
+            } else {
+                result.into()
+            }
+        })
     }
 
     fn close<'a>(&'a self, cx: &'a Cx, reason: DispatchCloseReason) -> DispatchCloseFuture<'a> {

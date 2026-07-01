@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use asupersync::Cx;
+use asupersync::{Cx, Outcome};
 use oraclemcp_core::error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_core::{
     DispatchContext, DispatchFuture, LaneContext, LaneDispatchFactory, StatefulLaneDispatch,
@@ -58,14 +58,14 @@ impl ToolDispatch for DbProbeDispatch {
                 .and_then(|row| row.parse_i64("LANE_OK"))
                 .unwrap_or_default();
             if observed != 1 {
-                return Err(ErrorEnvelope::new(
+                return Outcome::Err(ErrorEnvelope::new(
                     ErrorClass::RuntimeStateRequired,
                     format!("lane {} returned an unexpected probe value", self.lane_id),
                 ));
             }
             self.latencies_us.lock().push(elapsed_us);
             self.lane_threads.lock().insert(lane_thread.clone());
-            Ok(json!({
+            Outcome::Ok(json!({
                 "lane_id": self.lane_id,
                 "lane_thread": lane_thread,
                 "latency_us": elapsed_us

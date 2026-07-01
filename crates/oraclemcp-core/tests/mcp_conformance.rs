@@ -199,7 +199,7 @@ impl ToolDispatch for EchoDispatch {
         args: Value,
     ) -> DispatchFuture<'a> {
         Box::pin(async move {
-            match name {
+            let result: Result<Value, ErrorEnvelope> = match name {
                 "oracle_schema_inspect" => Ok(json!({
                     "tool": name,
                     "ok": true,
@@ -247,7 +247,8 @@ impl ToolDispatch for EchoDispatch {
                     ErrorClass::InvalidArguments,
                     format!("unknown tool: {name:?}"),
                 )),
-            }
+            };
+            result.into()
         })
     }
 }

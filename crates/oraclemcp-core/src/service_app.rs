@@ -516,10 +516,10 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use asupersync::Cx;
     use asupersync::cx::{NameRegistry, RegistryHandle};
     use asupersync::runtime::state::RuntimeState;
     use asupersync::types::TaskId;
+    use asupersync::{Cx, Outcome};
     use oraclemcp_guard::OperatingLevel;
     use parking_lot::Mutex;
     use serde_json::Value;
@@ -538,7 +538,7 @@ mod tests {
             _name: &'a str,
             _args: Value,
         ) -> DispatchFuture<'a> {
-            Box::pin(async { Ok(serde_json::json!({})) })
+            Box::pin(async { Outcome::Ok(serde_json::json!({})) })
         }
     }
 

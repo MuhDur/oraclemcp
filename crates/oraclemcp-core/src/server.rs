@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
-use asupersync::Cx;
+use asupersync::{CancelReason, Cx, Outcome, PanicPayload};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use serde_json::{Map, Value, json};
 
@@ -45,12 +45,31 @@ const SERVER_INSTRUCTIONS: &str = "Call oracle_capabilities first to discover to
 /// hold an Asupersync `Mutex` guard (which is `!Send`) across a native-async DB
 /// round trip. Served stateful dispatch is marshaled through [`crate::lane`] so
 /// the real dispatcher is polled on its owning lane thread.
-pub type DispatchFuture<'a> = Pin<Box<dyn Future<Output = Result<Value, ErrorEnvelope>> + 'a>>;
+pub type DispatchOutcome = Outcome<Value, ErrorEnvelope>;
+
+pub type DispatchFuture<'a> = Pin<Box<dyn Future<Output = DispatchOutcome> + 'a>>;
 
 /// Boxed dispatcher lifecycle future. Like [`DispatchFuture`], this is not
 /// `Send` because stateful cleanup must run on the lane/runtime that owns the
 /// Oracle session.
 pub type DispatchCloseFuture<'a> = Pin<Box<dyn Future<Output = Result<(), ErrorEnvelope>> + 'a>>;
+
+#[derive(Debug)]
+pub(crate) struct JsonRpcDispatchError {
+    response: Value,
+}
+
+impl JsonRpcDispatchError {
+    fn new(response: Value) -> Self {
+        Self { response }
+    }
+
+    pub(crate) fn into_response(self) -> Value {
+        self.response
+    }
+}
+
+pub(crate) type JsonRpcDispatchOutcome = Outcome<Option<Value>, JsonRpcDispatchError>;
 
 /// Why a stateful dispatcher is being closed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -512,13 +531,27 @@ impl OracleMcpServer {
         name: String,
         args: Value,
     ) -> Value {
+        self.tool_result_from_outcome(
+            self.run_tool_json_outcome_with_context(cx, context, name, args)
+                .await,
+        )
+    }
+
+    pub(crate) async fn run_tool_json_outcome_with_context(
+        &self,
+        cx: &Cx,
+        context: DispatchContext<'_>,
+        name: String,
+        args: Value,
+    ) -> DispatchOutcome {
         if name == CAPABILITIES_TOOL {
-            return self.capabilities_result_json();
+            return Outcome::Ok(self.capabilities_result_json());
         }
-        match self.dispatcher.dispatch(cx, context, &name, args).await {
-            Ok(value) => tool_result_ok_json(value),
-            Err(envelope) => tool_result_err_json(&self.sanitize_error_envelope(envelope)),
-        }
+        self.dispatcher
+            .dispatch(cx, context, &name, args)
+            .await
+            .map(tool_result_ok_json)
+            .map_err(|envelope| self.sanitize_error_envelope(envelope))
     }
 
     /// Run a tool by name + JSON args in an explicit Asupersync context.
@@ -550,6 +583,25 @@ impl OracleMcpServer {
                 return tool_result_err_json(&envelope);
             };
             self.run_tool_json_with_context(&cx, context, name, args)
+                .await
+        })
+    }
+
+    pub(crate) fn run_tool_blocking_outcome_with_context(
+        &self,
+        context: DispatchContext<'_>,
+        name: String,
+        args: Value,
+    ) -> DispatchOutcome {
+        crate::lane::block_on_lane_bridge(async {
+            let Some(cx) = Cx::current() else {
+                let envelope = ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    "Asupersync context was not installed for tool dispatch",
+                );
+                return Outcome::Err(envelope);
+            };
+            self.run_tool_json_outcome_with_context(&cx, context, name, args)
                 .await
         })
     }
@@ -587,45 +639,87 @@ impl OracleMcpServer {
         auth: Option<&StdioAuthPolicy>,
         context: DispatchContext<'_>,
     ) -> Option<Value> {
+        match self.handle_jsonrpc_request_with_context_outcome(request, auth, context) {
+            Outcome::Ok(response) => response,
+            Outcome::Err(error) => Some(error.into_response()),
+            Outcome::Cancelled(reason) => Some(jsonrpc_error(
+                Value::Null,
+                JSONRPC_SERVER_ERROR,
+                format!("Request cancelled: {reason}"),
+            )),
+            Outcome::Panicked(_) => Some(jsonrpc_error(
+                Value::Null,
+                JSONRPC_SERVER_ERROR,
+                "Request panicked",
+            )),
+        }
+    }
+
+    pub(crate) fn handle_jsonrpc_request_with_context_outcome(
+        &self,
+        request: Value,
+        auth: Option<&StdioAuthPolicy>,
+        context: DispatchContext<'_>,
+    ) -> JsonRpcDispatchOutcome {
         let Value::Object(object) = request else {
-            return Some(jsonrpc_error(
+            return Outcome::Ok(Some(jsonrpc_error(
                 Value::Null,
                 JSONRPC_INVALID_REQUEST,
                 "Invalid Request",
-            ));
+            )));
         };
         let id = object.get("id").cloned();
         let Some(method) = object.get("method").and_then(Value::as_str) else {
-            return id.map(|id| jsonrpc_error(id, JSONRPC_INVALID_REQUEST, "Invalid Request"));
+            return Outcome::Ok(
+                id.map(|id| jsonrpc_error(id, JSONRPC_INVALID_REQUEST, "Invalid Request")),
+            );
         };
         if object.get("jsonrpc") != Some(&Value::String("2.0".to_owned())) {
-            return id.map(|id| jsonrpc_error(id, JSONRPC_INVALID_REQUEST, "Invalid Request"));
+            return Outcome::Ok(
+                id.map(|id| jsonrpc_error(id, JSONRPC_INVALID_REQUEST, "Invalid Request")),
+            );
         }
-        let id = id?;
+        let Some(id) = id else {
+            return Outcome::Ok(None);
+        };
         match method {
-            "initialize" => Some(self.handle_initialize(id, object.get("params"), auth)),
-            "notifications/initialized" => None,
-            "resources/list" => Some(self.handle_resources_list(id, object.get("params"))),
-            "resources/templates/list" => {
-                Some(self.handle_resource_templates_list(id, object.get("params")))
+            "initialize" => {
+                Outcome::Ok(Some(self.handle_initialize(id, object.get("params"), auth)))
             }
-            "resources/read" => Some(self.handle_resource_read(id, object.get("params"), context)),
-            "resources/subscribe" => Some(self.handle_resource_subscribe(id, object.get("params"))),
-            "resources/unsubscribe" => {
-                Some(self.handle_resource_unsubscribe(id, object.get("params")))
+            "notifications/initialized" => Outcome::Ok(None),
+            "resources/list" => {
+                Outcome::Ok(Some(self.handle_resources_list(id, object.get("params"))))
             }
-            "prompts/list" => Some(self.handle_prompts_list(id)),
-            "prompts/get" => Some(self.handle_prompt_get(id, object.get("params"))),
-            "tools/list" => Some(self.handle_tools_list(id, object.get("params"))),
-            "tools/call" => Some(self.handle_tool_call(id, object.get("params"), context)),
-            "completion/complete" => {
-                Some(self.handle_completion_complete(id, object.get("params"), context))
-            }
-            _ => Some(jsonrpc_error(
+            "resources/templates/list" => Outcome::Ok(Some(
+                self.handle_resource_templates_list(id, object.get("params")),
+            )),
+            "resources/read" => Outcome::Ok(Some(self.handle_resource_read(
+                id,
+                object.get("params"),
+                context,
+            ))),
+            "resources/subscribe" => Outcome::Ok(Some(
+                self.handle_resource_subscribe(id, object.get("params")),
+            )),
+            "resources/unsubscribe" => Outcome::Ok(Some(
+                self.handle_resource_unsubscribe(id, object.get("params")),
+            )),
+            "prompts/list" => Outcome::Ok(Some(self.handle_prompts_list(id))),
+            "prompts/get" => Outcome::Ok(Some(self.handle_prompt_get(id, object.get("params")))),
+            "tools/list" => Outcome::Ok(Some(self.handle_tools_list(id, object.get("params")))),
+            "tools/call" => self
+                .handle_tool_call_outcome(id, object.get("params"), context)
+                .map(Some),
+            "completion/complete" => Outcome::Ok(Some(self.handle_completion_complete(
+                id,
+                object.get("params"),
+                context,
+            ))),
+            _ => Outcome::Ok(Some(jsonrpc_error(
                 id,
                 JSONRPC_METHOD_NOT_FOUND,
                 "Method not found",
-            )),
+            ))),
         }
     }
 
@@ -976,35 +1070,35 @@ impl OracleMcpServer {
             .unwrap_or(Value::Null))
     }
 
-    fn handle_tool_call(
+    fn handle_tool_call_outcome(
         &self,
         id: Value,
         params: Option<&Value>,
         context: DispatchContext<'_>,
-    ) -> Value {
+    ) -> Outcome<Value, JsonRpcDispatchError> {
         let Some(Value::Object(params)) = params else {
-            return jsonrpc_error(
+            return Outcome::Ok(jsonrpc_error(
                 id,
                 JSONRPC_INVALID_PARAMS,
                 "tools/call params must be an object",
-            );
+            ));
         };
         let Some(name) = params.get("name").and_then(Value::as_str) else {
-            return jsonrpc_error(
+            return Outcome::Ok(jsonrpc_error(
                 id,
                 JSONRPC_INVALID_PARAMS,
                 "tools/call name must be a string",
-            );
+            ));
         };
         let args = match params.get("arguments") {
             Some(Value::Object(arguments)) => Value::Object(arguments.clone()),
             Some(Value::Null) | None => Value::Null,
             Some(_) => {
-                return jsonrpc_error(
+                return Outcome::Ok(jsonrpc_error(
                     id,
                     JSONRPC_INVALID_PARAMS,
                     "tools/call arguments must be an object",
-                );
+                ));
             }
         };
         // E6: when the client supplied a `progressToken` (params._meta), bracket
@@ -1022,16 +1116,46 @@ impl OracleMcpServer {
                 Some(&format!("{name} started")),
             );
         }
-        let result = self.run_tool_blocking_with_context(context, name.to_owned(), args);
-        if let Some(token) = &progress_token {
-            self.notifications.enqueue_progress(
-                token,
-                1.0,
-                Some(1.0),
-                Some(&format!("{name} completed")),
-            );
+        match self.run_tool_blocking_outcome_with_context(context, name.to_owned(), args) {
+            Outcome::Ok(result) => {
+                if let Some(token) = &progress_token {
+                    self.notifications.enqueue_progress(
+                        token,
+                        1.0,
+                        Some(1.0),
+                        Some(&format!("{name} completed")),
+                    );
+                }
+                Outcome::Ok(jsonrpc_result(id, result))
+            }
+            Outcome::Err(envelope) => {
+                if let Some(token) = &progress_token {
+                    self.notifications.enqueue_progress(
+                        token,
+                        1.0,
+                        Some(1.0),
+                        Some(&format!("{name} completed")),
+                    );
+                }
+                let response = jsonrpc_result(id, tool_result_err_json(&envelope));
+                Outcome::Err(JsonRpcDispatchError::new(response))
+            }
+            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
         }
-        jsonrpc_result(id, result)
+    }
+
+    fn tool_result_from_outcome(&self, outcome: DispatchOutcome) -> Value {
+        match outcome {
+            Outcome::Ok(value) => value,
+            Outcome::Err(envelope) => tool_result_err_json(&envelope),
+            Outcome::Cancelled(reason) => {
+                tool_result_err_json(&cancelled_dispatch_envelope(&reason))
+            }
+            Outcome::Panicked(payload) => {
+                tool_result_err_json(&panicked_dispatch_envelope(&payload))
+            }
+        }
     }
 
     /// Serve `completion/complete` (E7): owner→type→object autocomplete for the
@@ -1584,6 +1708,22 @@ fn tool_result_err_json(envelope: &ErrorEnvelope) -> Value {
     tool_result_json(value, true, false)
 }
 
+fn cancelled_dispatch_envelope(reason: &CancelReason) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::Timeout,
+        format!("tool dispatch cancelled before completion: {reason}"),
+    )
+    .with_next_step("Retry only if the client did not intentionally cancel the request.")
+}
+
+fn panicked_dispatch_envelope(_payload: &PanicPayload) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::Internal,
+        "tool dispatch panicked; the owning lane must be inspected before retry",
+    )
+    .with_next_step("Inspect operator audit/logs before reusing this lane.")
+}
+
 fn tool_result_json(value: Value, is_error: bool, fence_text: bool) -> Value {
     let payload = value.to_string();
     let text = if fence_text {
@@ -1624,21 +1764,21 @@ mod tests {
         ) -> DispatchFuture<'a> {
             Box::pin(async move {
                 if name == "boom" {
-                    return Err(ErrorEnvelope::new(ErrorClass::Internal, "boom"));
+                    return Outcome::Err(ErrorEnvelope::new(ErrorClass::Internal, "boom"));
                 }
                 if name == "connect_fail" {
-                    return Err(ErrorEnvelope::new(
+                    return Outcome::Err(ErrorEnvelope::new(
                         ErrorClass::ConnectionFailed,
                         "connection unavailable",
                     ));
                 }
                 if name == "missing_object" {
-                    return Err(ErrorEnvelope::new(
+                    return Outcome::Err(ErrorEnvelope::new(
                         ErrorClass::ObjectNotFound,
                         "object not found",
                     ));
                 }
-                Ok(serde_json::json!({ "echoed": name, "args": args }))
+                Outcome::Ok(serde_json::json!({ "echoed": name, "args": args }))
             })
         }
     }
@@ -1672,11 +1812,12 @@ mod tests {
                 calls.fetch_add(1, Ordering::SeqCst);
                 active.fetch_add(1, Ordering::SeqCst);
                 let _guard = ActiveCallGuard { active };
-                cx.checkpoint_with("oraclemcp.test.tool-call.quiescence")
-                    .map_err(|err| {
-                        ErrorEnvelope::new(ErrorClass::Timeout, format!("cancelled: {err}"))
-                    })?;
-                Ok(serde_json::json!({ "completed": true }))
+                if let Err(_err) = cx.checkpoint_with("oraclemcp.test.tool-call.quiescence") {
+                    return Outcome::Cancelled(
+                        cx.cancel_reason().unwrap_or_else(CancelReason::timeout),
+                    );
+                }
+                Outcome::Ok(serde_json::json!({ "completed": true }))
             })
         }
     }

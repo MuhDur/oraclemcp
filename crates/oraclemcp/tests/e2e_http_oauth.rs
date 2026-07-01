@@ -6,7 +6,7 @@ use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::Duration;
 
-use asupersync::Cx;
+use asupersync::{Cx, Outcome};
 use oraclemcp::dispatch::OracleDispatcher;
 use oraclemcp::registry::{capabilities, tool_registry};
 use oraclemcp_auth::{ResourceServerConfig, SignatureVerifier};
@@ -155,7 +155,7 @@ impl ToolDispatch for BlockingToolDispatch {
                 .expect("release mutex not poisoned")
                 .recv()
                 .expect("test releases blocked lane dispatch");
-            Ok(json!({ "ok": true }))
+            Outcome::Ok(json!({ "ok": true }))
         })
     }
 }
