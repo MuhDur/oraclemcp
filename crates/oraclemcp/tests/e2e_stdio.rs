@@ -48,7 +48,10 @@ impl OracleConnection for FailingMock {
             "ORA-00942: table or view does not exist".to_owned(),
         ))
     }
-    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        if s == oraclemcp_guard::SET_TRANSACTION_READ_ONLY {
+            return Ok(0);
+        }
         Err(DbError::Execute("ORA-00942".to_owned()))
     }
     async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {

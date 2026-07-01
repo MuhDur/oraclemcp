@@ -32,19 +32,20 @@ use oraclemcp_core::{
 };
 use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
-    DbError, DbmsOutput, ORACLE_CELL_STRUCTURED_CONTRACT_VERSION, OracleBind, OracleConnection,
-    OracleConnectionInfo, OracleMetadataCacheKey, QuarantineOutcome, QueryCaps, SerializeOptions,
-    StructuredDecodeCaps, compile_errors, compile_object_statements, describe_columns,
-    describe_constraints, describe_index, describe_trigger, describe_view, execute_immediate_audit,
-    explain_plan, find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects,
-    list_schemas, plscope_identifiers, plscope_statements, read_lob, read_query, read_query_named,
-    sample_rows, search_objects, search_source, serialize_row,
+    DbError, DbmsOutput, ORACLE_CELL_STRUCTURED_CONTRACT_VERSION, OracleBackend, OracleBind,
+    OracleConnection, OracleConnectionInfo, OracleMetadataCacheKey, OracleRow, QuarantineOutcome,
+    QueryCaps, SerializeOptions, StructuredDecodeCaps, compile_errors, compile_object_statements,
+    describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
+    execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl, get_source,
+    get_sources_by_name, list_objects, list_schemas, plscope_identifiers, plscope_statements,
+    read_lob, read_query, read_query_named, sample_rows, search_objects, search_source,
+    serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
     Classifier, ClassifierConfig, DangerLevel, EscalationError, ExecGrantBinding, ExecGrantError,
-    ExecGrantStore, GuardDecision, LevelDecision, OperatingLevel, SessionLevelState, StageA,
-    stage_a,
+    ExecGrantStore, GuardDecision, LevelDecision, ObjectRef, OperatingLevel, Purity,
+    SessionLevelState, SideEffectOracle, StageA, stage_a,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -567,6 +568,28 @@ impl OracleDispatcher {
 /// every existing site already constructed.
 static DEFAULT_CLASSIFIER: LazyLock<Classifier> =
     LazyLock::new(|| Classifier::new(ClassifierConfig::new()));
+
+/// Classifier used for server-generated read SQL. It is deliberately separate
+/// from [`DEFAULT_CLASSIFIER`] so only this internal surface gets a tiny purity
+/// oracle for Oracle-owned read-only package routines used by dictionary tools.
+static GENERATED_READ_CLASSIFIER: LazyLock<Classifier> = LazyLock::new(|| {
+    Classifier::new(ClassifierConfig::new()).with_oracle(Arc::new(GeneratedReadPurityOracle))
+});
+
+struct GeneratedReadPurityOracle;
+
+impl SideEffectOracle for GeneratedReadPurityOracle {
+    fn routine_purity(&self, routine: &ObjectRef) -> Purity {
+        let schema = routine.schema.as_deref().unwrap_or("").to_ascii_uppercase();
+        let name = routine.name.to_ascii_uppercase();
+        match (schema.as_str(), name.as_str()) {
+            ("DBMS_LOB", "SUBSTR") | ("DBMS_METADATA", "GET_DDL") | ("DBMS_XPLAN", "DISPLAY") => {
+                Purity::ProvenReadOnly
+            }
+            _ => Purity::Unknown,
+        }
+    }
+}
 
 /// Serialize a slice of rows to a JSON array via the canonical row serializer.
 fn rows_to_json(rows: &[oraclemcp_db::OracleRow]) -> Value {
@@ -1267,12 +1290,11 @@ async fn owner_and_name_arg(
 /// (multi-statement batch, string-concat dynamic SQL, an unproven function call
 /// in a SELECT, …) are rejected with a structured envelope. Proven read-only
 /// `SELECT`/`WITH` and dictionary introspection pass.
-///
-/// The dictionary/profile tools build their own parameterized SQL or reconnect
-/// from configured profiles and never execute caller-supplied statements, so
-/// they need no raw-SQL gate.
 fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
-    let decision = DEFAULT_CLASSIFIER.classify(sql);
+    ensure_read_only_decision(DEFAULT_CLASSIFIER.classify(sql))
+}
+
+fn ensure_read_only_decision(decision: GuardDecision) -> Result<(), ErrorEnvelope> {
     // A session whose ceiling is READ_ONLY: `gate` returns `Allow` only for
     // statements the guard proved read-only; everything else is `Blocked` or
     // `RequireStepUp`, both of which this (step-up-less) server rejects.
@@ -2493,6 +2515,296 @@ fn append_audit(
             .map_err(audit_error_to_envelope)?;
     }
     Ok(())
+}
+
+fn system_generated_read_subject() -> AuditSubject {
+    AuditSubject::new("system", "generated-read").with_authn_method("server")
+}
+
+fn db_internal_from_envelope(err: ErrorEnvelope) -> DbError {
+    DbError::Internal(format!("{:?}: {}", err.error_class, err.message))
+}
+
+fn normalized_generated_sql(sql: &str) -> String {
+    sql.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase()
+}
+
+fn generated_read_sql_is_allowlisted(sql: &str) -> bool {
+    let normalized = normalized_generated_sql(sql);
+    if normalized.contains(';') || !normalized.starts_with("SELECT ") {
+        return false;
+    }
+
+    const ALLOWED_SURFACE_TOKENS: &[&str] = &[
+        " FROM ALL_",
+        " JOIN ALL_",
+        " FROM DBA_",
+        " JOIN DBA_",
+        " FROM USER_",
+        " JOIN USER_",
+        " FROM V$",
+        " JOIN V$",
+        " FROM GV$",
+        " JOIN GV$",
+        " FROM PERFSTAT.",
+        " JOIN PERFSTAT.",
+        " FROM STATS$",
+        " JOIN STATS$",
+        " DBMS_LOB.SUBSTR(",
+        " DBMS_METADATA.GET_DDL(",
+        " TABLE(DBMS_XPLAN.DISPLAY",
+    ];
+    if ALLOWED_SURFACE_TOKENS
+        .iter()
+        .any(|token| normalized.contains(token))
+    {
+        return true;
+    }
+
+    let sample_shape = normalized.starts_with("SELECT * FROM (SELECT * FROM ")
+        && normalized.ends_with(") WHERE ROWNUM <= :1");
+    let lob_lookup_shape = normalized.contains(" AS LOB_VALUE FROM ")
+        && normalized.ends_with(" = :1 FETCH FIRST 1 ROW ONLY");
+    sample_shape || lob_lookup_shape
+}
+
+fn ensure_generated_read_sql_allowed(sql: &str) -> Result<DangerLevel, ErrorEnvelope> {
+    let baseline = GENERATED_READ_CLASSIFIER.classify(sql);
+    if matches!(baseline.danger, DangerLevel::Forbidden) {
+        return ensure_read_only_decision(baseline).map(|()| DangerLevel::Safe);
+    }
+    if !generated_read_sql_is_allowlisted(sql) {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::PolicyDenied,
+            "server-generated read SQL is not on the built-in metadata/monitor allowlist",
+        )
+        .with_next_step(
+            "route ad-hoc SQL through oracle_query so the caller-supplied SQL gate owns it",
+        ));
+    }
+    if ensure_read_only_decision(baseline.clone()).is_ok() {
+        return Ok(baseline.danger);
+    }
+    let decision = Classifier::new(ClassifierConfig::new().with_allow(sql))
+        .with_oracle(Arc::new(GeneratedReadPurityOracle))
+        .classify(sql);
+    let danger = decision.danger;
+    ensure_read_only_decision(decision)?;
+    Ok(danger)
+}
+
+fn generated_read_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "oracle_schema_inspect"
+            | "oracle_search_objects"
+            | "oracle_list_schemas"
+            | "oracle_describe"
+            | "oracle_describe_index"
+            | "oracle_describe_trigger"
+            | "oracle_describe_view"
+            | "oracle_get_ddl"
+            | "oracle_get_source"
+            | "oracle_sample_rows"
+            | "oracle_top_queries"
+            | "oracle_db_health"
+            | "oracle_read_clob"
+            | "oracle_compile_errors"
+            | "oracle_search_source"
+            | "oracle_plscope_inspect"
+    )
+}
+
+fn generated_read_uses_primary_session(tool: &str) -> bool {
+    matches!(
+        tool,
+        "oracle_sample_rows" | "oracle_top_queries" | "oracle_db_health" | "oracle_read_clob"
+    )
+}
+
+#[derive(Clone, Copy)]
+struct GeneratedReadAuditCtx<'a> {
+    entry: AuditEntryCtx<'a>,
+    tool: &'a str,
+}
+
+struct GuardedGeneratedReadConn<'a> {
+    inner: &'a dyn OracleConnection,
+    audit: GeneratedReadAuditCtx<'a>,
+}
+
+impl GuardedGeneratedReadConn<'_> {
+    fn before_query(&self, sql: &str) -> Result<String, DbError> {
+        let danger = ensure_generated_read_sql_allowed(sql).map_err(db_internal_from_envelope)?;
+        let danger = audit_danger_string(danger);
+        append_audit(
+            self.audit.entry,
+            self.audit.tool,
+            sql,
+            &danger,
+            None,
+            AuditOutcome::Pending,
+        )
+        .map_err(db_internal_from_envelope)?;
+        Ok(danger)
+    }
+
+    fn after_query(&self, sql: &str, danger: &str, outcome: AuditOutcome) -> Result<(), DbError> {
+        append_audit(
+            self.audit.entry,
+            self.audit.tool,
+            sql,
+            danger,
+            None,
+            outcome,
+        )
+        .map_err(db_internal_from_envelope)
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for GuardedGeneratedReadConn<'_> {
+    fn backend(&self) -> OracleBackend {
+        self.inner.backend()
+    }
+
+    async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.ping(cx).await
+    }
+
+    async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        self.inner.describe(cx).await
+    }
+
+    async fn query_rows(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let danger = self.before_query(sql)?;
+        match self.inner.query_rows(cx, sql, binds).await {
+            Ok(rows) => {
+                self.after_query(sql, &danger, AuditOutcome::Succeeded)?;
+                Ok(rows)
+            }
+            Err(err) => {
+                self.after_query(sql, &danger, AuditOutcome::Failed)?;
+                Err(err)
+            }
+        }
+    }
+
+    async fn query_rows_with_serialize_options(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+        serialize_opts: &SerializeOptions,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let danger = self.before_query(sql)?;
+        match self
+            .inner
+            .query_rows_with_serialize_options(cx, sql, binds, serialize_opts)
+            .await
+        {
+            Ok(rows) => {
+                self.after_query(sql, &danger, AuditOutcome::Succeeded)?;
+                Ok(rows)
+            }
+            Err(err) => {
+                self.after_query(sql, &danger, AuditOutcome::Failed)?;
+                Err(err)
+            }
+        }
+    }
+
+    async fn query_rows_named(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[(String, OracleBind)],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let danger = self.before_query(sql)?;
+        match self.inner.query_rows_named(cx, sql, binds).await {
+            Ok(rows) => {
+                self.after_query(sql, &danger, AuditOutcome::Succeeded)?;
+                Ok(rows)
+            }
+            Err(err) => {
+                self.after_query(sql, &danger, AuditOutcome::Failed)?;
+                Err(err)
+            }
+        }
+    }
+
+    async fn query_rows_named_with_serialize_options(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[(String, OracleBind)],
+        serialize_opts: &SerializeOptions,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let danger = self.before_query(sql)?;
+        match self
+            .inner
+            .query_rows_named_with_serialize_options(cx, sql, binds, serialize_opts)
+            .await
+        {
+            Ok(rows) => {
+                self.after_query(sql, &danger, AuditOutcome::Succeeded)?;
+                Ok(rows)
+            }
+            Err(err) => {
+                self.after_query(sql, &danger, AuditOutcome::Failed)?;
+                Err(err)
+            }
+        }
+    }
+
+    async fn query_optional_row(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Option<OracleRow>, DbError> {
+        let danger = self.before_query(sql)?;
+        match self.inner.query_optional_row(cx, sql, binds).await {
+            Ok(row) => {
+                self.after_query(sql, &danger, AuditOutcome::Succeeded)?;
+                Ok(row)
+            }
+            Err(err) => {
+                self.after_query(sql, &danger, AuditOutcome::Failed)?;
+                Err(err)
+            }
+        }
+    }
+
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        Err(DbError::Internal(
+            "generated-read connection refuses execute on a read-only tool path".to_owned(),
+        ))
+    }
+
+    fn call_timeout(&self) -> Result<Option<Duration>, DbError> {
+        self.inner.call_timeout()
+    }
+
+    fn set_call_timeout(&self, timeout: Option<Duration>) -> Result<(), DbError> {
+        self.inner.set_call_timeout(timeout)
+    }
+
+    async fn commit(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.commit(cx).await
+    }
+
+    async fn rollback(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.rollback(cx).await
+    }
 }
 
 fn close_reason_cancel(reason: DispatchCloseReason) -> AuditCancel {
@@ -5094,11 +5406,47 @@ impl OracleDispatcher {
                 )
                 .await;
         }
+        let generated_read = generated_read_tool(tool);
+        if generated_read
+            && (generated_read_uses_primary_session(tool) || state.stateless_conn.is_none())
+        {
+            let DispatcherState {
+                conn,
+                read_only_backstop,
+                ..
+            } = &mut *state;
+            read_only_backstop
+                .ensure_armed(cx, conn.as_ref(), &scoped_level)
+                .await?;
+        }
+
         let conn: &dyn OracleConnection = state.conn.as_ref();
         let metadata_conn: &dyn OracleConnection = state
             .stateless_conn
             .as_deref()
             .unwrap_or_else(|| state.conn.as_ref());
+        let generated_read_subject = system_generated_read_subject();
+        let generated_read_db_evidence = if generated_read {
+            collect_audit_db_evidence(cx, self.auditor.as_deref(), conn).await
+        } else {
+            None
+        };
+        let generated_read_audit = GeneratedReadAuditCtx {
+            entry: AuditEntryCtx {
+                auditor: self.auditor.as_deref(),
+                subject: &generated_read_subject,
+                db_evidence: generated_read_db_evidence.as_ref(),
+            },
+            tool,
+        };
+        let guarded_conn = GuardedGeneratedReadConn {
+            inner: conn,
+            audit: generated_read_audit,
+        };
+        let guarded_metadata_conn = GuardedGeneratedReadConn {
+            inner: metadata_conn,
+            audit: generated_read_audit,
+        };
 
         let result: Result<Value, ErrorEnvelope> = match tool {
             #[cfg(feature = "plsql-intelligence")]
@@ -5256,7 +5604,7 @@ impl OracleDispatcher {
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.schema_inspect.before")?;
                 let rows = list_objects(
                     cx,
-                    metadata_conn,
+                    &guarded_metadata_conn,
                     owner_filter.as_deref(),
                     object_type.as_deref(),
                     name_like.as_deref(),
@@ -5324,7 +5672,7 @@ impl OracleDispatcher {
                 // handler scaffolding, and the IO call is the explicit exception.
                 let results = search_objects(
                     cx,
-                    metadata_conn,
+                    &guarded_metadata_conn,
                     owner_filter.as_deref(),
                     object_type.as_deref(),
                     name_like.as_deref(),
@@ -5353,7 +5701,7 @@ impl OracleDispatcher {
                     .unwrap_or(DEFAULT_SCHEMA_LIST_MAX_ROWS)
                     .clamp(1, MAX_SCHEMA_LIST_MAX_ROWS);
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.list_schemas.before")?;
-                let rows = list_schemas(cx, metadata_conn, name_like.as_deref(), max_rows)
+                let rows = list_schemas(cx, &guarded_metadata_conn, name_like.as_deref(), max_rows)
                     .await
                     .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.list_schemas.after")?;
@@ -5370,11 +5718,11 @@ impl OracleDispatcher {
                 let (owner, table) =
                     owner_and_name_arg(cx, metadata_conn, a.owner, table, "table").await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_columns.before")?;
-                let columns = describe_columns(cx, metadata_conn, &owner, &table)
+                let columns = describe_columns(cx, &guarded_metadata_conn, &owner, &table)
                     .await
                     .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_constraints.before")?;
-                let constraints = describe_constraints(cx, metadata_conn, &owner, &table)
+                let constraints = describe_constraints(cx, &guarded_metadata_conn, &owner, &table)
                     .await
                     .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_constraints.after")?;
@@ -5390,7 +5738,7 @@ impl OracleDispatcher {
                 let (owner, object_name) =
                     owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "index").await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_index.before")?;
-                let desc = describe_index(cx, metadata_conn, &owner, &object_name)
+                let desc = describe_index(cx, &guarded_metadata_conn, &owner, &object_name)
                     .await
                     .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_index.after")?;
@@ -5407,7 +5755,7 @@ impl OracleDispatcher {
                 let (owner, object_name) =
                     owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "trigger").await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_trigger.before")?;
-                let desc = describe_trigger(cx, metadata_conn, &owner, &object_name)
+                let desc = describe_trigger(cx, &guarded_metadata_conn, &owner, &object_name)
                     .await
                     .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_trigger.after")?;
@@ -5422,7 +5770,7 @@ impl OracleDispatcher {
                 let (owner, object_name) =
                     owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "view").await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_view.before")?;
-                let desc = describe_view(cx, metadata_conn, &owner, &object_name)
+                let desc = describe_view(cx, &guarded_metadata_conn, &owner, &object_name)
                     .await
                     .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_view.after")?;
@@ -5438,9 +5786,15 @@ impl OracleDispatcher {
                 let (owner, object_name) =
                     owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "name").await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.get_ddl.before")?;
-                let ddl = get_ddl(cx, metadata_conn, &a.object_type, &owner, &object_name)
-                    .await
-                    .map_err(DbError::into_envelope)?;
+                let ddl = get_ddl(
+                    cx,
+                    &guarded_metadata_conn,
+                    &a.object_type,
+                    &owner,
+                    &object_name,
+                )
+                .await
+                .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.get_ddl.after")?;
                 Ok(json!({ "owner": owner, "name": object_name, "ddl": ddl }))
             }
@@ -5454,7 +5808,7 @@ impl OracleDispatcher {
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.get_source.before")?;
                         let source = get_source(
                             cx,
-                            metadata_conn,
+                            &guarded_metadata_conn,
                             &owner,
                             &object_name,
                             object_type,
@@ -5467,10 +5821,15 @@ impl OracleDispatcher {
                     }
                     None => {
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.get_sources_by_name.before")?;
-                        let sources =
-                            get_sources_by_name(cx, metadata_conn, &owner, &object_name, max_chars)
-                                .await
-                                .map_err(DbError::into_envelope)?;
+                        let sources = get_sources_by_name(
+                            cx,
+                            &guarded_metadata_conn,
+                            &owner,
+                            &object_name,
+                            max_chars,
+                        )
+                        .await
+                        .map_err(DbError::into_envelope)?;
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.get_sources_by_name.after")?;
                         Ok(json!({
                             "owner": owner,
@@ -5490,7 +5849,7 @@ impl OracleDispatcher {
                 let (owner, table) =
                     owner_and_name_arg(cx, conn, a.owner, a.table, "table").await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.sample_rows.before")?;
-                let rows = sample_rows(cx, conn, &owner, &table, max_rows)
+                let rows = sample_rows(cx, &guarded_conn, &owner, &table, max_rows)
                     .await
                     .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.sample_rows.after")?;
@@ -5517,9 +5876,10 @@ impl OracleDispatcher {
                 // Statspack, else a structured-unavailable error), build the ranked
                 // SQL, and run it as a bounded read.
                 return with_call_timeout(cx, conn, request_budget, timeout_seconds, || async {
-                    let source = oraclemcp_db::resolve_top_sql_source(cx, conn, historical).await;
+                    let source =
+                        oraclemcp_db::resolve_top_sql_source(cx, &guarded_conn, historical).await;
                     let sql = oraclemcp_db::top_sql_query(source, metric, top_n, min_pct)?;
-                    let rows = conn
+                    let rows = guarded_conn
                         .query_rows(cx, &sql, &[])
                         .await
                         .map_err(DbError::into_envelope)?;
@@ -5543,7 +5903,8 @@ impl OracleDispatcher {
                 // rather than failing the whole call. Unknown subcheck names are
                 // reported, never fatal.
                 return with_call_timeout(cx, conn, request_budget, timeout_seconds, || async {
-                    let findings = oraclemcp_db::run_health(cx, conn, &request.subchecks).await;
+                    let findings =
+                        oraclemcp_db::run_health(cx, &guarded_conn, &request.subchecks).await;
                     let checks_run: Vec<&str> = findings
                         .iter()
                         .filter(|f| {
@@ -5575,7 +5936,7 @@ impl OracleDispatcher {
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.read_lob.before")?;
                 let clob = read_lob(
                     cx,
-                    conn,
+                    &guarded_conn,
                     &owner,
                     &table,
                     &a.clob_column,
@@ -5597,9 +5958,10 @@ impl OracleDispatcher {
                             owner_and_name_arg(cx, metadata_conn, a.owner, object_name, "name")
                                 .await?;
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.before")?;
-                        let rows = compile_errors(cx, metadata_conn, &owner, Some(&object_name))
-                            .await
-                            .map_err(DbError::into_envelope)?;
+                        let rows =
+                            compile_errors(cx, &guarded_metadata_conn, &owner, Some(&object_name))
+                                .await
+                                .map_err(DbError::into_envelope)?;
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.after")?;
                         Ok(
                             json!({ "owner": owner, "name": object_name, "errors": rows_to_json(&rows) }),
@@ -5610,7 +5972,7 @@ impl OracleDispatcher {
                             .await
                             .map_err(DbError::into_envelope)?;
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.before")?;
-                        let rows = compile_errors(cx, metadata_conn, &owner, None)
+                        let rows = compile_errors(cx, &guarded_metadata_conn, &owner, None)
                             .await
                             .map_err(DbError::into_envelope)?;
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.after")?;
@@ -5639,7 +6001,7 @@ impl OracleDispatcher {
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.search_source.before")?;
                 let rows = search_source(
                     cx,
-                    metadata_conn,
+                    &guarded_metadata_conn,
                     owner.as_deref(),
                     &a.needle,
                     object_type.as_deref(),
@@ -5663,14 +6025,16 @@ impl OracleDispatcher {
                 let (owner, object_name) =
                     owner_and_name_arg(cx, metadata_conn, a.owner, object_name, "name").await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_identifiers.before")?;
-                let identifiers = plscope_identifiers(cx, metadata_conn, &owner, &object_name)
-                    .await
-                    .map_err(DbError::into_envelope)?;
+                let identifiers =
+                    plscope_identifiers(cx, &guarded_metadata_conn, &owner, &object_name)
+                        .await
+                        .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_identifiers.after")?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_statements.before")?;
-                let statements = plscope_statements(cx, metadata_conn, &owner, &object_name)
-                    .await
-                    .map_err(DbError::into_envelope)?;
+                let statements =
+                    plscope_statements(cx, &guarded_metadata_conn, &owner, &object_name)
+                        .await
+                        .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_statements.after")?;
                 let unused_declarations = find_unused_declarations(&identifiers);
                 let dynamic_sql_lines = execute_immediate_audit(&statements);

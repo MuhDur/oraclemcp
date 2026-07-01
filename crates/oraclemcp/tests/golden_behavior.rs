@@ -181,7 +181,10 @@ impl OracleConnection for FailingMock {
         ))
     }
 
-    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        if sql == oraclemcp_guard::SET_TRANSACTION_READ_ONLY {
+            return Ok(0);
+        }
         Err(DbError::Execute("ORA-00942".to_owned()))
     }
 

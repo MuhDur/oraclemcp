@@ -42,6 +42,26 @@ fn read_path_handler_work_runs_under_narrowed_read_cx() {
     });
 }
 
+#[test]
+fn generated_read_gate_allows_known_metadata_sql_and_rejects_unknown_functions() {
+    let ddl_sql =
+        "SELECT DBMS_LOB.SUBSTR(DBMS_METADATA.GET_DDL('TABLE', :1, :2), 4000, 1) AS ddl FROM dual";
+    assert_eq!(
+        ensure_generated_read_sql_allowed(ddl_sql).expect("DBMS_METADATA read is allowed"),
+        DangerLevel::Safe
+    );
+
+    let (_, health_sql) = oraclemcp_db::invalid_objects_sql(oraclemcp_db::ViewTier::All);
+    assert_eq!(
+        ensure_generated_read_sql_allowed(&health_sql).expect("health dictionary read is allowed"),
+        DangerLevel::Safe
+    );
+
+    let err = ensure_generated_read_sql_allowed("SELECT billing.purge_old_rows() FROM dual")
+        .expect_err("unknown qualified routine must not clear the generated-read gate");
+    assert_eq!(err.error_class, ErrorClass::PolicyDenied);
+}
+
 fn read_write_level() -> SessionLevelState {
     let mut level = SessionLevelState::new(OperatingLevel::ReadWrite, false);
     level
@@ -1754,10 +1774,13 @@ impl OracleConnection for SearchObjectsDispatchMock {
         }
         Ok(None)
     }
-    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
-        // A read-only dictionary tool must never call execute(): an execute here
-        // would be a bug, so make it loud.
-        panic!("oracle_search_objects must be read-only and never call execute()");
+    async fn execute(&self, _cx: &Cx, s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        // Generated dictionary reads may assert the transaction-level read-only
+        // backstop. Any other execute remains a bug.
+        if s == oraclemcp_guard::SET_TRANSACTION_READ_ONLY {
+            return Ok(0);
+        }
+        panic!("oracle_search_objects must not execute non-backstop SQL: {s}");
     }
     async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
         panic!("oracle_search_objects must be read-only and never commit()");
@@ -5195,6 +5218,66 @@ mod read_only_backstop_wiring {
             .iter()
             .filter(|sql| sql.as_str() == SET_TRANSACTION_READ_ONLY)
             .count()
+    }
+
+    #[test]
+    fn generated_dictionary_reads_arm_backstop_and_audit_as_system() {
+        use oraclemcp_audit::{
+            AuditError, AuditOutcome, AuditRecord, AuditSink, AuditSubject, MemoryAuditSink,
+            SigningKey,
+        };
+
+        struct SharedSink(Arc<MemoryAuditSink>);
+        impl AuditSink for SharedSink {
+            fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+                self.0.append(record)
+            }
+
+            fn flush(&self) -> Result<(), AuditError> {
+                self.0.flush()
+            }
+        }
+
+        let state = Arc::new(BackstopRecordingState::default());
+        let sink = Arc::new(MemoryAuditSink::new());
+        let auditor = Arc::new(Auditor::new(
+            Box::new(SharedSink(sink.clone())),
+            SigningKey::new("test-key", b"generated-read-audit-test-key".to_vec()),
+        ));
+        let dispatcher = OracleDispatcher::new_with_profile(
+            Box::new(BackstopRecordingMock {
+                state: state.clone(),
+            }),
+            Some("dev".to_owned()),
+        )
+        .with_auditor(auditor);
+
+        dispatcher
+            .dispatch("oracle_list_schemas", json!({ "limit": 5 }))
+            .expect("generated dictionary read succeeds");
+
+        assert_eq!(
+            backstop_statements(&state),
+            1,
+            "generated reads on the pinned session assert SET TRANSACTION READ ONLY"
+        );
+        let records = sink.records();
+        assert_eq!(records.len(), 2, "pending + succeeded audit records");
+        let subject = AuditSubject::new("system", "generated-read").with_authn_method("server");
+        assert_eq!(records[0].subject, subject);
+        assert_eq!(records[1].subject, subject);
+        assert_eq!(records[0].tool, "oracle_list_schemas");
+        assert_eq!(records[1].tool, "oracle_list_schemas");
+        assert_eq!(records[0].danger_level, "SAFE");
+        assert_eq!(records[1].danger_level, "SAFE");
+        assert_eq!(records[0].outcome, AuditOutcome::Pending);
+        assert_eq!(records[1].outcome, AuditOutcome::Succeeded);
+        assert!(
+            records[0].sql_preview.starts_with("SELECT * FROM ("),
+            "audit preview identifies the generated dictionary SQL"
+        );
+        assert!(records[0].hash_is_valid());
+        assert!(records[1].hash_is_valid());
     }
 
     #[test]
