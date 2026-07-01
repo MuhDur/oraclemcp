@@ -43,6 +43,10 @@ export type OperatorResponse<T extends Record<string, unknown> = Record<string, 
 
 export type WorkbenchMode = "classify_only" | "read_query" | "dml_preview_confirm" | "ddl_plan_confirm";
 
+export type OperatingLevel = "READ_ONLY" | "READ_WRITE" | "DDL" | "ADMIN";
+
+export type SessionLevelAction = "preview" | "apply" | "drop" | "status";
+
 export type RequestCount = {
   tool: string;
   status: string;
@@ -378,6 +382,14 @@ export type WorkbenchExecuteRequest = WorkbenchSqlRequest & {
   captureDbmsOutput: boolean;
 };
 
+export type SessionLevelRequest = {
+  laneId?: string;
+  level?: OperatingLevel;
+  ttlSeconds?: number;
+  confirm?: string;
+  action: SessionLevelAction;
+};
+
 export type AuditTailFilters = {
   limit: number;
   subjectIdHash: string;
@@ -632,6 +644,35 @@ export async function executeWorkbenchSql(
       confirm: request.confirm?.trim() || undefined,
       capture_dbms_output: request.captureDbmsOutput
     }
+  });
+}
+
+export async function setSessionLevel(
+  session: DashboardSession,
+  request: SessionLevelRequest
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  const argumentsBody: Record<string, unknown> = {
+    action: request.action
+  };
+  if (request.action === "preview") {
+    argumentsBody["execute"] = false;
+  }
+  if (request.action === "apply") {
+    argumentsBody["execute"] = true;
+  }
+  if (request.action !== "drop" && request.level) {
+    argumentsBody["level"] = request.level;
+  }
+  if (request.ttlSeconds && request.action !== "drop") {
+    argumentsBody["ttl_seconds"] = request.ttlSeconds;
+  }
+  if (request.action !== "drop" && request.confirm?.trim()) {
+    argumentsBody["confirm"] = request.confirm.trim();
+  }
+  return operatorPost("/operator/v1/session/set-level", session, {
+    idempotency_key: requestId(`session-level-${request.action}`),
+    lane_id: laneIdValue(request.laneId),
+    arguments: argumentsBody
   });
 }
 

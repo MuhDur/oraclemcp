@@ -1426,6 +1426,18 @@ mod tests {
             self.lanes.clone()
         }
 
+        fn lane_binding(&self, lane_id: &str) -> Option<HttpLaneBinding> {
+            self.lanes
+                .iter()
+                .find(|lane| lane.lane_id == lane_id)
+                .map(|lane| HttpLaneBinding {
+                    lane_id: lane.lane_id.clone(),
+                    mcp_session_id: format!("mcp-session:{}", lane.lane_id),
+                    principal_key: format!("principal:{}", lane.subject_id_hash),
+                    generation: lane.generation,
+                })
+        }
+
         fn capacity_snapshot(&self, scope: &str, subject: &str) -> Option<CapacitySnapshot> {
             Some(
                 crate::admission::AdmissionController::n4_stateful_defaults()
@@ -2011,6 +2023,134 @@ mod tests {
             calls.load(AtomicOrdering::SeqCst),
             1,
             "conflicting replay must not re-enter guarded dispatch"
+        );
+    }
+
+    #[test]
+    fn operator_session_set_level_is_lane_bound_preview_apply_drop() {
+        let (auditor, _sink) = operator_auditor();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = server_with_dispatch(Arc::new(CountingDispatch {
+            calls: Arc::clone(&calls),
+        }));
+        let cfg = HttpTransportConfig {
+            stateful: true,
+            operator_auditor: Some(auditor),
+            session_lifecycle: Some(Arc::new(StaticLaneLifecycle::one_lane())),
+            ..Default::default()
+        };
+        let action_request = |body: &Value| {
+            HttpRequest::new(
+                "POST",
+                "/operator/v1/session/set-level",
+                [
+                    ("host", "127.0.0.1"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json"),
+                ],
+                body.to_string().into_bytes(),
+            )
+            .with_peer_loopback(true)
+        };
+
+        let missing_lane = handle_http_request(
+            &server,
+            &cfg,
+            action_request(&serde_json::json!({
+                "idempotency_key": "level-missing-lane",
+                "arguments": { "level": "READ_WRITE", "action": "preview" }
+            })),
+        );
+        assert_eq!(missing_lane.status, 400);
+        assert_eq!(
+            response_json(&missing_lane)["data"]["error"],
+            serde_json::json!("operator_lane_required")
+        );
+
+        let preview = handle_http_request(
+            &server,
+            &cfg,
+            action_request(&serde_json::json!({
+                "idempotency_key": "level-preview",
+                "lane_id": "lane-a",
+                "arguments": {
+                    "level": "READ_WRITE",
+                    "ttl_seconds": 120,
+                    "action": "preview",
+                    "execute": false
+                }
+            })),
+        );
+        assert_eq!(preview.status, 200);
+        let preview_json = response_json(&preview);
+        let preview_result = &preview_json["data"]["mcp_response"]["result"]["structuredContent"];
+        assert_eq!(
+            preview_json["data"]["mcp_tool"],
+            serde_json::json!("oracle_set_session_level")
+        );
+        assert_eq!(
+            preview_json["data"]["idempotency"]["lane_id"],
+            serde_json::json!("lane-a")
+        );
+        assert_eq!(
+            preview_json["data"]["idempotency"]["lane_generation"],
+            serde_json::json!(7)
+        );
+        assert_eq!(
+            preview_result["tool"],
+            serde_json::json!("oracle_set_session_level")
+        );
+        assert_eq!(
+            preview_result["args"]["level"],
+            serde_json::json!("READ_WRITE")
+        );
+        assert_eq!(
+            preview_result["args"]["ttl_seconds"],
+            serde_json::json!(120)
+        );
+        assert_eq!(preview_result["args"]["execute"], serde_json::json!(false));
+
+        let apply = handle_http_request(
+            &server,
+            &cfg,
+            action_request(&serde_json::json!({
+                "idempotency_key": "level-apply",
+                "lane_id": "lane-a",
+                "arguments": {
+                    "level": "READ_WRITE",
+                    "ttl_seconds": 120,
+                    "action": "apply",
+                    "execute": true,
+                    "confirm": "opaque-session-level-grant"
+                }
+            })),
+        );
+        assert_eq!(apply.status, 200);
+        let apply_json = response_json(&apply);
+        let apply_result = &apply_json["data"]["mcp_response"]["result"]["structuredContent"];
+        assert_eq!(apply_result["args"]["execute"], serde_json::json!(true));
+        assert_eq!(
+            apply_result["args"]["confirm"],
+            serde_json::json!("opaque-session-level-grant")
+        );
+
+        let drop = handle_http_request(
+            &server,
+            &cfg,
+            action_request(&serde_json::json!({
+                "idempotency_key": "level-drop",
+                "lane_id": "lane-a",
+                "arguments": { "action": "drop" }
+            })),
+        );
+        assert_eq!(drop.status, 200);
+        let drop_json = response_json(&drop);
+        let drop_result = &drop_json["data"]["mcp_response"]["result"]["structuredContent"];
+        assert_eq!(drop_result["args"]["action"], serde_json::json!("drop"));
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            3,
+            "missing-lane request must fail before dispatch; preview/apply/drop must dispatch"
         );
     }
 

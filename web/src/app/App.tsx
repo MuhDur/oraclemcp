@@ -79,6 +79,7 @@ import {
   previewWorkbenchSql,
   readWorkbenchSql,
   rollbackConfigDraft,
+  setSessionLevel,
   type OperatorResponse,
   type ProbeDefinition,
   type ProbeResult,
@@ -93,6 +94,7 @@ import {
   type ExplorerObjectRef,
   type LaneRequestDuration,
   type MetricsSnapshot,
+  type OperatingLevel,
   type OperatorHealthData,
   type OperatorCapacityData,
   type OperatorEventEnvelope,
@@ -403,14 +405,336 @@ function OverviewPage(): React.ReactElement {
 }
 
 function SessionsPage(): React.ReactElement {
+  const [selectedLaneId, setSelectedLaneId] = React.useState("");
+  const [targetLevel, setTargetLevel] = React.useState<OperatingLevel>("READ_WRITE");
+  const [ttlSeconds, setTtlSeconds] = React.useState(900);
+  const [confirm, setConfirm] = React.useState("");
+  const [lastResult, setLastResult] = React.useState<SessionLevelResult | null>(null);
+  const session = useQuery({
+    queryKey: ["dashboard-session"],
+    queryFn: fetchDashboardSession,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    retry: 1
+  });
+  const activeLanes = useQuery({
+    queryKey: ["active-lanes"],
+    queryFn: fetchActiveLanes,
+    refetchInterval: 5_000
+  });
+  const lanes = activeLanes.data?.data.lanes ?? [];
+  const selectedLane = lanes.find((lane) => lane.lane_id === selectedLaneId) ?? lanes[0] ?? null;
+
+  React.useEffect(() => {
+    if (!selectedLaneId && lanes.length > 0) {
+      setSelectedLaneId(lanes[0].lane_id);
+    }
+  }, [lanes, selectedLaneId]);
+
+  const levelMutation = useMutation({
+    mutationFn: async (action: SessionLevelControlAction) => {
+      if (!session.data) {
+        throw new Error("dashboard session is not ready");
+      }
+      const laneId = selectedLane?.lane_id ?? selectedLaneId.trim();
+      if (!laneId) {
+        throw new Error("select an active lane");
+      }
+      return setSessionLevel(session.data, {
+        laneId,
+        level: targetLevel,
+        ttlSeconds,
+        confirm,
+        action
+      });
+    },
+    onSuccess: (response, action) => {
+      setLastResult({ state: "ok", action, response });
+      const nextConfirm = confirmationFromResponse(response);
+      if (action === "preview") {
+        setConfirm(nextConfirm ?? "");
+      } else if (action === "apply" || action === "drop") {
+        setConfirm("");
+      }
+      queryClient.invalidateQueries({ queryKey: ["active-lanes"] });
+      queryClient.invalidateQueries({ queryKey: ["operator-metrics"] });
+    },
+    onError: (error, action) => {
+      setLastResult({
+        state: "error",
+        action,
+        message: error instanceof Error ? error.message : "session level action failed"
+      });
+    }
+  });
+
+  const sessionTone =
+    session.status === "success" ? "ok" : session.status === "error" ? "warn" : "info";
+  const canAct = session.status === "success" && Boolean(selectedLane) && !levelMutation.isPending;
+  const pending = activeLanes.isFetching || session.isFetching || levelMutation.isPending;
+
   return (
     <PageFrame
       title="Sessions"
       eyebrow="Active Lanes"
-      description="Lane state and operator health endpoints."
+      description="Lane state and operating-level control."
     >
-      <ProbeDashboard probes={sessionsProbes} compact />
+      <div className="space-y-4">
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)]">
+          <SessionLaneTable
+            lanes={lanes}
+            selectedLaneId={selectedLane?.lane_id ?? selectedLaneId}
+            pending={activeLanes.isFetching}
+            onSelect={(laneId) => setSelectedLaneId(laneId)}
+          />
+          <SessionLevelControlPanel
+            canAct={canAct}
+            confirm={confirm}
+            pending={pending}
+            result={lastResult}
+            selectedLane={selectedLane}
+            sessionTone={sessionTone}
+            targetLevel={targetLevel}
+            ttlSeconds={ttlSeconds}
+            onConfirmChange={setConfirm}
+            onLevelChange={setTargetLevel}
+            onTtlChange={setTtlSeconds}
+            onAction={(action) => levelMutation.mutate(action)}
+          />
+        </div>
+        <ProbeDashboard probes={sessionsProbes} compact />
+      </div>
     </PageFrame>
+  );
+}
+
+type SessionLevelControlAction = "preview" | "apply" | "drop";
+
+type SessionLevelResult =
+  | {
+      state: "ok";
+      action: SessionLevelControlAction;
+      response: OperatorResponse<WorkbenchActionData>;
+    }
+  | {
+      state: "error";
+      action: SessionLevelControlAction;
+      message: string;
+    };
+
+const operatingLevels: OperatingLevel[] = ["READ_WRITE", "DDL", "ADMIN"];
+
+function SessionLaneTable({
+  lanes,
+  selectedLaneId,
+  pending,
+  onSelect
+}: {
+  lanes: ActiveLane[];
+  selectedLaneId: string;
+  pending: boolean;
+  onSelect: (laneId: string) => void;
+}): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={Database}
+        title="Active Lanes"
+        meta={pending ? "sync" : `${lanes.length} lanes`}
+        tone={pending ? "info" : lanes.length > 0 ? "ok" : "off"}
+      />
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[760px] border-collapse text-left">
+          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+            <tr>
+              <th className="px-4 py-3 font-bold">Lane</th>
+              <th className="px-4 py-3 font-bold">Status</th>
+              <th className="px-4 py-3 font-bold">Generation</th>
+              <th className="px-4 py-3 font-bold">Subject</th>
+              <th className="px-4 py-3 font-bold">Control</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-100">
+            {lanes.length === 0 ? (
+              <tr>
+                <td className="px-4 py-8 text-center text-sm font-semibold text-zinc-500" colSpan={5}>
+                  No active lanes
+                </td>
+              </tr>
+            ) : (
+              lanes.map((lane) => {
+                const selected = lane.lane_id === selectedLaneId;
+                return (
+                  <tr key={lane.lane_id} className={selected ? "bg-emerald-50" : "bg-white"}>
+                    <td className="px-4 py-4 align-top font-mono text-sm font-semibold text-zinc-950">
+                      {lane.lane_id}
+                    </td>
+                    <td className="px-4 py-4 align-top">
+                      <Badge tone={lane.status === "active" ? "ok" : "off"}>{lane.status}</Badge>
+                    </td>
+                    <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
+                      {formatNumber(lane.generation)}
+                    </td>
+                    <td className="px-4 py-4 align-top">
+                      <p className="max-w-[360px] break-all font-mono text-xs text-zinc-600">
+                        {lane.subject_id_hash}
+                      </p>
+                    </td>
+                    <td className="px-4 py-4 align-top">
+                      <Button
+                        type="button"
+                        variant={selected ? "primary" : "secondary"}
+                        onClick={() => onSelect(lane.lane_id)}
+                      >
+                        <SlidersHorizontal className="size-4" aria-hidden="true" />
+                        Select
+                      </Button>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </Surface>
+  );
+}
+
+function SessionLevelControlPanel({
+  canAct,
+  confirm,
+  pending,
+  result,
+  selectedLane,
+  sessionTone,
+  targetLevel,
+  ttlSeconds,
+  onConfirmChange,
+  onLevelChange,
+  onTtlChange,
+  onAction
+}: {
+  canAct: boolean;
+  confirm: string;
+  pending: boolean;
+  result: SessionLevelResult | null;
+  selectedLane: ActiveLane | null;
+  sessionTone: "neutral" | "ok" | "warn" | "off" | "info";
+  targetLevel: OperatingLevel;
+  ttlSeconds: number;
+  onConfirmChange: (value: string) => void;
+  onLevelChange: (value: OperatingLevel) => void;
+  onTtlChange: (value: number) => void;
+  onAction: (action: SessionLevelControlAction) => void;
+}): React.ReactElement {
+  const summary = result?.state === "ok" ? sessionLevelSummary(result.response) : null;
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={ShieldCheck}
+        title="Operating Level"
+        meta={selectedLane?.lane_id ?? "no lane"}
+        tone={pending ? "info" : selectedLane ? sessionTone : "off"}
+      />
+      <div className="space-y-4 p-4">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <CapacityFact label="Lane" value={selectedLane?.lane_id ?? "none"} mono />
+          <CapacityFact label="Generation" value={selectedLane?.generation ?? 0} />
+          <CapacityFact label="Current" value={summary?.currentLevel ?? "unknown"} mono />
+          <CapacityFact label="Ceiling" value={summary?.profileCeiling ?? "unknown"} mono />
+        </div>
+        <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_140px]">
+          <label className="block">
+            <span className="mb-2 block text-sm font-bold text-zinc-700">Target</span>
+            <select
+              className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+              value={targetLevel}
+              onChange={(event) => onLevelChange(event.target.value as OperatingLevel)}
+            >
+              {operatingLevels.map((level) => (
+                <option key={level} value={level}>
+                  {level}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-sm font-bold text-zinc-700">TTL</span>
+            <input
+              className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+              type="number"
+              min={1}
+              max={3600}
+              value={ttlSeconds}
+              onChange={(event) => onTtlChange(clampTtl(event.target.valueAsNumber))}
+            />
+          </label>
+        </div>
+        <label className="block">
+          <span className="mb-2 block text-sm font-bold text-zinc-700">Confirm</span>
+          <input
+            className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+            value={confirm}
+            onChange={(event) => onConfirmChange(event.target.value)}
+            placeholder="preview grant"
+          />
+        </label>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="secondary" disabled={!canAct} onClick={() => onAction("preview")}>
+            <Search className="size-4" aria-hidden="true" />
+            Preview
+          </Button>
+          <Button
+            type="button"
+            variant="primary"
+            disabled={!canAct || confirm.trim().length === 0}
+            onClick={() => onAction("apply")}
+          >
+            <CheckCircle2 className="size-4" aria-hidden="true" />
+            Elevate
+          </Button>
+          <Button type="button" variant="secondary" disabled={!canAct} onClick={() => onAction("drop")}>
+            <RotateCcw className="size-4" aria-hidden="true" />
+            Drop
+          </Button>
+        </div>
+        {summary ? <SessionLevelSummaryPanel summary={summary} /> : null}
+        {result?.state === "error" ? (
+          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+            {result.message}
+          </div>
+        ) : null}
+      </div>
+    </Surface>
+  );
+}
+
+type SessionLevelSummary = {
+  action: string;
+  preview: string;
+  targetLevel: string;
+  ttlSeconds: string;
+  currentLevel: string;
+  profileCeiling: string;
+  gateDecision: string;
+  confirm: string;
+};
+
+function SessionLevelSummaryPanel({
+  summary
+}: {
+  summary: SessionLevelSummary;
+}): React.ReactElement {
+  return (
+    <div className="grid gap-2 sm:grid-cols-2">
+      <CapacityFact label="Action" value={summary.action} mono />
+      <CapacityFact label="Preview" value={summary.preview} mono />
+      <CapacityFact label="Target" value={summary.targetLevel} mono />
+      <CapacityFact label="TTL" value={summary.ttlSeconds} mono />
+      <CapacityFact label="Gate" value={summary.gateDecision} mono />
+      <CapacityFact label="Confirm" value={summary.confirm} mono />
+    </div>
   );
 }
 
@@ -3726,6 +4050,30 @@ function factsFromResponse(response: OperatorResponse<WorkbenchActionData>): Wor
   return facts;
 }
 
+function sessionLevelSummary(response: OperatorResponse<WorkbenchActionData>): SessionLevelSummary {
+  const result = mcpResult(response.data.mcp_response);
+  const resultRecord = isRecord(result) ? result : {};
+  const session = isRecord(resultRecord["session"]) ? resultRecord["session"] : {};
+  const gate = isRecord(resultRecord["gate"]) ? resultRecord["gate"] : {};
+  return {
+    action: stringValue(resultRecord["action"], "unknown"),
+    preview: stringValue(resultRecord["preview"], "false"),
+    targetLevel: stringValue(resultRecord["target_level"], "READ_ONLY"),
+    ttlSeconds: stringValue(resultRecord["ttl_seconds"], "0"),
+    currentLevel: stringValue(session["current_level"], "unknown"),
+    profileCeiling: stringValue(session["profile_ceiling"], "unknown"),
+    gateDecision: stringValue(gate["decision"], "not_required"),
+    confirm: confirmationFromResponse(response) ?? "none"
+  };
+}
+
+function stringValue(value: unknown, fallback: string): string {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+  return String(value);
+}
+
 function addFact(facts: WorkbenchFact[], label: string, value: unknown): void {
   if (value === null || value === undefined || value === "") {
     return;
@@ -3784,6 +4132,13 @@ function clampRows(value: number): number {
     return 100;
   }
   return Math.min(5000, Math.max(1, Math.trunc(value)));
+}
+
+function clampTtl(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 900;
+  }
+  return Math.min(3600, Math.max(1, Math.trunc(value)));
 }
 
 const columns: ColumnDef<ProbeResult>[] = [
