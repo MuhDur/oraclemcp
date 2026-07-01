@@ -157,6 +157,55 @@ export type WorkbenchActionData = {
   message?: string;
 };
 
+export const ORACLE_METADATA_SERIALIZATION_CONTRACT_VERSION = 1;
+
+export type ExplorerDetailLevel = "names" | "summary" | "standard" | "full";
+
+export type ExplorerCacheStatus = "hit" | "miss" | "stale" | "bypass";
+
+export type ExplorerMetadataCacheKey = {
+  db_fingerprint: string;
+  profile: string;
+  user: string;
+  visible_schema: string;
+  serialization_contract_version: number;
+};
+
+export type ExplorerCachedResult<T> = {
+  value: T;
+  status: ExplorerCacheStatus;
+  bytes: number;
+  cacheKey: string;
+};
+
+export type ExplorerConnectionData = WorkbenchActionData;
+
+export type ExplorerSchemasRequest = {
+  laneId?: string;
+  nameLike?: string;
+  maxRows: number;
+};
+
+export type ExplorerObjectsRequest = {
+  laneId?: string;
+  owner?: string;
+  objectType?: string;
+  nameLike?: string;
+  detailLevel: ExplorerDetailLevel;
+  maxRows: number;
+};
+
+export type ExplorerObjectRef = {
+  owner: string;
+  name: string;
+  objectType: string;
+};
+
+export type ExplorerSourceRequest = ExplorerObjectRef & {
+  laneId?: string;
+  maxChars: number;
+};
+
 export type WorkbenchSqlRequest = {
   sql: string;
   mode: WorkbenchMode;
@@ -397,6 +446,133 @@ export async function executeWorkbenchSql(
   });
 }
 
+export async function fetchExplorerConnection(
+  session: DashboardSession,
+  laneId?: string
+): Promise<OperatorResponse<ExplorerConnectionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId("explorer-connection"),
+    lane_id: laneIdValue(laneId),
+    tool: "oracle_connection_info",
+    arguments: {}
+  });
+}
+
+export async function fetchExplorerSchemas(
+  session: DashboardSession,
+  request: ExplorerSchemasRequest
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId("explorer-schemas"),
+    lane_id: laneIdValue(request.laneId),
+    tool: "oracle_list_schemas",
+    arguments: {
+      name_like: optionalString(request.nameLike),
+      max_rows: request.maxRows
+    }
+  });
+}
+
+export async function fetchExplorerObjects(
+  session: DashboardSession,
+  request: ExplorerObjectsRequest
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId("explorer-objects"),
+    lane_id: laneIdValue(request.laneId),
+    tool: "oracle_search_objects",
+    arguments: {
+      owner: optionalString(request.owner),
+      object_type: optionalString(request.objectType),
+      name_like: optionalString(request.nameLike),
+      detail_level: request.detailLevel,
+      max_rows: request.maxRows
+    }
+  });
+}
+
+export async function fetchExplorerDdl(
+  session: DashboardSession,
+  request: ExplorerObjectRef & { laneId?: string }
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId("explorer-ddl"),
+    lane_id: laneIdValue(request.laneId),
+    tool: "oracle_get_ddl",
+    arguments: {
+      owner: request.owner,
+      name: request.name,
+      object_type: ddlObjectType(request.objectType)
+    }
+  });
+}
+
+export async function fetchExplorerSource(
+  session: DashboardSession,
+  request: ExplorerSourceRequest
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId("explorer-source"),
+    lane_id: laneIdValue(request.laneId),
+    tool: "oracle_get_source",
+    arguments: {
+      owner: request.owner,
+      name: request.name,
+      object_type: sourceObjectType(request.objectType),
+      max_chars: request.maxChars
+    }
+  });
+}
+
+export async function cachedExplorerMetadata<T>(
+  scope: ExplorerMetadataCacheKey,
+  slot: string,
+  load: () => Promise<T>
+): Promise<ExplorerCachedResult<T>> {
+  const cacheKey = explorerCacheKey(scope, slot);
+  const now = Date.now();
+  const existing = explorerMetadataCache.get(cacheKey);
+  if (existing) {
+    if (existing.expiresAt > now) {
+      existing.lastAccessed = now;
+      return {
+        value: existing.value as T,
+        status: "hit",
+        bytes: existing.bytes,
+        cacheKey
+      };
+    }
+    removeExplorerCacheEntry(cacheKey);
+  }
+  const value = await load();
+  const bytes = approxJsonBytes(value);
+  if (bytes > EXPLORER_METADATA_CACHE_MAX_BYTES) {
+    return { value, status: "bypass", bytes, cacheKey };
+  }
+  explorerMetadataCache.set(cacheKey, {
+    value,
+    bytes,
+    expiresAt: now + EXPLORER_METADATA_CACHE_TTL_MS,
+    lastAccessed: now
+  });
+  explorerMetadataCacheBytes += bytes;
+  trimExplorerMetadataCache();
+  return { value, status: existing ? "stale" : "miss", bytes, cacheKey };
+}
+
+export function clearExplorerMetadataCache(): void {
+  explorerMetadataCache.clear();
+  explorerMetadataCacheBytes = 0;
+}
+
+export function explorerMetadataCacheSummary(): { entries: number; bytes: number } {
+  trimExplorerMetadataCache();
+  return {
+    entries: explorerMetadataCache.size,
+    bytes: explorerMetadataCacheBytes
+  };
+}
+
 export async function fetchAuditTail(
   filters: AuditTailFilters
 ): Promise<OperatorResponse<AuditTailData>> {
@@ -441,6 +617,11 @@ function setOptionalParam(params: URLSearchParams, key: string, value: string): 
   if (trimmed) {
     params.set(key, trimmed);
   }
+}
+
+function optionalString(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 function stateForStatus(status: number, ok: boolean): ProbeState {
@@ -541,6 +722,76 @@ function actionTicketFor(session: DashboardSession, path: string): string {
 function laneIdValue(laneId: string | undefined): string | undefined {
   const trimmed = laneId?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function ddlObjectType(objectType: string): string {
+  return objectType.trim().toUpperCase().replace(/\s+/g, "_");
+}
+
+function sourceObjectType(objectType: string): string | undefined {
+  const normalized = objectType.trim().toUpperCase();
+  if (!normalized || normalized === "VIEW") {
+    return undefined;
+  }
+  return normalized;
+}
+
+type ExplorerMetadataCacheEntry = {
+  value: unknown;
+  bytes: number;
+  expiresAt: number;
+  lastAccessed: number;
+};
+
+const EXPLORER_METADATA_CACHE_TTL_MS = 60_000;
+const EXPLORER_METADATA_CACHE_MAX_BYTES = 512_000;
+const EXPLORER_METADATA_CACHE_MAX_ENTRIES = 64;
+const explorerMetadataCache = new Map<string, ExplorerMetadataCacheEntry>();
+let explorerMetadataCacheBytes = 0;
+
+function explorerCacheKey(scope: ExplorerMetadataCacheKey, slot: string): string {
+  return JSON.stringify({
+    db_fingerprint: scope.db_fingerprint,
+    profile: scope.profile,
+    user: scope.user,
+    visible_schema: scope.visible_schema,
+    serialization_contract_version: scope.serialization_contract_version,
+    slot
+  });
+}
+
+function removeExplorerCacheEntry(cacheKey: string): void {
+  const existing = explorerMetadataCache.get(cacheKey);
+  if (!existing) {
+    return;
+  }
+  explorerMetadataCache.delete(cacheKey);
+  explorerMetadataCacheBytes = Math.max(0, explorerMetadataCacheBytes - existing.bytes);
+}
+
+function trimExplorerMetadataCache(): void {
+  const now = Date.now();
+  for (const [cacheKey, entry] of explorerMetadataCache) {
+    if (entry.expiresAt <= now) {
+      removeExplorerCacheEntry(cacheKey);
+    }
+  }
+  while (
+    explorerMetadataCache.size > EXPLORER_METADATA_CACHE_MAX_ENTRIES ||
+    explorerMetadataCacheBytes > EXPLORER_METADATA_CACHE_MAX_BYTES
+  ) {
+    const oldest = [...explorerMetadataCache.entries()].sort(
+      (a, b) => a[1].lastAccessed - b[1].lastAccessed
+    )[0];
+    if (!oldest) {
+      break;
+    }
+    removeExplorerCacheEntry(oldest[0]);
+  }
+}
+
+function approxJsonBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
 }
 
 function requestId(prefix: string): string {

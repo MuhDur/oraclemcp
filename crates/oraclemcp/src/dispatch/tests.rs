@@ -1069,6 +1069,26 @@ fn connection_info_reports_the_active_profile() {
         .expect("connection info");
     assert_eq!(out["active_profile"], json!("dev"));
     assert_eq!(out["connected"], json!(true));
+    assert_eq!(out["metadata_cache_key"]["profile"], json!("dev"));
+    assert!(
+        out["metadata_cache_key"]["visible_schema"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("schema-sha256:"))
+    );
+    assert_eq!(
+        out["metadata_cache_key"]["serialization_contract_version"],
+        json!(oraclemcp_db::ORACLE_CELL_STRUCTURED_CONTRACT_VERSION)
+    );
+    assert!(
+        out["metadata_cache_key"]["db_fingerprint"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("db-sha256:"))
+    );
+    assert!(
+        out["metadata_cache_key"]["user"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("user-sha256:"))
+    );
     assert_eq!(out["connection"].get("module"), None);
     assert_eq!(out["connection"].get("client_identifier"), None);
     assert_eq!(out["connection"].get("program"), None);
@@ -1090,6 +1110,9 @@ fn connection_info_reports_the_active_profile() {
         "operator",
         "workstation",
         "oraclemcp-driver",
+        "ORCL23A",
+        "freepdb1",
+        "APP",
     ] {
         assert!(!serialized.contains(forbidden), "{forbidden} leaked: {out}");
     }

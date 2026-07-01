@@ -2102,6 +2102,105 @@ mod tests {
     }
 
     #[test]
+    fn operator_execute_allows_read_only_metadata_tools_for_explorer() {
+        let (auditor, _sink) = operator_auditor();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = server_with_dispatch(Arc::new(WorkbenchDispatch {
+            calls: Arc::clone(&calls),
+        }));
+        let cfg = HttpTransportConfig {
+            operator_auditor: Some(auditor),
+            ..Default::default()
+        };
+        let action_request = |path: &'static str, body: &Value| {
+            HttpRequest::new(
+                "POST",
+                path,
+                [
+                    ("host", "127.0.0.1"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json"),
+                ],
+                body.to_string().into_bytes(),
+            )
+            .with_peer_loopback(true)
+        };
+        let metadata_tools = [
+            ("oracle_connection_info", serde_json::json!({})),
+            (
+                "oracle_list_schemas",
+                serde_json::json!({ "name_like": "APP%", "max_rows": 10 }),
+            ),
+            (
+                "oracle_search_objects",
+                serde_json::json!({
+                    "owner": "APP",
+                    "object_type": "TABLE",
+                    "name_like": "CUSTOMER%",
+                    "detail_level": "names",
+                    "max_rows": 10
+                }),
+            ),
+            (
+                "oracle_get_ddl",
+                serde_json::json!({ "owner": "APP", "name": "CUSTOMERS", "object_type": "TABLE" }),
+            ),
+            (
+                "oracle_get_source",
+                serde_json::json!({
+                    "owner": "APP",
+                    "name": "PKG_CUSTOMERS",
+                    "object_type": "PACKAGE",
+                    "max_chars": 4000
+                }),
+            ),
+        ];
+        let expected_count = metadata_tools.len();
+
+        for (tool, arguments) in metadata_tools {
+            let response = handle_http_request(
+                &server,
+                &cfg,
+                action_request(
+                    "/operator/v1/actions/execute",
+                    &serde_json::json!({
+                        "idempotency_key": format!("explorer:{tool}"),
+                        "tool": tool,
+                        "arguments": arguments
+                    }),
+                ),
+            );
+            assert_eq!(response.status, 200, "{tool} should be forwarded");
+            let result =
+                response_json(&response)["data"]["mcp_response"]["result"]["structuredContent"]
+                    .clone();
+            assert_eq!(result["tool"], serde_json::json!(tool));
+        }
+
+        let preview_response = handle_http_request(
+            &server,
+            &cfg,
+            action_request(
+                "/operator/v1/actions/preview",
+                &serde_json::json!({
+                    "tool": "oracle_search_objects",
+                    "arguments": { "owner": "APP", "detail_level": "names" }
+                }),
+            ),
+        );
+        assert_eq!(preview_response.status, 400);
+        assert_eq!(
+            response_json(&preview_response)["data"]["error"],
+            serde_json::json!("operator_action_tool_not_allowed")
+        );
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            expected_count,
+            "rejected preview metadata action must not enter dispatch"
+        );
+    }
+
+    #[test]
     fn dashboard_workbench_ddl_apply_is_release_gated() {
         let (auditor, _sink) = operator_auditor();
         let calls = Arc::new(AtomicUsize::new(0));
@@ -6021,6 +6120,11 @@ fn allowed_operator_action_tool(route: OperatorRouteKind, tool: &str) -> Option<
         "oracle_patch_source",
     ];
     const EXECUTE: &[&str] = &[
+        "oracle_connection_info",
+        "oracle_list_schemas",
+        "oracle_search_objects",
+        "oracle_get_ddl",
+        "oracle_get_source",
         "oracle_query",
         "oracle_execute",
         "oracle_set_session_level",

@@ -66,11 +66,24 @@ import {
   type AuditTailFilters,
   type AuditTailRecord,
   type ActiveLane,
+  type ExplorerCacheStatus,
+  type ExplorerDetailLevel,
+  type ExplorerMetadataCacheKey,
+  type ExplorerObjectRef,
   type LaneRequestDuration,
   type MetricsSnapshot,
   type OperatorEventEnvelope,
   sessionsProbes,
+  cachedExplorerMetadata,
+  clearExplorerMetadataCache,
   fetchAuditTail,
+  fetchExplorerConnection,
+  fetchExplorerDdl,
+  fetchExplorerObjects,
+  fetchExplorerSchemas,
+  fetchExplorerSource,
+  explorerMetadataCacheSummary,
+  ORACLE_METADATA_SERIALIZATION_CONTRACT_VERSION,
   type WorkbenchActionData,
   type WorkbenchMode
 } from "./operator-client";
@@ -94,6 +107,7 @@ type NavItem = {
 const navItems: NavItem[] = [
   { to: "/", label: "Overview", icon: Activity },
   { to: "/sessions", label: "Sessions", icon: Database },
+  { to: "/explorer", label: "Explorer", icon: Search },
   { to: "/workbench", label: "Workbench", icon: SquarePen },
   { to: "/audit", label: "Audit", icon: FileClock },
   { to: "/doctor", label: "Doctor", icon: Stethoscope }
@@ -121,6 +135,12 @@ const auditRoute = createRoute({
   component: AuditPage
 });
 
+const explorerRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/explorer",
+  component: ExplorerPage
+});
+
 const workbenchRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/workbench",
@@ -137,6 +157,7 @@ const router = createRouter({
   routeTree: rootRoute.addChildren([
     overviewRoute,
     sessionsRoute,
+    explorerRoute,
     workbenchRoute,
     auditRoute,
     doctorRoute
@@ -886,6 +907,810 @@ function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
 }
 
+const explorerDetailLevels: ExplorerDetailLevel[] = ["names", "summary", "standard", "full"];
+
+const explorerObjectTypes = [
+  "",
+  "TABLE",
+  "VIEW",
+  "PACKAGE",
+  "PACKAGE BODY",
+  "PROCEDURE",
+  "FUNCTION",
+  "TRIGGER",
+  "TYPE",
+  "TYPE BODY",
+  "SEQUENCE",
+  "INDEX",
+  "SYNONYM"
+] as const;
+
+type ExplorerSchemaRow = {
+  schemaName: string;
+  objectCount: string;
+};
+
+type ExplorerObjectRow = {
+  owner: string;
+  objectName: string;
+  objectType: string;
+  status: string;
+  numRows: string;
+  columnCount: string;
+  lastAnalyzed: string;
+  comment: string;
+  raw: Record<string, unknown>;
+};
+
+type ExplorerDetailResult =
+  | {
+      state: "ok";
+      kind: "ddl" | "source";
+      ref: ExplorerObjectRef;
+      response: OperatorResponse<WorkbenchActionData>;
+      cacheStatus: ExplorerCacheStatus;
+      bytes: number;
+    }
+  | {
+      state: "error";
+      kind: "ddl" | "source";
+      ref: ExplorerObjectRef | null;
+      message: string;
+    };
+
+function ExplorerPage(): React.ReactElement {
+  const [laneId, setLaneId] = React.useState("");
+  const [schemaFilter, setSchemaFilter] = React.useState("");
+  const [owner, setOwner] = React.useState("");
+  const [objectType, setObjectType] = React.useState("");
+  const [nameLike, setNameLike] = React.useState("");
+  const [detailLevel, setDetailLevel] = React.useState<ExplorerDetailLevel>("summary");
+  const [maxRows, setMaxRows] = React.useState(100);
+  const [maxChars, setMaxChars] = React.useState(40_000);
+  const [selectedRef, setSelectedRef] = React.useState<ExplorerObjectRef | null>(null);
+  const [detailResult, setDetailResult] = React.useState<ExplorerDetailResult | null>(null);
+  const [cacheVersion, setCacheVersion] = React.useState(0);
+
+  const session = useQuery({
+    queryKey: ["dashboard-session"],
+    queryFn: fetchDashboardSession,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    retry: 1
+  });
+  const activeLanes = useQuery({
+    queryKey: ["active-lanes"],
+    queryFn: fetchActiveLanes,
+    refetchInterval: 5_000
+  });
+  const lanes = activeLanes.data?.data.lanes ?? [];
+
+  React.useEffect(() => {
+    if (!laneId && lanes.length === 1) {
+      setLaneId(lanes[0].lane_id);
+    }
+  }, [laneId, lanes]);
+
+  React.useEffect(() => {
+    clearExplorerMetadataCache();
+    setCacheVersion((version) => version + 1);
+    setSelectedRef(null);
+    setDetailResult(null);
+  }, [laneId]);
+
+  React.useEffect(() => {
+    setSelectedRef(null);
+    setDetailResult(null);
+  }, [detailLevel, nameLike, objectType, owner]);
+
+  const connection = useQuery({
+    queryKey: ["explorer", "connection", laneId],
+    queryFn: async () => {
+      if (!session.data) {
+        throw new Error("dashboard session is not ready");
+      }
+      return fetchExplorerConnection(session.data, laneId);
+    },
+    enabled: session.status === "success",
+    retry: 1
+  });
+
+  const baseCacheKey = metadataCacheKeyFromResponse(connection.data);
+  const schemasScope = baseCacheKey ? explorerScopeForVisibleSchema(baseCacheKey, "*") : null;
+  const objectScope = baseCacheKey
+    ? explorerScopeForVisibleSchema(baseCacheKey, owner.trim() || baseCacheKey.visible_schema)
+    : null;
+
+  const schemasQuery = useQuery({
+    queryKey: [
+      "explorer",
+      "schemas",
+      laneId,
+      schemaFilter,
+      maxRows,
+      cacheScopeToken(schemasScope),
+      cacheVersion
+    ],
+    queryFn: async () => {
+      if (!session.data || !schemasScope) {
+        throw new Error("explorer schema cache is not ready");
+      }
+      return cachedExplorerMetadata(
+        schemasScope,
+        JSON.stringify({
+          tool: "oracle_list_schemas",
+          name_like: schemaFilter.trim(),
+          max_rows: maxRows
+        }),
+        () =>
+          fetchExplorerSchemas(session.data, {
+            laneId,
+            nameLike: schemaFilter,
+            maxRows
+          })
+      );
+    },
+    enabled: session.status === "success" && Boolean(schemasScope),
+    retry: 1
+  });
+
+  const objectsQuery = useQuery({
+    queryKey: [
+      "explorer",
+      "objects",
+      laneId,
+      owner,
+      objectType,
+      nameLike,
+      detailLevel,
+      maxRows,
+      cacheScopeToken(objectScope),
+      cacheVersion
+    ],
+    queryFn: async () => {
+      if (!session.data || !objectScope) {
+        throw new Error("explorer object cache is not ready");
+      }
+      return cachedExplorerMetadata(
+        objectScope,
+        JSON.stringify({
+          tool: "oracle_search_objects",
+          owner: owner.trim(),
+          object_type: objectType,
+          name_like: nameLike.trim(),
+          detail_level: detailLevel,
+          max_rows: maxRows
+        }),
+        () =>
+          fetchExplorerObjects(session.data, {
+            laneId,
+            owner,
+            objectType,
+            nameLike,
+            detailLevel,
+            maxRows
+          })
+      );
+    },
+    enabled: session.status === "success" && Boolean(objectScope),
+    retry: 1
+  });
+
+  const detailMutation = useMutation({
+    mutationFn: async ({ kind, ref }: { kind: "ddl" | "source"; ref: ExplorerObjectRef }) => {
+      if (!session.data || !baseCacheKey) {
+        throw new Error("explorer cache key is not ready");
+      }
+      const scope = explorerScopeForVisibleSchema(baseCacheKey, ref.owner);
+      const slot = JSON.stringify({
+        tool: kind === "ddl" ? "oracle_get_ddl" : "oracle_get_source",
+        owner: ref.owner,
+        name: ref.name,
+        object_type: ref.objectType,
+        max_chars: kind === "source" ? maxChars : undefined
+      });
+      const cached = await cachedExplorerMetadata(scope, slot, () =>
+        kind === "ddl"
+          ? fetchExplorerDdl(session.data, { ...ref, laneId })
+          : fetchExplorerSource(session.data, { ...ref, laneId, maxChars })
+      );
+      return {
+        state: "ok" as const,
+        kind,
+        ref,
+        response: cached.value,
+        cacheStatus: cached.status,
+        bytes: cached.bytes
+      };
+    },
+    onSuccess: (result) => {
+      setDetailResult(result);
+    },
+    onError: (error, variables) => {
+      setDetailResult({
+        state: "error",
+        kind: variables.kind,
+        ref: variables.ref,
+        message: error instanceof Error ? error.message : "metadata request failed"
+      });
+    }
+  });
+
+  const schemaRows = schemaRowsFromResponse(schemasQuery.data?.value);
+  const objectRows = objectRowsFromResponse(objectsQuery.data?.value);
+  const selectedRow = selectedRef
+    ? objectRows.find((row) => objectRefKey(rowRef(row)) === objectRefKey(selectedRef)) ?? null
+    : null;
+  const cacheSummary = explorerMetadataCacheSummary();
+  const connected = connectedFromResponse(connection.data);
+  const sessionTone =
+    session.status === "success" ? "ok" : session.status === "error" ? "warn" : "info";
+
+  const refreshExplorer = (): void => {
+    clearExplorerMetadataCache();
+    setCacheVersion((version) => version + 1);
+    queryClient.invalidateQueries({ queryKey: ["explorer"] });
+  };
+
+  const selectRow = (row: ExplorerObjectRow): void => {
+    const ref = rowRef(row);
+    setSelectedRef(ref);
+    setDetailResult(null);
+  };
+
+  return (
+    <PageFrame
+      title="Explorer"
+      eyebrow="Schema Metadata"
+      description="Schema and object metadata through the guarded dictionary tools and bounded browser metadata cache."
+    >
+      <div className="space-y-4">
+        <Surface className="p-4">
+          <div className="grid gap-3 xl:grid-cols-[minmax(180px,0.9fr)_minmax(140px,0.7fr)_minmax(140px,0.7fr)_minmax(140px,0.7fr)_minmax(140px,0.7fr)_110px_auto] xl:items-end">
+            <label className="block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Lane</span>
+              <input
+                className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                value={laneId}
+                onChange={(event) => setLaneId(event.target.value)}
+                list="explorer-lanes"
+                placeholder={lanes[0]?.lane_id ?? "operator"}
+              />
+              <datalist id="explorer-lanes">
+                {lanes.map((lane) => (
+                  <option key={lane.lane_id} value={lane.lane_id} />
+                ))}
+              </datalist>
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Schema Filter</span>
+              <input
+                className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                value={schemaFilter}
+                onChange={(event) => setSchemaFilter(event.target.value)}
+                placeholder="APP%"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Schema</span>
+              <select
+                className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                value={owner}
+                onChange={(event) => setOwner(event.target.value)}
+              >
+                <option value="">Current</option>
+                <option value="*">All visible</option>
+                {schemaRows.map((row) => (
+                  <option key={row.schemaName} value={row.schemaName}>
+                    {row.schemaName}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Type</span>
+              <select
+                className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                value={objectType}
+                onChange={(event) => setObjectType(event.target.value)}
+              >
+                {explorerObjectTypes.map((type) => (
+                  <option key={type || "all"} value={type}>
+                    {type || "All"}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Name Like</span>
+              <input
+                className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                value={nameLike}
+                onChange={(event) => setNameLike(event.target.value)}
+                placeholder="CUSTOMER%"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Rows</span>
+              <input
+                className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                min={1}
+                max={5000}
+                type="number"
+                value={maxRows}
+                onChange={(event) => setMaxRows(clampRows(event.target.valueAsNumber))}
+              />
+            </label>
+            <Button type="button" variant="ghost" onClick={refreshExplorer}>
+              <RefreshCcw className="size-4" aria-hidden="true" />
+              Refresh
+            </Button>
+          </div>
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            {explorerDetailLevels.map((level) => (
+              <Button
+                key={level}
+                type="button"
+                variant={detailLevel === level ? "primary" : "secondary"}
+                onClick={() => setDetailLevel(level)}
+              >
+                {level}
+              </Button>
+            ))}
+            <Badge tone={sessionTone}>
+              {session.status === "success" ? "paired" : session.status === "error" ? "blocked" : "pairing"}
+            </Badge>
+            <Badge tone={connected ? "ok" : connection.isError ? "warn" : "info"}>
+              {connected ? "connected" : connection.isError ? "blocked" : "sync"}
+            </Badge>
+            <Badge tone={cacheStatusTone(objectsQuery.data?.status ?? schemasQuery.data?.status)}>
+              {objectsQuery.data?.status ?? schemasQuery.data?.status ?? "cold"}
+            </Badge>
+            <span className="font-mono text-xs font-semibold text-zinc-500">
+              {cacheSummary.entries} entries · {formatBytes(cacheSummary.bytes)}
+            </span>
+          </div>
+          {connection.error instanceof Error ? (
+            <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+              {connection.error.message}
+            </p>
+          ) : null}
+        </Surface>
+
+        <div className="grid gap-4 xl:grid-cols-[minmax(260px,0.55fr)_minmax(0,1.45fr)]">
+          <ExplorerSchemasPanel
+            rows={schemaRows}
+            selectedOwner={owner}
+            pending={schemasQuery.isFetching}
+            error={schemasQuery.error instanceof Error ? schemasQuery.error.message : null}
+            onSelect={setOwner}
+          />
+          <ExplorerObjectsPanel
+            rows={objectRows}
+            selectedRef={selectedRef}
+            pending={objectsQuery.isFetching}
+            error={objectsQuery.error instanceof Error ? objectsQuery.error.message : null}
+            onSelect={selectRow}
+          />
+        </div>
+
+        <ExplorerObjectDetailPanel
+          row={selectedRow}
+          selectedRef={selectedRef}
+          result={detailResult}
+          pending={detailMutation.isPending}
+          maxChars={maxChars}
+          onMaxCharsChange={setMaxChars}
+          onReadDdl={(ref) => detailMutation.mutate({ kind: "ddl", ref })}
+          onReadSource={(ref) => detailMutation.mutate({ kind: "source", ref })}
+        />
+      </div>
+    </PageFrame>
+  );
+}
+
+function ExplorerSchemasPanel({
+  rows,
+  selectedOwner,
+  pending,
+  error,
+  onSelect
+}: {
+  rows: ExplorerSchemaRow[];
+  selectedOwner: string;
+  pending: boolean;
+  error: string | null;
+  onSelect: (owner: string) => void;
+}): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={Database}
+        title="Schemas"
+        meta={pending ? "sync" : `${rows.length} visible`}
+        tone={pending ? "info" : rows.length > 0 ? "ok" : "off"}
+      />
+      {error ? <ErrorNotice message={error} /> : null}
+      <div className="max-h-[520px] divide-y divide-zinc-100 overflow-auto">
+        {rows.length === 0 ? (
+          <p className="px-4 py-8 text-center text-sm font-semibold text-zinc-500">No schemas</p>
+        ) : (
+          rows.map((row) => {
+            const selected = selectedOwner === row.schemaName;
+            return (
+              <button
+                key={row.schemaName}
+                type="button"
+                className={cn(
+                  "grid w-full grid-cols-[minmax(0,1fr)_80px] gap-3 px-4 py-3 text-left hover:bg-zinc-50",
+                  selected ? "bg-emerald-50" : "bg-white"
+                )}
+                onClick={() => onSelect(row.schemaName)}
+              >
+                <span className="truncate font-mono text-sm font-semibold text-zinc-950">
+                  {row.schemaName}
+                </span>
+                <span className="text-right font-mono text-sm text-zinc-700">
+                  {row.objectCount}
+                </span>
+              </button>
+            );
+          })
+        )}
+      </div>
+    </Surface>
+  );
+}
+
+function ExplorerObjectsPanel({
+  rows,
+  selectedRef,
+  pending,
+  error,
+  onSelect
+}: {
+  rows: ExplorerObjectRow[];
+  selectedRef: ExplorerObjectRef | null;
+  pending: boolean;
+  error: string | null;
+  onSelect: (row: ExplorerObjectRow) => void;
+}): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={Search}
+        title="Objects"
+        meta={pending ? "sync" : `${rows.length} objects`}
+        tone={pending ? "info" : rows.length > 0 ? "ok" : "off"}
+      />
+      {error ? <ErrorNotice message={error} /> : null}
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[980px] border-collapse text-left">
+          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+            <tr>
+              <th className="px-4 py-3 font-bold">Object</th>
+              <th className="px-4 py-3 font-bold">Type</th>
+              <th className="px-4 py-3 font-bold">Status</th>
+              <th className="px-4 py-3 font-bold">Rows</th>
+              <th className="px-4 py-3 font-bold">Columns</th>
+              <th className="px-4 py-3 font-bold">Analyzed</th>
+              <th className="px-4 py-3 font-bold">Comment</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-100">
+            {rows.length === 0 ? (
+              <tr>
+                <td className="px-4 py-8 text-center text-sm font-semibold text-zinc-500" colSpan={7}>
+                  No objects
+                </td>
+              </tr>
+            ) : (
+              rows.map((row) => {
+                const ref = rowRef(row);
+                const selected = selectedRef && objectRefKey(selectedRef) === objectRefKey(ref);
+                return (
+                  <tr
+                    key={objectRefKey(ref)}
+                    className={cn("cursor-pointer", selected ? "bg-emerald-50" : "bg-white")}
+                    onClick={() => onSelect(row)}
+                  >
+                    <td className="px-4 py-4 align-top">
+                      <p className="font-mono text-sm font-semibold text-zinc-950">{row.objectName}</p>
+                      <p className="mt-1 font-mono text-xs text-zinc-500">{row.owner}</p>
+                    </td>
+                    <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
+                      {row.objectType}
+                    </td>
+                    <td className="px-4 py-4 align-top">
+                      <Badge tone={row.status === "INVALID" ? "warn" : row.status ? "ok" : "off"}>
+                        {row.status || "..."}
+                      </Badge>
+                    </td>
+                    <td className="px-4 py-4 align-top font-mono text-sm text-zinc-700">
+                      {row.numRows}
+                    </td>
+                    <td className="px-4 py-4 align-top font-mono text-sm text-zinc-700">
+                      {row.columnCount}
+                    </td>
+                    <td className="px-4 py-4 align-top font-mono text-xs text-zinc-700">
+                      {row.lastAnalyzed}
+                    </td>
+                    <td className="max-w-[280px] px-4 py-4 align-top text-sm text-zinc-700">
+                      <p className="line-clamp-2">{row.comment}</p>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </Surface>
+  );
+}
+
+function ExplorerObjectDetailPanel({
+  row,
+  selectedRef,
+  result,
+  pending,
+  maxChars,
+  onMaxCharsChange,
+  onReadDdl,
+  onReadSource
+}: {
+  row: ExplorerObjectRow | null;
+  selectedRef: ExplorerObjectRef | null;
+  result: ExplorerDetailResult | null;
+  pending: boolean;
+  maxChars: number;
+  onMaxCharsChange: (value: number) => void;
+  onReadDdl: (ref: ExplorerObjectRef) => void;
+  onReadSource: (ref: ExplorerObjectRef) => void;
+}): React.ReactElement {
+  const sourceAllowed = selectedRef ? canReadSource(selectedRef.objectType) : false;
+  const detail = result?.state === "ok" ? mcpResult(result.response.data.mcp_response) : null;
+  return (
+    <Surface className="overflow-hidden">
+      <div className="flex flex-col gap-3 border-b border-zinc-200 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
+            <Code2 className="size-4" aria-hidden="true" />
+            Object Detail
+          </h3>
+          <p className="mt-1 break-all font-mono text-sm text-zinc-500">
+            {selectedRef ? objectRefKey(selectedRef) : "idle"}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="block">
+            <span className="mb-1 block text-xs font-bold uppercase text-zinc-500">Chars</span>
+            <input
+              className="h-9 w-28 rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+              min={1000}
+              max={1000000}
+              type="number"
+              value={maxChars}
+              onChange={(event) => onMaxCharsChange(clampChars(event.target.valueAsNumber))}
+            />
+          </label>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={!selectedRef || pending}
+            onClick={() => selectedRef && onReadDdl(selectedRef)}
+          >
+            <Database className="size-4" aria-hidden="true" />
+            DDL
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={!selectedRef || !sourceAllowed || pending}
+            onClick={() => selectedRef && onReadSource(selectedRef)}
+          >
+            <Code2 className="size-4" aria-hidden="true" />
+            Source
+          </Button>
+          <Badge tone={pending ? "info" : result?.state === "error" ? "warn" : result ? "ok" : "off"}>
+            {pending ? "loading" : result?.state ?? "empty"}
+          </Badge>
+        </div>
+      </div>
+      <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,0.65fr)_minmax(360px,1.35fr)]">
+        <div className="space-y-3">
+          <ExplorerFact label="Owner" value={selectedRef?.owner ?? "..."} />
+          <ExplorerFact label="Name" value={selectedRef?.name ?? "..."} />
+          <ExplorerFact label="Type" value={selectedRef?.objectType ?? "..."} />
+          <ExplorerFact label="Status" value={row?.status || "..."} />
+          <ExplorerFact label="Columns" value={row?.columnCount ?? "..."} />
+          <ExplorerFact label="Rows" value={row?.numRows ?? "..."} />
+          {result?.state === "ok" ? (
+            <ExplorerFact
+              label="Cache"
+              value={`${result.cacheStatus} · ${formatBytes(result.bytes)}`}
+            />
+          ) : null}
+        </div>
+        {result?.state === "error" ? (
+          <ErrorNotice message={result.message} />
+        ) : (
+          <pre className="max-h-[620px] overflow-auto rounded-md bg-zinc-950 p-3 text-xs leading-5 text-zinc-50">
+            {detail ? prettyJson(detail) : "{}"}
+          </pre>
+        )}
+      </div>
+    </Surface>
+  );
+}
+
+function ErrorNotice({ message }: { message: string }): React.ReactElement {
+  return (
+    <p className="m-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+      {message}
+    </p>
+  );
+}
+
+function ExplorerFact({ label, value }: { label: string; value: string }): React.ReactElement {
+  return (
+    <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
+      <p className="text-xs font-bold uppercase text-zinc-500">{label}</p>
+      <p className="mt-1 break-all font-mono text-xs text-zinc-900">{value}</p>
+    </div>
+  );
+}
+
+function metadataCacheKeyFromResponse(
+  response: OperatorResponse<WorkbenchActionData> | undefined
+): ExplorerMetadataCacheKey | null {
+  const result = mcpResult(response?.data.mcp_response);
+  if (!isRecord(result) || !isRecord(result["metadata_cache_key"])) {
+    return null;
+  }
+  const key = result["metadata_cache_key"];
+  if (
+    typeof key["db_fingerprint"] !== "string" ||
+    typeof key["profile"] !== "string" ||
+    typeof key["user"] !== "string" ||
+    typeof key["visible_schema"] !== "string" ||
+    typeof key["serialization_contract_version"] !== "number"
+  ) {
+    return null;
+  }
+  return {
+    db_fingerprint: key["db_fingerprint"],
+    profile: key["profile"],
+    user: key["user"],
+    visible_schema: key["visible_schema"],
+    serialization_contract_version:
+      key["serialization_contract_version"] || ORACLE_METADATA_SERIALIZATION_CONTRACT_VERSION
+  };
+}
+
+function explorerScopeForVisibleSchema(
+  key: ExplorerMetadataCacheKey,
+  visibleSchema: string
+): ExplorerMetadataCacheKey {
+  return {
+    ...key,
+    visible_schema: visibleSchema.trim() || key.visible_schema || "*"
+  };
+}
+
+function cacheScopeToken(scope: ExplorerMetadataCacheKey | null): string {
+  return scope ? JSON.stringify(scope) : "pending";
+}
+
+function connectedFromResponse(response: OperatorResponse<WorkbenchActionData> | undefined): boolean {
+  const result = mcpResult(response?.data.mcp_response);
+  return isRecord(result) && result["connected"] === true;
+}
+
+function schemaRowsFromResponse(
+  response: OperatorResponse<WorkbenchActionData> | undefined
+): ExplorerSchemaRow[] {
+  const result = mcpResult(response?.data.mcp_response);
+  const schemas = isRecord(result) && Array.isArray(result["schemas"]) ? result["schemas"] : [];
+  return schemas
+    .filter(isRecord)
+    .map((row) => ({
+      schemaName: cellText(row, "SCHEMA_NAME") ?? cellText(row, "schema_name") ?? "",
+      objectCount: cellText(row, "OBJECT_COUNT") ?? cellText(row, "object_count") ?? "0"
+    }))
+    .filter((row) => row.schemaName.length > 0);
+}
+
+function objectRowsFromResponse(
+  response: OperatorResponse<WorkbenchActionData> | undefined
+): ExplorerObjectRow[] {
+  const result = mcpResult(response?.data.mcp_response);
+  const objects = isRecord(result) && Array.isArray(result["results"]) ? result["results"] : [];
+  return objects.filter(isRecord).map((row) => ({
+    owner: cellText(row, "owner") ?? "",
+    objectName: cellText(row, "object_name") ?? "",
+    objectType: cellText(row, "object_type") ?? "",
+    status: cellText(row, "status") ?? "",
+    numRows: cellText(row, "num_rows") ?? "...",
+    columnCount: cellText(row, "column_count") ?? "...",
+    lastAnalyzed: cellText(row, "last_analyzed") ?? "...",
+    comment: cellText(row, "comment") ?? "",
+    raw: row
+  }));
+}
+
+function rowRef(row: ExplorerObjectRow): ExplorerObjectRef {
+  return {
+    owner: row.owner,
+    name: row.objectName,
+    objectType: row.objectType
+  };
+}
+
+function objectRefKey(ref: ExplorerObjectRef): string {
+  return `${ref.owner}.${ref.name}:${ref.objectType}`;
+}
+
+function cellText(row: Record<string, unknown>, key: string): string | null {
+  const value = row[key] ?? row[key.toUpperCase()] ?? row[key.toLowerCase()];
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (isRecord(value) && typeof value["value"] === "string") {
+    return value["value"];
+  }
+  return null;
+}
+
+function canReadSource(objectType: string): boolean {
+  return [
+    "PACKAGE",
+    "PACKAGE BODY",
+    "PROCEDURE",
+    "FUNCTION",
+    "TRIGGER",
+    "TYPE",
+    "TYPE BODY"
+  ].includes(objectType.toUpperCase());
+}
+
+function cacheStatusTone(
+  status: ExplorerCacheStatus | "cold" | undefined
+): "neutral" | "ok" | "warn" | "off" | "info" {
+  switch (status) {
+    case "hit":
+      return "ok";
+    case "stale":
+    case "bypass":
+      return "warn";
+    case "miss":
+      return "info";
+    case "cold":
+    case undefined:
+      return "off";
+  }
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  if (value < 1024 * 1024) {
+    return `${Math.round(value / 1024)} KiB`;
+  }
+  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function clampChars(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 40_000;
+  }
+  return Math.min(1_000_000, Math.max(1_000, Math.trunc(value)));
+}
+
 const workbenchModes: Array<{ id: WorkbenchMode; label: string }> = [
   { id: "classify_only", label: "Classify" },
   { id: "read_query", label: "Read" },
@@ -945,6 +1770,10 @@ function WorkbenchPage(): React.ReactElement {
     },
     onSuccess: (response, kind) => {
       setLastResult({ state: "ok", label: actionLabel(kind), response });
+      if (kind === "commit") {
+        clearExplorerMetadataCache();
+        queryClient.invalidateQueries({ queryKey: ["explorer"] });
+      }
       const nextConfirm = confirmationFromResponse(response);
       if (nextConfirm) {
         setConfirm(nextConfirm);
