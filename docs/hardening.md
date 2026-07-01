@@ -45,9 +45,9 @@ vulnerability-reporting policy and supported versions are in the repo-root
       `ALTER SYSTEM`, `UNLIMITED TABLESPACE`, the `DBA`/`RESOURCE` roles).
 - [ ] Prefer **proxy authentication** so each agent's identity is preserved in
       the audit trail (`ALTER USER target GRANT CONNECT THROUGH proxy`).
-- [ ] Run `oraclemcp --json doctor --profile <p>` and confirm the **Write
-      posture** check (11) reports a clean read-only posture. Treat any warning
-      (it names the offending privileges) as a finding to fix.
+- [ ] Run `oraclemcp --json doctor --online --profile <p>` and confirm the
+      **Write posture** check (11) reports a clean read-only posture. Treat any
+      warning (it names the offending privileges) as a finding to fix.
 
 ### Profile / operating-level configuration
 

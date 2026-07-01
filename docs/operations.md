@@ -299,7 +299,7 @@ any client request or OAuth scope. Mark a physical standby with
 ### 3.5 Verify the posture from the database's own view
 
 ```sh
-oraclemcp --json doctor --profile db_ro
+oraclemcp --json doctor --online --profile db_ro
 ```
 
 Doctor's **Write posture** check (check 11) reads the session's own
@@ -361,7 +361,7 @@ oraclemcp --json doctor
 
 # Add live connectivity, auth, role/open-mode, standby, and the write-posture
 # check (§3.5) for the profile you will serve.
-oraclemcp --json doctor --profile db_ro
+oraclemcp --json doctor --online --profile db_ro
 ```
 
 Both emit a single JSON object on stdout (`--json` is the alias for

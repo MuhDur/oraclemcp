@@ -51,15 +51,16 @@ use oraclemcp_config::{AuditConfig, HttpConfig, HttpTlsConfig, OracleMcpConfig};
 use oraclemcp_core::http::SinglePrincipalGuard;
 use oraclemcp_core::{
     AdmissionController, CapabilitiesReport, CustomToolCatalog, CustomToolDef, DashboardAuth,
-    DispatchFuture, DispatchOutcome, DoctorContext, ExportRegistry, FeatureTiers,
-    HttpSessionLifecycle, HttpTransportConfig, LaneContext, LaneDispatchFactory, LaneRuntime,
-    MCP_PATH, McpSurfaceDetail, McpSurfaceFuture, OAuthEnforcement, ObservabilityState,
-    OperatorAuthorityPolicy, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport,
-    ShutdownCoordinator, SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy,
-    TlsMaterial, TlsServerConfig, ToolDispatch, WriteIntentLog, build_server_config,
-    default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
-    mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file, requires_mtls,
-    run_doctor, sign, start_oraclemcp_service_app_with_transport,
+    DispatchFuture, DispatchOutcome, DoctorContext, DoctorLevelCaps, DoctorProfileCaps,
+    ExportRegistry, FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext,
+    LaneDispatchFactory, LaneRuntime, MCP_PATH, McpSurfaceDetail, McpSurfaceFuture,
+    OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy, OracleMcpServer,
+    PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport, ShutdownCoordinator, SiemFormat,
+    SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial, TlsServerConfig,
+    ToolDispatch, WriteIntentLog, build_server_config, default_dashboard_ticket_dir, load_tools,
+    load_tools_for_profile, mint_dashboard_pairing_ticket, operator_subject_id_hash,
+    parse_tools_file, requires_mtls, run_doctor, service_app_doctor_snapshot, sign,
+    start_oraclemcp_service_app_with_transport,
 };
 use oraclemcp_db::{
     DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
@@ -133,10 +134,15 @@ enum Command {
     Info,
     /// Run diagnostics; exit 2 on a blocker.
     Doctor {
-        /// Connect using this named profile and include live connectivity checks.
-        /// Omit for offline diagnostics only.
+        /// Inspect this named profile. Offline unless --online is also set.
         #[arg(long)]
         profile: Option<String>,
+        /// Open a live database connection for connectivity/auth/role probes.
+        #[arg(long)]
+        online: bool,
+        /// Plan scoped self-repair. Out-of-scope targets are refused with exit 4.
+        #[arg(long)]
+        fix: bool,
     },
     /// List configured connection profiles without opening a database connection.
     #[command(alias = "list-profiles")]
@@ -361,7 +367,11 @@ fn main() -> ExitCode {
             robot_json,
         ),
         Command::Info => run_info(robot_json),
-        Command::Doctor { profile } => run_doctor_cmd(robot_json, profile),
+        Command::Doctor {
+            profile,
+            online,
+            fix,
+        } => run_doctor_cmd(robot_json, profile, online, fix),
         Command::Profiles => run_profiles(robot_json),
         Command::Capabilities => run_capabilities(robot_json),
         Command::Service { command } => run_service_cmd(robot_json, command),
@@ -436,6 +446,7 @@ struct ResolvedProfile {
     opts: OracleConnectOptions,
     level: SessionLevelState,
     pool_settings: Option<PoolSettings>,
+    doctor_caps: DoctorProfileCaps,
 }
 
 fn resolve_profile_options(profile: Option<&str>) -> Result<Option<ResolvedProfile>, DbError> {
@@ -487,11 +498,13 @@ fn resolve_profile_options_with(
     )?;
 
     let ctx = oraclemcp_core::build_session_context(chosen, password, wallet_password, false)?;
+    let doctor_caps = doctor_profile_caps(chosen, &ctx.level_state);
     Ok(Some(ResolvedProfile {
         name: chosen.name.clone(),
         opts: ctx.options,
         level: ctx.level_state,
         pool_settings: ctx.pool_settings,
+        doctor_caps,
     }))
 }
 
@@ -2420,7 +2433,7 @@ fn setup_payload(
             ["oraclemcp", "--json", "setup", "--profile", profile],
             ["oraclemcp", "--json", "profiles"],
             ["oraclemcp", "--json", "doctor"],
-            ["oraclemcp", "--json", "doctor", "--profile", profile],
+            ["oraclemcp", "--json", "doctor", "--online", "--profile", profile],
             ["oraclemcp", "--json", "capabilities"]
         ],
         "next_actions": [
@@ -2540,7 +2553,7 @@ fn custom_tool_signatures(
         "next_actions": [
             "copy each signature into its matching [[tool]] block as signature = \"...\"",
             "set ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY in the MCP server environment",
-            "run oraclemcp --json doctor --profile <profile> before restarting clients"
+            "run oraclemcp --json doctor --online --profile <profile> before restarting clients"
         ]
     }))
 }
@@ -2857,6 +2870,9 @@ fn run_profiles(robot_json: bool) -> ExitCode {
 }
 
 fn doctor_process_exit_code(report: &oraclemcp_core::DoctorReport) -> u8 {
+    if let Some(fix) = &report.fix {
+        return fix.exit_code;
+    }
     // Mirror plsql-mcp: a blocker (any failed check) exits 2.
     if report.any_failed() { 2 } else { 0 }
 }
@@ -2870,7 +2886,25 @@ struct DoctorProfileContext {
     call_timeout_resolved: bool,
     call_timeout: Option<std::time::Duration>,
     proxy_user: bool,
+    profile_caps: Option<DoctorProfileCaps>,
     sensitive_values: Vec<String>,
+}
+
+impl DoctorProfileContext {
+    fn offline() -> Self {
+        DoctorProfileContext {
+            conn: None,
+            connection_error: None,
+            wallet_location: None,
+            protected_profile_writable: false,
+            connection_strategy: None,
+            call_timeout_resolved: false,
+            call_timeout: None,
+            proxy_user: false,
+            profile_caps: None,
+            sensitive_values: Vec::new(),
+        }
+    }
 }
 
 fn doctor_sensitive_values(opts: &OracleConnectOptions) -> Vec<String> {
@@ -2932,68 +2966,106 @@ fn doctor_connection_error(error: DbError) -> String {
     error.into_envelope().message
 }
 
-fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
-    let Some(profile) = profile else {
+fn doctor_call_timeout(call_timeout_seconds: Option<u64>) -> Option<std::time::Duration> {
+    match call_timeout_seconds {
+        None => Some(oraclemcp_core::resilience::DEFAULT_CALL_TIMEOUT),
+        Some(0) => None,
+        Some(seconds) => Some(std::time::Duration::from_secs(seconds)),
+    }
+}
+
+fn doctor_profile_caps(
+    profile: &oraclemcp_config::ConnectionProfile,
+    level: &SessionLevelState,
+) -> DoctorProfileCaps {
+    DoctorProfileCaps {
+        profile: profile.name.clone(),
+        configured: DoctorLevelCaps {
+            default_level: profile.default_level(),
+            max_level: profile.max_level(),
+        },
+        effective: DoctorLevelCaps {
+            default_level: level.effective_level(),
+            max_level: level.max_level(),
+        },
+        protected: level.is_protected(),
+        read_only_standby: profile.read_only_standby(),
+    }
+}
+
+fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
+    let cfg = match OracleMcpConfig::load(None) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            return DoctorProfileContext {
+                connection_error: Some(format!("config load failed: {e}")),
+                ..DoctorProfileContext::offline()
+            };
+        }
+    };
+    let Some(chosen) = cfg.profile(profile) else {
         return DoctorProfileContext {
-            conn: None,
-            connection_error: None,
-            wallet_location: None,
-            protected_profile_writable: false,
-            connection_strategy: None,
-            call_timeout_resolved: false,
-            call_timeout: None,
-            proxy_user: false,
-            sensitive_values: Vec::new(),
+            connection_error: Some(format!("connection profile `{profile}` not found")),
+            ..DoctorProfileContext::offline()
+        };
+    };
+    let level = oraclemcp_core::session_level_state(chosen, false);
+    DoctorProfileContext {
+        conn: None,
+        connection_error: None,
+        wallet_location: chosen
+            .oci
+            .as_ref()
+            .and_then(|oci| oci.wallet_location.as_ref())
+            .map(|path| path.display().to_string()),
+        protected_profile_writable: level.is_protected()
+            && level.max_level() > OperatingLevel::ReadOnly,
+        connection_strategy: Some(
+            if chosen.pool.is_some() {
+                "hybrid_pool"
+            } else {
+                "single_session"
+            }
+            .to_owned(),
+        ),
+        call_timeout_resolved: true,
+        call_timeout: doctor_call_timeout(chosen.call_timeout_seconds),
+        proxy_user: chosen
+            .proxy_auth
+            .as_ref()
+            .and_then(|proxy| proxy.proxy_user())
+            .is_some(),
+        profile_caps: Some(doctor_profile_caps(chosen, &level)),
+        sensitive_values: Vec::new(),
+    }
+}
+
+fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileContext {
+    if !online {
+        return profile.map_or_else(
+            DoctorProfileContext::offline,
+            doctor_profile_metadata_context,
+        );
+    }
+
+    let Some(profile) = profile else {
+        return match resolve_profile_options(None) {
+            Ok(Some(resolved)) => doctor_open_resolved_profile(resolved),
+            Ok(None) => DoctorProfileContext {
+                connection_error: Some(
+                    "no default or sole connection profile is configured for --online".to_owned(),
+                ),
+                ..DoctorProfileContext::offline()
+            },
+            Err(e) => DoctorProfileContext {
+                connection_error: Some(doctor_connection_error(e)),
+                ..DoctorProfileContext::offline()
+            },
         };
     };
 
     match resolve_profile_options(Some(profile)) {
-        Ok(Some(resolved)) => {
-            let wallet_location = resolved
-                .opts
-                .wallet_location
-                .as_ref()
-                .map(|path| path.display().to_string());
-            let protected_profile_writable = resolved.level.is_protected()
-                && resolved.level.max_level() > OperatingLevel::ReadOnly;
-            let proxy_user = resolved.opts.auth_adapter.proxy_connect_user().is_some();
-            let sensitive_values = doctor_sensitive_values(&resolved.opts);
-            let call_timeout = resolved.opts.call_timeout;
-            let connection_strategy = Some(
-                if resolved.pool_settings.is_some() {
-                    "hybrid_pool"
-                } else {
-                    "single_session"
-                }
-                .to_owned(),
-            );
-            match block_on_connect(
-                |cx| async move { try_open_runtime_connections(&cx, resolved).await },
-            ) {
-                Ok(connections) => DoctorProfileContext {
-                    conn: Some(connections.session),
-                    connection_error: None,
-                    wallet_location,
-                    protected_profile_writable,
-                    connection_strategy,
-                    call_timeout_resolved: true,
-                    call_timeout,
-                    proxy_user,
-                    sensitive_values,
-                },
-                Err(e) => DoctorProfileContext {
-                    conn: None,
-                    connection_error: Some(doctor_connection_error(e)),
-                    wallet_location,
-                    protected_profile_writable,
-                    connection_strategy,
-                    call_timeout_resolved: true,
-                    call_timeout,
-                    proxy_user,
-                    sensitive_values,
-                },
-            }
-        }
+        Ok(Some(resolved)) => doctor_open_resolved_profile(resolved),
         Ok(None) => DoctorProfileContext {
             conn: None,
             connection_error: Some(format!("connection profile `{profile}` not found")),
@@ -3003,6 +3075,7 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
             call_timeout_resolved: false,
             call_timeout: None,
             proxy_user: false,
+            profile_caps: None,
             sensitive_values: Vec::new(),
         },
         Err(e) => DoctorProfileContext {
@@ -3014,16 +3087,64 @@ fn doctor_profile_context(profile: Option<&str>) -> DoctorProfileContext {
             call_timeout_resolved: false,
             call_timeout: None,
             proxy_user: false,
+            profile_caps: None,
             sensitive_values: Vec::new(),
         },
     }
 }
 
-fn run_doctor_cmd(robot_json: bool, profile: Option<String>) -> ExitCode {
-    // Offline by default: no live connection (the live subset reports Skip with
-    // a reason). With --profile, use the configured profile and let the live
-    // checks report connection/auth/role failures as ordinary doctor checks.
-    let profile_ctx = doctor_profile_context(profile.as_deref());
+fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileContext {
+    let wallet_location = resolved
+        .opts
+        .wallet_location
+        .as_ref()
+        .map(|path| path.display().to_string());
+    let protected_profile_writable =
+        resolved.level.is_protected() && resolved.level.max_level() > OperatingLevel::ReadOnly;
+    let proxy_user = resolved.opts.auth_adapter.proxy_connect_user().is_some();
+    let sensitive_values = doctor_sensitive_values(&resolved.opts);
+    let call_timeout = resolved.opts.call_timeout;
+    let connection_strategy = Some(
+        if resolved.pool_settings.is_some() {
+            "hybrid_pool"
+        } else {
+            "single_session"
+        }
+        .to_owned(),
+    );
+    let profile_caps = Some(resolved.doctor_caps.clone());
+    match block_on_connect(|cx| async move { try_open_runtime_connections(&cx, resolved).await }) {
+        Ok(connections) => DoctorProfileContext {
+            conn: Some(connections.session),
+            connection_error: None,
+            wallet_location,
+            protected_profile_writable,
+            connection_strategy,
+            call_timeout_resolved: true,
+            call_timeout,
+            proxy_user,
+            profile_caps,
+            sensitive_values,
+        },
+        Err(e) => DoctorProfileContext {
+            conn: None,
+            connection_error: Some(doctor_connection_error(e)),
+            wallet_location,
+            protected_profile_writable,
+            connection_strategy,
+            call_timeout_resolved: true,
+            call_timeout,
+            proxy_user,
+            profile_caps,
+            sensitive_values,
+        },
+    }
+}
+
+fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: bool) -> ExitCode {
+    // Offline by default: profile metadata inspection does not resolve secrets
+    // or open Oracle. --online is the explicit live-connect boundary.
+    let profile_ctx = doctor_profile_context(profile.as_deref(), online);
     let ctx = DoctorContext {
         conn: profile_ctx.conn.as_deref(),
         connection_error: profile_ctx.connection_error,
@@ -3034,9 +3155,15 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>) -> ExitCode {
         call_timeout_resolved: profile_ctx.call_timeout_resolved,
         call_timeout: profile_ctx.call_timeout,
         proxy_user: profile_ctx.proxy_user,
+        online,
+        profile_caps: profile_ctx.profile_caps,
+        service_health: service_app_doctor_snapshot().ok(),
         sensitive_values: profile_ctx.sensitive_values,
     };
-    let report = block_on_connect(|cx| async move { run_doctor(&cx, &ctx).await });
+    let mut report = block_on_connect(|cx| async move { run_doctor(&cx, &ctx).await });
+    if fix {
+        report = report.with_fix_report();
+    }
     let exit_code = doctor_process_exit_code(&report);
     if robot_json {
         let output = report
@@ -3478,7 +3605,12 @@ mod tests {
 
     #[test]
     fn doctor_process_exit_code_matches_cli_contract() {
-        let ok = oraclemcp_core::DoctorReport { checks: Vec::new() };
+        let ok = oraclemcp_core::DoctorReport {
+            checks: Vec::new(),
+            profile_caps: None,
+            service_health: None,
+            fix: None,
+        };
         assert_eq!(doctor_process_exit_code(&ok), 0);
 
         let failed = oraclemcp_core::DoctorReport {
@@ -3492,6 +3624,9 @@ mod tests {
                 auth_mode: None,
                 ora_code: None,
             }],
+            profile_caps: None,
+            service_health: None,
+            fix: None,
         };
         let process_code = doctor_process_exit_code(&failed);
         assert_eq!(process_code, 2);
@@ -3499,6 +3634,8 @@ mod tests {
             failed.to_json_with_exit_code(i32::from(process_code))["exit_code"],
             serde_json::json!(2)
         );
+        let fix_report = failed.with_fix_report();
+        assert_eq!(doctor_process_exit_code(&fix_report), 2);
     }
 
     #[test]
@@ -4078,7 +4215,14 @@ mod tests {
         );
         assert_eq!(
             out["first_commands"][3]["argv"],
-            serde_json::json!(["oraclemcp", "--json", "doctor", "--profile", "<profile>"])
+            serde_json::json!([
+                "oraclemcp",
+                "--json",
+                "doctor",
+                "--online",
+                "--profile",
+                "<profile>"
+            ])
         );
         assert_eq!(
             out["first_commands"][5]["argv"],

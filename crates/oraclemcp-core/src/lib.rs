@@ -95,8 +95,9 @@ pub use dashboard_auth::{
     mint_dashboard_pairing_ticket,
 };
 pub use doctor::{
-    AuthModeClass, CheckResult, CheckStatus, DoctorContext, DoctorReport, classify_auth_mode,
-    run_doctor,
+    AuthModeClass, CheckResult, CheckStatus, DoctorContext, DoctorFixOutcome, DoctorFixPolicy,
+    DoctorFixRefusal, DoctorFixReport, DoctorLevelCaps, DoctorProfileCaps, DoctorReport,
+    classify_auth_mode, run_doctor,
 };
 pub use export::{
     ExportAccess, ExportContents, ExportFormat, ExportHandle, ExportRegistry, export_uri,
@@ -135,9 +136,12 @@ pub use resources::{
 pub use service_app::{
     SERVICE_APP_NAME, SERVICE_CHILD_AUDIT_CHAIN_WRITER, SERVICE_CHILD_DASHBOARD_API,
     SERVICE_CHILD_LANE_REGISTRY_SUPERVISOR, SERVICE_CHILD_METRICS_HEALTH_COLLECTOR,
-    SERVICE_CHILD_TRANSPORT, ServiceAppChild, ServiceAppRuntime, ServiceAppStartError,
-    ServiceAppStopError, ServiceTransport, oraclemcp_service_app_spec, service_app_start_order,
-    start_oraclemcp_service_app, start_oraclemcp_service_app_with_transport,
+    SERVICE_CHILD_TRANSPORT, ServiceAppChild, ServiceAppDoctorSnapshot, ServiceAppRuntime,
+    ServiceAppStartError, ServiceAppStopError, ServiceCancellationDoctorSnapshot,
+    ServiceCapsDoctorSnapshot, ServiceChildDoctorSnapshot, ServiceSpectralDoctorSnapshot,
+    ServiceTaskDoctorSnapshot, ServiceTransport, oraclemcp_service_app_spec,
+    service_app_doctor_snapshot, service_app_start_order, start_oraclemcp_service_app,
+    start_oraclemcp_service_app_with_transport,
 };
 pub use session_tool::{LeaseAcquirer, SessionAction, SessionDeps, oracle_session};
 pub use subscriptions::{PollingSource, SubscribeSource, SubscriptionHub, SubscriptionRegistry};

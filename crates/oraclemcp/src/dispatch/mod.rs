@@ -4788,7 +4788,7 @@ fn connection_info_json(
                 "args": {},
             })];
             let doctor_args = match active_profile.as_deref() {
-                Some(profile) => json!(["--json", "doctor", "--profile", profile]),
+                Some(profile) => json!(["--json", "doctor", "--online", "--profile", profile]),
                 None => json!(["--json", "doctor"]),
             };
             next_actions.push(json!({

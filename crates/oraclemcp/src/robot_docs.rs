@@ -189,9 +189,9 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
                     "argv": ["oraclemcp", "--json", "setup", "--profile", "<profile>"]
                 },
                 {
-                    "intent": "verify the installed binary and local config without MCP",
-                    "command": "oraclemcp --json doctor --profile <profile>",
-                    "argv": ["oraclemcp", "--json", "doctor", "--profile", "<profile>"]
+                    "intent": "verify the live database profile without MCP",
+                    "command": "oraclemcp --json doctor --online --profile <profile>",
+                    "argv": ["oraclemcp", "--json", "doctor", "--online", "--profile", "<profile>"]
                 },
                 {
                     "intent": "verify the MCP client can import the tool list",
@@ -223,9 +223,9 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
                 "argv": ["oraclemcp", "--json", "doctor"]
             },
             {
-                "intent": "run profile-backed diagnostics",
-                "command": "oraclemcp --json doctor --profile <profile>",
-                "argv": ["oraclemcp", "--json", "doctor", "--profile", "<profile>"]
+                "intent": "run live profile-backed diagnostics",
+                "command": "oraclemcp --json doctor --online --profile <profile>",
+                "argv": ["oraclemcp", "--json", "doctor", "--online", "--profile", "<profile>"]
             },
             {
                 "intent": "inspect the MCP tool surface",
@@ -303,7 +303,7 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
         "thin_diagnostics": {
             "driver": "pure-Rust oracledb thin driver; no Oracle Instant Client, ODPI-C, libclntsh, or C toolchain required",
             "offline": "oraclemcp --json doctor checks thin-driver posture, TNS/wallet directory presence, NLS setup, classifier self-test, and custom-tool availability without opening a database",
-            "profile": "oraclemcp --json doctor --profile <profile> adds live connectivity, authentication, role/open-mode, standby, and privilege-tier checks",
+            "profile": "oraclemcp --json doctor --profile <profile> inspects non-secret profile metadata offline; add --online to open the live connection for authentication, role/open-mode, standby, and privilege-tier checks",
             "secret_handling": "doctor and profiles output omit connect strings, usernames, credential_ref values, passwords, proxy identities, wallet passwords, IAM tokens, wallet paths, and server DNs",
             "unsupported_auth": "username/password over TCPS wallet is supported; passwordless external wallet auth, profile-driven OCI IAM token retrieval, and Kerberos/RADIUS auth are returned as structured unsupported diagnostics rather than falling back silently"
         },
@@ -330,8 +330,8 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
                 "argv": ["oraclemcp", "--json", "doctor"]
             },
             {
-                "intent": "profile-backed checks",
-                "argv": ["oraclemcp", "--json", "doctor", "--profile", "<profile>"]
+                "intent": "live profile-backed checks",
+                "argv": ["oraclemcp", "--json", "doctor", "--online", "--profile", "<profile>"]
             },
             {
                 "intent": "MCP tool surface and schema inspection",
@@ -392,7 +392,7 @@ Always-on service
 
 Client smoke tests
 1. oraclemcp --json setup --profile <profile>
-2. oraclemcp --json doctor --profile <profile>
+2. oraclemcp --json doctor --online --profile <profile>
 3. MCP tools/list discovers oracle_capabilities plus the advertised Oracle tools without schema import errors
 4. MCP tools/call oracle_capabilities with empty arguments succeeds
 
@@ -400,7 +400,7 @@ First commands
 - oraclemcp --json setup --profile <profile>
 - oraclemcp --json profiles
 - oraclemcp --json doctor
-- oraclemcp --json doctor --profile <profile>
+- oraclemcp --json doctor --online --profile <profile>
 - oraclemcp --json capabilities
 - oraclemcp --json service install --dry-run --profile <profile>
 - oraclemcp serve --profile <profile> --allow-no-auth
@@ -452,13 +452,13 @@ Diagnostic flow
 2. oraclemcp --json setup --profile <profile>
 3. oraclemcp --json profiles
 4. oraclemcp --json doctor
-5. oraclemcp --json doctor --profile <profile>
+5. oraclemcp --json doctor --online --profile <profile>
 6. oraclemcp --json capabilities
 7. oraclemcp --json service status
 
 Thin diagnostics
 - Offline doctor checks the thin driver posture, optional TNS/wallet directories, canonical NLS setup, classifier self-test, and custom-tool availability without opening a database.
-- Profile doctor adds live connectivity, authentication, role/open-mode, standby, and privilege-tier checks.
+- Profile doctor inspects non-secret metadata offline; add --online for live connectivity, authentication, role/open-mode, standby, and privilege-tier checks.
 - Doctor output omits connect strings, usernames, credential_ref values, passwords, proxy identities, wallet passwords, IAM tokens, wallet paths, and server DNs.
 - Unsupported thin auth/features are explicit diagnostics; the binary never silently falls back to thick mode.
 

@@ -13,13 +13,20 @@ use std::time::Duration;
 
 use asupersync::app::{AppHandle, AppSpec, AppStartError, AppStopError};
 use asupersync::cx::registry::RegistryHandle;
+use asupersync::observability::{
+    CancellationExplanation, TaskInspector, TaskSummaryWire,
+    spectral_health::{
+        EarlyWarningSeverity, HealthClassification, SpectralHealthMonitor, SpectralThresholds,
+    },
+};
 use asupersync::runtime::{RuntimeBuilder, state::RuntimeState};
 use asupersync::supervision::{
     ChildSpec, ChildStart, NameCollisionPolicy, NameRegistrationPolicy, RestartConfig,
     RestartPolicy, StartTieBreak, SupervisionStrategy,
 };
-use asupersync::types::{Budget, RegionId};
+use asupersync::types::{Budget, CancelKind, RegionId};
 use parking_lot::Mutex;
+use serde::Serialize;
 
 use crate::http::{HttpTransportConfig, serve_http_until, serve_https_until};
 use crate::server::OracleMcpServer;
@@ -107,6 +114,258 @@ pub const fn service_app_start_order() -> [ServiceAppChild; 5] {
         ServiceAppChild::DashboardApi,
         ServiceAppChild::Transport,
     ]
+}
+
+/// One service child row in the doctor health snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ServiceChildDoctorSnapshot {
+    /// Stable child name.
+    pub name: &'static str,
+    /// Stable dependency names.
+    pub dependencies: Vec<&'static str>,
+    /// Supervision behavior for this child.
+    pub supervision: &'static str,
+}
+
+/// Compact spectral topology row for `oraclemcp doctor`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ServiceSpectralDoctorSnapshot {
+    /// Health state vocabulary expected by operator surfaces.
+    pub state: &'static str,
+    /// Full asupersync spectral classification rendered for humans.
+    pub classification: String,
+    /// Quantized Fiedler value to avoid unstable floating-point JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fiedler_micro_units: Option<u64>,
+    /// Quantized spectral gap in basis points.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spectral_gap_bps: Option<u16>,
+    /// Number of structural bottleneck nodes.
+    pub bottleneck_count: usize,
+    /// Early-warning severity from the Spectral Health Monitor.
+    pub early_warning: &'static str,
+}
+
+/// TaskInspector summary row for `oraclemcp doctor`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ServiceTaskDoctorSnapshot {
+    /// Stable summary produced through asupersync TaskInspector.
+    pub summary: TaskSummaryWire,
+    /// Non-terminal tasks in the snapshot.
+    pub active_tasks: usize,
+}
+
+/// CancellationExplanation summary row for `oraclemcp doctor`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ServiceCancellationDoctorSnapshot {
+    /// Whether a cancellation chain is currently observed in the snapshot.
+    pub observed: bool,
+    /// asupersync cancellation kind rendered from CancellationExplanation.
+    pub kind: String,
+    /// Optional sanitized cancellation context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Number of propagation hops in the explanation.
+    pub propagation_path_len: usize,
+}
+
+/// Configured/effective service-topology caps surfaced by doctor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ServiceCapsDoctorSnapshot {
+    /// Root AppSpec restart policy.
+    pub restart_policy: &'static str,
+    /// Number of configured service children.
+    pub child_count: usize,
+    /// Maximum restart attempts per restart window for restartable children.
+    pub restart_max: u32,
+    /// Restart window in seconds.
+    pub restart_window_seconds: u64,
+}
+
+/// Read-only service/lane health snapshot for `oraclemcp doctor`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ServiceAppDoctorSnapshot {
+    /// Snapshot producer.
+    pub source: &'static str,
+    /// AppSpec name.
+    pub app: &'static str,
+    /// Configured service children.
+    pub children: Vec<ServiceChildDoctorSnapshot>,
+    /// Spectral Health Monitor summary.
+    pub spectral: ServiceSpectralDoctorSnapshot,
+    /// TaskInspector summary.
+    pub task_inspector: ServiceTaskDoctorSnapshot,
+    /// CancellationExplanation summary.
+    pub cancellation: ServiceCancellationDoctorSnapshot,
+    /// Configured topology caps.
+    pub configured_caps: ServiceCapsDoctorSnapshot,
+    /// Effective topology caps after this binary's static policy.
+    pub effective_caps: ServiceCapsDoctorSnapshot,
+}
+
+fn service_child_supervision_label(child: ServiceAppChild) -> &'static str {
+    match child {
+        ServiceAppChild::AuditChainWriter => "escalate",
+        ServiceAppChild::MetricsHealthCollector
+        | ServiceAppChild::LaneRegistrySupervisor
+        | ServiceAppChild::DashboardApi
+        | ServiceAppChild::Transport => "restart",
+    }
+}
+
+fn service_child_doctor_snapshots() -> Vec<ServiceChildDoctorSnapshot> {
+    service_app_start_order()
+        .into_iter()
+        .map(|child| ServiceChildDoctorSnapshot {
+            name: child.name(),
+            dependencies: child.dependencies().to_vec(),
+            supervision: service_child_supervision_label(child),
+        })
+        .collect()
+}
+
+fn service_dependency_edges(children: &[ServiceChildDoctorSnapshot]) -> Vec<(usize, usize)> {
+    children
+        .iter()
+        .enumerate()
+        .flat_map(|(child_index, child)| {
+            child.dependencies.iter().filter_map(move |dependency| {
+                children
+                    .iter()
+                    .position(|candidate| candidate.name == *dependency)
+                    .map(|dependency_index| (dependency_index, child_index))
+            })
+        })
+        .collect()
+}
+
+fn finite_micro_units(value: f64) -> Option<u64> {
+    if value.is_finite() && value >= 0.0 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Some((value * 1_000_000.0).round().min(u64::MAX as f64) as u64)
+    } else {
+        None
+    }
+}
+
+fn finite_bps(value: f64) -> Option<u16> {
+    if value.is_finite() && value >= 0.0 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Some((value * 10_000.0).round().clamp(0.0, f64::from(u16::MAX)) as u16)
+    } else {
+        None
+    }
+}
+
+fn early_warning_label(severity: EarlyWarningSeverity) -> &'static str {
+    match severity {
+        EarlyWarningSeverity::None => "none",
+        EarlyWarningSeverity::Watch => "watch",
+        EarlyWarningSeverity::Warning => "warning",
+        EarlyWarningSeverity::Critical => "critical",
+    }
+}
+
+fn spectral_state(
+    classification: &HealthClassification,
+    early_warning: EarlyWarningSeverity,
+) -> &'static str {
+    if early_warning != EarlyWarningSeverity::None {
+        return early_warning_label(early_warning);
+    }
+    match classification {
+        HealthClassification::Healthy { .. } => "none",
+        HealthClassification::Degraded { .. } => "watch",
+        HealthClassification::Critical { .. } | HealthClassification::Fragmented { .. } => {
+            "warning"
+        }
+        HealthClassification::Deadlocked => "critical",
+    }
+}
+
+fn service_spectral_snapshot(
+    children: &[ServiceChildDoctorSnapshot],
+) -> ServiceSpectralDoctorSnapshot {
+    let edges = service_dependency_edges(children);
+    let mut monitor = SpectralHealthMonitor::new(SpectralThresholds::default());
+    let report = monitor.analyze(children.len(), &edges);
+    let early_warning = report
+        .bifurcation
+        .as_ref()
+        .map_or(EarlyWarningSeverity::None, |warning| warning.severity);
+    ServiceSpectralDoctorSnapshot {
+        state: spectral_state(&report.classification, early_warning),
+        classification: report.classification.to_string(),
+        fiedler_micro_units: finite_micro_units(report.decomposition.fiedler_value),
+        spectral_gap_bps: finite_bps(report.decomposition.spectral_gap),
+        bottleneck_count: report.bottlenecks.len(),
+        early_warning: early_warning_label(early_warning),
+    }
+}
+
+fn service_caps_snapshot(child_count: usize) -> ServiceCapsDoctorSnapshot {
+    ServiceCapsDoctorSnapshot {
+        restart_policy: "rest_for_one",
+        child_count,
+        restart_max: SERVICE_RESTART_MAX,
+        restart_window_seconds: SERVICE_RESTART_WINDOW.as_secs(),
+    }
+}
+
+/// Build the doctor service/lane health snapshot without touching service files,
+/// Oracle, audit records, or profile configuration.
+#[allow(clippy::arc_with_non_send_sync)]
+pub fn service_app_doctor_snapshot() -> Result<ServiceAppDoctorSnapshot, ServiceAppStartError> {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .map_err(ServiceAppStartError::RuntimeBuild)?;
+
+    // block-on-boundary: one-shot local AppSpec introspection for doctor output.
+    runtime.block_on(async move {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = asupersync::Cx::current().ok_or(ServiceAppStartError::MissingCurrentCx)?;
+        let spec = oraclemcp_service_app_spec(
+            None,
+            dormant_service_child(),
+            dormant_service_child(),
+            dormant_service_child(),
+            dormant_service_child(),
+            dormant_service_child(),
+        );
+        let _handle = spec
+            .start(&mut state, &cx, root)
+            .map_err(ServiceAppStartError::AppStart)?;
+        let inspector = TaskInspector::new(Arc::new(state), None);
+        let summary = TaskSummaryWire::from(inspector.summary());
+        let active_tasks = summary.total_tasks.saturating_sub(summary.completed);
+
+        let cancellation = CancellationExplanation {
+            kind: CancelKind::User,
+            message: Some("no cancellation observed in doctor snapshot".to_owned()),
+            propagation_path: Vec::new(),
+        };
+        let children = service_child_doctor_snapshots();
+        let caps = service_caps_snapshot(children.len());
+        Ok(ServiceAppDoctorSnapshot {
+            source: "local_appspec_introspection",
+            app: SERVICE_APP_NAME,
+            spectral: service_spectral_snapshot(&children),
+            task_inspector: ServiceTaskDoctorSnapshot {
+                summary,
+                active_tasks,
+            },
+            cancellation: ServiceCancellationDoctorSnapshot {
+                observed: false,
+                kind: cancellation.kind.to_string(),
+                message: cancellation.message,
+                propagation_path_len: cancellation.propagation_path.len(),
+            },
+            configured_caps: caps.clone(),
+            effective_caps: caps,
+            children,
+        })
+    })
 }
 
 fn service_child<F>(kind: ServiceAppChild, start: F) -> ChildSpec
@@ -659,6 +918,30 @@ mod tests {
         runtime
             .stop_and_join()
             .expect("service app stops and joins");
+    }
+
+    #[test]
+    fn doctor_snapshot_surfaces_spectral_task_and_cancellation_health() {
+        let snapshot = service_app_doctor_snapshot().expect("doctor snapshot builds");
+
+        assert_eq!(snapshot.app, SERVICE_APP_NAME);
+        assert_eq!(snapshot.children.len(), service_app_start_order().len());
+        assert!(matches!(
+            snapshot.spectral.state,
+            "none" | "watch" | "warning" | "critical"
+        ));
+        assert!(snapshot.task_inspector.summary.total_tasks >= snapshot.children.len());
+        assert_eq!(
+            snapshot.task_inspector.active_tasks,
+            snapshot
+                .task_inspector
+                .summary
+                .total_tasks
+                .saturating_sub(snapshot.task_inspector.summary.completed)
+        );
+        assert!(!snapshot.cancellation.observed);
+        assert_eq!(snapshot.cancellation.kind, "user");
+        assert_eq!(snapshot.configured_caps, snapshot.effective_caps);
     }
 
     #[test]

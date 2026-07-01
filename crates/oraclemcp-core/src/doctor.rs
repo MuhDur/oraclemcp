@@ -25,6 +25,8 @@ use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::service_app::ServiceAppDoctorSnapshot;
+
 /// A single check's outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,6 +112,110 @@ impl CheckResult {
     }
 }
 
+/// Configured/effective level pair for doctor profile-cap reporting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct DoctorLevelCaps {
+    /// Fresh-session default level.
+    pub default_level: OperatingLevel,
+    /// Maximum level this profile can ever reach.
+    pub max_level: OperatingLevel,
+}
+
+/// Non-secret profile authority posture surfaced by `doctor`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DoctorProfileCaps {
+    /// Profile name.
+    pub profile: String,
+    /// Operator-configured profile levels before effective safety clamps.
+    pub configured: DoctorLevelCaps,
+    /// Effective profile levels after protected/standby/read-only clamps.
+    pub effective: DoctorLevelCaps,
+    /// Whether this profile is protected.
+    pub protected: bool,
+    /// Whether config pins this profile as a read-only standby.
+    pub read_only_standby: bool,
+}
+
+/// `doctor --fix` policy summary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DoctorFixPolicy {
+    /// The only write scope `doctor --fix` may ever use.
+    pub write_scope: &'static str,
+    /// Targets `doctor --fix` must never mutate.
+    pub forbidden_targets: Vec<&'static str>,
+    /// Whether every future mutation must have a backup.
+    pub backups_required: bool,
+    /// Whether every future mutation must publish an undo record.
+    pub undo_required: bool,
+    /// Rule-1 posture for local files.
+    pub delete_policy: &'static str,
+}
+
+/// One out-of-scope `doctor --fix` refusal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DoctorFixRefusal {
+    /// Check id that produced this refusal.
+    pub check_id: u8,
+    /// Check name.
+    pub check: String,
+    /// Stable target name.
+    pub target: &'static str,
+    /// Target scope.
+    pub scope: &'static str,
+    /// Why doctor refused to mutate it.
+    pub reason: &'static str,
+}
+
+/// One future mutation row. G8 intentionally emits none for out-of-scope checks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DoctorFixMutation {
+    /// Stable mutation id.
+    pub id: &'static str,
+    /// Service-local target.
+    pub target: &'static str,
+    /// Backup artifact path or token.
+    pub backup: String,
+    /// Undo artifact path or token.
+    pub undo: String,
+}
+
+/// Overall `doctor --fix` outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorFixOutcome {
+    /// No fixable mutation or refusal was produced.
+    Noop,
+    /// One or more blockers remain, but there is no scoped repair plan.
+    UnresolvedFindings,
+    /// One or more findings had fixes, but every candidate was out of scope.
+    RefusedOutOfScope,
+}
+
+/// Machine-readable `doctor --fix` report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DoctorFixReport {
+    /// Whether `--fix` was requested.
+    pub requested: bool,
+    /// High-level outcome.
+    pub outcome: DoctorFixOutcome,
+    /// Process exit code for this fix run.
+    pub exit_code: u8,
+    /// Safety policy applied before any mutation.
+    pub policy: DoctorFixPolicy,
+    /// Per-finding refusals.
+    pub refusals: Vec<DoctorFixRefusal>,
+    /// Performed mutations. Empty until a service-local repair is explicitly wired.
+    pub mutations: Vec<DoctorFixMutation>,
+}
+
+impl DoctorFixReport {
+    /// True when fix mode found any out-of-scope action.
+    #[must_use]
+    pub fn refused(&self) -> bool {
+        !self.refusals.is_empty()
+    }
+}
+
 /// Inputs for a `doctor` run. A `None` connection runs the offline subset.
 #[derive(Default)]
 pub struct DoctorContext<'a> {
@@ -134,6 +240,12 @@ pub struct DoctorContext<'a> {
     pub call_timeout: Option<Duration>,
     /// Whether a proxy / least-privilege connect user is configured (A2).
     pub proxy_user: bool,
+    /// Whether this run was explicitly allowed to open a live connection.
+    pub online: bool,
+    /// Non-secret profile authority posture.
+    pub profile_caps: Option<DoctorProfileCaps>,
+    /// Service/lane health snapshot.
+    pub service_health: Option<ServiceAppDoctorSnapshot>,
     /// Exact setup values that must never appear in doctor output.
     pub sensitive_values: Vec<String>,
 }
@@ -143,6 +255,15 @@ pub struct DoctorContext<'a> {
 pub struct DoctorReport {
     /// All checks, in order.
     pub checks: Vec<CheckResult>,
+    /// Non-secret profile authority posture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_caps: Option<DoctorProfileCaps>,
+    /// Service/lane health snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_health: Option<ServiceAppDoctorSnapshot>,
+    /// `doctor --fix` policy/refusal outcome when requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<DoctorFixReport>,
 }
 
 impl DoctorReport {
@@ -167,11 +288,21 @@ impl DoctorReport {
     /// Machine-readable report with a caller-selected process exit code.
     #[must_use]
     pub fn to_json_with_exit_code(&self, exit_code: i32) -> Value {
-        json!({
+        let mut value = json!({
             "checks": self.checks,
             "ok": !self.any_failed(),
             "exit_code": exit_code,
-        })
+        });
+        if let Some(profile_caps) = &self.profile_caps {
+            value["profile_caps"] = serde_json::to_value(profile_caps).unwrap_or(Value::Null);
+        }
+        if let Some(service_health) = &self.service_health {
+            value["service_health"] = serde_json::to_value(service_health).unwrap_or(Value::Null);
+        }
+        if let Some(fix) = &self.fix {
+            value["fix"] = serde_json::to_value(fix).unwrap_or(Value::Null);
+        }
+        value
     }
 
     /// Human-readable report (one line per check + indented fixes).
@@ -184,6 +315,27 @@ impl DoctorReport {
     #[must_use]
     pub fn to_text_with_exit_code(&self, exit_code: i32) -> String {
         let mut out = String::from("oraclemcp doctor\n");
+        if let Some(profile_caps) = &self.profile_caps {
+            out.push_str(&format!(
+                "profile caps: {} configured default={:?} max={:?}; effective default={:?} max={:?}; protected={}\n",
+                profile_caps.profile,
+                profile_caps.configured.default_level,
+                profile_caps.configured.max_level,
+                profile_caps.effective.default_level,
+                profile_caps.effective.max_level,
+                profile_caps.protected,
+            ));
+        }
+        if let Some(service_health) = &self.service_health {
+            out.push_str(&format!(
+                "service health: spectral={} tasks={} active={} cancelling={} stuck={}\n",
+                service_health.spectral.state,
+                service_health.task_inspector.summary.total_tasks,
+                service_health.task_inspector.active_tasks,
+                service_health.task_inspector.summary.cancelling,
+                service_health.task_inspector.summary.stuck_count,
+            ));
+        }
         for c in &self.checks {
             out.push_str(&format!(
                 "[{}] {}. {} — {}\n",
@@ -196,9 +348,107 @@ impl DoctorReport {
                 out.push_str(&format!("      fix: {fix}\n"));
             }
         }
+        if let Some(fix) = &self.fix {
+            out.push_str(&format!(
+                "fix: {:?} (refusals={}, mutations={}, exit {})\n",
+                fix.outcome,
+                fix.refusals.len(),
+                fix.mutations.len(),
+                fix.exit_code,
+            ));
+        }
         let verdict = if self.any_failed() { "FAILED" } else { "ok" };
         out.push_str(&format!("verdict: {verdict} (exit {exit_code})\n"));
         out
+    }
+
+    /// Attach a `doctor --fix` policy report.
+    #[must_use]
+    pub fn with_fix_report(mut self) -> Self {
+        self.fix = Some(self.plan_fix_report());
+        self
+    }
+
+    /// Build the `doctor --fix` policy report without mutating anything.
+    #[must_use]
+    pub fn plan_fix_report(&self) -> DoctorFixReport {
+        let refusals = self
+            .checks
+            .iter()
+            .filter(|check| {
+                matches!(check.status, CheckStatus::Warn | CheckStatus::Fail) && check.fix.is_some()
+            })
+            .map(fix_refusal_for_check)
+            .collect::<Vec<_>>();
+        let outcome = if refusals.is_empty() {
+            if self.any_failed() {
+                DoctorFixOutcome::UnresolvedFindings
+            } else {
+                DoctorFixOutcome::Noop
+            }
+        } else {
+            DoctorFixOutcome::RefusedOutOfScope
+        };
+        let exit_code = match outcome {
+            DoctorFixOutcome::Noop => 0,
+            DoctorFixOutcome::UnresolvedFindings => 2,
+            DoctorFixOutcome::RefusedOutOfScope => 4,
+        };
+        DoctorFixReport {
+            requested: true,
+            outcome,
+            exit_code,
+            policy: doctor_fix_policy(),
+            refusals,
+            mutations: Vec::new(),
+        }
+    }
+}
+
+fn doctor_fix_policy() -> DoctorFixPolicy {
+    DoctorFixPolicy {
+        write_scope: "service_local_state_only",
+        forbidden_targets: vec![
+            "oracle_database",
+            "audit_hash_chain",
+            "classifier",
+            "profile_max_level",
+        ],
+        backups_required: true,
+        undo_required: true,
+        delete_policy: "quarantine_not_delete",
+    }
+}
+
+fn fix_refusal_for_check(check: &CheckResult) -> DoctorFixRefusal {
+    let (target, scope, reason) = match check.id {
+        3 | 10 | 11 => (
+            "oracle_database",
+            "oracle_database",
+            "doctor --fix never touches Oracle objects, grants, sessions, or connectivity state",
+        ),
+        6 => (
+            "profile_max_level",
+            "profile_config",
+            "doctor --fix never changes a profile max_level; protected ceilings are detect-only",
+        ),
+        8 => (
+            "classifier",
+            "classifier",
+            "doctor --fix never rewrites the classifier; classifier regressions require code review",
+        ),
+        _ => (
+            "operator_config",
+            "operator_config",
+            "doctor --fix is scoped to service-local state; operator-owned config is detect-only",
+        ),
+    };
+    DoctorFixRefusal {
+        check_id: check.id,
+        check: check.name.clone(),
+        target,
+        scope,
+        reason,
     }
 }
 
@@ -236,7 +486,12 @@ pub async fn run_doctor(cx: &Cx, ctx: &DoctorContext<'_>) -> DoctorReport {
         check_write_posture(cx, ctx).await,
         check_call_timeout(ctx),
     ];
-    DoctorReport { checks }
+    DoctorReport {
+        checks,
+        profile_caps: ctx.profile_caps.clone(),
+        service_health: ctx.service_health.clone(),
+        fix: None,
+    }
 }
 
 fn check_oracle_driver() -> CheckResult {
@@ -455,12 +710,16 @@ async fn check_connectivity(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
             .with_oracle_error(error);
     }
     match ctx.conn {
-        None => CheckResult::new(
-            3,
-            "Connectivity",
-            CheckStatus::Skip,
-            "offline — supply a profile/connection to test connectivity + auth",
-        ),
+        None => {
+            let detail = if ctx.online {
+                "online requested, but no profile resolved to a live connection"
+            } else if ctx.profile_caps.is_some() {
+                "offline — rerun with --online --profile <profile> to test connectivity + auth"
+            } else {
+                "offline — rerun with --online and a configured profile to test connectivity + auth"
+            };
+            CheckResult::new(3, "Connectivity", CheckStatus::Skip, detail)
+        }
         Some(conn) => match conn.ping(cx).await {
             Ok(()) => {
                 let detail = ctx.connection_strategy.as_deref().map_or_else(
@@ -1381,6 +1640,78 @@ mod tests {
             report
                 .to_text_with_exit_code(2)
                 .contains("verdict: FAILED (exit 2)")
+        );
+    }
+
+    #[test]
+    fn self_heal_down_never_up_refuses_protected_profile_repair() {
+        let ctx = DoctorContext {
+            protected_profile_writable: true,
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx).with_fix_report();
+        let fix = report.fix.as_ref().expect("fix report");
+
+        assert_eq!(fix.exit_code, 4);
+        assert_eq!(fix.outcome, DoctorFixOutcome::RefusedOutOfScope);
+        assert!(
+            fix.mutations.is_empty(),
+            "fix must not mutate profile state"
+        );
+        assert!(
+            fix.policy.forbidden_targets.contains(&"profile_max_level"),
+            "profile max-level must be a hard forbidden target"
+        );
+        assert!(
+            fix.policy.forbidden_targets.contains(&"audit_hash_chain"),
+            "audit chain is detect-only"
+        );
+        assert!(
+            fix.refusals
+                .iter()
+                .any(|refusal| refusal.target == "profile_max_level"),
+            "{fix:?}"
+        );
+        assert_eq!(report.to_json_with_exit_code(4)["exit_code"], json!(4));
+    }
+
+    #[test]
+    fn fix_policy_refuses_oracle_and_classifier_targets() {
+        let report = DoctorReport {
+            checks: vec![
+                CheckResult::new(
+                    8,
+                    "Classifier self-test",
+                    CheckStatus::Fail,
+                    "classifier regression",
+                )
+                .with_fix("review classifier"),
+                CheckResult::new(
+                    11,
+                    "Write posture",
+                    CheckStatus::Warn,
+                    "principal can write",
+                )
+                .with_fix("tighten grants"),
+            ],
+            profile_caps: None,
+            service_health: None,
+            fix: None,
+        }
+        .with_fix_report();
+        let fix = report.fix.as_ref().expect("fix report");
+
+        assert_eq!(fix.exit_code, 4);
+        assert!(fix.mutations.is_empty());
+        assert!(
+            fix.refusals
+                .iter()
+                .any(|refusal| refusal.target == "classifier")
+        );
+        assert!(
+            fix.refusals
+                .iter()
+                .any(|refusal| refusal.target == "oracle_database")
         );
     }
 

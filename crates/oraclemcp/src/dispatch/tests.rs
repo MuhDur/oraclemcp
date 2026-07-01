@@ -1266,7 +1266,7 @@ fn connection_info_degrades_when_describe_fails() {
         assert_eq!(out["next_actions"][1]["command"], json!("oraclemcp"));
         assert_eq!(
             out["next_actions"][1]["args"],
-            json!(["--json", "doctor", "--profile", "dev"])
+            json!(["--json", "doctor", "--online", "--profile", "dev"])
         );
     }
 }

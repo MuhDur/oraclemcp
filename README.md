@@ -51,13 +51,15 @@ cargo +nightly-2026-05-11 install oraclemcp
 No Oracle Instant Client, ODPI-C library, or C toolchain is required by the
 driver.
 
-Use `oraclemcp --json doctor` to verify the binary and offline setup, and
-`oraclemcp --json doctor --profile <profile>` to add live connectivity,
-authentication, role/open-mode, standby, and privilege checks. Doctor output is
-safe to paste into agent sessions: it omits connect strings, usernames,
-`credential_ref` values, passwords, proxy identities, wallet passwords, IAM
-tokens, wallet paths, and server DNs while keeping
-structured failure classes and ORA codes visible.
+Use `oraclemcp --json doctor` to verify the binary and offline setup,
+`oraclemcp --json doctor --profile <profile>` to inspect non-secret profile
+metadata without resolving secrets, and
+`oraclemcp --json doctor --online --profile <profile>` to add live
+connectivity, authentication, role/open-mode, standby, and privilege checks.
+Doctor output is safe to paste into agent sessions: it omits connect strings,
+usernames, `credential_ref` values, passwords, proxy identities, wallet
+passwords, IAM tokens, wallet paths, and server DNs while keeping structured
+failure classes and ORA codes visible.
 
 Generate generic local setup templates for profiles, wrappers, and MCP client
 snippets:
@@ -128,7 +130,8 @@ oraclemcp --json setup --profile db_ro    # generic onboarding templates
 oraclemcp capabilities               # the advertised tool surface + feature tiers (JSON)
 oraclemcp --json profiles            # configured profile names and non-secret metadata
 oraclemcp doctor                     # offline diagnostics (thin driver, TNS/wallet, classifier, NLS)
-oraclemcp doctor --profile dev_ro    # include live connectivity/auth/role/privilege checks
+oraclemcp doctor --profile dev_ro    # inspect profile metadata offline
+oraclemcp doctor --online --profile dev_ro  # include live connectivity/auth/role/privilege checks
 oraclemcp info                       # build info: version, tools, transports, thin DB
 oraclemcp robot-docs guide           # compact in-binary guide for agents
 oraclemcp --json service install --dry-run --profile db_ro  # preview systemd/launchd/Windows service changes
@@ -423,8 +426,8 @@ The current `oraclemcp` thin adapter fails explicitly for auth/features it
 cannot serve end-to-end safely, such as external wallet auth without
 username/password, OCI IAM database-token connect, and Kerberos/RADIUS auth.
 These appear as structured unsupported diagnostics in
-`oraclemcp doctor --profile <profile>` and MCP error envelopes; the binary does
-not silently fall back to thick mode.
+`oraclemcp doctor --online --profile <profile>` and MCP error envelopes; the
+binary does not silently fall back to thick mode.
 
 #### OCI IAM database-token auth
 
@@ -841,13 +844,15 @@ DELETE ANY TABLE`, `CREATE/ALTER ANY PROCEDURE`, `ALTER SYSTEM`, …). For a
 read-write profile, grant only the specific object DML/DDL the agent needs, and
 keep the profile `max_level` no higher than that work requires.
 
-`oraclemcp doctor --profile <p>` includes a **Write posture** check (11): with a
-live connection it reads the session's own `SESSION_PRIVS` and reports a
-read-only posture when the principal holds no write-implying system privilege, or
-**warns** (naming the offending privileges) when it can write. The same check
-reports the supported TCPS wallet modes — auto-login `cwallet.sso`, unencrypted
-`ewallet.pem`, and password-protected `ewallet.p12` (via `wallet_password` /
-`wallet_password_ref`) are all supported.
+`oraclemcp doctor --online --profile <p>` includes a **Write posture** check
+(11): with a live connection it reads the session's own `SESSION_PRIVS` and
+reports a read-only posture when the principal holds no write-implying system
+privilege, or **warns** (naming the offending privileges) when it can write. The
+same check reports the supported TCPS wallet modes — auto-login `cwallet.sso`,
+unencrypted `ewallet.pem`, and password-protected `ewallet.p12` (via
+`wallet_password` / `wallet_password_ref`) are all supported. `doctor --fix`
+never changes Oracle, the audit hash-chain, the SQL classifier, or a profile
+`max_level`; those findings are detect-only and refused with exit 4.
 
 ## Architecture
 
