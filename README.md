@@ -131,10 +131,21 @@ oraclemcp doctor                     # offline diagnostics (thin driver, TNS/wal
 oraclemcp doctor --profile dev_ro    # include live connectivity/auth/role/privilege checks
 oraclemcp info                       # build info: version, tools, transports, thin DB
 oraclemcp robot-docs guide           # compact in-binary guide for agents
+oraclemcp --json service install --dry-run --profile db_ro  # preview systemd/launchd/Windows service changes
+oraclemcp service install --yes --profile db_ro              # install the persistent local service
+oraclemcp --json service status       # inspect service-manager state
+oraclemcp --json service logs         # inspect recent service logs
 ```
 
 `--json` is a visible alias for `--robot-json` and keeps stdout as a single
 machine-readable JSON object.
+
+`oraclemcp service install` targets the platform user service manager: systemd
+`--user` on Linux, launchd on macOS, and Windows services on Windows. Mutating
+service operations (`install`, `uninstall`, `restart`) require `--yes`;
+`--dry-run` emits the exact file and command plan without changing the host.
+Streamable HTTP auth rules are unchanged for service mode: configure OAuth or
+mTLS, or pass `--allow-no-auth` only for intentional local development.
 
 The Streamable HTTP transport (`--listen`) fails closed. It starts only when
 OAuth bearer enforcement is configured or `--allow-no-auth` is supplied, and it

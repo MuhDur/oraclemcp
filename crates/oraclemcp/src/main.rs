@@ -21,6 +21,7 @@
 
 mod readiness;
 mod robot_docs;
+mod service_lifecycle;
 
 use std::collections::HashSet;
 use std::fs;
@@ -63,6 +64,10 @@ use oraclemcp_db::{
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel, SessionLevelState};
 use oraclemcp_telemetry::{HealthState, Metrics, OtlpConfig};
+use service_lifecycle::{
+    ServiceCommand as ServiceLifecycleCommand, ServiceInstallOptions, ServiceLogsOptions,
+    ServiceMutationOptions, ServiceReadOptions,
+};
 
 /// Whether this build includes live Oracle connectivity.
 const LIVE_DB: bool = true;
@@ -135,6 +140,11 @@ enum Command {
     Profiles,
     /// Print the capabilities report (tools, level, feature tiers) as JSON.
     Capabilities,
+    /// Install and operate the persistent local service.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCliCommand,
+    },
     /// Print an agent-oriented usage guide from the binary itself.
     #[command(name = "robot-docs", alias = "robot_docs")]
     RobotDocs {
@@ -188,6 +198,75 @@ enum AuditCommand {
         #[arg(long)]
         key_id: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum ServiceCliCommand {
+    /// Install and start the persistent local service.
+    Install(ServiceInstallCliArgs),
+    /// Stop and unregister the persistent local service.
+    Uninstall(ServiceMutationCliArgs),
+    /// Report service-manager state.
+    Status(ServiceReadCliArgs),
+    /// Print recent service logs.
+    Logs(ServiceLogsCliArgs),
+    /// Restart the persistent local service.
+    Restart(ServiceMutationCliArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct ServiceInstallCliArgs {
+    /// Service name / label. Keep this stable; it determines the unit/plist/service id.
+    #[arg(long, default_value = "oraclemcp")]
+    name: String,
+    /// Local HTTP listener for the service's `serve --listen` command.
+    #[arg(long, default_value = "127.0.0.1:7070")]
+    listen: String,
+    /// Connect using this named profile from the loaded config.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Start HTTP without OAuth/mTLS (local development only).
+    #[arg(long)]
+    allow_no_auth: bool,
+    /// Do not run the optional Linux `loginctl enable-linger <user>` step.
+    #[arg(long)]
+    skip_linger: bool,
+    /// Execute the service-manager changes. Omit and use --dry-run to inspect safely.
+    #[arg(long)]
+    yes: bool,
+    /// Print the service-manager plan without writing files or running commands.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+struct ServiceMutationCliArgs {
+    /// Service name / label.
+    #[arg(long, default_value = "oraclemcp")]
+    name: String,
+    /// Execute the service-manager changes. Omit and use --dry-run to inspect safely.
+    #[arg(long)]
+    yes: bool,
+    /// Print the service-manager plan without writing files or running commands.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+struct ServiceReadCliArgs {
+    /// Service name / label.
+    #[arg(long, default_value = "oraclemcp")]
+    name: String,
+}
+
+#[derive(Args, Debug, Clone)]
+struct ServiceLogsCliArgs {
+    /// Service name / label.
+    #[arg(long, default_value = "oraclemcp")]
+    name: String,
+    /// Number of recent log lines/events to request.
+    #[arg(long, default_value_t = 100)]
+    lines: u16,
 }
 
 #[derive(Args, Debug, Default)]
@@ -273,6 +352,7 @@ fn main() -> ExitCode {
         Command::Doctor { profile } => run_doctor_cmd(robot_json, profile),
         Command::Profiles => run_profiles(robot_json),
         Command::Capabilities => run_capabilities(robot_json),
+        Command::Service { command } => run_service_cmd(robot_json, command),
         Command::RobotDocs { command } => match command {
             None | Some(RobotDocsCommand::Guide) => run_robot_docs_guide(robot_json),
         },
@@ -2380,6 +2460,70 @@ fn run_capabilities(robot_json: bool) -> ExitCode {
     stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
 }
 
+fn run_service_cmd(robot_json: bool, command: ServiceCliCommand) -> ExitCode {
+    let command = match command {
+        ServiceCliCommand::Install(args) => {
+            ServiceLifecycleCommand::Install(ServiceInstallOptions {
+                name: args.name,
+                listen: args.listen,
+                profile: args.profile,
+                allow_no_auth: args.allow_no_auth,
+                skip_linger: args.skip_linger,
+                yes: args.yes,
+                dry_run: args.dry_run,
+            })
+        }
+        ServiceCliCommand::Uninstall(args) => {
+            ServiceLifecycleCommand::Uninstall(ServiceMutationOptions {
+                name: args.name,
+                yes: args.yes,
+                dry_run: args.dry_run,
+            })
+        }
+        ServiceCliCommand::Status(args) => {
+            ServiceLifecycleCommand::Status(ServiceReadOptions { name: args.name })
+        }
+        ServiceCliCommand::Logs(args) => ServiceLifecycleCommand::Logs(ServiceLogsOptions {
+            name: args.name,
+            lines: args.lines,
+        }),
+        ServiceCliCommand::Restart(args) => {
+            ServiceLifecycleCommand::Restart(ServiceMutationOptions {
+                name: args.name,
+                yes: args.yes,
+                dry_run: args.dry_run,
+            })
+        }
+    };
+
+    match service_lifecycle::run_service_command(command) {
+        Ok(result) => {
+            let output = if robot_json {
+                serde_json::to_string(&result.payload).unwrap()
+            } else {
+                result.text
+            };
+            stdout_exit(write_stdout_line(&output), ExitCode::from(result.exit_code))
+        }
+        Err(e) => {
+            if robot_json {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "kind": "error",
+                        "code": e.code,
+                        "message": e.message,
+                        "exit_code": e.exit_code,
+                    })
+                );
+            } else {
+                eprintln!("oraclemcp service: {}", e.message);
+            }
+            ExitCode::from(e.exit_code)
+        }
+    }
+}
+
 fn run_robot_docs_guide(robot_json: bool) -> ExitCode {
     if robot_json {
         let output = serde_json::to_string(&robot_docs::robot_docs_guide_json()).unwrap();
@@ -3537,6 +3681,74 @@ mod tests {
     }
 
     #[test]
+    fn service_commands_parse() {
+        let install = Cli::try_parse_from([
+            "oraclemcp",
+            "--json",
+            "service",
+            "install",
+            "--dry-run",
+            "--listen",
+            "127.0.0.1:7070",
+            "--profile",
+            "dev_ro",
+            "--allow-no-auth",
+            "--skip-linger",
+        ])
+        .expect("parse service install");
+        assert!(install.robot_json);
+        assert!(matches!(
+            install.command,
+            Some(Command::Service {
+                command: ServiceCliCommand::Install(ServiceInstallCliArgs {
+                    ref listen,
+                    ref profile,
+                    allow_no_auth: true,
+                    skip_linger: true,
+                    dry_run: true,
+                    ..
+                })
+            }) if listen == "127.0.0.1:7070" && profile.as_deref() == Some("dev_ro")
+        ));
+
+        let uninstall = Cli::try_parse_from(["oraclemcp", "service", "uninstall", "--yes"])
+            .expect("parse service uninstall");
+        assert!(matches!(
+            uninstall.command,
+            Some(Command::Service {
+                command: ServiceCliCommand::Uninstall(ServiceMutationCliArgs { yes: true, .. })
+            })
+        ));
+
+        let status =
+            Cli::try_parse_from(["oraclemcp", "service", "status"]).expect("parse service status");
+        assert!(matches!(
+            status.command,
+            Some(Command::Service {
+                command: ServiceCliCommand::Status(ServiceReadCliArgs { .. })
+            })
+        ));
+
+        let logs = Cli::try_parse_from(["oraclemcp", "service", "logs", "--lines", "25"])
+            .expect("parse service logs");
+        assert!(matches!(
+            logs.command,
+            Some(Command::Service {
+                command: ServiceCliCommand::Logs(ServiceLogsCliArgs { lines: 25, .. })
+            })
+        ));
+
+        let restart = Cli::try_parse_from(["oraclemcp", "service", "restart", "--dry-run"])
+            .expect("parse service restart");
+        assert!(matches!(
+            restart.command,
+            Some(Command::Service {
+                command: ServiceCliCommand::Restart(ServiceMutationCliArgs { dry_run: true, .. })
+            })
+        ));
+    }
+
+    #[test]
     fn robot_docs_guide_is_available_with_or_without_guide_subcommand() {
         let bare = Cli::try_parse_from(["oraclemcp", "robot-docs"]).expect("parse");
         assert!(matches!(
@@ -3569,6 +3781,9 @@ mod tests {
         );
         assert!(text.contains("Client smoke tests"));
         assert!(text.contains("oraclemcp --json setup --profile <profile>"));
+        assert!(text.contains("Always-on service"));
+        assert!(text.contains("oraclemcp --json service install --dry-run --profile <profile>"));
+        assert!(text.contains("oraclemcp service install --yes --profile <profile>"));
         assert!(text.contains("Thin diagnostics"));
         assert!(text.contains("does not need Oracle Instant Client"));
         assert!(text.contains("Result materialization"));
@@ -3607,6 +3822,10 @@ mod tests {
             serde_json::json!(["oraclemcp", "--json", "capabilities"])
         );
         assert_eq!(
+            out["diagnostic_flow"][6]["argv"],
+            serde_json::json!(["oraclemcp", "--json", "service", "status"])
+        );
+        assert_eq!(
             out["first_commands"][0]["argv"],
             serde_json::json!(["oraclemcp", "--json", "setup", "--profile", "<profile>"])
         );
@@ -3617,6 +3836,22 @@ mod tests {
         assert_eq!(
             out["first_commands"][3]["argv"],
             serde_json::json!(["oraclemcp", "--json", "doctor", "--profile", "<profile>"])
+        );
+        assert_eq!(
+            out["first_commands"][5]["argv"],
+            serde_json::json!([
+                "oraclemcp",
+                "--json",
+                "service",
+                "install",
+                "--dry-run",
+                "--profile",
+                "<profile>"
+            ])
+        );
+        assert_eq!(
+            out["client_setup"]["service"]["status"]["argv"],
+            serde_json::json!(["oraclemcp", "--json", "service", "status"])
         );
         assert_eq!(
             out["safety_model"]["levels"],

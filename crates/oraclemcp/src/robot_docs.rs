@@ -159,6 +159,29 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
                     "If the client cannot send an init token, keep the server local and use --allow-no-auth intentionally."
                 ]
             },
+            "service": {
+                "dry_run": {
+                    "command": "oraclemcp --json service install --dry-run --profile <profile>",
+                    "argv": ["oraclemcp", "--json", "service", "install", "--dry-run", "--profile", "<profile>"]
+                },
+                "install": {
+                    "command": "oraclemcp service install --yes --profile <profile>",
+                    "argv": ["oraclemcp", "service", "install", "--yes", "--profile", "<profile>"]
+                },
+                "status": {
+                    "command": "oraclemcp --json service status",
+                    "argv": ["oraclemcp", "--json", "service", "status"]
+                },
+                "logs": {
+                    "command": "oraclemcp --json service logs",
+                    "argv": ["oraclemcp", "--json", "service", "logs"]
+                },
+                "notes": [
+                    "Use service install --dry-run before --yes; install/uninstall/restart deliberately require --yes.",
+                    "The service command writes the platform user service definition for systemd --user, launchd, or Windows services.",
+                    "Streamable HTTP auth rules are unchanged: configure OAuth or mTLS, or use --allow-no-auth only for intentional local development."
+                ]
+            },
             "smoke_tests": [
                 {
                     "intent": "generate generic local setup templates without reading private config",
@@ -208,6 +231,11 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
                 "intent": "inspect the MCP tool surface",
                 "command": "oraclemcp --json capabilities",
                 "argv": ["oraclemcp", "--json", "capabilities"]
+            },
+            {
+                "intent": "preview the always-on service manager changes without mutating the host",
+                "command": "oraclemcp --json service install --dry-run --profile <profile>",
+                "argv": ["oraclemcp", "--json", "service", "install", "--dry-run", "--profile", "<profile>"]
             },
             {
                 "intent": "start stdio MCP for a local agent",
@@ -308,6 +336,10 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
             {
                 "intent": "MCP tool surface and schema inspection",
                 "argv": ["oraclemcp", "--json", "capabilities"]
+            },
+            {
+                "intent": "always-on service status",
+                "argv": ["oraclemcp", "--json", "service", "status"]
             }
         ],
         "agent_rules": [
@@ -319,6 +351,7 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
             "Treat confirmation tokens as process-local preview tokens; regenerate them after restarting the server.",
             "Never assume DDL can be rollback-previewed.",
             "Treat profile max_level as the hard ceiling for the running server.",
+            "Preview service lifecycle changes with oraclemcp --json service install --dry-run before using --yes.",
             "Keep environment-specific tools, names, identities, and connection details in config."
         ],
         "exit_codes": [
@@ -347,6 +380,16 @@ Client setup
 - If Oracle Net files need TNS_ADMIN, point every MCP client at the same small wrapper script.
 - After replacing the binary or wrapper, restart or reconnect each MCP client so it imports the fresh tool schema.
 
+Always-on service
+- Preview host changes first: oraclemcp --json service install --dry-run --profile <profile>
+- Install only with explicit consent: oraclemcp service install --yes --profile <profile>
+- Check state: oraclemcp --json service status
+- Read logs: oraclemcp --json service logs
+- Restart: oraclemcp service restart --yes
+- Uninstall: oraclemcp service uninstall --yes
+- The service command targets the platform user service manager: systemd --user on Linux, launchd on macOS, and Windows services on Windows.
+- Streamable HTTP auth rules are unchanged: configure OAuth or mTLS, or use --allow-no-auth only for intentional local development.
+
 Client smoke tests
 1. oraclemcp --json setup --profile <profile>
 2. oraclemcp --json doctor --profile <profile>
@@ -359,6 +402,7 @@ First commands
 - oraclemcp --json doctor
 - oraclemcp --json doctor --profile <profile>
 - oraclemcp --json capabilities
+- oraclemcp --json service install --dry-run --profile <profile>
 - oraclemcp serve --profile <profile> --allow-no-auth
 
 MCP read workflow
@@ -410,6 +454,7 @@ Diagnostic flow
 4. oraclemcp --json doctor
 5. oraclemcp --json doctor --profile <profile>
 6. oraclemcp --json capabilities
+7. oraclemcp --json service status
 
 Thin diagnostics
 - Offline doctor checks the thin driver posture, optional TNS/wallet directories, canonical NLS setup, classifier self-test, and custom-tool availability without opening a database.
@@ -430,6 +475,7 @@ Agent rules
 - deploy_ddl accepts name and wait_seconds for compatibility; the generic core executes synchronously and returns those fields.
 - Never assume DDL can be rollback-previewed.
 - Treat profile max_level as the hard ceiling for the running server.
+- Preview service lifecycle changes with oraclemcp --json service install --dry-run before using --yes.
 - Keep environment-specific tools, names, identities, and connection details in config.
 "#
 }
