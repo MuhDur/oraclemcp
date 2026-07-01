@@ -32,8 +32,8 @@ use crate::admission::{AdmissionController, AdmissionPermit, DEFAULT_RETRY_AFTER
 use crate::http::{HttpLaneBinding, HttpLaneSnapshot, HttpSessionLifecycle};
 use crate::operator_protocol::operator_subject_id_hash;
 use crate::server::{
-    DispatchCloseReason, DispatchContext, DispatchFuture, DispatchOutcome, OwnedDispatchContext,
-    ToolDispatch,
+    DispatchCloseReason, DispatchContext, DispatchFuture, DispatchOutcome, McpSurfaceDetail,
+    McpSurfaceFuture, McpSurfaceOutcome, OwnedDispatchContext, ToolDispatch,
 };
 
 /// Default number of queued dispatch commands accepted by one lane.
@@ -165,6 +165,11 @@ enum LaneCommand {
         name: String,
         args: Value,
         reply: oneshot::Sender<DispatchOutcome>,
+    },
+    SurfaceState {
+        context: OwnedDispatchContext,
+        detail: McpSurfaceDetail,
+        reply: oneshot::Sender<McpSurfaceOutcome>,
     },
     Close {
         reason: DispatchCloseReason,
@@ -442,6 +447,58 @@ impl ToolDispatch for LaneRuntime {
             }
         })
     }
+
+    fn mcp_surface_state<'a>(
+        &'a self,
+        cx: &'a Cx,
+        context: DispatchContext<'a>,
+        detail: McpSurfaceDetail,
+    ) -> McpSurfaceFuture<'a> {
+        Box::pin(async move {
+            if cx.checkpoint().is_err() {
+                return Outcome::Cancelled(cancel_reason_from_cx(
+                    cx,
+                    "dispatch lane surface-state send cancelled before admission",
+                ));
+            }
+            let sender = match self.sender() {
+                Ok(sender) => sender,
+                Err(_) if self.status() == LaneRuntimeStatus::Quarantined => {
+                    return Outcome::Panicked(lane_panic_payload(self.name()));
+                }
+                Err(err) => return Outcome::Err(err),
+            };
+            let (reply_tx, mut reply_rx) = oneshot::channel();
+            let lane_generation = self.generation();
+            let context = context.with_lane_identity(self.name(), lane_generation);
+            let command = LaneCommand::SurfaceState {
+                context: context.to_owned_context(),
+                detail,
+                reply: reply_tx,
+            };
+            let permit = match sender.try_reserve() {
+                Ok(permit) => permit,
+                Err(error) => return lane_send_error_surface_outcome(self.name(), error, cx),
+            };
+            if let Err(error) = permit.try_send(command) {
+                return lane_send_error_surface_outcome(self.name(), error, cx);
+            }
+            match reply_rx.recv(cx).await {
+                Ok(outcome) => outcome,
+                Err(oneshot::RecvError::Cancelled) => Outcome::Cancelled(cancel_reason_from_cx(
+                    cx,
+                    "dispatch lane surface-state receive cancelled before reply",
+                )),
+                Err(oneshot::RecvError::Closed) => {
+                    Outcome::Panicked(lane_panic_payload(self.name()))
+                }
+                Err(_) => Outcome::Err(ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    format!("dispatch lane {} stopped before replying", self.name()),
+                )),
+            }
+        })
+    }
 }
 
 /// Guard for stateful HTTP lane dispatch.
@@ -663,6 +720,18 @@ impl ToolDispatch for StatefulLaneDispatch {
             lane.dispatch(cx, context, name, args).await
         })
     }
+
+    fn mcp_surface_state<'a>(
+        &'a self,
+        cx: &'a Cx,
+        context: DispatchContext<'a>,
+        detail: McpSurfaceDetail,
+    ) -> McpSurfaceFuture<'a> {
+        Box::pin(async move {
+            let lane = self.resolve_lane(cx, context)?;
+            lane.mcp_surface_state(cx, context, detail).await
+        })
+    }
 }
 
 fn lease_required() -> ErrorEnvelope {
@@ -697,6 +766,20 @@ fn lane_send_error_outcome<T>(name: &str, error: SendError<T>, cx: &Cx) -> Dispa
         SendError::Cancelled(_) => Outcome::Cancelled(cancel_reason_from_cx(
             cx,
             "dispatch lane send cancelled before admission",
+        )),
+        other => Outcome::Err(lane_send_error(name, other)),
+    }
+}
+
+fn lane_send_error_surface_outcome<T>(
+    name: &str,
+    error: SendError<T>,
+    cx: &Cx,
+) -> McpSurfaceOutcome {
+    match error {
+        SendError::Cancelled(_) => Outcome::Cancelled(cancel_reason_from_cx(
+            cx,
+            "dispatch lane surface-state send cancelled before admission",
         )),
         other => Outcome::Err(lane_send_error(name, other)),
     }
@@ -831,6 +914,28 @@ async fn run_lane_loop_with_factory(
                     .as_ref()
                     .expect("dispatcher initialized above")
                     .dispatch(&cx, borrowed_context, name.as_str(), args)
+                    .await;
+                let _ = reply.send_blocking(result);
+            }
+            LaneCommand::SurfaceState {
+                context,
+                detail,
+                reply,
+            } => {
+                if dispatcher.is_none() {
+                    match factory(&cx, &lane_context).await {
+                        Ok(created) => dispatcher = Some(created),
+                        Err(err) => {
+                            let _ = reply.send_blocking(Outcome::Err(err));
+                            continue;
+                        }
+                    }
+                }
+                let borrowed_context = context.as_dispatch_context();
+                let result = dispatcher
+                    .as_ref()
+                    .expect("dispatcher initialized above")
+                    .mcp_surface_state(&cx, borrowed_context, detail)
                     .await;
                 let _ = reply.send_blocking(result);
             }

@@ -17,11 +17,14 @@ use std::sync::Arc;
 use asupersync::Cx;
 use oraclemcp::dispatch::OracleDispatcher;
 use oraclemcp::registry::{capabilities, tool_names, tool_registry};
-use oraclemcp_core::{CAPABILITIES_TOOL, OracleMcpServer, StdioAuthPolicy};
+use oraclemcp_core::{
+    CAPABILITIES_TOOL, DispatchContext, OracleMcpServer, ScopeGrant, StdioAuthPolicy,
+};
 use oraclemcp_db::{
     DbError, OracleBackend, OracleBind, OracleCell, OracleConnection, OracleConnectionInfo,
     OracleRow,
 };
+use oraclemcp_guard::{OperatingLevel, SessionLevelState};
 use serde_json::{Value, json};
 
 /// A driver-free mock whose every query fails with a classifiable ORA- error,
@@ -106,14 +109,58 @@ impl OracleConnection for SuccessfulQueryMock {
 
 /// Build the real server surface over the given mock connection.
 fn server_over(conn: Box<dyn OracleConnection>) -> OracleMcpServer {
+    server_over_with_dispatch(Arc::new(OracleDispatcher::new(conn)))
+}
+
+fn server_over_with_level(
+    conn: Box<dyn OracleConnection>,
+    level: SessionLevelState,
+) -> OracleMcpServer {
+    server_over_with_dispatch(Arc::new(OracleDispatcher::new_with_profile_level(
+        conn,
+        Some("test_profile".to_owned()),
+        level,
+    )))
+}
+
+fn server_over_with_dispatch(dispatcher: Arc<dyn oraclemcp_core::ToolDispatch>) -> OracleMcpServer {
     let registry = tool_registry();
     let caps = capabilities("0.1.0", true, false);
-    OracleMcpServer::new(
-        "0.1.0",
-        registry,
-        caps,
-        Arc::new(OracleDispatcher::new(conn)),
-    )
+    OracleMcpServer::new("0.1.0", registry, caps, dispatcher)
+}
+
+fn elevated_ddl_level() -> SessionLevelState {
+    let mut level = SessionLevelState::new(OperatingLevel::Ddl, false);
+    level
+        .set_current_level(OperatingLevel::Ddl)
+        .expect("test level can be raised within ceiling");
+    level
+}
+
+fn read_only_hidden_tools() -> &'static [&'static str] {
+    &[
+        "oracle_execute",
+        "oracle_compile_object",
+        "oracle_create_or_replace",
+        "oracle_patch_source",
+        "oracle_explain_plan",
+        "enable_writes",
+        "disable_writes",
+        "execute_approved",
+        "compile_object",
+        "compile_with_warnings",
+        "create_or_replace",
+        "patch_package",
+        "patch_view",
+        "deploy_ddl",
+    ]
+}
+
+fn find_tool<'a>(catalog: &'a [Value], name: &str) -> &'a Value {
+    catalog
+        .iter()
+        .find(|tool| tool["name"] == json!(name))
+        .unwrap_or_else(|| panic!("{name} advertised"))
 }
 
 /// One newline-delimited JSON-RPC request frame.
@@ -220,7 +267,7 @@ fn initialize_completes_and_advertises_the_server() {
 }
 
 #[test]
-fn tools_list_advertises_registry_tools_plus_capabilities() {
+fn tools_list_reflects_the_calling_session_level() {
     let list_req = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
     let replies = run_session(server_over(Box::new(FailingMock)), vec![list_req]);
     let list = replies
@@ -233,10 +280,17 @@ fn tools_list_advertises_registry_tools_plus_capabilities() {
 
     let registry_tools = tool_names();
     for name in &registry_tools {
-        assert!(
-            names.contains(name),
-            "tools/list missing `{name}`: {names:?}"
-        );
+        if read_only_hidden_tools().contains(name) {
+            assert!(
+                !names.contains(name),
+                "read-only tools/list must hide `{name}`: {names:?}"
+            );
+        } else {
+            assert!(
+                names.contains(name),
+                "tools/list missing `{name}`: {names:?}"
+            );
+        }
     }
     assert!(
         names.contains(&CAPABILITIES_TOOL),
@@ -244,8 +298,8 @@ fn tools_list_advertises_registry_tools_plus_capabilities() {
     );
     assert_eq!(
         names.len(),
-        registry_tools.len() + 1,
-        "registry tools + oracle_capabilities, got {names:?}"
+        registry_tools.len() + 1 - read_only_hidden_tools().len(),
+        "read-only registry tools + oracle_capabilities, got {names:?}"
     );
     // oracle_capabilities appears exactly once (no dup with the registry).
     assert_eq!(
@@ -297,6 +351,143 @@ fn tools_list_advertises_registry_tools_plus_capabilities() {
         }
     }
 
+    for name in ["oracle_query", "query"] {
+        let output_schema = find_tool(tools, name)
+            .get("outputSchema")
+            .unwrap_or_else(|| panic!("{name} must advertise outputSchema"));
+        assert_eq!(output_schema["type"], json!("object"));
+        // E3: the inline-page and export arms share one output schema; only
+        // columns + row_count are always required, while rows/truncated/
+        // total_bytes (inline) and export/resource_link (export) are optional.
+        assert_eq!(output_schema["required"], json!(["columns", "row_count"]));
+        for field in [
+            "rows",
+            "truncated",
+            "total_bytes",
+            "export",
+            "resource_link",
+        ] {
+            assert!(
+                output_schema["properties"].get(field).is_some(),
+                "{name} outputSchema must document the {field} field"
+            );
+        }
+        assert_eq!(
+            output_schema["properties"]["rows"]["items"]["additionalProperties"]["oneOf"][0]["type"],
+            json!("string"),
+            "{name} outputSchema must preserve NUMBER-as-string by default"
+        );
+    }
+
+    let elevated = run_session(
+        server_over_with_level(Box::new(FailingMock), elevated_ddl_level()),
+        vec![json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })],
+    );
+    let elevated_tools = elevated
+        .iter()
+        .find(|r| r["id"] == json!(2))
+        .expect("elevated tools/list reply")["result"]["tools"]
+        .as_array()
+        .expect("elevated tools array");
+    let elevated_names: Vec<&str> = elevated_tools
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for name in [
+        "oracle_execute",
+        "oracle_compile_object",
+        "oracle_create_or_replace",
+        "oracle_patch_source",
+        "oracle_explain_plan",
+        "deploy_ddl",
+    ] {
+        assert!(
+            elevated_names.contains(&name),
+            "elevated tools/list must advertise `{name}`: {elevated_names:?}"
+        );
+    }
+    assert!(
+        find_tool(elevated_tools, "oracle_execute")
+            .get("outputSchema")
+            .is_none(),
+        "oracle_execute must not advertise the query/explain outputSchema"
+    );
+    assert_eq!(
+        find_tool(elevated_tools, "oracle_explain_plan")["outputSchema"]["properties"]["diagnostic_write"]
+            ["properties"]["required_level"]["enum"],
+        json!(["READ_WRITE"])
+    );
+}
+
+#[test]
+fn tools_list_honors_request_scope_ceiling() {
+    let server = server_over_with_level(Box::new(FailingMock), elevated_ddl_level());
+    let grant = ScopeGrant(vec!["oracle:read".to_owned()]);
+    let reply = server
+        .handle_jsonrpc_request_with_context(
+            json!({
+                "jsonrpc": "2.0",
+                "id": "scoped-tools",
+                "method": "tools/list"
+            }),
+            Some(&StdioAuthPolicy::Disabled),
+            DispatchContext::with_scope_grant(&grant),
+        )
+        .expect("tools/list reply");
+    let tools = reply["result"]["tools"].as_array().expect("tools array");
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name"))
+        .collect();
+    assert!(names.contains(&"oracle_query"));
+    for hidden in read_only_hidden_tools() {
+        assert!(
+            !names.contains(hidden),
+            "oracle:read scope must hide `{hidden}` despite a DDL-capable profile"
+        );
+    }
+}
+
+#[test]
+fn tools_list_static_dispatchers_keep_the_full_registry() {
+    struct StaticDispatch;
+    impl oraclemcp_core::ToolDispatch for StaticDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: oraclemcp_core::DispatchContext<'a>,
+            name: &'a str,
+            _args: Value,
+        ) -> oraclemcp_core::DispatchFuture<'a> {
+            Box::pin(async move { asupersync::Outcome::Ok(json!({ "tool": name })) })
+        }
+    }
+    let list_req = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+    let replies = run_session(
+        server_over_with_dispatch(Arc::new(StaticDispatch)),
+        vec![list_req],
+    );
+    let list = replies
+        .iter()
+        .find(|r| r["id"] == json!(2))
+        .expect("tools/list reply present");
+    let tools = list["result"]["tools"].as_array().expect("tools array");
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    for name in tool_names() {
+        assert!(names.contains(&name), "static list missing `{name}`");
+    }
+    assert_eq!(names.len(), tool_names().len() + 1);
+}
+
+#[test]
+fn tools_list_schema_contract_is_preserved_for_visible_tools() {
+    let list_req = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+    let replies = run_session(server_over(Box::new(FailingMock)), vec![list_req]);
+    let list = replies
+        .iter()
+        .find(|r| r["id"] == json!(2))
+        .expect("tools/list reply present");
+    let tools = list["result"]["tools"].as_array().expect("tools array");
     let tool = |name: &str| {
         tools
             .iter()
@@ -330,15 +521,60 @@ fn tools_list_advertises_registry_tools_plus_capabilities() {
             "{name} outputSchema must preserve NUMBER-as-string by default"
         );
     }
-    assert!(
-        tool("oracle_execute").get("outputSchema").is_none(),
-        "oracle_execute must not advertise the query/explain outputSchema"
+}
+
+#[test]
+fn discovery_resources_reflect_the_calling_session_level() {
+    let replies = run_session(
+        server_over(Box::new(FailingMock)),
+        vec![
+            json!({
+                "jsonrpc": "2.0",
+                "id": "tools-resource",
+                "method": "resources/read",
+                "params": { "uri": "oracle://tools" }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "caps-resource",
+                "method": "resources/read",
+                "params": { "uri": "oracle://capabilities" }
+            }),
+        ],
     );
-    assert_eq!(
-        tool("oracle_explain_plan")["outputSchema"]["properties"]["diagnostic_write"]["properties"]
-            ["required_level"]["enum"],
-        json!(["READ_WRITE"])
-    );
+    let text_for = |id: &str| {
+        replies
+            .iter()
+            .find(|reply| reply["id"] == json!(id))
+            .expect("resource reply")["result"]["contents"][0]["text"]
+            .as_str()
+            .expect("resource text")
+            .to_owned()
+    };
+    let tools_doc: Value = serde_json::from_str(&text_for("tools-resource")).expect("tools JSON");
+    let tool_names: Vec<&str> = tools_doc["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name"))
+        .collect();
+    for hidden in read_only_hidden_tools() {
+        assert!(
+            !tool_names.contains(hidden),
+            "oracle://tools must hide read-only-unreachable `{hidden}`"
+        );
+    }
+
+    let caps_doc: Value =
+        serde_json::from_str(&text_for("caps-resource")).expect("capabilities JSON");
+    assert_eq!(caps_doc["operating_level"]["current"], json!("READ_ONLY"));
+    let caps_names: Vec<&str> = caps_doc["tools"]
+        .as_array()
+        .expect("capability tools array")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name"))
+        .collect();
+    assert!(!caps_names.contains(&"oracle_execute"));
 }
 
 #[test]
@@ -363,11 +599,25 @@ fn call_oracle_capabilities_returns_the_report() {
     let structured = &result["structuredContent"];
     assert_eq!(structured["server_name"], json!("oraclemcp"));
     assert_eq!(structured["protocol_version"], json!("2025-11-25"));
-    // The advertised tool surface in the report is the registry surface.
+    assert_eq!(structured["operating_level"]["current"], json!("READ_ONLY"));
+    assert_eq!(structured["operating_level"]["max"], json!("READ_ONLY"));
+    assert_eq!(structured["operating_level"]["protected"], json!(false));
+    assert_eq!(structured["connection"]["connected"], json!(true));
+    let reported_tools = structured["tools"].as_array().expect("tools array");
+    let reported_names: Vec<&str> = reported_tools
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name"))
+        .collect();
+    for hidden in read_only_hidden_tools() {
+        assert!(
+            !reported_names.contains(hidden),
+            "capabilities must hide read-only-unreachable `{hidden}`: {reported_names:?}"
+        );
+    }
     assert_eq!(
-        structured["tools"].as_array().map(Vec::len),
-        Some(tool_names().len()),
-        "capability report lists the registry tools"
+        reported_tools.len(),
+        tool_names().len() - read_only_hidden_tools().len(),
+        "capability report lists the calling lane's reachable registry tools"
     );
 }
 

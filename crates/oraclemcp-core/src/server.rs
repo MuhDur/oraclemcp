@@ -14,12 +14,13 @@ use asupersync::{CancelReason, Cx, Outcome, PanicPayload};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use serde_json::{Map, Value, json};
 
-use crate::capabilities::CapabilitiesReport;
+use crate::capabilities::{CapabilitiesReport, ConnectionStatus, OperatingLevelReport};
 use crate::init_token::StdioAuthPolicy;
 use crate::resources::{
     PromptMessage, ResourceContents, ResourceUri, prompt_catalog, render_prompt, resource_templates,
 };
 use crate::tools::{ToolAnnotations, ToolDescriptor, ToolRegistry};
+use oraclemcp_guard::OperatingLevel;
 
 /// The `_meta` field carrying the stdio init token on the `initialize` request.
 /// The client places its shared token here so the server can gate the handshake
@@ -48,6 +49,39 @@ const SERVER_INSTRUCTIONS: &str = "Call oracle_capabilities first to discover to
 pub type DispatchOutcome = Outcome<Value, ErrorEnvelope>;
 
 pub type DispatchFuture<'a> = Pin<Box<dyn Future<Output = DispatchOutcome> + 'a>>;
+
+/// How much dynamic MCP surface state the caller needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum McpSurfaceDetail {
+    /// Only session/profile level state is needed. Used for `tools/list`, where
+    /// the server must not do extra DB metadata work just to render a catalog.
+    LevelOnly,
+    /// Include best-effort connection metadata for `oracle_capabilities`.
+    Connection,
+}
+
+/// Calling-lane MCP surface state used to narrow discovery responses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpSurfaceState {
+    /// Current effective session level after request-local scope narrowing.
+    pub current_level: OperatingLevel,
+    /// Effective ceiling after profile policy and request-local scopes.
+    pub effective_ceiling: OperatingLevel,
+    /// Profile ceiling before request-local scope narrowing.
+    pub max_level: OperatingLevel,
+    /// Whether the active profile is protected.
+    pub protected: bool,
+    /// Active profile name, if one is selected.
+    pub active_profile: Option<String>,
+    /// Best-effort connection metadata for the calling lane.
+    pub connection: ConnectionStatus,
+}
+
+/// Dynamic MCP surface snapshot outcome.
+pub type McpSurfaceOutcome = Outcome<Option<McpSurfaceState>, ErrorEnvelope>;
+
+/// Dynamic MCP surface snapshot future.
+pub type McpSurfaceFuture<'a> = Pin<Box<dyn Future<Output = McpSurfaceOutcome> + 'a>>;
 
 /// Boxed dispatcher lifecycle future. Like [`DispatchFuture`], this is not
 /// `Send` because stateful cleanup must run on the lane/runtime that owns the
@@ -229,6 +263,22 @@ pub trait ToolDispatch: Send + Sync + 'static {
     fn close<'a>(&'a self, _cx: &'a Cx, _reason: DispatchCloseReason) -> DispatchCloseFuture<'a> {
         Box::pin(async { Ok(()) })
     }
+
+    /// Return the calling lane's dynamic MCP discovery state.
+    ///
+    /// Dispatchers that do not own profile/session state can keep the default:
+    /// the server then renders the static registry. Production dispatchers
+    /// override this so `tools/list`, `oracle://tools`, `oracle://capabilities`,
+    /// and the server-direct `oracle_capabilities` tool reflect the active
+    /// profile, OAuth-narrowed ceiling, and session level.
+    fn mcp_surface_state<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        _context: DispatchContext<'a>,
+        _detail: McpSurfaceDetail,
+    ) -> McpSurfaceFuture<'a> {
+        Box::pin(async { Outcome::Ok(None) })
+    }
 }
 
 /// The MCP server surface shared by native stdio and HTTP transports.
@@ -371,6 +421,28 @@ impl OracleMcpServer {
             .clone()
     }
 
+    fn tools_json_for_context(
+        &self,
+        context: DispatchContext<'_>,
+    ) -> Result<Vec<Value>, ErrorEnvelope> {
+        match self.surface_state_blocking(context, McpSurfaceDetail::LevelOnly) {
+            Outcome::Ok(Some(surface)) => Ok(tools_json_for_descriptors(
+                &self.visible_tool_descriptors(&surface),
+            )),
+            Outcome::Ok(None) => Ok(self.tools_json()),
+            Outcome::Err(envelope) => Err(envelope),
+            Outcome::Cancelled(reason) => Err(cancelled_dispatch_envelope(&reason)),
+            Outcome::Panicked(payload) => Err(panicked_dispatch_envelope(&payload)),
+        }
+    }
+
+    fn tools_list_result_json_for_context(
+        &self,
+        context: DispatchContext<'_>,
+    ) -> Result<Value, ErrorEnvelope> {
+        Ok(json!({ "tools": self.tools_json_for_context(context)? }))
+    }
+
     /// Serve over stdio until the client disconnects. `auth` must already be
     /// resolved (the caller refuses to start when no token + no `--allow-no-auth`
     /// — §7.1). This native line-delimited JSON-RPC loop keeps stdout pure MCP
@@ -460,9 +532,71 @@ impl OracleMcpServer {
         })
     }
 
+    #[cfg(test)]
     fn capabilities_result_json(&self) -> Value {
-        let value = serde_json::to_value(&*self.capabilities).unwrap_or(Value::Null);
-        tool_result_ok_json(value)
+        tool_result_ok_json(self.capabilities_report_json(None))
+    }
+
+    async fn capabilities_result_json_with_context(
+        &self,
+        cx: &Cx,
+        context: DispatchContext<'_>,
+    ) -> DispatchOutcome {
+        match self
+            .dispatcher
+            .mcp_surface_state(cx, context, McpSurfaceDetail::Connection)
+            .await
+        {
+            Outcome::Ok(surface) => Outcome::Ok(tool_result_ok_json(
+                self.capabilities_report_json(surface.as_ref()),
+            )),
+            Outcome::Err(envelope) => Outcome::Err(envelope),
+            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
+        }
+    }
+
+    fn capabilities_report_json(&self, surface: Option<&McpSurfaceState>) -> Value {
+        let mut report = (*self.capabilities).clone();
+        if let Some(surface) = surface {
+            report.tools = self.visible_tool_descriptors(surface);
+            report.operating_level = OperatingLevelReport {
+                current: surface.current_level,
+                max: surface.effective_ceiling,
+                escalation_gated: surface.current_level < surface.effective_ceiling,
+                protected: surface.protected,
+                elevation_expires_at: None,
+            };
+            report.connection = surface.connection.clone();
+            if report.connection.profile.is_none() {
+                report.connection.profile = surface.active_profile.clone();
+            }
+        }
+        serde_json::to_value(report).unwrap_or(Value::Null)
+    }
+
+    fn surface_state_blocking(
+        &self,
+        context: DispatchContext<'_>,
+        detail: McpSurfaceDetail,
+    ) -> McpSurfaceOutcome {
+        crate::lane::block_on_lane_bridge(async {
+            let Some(cx) = Cx::current() else {
+                return Outcome::Ok(None);
+            };
+            self.dispatcher
+                .mcp_surface_state(&cx, context, detail)
+                .await
+        })
+    }
+
+    fn visible_tool_descriptors(&self, surface: &McpSurfaceState) -> Vec<ToolDescriptor> {
+        self.registry
+            .tools
+            .iter()
+            .filter(|descriptor| descriptor_visible_for_surface(descriptor, surface))
+            .cloned()
+            .collect()
     }
 
     fn advertises_tool(&self, name: &str) -> bool {
@@ -545,7 +679,9 @@ impl OracleMcpServer {
         args: Value,
     ) -> DispatchOutcome {
         if name == CAPABILITIES_TOOL {
-            return Outcome::Ok(self.capabilities_result_json());
+            return self
+                .capabilities_result_json_with_context(cx, context)
+                .await;
         }
         self.dispatcher
             .dispatch(cx, context, &name, args)
@@ -706,7 +842,11 @@ impl OracleMcpServer {
             )),
             "prompts/list" => Outcome::Ok(Some(self.handle_prompts_list(id))),
             "prompts/get" => Outcome::Ok(Some(self.handle_prompt_get(id, object.get("params")))),
-            "tools/list" => Outcome::Ok(Some(self.handle_tools_list(id, object.get("params")))),
+            "tools/list" => Outcome::Ok(Some(self.handle_tools_list(
+                id,
+                object.get("params"),
+                context,
+            ))),
             "tools/call" => self
                 .handle_tool_call_outcome(id, object.get("params"), context)
                 .map(Some),
@@ -788,8 +928,16 @@ impl OracleMcpServer {
         }
     }
 
-    fn handle_tools_list(&self, id: Value, params: Option<&Value>) -> Value {
-        self.paginated_list_result(id, params, "tools", "tools", &self.tools_json())
+    fn handle_tools_list(
+        &self,
+        id: Value,
+        params: Option<&Value>,
+        context: DispatchContext<'_>,
+    ) -> Value {
+        match self.tools_json_for_context(context) {
+            Ok(tools) => self.paginated_list_result(id, params, "tools", "tools", &tools),
+            Err(envelope) => jsonrpc_error_from_envelope(id, JSONRPC_SERVER_ERROR, &envelope),
+        }
     }
 
     fn handle_resources_list(&self, id: Value, params: Option<&Value>) -> Value {
@@ -939,14 +1087,20 @@ impl OracleMcpServer {
             ResourceUri::Capabilities => Ok(ResourceContents {
                 uri: ResourceUri::Capabilities.to_uri(),
                 mime_type: "application/json".to_owned(),
-                text: serde_json::to_value(&*self.capabilities)
-                    .unwrap_or(Value::Null)
-                    .to_string(),
+                text: match self.surface_state_blocking(context, McpSurfaceDetail::Connection) {
+                    Outcome::Ok(surface) => self.capabilities_report_json(surface.as_ref()),
+                    Outcome::Err(envelope) => return Err(envelope),
+                    Outcome::Cancelled(reason) => return Err(cancelled_dispatch_envelope(&reason)),
+                    Outcome::Panicked(payload) => return Err(panicked_dispatch_envelope(&payload)),
+                }
+                .to_string(),
             }),
             ResourceUri::Tools => Ok(ResourceContents {
                 uri: ResourceUri::Tools.to_uri(),
                 mime_type: "application/json".to_owned(),
-                text: self.tools_list_result_json().to_string(),
+                text: self
+                    .tools_list_result_json_for_context(context)?
+                    .to_string(),
             }),
             ResourceUri::Schema { owner } => {
                 let resource_uri = ResourceUri::Schema {
@@ -1636,7 +1790,11 @@ fn descriptor_output_schema(descriptor: &ToolDescriptor) -> Option<Map<String, V
 }
 
 fn tools_json_for_registry(registry: &ToolRegistry) -> Vec<Value> {
-    let mut tools = Vec::with_capacity(registry.tools.len() + 1);
+    tools_json_for_descriptors(&registry.tools)
+}
+
+fn tools_json_for_descriptors(descriptors: &[ToolDescriptor]) -> Vec<Value> {
+    let mut tools = Vec::with_capacity(descriptors.len() + 1);
     tools.push(json!({
         "name": CAPABILITIES_TOOL,
         "title": "Oracle Capabilities",
@@ -1644,7 +1802,7 @@ fn tools_json_for_registry(registry: &ToolRegistry) -> Vec<Value> {
         "inputSchema": empty_object_schema(),
         "annotations": ToolAnnotations::read_only(),
     }));
-    for d in &registry.tools {
+    for d in descriptors {
         if d.name == CAPABILITIES_TOOL {
             continue;
         }
@@ -1663,6 +1821,42 @@ fn tools_json_for_registry(registry: &ToolRegistry) -> Vec<Value> {
         tools.push(tool);
     }
     tools
+}
+
+fn descriptor_visible_for_surface(descriptor: &ToolDescriptor, surface: &McpSurfaceState) -> bool {
+    match descriptor.name.as_str() {
+        "oracle_set_session_level" => true,
+        "enable_writes" => surface.effective_ceiling >= OperatingLevel::ReadWrite,
+        "disable_writes" => surface.current_level > OperatingLevel::ReadOnly,
+        name => match required_current_level_for_tool(name) {
+            Some(required) => {
+                surface.current_level >= required && surface.effective_ceiling >= required
+            }
+            None if descriptor.destructive => {
+                surface.current_level >= OperatingLevel::ReadWrite
+                    && surface.effective_ceiling >= OperatingLevel::ReadWrite
+            }
+            None => true,
+        },
+    }
+}
+
+fn required_current_level_for_tool(name: &str) -> Option<OperatingLevel> {
+    match name {
+        "oracle_execute" | "execute_approved" | "oracle_explain_plan" => {
+            Some(OperatingLevel::ReadWrite)
+        }
+        "oracle_compile_object"
+        | "oracle_create_or_replace"
+        | "oracle_patch_source"
+        | "compile_object"
+        | "compile_with_warnings"
+        | "create_or_replace"
+        | "patch_package"
+        | "patch_view"
+        | "deploy_ddl" => Some(OperatingLevel::Ddl),
+        _ => None,
+    }
 }
 
 fn jsonrpc_result(id: Value, result: Value) -> Value {

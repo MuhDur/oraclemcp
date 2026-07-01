@@ -53,12 +53,13 @@ use oraclemcp_core::{
     AdmissionController, CapabilitiesReport, CustomToolCatalog, CustomToolDef, DashboardAuth,
     DispatchFuture, DispatchOutcome, DoctorContext, ExportRegistry, FeatureTiers,
     HttpSessionLifecycle, HttpTransportConfig, LaneContext, LaneDispatchFactory, LaneRuntime,
-    MCP_PATH, OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy, OracleMcpServer,
-    PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport, ShutdownCoordinator, SiemFormat,
-    SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial, TlsServerConfig,
-    ToolDispatch, WriteIntentLog, build_server_config, default_dashboard_ticket_dir, load_tools,
-    load_tools_for_profile, mint_dashboard_pairing_ticket, operator_subject_id_hash,
-    parse_tools_file, requires_mtls, run_doctor, sign, start_oraclemcp_service_app_with_transport,
+    MCP_PATH, McpSurfaceDetail, McpSurfaceFuture, OAuthEnforcement, ObservabilityState,
+    OperatorAuthorityPolicy, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport,
+    ShutdownCoordinator, SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy,
+    TlsMaterial, TlsServerConfig, ToolDispatch, WriteIntentLog, build_server_config,
+    default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
+    mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file, requires_mtls,
+    run_doctor, sign, start_oraclemcp_service_app_with_transport,
 };
 use oraclemcp_db::{
     DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
@@ -1329,6 +1330,15 @@ impl ToolDispatch for MetricsDispatch {
     ) -> oraclemcp_core::DispatchCloseFuture<'a> {
         self.inner.close(cx, reason)
     }
+
+    fn mcp_surface_state<'a>(
+        &'a self,
+        cx: &'a Cx,
+        context: oraclemcp_core::DispatchContext<'a>,
+        detail: McpSurfaceDetail,
+    ) -> McpSurfaceFuture<'a> {
+        self.inner.mcp_surface_state(cx, context, detail)
+    }
 }
 
 fn metrics_status(outcome: &DispatchOutcome) -> &'static str {
@@ -1455,7 +1465,7 @@ fn build_server_with_lifecycle(
     let caps = CapabilitiesReport::new(
         version,
         registry.tools.clone(),
-        OperatingLevel::ReadOnly,
+        level.max_level(),
         FeatureTiers {
             live_db: LIVE_DB,
             engine: cfg!(feature = "plsql-intelligence"),

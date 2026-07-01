@@ -25,10 +25,11 @@ use oraclemcp_audit::{
 use oraclemcp_auth::apply_oauth_scopes;
 use oraclemcp_config::{ConfigReloadPlan, OracleMcpConfig};
 use oraclemcp_core::{
-    CustomToolCatalog, CustomToolExecutor, DEFAULT_REQUEST_TIMEOUT, DispatchCloseFuture,
-    DispatchCloseReason, DispatchContext, DispatchFuture, RequestBudget, ToolBody, ToolDispatch,
-    WriteIntent, WriteIntentDetails, WriteIntentError, WriteIntentLog, WriteIntentOutcome,
-    execute_custom_tool, narrow_to_read_path, sign_token, verify_token,
+    ConnectionStatus, CustomToolCatalog, CustomToolExecutor, DEFAULT_REQUEST_TIMEOUT,
+    DispatchCloseFuture, DispatchCloseReason, DispatchContext, DispatchFuture, McpSurfaceDetail,
+    McpSurfaceFuture, McpSurfaceState, RequestBudget, ToolBody, ToolDispatch, WriteIntent,
+    WriteIntentDetails, WriteIntentError, WriteIntentLog, WriteIntentOutcome, execute_custom_tool,
+    narrow_to_read_path, sign_token, verify_token,
 };
 use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
@@ -4918,6 +4919,25 @@ impl ToolDispatch for OracleDispatcher {
     fn close<'a>(&'a self, cx: &'a Cx, reason: DispatchCloseReason) -> DispatchCloseFuture<'a> {
         Box::pin(async move { self.close_with_cx(reason, cx).await })
     }
+
+    fn mcp_surface_state<'a>(
+        &'a self,
+        cx: &'a Cx,
+        context: DispatchContext<'a>,
+        detail: McpSurfaceDetail,
+    ) -> McpSurfaceFuture<'a> {
+        Box::pin(async move {
+            if cx.checkpoint().is_err() {
+                return Outcome::Cancelled(
+                    cx.cancel_reason().unwrap_or_else(CancelReason::timeout),
+                );
+            }
+            match self.surface_state_with_cx(cx, context, detail).await {
+                Ok(surface) => Outcome::Ok(Some(surface)),
+                Err(envelope) => Outcome::Err(envelope),
+            }
+        })
+    }
 }
 
 /// `oracle_query` request, parsed and classified ONCE up front (A3/perf).
@@ -5062,6 +5082,40 @@ impl OracleDispatcher {
             "stateful Oracle dispatcher lifecycle cleanup completed"
         );
         Ok(())
+    }
+
+    async fn surface_state_with_cx(
+        &self,
+        cx: &Cx,
+        context: DispatchContext<'_>,
+        detail: McpSurfaceDetail,
+    ) -> Result<McpSurfaceState, ErrorEnvelope> {
+        let state = self.state.lock(cx).await.map_err(|_| {
+            ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
+        })?;
+        let scoped_level = scoped_session_level(&state.level, context);
+        let active_profile = state.active_profile.clone();
+        let mut connection = ConnectionStatus {
+            connected: false,
+            profile: active_profile.clone(),
+            server_version: None,
+            read_only_standby: false,
+        };
+        if detail == McpSurfaceDetail::Connection
+            && let Ok(info) = describe_conn(cx, state.conn.as_ref()).await
+        {
+            connection.connected = true;
+            connection.read_only_standby = info.is_read_only_standby();
+            connection.server_version = info.server_version;
+        }
+        Ok(McpSurfaceState {
+            current_level: scoped_level.effective_level(),
+            effective_ceiling: scoped_level.effective_ceiling(),
+            max_level: scoped_level.max_level(),
+            protected: scoped_level.is_protected(),
+            active_profile,
+            connection,
+        })
     }
 
     async fn dispatch_with_cx_inner(
