@@ -23,18 +23,25 @@ import {
 } from "@tanstack/react-table";
 import {
   Activity,
+  AlertTriangle,
+  BarChart3,
   CheckCircle2,
   Code2,
   Database,
   Download,
   FileClock,
+  Gauge,
   Play,
+  Radio,
   RefreshCcw,
   RotateCcw,
   Search,
   ShieldCheck,
   SquarePen,
-  Stethoscope
+  Stethoscope,
+  Timer,
+  Users,
+  Wifi
 } from "lucide-react";
 
 import { Badge, Button, Surface } from "../components/ui/primitives";
@@ -43,7 +50,9 @@ import {
   auditProbes,
   doctorProbes,
   executeWorkbenchSql,
+  fetchActiveLanes,
   fetchDashboardSession,
+  fetchOperatorMetrics,
   fetchProbe,
   overviewProbes,
   pendingProbe,
@@ -55,6 +64,10 @@ import {
   type AuditTailData,
   type AuditTailFilters,
   type AuditTailRecord,
+  type ActiveLane,
+  type LaneRequestDuration,
+  type MetricsSnapshot,
+  type OperatorEventEnvelope,
   sessionsProbes,
   fetchAuditTail,
   type WorkbenchActionData,
@@ -187,13 +200,41 @@ function NavLink({ item }: { item: NavItem }): React.ReactElement {
 }
 
 function OverviewPage(): React.ReactElement {
+  const metrics = useQuery({
+    queryKey: ["operator-metrics"],
+    queryFn: fetchOperatorMetrics,
+    refetchInterval: 5_000
+  });
+  const activeLanes = useQuery({
+    queryKey: ["active-lanes"],
+    queryFn: fetchActiveLanes,
+    refetchInterval: 5_000
+  });
+  const eventLog = useOperatorEventLog("operator");
+  const snapshot = metrics.data?.data.snapshot ?? null;
+  const lanes = activeLanes.data?.data.lanes ?? [];
+
   return (
     <PageFrame
       title="Overview"
       eyebrow="Mission Control"
       description="Runtime and operator protocol posture from the active service."
     >
-      <ProbeDashboard probes={overviewProbes} />
+      <div className="space-y-4">
+        <OverviewMetricTiles
+          snapshot={snapshot}
+          lanes={lanes}
+          pending={metrics.isFetching || activeLanes.isFetching}
+        />
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
+          <LaneMetricsPanel snapshot={snapshot} lanes={lanes} />
+          <OperatorEventLogPanel status={eventLog.status} events={eventLog.events} />
+        </div>
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,0.85fr)_minmax(360px,1.15fr)]">
+          <ToolMetricsPanel snapshot={snapshot} />
+          <ProbeDashboard probes={overviewProbes} compact />
+        </div>
+      </div>
     </PageFrame>
   );
 }
@@ -208,6 +249,519 @@ function SessionsPage(): React.ReactElement {
       <ProbeDashboard probes={sessionsProbes} compact />
     </PageFrame>
   );
+}
+
+type EventStreamStatus = "connecting" | "live" | "reconnecting" | "closed";
+
+function useOperatorEventLog(laneId: string): {
+  status: EventStreamStatus;
+  events: OperatorEventEnvelope[];
+} {
+  const [status, setStatus] = React.useState<EventStreamStatus>("connecting");
+  const [events, setEvents] = React.useState<OperatorEventEnvelope[]>([]);
+
+  React.useEffect(() => {
+    let mounted = true;
+    setStatus("connecting");
+    const source = new EventSource(
+      `/operator/v1/events?lane_id=${encodeURIComponent(laneId)}`,
+      { withCredentials: true }
+    );
+    const handleEvent = (message: MessageEvent<string>): void => {
+      const parsed = parseOperatorEvent(message.data);
+      if (!mounted || !parsed) {
+        return;
+      }
+      setStatus("live");
+      setEvents((current) => [parsed, ...current].slice(0, 24));
+      queryClient.invalidateQueries({ queryKey: ["operator-metrics"] });
+      queryClient.invalidateQueries({ queryKey: ["active-lanes"] });
+    };
+    const handleSnapshot = handleEvent as EventListener;
+    source.addEventListener("operator.snapshot", handleSnapshot);
+    source.addEventListener("operator.stream_gap", handleSnapshot);
+    source.onmessage = handleEvent;
+    source.onerror = () => {
+      if (!mounted) {
+        return;
+      }
+      setStatus(source.readyState === EventSource.CLOSED ? "closed" : "reconnecting");
+    };
+    return () => {
+      mounted = false;
+      source.close();
+    };
+  }, [laneId]);
+
+  return { status, events };
+}
+
+function OverviewMetricTiles({
+  snapshot,
+  lanes,
+  pending
+}: {
+  snapshot: MetricsSnapshot | null;
+  lanes: ActiveLane[];
+  pending: boolean;
+}): React.ReactElement {
+  const summary = overviewSummary(snapshot, lanes);
+  return (
+    <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-6" aria-label="overview metrics">
+      <MetricTile
+        icon={Users}
+        label="Active lanes"
+        value={summary.activeLanes}
+        suffix=""
+        tone={summary.activeLanes > 0 ? "ok" : "off"}
+        pending={pending}
+      />
+      <MetricTile
+        icon={BarChart3}
+        label="Tool calls"
+        value={summary.totalRequests}
+        suffix=""
+        tone="info"
+        pending={pending}
+      />
+      <MetricTile
+        icon={AlertTriangle}
+        label="Blocked"
+        value={summary.blocked}
+        suffix=""
+        tone={summary.blocked > 0 ? "warn" : "ok"}
+        pending={pending}
+      />
+      <MetricTile
+        icon={Timer}
+        label="MCP latency"
+        value={summary.meanLatencyMs}
+        suffix="ms"
+        tone={summary.meanLatencyMs > 500 ? "warn" : "neutral"}
+        pending={pending}
+      />
+      <MetricTile
+        icon={Gauge}
+        label="DB errors"
+        value={summary.errors}
+        suffix=""
+        tone={summary.errors > 0 ? "warn" : "ok"}
+        pending={pending}
+      />
+      <MetricTile
+        icon={Database}
+        label="Pool active"
+        value={summary.poolActive}
+        suffix=""
+        tone="neutral"
+        pending={pending}
+      />
+    </section>
+  );
+}
+
+function MetricTile({
+  icon: Icon,
+  label,
+  value,
+  suffix,
+  tone,
+  pending
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  value: number;
+  suffix: string;
+  tone: "neutral" | "ok" | "warn" | "off" | "info";
+  pending: boolean;
+}): React.ReactElement {
+  return (
+    <Surface className="min-h-32 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex size-9 items-center justify-center rounded-md border border-zinc-200 bg-zinc-50 text-zinc-700">
+          <Icon className="size-4" aria-hidden="true" />
+        </div>
+        <Badge tone={pending ? "info" : tone}>{pending ? "sync" : tone}</Badge>
+      </div>
+      <p className="mt-4 text-sm font-semibold text-zinc-600">{label}</p>
+      <strong className="mt-2 block text-3xl leading-none text-zinc-950">
+        {formatNumber(value)}
+        {suffix ? <span className="ml-1 text-base text-zinc-500">{suffix}</span> : null}
+      </strong>
+    </Surface>
+  );
+}
+
+function LaneMetricsPanel({
+  snapshot,
+  lanes
+}: {
+  snapshot: MetricsSnapshot | null;
+  lanes: ActiveLane[];
+}): React.ReactElement {
+  const rows = laneMetricRows(snapshot, lanes);
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={Radio}
+        title="Lane Metrics"
+        meta={`${rows.length} lanes`}
+        tone={rows.length > 0 ? "ok" : "off"}
+      />
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[780px] border-collapse text-left">
+          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+            <tr>
+              <th className="px-4 py-3 font-bold">Lane</th>
+              <th className="px-4 py-3 font-bold">Requests</th>
+              <th className="px-4 py-3 font-bold">Blocked</th>
+              <th className="px-4 py-3 font-bold">Latency</th>
+              <th className="px-4 py-3 font-bold">State</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-100">
+            {rows.length === 0 ? (
+              <tr>
+                <td className="px-4 py-8 text-center text-sm font-semibold text-zinc-500" colSpan={5}>
+                  No lane metrics
+                </td>
+              </tr>
+            ) : (
+              rows.map((row) => (
+                <tr key={`${row.laneId}:${row.subjectIdHash}`} className="bg-white">
+                  <td className="px-4 py-4 align-top">
+                    <p className="font-mono text-sm font-semibold text-zinc-950">{row.laneId}</p>
+                    <p className="mt-1 break-all font-mono text-xs text-zinc-500">
+                      {row.subjectIdHash}
+                    </p>
+                  </td>
+                  <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
+                    {formatNumber(row.requests)}
+                  </td>
+                  <td className="px-4 py-4 align-top">
+                    <Badge tone={row.blocked > 0 ? "warn" : "ok"}>{formatNumber(row.blocked)}</Badge>
+                  </td>
+                  <td className="px-4 py-4 align-top">
+                    <div className="w-full max-w-[180px]">
+                      <div className="h-2 rounded-full bg-zinc-100">
+                        <div
+                          className="h-2 rounded-full bg-sky-600"
+                          style={{ width: `${latencyBarWidth(row.meanLatencyMs)}%` }}
+                        />
+                      </div>
+                      <p className="mt-2 font-mono text-xs text-zinc-700">
+                        {formatMs(row.meanLatencyMs)} avg · {formatMs(row.maxLatencyMs)} max
+                      </p>
+                    </div>
+                  </td>
+                  <td className="px-4 py-4 align-top">
+                    <Badge tone={row.active ? "ok" : "off"}>{row.active ? "active" : "idle"}</Badge>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </Surface>
+  );
+}
+
+function ToolMetricsPanel({
+  snapshot
+}: {
+  snapshot: MetricsSnapshot | null;
+}): React.ReactElement {
+  const rows = [...(snapshot?.requests ?? [])].sort((a, b) => b.count - a.count).slice(0, 8);
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={Activity}
+        title="Tool Metrics"
+        meta={`${rows.length} series`}
+        tone={rows.length > 0 ? "info" : "off"}
+      />
+      <div className="divide-y divide-zinc-100">
+        {rows.length === 0 ? (
+          <p className="px-4 py-8 text-center text-sm font-semibold text-zinc-500">No tool metrics</p>
+        ) : (
+          rows.map((row) => (
+            <div key={`${row.tool}:${row.status}`} className="grid gap-3 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_92px_72px] sm:items-center">
+              <div className="min-w-0">
+                <p className="truncate font-mono text-sm font-semibold text-zinc-950">{row.tool}</p>
+                <p className="mt-1 text-xs text-zinc-500">{row.status}</p>
+              </div>
+              <div className="h-2 rounded-full bg-zinc-100">
+                <div
+                  className={cn("h-2 rounded-full", row.status === "ok" ? "bg-emerald-600" : "bg-amber-500")}
+                  style={{ width: `${requestBarWidth(row.count, rows[0]?.count ?? 1)}%` }}
+                />
+              </div>
+              <p className="font-mono text-sm font-semibold text-zinc-800">{formatNumber(row.count)}</p>
+            </div>
+          ))
+        )}
+      </div>
+    </Surface>
+  );
+}
+
+function OperatorEventLogPanel({
+  status,
+  events
+}: {
+  status: EventStreamStatus;
+  events: OperatorEventEnvelope[];
+}): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader icon={Wifi} title="Event Log" meta={status} tone={eventStatusTone(status)} />
+      <div className="max-h-[460px] divide-y divide-zinc-100 overflow-auto">
+        {events.length === 0 ? (
+          <p className="px-4 py-8 text-center text-sm font-semibold text-zinc-500">No events</p>
+        ) : (
+          events.map((event) => (
+            <div key={event.event_id} className="px-4 py-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-mono text-sm font-semibold text-zinc-950">{event.event_id}</p>
+                  <p className="mt-1 break-all font-mono text-xs text-zinc-500">
+                    {event.subject_id_hash}
+                  </p>
+                </div>
+                <Badge tone={event.event_type === "operator.stream_gap" ? "warn" : "info"}>
+                  {event.event_type}
+                </Badge>
+              </div>
+              <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                <EventFact label="Lane" value={event.lane_id} />
+                <EventFact label="Active" value={eventMetric(event, "active_lanes")} />
+                <EventFact label="Seq" value={event.event_seq} />
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </Surface>
+  );
+}
+
+function PanelHeader({
+  icon: Icon,
+  title,
+  meta,
+  tone
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  meta: string;
+  tone: "neutral" | "ok" | "warn" | "off" | "info";
+}): React.ReactElement {
+  return (
+    <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+      <div className="flex min-w-0 items-center gap-3">
+        <div className="flex size-9 items-center justify-center rounded-md border border-zinc-200 bg-zinc-50 text-zinc-700">
+          <Icon className="size-4" aria-hidden="true" />
+        </div>
+        <div className="min-w-0">
+          <h3 className="truncate text-base font-bold text-zinc-950">{title}</h3>
+          <p className="mt-1 truncate text-sm text-zinc-500">{meta}</p>
+        </div>
+      </div>
+      <Badge tone={tone}>{tone}</Badge>
+    </div>
+  );
+}
+
+function EventFact({ label, value }: { label: string; value: unknown }): React.ReactElement {
+  return (
+    <div className="rounded-md border border-zinc-200 bg-zinc-50 p-2">
+      <p className="text-xs font-bold uppercase text-zinc-500">{label}</p>
+      <p className="mt-1 break-all font-mono text-xs text-zinc-900">{String(value ?? "...")}</p>
+    </div>
+  );
+}
+
+type OverviewSummary = {
+  activeLanes: number;
+  totalRequests: number;
+  blocked: number;
+  errors: number;
+  meanLatencyMs: number;
+  poolActive: number;
+};
+
+type LaneMetricRow = {
+  laneId: string;
+  subjectIdHash: string;
+  requests: number;
+  blocked: number;
+  meanLatencyMs: number;
+  maxLatencyMs: number;
+  active: boolean;
+};
+
+function overviewSummary(snapshot: MetricsSnapshot | null, lanes: ActiveLane[]): OverviewSummary {
+  const durations = snapshot?.lane_request_duration_ms ?? [];
+  const latency = aggregateDurations(durations);
+  return {
+    activeLanes: snapshot?.active_lanes ?? lanes.length,
+    totalRequests: sumCounts(snapshot?.requests ?? []),
+    blocked: sumCounts(snapshot?.lane_blocked ?? []),
+    errors: sumCounts(snapshot?.errors ?? []),
+    meanLatencyMs: latency.mean,
+    poolActive: snapshot?.pool_active_connections ?? 0
+  };
+}
+
+function laneMetricRows(snapshot: MetricsSnapshot | null, lanes: ActiveLane[]): LaneMetricRow[] {
+  const rows = new Map<string, LaneMetricRow>();
+  const ensure = (laneId: string, subjectIdHash: string): LaneMetricRow => {
+    const key = `${laneId}\u0000${subjectIdHash}`;
+    const existing = rows.get(key);
+    if (existing) {
+      return existing;
+    }
+    const row: LaneMetricRow = {
+      laneId,
+      subjectIdHash,
+      requests: 0,
+      blocked: 0,
+      meanLatencyMs: 0,
+      maxLatencyMs: 0,
+      active: false
+    };
+    rows.set(key, row);
+    return row;
+  };
+
+  for (const lane of lanes) {
+    const row = ensure(lane.lane_id, lane.subject_id_hash);
+    row.active = lane.status === "active";
+  }
+  for (const gauge of snapshot?.active_lane_gauges ?? []) {
+    const row = ensure(gauge.lane_id, gauge.subject_id_hash);
+    row.active = gauge.active > 0;
+  }
+  for (const request of snapshot?.lane_requests ?? []) {
+    const row = ensure(request.lane_id, request.subject_id_hash);
+    row.requests += request.count;
+  }
+  for (const blocked of snapshot?.lane_blocked ?? []) {
+    const row = ensure(blocked.lane_id, blocked.subject_id_hash);
+    row.blocked += blocked.count;
+  }
+  const latencyByLane = new Map<string, ReturnType<typeof aggregateDurations>>();
+  for (const duration of snapshot?.lane_request_duration_ms ?? []) {
+    const key = `${duration.lane_id}\u0000${duration.subject_id_hash}`;
+    const current = latencyByLane.get(key);
+    const next = aggregateDurations([duration], current);
+    latencyByLane.set(key, next);
+  }
+  for (const [key, latency] of latencyByLane) {
+    const row = rows.get(key);
+    if (row) {
+      row.meanLatencyMs = latency.mean;
+      row.maxLatencyMs = latency.max;
+    }
+  }
+  return [...rows.values()].sort((a, b) => {
+    if (a.active !== b.active) {
+      return a.active ? -1 : 1;
+    }
+    return b.requests - a.requests || a.laneId.localeCompare(b.laneId);
+  });
+}
+
+function aggregateDurations(
+  durations: LaneRequestDuration[],
+  base: { count: number; sum: number; max: number; mean: number } = {
+    count: 0,
+    sum: 0,
+    max: 0,
+    mean: 0
+  }
+): { count: number; sum: number; max: number; mean: number } {
+  let count = base.count;
+  let sum = base.sum;
+  let max = base.max;
+  for (const duration of durations) {
+    count += duration.histogram.count;
+    sum += duration.histogram.sum;
+    max = Math.max(max, duration.histogram.max);
+  }
+  return {
+    count,
+    sum,
+    max,
+    mean: count === 0 ? 0 : Math.round(sum / count)
+  };
+}
+
+function sumCounts(rows: Array<{ count: number }>): number {
+  return rows.reduce((total, row) => total + row.count, 0);
+}
+
+function parseOperatorEvent(raw: string): OperatorEventEnvelope | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed)) {
+      return null;
+    }
+    if (
+      parsed["protocol_version"] !== "operator.v1" ||
+      typeof parsed["event_id"] !== "string" ||
+      typeof parsed["event_seq"] !== "number" ||
+      typeof parsed["lane_id"] !== "string" ||
+      typeof parsed["subject_id_hash"] !== "string" ||
+      typeof parsed["event_type"] !== "string" ||
+      !isRecord(parsed["data"])
+    ) {
+      return null;
+    }
+    return parsed as OperatorEventEnvelope;
+  } catch {
+    return null;
+  }
+}
+
+function eventMetric(event: OperatorEventEnvelope, key: string): unknown {
+  return event.data[key];
+}
+
+function eventStatusTone(status: EventStreamStatus): "neutral" | "ok" | "warn" | "off" | "info" {
+  switch (status) {
+    case "live":
+      return "ok";
+    case "reconnecting":
+      return "warn";
+    case "closed":
+      return "off";
+    case "connecting":
+      return "info";
+  }
+}
+
+function latencyBarWidth(ms: number): number {
+  if (ms <= 0) {
+    return 2;
+  }
+  return Math.min(100, Math.max(8, Math.round((ms / 1_000) * 100)));
+}
+
+function requestBarWidth(count: number, max: number): number {
+  if (max <= 0) {
+    return 2;
+  }
+  return Math.min(100, Math.max(8, Math.round((count / max) * 100)));
+}
+
+function formatMs(ms: number): string {
+  return `${formatNumber(ms)}ms`;
+}
+
+function formatNumber(value: number): string {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
 }
 
 const workbenchModes: Array<{ id: WorkbenchMode; label: string }> = [

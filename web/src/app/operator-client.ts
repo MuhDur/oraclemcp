@@ -43,6 +43,94 @@ export type OperatorResponse<T extends Record<string, unknown> = Record<string, 
 
 export type WorkbenchMode = "classify_only" | "read_query" | "dml_preview_confirm" | "ddl_plan_confirm";
 
+export type RequestCount = {
+  tool: string;
+  status: string;
+  count: number;
+};
+
+export type HistogramSnapshot = {
+  count: number;
+  sum: number;
+  max: number;
+  mean: number;
+};
+
+export type LaneRequestCount = {
+  lane_id: string;
+  subject_id_hash: string;
+  tool: string;
+  status: string;
+  count: number;
+};
+
+export type LaneBlockedCount = {
+  lane_id: string;
+  subject_id_hash: string;
+  count: number;
+};
+
+export type LaneRequestDuration = {
+  lane_id: string;
+  subject_id_hash: string;
+  tool: string;
+  histogram: HistogramSnapshot;
+};
+
+export type ActiveLaneGauge = {
+  lane_id: string;
+  subject_id_hash: string;
+  active: number;
+};
+
+export type ErrorCount = {
+  ora_code: number;
+  count: number;
+};
+
+export type MetricsSnapshot = {
+  requests: RequestCount[];
+  lane_requests?: LaneRequestCount[];
+  lane_blocked?: LaneBlockedCount[];
+  lane_request_duration_ms?: LaneRequestDuration[];
+  errors: ErrorCount[];
+  query_duration_ms: HistogramSnapshot;
+  pool_wait_ms: HistogramSnapshot;
+  pool_active_connections: number;
+  active_lanes?: number;
+  active_lane_gauges?: ActiveLaneGauge[];
+};
+
+export type OperatorMetricsData = {
+  source: string;
+  reason?: string;
+  snapshot: MetricsSnapshot | null;
+};
+
+export type ActiveLane = {
+  lane_id: string;
+  generation: number;
+  status: string;
+  subject_id_hash: string;
+};
+
+export type ActiveLanesData = {
+  source: string;
+  lanes: ActiveLane[];
+};
+
+export type OperatorEventEnvelope = {
+  protocol_version: "operator.v1";
+  schema_version: number;
+  event_seq: number;
+  event_id: string;
+  lane_id: string;
+  subject_id_hash: string;
+  redaction_level: "operator_redacted";
+  event_type: string;
+  data: Record<string, unknown>;
+};
+
 export type WorkbenchActionData = {
   status?: string;
   lane_id?: string | null;
@@ -234,6 +322,14 @@ export async function fetchDashboardSession(): Promise<DashboardSession> {
   return parseDashboardSession(response);
 }
 
+export async function fetchOperatorMetrics(): Promise<OperatorResponse<OperatorMetricsData>> {
+  return operatorGet("/operator/v1/metrics");
+}
+
+export async function fetchActiveLanes(): Promise<OperatorResponse<ActiveLanesData>> {
+  return operatorGet("/operator/v1/active-lanes");
+}
+
 export async function previewWorkbenchSql(
   session: DashboardSession,
   request: WorkbenchSqlRequest
@@ -303,6 +399,21 @@ export async function fetchAuditTail(
     throw new Error(errorMessage(parsed, response.status));
   }
   return parsed as OperatorResponse<AuditTailData>;
+}
+
+async function operatorGet<T extends Record<string, unknown>>(
+  path: string
+): Promise<OperatorResponse<T>> {
+  const response = await fetch(path, {
+    headers: { accept: "application/json" },
+    cache: "no-store",
+    credentials: "same-origin"
+  });
+  const parsed = (await response.json()) as unknown;
+  if (!response.ok) {
+    throw new Error(errorMessage(parsed, response.status));
+  }
+  return parsed as OperatorResponse<T>;
 }
 
 function setOptionalParam(params: URLSearchParams, key: string, value: string): void {
