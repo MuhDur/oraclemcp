@@ -6,6 +6,7 @@ Spec sources:
 - JSON-RPC: `2.0`
 - RFC 6750 Bearer Token Usage
 - RFC 9728 OAuth 2.0 Protected Resource Metadata
+- 0.6.0 WP-N concurrency/session acceptance contract (`N9`)
 
 Harnesses:
 
@@ -47,6 +48,13 @@ Harnesses:
   `crates/oraclemcp-core/src/write_intent.rs`,
   `crates/oraclemcp/src/main.rs`, and
   `crates/oraclemcp/src/dispatch/tests.rs`
+- WP-N concurrency/session contract:
+  `crates/oraclemcp-core/tests/concurrency_contract.rs`,
+  `crates/oraclemcp-core/tests/lane_state_machine.rs`,
+  `crates/oraclemcp-core/src/{admission,lane,http}.rs`,
+  `crates/oraclemcp/tests/e2e_http_oauth.rs`,
+  `crates/oraclemcp-db/tests/{cancel_correctness,load_soak,multi_lane_live_xe}.rs`,
+  and `crates/oraclemcp/src/dispatch/tests.rs`
 - Native listener TLS tests: `crates/oraclemcp-core/src/http.rs`
 - Transports under test:
   - stdio: `OracleMcpServer::serve_stdio_with_io`
@@ -78,8 +86,9 @@ Harnesses:
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
 | Oracle structured cells | 6 | 0 | 6 | 6 | 0 | 100% |
 | Durable SQL idempotency | 1 | 0 | 1 | 1 | 0 | 100% |
+| WP-N concurrency/session | 11 | 0 | 11 | 11 | 0 | 100% |
 
-Total tracked requirements: 50 MUST, 2 SHOULD, 52 tested.
+Total tracked requirements: 61 MUST, 2 SHOULD, 63 tested.
 
 ## Requirement IDs
 
@@ -138,6 +147,17 @@ Total tracked requirements: 50 MUST, 2 SHOULD, 52 tested.
 | DB-SER-005 | MUST | Oracle structured cells | `OracleCell::structured` carries the structured contract version, the published schema declares it, and metadata cache keys include it. |
 | DB-SER-006 | MUST | Oracle structured cells | Structured ARRAY/JSON/VECTOR decode is capped by row, cell, byte, and depth budgets; larger query budgets require `deep_decode=true`. |
 | WRITE-INTENT-001 | MUST | Durable SQL idempotency | Committing tools write a durable pre-execute intent, unresolved in-doubt intents fail writable startup closed, and recovered terminal history rejects exact confirmation-grant plus SQL replay after restart. |
+| WPN-A-001 | MUST | WP-N concurrency/session | Per-session and per-subject lanes keep operating level, profile, connection, and session state isolated. |
+| WPN-A-002 | MUST | WP-N concurrency/session | Confirmation and execution grants are single-use and bound to lane, subject, session, profile, and generation. |
+| WPN-B-001 | MUST | WP-N concurrency/session | Different configured databases stay isolated under concurrent live lanes. |
+| WPN-C-001 | MUST | WP-N concurrency/session | Blocked or contended database work cannot head-of-line-block unrelated lanes and must finish or return a typed timeout/deadlock/busy result. |
+| WPN-D-001 | MUST | WP-N concurrency/session | Capacity is bounded, redacted, reserve-aware, and fair across subjects. |
+| WPN-E-001 | MUST | WP-N concurrency/session | DELETE, timeout, cancel, shutdown, and reaper terminal paths release permits and roll back dirty work exactly once. |
+| WPN-F-001 | MUST | WP-N concurrency/session | Streamable HTTP lanes coexist with the frozen stdio contract without changing stdio golden behavior. |
+| WPN-G-001 | MUST | WP-N concurrency/session | Concurrent actions keep per-subject audit identity, valid hash chains, and idempotency replay semantics. |
+| WPN-H-001 | MUST | WP-N concurrency/session | Mixed lane live/load evidence captures latency percentiles and zero leak/starvation verdicts. |
+| WPN-J-001 | MUST | WP-N concurrency/session | SSE ids, Last-Event-ID/cursor replay, typed expiry/gaps, and DELETE are scoped to the target session/stream. |
+| WPN-K-001 | MUST | WP-N concurrency/session | The lane model forbids permit leaks, stale grants, ceiling races, and subject/connection/audit mixing. |
 
 ## HTTP Proof Map
 
@@ -166,6 +186,22 @@ Total tracked requirements: 50 MUST, 2 SHOULD, 52 tested.
 | HTTPS-002 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_requires_client_certificate_when_mtls_is_configured` |
 | WRITE-INTENT-001 | `crates/oraclemcp-core/src/write_intent.rs::tests::resolved_intent_survives_reopen_and_rejects_same_grant_sql_replay`; `crates/oraclemcp/src/main.rs::tests::build_write_intent_log_fails_closed_on_unresolved_restart_intent`; `crates/oraclemcp/src/dispatch/tests.rs::execute_commit_in_doubt_leaves_durable_intent_unresolved` |
 
+## WP-N Proof Map
+
+| Requirement | Primary proof |
+| --- | --- |
+| WPN-A-001 | `crates/oraclemcp/tests/e2e_http_oauth.rs::stateful_http_lanes_keep_operating_level_isolated_per_session_and_subject`; `crates/oraclemcp/tests/e2e_http_oauth.rs::stateful_http_lanes_keep_profile_switches_and_connections_isolated` |
+| WPN-A-002 | `crates/oraclemcp/src/dispatch/tests.rs::execute_grant_is_lane_bound_and_not_consumed_by_wrong_lane`; `crates/oraclemcp/src/dispatch/tests.rs::session_level_grant_is_lane_bound_and_not_recomputable`; `crates/oraclemcp/src/dispatch/tests.rs::execute_grant_is_invalid_after_session_level_generation_change` |
+| WPN-B-001 | `crates/oraclemcp-db/tests/multi_lane_live_xe.rs::live_xe_two_database_lanes_keep_db_identity_isolated` |
+| WPN-C-001 | `crates/oraclemcp-db/tests/multi_lane_live_xe.rs::live_xe_same_database_contention_is_typed_or_succeeds_without_hanging`; `crates/oraclemcp/tests/e2e_http_oauth.rs::binary_http_transport_responsive_while_lane_blocked_in_db` |
+| WPN-D-001 | `crates/oraclemcp-core/src/admission.rs::tests::queued_admission_round_robins_between_subjects`; `crates/oraclemcp-core/src/admission.rs::tests::bounded_queue_at_capacity_keeps_snapshot_redacted`; `crates/oraclemcp-core/src/admission.rs::tests::n4_defaults_keep_operator_and_doctor_reserve_out_of_regular_capacity` |
+| WPN-E-001 | `crates/oraclemcp-core/tests/lane_state_machine.rs::permit_released_exactly_once_for_every_terminal_lane_path`; `crates/oraclemcp-db/tests/cancel_correctness.rs::release_all_force_rolls_back_open_transactions_on_shutdown`; `crates/oraclemcp-db/tests/cancel_correctness.rs::cancelled_preview_discards_session_dirty_never_commits` |
+| WPN-F-001 | `crates/oraclemcp-core/tests/golden_behavior.rs::golden_http_stateful_streamable_session`; `crates/oraclemcp/tests/golden_behavior.rs::golden_stdio_main_tool_transcript` |
+| WPN-G-001 | `crates/oraclemcp-core/src/http.rs::tests::operator_action_idempotency_replays_same_response_and_conflicts_on_drift`; `crates/oraclemcp/src/dispatch/tests.rs::caller_supplied_identity_cannot_change_audit_subject_or_db_evidence`; `crates/oraclemcp-core/src/lane.rs::tests::lane_panic_is_quarantined_audited_and_sibling_lane_survives` |
+| WPN-H-001 | `crates/oraclemcp-core/tests/phase0_capacity.rs::phase0_capacity_spike`; `crates/oraclemcp-db/tests/load_soak.rs::load_soak_zero_leaked_sessions_clean_drain_bounded`; `crates/oraclemcp-db/tests/load_soak.rs::live_xe_load_soak_pool_accounting_and_latency` |
+| WPN-J-001 | `crates/oraclemcp-core/src/http.rs::tests::stateful_get_replays_buffered_lane_results_by_cursor`; `crates/oraclemcp-core/src/http.rs::tests::stateful_get_last_event_id_reports_gap_marker_for_slow_consumer`; `crates/oraclemcp-core/src/http.rs::tests::principal_session_close_clears_sessions_buffers_and_lanes` |
+| WPN-K-001 | `crates/oraclemcp-core/tests/lane_state_machine.rs::switch_generation_invalidates_stale_grants_and_subject_mix`; `crates/oraclemcp/src/dispatch/tests.rs::set_session_level_cannot_exceed_profile_ceiling`; `crates/oraclemcp/src/dispatch/tests.rs::oauth_read_scope_does_not_persistently_lower_session_level` |
+
 ## Provenance
 
 This harness was created from the native stdio implementation and the MCP
@@ -173,5 +209,7 @@ This harness was created from the native stdio implementation and the MCP
 `tests/golden/http/*.json`. The HTTP/OAuth rows are derived from the native
 listener, parser, OAuth challenge builder, scope dispatcher path, operator v1
 Rust schema source, generated UI fixtures, and rustls TLS listener in this
-repository. No third-party reference implementation or externally generated
-fixture corpus is used.
+repository. WP-N rows are derived from the 0.6.0 lane runtime acceptance
+contract and use offline deterministic tests plus opt-in live-XE hooks for
+real-database isolation and contention. No third-party reference implementation
+or externally generated fixture corpus is used.

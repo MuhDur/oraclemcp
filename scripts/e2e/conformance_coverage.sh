@@ -54,6 +54,9 @@ required=(
   scripts/oraclemcp_feature_powerset.sh
   scripts/oraclemcp_ergonomics_lint.sh
   scripts/release_acceptance_ci_suite.sh
+  crates/oraclemcp-core/tests/concurrency_contract.rs
+  crates/oraclemcp-core/tests/lane_state_machine.rs
+  crates/oraclemcp-db/tests/multi_lane_live_xe.rs
 )
 missing=0
 for path in "${required[@]}"; do
@@ -72,7 +75,10 @@ fi
 if ! grep -F "| Operator v1 | 8 | 0 | 8 | 8 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "tests/conformance/COVERAGE.md must record 1.00 MUST coverage for operator v1"
 fi
-if ! grep -F "Total tracked requirements: 50 MUST, 2 SHOULD, 52 tested." tests/conformance/COVERAGE.md >/dev/null; then
+if ! grep -F "| WP-N concurrency/session | 11 | 0 | 11 | 11 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "tests/conformance/COVERAGE.md must record 1.00 MUST coverage for WP-N"
+fi
+if ! grep -F "Total tracked requirements: 61 MUST, 2 SHOULD, 63 tested." tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "tests/conformance/COVERAGE.md totals are stale"
 fi
 if ! grep -F "| JSON-RPC errors | 3 | 2 | 5 | 5 | 1 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
