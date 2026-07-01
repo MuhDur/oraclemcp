@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use asupersync::Cx;
-use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use oraclemcp::dispatch::{
     McpExposurePolicy, OracleDispatcher, ProfileConnector, ProfileDrainState,
     ProfileStatelessConnector, StatelessReadStrategy, profile_draining_error,
@@ -152,6 +152,12 @@ enum Command {
     Profiles,
     /// Print the capabilities report (tools, level, feature tiers) as JSON.
     Capabilities,
+    /// Generate shell completions to stdout.
+    Completions {
+        /// Shell to generate completions for.
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
     /// Install and operate the persistent local service.
     Service {
         #[command(subcommand)]
@@ -342,6 +348,15 @@ enum RobotDocsCommand {
     Guide,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+    #[value(name = "powershell", alias = "pwsh", alias = "power-shell")]
+    Powershell,
+}
+
 fn display_binary_name_from_argv0(argv0: Option<&std::ffi::OsStr>) -> &'static str {
     let Some(argv0) = argv0 else {
         return DEFAULT_BINARY_NAME;
@@ -413,6 +428,7 @@ fn main() -> ExitCode {
         } => run_doctor_cmd(robot_json, profile, online, fix),
         Command::Profiles => run_profiles(robot_json),
         Command::Capabilities => run_capabilities(robot_json),
+        Command::Completions { shell } => run_completions_cmd(binary_name, shell),
         Command::Service { command } => run_service_cmd(robot_json, command),
         Command::Dashboard { url, no_open } => {
             run_dashboard_cmd(robot_json, binary_name, &url, no_open)
@@ -2483,6 +2499,34 @@ fn open_dashboard_url(url: &str) -> io::Result<()> {
     } else {
         Err(io::Error::other("browser launcher exited unsuccessfully"))
     }
+}
+
+fn run_completions_cmd(binary_name: &'static str, shell: CompletionShell) -> ExitCode {
+    let mut cmd = cli_command(binary_name);
+    let mut out = Vec::new();
+    match shell {
+        CompletionShell::Bash => {
+            clap_complete::generate(clap_complete::shells::Bash, &mut cmd, binary_name, &mut out);
+        }
+        CompletionShell::Zsh => {
+            clap_complete::generate(clap_complete::shells::Zsh, &mut cmd, binary_name, &mut out);
+        }
+        CompletionShell::Fish => {
+            clap_complete::generate(clap_complete::shells::Fish, &mut cmd, binary_name, &mut out);
+        }
+        CompletionShell::Powershell => {
+            clap_complete::generate(
+                clap_complete::shells::PowerShell,
+                &mut cmd,
+                binary_name,
+                &mut out,
+            );
+        }
+    }
+    stdout_exit(
+        write_stdout(|stdout| stdout.write_all(&out)),
+        ExitCode::SUCCESS,
+    )
 }
 
 fn run_info(robot_json: bool) -> ExitCode {

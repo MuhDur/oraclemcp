@@ -59,6 +59,12 @@ fn wait_with_timeout(mut cmd: Command, timeout: Duration) -> Output {
     }
 }
 
+fn run_binary(args: &[&str]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    wait_with_timeout(cmd, Duration::from_secs(5))
+}
+
 #[test]
 fn serve_with_missing_explicit_profile_fails_fast() {
     let config = temp_config(
@@ -95,6 +101,44 @@ fn serve_with_missing_explicit_profile_fails_fast() {
             .expect("message")
             .contains("connection profile `missing` not found")
     );
+}
+
+#[test]
+fn completions_subcommand_emits_supported_shells() {
+    for (shell, marker) in [
+        ("bash", "_oraclemcp()"),
+        ("zsh", "#compdef oraclemcp"),
+        ("fish", "complete -c oraclemcp"),
+        ("powershell", "Register-ArgumentCompleter"),
+    ] {
+        let output = run_binary(&["completions", shell]);
+        assert_eq!(output.status.code(), Some(0), "{shell}");
+        assert!(
+            output.stderr.is_empty(),
+            "{shell} stderr should be empty: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("completion script is utf8");
+        assert!(stdout.contains("oraclemcp"), "{shell}: {stdout}");
+        assert!(stdout.contains(marker), "{shell}: {stdout}");
+    }
+
+    let dir = temp_dir("om-completions");
+    let alias = make_om_alias(&dir);
+    let mut cmd = Command::new(&alias);
+    cmd.args(["completions", "bash"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        output.stderr.is_empty(),
+        "om completions stderr should be empty: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("om completion script is utf8");
+    assert!(stdout.contains("_om()"));
+    assert!(!stdout.contains("_oraclemcp()"));
 }
 
 #[test]

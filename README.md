@@ -134,6 +134,7 @@ oraclemcp doctor --profile dev_ro    # inspect profile metadata offline
 oraclemcp doctor --online --profile dev_ro  # include live connectivity/auth/role/privilege checks
 oraclemcp info                       # build info: version, tools, transports, thin DB
 oraclemcp robot-docs guide           # compact in-binary guide for agents
+oraclemcp completions bash           # shell completions: bash, zsh, fish, powershell
 oraclemcp --json service install --dry-run --profile db_ro  # preview systemd/launchd/Windows service changes
 oraclemcp service install --yes --profile db_ro              # install the persistent local service
 oraclemcp --json service status       # inspect service-manager state

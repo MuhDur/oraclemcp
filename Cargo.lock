@@ -537,6 +537,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97bf4965940c2382204c0ded6dd3dd48c0c4e872f1e76fb1bf94f45991a2cb6a"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1683,6 +1692,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "clap_complete",
  "getrandom 0.2.17",
  "oraclemcp-audit",
  "oraclemcp-auth",
