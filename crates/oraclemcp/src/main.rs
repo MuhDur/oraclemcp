@@ -56,17 +56,18 @@ use oraclemcp_core::admission::DEFAULT_READ_PER_PROFILE_CAP;
 use oraclemcp_core::http::SinglePrincipalGuard;
 use oraclemcp_core::{
     AdmissionController, CapabilitiesReport, ClientCredentialError, ClientCredentialIssueRequest,
-    ClientCredentialLifecycle, ClientCredentialStore, ConfigOpsBackend, ConfigOpsService,
-    ConfigReloadApplier, ConfigReloadApplyReport, CustomToolCatalog, CustomToolDef, DashboardAuth,
-    DispatchCloseReason, DispatchContext, DispatchFuture, DispatchOutcome, DoctorAuthCapabilities,
-    DoctorAuthModeKind, DoctorContext, DoctorLevelCaps, DoctorProfileCaps, DoctorStateLayout,
-    ExportRegistry, FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext,
-    LaneDispatchFactory, LaneRuntime, MCP_PATH, McpSurfaceDetail, McpSurfaceFuture,
-    MtlsClientRegistry, OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy,
-    OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport, ShutdownCoordinator,
-    SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial,
-    TlsServerConfig, ToolDispatch, WriteIntentLog, apply_legacy_state_migration,
-    build_server_config, default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
+    ClientCredentialLifecycle, ClientCredentialStore, ConfigApplyOutcome, ConfigDraftPreview,
+    ConfigOpsBackend, ConfigOpsError, ConfigOpsService, ConfigOpsStatus, ConfigReloadApplier,
+    ConfigReloadApplyReport, CustomToolCatalog, CustomToolDef, DashboardAuth, DispatchCloseReason,
+    DispatchContext, DispatchFuture, DispatchOutcome, DoctorAuthCapabilities, DoctorAuthModeKind,
+    DoctorContext, DoctorLevelCaps, DoctorProfileCaps, DoctorStateLayout, ExportRegistry,
+    FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext, LaneDispatchFactory,
+    LaneRuntime, MCP_PATH, McpSurfaceDetail, McpSurfaceFuture, MtlsClientRegistry,
+    OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy, OracleMcpServer,
+    PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport, ShutdownCoordinator, SiemFormat,
+    SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial, TlsServerConfig,
+    ToolDispatch, WriteIntentLog, apply_legacy_state_migration, build_server_config,
+    default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
     mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file, requires_mtls,
     run_doctor, service_app_doctor_snapshot, sign, start_oraclemcp_service_app_with_transport,
 };
@@ -85,6 +86,7 @@ use service_lifecycle::{
 const LIVE_DB: bool = true;
 const CUSTOM_TOOLS_DIR_ENV: &str = "ORACLEMCP_TOOLS_DIR";
 const CUSTOM_TOOLS_HMAC_KEY_ENV: &str = "ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY";
+const DEFAULT_SETUP_CONFIG_PATH: &str = "~/.config/oraclemcp/profiles.toml";
 /// Fallback environment variable for the audit signing key when the config's
 /// `[audit].key_ref` is not set.
 const AUDIT_KEY_ENV: &str = "ORACLEMCP_AUDIT_KEY";
@@ -199,6 +201,9 @@ enum Command {
     },
     /// Print generic onboarding templates for profiles, wrappers, and MCP clients.
     Setup {
+        /// Write the generated profile config through the SCFG config-ops backend.
+        #[arg(long)]
+        write: bool,
         /// Example profile name to use in generated snippets.
         #[arg(long, default_value = "db_ro")]
         profile: String,
@@ -209,7 +214,7 @@ enum Command {
         #[arg(long, default_value = "~/.local/bin/oraclemcp-local")]
         wrapper_path: String,
         /// Config path shown in generated guidance.
-        #[arg(long, default_value = "~/.config/oraclemcp/profiles.toml")]
+        #[arg(long, default_value = DEFAULT_SETUP_CONFIG_PATH)]
         config_path: String,
         /// Custom tools directory shown in generated guidance.
         #[arg(long, default_value = "~/.config/oraclemcp/tools.d")]
@@ -491,6 +496,7 @@ fn main() -> ExitCode {
             None | Some(RobotDocsCommand::Guide) => run_robot_docs_guide(robot_json),
         },
         Command::Setup {
+            write,
             profile,
             credential_env,
             wrapper_path,
@@ -498,6 +504,7 @@ fn main() -> ExitCode {
             tools_dir,
         } => run_setup(
             robot_json,
+            write,
             &profile,
             &credential_env,
             &wrapper_path,
@@ -3031,21 +3038,179 @@ fn setup_payload(
     })
 }
 
+#[derive(Debug)]
+struct SetupWriteResult {
+    preview: ConfigDraftPreview,
+    outcome: ConfigApplyOutcome,
+    status: ConfigOpsStatus,
+}
+
+fn setup_write_target_path(config_path: &str) -> PathBuf {
+    if config_path == DEFAULT_SETUP_CONFIG_PATH {
+        return operator_config_target_path();
+    }
+    expand_home_path(config_path)
+}
+
+fn expand_home_path(path: &str) -> PathBuf {
+    if path == "~" {
+        return std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(path));
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| PathBuf::from(path));
+    }
+    PathBuf::from(path)
+}
+
+fn setup_apply_config_with_backend(
+    backend: ConfigOpsBackend,
+    target_path: PathBuf,
+    draft_toml: &str,
+) -> Result<SetupWriteResult, ConfigOpsError> {
+    let service = ConfigOpsService::new(backend, target_path, None);
+    let preview = service.stage(draft_toml)?;
+    let outcome = service.apply(draft_toml, Some(&preview.current_sha256))?;
+    let status = service.status()?;
+    Ok(SetupWriteResult {
+        preview,
+        outcome,
+        status,
+    })
+}
+
+fn setup_write_payload(
+    mut payload: serde_json::Value,
+    target_path: &Path,
+    result: &SetupWriteResult,
+) -> serde_json::Value {
+    if let Some(obj) = payload.as_object_mut() {
+        obj.remove("profiles_toml");
+        obj.insert(
+            "write".to_owned(),
+            serde_json::json!({
+                "enabled": true,
+                "source": "config_ops",
+                "target_path": target_path,
+                "preview": &result.preview,
+                "outcome": &result.outcome,
+                "status": &result.status,
+                "redaction": "profiles TOML and secret references are not echoed by setup --write"
+            }),
+        );
+        obj.insert(
+            "next_actions".to_owned(),
+            serde_json::json!([
+                format!("edit {} locally to replace placeholder database metadata before live use", target_path.display()),
+                "set the environment variables referenced by credential_ref and wallet_password_ref outside profiles.toml",
+                "write the wrapper template only if local Oracle network environment setup is needed",
+                "for HTTP clients, issue one per-client bearer and configure --client-credentials on the service",
+                "run the validation commands before allowing agents to use live database tools"
+            ]),
+        );
+    }
+    payload
+}
+
+fn setup_config_error_status(error: &ConfigOpsError) -> (&'static str, String) {
+    match error {
+        ConfigOpsError::CurrentChanged { .. } => (
+            "ORACLEMCP_SETUP_CONFIG_CHANGED",
+            "config target changed during setup --write; rerun setup after reviewing the current file"
+                .to_owned(),
+        ),
+        ConfigOpsError::InvalidTargetPath(reason) => {
+            ("ORACLEMCP_SETUP_TARGET_INVALID", reason.clone())
+        }
+        ConfigOpsError::InvalidUtf8 { .. } => (
+            "ORACLEMCP_SETUP_CONFIG_INVALID_UTF8",
+            "config target is not valid UTF-8".to_owned(),
+        ),
+        ConfigOpsError::Config(_) => (
+            "ORACLEMCP_SETUP_CONFIG_INVALID",
+            "generated setup config failed strict validation".to_owned(),
+        ),
+        ConfigOpsError::UnknownRollbackId => (
+            "ORACLEMCP_SETUP_ROLLBACK_UNKNOWN",
+            "rollback id is unknown or already consumed".to_owned(),
+        ),
+        ConfigOpsError::FileStore(_) | ConfigOpsError::Io(_) => (
+            "ORACLEMCP_SETUP_WRITE_FAILED",
+            "config workflow failed before completion".to_owned(),
+        ),
+        _ => (
+            "ORACLEMCP_SETUP_WRITE_FAILED",
+            "config workflow failed before completion".to_owned(),
+        ),
+    }
+}
+
+fn emit_command_error(robot_json: bool, command: &str, code: &str, message: &str) {
+    if robot_json {
+        eprintln!(
+            "{}",
+            serde_json::json!({ "kind": "error", "code": code, "message": message })
+        );
+    } else {
+        eprintln!("oraclemcp {command}: {message}");
+    }
+}
+
 fn run_setup(
     robot_json: bool,
+    write: bool,
     profile: &str,
     credential_env: &str,
     wrapper_path: &str,
     config_path: &str,
     tools_dir: &str,
 ) -> ExitCode {
-    let payload = setup_payload(
+    let target_path = setup_write_target_path(config_path);
+    let config_path_display;
+    let setup_config_path = if write {
+        config_path_display = target_path.display().to_string();
+        config_path_display.as_str()
+    } else {
+        config_path
+    };
+    let mut payload = setup_payload(
         profile,
         credential_env,
         wrapper_path,
-        config_path,
+        setup_config_path,
         tools_dir,
     );
+    let write_result = if write {
+        let draft_toml = payload["profiles_toml"]
+            .as_str()
+            .expect("setup payload includes profiles_toml")
+            .to_owned();
+        let backend = match ConfigOpsBackend::open_default() {
+            Ok(backend) => backend,
+            Err(error) => {
+                let (code, message) = setup_config_error_status(&error);
+                emit_command_error(robot_json, "setup", code, &message);
+                return ExitCode::from(2);
+            }
+        };
+        match setup_apply_config_with_backend(backend, target_path.clone(), &draft_toml) {
+            Ok(result) => Some(result),
+            Err(error) => {
+                let (code, message) = setup_config_error_status(&error);
+                emit_command_error(robot_json, "setup", code, &message);
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(result) = write_result.as_ref() {
+        payload = setup_write_payload(payload, &target_path, result);
+    }
     if robot_json {
         let output = serde_json::to_string(&payload).unwrap();
         stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
@@ -3053,11 +3218,26 @@ fn run_setup(
         let mut output = String::new();
         output.push_str("oraclemcp setup\n\n");
         output.push_str("Install:\n  cargo install oraclemcp\n\n");
-        output.push_str(&format!("Profiles path:\n  {config_path}\n\n"));
-        output.push_str(&format!(
-            "profiles.toml template:\n{}\n\n",
-            payload["profiles_toml"].as_str().unwrap_or("")
-        ));
+        output.push_str(&format!("Profiles path:\n  {setup_config_path}\n\n"));
+        if let Some(result) = write_result.as_ref() {
+            output.push_str("profiles.toml written through config-ops:\n");
+            output.push_str(&format!(
+                "  target: {}\n",
+                result.outcome.apply.target_path.display()
+            ));
+            output.push_str(&format!(
+                "  backup: {}\n",
+                result.outcome.apply.backup_path.display()
+            ));
+            output.push_str(&format!("  rollback: {}\n", result.outcome.rollback_id));
+            output.push_str(&format!("  reload: {}\n", result.outcome.reload.status));
+            output.push_str("  redaction: profiles TOML and secret references are not echoed by setup --write\n\n");
+        } else {
+            output.push_str(&format!(
+                "profiles.toml template:\n{}\n\n",
+                payload["profiles_toml"].as_str().unwrap_or("")
+            ));
+        }
         output.push_str(&format!("Wrapper path:\n  {wrapper_path}\n\n"));
         output.push_str(&format!(
             "wrapper script template:\n{}\n\n",
@@ -5260,6 +5440,7 @@ mod tests {
             "oraclemcp",
             "--json",
             "setup",
+            "--write",
             "--profile",
             "tenant_ro",
             "--credential-env",
@@ -5270,6 +5451,7 @@ mod tests {
         assert!(matches!(
             setup.command,
             Some(Command::Setup {
+                write: true,
                 ref profile,
                 ref credential_env,
                 ..

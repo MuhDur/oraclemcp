@@ -162,6 +162,15 @@ snippets:
 oraclemcp --json setup --profile db_ro
 ```
 
+To create the starter profiles file directly, use the same template through the
+SCFG config-ops backend. This validates the draft, writes a backup, atomically
+replaces the target, and reports the reload/rollback metadata without echoing
+the raw profile TOML:
+
+```sh
+oraclemcp --json setup --write --profile db_ro
+```
+
 **Docker:** a ready-to-run thin-driver image, published to GHCR and listed in the [MCP registry](https://registry.modelcontextprotocol.io) on release as `io.github.MuhDur/oraclemcp`. Mount a profiles config and pass the credential the profile's `credential_ref` expects:
 
 ```sh
@@ -223,6 +232,7 @@ oraclemcp --json clients issue --label claude --scope oracle:read  # shown-once 
 oraclemcp serve --listen 127.0.0.1:7070 --client-credentials --profile db_ro
 oraclemcp serve --listen 127.0.0.1:7070 --allow-no-auth   # local HTTP dev only
 oraclemcp --json setup --profile db_ro    # generic onboarding templates
+oraclemcp --json setup --write --profile db_ro  # write starter profiles via SCFG
 oraclemcp capabilities               # the advertised tool surface + feature tiers (JSON)
 oraclemcp --json profiles            # configured profile names and non-secret metadata
 oraclemcp doctor                     # offline diagnostics (thin driver, TNS/wallet, classifier, NLS)
@@ -617,6 +627,7 @@ Profile/config regression commands:
 # Local, non-secret profile parsing/redaction/setup checks.
 cargo test -p oraclemcp-config -p oraclemcp-core profile -- --nocapture
 cargo test -p oraclemcp setup_payload_is_generic_and_client_ready -- --nocapture
+cargo test -p oraclemcp --test cli setup_write_round_trips_profiles_through_config_ops -- --nocapture
 cargo test -p oraclemcp profiles_json_reports_non_secret_metadata -- --nocapture
 
 # Live Oracle 23ai/FREE thin profile/config matrix.

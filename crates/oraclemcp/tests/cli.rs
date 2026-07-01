@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use oraclemcp_config::{CONFIG_PATH_ENV, OracleMcpConfig};
+
 fn temp_config(contents: &str) -> PathBuf {
     let dir = temp_dir("config");
     let path = dir.join("profiles.toml");
@@ -187,4 +189,79 @@ fn om_alias_argv0_aware_runs_dashboard_pairing() {
             .expect("url string")
             .starts_with("http://127.0.0.1:7777/dashboard/pair?ticket=")
     );
+}
+
+#[test]
+fn setup_write_round_trips_profiles_through_config_ops() {
+    let dir = temp_dir("setup-write");
+    let config = dir.join("profiles.toml");
+    let state = dir.join("state");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args([
+        "--json",
+        "setup",
+        "--write",
+        "--profile",
+        "tenant_ro",
+        "--credential-env",
+        "APP_PASSWORD",
+    ])
+    .env(CONFIG_PATH_ENV, &config)
+    .env("XDG_STATE_HOME", &state)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        output.stderr.is_empty(),
+        "setup --write stderr should be empty: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("setup JSON is utf8");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("setup JSON");
+    assert_eq!(value["ok"], serde_json::json!(true));
+    assert_eq!(value["kind"], serde_json::json!("oraclemcp_setup"));
+    assert!(value.get("profiles_toml").is_none());
+    assert_eq!(value["write"]["source"], serde_json::json!("config_ops"));
+    assert_eq!(
+        value["write"]["target_path"],
+        serde_json::json!(config.display().to_string())
+    );
+    assert_eq!(
+        value["write"]["redaction"],
+        serde_json::json!("profiles TOML and secret references are not echoed by setup --write")
+    );
+    assert!(
+        value["write"]["outcome"]["rollback_id"]
+            .as_str()
+            .expect("rollback id")
+            .starts_with("rollback-")
+    );
+
+    for forbidden in [
+        "credential_ref =",
+        "env:APP_PASSWORD",
+        "dbhost.example.com",
+        "APP_READONLY",
+        "wallet_password_ref =",
+    ] {
+        assert!(
+            !stdout.contains(forbidden),
+            "setup --write JSON leaked raw draft material {forbidden}: {stdout}"
+        );
+    }
+
+    let written = fs::read_to_string(&config).expect("profiles config written");
+    assert!(written.contains("credential_ref = \"env:APP_PASSWORD\""));
+    assert!(written.contains("connect_string = \"dbhost.example.com:1521/service_name\""));
+    assert!(written.contains("[profiles.drcp]"));
+    OracleMcpConfig::from_toml_str(&written).expect("written setup config parses");
+
+    let backup_path = value["write"]["outcome"]["apply"]["backup_path"]
+        .as_str()
+        .expect("backup path");
+    assert!(PathBuf::from(backup_path).exists());
 }

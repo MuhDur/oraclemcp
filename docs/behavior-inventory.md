@@ -28,7 +28,7 @@ query text.
 | `oraclemcp profiles` / `list-profiles` | Lists configured profiles and safe metadata. Connect strings and credential refs are omitted from metadata. | `crates/oraclemcp/src/main.rs`, `crates/oraclemcp-config/src/profile.rs` |
 | `oraclemcp capabilities` | Emits robot-readable config, tools, tiers, auth posture, and environment guidance. | `crates/oraclemcp/src/main.rs`, `crates/oraclemcp/src/robot_docs.rs` |
 | `oraclemcp robot-docs guide` | Emits agent-oriented setup and usage docs. | `crates/oraclemcp/src/robot_docs.rs` |
-| `oraclemcp setup` | Generates local profile/tool templates and references `ORACLEMCP_STDIO_TOKEN`; must not print real secrets. | `crates/oraclemcp/src/main.rs` |
+| `oraclemcp setup` | Generates local profile/tool templates and references `ORACLEMCP_STDIO_TOKEN`; `setup --write` applies the starter profiles file through SCFG config-ops and does not echo the raw draft. Must not print real secrets. | `crates/oraclemcp/src/main.rs` |
 | `oraclemcp sign-tool` | Signs operator-defined TOML custom tools with `ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY`. | `crates/oraclemcp/src/main.rs`, `README.md` |
 | Global `--robot-json` / `--json` | Machine-readable output mode for CLI commands that support it. | `crates/oraclemcp/src/main.rs` |
 
