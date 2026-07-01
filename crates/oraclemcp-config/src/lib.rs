@@ -222,6 +222,10 @@ pub struct HttpConfig {
     pub stateful_idle_ttl_seconds: u64,
     /// Optional OAuth 2.1 resource-server protection for `/mcp`.
     pub oauth: Option<HttpOAuthConfig>,
+    /// Optional mTLS client registry. Client-CA verification alone proves only
+    /// certificate issuance; the leaf fingerprint must be listed here before it
+    /// becomes a server-derived principal.
+    pub mtls: HttpMtlsConfig,
     /// Optional TLS material for the native HTTPS listener.
     pub tls: Option<HttpTlsConfig>,
     /// Operator-authority policy for `/operator/v1`.
@@ -237,6 +241,7 @@ impl Default for HttpConfig {
             stateful: false,
             stateful_idle_ttl_seconds: DEFAULT_HTTP_STATEFUL_IDLE_TTL_SECONDS,
             oauth: None,
+            mtls: HttpMtlsConfig::default(),
             tls: None,
             operator: HttpOperatorConfig::default(),
         }
@@ -251,6 +256,7 @@ impl HttpConfig {
         if let Some(oauth) = &self.oauth {
             oauth.validate()?;
         }
+        self.mtls.validate()?;
         if let Some(tls) = &self.tls {
             tls.validate()?;
         }
@@ -306,6 +312,37 @@ impl HttpOperatorConfig {
     }
 }
 
+/// mTLS application-identity registry for the native HTTP transport.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HttpMtlsConfig {
+    /// Registered client leaf-certificate fingerprints. Values are SHA-256 over
+    /// the DER leaf certificate and may be written as `sha256:<hex>` or `<hex>`.
+    /// At runtime they become principal keys `mtls:sha256:<hex>`.
+    pub client_fingerprints: Vec<String>,
+}
+
+impl HttpMtlsConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        let mut seen = BTreeSet::new();
+        for fingerprint in &self.client_fingerprints {
+            let Some(normalized) = normalize_sha256_fingerprint(fingerprint) else {
+                return Err(ConfigError::InvalidHttp {
+                    field: "http.mtls.client_fingerprints",
+                    reason: "entries must be sha256:<64 lowercase-or-uppercase hex chars>",
+                });
+            };
+            if !seen.insert(normalized) {
+                return Err(ConfigError::InvalidHttp {
+                    field: "http.mtls.client_fingerprints",
+                    reason: "entries must be unique",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// OAuth 2.1 resource-server configuration for the native HTTP transport.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -342,6 +379,12 @@ impl HttpOAuthConfig {
         }
         Ok(())
     }
+}
+
+fn normalize_sha256_fingerprint(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_lowercase();
+    let hex = value.strip_prefix("sha256:").unwrap_or(&value);
+    (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then(|| format!("sha256:{hex}"))
 }
 
 /// TLS material paths for native HTTPS serving.
@@ -948,6 +991,47 @@ mod tests {
             err,
             ConfigError::InvalidOperator {
                 field: "http.operator.allowed_subjects",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn http_mtls_client_fingerprints_load_and_validate() {
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [http.mtls]
+            client_fingerprints = [
+              "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+              "FFEEDDCCBBAA99887766554433221100FFEEDDCCBBAA99887766554433221100",
+            ]
+            "#,
+        )
+        .expect("mTLS client registry loads");
+
+        assert_eq!(
+            cfg.http.mtls.client_fingerprints,
+            vec![
+                "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+                "FFEEDDCCBBAA99887766554433221100FFEEDDCCBBAA99887766554433221100",
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_http_mtls_fingerprint_is_rejected() {
+        let err = OracleMcpConfig::from_toml_str(
+            r#"
+            [http.mtls]
+            client_fingerprints = ["sha256:not-a-fingerprint"]
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ConfigError::InvalidHttp {
+                field: "http.mtls.client_fingerprints",
                 ..
             }
         ));

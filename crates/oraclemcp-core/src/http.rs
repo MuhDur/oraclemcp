@@ -103,6 +103,51 @@ impl std::fmt::Debug for ObservabilityState {
     }
 }
 
+/// Registered mTLS clients for the native HTTP transport.
+///
+/// rustls verifies the certificate chain against the configured client CA. This
+/// registry is the application-identity step: only a listed leaf fingerprint is
+/// converted into an `mtls:sha256:<hex>` principal key.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MtlsClientRegistry {
+    fingerprints: Vec<String>,
+}
+
+impl MtlsClientRegistry {
+    /// Build a registry from SHA-256 leaf-certificate fingerprints. Invalid
+    /// entries are ignored because config validation owns operator-facing
+    /// errors; direct embedders can use [`Self::is_empty`] to detect no entries.
+    #[must_use]
+    pub fn from_fingerprints<I, S>(fingerprints: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut fingerprints = fingerprints
+            .into_iter()
+            .filter_map(|fingerprint| normalize_cert_fingerprint(fingerprint.as_ref()))
+            .collect::<Vec<_>>();
+        fingerprints.sort();
+        fingerprints.dedup();
+        Self { fingerprints }
+    }
+
+    /// `true` when no client certificate can be mapped to an application
+    /// principal.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.fingerprints.is_empty()
+    }
+
+    fn principal_key_for_fingerprint(&self, fingerprint: &str) -> Option<String> {
+        let fingerprint = normalize_cert_fingerprint(fingerprint)?;
+        self.fingerprints
+            .binary_search(&fingerprint)
+            .ok()
+            .map(|_| mtls_principal_key(&fingerprint))
+    }
+}
+
 /// Operator configuration for the HTTP transport.
 #[derive(Clone)]
 pub struct HttpTransportConfig {
@@ -123,10 +168,14 @@ pub struct HttpTransportConfig {
     /// The RFC 9728 protected-resource metadata document to serve, if OAuth is
     /// enabled (from [`oraclemcp_auth::oauth_rs::ResourceServerConfig`]).
     pub resource_metadata: Option<Value>,
-    /// OAuth 2.1 resource-server enforcement (P1-9b). When set, every `/mcp`
-    /// request must carry a valid bearer token; the metadata route stays open so
-    /// clients can discover the authorization server.
+    /// OAuth 2.1 resource-server enforcement (P1-9b). When set, `/mcp`
+    /// requests may authenticate with a valid bearer token, or with a
+    /// registered mTLS leaf fingerprint when mTLS is configured; the metadata
+    /// route stays open so clients can discover the authorization server.
     pub oauth: Option<Arc<OAuthEnforcement>>,
+    /// Registered mTLS clients. A CA-verified client certificate becomes an
+    /// authenticated principal only when its leaf fingerprint appears here.
+    pub mtls_clients: MtlsClientRegistry,
     /// Issued stateful Streamable HTTP session ids. Listener wrappers install a
     /// store automatically when `stateful` is true.
     pub session_store: Option<Arc<HttpSessionStore>>,
@@ -178,6 +227,7 @@ impl std::fmt::Debug for HttpTransportConfig {
             .field("stateful_idle_ttl", &self.stateful_idle_ttl)
             .field("resource_metadata", &self.resource_metadata.is_some())
             .field("oauth", &self.oauth.is_some())
+            .field("mtls_client_count", &self.mtls_clients.fingerprints.len())
             .field("session_store", &self.session_store.is_some())
             .field("result_store", &self.result_store.is_some())
             .field("session_lifecycle", &self.session_lifecycle.is_some())
@@ -212,6 +262,7 @@ impl Default for HttpTransportConfig {
             stateful_idle_ttl: Duration::from_secs(DEFAULT_STATEFUL_IDLE_TTL_SECONDS),
             resource_metadata: None,
             oauth: None,
+            mtls_clients: MtlsClientRegistry::default(),
             session_store: None,
             result_store: None,
             session_lifecycle: None,
@@ -3940,8 +3991,10 @@ mod tests {
         .into()
     }
 
-    fn spawn_https(
+    fn spawn_https_with(
         tls: Arc<TlsServerConfig>,
+        server: OracleMcpServer,
+        config: HttpTransportConfig,
     ) -> (
         std::net::SocketAddr,
         Arc<AtomicBool>,
@@ -3952,20 +4005,28 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let server_shutdown = Arc::clone(&shutdown);
         let handle = std::thread::spawn(move || {
-            serve_https_until(
-                listener,
-                test_server(),
-                &HttpTransportConfig {
-                    json_response: true,
-                    stateful: false,
-                    ..Default::default()
-                },
-                tls,
-                server_shutdown,
-            )
-            .expect("native HTTPS server exits cleanly")
+            serve_https_until(listener, server, &config, tls, server_shutdown)
+                .expect("native HTTPS server exits cleanly")
         });
         (addr, shutdown, handle)
+    }
+
+    fn spawn_https(
+        tls: Arc<TlsServerConfig>,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        spawn_https_with(
+            tls,
+            test_server(),
+            HttpTransportConfig {
+                json_response: true,
+                stateful: false,
+                ..Default::default()
+            },
+        )
     }
 
     fn https_get(
@@ -3985,6 +4046,35 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response)?;
         Ok(response)
+    }
+
+    fn https_post(
+        addr: std::net::SocketAddr,
+        config: Arc<rustls::ClientConfig>,
+        body: &str,
+    ) -> std::io::Result<String> {
+        let stream = TcpStream::connect(addr)?;
+        let connection =
+            rustls::ClientConnection::new(config, ServerName::try_from("localhost").unwrap())
+                .map_err(|e| std::io::Error::other(format!("TLS client setup: {e}")))?;
+        let mut stream = rustls::StreamOwned::new(connection, stream);
+        write!(
+            stream,
+            "POST {MCP_PATH} HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: application/json\r\naccept: application/json, text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        )?;
+        stream.flush()?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        Ok(response)
+    }
+
+    fn http_body(response: &str) -> &str {
+        response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("HTTP response has body separator")
     }
 
     #[test]
@@ -4030,7 +4120,69 @@ mod tests {
             tls_client_config(&server_cert, Some((&client_cert, &client_key))),
         )
         .expect("mTLS request with client certificate");
-        assert!(response.starts_with("HTTP/1.1 405 Method Not Allowed"));
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(
+            response.contains("mtls_client_not_registered"),
+            "CA-valid but unregistered mTLS client must fail closed: {response}"
+        );
+
+        shutdown.store(true, Ordering::SeqCst);
+        handle.join().expect("mTLS server thread joins");
+    }
+
+    #[test]
+    fn registered_mtls_client_certificate_becomes_dispatch_principal() {
+        let (server_cert, server_key) = self_signed_cert();
+        let (client_ca, client_ca_key) = ca_cert();
+        let (client_cert, client_key) =
+            cert_signed_by("oraclemcp-test-client", &client_ca, &client_ca_key);
+        let fingerprint = cert_fingerprint_sha256(pem_certs(&client_cert)[0].as_ref());
+        let tls = crate::tls::build_server_config(&crate::tls::TlsMaterial {
+            cert_chain_pem: server_cert.clone(),
+            private_key_pem: server_key,
+            client_ca_pem: Some(client_ca.pem().into_bytes()),
+        })
+        .expect("mTLS config builds");
+        let (addr, shutdown, handle) = spawn_https_with(
+            tls,
+            scope_echo_server(),
+            HttpTransportConfig {
+                json_response: true,
+                stateful: false,
+                mtls_clients: MtlsClientRegistry::from_fingerprints([fingerprint.clone()]),
+                ..Default::default()
+            },
+        );
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "oracle_preview_sql",
+                "arguments": { "sql": "SELECT 1 FROM dual" }
+            }
+        })
+        .to_string();
+        let response = https_post(
+            addr,
+            tls_client_config(&server_cert, Some((&client_cert, &client_key))),
+            &body,
+        )
+        .expect("mTLS request with registered client certificate");
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "registered mTLS client should dispatch successfully: {response}"
+        );
+        let json: Value = serde_json::from_str(http_body(&response)).expect("JSON response body");
+        assert_eq!(
+            json["result"]["structuredContent"]["principal_key"],
+            serde_json::json!(format!("mtls:{fingerprint}"))
+        );
+        assert_eq!(
+            json["result"]["structuredContent"]["scopes"],
+            serde_json::json!([])
+        );
 
         shutdown.store(true, Ordering::SeqCst);
         handle.join().expect("mTLS server thread joins");
@@ -4300,6 +4452,12 @@ struct ValidatedOAuthRequest {
     principal_key: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthenticatedHttpRequest {
+    scope_grant: Option<ScopeGrant>,
+    principal_key: String,
+}
+
 /// A parsed native HTTP request. Header names are stored lowercase.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpRequest {
@@ -4310,6 +4468,8 @@ pub struct HttpRequest {
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub peer_is_loopback: bool,
+    pub peer_addr: Option<String>,
+    pub peer_cert_fingerprint_sha256: Option<String>,
 }
 
 impl HttpRequest {
@@ -4339,6 +4499,8 @@ impl HttpRequest {
             headers,
             body: body.into(),
             peer_is_loopback: false,
+            peer_addr: None,
+            peer_cert_fingerprint_sha256: None,
         }
     }
 
@@ -4347,6 +4509,21 @@ impl HttpRequest {
     #[must_use]
     pub fn with_peer_loopback(mut self, peer_is_loopback: bool) -> Self {
         self.peer_is_loopback = peer_is_loopback;
+        self
+    }
+
+    /// Attach server-observed peer address. The value is informational and is
+    /// never accepted from HTTP headers.
+    #[must_use]
+    pub fn with_peer_addr(mut self, peer_addr: Option<String>) -> Self {
+        self.peer_addr = peer_addr;
+        self
+    }
+
+    /// Attach the rustls-verified mTLS leaf-certificate fingerprint.
+    #[must_use]
+    pub fn with_peer_cert_fingerprint_sha256(mut self, fingerprint: Option<String>) -> Self {
+        self.peer_cert_fingerprint_sha256 = fingerprint;
         self
     }
 
@@ -4495,6 +4672,45 @@ fn validate_oauth_request(
         .map_err(|err| oauth_error_response(enforcement, Some(err)))
 }
 
+fn authenticate_http_request(
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+    allow_unauthenticated_cookie_get: bool,
+) -> Result<Option<AuthenticatedHttpRequest>, HttpResponse> {
+    if let Some(enforcement) = &config.oauth
+        && request.header("authorization").is_some()
+    {
+        let validated = validate_oauth_request(request, enforcement)?;
+        return Ok(Some(AuthenticatedHttpRequest {
+            scope_grant: Some(validated.scope_grant),
+            principal_key: validated.principal_key,
+        }));
+    }
+
+    if let Some(fingerprint) = request.peer_cert_fingerprint_sha256.as_deref() {
+        let Some(principal_key) = config
+            .mtls_clients
+            .principal_key_for_fingerprint(fingerprint)
+        else {
+            return Err(mtls_forbidden_response());
+        };
+        return Ok(Some(AuthenticatedHttpRequest {
+            scope_grant: None,
+            principal_key,
+        }));
+    }
+
+    if allow_unauthenticated_cookie_get {
+        return Ok(None);
+    }
+
+    if let Some(enforcement) = &config.oauth {
+        return Err(oauth_error_response(enforcement, None));
+    }
+
+    Ok(None)
+}
+
 fn oauth_error_response(enforcement: &OAuthEnforcement, err: Option<TokenError>) -> HttpResponse {
     let challenge = enforcement.config.www_authenticate(
         &enforcement.metadata_url,
@@ -4532,6 +4748,31 @@ fn oauth_principal_key_from_validated_token(token: &str) -> String {
         })
         .unwrap_or_else(|| format!("token={}", sha256_hex(token.as_bytes())));
     format!("oauth:{}", sha256_hex(stable_material.as_bytes()))
+}
+
+fn cert_fingerprint_sha256(cert_der: &[u8]) -> String {
+    prefixed_sha256_hex(cert_der)
+}
+
+fn normalize_cert_fingerprint(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_lowercase();
+    let hex = value.strip_prefix("sha256:").unwrap_or(&value);
+    (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then(|| format!("sha256:{hex}"))
+}
+
+fn mtls_principal_key(fingerprint_sha256: &str) -> String {
+    format!("mtls:{fingerprint_sha256}")
+}
+
+fn mtls_forbidden_response() -> HttpResponse {
+    json_response(
+        403,
+        &json!({
+            "error": "mtls_client_not_registered",
+            "message": "mTLS client certificate is verified but not registered for this service",
+        }),
+    )
+    .with_header("cache-control", "no-store")
 }
 
 fn jwt_claims_unverified(token: &str) -> Option<Value> {
@@ -4630,11 +4871,10 @@ fn cookie_get_requires_origin(request: &HttpRequest) -> Option<HttpResponse> {
 
 fn enforce_single_principal(
     config: &HttpTransportConfig,
-    validated_oauth: Option<&ValidatedOAuthRequest>,
+    authenticated: Option<&AuthenticatedHttpRequest>,
 ) -> Option<HttpResponse> {
     let guard = config.single_principal_guard.as_ref()?;
-    let key =
-        stateful_principal_key(validated_oauth.map(|validated| validated.principal_key.as_str()));
+    let key = stateful_principal_key(authenticated.map(|auth| auth.principal_key.as_str()));
     guard
         .admit(key)
         .err()
@@ -4774,16 +5014,13 @@ fn handle_http_exchange(
             if !accepts_media(request.header("accept"), required_media) {
                 return HttpExchange::Buffered(empty_response(406));
             }
-            let validated_oauth = match &config.oauth {
-                Some(enforcement) => match validate_oauth_request(&request, enforcement) {
-                    Ok(validated) => Some(validated),
-                    Err(response) => return HttpExchange::Buffered(response),
-                },
-                None => None,
+            let authenticated = match authenticate_http_request(config, &request, false) {
+                Ok(authenticated) => authenticated,
+                Err(response) => return HttpExchange::Buffered(response),
             };
-            let principal_key = validated_oauth
+            let principal_key = authenticated
                 .as_ref()
-                .map(|validated| validated.principal_key.as_str());
+                .map(|auth| auth.principal_key.as_str());
             if let Some(response) =
                 enforce_dashboard_operator_auth(config, &request, principal_key.is_some())
             {
@@ -4839,23 +5076,20 @@ fn handle_http_exchange(
         && config.stateful
         && request.header("authorization").is_none()
         && stateful_session_cookie(&request).is_some();
-    let validated_oauth = match &config.oauth {
-        Some(enforcement) => match validate_oauth_request(&request, enforcement) {
-            Ok(validated) => Some(validated),
-            Err(_) if cookie_authenticated_get => None,
-            Err(response) => return HttpExchange::Buffered(response),
-        },
-        None => None,
+    let authenticated = match authenticate_http_request(config, &request, cookie_authenticated_get)
+    {
+        Ok(authenticated) => authenticated,
+        Err(response) => return HttpExchange::Buffered(response),
     };
-    if let Some(response) = enforce_single_principal(config, validated_oauth.as_ref()) {
+    if let Some(response) = enforce_single_principal(config, authenticated.as_ref()) {
         return HttpExchange::Buffered(response);
     }
-    let scope_grant = validated_oauth
+    let scope_grant = authenticated
         .as_ref()
-        .map(|validated| &validated.scope_grant);
-    let principal_key = validated_oauth
+        .and_then(|auth| auth.scope_grant.as_ref());
+    let principal_key = authenticated
         .as_ref()
-        .map(|validated| validated.principal_key.as_str());
+        .map(|auth| auth.principal_key.as_str());
     match request.method.as_str() {
         "GET" => handle_mcp_get(config, &request, principal_key, allow_streaming_get),
         "DELETE" => HttpExchange::Buffered(handle_mcp_delete(
@@ -7249,30 +7483,53 @@ fn handle_connection(
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT))?;
     stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT))?;
-    let peer_is_loopback = stream
-        .peer_addr()
-        .map(|addr| addr.ip().is_loopback())
-        .unwrap_or(false);
-    handle_stream(&mut stream, server, config, peer_is_loopback)
+    let peer_addr = stream.peer_addr().ok();
+    let peer_is_loopback = peer_addr.is_some_and(|addr| addr.ip().is_loopback());
+    handle_stream(
+        &mut stream,
+        server,
+        config,
+        peer_is_loopback,
+        peer_addr.map(|addr| addr.to_string()),
+        None,
+    )
 }
 
 fn handle_tls_connection(
-    stream: TcpStream,
+    mut stream: TcpStream,
     server: &OracleMcpServer,
     config: &HttpTransportConfig,
     tls: Arc<TlsServerConfig>,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT))?;
     stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT))?;
-    let connection = ServerConnection::new(tls).map_err(|e| {
+    let mut connection = ServerConnection::new(tls).map_err(|e| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("TLS setup: {e}"))
     })?;
-    let peer_is_loopback = stream
-        .peer_addr()
-        .map(|addr| addr.ip().is_loopback())
-        .unwrap_or(false);
+    let peer_addr = stream.peer_addr().ok();
+    let peer_is_loopback = peer_addr.is_some_and(|addr| addr.ip().is_loopback());
+    while connection.is_handshaking() {
+        let (read, written) = connection.complete_io(&mut stream)?;
+        if read == 0 && written == 0 && connection.is_handshaking() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "TLS handshake did not complete",
+            ));
+        }
+    }
+    let peer_cert_fingerprint_sha256 = connection
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+        .map(|cert| cert_fingerprint_sha256(cert.as_ref()));
     let mut stream = StreamOwned::new(connection, stream);
-    let result = handle_stream(&mut stream, server, config, peer_is_loopback);
+    let result = handle_stream(
+        &mut stream,
+        server,
+        config,
+        peer_is_loopback,
+        peer_addr.map(|addr| addr.to_string()),
+        peer_cert_fingerprint_sha256,
+    );
     stream.conn.send_close_notify();
     let _ = stream.flush();
     result
@@ -7283,12 +7540,17 @@ fn handle_stream(
     server: &OracleMcpServer,
     config: &HttpTransportConfig,
     peer_is_loopback: bool,
+    peer_addr: Option<String>,
+    peer_cert_fingerprint_sha256: Option<String>,
 ) -> std::io::Result<()> {
     let exchange = match read_http_request(stream) {
         Ok(Some(request)) => handle_http_exchange(
             server,
             config,
-            request.with_peer_loopback(peer_is_loopback),
+            request
+                .with_peer_loopback(peer_is_loopback)
+                .with_peer_addr(peer_addr)
+                .with_peer_cert_fingerprint_sha256(peer_cert_fingerprint_sha256),
             true,
         ),
         Ok(None) => return Ok(()),

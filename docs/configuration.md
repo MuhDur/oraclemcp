@@ -346,21 +346,23 @@ dispatch until a future profile-level dashboard DDL opt-in is added.
 `[http]` fields: `allowed_hosts`, `allowed_origins` (both default `[]`,
 loopback-only), `json_response` (default `false`), `stateful` (default `false`),
 `stateful_idle_ttl_seconds` (default `900`, `0` disables idle reaping), the
-optional `[http.oauth]` resource-server table, the optional `[http.tls]`
-rustls material, and the `[http.operator]` operator-authority table. Idle
+optional `[http.oauth]` resource-server table, the `[http.mtls]` client
+fingerprint registry, the optional `[http.tls]` rustls material, and the
+`[http.operator]` operator-authority table. Idle
 stateful sessions are reaped by sending a close message to the owning lane; the
 watchdog never touches the Oracle connection from the HTTP thread. When OAuth is
 enabled, granted `oracle:*` scopes can only **lower** the effective ceiling,
 never raise it, and protected profiles stay `READ_ONLY`. Server-only TLS is
 transport encryption, not application authentication — `/mcp` still needs OAuth
 or `--allow-no-auth`. Adding `[http.tls.client_ca_path]` requires mTLS client
-certs.
+certs, but only leaf DER SHA-256 fingerprints listed in
+`[http.mtls].client_fingerprints` become `mtls:sha256:<hex>` principals.
 
 `[http.operator]` is binary in this line: a request is operator-authorized only
 when it is the unauthenticated loopback local-owner path
 (`allow_loopback_owner = true`, the default) or its server-derived principal key
 is listed in `allowed_subjects`, for example `oauth:<stable-hash>` or
-`mtls:<certificate-fingerprint>`. A regular OAuth-scoped principal is never an
+`mtls:sha256:<certificate-fingerprint>`. A regular OAuth-scoped principal is never an
 operator merely by asking for it in a tool argument or query parameter. Operator
 API actions require the signed audit chain; without an audit sink, `/operator/v1`
 fails closed.

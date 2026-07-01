@@ -157,7 +157,8 @@ through `sc.exe`. `oraclemcp --json doctor` reports those configured caps plus
 the effective open-file, task, memory-cgroup, and OOM caps visible to the
 current process.
 Streamable HTTP auth rules are unchanged for service mode: configure OAuth or
-mTLS, or pass `--allow-no-auth` only for intentional local development.
+mTLS with registered client leaf fingerprints, or pass `--allow-no-auth` only
+for intentional local development.
 
 The browser dashboard is paired separately even on loopback. `oraclemcp
 dashboard` creates a 0600 one-time ticket under the user runtime directory,
@@ -174,9 +175,11 @@ DDL/Admin apply is release-gated; DDL can be previewed, but applying it requires
 a non-browser operator path until a profile-level dashboard DDL opt-in exists.
 
 The Streamable HTTP transport (`--listen`) fails closed. It starts only when
-OAuth bearer enforcement is configured or `--allow-no-auth` is supplied, and it
-refuses any non-loopback bind unless `ORACLEMCP_HTTP_ALLOW_REMOTE=1` is set.
-OAuth configuration can come from `profiles.toml` or CLI flags:
+OAuth bearer enforcement, mTLS client-certificate verification, or
+`--allow-no-auth` is supplied, and mTLS requests become application principals
+only through registered leaf fingerprints. It refuses any non-loopback bind
+unless `ORACLEMCP_HTTP_ALLOW_REMOTE=1` is set. OAuth configuration can come from
+`profiles.toml` or CLI flags:
 
 ```sh
 export ORACLEMCP_OAUTH_HS256_SECRET='replace-with-a-long-random-secret'
@@ -199,9 +202,12 @@ profile above its `max_level`, and protected profiles remain `READ_ONLY`.
 
 Native TLS uses rustls when `[http.tls]` or `--tls-cert` / `--tls-key` are
 configured. Adding `[http.tls.client_ca_path]` or `--mtls-client-ca` requires
-client certificates (mTLS) verified against that CA. Server-only TLS encrypts
-the transport but is not application authentication, so `/mcp` still needs OAuth
-or an explicit `--allow-no-auth` development opt-in. Non-loopback binds require
+client certificates (mTLS) verified against that CA, but a CA-verified cert is
+not an application identity until its leaf DER SHA-256 fingerprint is listed in
+`[http.mtls].client_fingerprints` or passed with `--mtls-client-fingerprint`.
+The resulting principal key is `mtls:sha256:<hex>`. Server-only TLS encrypts the
+transport but is not application authentication, so `/mcp` still needs OAuth or
+an explicit `--allow-no-auth` development opt-in. Non-loopback binds require
 `ORACLEMCP_HTTP_ALLOW_REMOTE=1` even with TLS.
 
 Connection profiles are resolved from layered configuration (`oraclemcp-config`); select one with `serve --profile <name>`.
@@ -238,6 +244,9 @@ hs256_secret_ref = "env:ORACLEMCP_OAUTH_HS256_SECRET"
 # cert_chain_path = "/path/to/server-chain.pem"
 # private_key_path = "/path/to/server-key.pem"
 # client_ca_path = "/path/to/client-ca.pem"  # require mTLS client certs
+#
+# [http.mtls]
+# client_fingerprints = ["sha256:<client-leaf-der-sha256>"]
 
 [[profiles]]
 name = "dev_ro"

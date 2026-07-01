@@ -54,13 +54,13 @@ use oraclemcp_core::{
     DispatchFuture, DispatchOutcome, DoctorContext, DoctorLevelCaps, DoctorProfileCaps,
     ExportRegistry, FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext,
     LaneDispatchFactory, LaneRuntime, MCP_PATH, McpSurfaceDetail, McpSurfaceFuture,
-    OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy, OracleMcpServer,
-    PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport, ShutdownCoordinator, SiemFormat,
-    SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial, TlsServerConfig,
-    ToolDispatch, WriteIntentLog, build_server_config, default_dashboard_ticket_dir, load_tools,
-    load_tools_for_profile, mint_dashboard_pairing_ticket, operator_subject_id_hash,
-    parse_tools_file, requires_mtls, run_doctor, service_app_doctor_snapshot, sign,
-    start_oraclemcp_service_app_with_transport,
+    MtlsClientRegistry, OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy,
+    OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport, ShutdownCoordinator,
+    SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial,
+    TlsServerConfig, ToolDispatch, WriteIntentLog, build_server_config,
+    default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
+    mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file, requires_mtls,
+    run_doctor, service_app_doctor_snapshot, sign, start_oraclemcp_service_app_with_transport,
 };
 use oraclemcp_db::{
     DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
@@ -111,9 +111,9 @@ enum Command {
     /// Start the MCP server (stdio by default; --listen <ADDR> for HTTP).
     Serve {
         /// Bind a Streamable HTTP listener at <ADDR> (e.g. 127.0.0.1:7070)
-        /// instead of stdio. HTTP starts only with configured OAuth enforcement
-        /// or explicit --allow-no-auth; use native TLS/mTLS or a terminating
-        /// proxy for off-box clients.
+        /// instead of stdio. HTTP starts only with configured OAuth, mTLS
+        /// client-certificate verification, or explicit --allow-no-auth; mTLS
+        /// identities require registered leaf fingerprints.
         #[arg(long)]
         listen: Option<String>,
         /// Run stdio without an init token (development only). Without this and
@@ -243,7 +243,7 @@ struct ServiceInstallCliArgs {
     /// Connect using this named profile from the loaded config.
     #[arg(long)]
     profile: Option<String>,
-    /// Start HTTP without OAuth/mTLS (local development only).
+    /// Start HTTP without OAuth or registered mTLS (local development only).
     #[arg(long)]
     allow_no_auth: bool,
     /// Do not run the optional Linux `loginctl enable-linger <user>` step.
@@ -328,6 +328,9 @@ struct HttpServeArgs {
     /// Client CA PEM path for native mTLS client-certificate verification.
     #[arg(long = "mtls-client-ca")]
     mtls_client_ca: Option<PathBuf>,
+    /// Registered mTLS client leaf certificate SHA-256 fingerprint.
+    #[arg(long = "mtls-client-fingerprint")]
+    mtls_client_fingerprints: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1612,6 +1615,10 @@ fn apply_http_cli_overrides(mut config: HttpConfig, cli: &HttpServeArgs) -> Http
         }
         config.tls = Some(tls);
     }
+    config
+        .mtls
+        .client_fingerprints
+        .extend(cli.mtls_client_fingerprints.iter().cloned());
 
     config
 }
@@ -1737,6 +1744,7 @@ fn http_transport_config_from_merged(
             stateful_idle_ttl: std::time::Duration::from_secs(http.stateful_idle_ttl_seconds),
             resource_metadata,
             oauth,
+            mtls_clients: MtlsClientRegistry::from_fingerprints(http.mtls.client_fingerprints),
             session_store: None,
             result_store: None,
             session_lifecycle: None,
@@ -2233,9 +2241,9 @@ fn emit_serve_status(robot_json: bool, transport: &str, addr: Option<&str>, tool
 /// `Err((code, message))` = refuse with exit code 2.
 ///
 /// Fail-closed parity with stdio (§7.1): `/mcp` must either have OAuth bearer
-/// enforcement/mTLS or the operator must explicitly accept unauthenticated local dev
-/// mode with `--allow-no-auth`. Binding a routable (non-loopback) address still
-/// needs a second deliberate opt-in.
+/// enforcement/mTLS verification or the operator must explicitly accept
+/// unauthenticated local dev mode with `--allow-no-auth`. Binding a routable
+/// (non-loopback) address still needs a second deliberate opt-in.
 fn http_listen_guard(
     allow_no_auth: bool,
     auth_enabled: bool,
@@ -2248,8 +2256,9 @@ fn http_listen_guard(
             "ORACLEMCP_AUTH_REQUIRED",
             "the HTTP transport (--listen) has no OAuth enforcement or mTLS \
              client-certificate verification configured; configure [http.oauth] / \
-             --oauth-* / [http.tls.client_ca_path], or re-run with --allow-no-auth \
-             to accept unauthenticated development mode explicitly"
+             --oauth-* / [http.tls.client_ca_path], and register mTLS clients with \
+             [http.mtls].client_fingerprints or --mtls-client-fingerprint; or re-run \
+             with --allow-no-auth to accept unauthenticated development mode explicitly"
                 .to_owned(),
         ));
     }
@@ -3564,6 +3573,10 @@ mod tests {
             tls_cert: Some(cert_path.clone()),
             tls_key: Some(key_path),
             mtls_client_ca: Some(client_ca_path.clone()),
+            mtls_client_fingerprints: vec![
+                "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+                    .to_owned(),
+            ],
             ..Default::default()
         };
         let http = apply_http_cli_overrides(HttpConfig::default(), &args);
@@ -3578,6 +3591,7 @@ mod tests {
             .expect("native TLS listener config builds");
         assert!(cfg.tls.is_some());
         assert!(cfg.mtls_required);
+        assert!(!cfg.transport.mtls_clients.is_empty());
     }
 
     #[test]

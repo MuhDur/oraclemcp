@@ -72,9 +72,10 @@ vulnerability-reporting policy and supported versions are in the repo-root
 
 - [ ] Use **stdio** for single-client, local agent integrations — it has no
       network surface; the parent process is the trust boundary.
-- [ ] For the **HTTP** transport, require OAuth bearer enforcement. The listener
-      fails closed: it will not bind without OAuth or an explicit
-      `--allow-no-auth` dev opt-in.
+- [ ] For the **HTTP** transport, require OAuth bearer enforcement or mTLS with
+      registered client leaf fingerprints. The listener fails closed: it will
+      not bind without OAuth, mTLS client-certificate verification, or an
+      explicit `--allow-no-auth` dev opt-in.
 - [ ] Reserve `--allow-no-auth` for local development only.
 - [ ] Keep the bind on loopback unless you have a deliberate network boundary; a
       non-loopback bind requires `ORACLEMCP_HTTP_ALLOW_REMOTE=1`.
@@ -83,8 +84,10 @@ vulnerability-reporting policy and supported versions are in the repo-root
 - [ ] Grant each client the **narrowest OAuth scope** it needs; scopes can only
       *lower* the effective ceiling (`oracle:read` → `READ_ONLY`).
 - [ ] Enable native rustls **TLS**, and **mTLS** (`[http.tls.client_ca_path]` /
-      `--mtls-client-ca`) for service-to-service callers. Remember server-only
-      TLS is encryption, not authentication — `/mcp` still needs OAuth.
+      `--mtls-client-ca`) for service-to-service callers, and register each
+      client leaf DER SHA-256 fingerprint with `[http.mtls].client_fingerprints`
+      or `--mtls-client-fingerprint`. Remember server-only TLS is encryption,
+      not authentication — `/mcp` still needs OAuth or registered mTLS.
 - [ ] See [`operations.md` §4](operations.md#4-network-posture) for the full
       posture and example flags.
 

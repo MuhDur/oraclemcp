@@ -339,15 +339,18 @@ surface. Everything below concerns the HTTP transport (`serve --listen`).
 - **TLS / mTLS.** Native rustls TLS is enabled with `[http.tls]` or
   `--tls-cert`/`--tls-key`. Adding `[http.tls.client_ca_path]` or
   `--mtls-client-ca` requires client certificates (mTLS) verified against that
-  CA. Server-only TLS encrypts the transport but is **not** application
-  authentication — `/mcp` still needs OAuth or an explicit `--allow-no-auth`
-  dev opt-in, and a non-loopback bind still needs `ORACLEMCP_HTTP_ALLOW_REMOTE=1`
-  even with TLS.
+  CA. Register each allowed client leaf DER SHA-256 fingerprint in
+  `[http.mtls].client_fingerprints` or with `--mtls-client-fingerprint`; only
+  then does the request get an `mtls:sha256:<hex>` principal. Server-only TLS
+  encrypts the transport but is **not** application authentication — `/mcp`
+  still needs OAuth or an explicit `--allow-no-auth` dev opt-in, and a
+  non-loopback bind still needs `ORACLEMCP_HTTP_ALLOW_REMOTE=1` even with TLS.
 
 Recommended production posture: bind behind a reverse proxy or service mesh,
 require OAuth with the narrowest scope each client needs (`oracle:read` for
-read-only agents), enable mTLS for service-to-service callers, and keep
-`max_level` pinned at the lowest level the workload requires.
+read-only agents), enable mTLS with registered leaf fingerprints for
+service-to-service callers, and keep `max_level` pinned at the lowest level the
+workload requires.
 
 ---
 
@@ -557,11 +560,11 @@ database-evidence fields. `audit verify` still accepts signed v1/v2 records, so
 existing logs do not need to be rewritten.
 
 The `/operator/v1` API is gated above ordinary MCP subjects. An OAuth/mTLS
-principal is an operator only when its server-derived subject key appears in
-`[http.operator].allowed_subjects`; otherwise only the unauthenticated loopback
-local-owner path is accepted by default. Authorized operator API actions append
-to the same signed audit chain before routing, and fail closed if no audit sink
-is configured.
+principal is an operator only when its server-derived subject key, such as
+`mtls:sha256:<hex>`, appears in `[http.operator].allowed_subjects`; otherwise
+only the unauthenticated loopback local-owner path is accepted by default.
+Authorized operator API actions append to the same signed audit chain before
+routing, and fail closed if no audit sink is configured.
 
 Operator v1 is versioned and schema-first. `GET /operator/v1/schema` serves the
 generated schema bundle (`schemas/operator.schema.json`), while the captured UI
