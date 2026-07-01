@@ -19,6 +19,10 @@
 //! `serve` (stdio default, `--listen <ADDR>` for Streamable HTTP), `info`,
 //! `doctor`, `capabilities`, and `robot-docs guide`.
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod readiness;
 mod robot_docs;
 mod service_lifecycle;

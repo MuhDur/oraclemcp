@@ -50,6 +50,10 @@ live-xe = ["oraclemcp-db/live-xe"]
 # Embed the operator dashboard bundle that CI/release builds under web/dist.
 # Default/cargo-install builds stay Node-free and omit the bundle.
 dashboard-bundle = ["oraclemcp-core/dashboard-bundle"]
+# Optional allocator for production packages that deliberately opt into native
+# allocator code. The default build stays pure Rust and does not require a C
+# toolchain.
+mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 oraclemcp-core = { path = "../oraclemcp-core", version = "0.4.1" }
@@ -70,6 +74,7 @@ getrandom = "0.2"
 tracing.workspace = true
 tracing-subscriber = "0.3"
 chrono = { version = "0.4.44", features = ["serde"], optional = true }
+mimalloc = { version = "0.1.52", default-features = false, optional = true }
 plsql-core = { workspace = true, optional = true }
 plsql-engine = { workspace = true, optional = true }
 plsql-catalog = { workspace = true, optional = true }

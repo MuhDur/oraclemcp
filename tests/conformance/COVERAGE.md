@@ -96,10 +96,10 @@ Harnesses:
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
 | Oracle structured cells | 6 | 0 | 6 | 6 | 0 | 100% |
 | Durable SQL idempotency | 1 | 0 | 1 | 1 | 0 | 100% |
-| WP-S persistent service | 1 | 0 | 1 | 1 | 0 | 100% |
+| WP-S persistent service | 2 | 0 | 2 | 2 | 0 | 100% |
 | WP-N concurrency/session | 11 | 0 | 11 | 11 | 0 | 100% |
 
-Total tracked requirements: 73 MUST, 2 SHOULD, 75 tested.
+Total tracked requirements: 74 MUST, 2 SHOULD, 76 tested.
 
 ## Requirement IDs
 
@@ -170,6 +170,7 @@ Total tracked requirements: 73 MUST, 2 SHOULD, 75 tested.
 | DB-SER-006 | MUST | Oracle structured cells | Structured ARRAY/JSON/VECTOR decode is capped by row, cell, byte, and depth budgets; larger query budgets require `deep_decode=true`. |
 | WRITE-INTENT-001 | MUST | Durable SQL idempotency | Committing tools write a durable pre-execute intent, unresolved in-doubt intents fail writable startup closed, and recovered terminal history rejects exact confirmation-grant plus SQL replay after restart. |
 | WPS-BACKUP-001 | MUST | WP-S persistent service | Service backup snapshots the XDG state directory plus config under the service lock, restore verifies the backed-up audit hash-chain before recovering files, and audit data remains non-prunable. |
+| WPS-S4-001 | MUST | WP-S persistent service | Mimalloc is wired as an explicit opt-in allocator feature, background worker creation is gated by service/runtime admission, and the DL-4 lock hierarchy is documented and debug-asserted. |
 | WPN-A-001 | MUST | WP-N concurrency/session | Per-session and per-subject lanes keep operating level, profile, connection, and session state isolated. |
 | WPN-A-002 | MUST | WP-N concurrency/session | Confirmation and execution grants are single-use and bound to lane, subject, session, profile, and generation. |
 | WPN-B-001 | MUST | WP-N concurrency/session | Different configured databases stay isolated under concurrent live lanes. |
@@ -225,6 +226,7 @@ Total tracked requirements: 73 MUST, 2 SHOULD, 75 tested.
 | Requirement | Primary proof |
 | --- | --- |
 | WPS-BACKUP-001 | `crates/oraclemcp/src/service_lifecycle.rs::tests::backup_restore_verifies_audit_chain`; `crates/oraclemcp-core/src/file_store.rs::tests::retention_prunes_metrics_but_never_audit` |
+| WPS-S4-001 | `cargo check -p oraclemcp --features mimalloc`; `crates/oraclemcp-core/src/lane.rs::tests::registry_lane_lock_order_ab_ba_unconstructible`; `crates/oraclemcp-core/src/http.rs::tests::serve_http_until_bounds_connection_workers_before_request_parse`; `crates/oraclemcp/src/main.rs::tests::stateless_http_read_workers_do_not_head_of_line_block`; `crates/oraclemcp/src/readiness.rs::tests::stub_connection_is_never_reachable`; `docs/operations.md` |
 
 ## WP-N Proof Map
 

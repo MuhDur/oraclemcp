@@ -475,7 +475,36 @@ connect to them before resolving secrets or opening Oracle, and lanes already
 pinned to a drained profile refuse further non-diagnostic work until the MCP
 session is deleted or expires by the stateful idle TTL.
 
-### 5.3.2 Connection pool and failover posture
+### 5.3.2 Allocator, workers, and lock order
+
+The default `oraclemcp` build remains pure Rust and does not require a C
+toolchain. Product builds that deliberately want mimalloc can compile the binary
+with `--features mimalloc`, which installs `mimalloc::MiMalloc` as the Rust
+global allocator. The feature is opt-in because it links native allocator code.
+
+Service background work is behind explicit runtime gates:
+
+- DB readiness probing starts only in served HTTP mode, after config resolution,
+  and is owned by `DbReadinessPinger`; shutdown flips its stop flag and joins the
+  probe thread.
+- Stateful lane threads start only after HTTP session/principal resolution and
+  capacity admission.
+- Stateless generated-read workers start only for served HTTP stateless reads
+  on allow-listed metadata tools and are keyed by server-derived principal plus
+  active profile.
+- Accepted HTTP(S) connection workers are admitted before spawning, so slow
+  clients cannot create unbounded worker threads before request parsing.
+
+The shared-state lock hierarchy is canonical and debug-asserted:
+
+`Config watch/read -> Registry -> Lane(status) -> Lease -> Grants -> Audit-chain -> Metadata-cache`.
+
+The high-risk rule is that the lane registry may hold only lane handles and
+metadata. It must never hold the registry lock while sending to, closing, or
+awaiting a lane. Debug builds assert that Registry-to-Lane AB-BA edge and the
+concurrency contract keeps it named in the conformance matrix.
+
+### 5.3.3 Connection pool and failover posture
 
 The local stateless-read pool (`oraclemcp-db`, `[profiles.pool]`) is a bounded,
 pure-Rust async pool — no Tokio/r2d2 boundary — for stdio/direct dispatch and
@@ -556,7 +585,7 @@ configured caps alongside the effective limits visible to the current process
 and cgroup. Run doctor from the installed service context when you need the
 service-inherited effective values rather than the invoking shell's limits.
 
-### 5.3.2 Persistent service file store
+### 5.3.4 Persistent service file store
 
 Service-owned state uses the shared `oraclemcp-core` file-store primitives under
 the XDG state directory (`$XDG_STATE_HOME/oraclemcp`, or

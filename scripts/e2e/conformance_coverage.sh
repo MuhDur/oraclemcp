@@ -86,10 +86,10 @@ fi
 if ! grep -F "| WP-N concurrency/session | 11 | 0 | 11 | 11 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "tests/conformance/COVERAGE.md must record 1.00 MUST coverage for WP-N"
 fi
-if ! grep -F "| WP-S persistent service | 1 | 0 | 1 | 1 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
-  e2e_finish_fail "tests/conformance/COVERAGE.md must record 1.00 MUST coverage for WP-S backup/restore"
+if ! grep -F "| WP-S persistent service | 2 | 0 | 2 | 2 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "tests/conformance/COVERAGE.md must record 1.00 MUST coverage for WP-S backup/restore and S4"
 fi
-if ! grep -F "Total tracked requirements: 73 MUST, 2 SHOULD, 75 tested." tests/conformance/COVERAGE.md >/dev/null; then
+if ! grep -F "Total tracked requirements: 74 MUST, 2 SHOULD, 76 tested." tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "tests/conformance/COVERAGE.md totals are stale"
 fi
 if ! grep -F "| JSON-RPC errors | 3 | 2 | 5 | 5 | 1 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
@@ -132,5 +132,5 @@ if ! grep -F "scripts/e2e/live_xe_headline.sh" scripts/e2e/PROVENANCE.md >/dev/n
   e2e_finish_fail "PROVENANCE.md must document the G6 live-XE headline command"
 fi
 
-e2e_log_event "coverage_summary" "assert" "pass" 0 "MUST coverage 73/73 score=1.00 xfail=0"
+e2e_log_event "coverage_summary" "assert" "pass" 0 "MUST coverage 74/74 score=1.00 xfail=0"
 e2e_finish_pass
