@@ -65,6 +65,7 @@ required=(
   scripts/dashboard_bundle_check.sh
   scripts/oraclemcp_feature_powerset.sh
   scripts/oraclemcp_arch_fitness_lint.sh
+  scripts/installer_lint_and_offline_smoke.sh
   scripts/e2e/COVERAGE.md
   scripts/e2e/PROVENANCE.md
 )
@@ -84,6 +85,15 @@ if ! grep -F "release acceptance suite" .github/workflows/ci.yml >/dev/null; the
 fi
 if ! grep -F "scripts/release_acceptance_ci_suite.sh" .github/workflows/ci.yml >/dev/null; then
   e2e_finish_fail "ci.yml must run the release acceptance suite script"
+fi
+if ! grep -F "installer lint and built-artifact smoke" .github/workflows/ci.yml >/dev/null; then
+  e2e_finish_fail "ci.yml must expose the installer built-artifact smoke job"
+fi
+if ! grep -F "ORACLEMCP_INSTALLER_BUILT_BINARY" .github/workflows/ci.yml >/dev/null; then
+  e2e_finish_fail "ci.yml must run installer smoke against a built artifact"
+fi
+if ! grep -F "Windows installer PSSA and dry-run" .github/workflows/ci.yml >/dev/null; then
+  e2e_finish_fail "ci.yml must expose the Windows installer PSSA job"
 fi
 if ! grep -F "scripts/release_acceptance_ci_suite.sh" .github/workflows/release.yml >/dev/null; then
   e2e_finish_fail "release.yml must gate tags with the release acceptance suite script"
@@ -107,6 +117,9 @@ fi
 if ! e2e_run_command "assert" bash scripts/dashboard_bundle_check.sh; then
   e2e_finish_fail "E0 dashboard web-build artifact check failed"
 fi
+if ! e2e_run_command "assert" bash scripts/installer_lint_and_offline_smoke.sh; then
+  e2e_finish_fail "E7 installer lint/smoke failed"
+fi
 if [ "$skip_feature_powerset" = true ]; then
   e2e_log_event "component_gate" "assert" "pass" 0 "feature-powerset asserted by required CI dependency"
 else
@@ -118,5 +131,5 @@ if ! e2e_run_command "assert" bash scripts/oraclemcp_arch_fitness_lint.sh; then
   e2e_finish_fail "architecture fitness lint failed"
 fi
 
-e2e_log_event "suite_summary" "assert" "pass" 0 "DL-9 ERG-10 DOC-10 E0 feature-powerset arch-fitness accounted"
+e2e_log_event "suite_summary" "assert" "pass" 0 "DL-9 ERG-10 DOC-10 E0 installer feature-powerset arch-fitness accounted"
 e2e_finish_pass

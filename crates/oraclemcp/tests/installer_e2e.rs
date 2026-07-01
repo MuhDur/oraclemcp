@@ -114,6 +114,40 @@ fn windows_installer_verifies_before_mutating_and_requires_service_consent() {
 }
 
 #[test]
+fn installer_ci_runs_built_artifact_and_windows_pssa_gates() {
+    let root = repo_root();
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let release_acceptance =
+        fs::read_to_string(root.join("scripts/release_acceptance_ci_suite.sh"))
+            .expect("read release acceptance script");
+
+    for needle in [
+        "installer lint and built-artifact smoke",
+        "ORACLEMCP_INSTALLER_REQUIRE_SHELLCHECK",
+        "ORACLEMCP_INSTALLER_BUILT_BINARY",
+        "target/x86_64-unknown-linux-musl/debug/oraclemcp",
+        "Windows installer PSSA and dry-run",
+        "Install-Module PSScriptAnalyzer",
+        "Invoke-ScriptAnalyzer -Path \"install.ps1\"",
+        "windows-installer",
+    ] {
+        assert!(ci.contains(needle), "ci.yml must contain {needle}");
+    }
+
+    for needle in [
+        "installer lint and built-artifact smoke",
+        "ORACLEMCP_INSTALLER_BUILT_BINARY",
+        "Windows installer PSSA and dry-run",
+        "scripts/installer_lint_and_offline_smoke.sh",
+    ] {
+        assert!(
+            release_acceptance.contains(needle),
+            "release acceptance must assert installer CI marker {needle}"
+        );
+    }
+}
+
+#[test]
 fn npx_verifies_binary_no_postinstall_side_effects() {
     let root = repo_root();
     let package_json = root.join("npm/oraclemcp/package.json");

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Offline installer gate: syntax, shellcheck when available, dry-run contract,
-# and no service-manager mutation unless explicitly requested.
+# Offline installer gate: syntax, shellcheck/PSSA when available, dry-run
+# contract, optional built-artifact offline install, and no service-manager
+# mutation unless explicitly requested.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,6 +20,93 @@ contains() {
 not_contains() {
   local haystack="$1" needle="$2"
   [[ "$haystack" != *"$needle"* ]] || fail "output unexpectedly contained: $needle"
+}
+
+checksum_file() {
+  local archive="$1" base
+  base="$(basename "$archive")"
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$(dirname "$archive")" && sha256sum "$base" > "$base.sha256")
+  elif command -v shasum >/dev/null 2>&1; then
+    (cd "$(dirname "$archive")" && shasum -a 256 "$base" > "$base.sha256")
+  else
+    fail "sha256sum or shasum is required for built artifact smoke"
+  fi
+}
+
+run_built_artifact_smoke() {
+  local built_binary="$1"
+  local smoke_target="${ORACLEMCP_INSTALLER_SMOKE_TARGET:-x86_64-unknown-linux-musl}"
+  local bundle_root dist archive fake_bin fake_log fake_cosign built_prefix install_output install_status cosign_output
+
+  [ -x "$built_binary" ] || fail "ORACLEMCP_INSTALLER_BUILT_BINARY is not executable: $built_binary"
+  case "$smoke_target" in
+    x86_64-unknown-linux-musl | aarch64-unknown-linux-musl | x86_64-apple-darwin | aarch64-apple-darwin)
+      ;;
+    *)
+      fail "unsupported ORACLEMCP_INSTALLER_SMOKE_TARGET for install.sh smoke: $smoke_target"
+      ;;
+  esac
+
+  bundle_root="$SMOKE_ROOT/built-artifact-$$"
+  dist="$bundle_root/oraclemcp-$smoke_target"
+  archive="$bundle_root/oraclemcp-$smoke_target.tar.gz"
+  fake_bin="$bundle_root/fake-bin"
+  fake_log="$bundle_root/fake-cosign.log"
+  fake_cosign="$fake_bin/cosign"
+  built_prefix="$SMOKE_ROOT/built-prefix-$$"
+
+  mkdir -p "$dist" "$fake_bin"
+  cp "$built_binary" "$dist/oraclemcp"
+  chmod +x "$dist/oraclemcp"
+  (cd "$bundle_root" && tar czf "$(basename "$archive")" "oraclemcp-$smoke_target")
+  checksum_file "$archive"
+  : >"$archive.sig"
+  : >"$archive.crt"
+  : >"$archive.attestation.sigstore.json"
+
+  cat >"$fake_cosign" <<'COSIGN'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  verify-blob | verify-blob-attestation)
+    ;;
+  *)
+    printf 'fake-cosign: unexpected command: %s\n' "${1:-<missing>}" >&2
+    exit 2
+    ;;
+esac
+printf '%s\n' "$1" >> "${ORACLEMCP_INSTALLER_FAKE_COSIGN_LOG:?}"
+COSIGN
+  chmod +x "$fake_cosign"
+
+  set +e
+  install_output="$(
+    env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+      PATH="$fake_bin:$PATH" \
+      ORACLEMCP_INSTALLER_FAKE_COSIGN_LOG="$fake_log" \
+      bash install.sh \
+        --offline "$archive" \
+        --version "$SMOKE_VERSION" \
+        --target "$smoke_target" \
+        --prefix "$built_prefix" \
+        --force \
+        --no-service 2>&1
+  )"
+  install_status=$?
+  set -e
+  [ "$install_status" -eq 0 ] || fail "built artifact offline install failed: $install_output"
+
+  contains "$install_output" "oraclemcp installer: service install skipped"
+  not_contains "$install_output" "service install --yes"
+  not_contains "$install_output" "clients issue"
+  [ -x "$built_prefix/bin/oraclemcp" ] || fail "built artifact smoke did not install oraclemcp"
+  [ -e "$built_prefix/bin/om" ] || fail "built artifact smoke did not install om alias"
+  [ -f "$built_prefix/share/powershell/Completions/oraclemcp.ps1" ] || fail "built artifact smoke did not install PowerShell completion"
+
+  cosign_output="$(cat "$fake_log")"
+  contains "$cosign_output" "verify-blob"
+  contains "$cosign_output" "verify-blob-attestation"
 }
 
 if command -v shellcheck >/dev/null 2>&1; then
@@ -79,6 +167,10 @@ HOME_DIR="$SMOKE_ROOT/home"
 CONFIG_HOME="$SMOKE_ROOT/config"
 SMOKE_VERSION="9.9.9-installer-smoke"
 mkdir -p "$SMOKE_ROOT" "$HOME_DIR" "$CONFIG_HOME"
+
+if [ -n "${ORACLEMCP_INSTALLER_BUILT_BINARY:-}" ]; then
+  run_built_artifact_smoke "$ORACLEMCP_INSTALLER_BUILT_BINARY"
+fi
 
 if command -v pwsh >/dev/null 2>&1; then
   WIN_PREFIX="$SMOKE_ROOT/windows-prefix"

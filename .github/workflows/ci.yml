@@ -139,9 +139,83 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: bash scripts/oraclemcp_ergonomics_lint.sh
 
+  installer:
+    name: installer lint and built-artifact smoke
+    needs: web-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: Install installer lint tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck musl-tools
+      - run: cargo build -p oraclemcp --features dashboard-bundle --target x86_64-unknown-linux-musl
+      - name: installer offline smoke
+        env:
+          ORACLEMCP_INSTALLER_REQUIRE_SHELLCHECK: "1"
+          ORACLEMCP_INSTALLER_BUILT_BINARY: target/x86_64-unknown-linux-musl/debug/oraclemcp
+        run: bash scripts/installer_lint_and_offline_smoke.sh
+
+  windows-installer:
+    name: Windows installer PSSA and dry-run
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: PSScriptAnalyzer and dry-run contract
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+
+          $parseErrors = $null
+          [System.Management.Automation.PSParser]::Tokenize((Get-Content -LiteralPath "install.ps1" -Raw), [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -gt 0) {
+            $parseErrors | Format-List | Out-String | Write-Error
+            exit 1
+          }
+
+          Import-Module PSScriptAnalyzer
+          $violations = Invoke-ScriptAnalyzer -Path "install.ps1" -Severity Error,Warning
+          if ($violations) {
+            $violations | Format-Table -AutoSize | Out-String | Write-Error
+            exit 1
+          }
+
+          $offline = Join-Path $env:RUNNER_TEMP "oraclemcp-x86_64-pc-windows-msvc.zip"
+          $dry = .\install.ps1 -DryRun -Version 9.9.9-installer-smoke -Prefix (Join-Path $env:RUNNER_TEMP "oraclemcp") -Offline $offline
+          $dryText = $dry -join "`n"
+          if ($dryText -notmatch "mode: offline") {
+            throw "Windows installer dry-run did not report offline mode"
+          }
+          if ($dryText -match "service install --yes") {
+            throw "Windows installer dry-run mutated service without -Service"
+          }
+
+          $service = .\install.ps1 -DryRun -Version 9.9.9-installer-smoke -Prefix (Join-Path $env:RUNNER_TEMP "oraclemcp") -Service -Yes -Profile db_ro -Listen 127.0.0.1:7070
+          $serviceText = $service -join "`n"
+          if ($serviceText -notmatch "service install --yes --name oraclemcp --listen 127.0.0.1:7070 --profile db_ro") {
+            throw "Windows installer service dry-run did not show the consent-gated service command"
+          }
+
   release-acceptance:
     name: release acceptance suite (B.12)
-    needs: [web-build, test, feature-powerset, ergonomics, boundary]
+    needs: [web-build, test, feature-powerset, ergonomics, installer, windows-installer, boundary]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

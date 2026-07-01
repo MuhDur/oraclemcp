@@ -126,6 +126,7 @@ fn release_acceptance_suite_schedules_hci_component_gates() {
         "scripts/oraclemcp_ergonomics_lint.sh",
         "scripts/e2e/doctor_fixtures.sh --log",
         "scripts/dashboard_bundle_check.sh",
+        "scripts/installer_lint_and_offline_smoke.sh",
         "scripts/oraclemcp_feature_powerset.sh",
         "scripts/oraclemcp_arch_fitness_lint.sh",
     ] {
