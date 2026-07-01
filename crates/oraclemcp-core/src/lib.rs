@@ -21,6 +21,7 @@ pub mod audit_shipping;
 pub mod capabilities;
 pub mod capability;
 pub mod client_credentials;
+pub mod config_ops;
 pub mod connect;
 pub mod custom_tools;
 pub mod dashboard_auth;
@@ -80,6 +81,10 @@ pub use client_credentials::{
     AuthenticatedClientCredential, ClientCredentialError, ClientCredentialIssueRequest,
     ClientCredentialLifecycle, ClientCredentialStatus, ClientCredentialStore, ClientCredentialView,
     IssuedClientCredential,
+};
+pub use config_ops::{
+    ConfigApplyReport, ConfigDraftPlan, ConfigDraftPreview, ConfigFieldChange, ConfigOpsBackend,
+    ConfigOpsError, ConfigRedactedDiff, ConfigRollbackReport,
 };
 pub use connect::{SessionContext, build_session_context, profile_to_options, session_level_state};
 pub use custom_tools::{
