@@ -3822,6 +3822,27 @@ fn execute_commit_writes_intent_before_db_execute_and_resolves_after_commit() {
 }
 
 #[test]
+fn write_intent_replay_error_is_runtime_state_required() {
+    let err = write_intent_error_to_envelope(WriteIntentError::AlreadyResolved {
+        intent_id: "intent-test".to_owned(),
+        outcome: WriteIntentOutcome::Succeeded,
+    });
+    assert_eq!(err.error_class, ErrorClass::RuntimeStateRequired);
+    assert!(
+        err.message.contains("already resolved"),
+        "message should expose the replay reason: {}",
+        err.message
+    );
+    assert!(
+        err.next_steps
+            .iter()
+            .any(|step| step.contains("do not replay this confirmation grant")),
+        "next step should steer away from duplicate execution: {:?}",
+        err.next_steps
+    );
+}
+
+#[test]
 fn execute_grant_is_lane_bound_and_not_consumed_by_wrong_lane() {
     let state = Arc::new(ExecState::default());
     let dispatcher = OracleDispatcher::new_with_profile_level(

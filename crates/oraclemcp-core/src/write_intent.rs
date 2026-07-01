@@ -4,7 +4,7 @@
 //! non-secret idempotency and routing facts needed to fail closed after a crash.
 //! The sequence is append `pending` + fsync before the database call, append a
 //! terminal `resolved` record only after a safe terminal outcome, and rebuild the
-//! unresolved set on restart.
+//! unresolved set plus terminal idempotency index on restart.
 
 use std::collections::HashMap;
 use std::fs;
@@ -38,6 +38,20 @@ pub enum WriteIntentError {
     /// A pending intent with the same id is already unresolved.
     #[error("write intent is already unresolved: {0}")]
     Duplicate(String),
+    /// A terminal outcome already exists for the same idempotency key and SQL.
+    #[error("write intent is already resolved: {intent_id} ({outcome:?})")]
+    AlreadyResolved {
+        /// Stable intent id derived from the idempotency key material.
+        intent_id: String,
+        /// Previously recorded terminal outcome.
+        outcome: WriteIntentOutcome,
+    },
+    /// The same idempotency key material was reused for different SQL.
+    #[error("write intent idempotency key conflict: {intent_id}")]
+    IdempotencyConflict {
+        /// Stable intent id derived from the idempotency key material.
+        intent_id: String,
+    },
     /// A terminal outcome was requested for an unknown intent id.
     #[error("unknown write intent: {0}")]
     Unknown(String),
@@ -168,6 +182,38 @@ struct WriteIntentRecord {
     resolved_ts: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedWriteIntent {
+    intent: WriteIntent,
+    outcome: WriteIntentOutcome,
+}
+
+#[derive(Debug, Default)]
+struct WriteIntentState {
+    unresolved: HashMap<String, WriteIntent>,
+    resolved: HashMap<String, ResolvedWriteIntent>,
+}
+
+impl WriteIntentState {
+    fn ensure_appendable(&self, intent: &WriteIntent) -> Result<(), WriteIntentError> {
+        if self.unresolved.contains_key(&intent.intent_id) {
+            return Err(WriteIntentError::Duplicate(intent.intent_id.clone()));
+        }
+        if let Some(previous) = self.resolved.get(&intent.intent_id) {
+            if previous.intent.sql_sha256 == intent.sql_sha256 {
+                return Err(WriteIntentError::AlreadyResolved {
+                    intent_id: intent.intent_id.clone(),
+                    outcome: previous.outcome,
+                });
+            }
+            return Err(WriteIntentError::IdempotencyConflict {
+                intent_id: intent.intent_id.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
 impl WriteIntentRecord {
     fn pending(intent: &WriteIntent) -> Self {
         Self::from_intent(intent, WriteIntentEvent::Pending, None)
@@ -227,7 +273,7 @@ pub struct WriteIntentLog {
     store: FileStore,
     lock: ServiceLock,
     id: StoreId,
-    unresolved: Mutex<HashMap<String, WriteIntent>>,
+    state: Mutex<WriteIntentState>,
 }
 
 impl WriteIntentLog {
@@ -243,12 +289,12 @@ impl WriteIntentLog {
         let id = StoreId::from_safe_segment(WRITE_INTENT_ID)?;
         store.recover_jsonl(&lock, WRITE_INTENT_COLLECTION, &id)?;
         let path = store.path_for(WRITE_INTENT_COLLECTION, &id, "jsonl")?;
-        let unresolved = rebuild_unresolved(&path)?;
+        let state = rebuild_state(&path)?;
         Ok(Self {
             store,
             lock,
             id,
-            unresolved: Mutex::new(unresolved),
+            state: Mutex::new(state),
         })
     }
 
@@ -261,20 +307,18 @@ impl WriteIntentLog {
 
     /// Return a snapshot of unresolved intents recovered or appended so far.
     pub fn unresolved(&self) -> Result<Vec<WriteIntent>, WriteIntentError> {
-        let guard = self.unresolved.lock();
-        Ok(guard.values().cloned().collect())
+        let guard = self.state.lock();
+        Ok(guard.unresolved.values().cloned().collect())
     }
 
     /// Append a pending intent and fsync before returning.
     pub fn append_pending(&self, intent: WriteIntent) -> Result<String, WriteIntentError> {
-        let mut guard = self.unresolved.lock();
-        if guard.contains_key(&intent.intent_id) {
-            return Err(WriteIntentError::Duplicate(intent.intent_id));
-        }
+        let mut guard = self.state.lock();
+        guard.ensure_appendable(&intent)?;
         let record = WriteIntentRecord::pending(&intent);
         self.append_record(&record)?;
         let intent_id = intent.intent_id.clone();
-        guard.insert(intent_id.clone(), intent);
+        guard.unresolved.insert(intent_id.clone(), intent);
         Ok(intent_id)
     }
 
@@ -285,14 +329,19 @@ impl WriteIntentLog {
         intent_id: &str,
         outcome: WriteIntentOutcome,
     ) -> Result<(), WriteIntentError> {
-        let mut guard = self.unresolved.lock();
+        let mut guard = self.state.lock();
         let intent = guard
+            .unresolved
             .get(intent_id)
             .cloned()
             .ok_or_else(|| WriteIntentError::Unknown(intent_id.to_owned()))?;
         let record = WriteIntentRecord::resolved(&intent, outcome);
         self.append_record(&record)?;
-        guard.remove(intent_id);
+        guard.unresolved.remove(intent_id);
+        guard.resolved.insert(
+            intent_id.to_owned(),
+            ResolvedWriteIntent { intent, outcome },
+        );
         Ok(())
     }
 
@@ -305,10 +354,10 @@ impl WriteIntentLog {
     }
 }
 
-fn rebuild_unresolved(path: &Path) -> Result<HashMap<String, WriteIntent>, WriteIntentError> {
+fn rebuild_state(path: &Path) -> Result<WriteIntentState, WriteIntentError> {
     let bytes =
         fs::read(path).map_err(|e| WriteIntentError::Store(FileStoreError::Io(e.to_string())))?;
-    let mut unresolved = HashMap::new();
+    let mut state = WriteIntentState::default();
     for (idx, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
         let line_no = idx + 1;
         let record_bytes = line.strip_suffix(b"\n").unwrap_or(line);
@@ -337,20 +386,56 @@ fn rebuild_unresolved(path: &Path) -> Result<HashMap<String, WriteIntent>, Write
                         message: "pending record carries terminal fields".to_owned(),
                     });
                 }
-                unresolved.insert(record.intent_id.clone(), record.into_intent());
-            }
-            WriteIntentEvent::Resolved => {
-                if record.outcome.is_none() {
+                if state.resolved.contains_key(&record.intent_id) {
                     return Err(WriteIntentError::Parse {
                         line: line_no,
-                        message: "resolved record is missing outcome".to_owned(),
+                        message: "pending record follows terminal resolution".to_owned(),
                     });
                 }
-                unresolved.remove(&record.intent_id);
+                if state.unresolved.contains_key(&record.intent_id) {
+                    return Err(WriteIntentError::Parse {
+                        line: line_no,
+                        message: "duplicate pending record".to_owned(),
+                    });
+                }
+                state
+                    .unresolved
+                    .insert(record.intent_id.clone(), record.into_intent());
+            }
+            WriteIntentEvent::Resolved => {
+                let outcome = record.outcome.ok_or_else(|| WriteIntentError::Parse {
+                    line: line_no,
+                    message: "resolved record is missing outcome".to_owned(),
+                })?;
+                if state.resolved.contains_key(&record.intent_id) {
+                    return Err(WriteIntentError::Parse {
+                        line: line_no,
+                        message: "duplicate resolved record".to_owned(),
+                    });
+                }
+                let intent = record.into_intent();
+                let pending = state.unresolved.remove(&intent.intent_id).ok_or_else(|| {
+                    WriteIntentError::Parse {
+                        line: line_no,
+                        message: "resolved record has no pending record".to_owned(),
+                    }
+                })?;
+                if pending.idempotency_key != intent.idempotency_key
+                    || pending.sql_sha256 != intent.sql_sha256
+                {
+                    return Err(WriteIntentError::Parse {
+                        line: line_no,
+                        message: "resolved record does not match pending record".to_owned(),
+                    });
+                }
+                state.resolved.insert(
+                    intent.intent_id.clone(),
+                    ResolvedWriteIntent { intent, outcome },
+                );
             }
         }
     }
-    Ok(unresolved)
+    Ok(state)
 }
 
 fn unix_timestamp() -> String {
@@ -376,13 +461,20 @@ mod tests {
     }
 
     fn intent(key: &str) -> WriteIntent {
+        intent_with_sql(
+            key,
+            "UPDATE employees SET name = name WHERE employee_id = 100",
+        )
+    }
+
+    fn intent_with_sql(key: &str, sql: &str) -> WriteIntent {
         let binding = ExecGrantBinding::new("sess-1", "lane-1", "principal-1", 7);
         WriteIntent::new(WriteIntentDetails {
             idempotency_key_material: key,
             subject: "profile:dev",
             active_profile: Some("dev"),
             tool: "oracle_execute",
-            sql: "UPDATE employees SET name = name WHERE employee_id = 100",
+            sql,
             required_level: OperatingLevel::ReadWrite,
             binding: &binding,
         })
@@ -426,6 +518,53 @@ mod tests {
         assert!(matches!(
             log.append_pending(duplicate),
             Err(WriteIntentError::Duplicate(_))
+        ));
+    }
+
+    #[test]
+    fn resolved_intent_survives_reopen_and_rejects_same_grant_sql_replay() {
+        let root = test_root("resolved-replay");
+        let first_intent = intent("grant-resolved");
+        let intent_id = first_intent.intent_id.clone();
+        {
+            let log = WriteIntentLog::open(&root).expect("open first log");
+            log.append_pending(first_intent).expect("append pending");
+            log.resolve(&intent_id, WriteIntentOutcome::Succeeded)
+                .expect("resolve intent");
+        }
+
+        let log = WriteIntentLog::open(&root).expect("reopen resolved log");
+        let replay = intent("grant-resolved");
+        assert!(matches!(
+            log.append_pending(replay),
+            Err(WriteIntentError::AlreadyResolved {
+                intent_id: replay_id,
+                outcome: WriteIntentOutcome::Succeeded
+            }) if replay_id == intent_id
+        ));
+        assert!(
+            log.unresolved().expect("unresolved snapshot").is_empty(),
+            "terminal replay rejection must not create an unresolved poison record"
+        );
+    }
+
+    #[test]
+    fn resolved_intent_rejects_same_grant_with_different_sql_as_conflict() {
+        let root = test_root("resolved-conflict");
+        let first_intent = intent_with_sql("grant-conflict", "UPDATE employees SET name = name");
+        let intent_id = first_intent.intent_id.clone();
+        {
+            let log = WriteIntentLog::open(&root).expect("open first log");
+            log.append_pending(first_intent).expect("append pending");
+            log.resolve(&intent_id, WriteIntentOutcome::RolledBack)
+                .expect("resolve intent");
+        }
+
+        let log = WriteIntentLog::open(&root).expect("reopen resolved log");
+        let drift = intent_with_sql("grant-conflict", "UPDATE employees SET name = 'x'");
+        assert!(matches!(
+            log.append_pending(drift),
+            Err(WriteIntentError::IdempotencyConflict { intent_id: drift_id }) if drift_id == intent_id
         ));
     }
 }

@@ -744,7 +744,9 @@ Oracle. The intent log stores only non-secret hashes and routing facts
 `$HOME/.local/state/oraclemcp/...` when `XDG_STATE_HOME` is unset. If a writable
 server restarts and recovers an unresolved intent, startup fails closed with
 `ORACLEMCP_WRITE_INTENT_IN_DOUBT`; verify the database outcome before starting a
-writable service again.
+writable service again. Resolved terminal records are also recovered as an
+idempotency index, so the same confirmation grant hash plus SQL hash cannot be
+appended again after a restart.
 
 When a statement is allowed by the profile ceiling but above the current session
 level, call `oracle_set_session_level` first without `execute=true`. The preview
@@ -797,7 +799,8 @@ never "fixed" by a follow-up rollback; the dispatcher quarantines that session
 as `commit_in_doubt` and requires the operator to verify the Oracle outcome
 before retrying non-idempotent work. `commit_in_doubt` and unknown outcomes keep
 their durable write intent unresolved, so a restart cannot silently re-execute
-the same non-idempotent work.
+the same non-idempotent work. Safe terminal outcomes remain in the durable
+write-intent history and reject exact grant+SQL replay.
 
 `oracle_compile_object` is the structured alternative to handcrafting `ALTER ... COMPILE`. A call without `execute=true` only previews the validated compile statements, required `DDL` level, gate decision, and single-use confirmation grant. A second call with `execute=true` and that grant runs the compile and returns current `ALL_ERRORS` rows for the object. Set `plscope=true` to enable PL/Scope collection before compiling, or `warnings=true` to enable `PLSQL_WARNINGS='ENABLE:ALL'` before compiling. Both options remain profile-gated at `DDL`; `compile_with_warnings` is a compatibility alias for the warnings path.
 

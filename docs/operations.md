@@ -420,7 +420,9 @@ tools also append durable write intents under
 `$XDG_STATE_HOME/oraclemcp/write-intents/intents.jsonl` (or
 `$HOME/.local/state/oraclemcp/...`). `commit_in_doubt` and unknown outcomes keep
 the intent unresolved, so restart refuses writable service with
-`ORACLEMCP_WRITE_INTENT_IN_DOUBT` until the database outcome is verified.
+`ORACLEMCP_WRITE_INTENT_IN_DOUBT` until the database outcome is verified. Safe
+terminal outcomes are recovered as a durable idempotency index and reject exact
+confirmation-grant plus SQL replay after restart.
 Stateful lane close records use tool `lane_lifecycle`, SQL preview `LANE_CLOSE`,
 and hash-covered `cancel.kind` / `cancel.reason` fields such as
 `User/session_delete` for HTTP `DELETE /mcp` or `Shutdown/server_shutdown` for

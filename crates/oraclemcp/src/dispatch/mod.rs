@@ -2844,11 +2844,23 @@ fn append_lifecycle_audit(
 }
 
 fn write_intent_error_to_envelope(e: WriteIntentError) -> ErrorEnvelope {
-    ErrorEnvelope::new(
-        ErrorClass::Internal,
-        format!("write-intent operation failed: {e}"),
-    )
-    .with_next_step("do not retry non-idempotent work until the durable intent log is healthy")
+    let error_class = match &e {
+        WriteIntentError::AlreadyResolved { .. } | WriteIntentError::IdempotencyConflict { .. } => {
+            ErrorClass::RuntimeStateRequired
+        }
+        _ => ErrorClass::Internal,
+    };
+    let next_step = match &e {
+        WriteIntentError::AlreadyResolved { .. } => {
+            "do not replay this confirmation grant; inspect the prior durable write-intent/audit outcome"
+        }
+        WriteIntentError::IdempotencyConflict { .. } => {
+            "do not reuse a confirmation grant for different SQL; preview the intended statement again"
+        }
+        _ => "do not retry non-idempotent work until the durable intent log is healthy",
+    };
+    ErrorEnvelope::new(error_class, format!("write-intent operation failed: {e}"))
+        .with_next_step(next_step)
 }
 
 fn append_write_intent(
