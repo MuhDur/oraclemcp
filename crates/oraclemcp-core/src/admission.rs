@@ -4,21 +4,25 @@
 //! `ORA-12519`. The admission controller bounds concurrency *before* the pool
 //! is touched: a global cap (= pool `max_size`) plus a per-agent cap, both
 //! enforced with a drop-released permit ledger. Over budget returns a structured
-//! `BUSY { retry_after_ms }` rather than queueing unboundedly.
+//! `BUSY { retry_after_ms }`; the stateful-lane path may wait briefly in a
+//! bounded fair queue, but it never queues unboundedly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use asupersync::Cx;
 use asupersync::cx::CapSetRuntimeMask;
 use oraclemcp_error::{ErrorClass, ErrorEnvelope, OracleMcpError};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 /// Default `retry_after_ms` returned with a `BUSY`.
 pub const DEFAULT_RETRY_AFTER_MS: u64 = 250;
+/// Brief bounded wait for stateful lane admission before returning AT_CAPACITY.
+pub const DEFAULT_FAIR_ADMISSION_WAIT_MS: u64 = 25;
 /// CX-I6 capacity measurement that finalized the shipped N4 upper-bound caps.
 ///
 /// Evidence: `tests/artifacts/perf/20260630-cx-i6-phase0-capacity/RESULTS.md`.
@@ -55,6 +59,8 @@ impl Drop for AdmissionPermit {
             }
             None => {}
         }
+        drop(state);
+        self.inner.changed.notify_all();
     }
 }
 
@@ -70,15 +76,22 @@ struct AdmissionInner {
     operator_reserved: usize,
     doctor_reserved: usize,
     per_agent_cap: usize,
+    queued_per_subject_cap: usize,
+    queued_global_cap: usize,
+    fair_wait: Duration,
     retry_after_ms: u64,
     draining: AtomicBool,
     state: Mutex<AdmissionState>,
+    changed: Condvar,
 }
 
 #[derive(Debug, Default)]
 struct AdmissionState {
     global_in_use: usize,
     agents: HashMap<String, usize>,
+    queued_total: usize,
+    queued_subjects: HashMap<String, usize>,
+    queue_order: VecDeque<String>,
 }
 
 /// Redaction-safe capacity facts included in `AT_CAPACITY` diagnostics.
@@ -132,19 +145,41 @@ impl AdmissionController {
         operator_reserved: usize,
         doctor_reserved: usize,
     ) -> Self {
+        Self::with_reserved_and_wait(
+            global_cap,
+            per_agent_cap,
+            operator_reserved,
+            doctor_reserved,
+            Duration::from_millis(DEFAULT_FAIR_ADMISSION_WAIT_MS),
+        )
+    }
+
+    fn with_reserved_and_wait(
+        global_cap: usize,
+        per_agent_cap: usize,
+        operator_reserved: usize,
+        doctor_reserved: usize,
+        fair_wait: Duration,
+    ) -> Self {
         let global_cap = global_cap.max(1);
+        let per_agent_cap = per_agent_cap.max(1);
         let reserved = operator_reserved.saturating_add(doctor_reserved);
         let regular_global_cap = global_cap.saturating_sub(reserved);
+        let queued_global_cap = regular_global_cap.saturating_mul(2).max(1);
         AdmissionController {
             inner: Arc::new(AdmissionInner {
                 global_cap,
                 regular_global_cap,
                 operator_reserved,
                 doctor_reserved,
-                per_agent_cap: per_agent_cap.max(1),
+                per_agent_cap,
+                queued_per_subject_cap: per_agent_cap.min(queued_global_cap).max(1),
+                queued_global_cap,
+                fair_wait,
                 retry_after_ms: DEFAULT_RETRY_AFTER_MS,
                 draining: AtomicBool::new(false),
                 state: Mutex::new(AdmissionState::default()),
+                changed: Condvar::new(),
             }),
         }
     }
@@ -210,20 +245,12 @@ impl AdmissionController {
                 retry_after_ms: self.inner.retry_after_ms,
             });
         }
-        let agent_in_use = state.agents.get(agent).copied().unwrap_or(0);
-        if agent_in_use >= self.inner.per_agent_cap
-            || state.global_in_use >= self.inner.regular_global_cap
-        {
+        if state.queued_total > 0 || !self.subject_can_admit_locked(&state, agent) {
             return Err(OracleMcpError::Busy {
                 retry_after_ms: self.inner.retry_after_ms,
             });
         }
-        state.global_in_use += 1;
-        *state.agents.entry(agent.to_owned()).or_insert(0) += 1;
-        Ok(AdmissionPermit {
-            inner: Arc::clone(&self.inner),
-            agent: agent.to_owned(),
-        })
+        Ok(self.admit_locked(&mut state, agent))
     }
 
     /// Admit or return an agent-facing `AT_CAPACITY` envelope with a redacted
@@ -244,10 +271,100 @@ impl AdmissionController {
         })
     }
 
+    /// Admit after a bounded fair wait, or return an agent-facing
+    /// `AT_CAPACITY` envelope with a redacted snapshot.
+    pub fn admit_capacity_with_fair_wait<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        subject: &str,
+        scope: &str,
+    ) -> Result<AdmissionPermit, ErrorEnvelope>
+    where
+        Caps: CapSetRuntimeMask,
+    {
+        self.admit_with_fair_wait(cx, subject).map_err(|_| {
+            self.at_capacity_envelope(scope, subject).with_next_step(
+                "retry after retry_after_ms; admission already waited briefly in the bounded fair queue",
+            )
+        })
+    }
+
+    /// Admit through the bounded per-subject queue used by stateful lane
+    /// allocation. A subject with multiple queued requests gets one turn, then
+    /// rotates to the back so another eligible subject can acquire the next
+    /// released slot.
+    ///
+    /// # Errors
+    /// Returns [`OracleMcpError::Busy`] when capacity is unavailable after the
+    /// bounded wait, queue caps are full, or shutdown drain is active.
+    pub fn admit_with_fair_wait<Caps>(
+        &self,
+        _cx: &Cx<Caps>,
+        agent: &str,
+    ) -> Result<AdmissionPermit, OracleMcpError>
+    where
+        Caps: CapSetRuntimeMask,
+    {
+        if self.is_draining() || self.inner.regular_global_cap == 0 {
+            return Err(self.busy_error());
+        }
+
+        let deadline = Instant::now()
+            .checked_add(self.inner.fair_wait)
+            .unwrap_or_else(Instant::now);
+        let mut state = self.inner.state.lock();
+        if self.is_draining() {
+            return Err(self.busy_error());
+        }
+        if state.queued_total == 0 && self.subject_can_admit_locked(&state, agent) {
+            return Ok(self.admit_locked(&mut state, agent));
+        }
+        if !self.enqueue_locked(&mut state, agent) {
+            return Err(self.busy_error());
+        }
+
+        loop {
+            if self.is_draining() {
+                Self::dequeue_locked(&mut state, agent);
+                drop(state);
+                self.inner.changed.notify_all();
+                return Err(self.busy_error());
+            }
+            if self.subject_has_fair_turn_locked(&state, agent) {
+                Self::dequeue_locked(&mut state, agent);
+                let permit = self.admit_locked(&mut state, agent);
+                drop(state);
+                self.inner.changed.notify_all();
+                return Ok(permit);
+            }
+
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                Self::dequeue_locked(&mut state, agent);
+                drop(state);
+                self.inner.changed.notify_all();
+                return Err(self.busy_error());
+            };
+            if remaining.is_zero() {
+                Self::dequeue_locked(&mut state, agent);
+                drop(state);
+                self.inner.changed.notify_all();
+                return Err(self.busy_error());
+            }
+            let wait = self.inner.changed.wait_for(&mut state, remaining);
+            if wait.timed_out() && !self.subject_has_fair_turn_locked(&state, agent) {
+                Self::dequeue_locked(&mut state, agent);
+                drop(state);
+                self.inner.changed.notify_all();
+                return Err(self.busy_error());
+            }
+        }
+    }
+
     /// Stop admitting new work while preserving existing permits so in-flight
     /// calls can drain and release their capacity normally. Idempotent.
     pub fn begin_drain(&self) {
         self.inner.draining.store(true, Ordering::SeqCst);
+        self.inner.changed.notify_all();
     }
 
     /// Whether the controller is refusing new work during shutdown drain.
@@ -259,10 +376,7 @@ impl AdmissionController {
     /// Convenience: the agent-facing `BUSY` envelope.
     #[must_use]
     pub fn busy_envelope(&self) -> ErrorEnvelope {
-        OracleMcpError::Busy {
-            retry_after_ms: self.inner.retry_after_ms,
-        }
-        .into_envelope()
+        self.busy_error().into_envelope()
     }
 
     /// Redaction-safe snapshot of current regular-agent capacity.
@@ -324,10 +438,89 @@ impl AdmissionController {
         self.inner.regular_global_cap
     }
 
+    fn busy_error(&self) -> OracleMcpError {
+        OracleMcpError::Busy {
+            retry_after_ms: self.inner.retry_after_ms,
+        }
+    }
+
+    fn subject_can_admit_locked(&self, state: &AdmissionState, agent: &str) -> bool {
+        state.global_in_use < self.inner.regular_global_cap
+            && state.agents.get(agent).copied().unwrap_or(0) < self.inner.per_agent_cap
+    }
+
+    fn subject_has_fair_turn_locked(&self, state: &AdmissionState, agent: &str) -> bool {
+        for queued in &state.queue_order {
+            if self.subject_can_admit_locked(state, queued) {
+                return queued == agent;
+            }
+        }
+        false
+    }
+
+    fn admit_locked(&self, state: &mut AdmissionState, agent: &str) -> AdmissionPermit {
+        state.global_in_use += 1;
+        *state.agents.entry(agent.to_owned()).or_insert(0) += 1;
+        AdmissionPermit {
+            inner: Arc::clone(&self.inner),
+            agent: agent.to_owned(),
+        }
+    }
+
+    fn enqueue_locked(&self, state: &mut AdmissionState, agent: &str) -> bool {
+        if state.queued_total >= self.inner.queued_global_cap {
+            return false;
+        }
+        let queued_for_subject = state.queued_subjects.get(agent).copied().unwrap_or(0);
+        if queued_for_subject >= self.inner.queued_per_subject_cap {
+            return false;
+        }
+        if queued_for_subject == 0 {
+            state.queue_order.push_back(agent.to_owned());
+        }
+        state
+            .queued_subjects
+            .insert(agent.to_owned(), queued_for_subject + 1);
+        state.queued_total += 1;
+        true
+    }
+
+    fn dequeue_locked(state: &mut AdmissionState, agent: &str) {
+        let queued_for_subject = state.queued_subjects.get(agent).copied().unwrap_or(0);
+        if queued_for_subject == 0 {
+            return;
+        }
+        state.queued_total = state.queued_total.saturating_sub(1);
+        if queued_for_subject == 1 {
+            state.queued_subjects.remove(agent);
+        } else {
+            state
+                .queued_subjects
+                .insert(agent.to_owned(), queued_for_subject - 1);
+        }
+        if let Some(position) = state.queue_order.iter().position(|queued| queued == agent) {
+            let _ = state.queue_order.remove(position);
+        }
+        if queued_for_subject > 1 {
+            state.queue_order.push_back(agent.to_owned());
+        }
+    }
+
     /// Number of resident per-agent entries (test-only: the reclamation invariant).
     #[cfg(test)]
     fn tracked_agents(&self) -> usize {
         self.inner.state.lock().agents.len()
+    }
+
+    #[cfg(test)]
+    fn queued_subject_count(&self, subject: &str) -> usize {
+        self.inner
+            .state
+            .lock()
+            .queued_subjects
+            .get(subject)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -342,9 +535,63 @@ fn redact_subject_for_capacity(subject: &str) -> String {
 mod tests {
     use super::*;
     use asupersync::cx::NoCaps;
+    use std::sync::{Arc, mpsc};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     fn test_cx() -> Cx<NoCaps> {
         Cx::<NoCaps>::detached_cancel_context()
+    }
+
+    fn wait_until(description: &str, mut condition: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if condition() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("{description}");
+    }
+
+    fn spawn_waiter(
+        ctrl: Arc<AdmissionController>,
+        subject: &'static str,
+        label: &'static str,
+        admitted: mpsc::Sender<String>,
+    ) -> (String, mpsc::Sender<()>, thread::JoinHandle<()>) {
+        let (release_tx, release_rx) = mpsc::channel();
+        let label_string = label.to_owned();
+        let handle_label = label_string.clone();
+        let handle = thread::spawn(move || {
+            let cx = test_cx();
+            let permit = ctrl
+                .admit_with_fair_wait(&cx, subject)
+                .expect("waiter admitted through fair queue");
+            admitted
+                .send(handle_label)
+                .expect("test receiver accepts admission event");
+            release_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test releases admitted waiter");
+            drop(permit);
+        });
+        (label_string, release_tx, handle)
+    }
+
+    fn release_waiter(releases: &mut Vec<(String, mpsc::Sender<()>)>, label: &str) {
+        let position = releases
+            .iter()
+            .position(|(queued_label, _)| queued_label == label)
+            .expect("release channel for admitted waiter");
+        let (_, release) = releases.remove(position);
+        release.send(()).expect("waiter still alive");
+    }
+
+    fn recv_admitted(admitted: &mpsc::Receiver<String>) -> String {
+        admitted
+            .recv_timeout(Duration::from_secs(2))
+            .expect("queued waiter admitted before test timeout")
     }
 
     #[test]
@@ -427,6 +674,123 @@ mod tests {
         );
         drop(permits);
         assert_eq!(ctrl.available_global(), ctrl.regular_global_cap());
+    }
+
+    #[test]
+    fn queued_admission_waits_for_release_before_at_capacity() {
+        let cx = test_cx();
+        let ctrl = Arc::new(AdmissionController::with_reserved_and_wait(
+            1,
+            1,
+            0,
+            0,
+            Duration::from_millis(200),
+        ));
+        let held = ctrl.try_admit(&cx, "holder").expect("holder admitted");
+        let (admitted_tx, admitted_rx) = mpsc::channel();
+        let (label, release, handle) =
+            spawn_waiter(Arc::clone(&ctrl), "waiter", "waiter-1", admitted_tx);
+        wait_until("waiter enters bounded queue", || {
+            ctrl.queued_subject_count("waiter") == 1
+        });
+
+        drop(held);
+        assert_eq!(recv_admitted(&admitted_rx), label);
+        release.send(()).expect("release waiter");
+        handle.join().expect("waiter thread exits");
+        assert_eq!(ctrl.available_global(), 1);
+    }
+
+    #[test]
+    fn queued_admission_round_robins_between_subjects() {
+        let cx = test_cx();
+        let ctrl = Arc::new(AdmissionController::with_reserved_and_wait(
+            2,
+            2,
+            0,
+            0,
+            Duration::from_millis(500),
+        ));
+        let held_a = ctrl.try_admit(&cx, "holder-a").expect("holder a");
+        let held_b = ctrl.try_admit(&cx, "holder-b").expect("holder b");
+        let (admitted_tx, admitted_rx) = mpsc::channel();
+        let mut releases = Vec::new();
+        let mut handles = Vec::new();
+
+        let (label, release, handle) =
+            spawn_waiter(Arc::clone(&ctrl), "noisy", "noisy-1", admitted_tx.clone());
+        releases.push((label, release));
+        handles.push(handle);
+        wait_until("first noisy request queues", || {
+            ctrl.queued_subject_count("noisy") == 1
+        });
+
+        let (label, release, handle) =
+            spawn_waiter(Arc::clone(&ctrl), "quiet", "quiet-1", admitted_tx.clone());
+        releases.push((label, release));
+        handles.push(handle);
+        wait_until("quiet request queues", || {
+            ctrl.queued_subject_count("quiet") == 1
+        });
+
+        let (label, release, handle) =
+            spawn_waiter(Arc::clone(&ctrl), "noisy", "noisy-2", admitted_tx);
+        releases.push((label, release));
+        handles.push(handle);
+        wait_until("second noisy request queues", || {
+            ctrl.queued_subject_count("noisy") == 2
+        });
+
+        drop(held_a);
+        let first = recv_admitted(&admitted_rx);
+        assert!(
+            first.starts_with("noisy-"),
+            "the first subject in the fair queue should admit first, got {first}"
+        );
+        release_waiter(&mut releases, &first);
+
+        let second = recv_admitted(&admitted_rx);
+        assert_eq!(
+            second, "quiet-1",
+            "a subject with multiple queued requests must rotate behind another eligible subject"
+        );
+        release_waiter(&mut releases, &second);
+
+        let third = recv_admitted(&admitted_rx);
+        assert!(
+            third.starts_with("noisy-"),
+            "the noisy subject's remaining queued turn should run after quiet, got {third}"
+        );
+        release_waiter(&mut releases, &third);
+
+        drop(held_b);
+        for handle in handles {
+            handle.join().expect("waiter thread exits");
+        }
+        assert_eq!(ctrl.available_global(), 2);
+    }
+
+    #[test]
+    fn bounded_queue_at_capacity_keeps_snapshot_redacted() {
+        let cx = test_cx();
+        let ctrl =
+            AdmissionController::with_reserved_and_wait(1, 1, 0, 0, Duration::from_millis(1));
+        let _held = ctrl
+            .try_admit(&cx, "holder")
+            .expect("holder consumes the only regular slot");
+
+        let err = ctrl
+            .admit_capacity_with_fair_wait(&cx, "raw-principal-secret", "stateful_lane")
+            .expect_err("bounded wait ends at capacity");
+        assert_eq!(err.error_class, ErrorClass::AtCapacity);
+        assert_eq!(err.retry_after_ms, Some(DEFAULT_RETRY_AFTER_MS));
+        assert!(err.message.contains("capacity_snapshot"));
+        assert!(err.message.contains("\"subject\":\"subject-len20\""));
+        assert!(
+            !err.message.contains("raw-principal-secret"),
+            "capacity snapshots must not echo raw principal keys"
+        );
+        assert_eq!(ctrl.queued_subject_count("raw-principal-secret"), 0);
     }
 
     #[test]

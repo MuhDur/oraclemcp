@@ -723,11 +723,36 @@ impl StatefulLaneDispatch {
         if let Some(lane) = lanes.get(&key).cloned() {
             return Ok(lane);
         }
-        let capacity_permit = self
-            .admission
-            .as_ref()
-            .map(|admission| admission.try_admit_capacity(cx, principal_key, "stateful_lane"))
-            .transpose()?;
+        let capacity_permit = if let Some(admission) = self.admission.as_ref() {
+            match admission.try_admit(cx, principal_key) {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    drop(lanes);
+                    let permit = admission.admit_capacity_with_fair_wait(
+                        cx,
+                        principal_key,
+                        "stateful_lane",
+                    )?;
+                    let mut lanes = self.lock_lanes();
+                    if let Some(lane) = lanes.get(&key).cloned() {
+                        drop(permit);
+                        return Ok(lane);
+                    }
+                    return Ok(self.spawn_lane_locked(&mut lanes, key, Some(permit)));
+                }
+            }
+        } else {
+            None
+        };
+        Ok(self.spawn_lane_locked(&mut lanes, key, capacity_permit))
+    }
+
+    fn spawn_lane_locked(
+        &self,
+        lanes: &mut LaneRegistryGuard<'_>,
+        key: LaneKey,
+        capacity_permit: Option<AdmissionPermit>,
+    ) -> LaneRuntime {
         let lane_number = self.next_lane_id.fetch_add(1, Ordering::SeqCst);
         let lane_id = format!("http-lane-{lane_number}");
         let lane_context = LaneContext::new(
@@ -749,7 +774,7 @@ impl StatefulLaneDispatch {
         // send happens after `resolve_lane` returns and the registry guard has
         // been dropped. Debug assertions in `LaneRuntime` enforce that rule.
         lanes.insert(key, lane.clone());
-        Ok(lane)
+        lane
     }
 
     /// Close and forget the lane bound to one MCP session/principal pair.
