@@ -61,6 +61,20 @@ sha2 = "0.11"
 thiserror = "2"
 tracing = "0.1"
 rust-embed = { version = "8.11.0", default-features = false }
+# A-plsql: optional PL/SQL intelligence engine crates. Keep these exact-pinned
+# and runtime-free; the default oraclemcp build stays engine-free.
+plsql-core = { version = "=0.7.0", default-features = false }
+plsql-engine = { version = "=0.7.0", default-features = false }
+plsql-catalog = { version = "=0.7.0", default-features = false }
+plsql-depgraph = { version = "=0.7.0", default-features = false }
+plsql-lineage = { version = "=0.7.0", default-features = false }
+plsql-ir = { version = "=0.7.0", default-features = false }
+plsql-parser-antlr = { version = "=0.7.0", default-features = false }
+plsql-symbols = { version = "=0.7.0", default-features = false }
+plsql-cicd = { version = "=0.7.0", default-features = false }
+plsql-doc = { version = "=0.7.0", default-features = false }
+plsql-sast = { version = "=0.7.0", default-features = false }
+plsql-output = { version = "=0.7.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

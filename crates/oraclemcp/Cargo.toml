@@ -26,6 +26,7 @@ plsql-intelligence = [
     "dep:plsql-lineage",
     "dep:plsql-ir",
     "dep:plsql-parser-antlr",
+    "dep:plsql-symbols",
     "dep:plsql-cicd",
     "dep:plsql-doc",
     "dep:plsql-sast",
@@ -59,17 +60,18 @@ getrandom = "0.2"
 tracing.workspace = true
 tracing-subscriber = "0.3"
 chrono = { version = "0.4.44", features = ["serde"], optional = true }
-plsql-core = { version = "0.7.0", optional = true, default-features = false }
-plsql-engine = { version = "0.7.0", optional = true, default-features = false }
-plsql-catalog = { version = "0.7.0", optional = true, default-features = false }
-plsql-depgraph = { version = "0.7.0", optional = true, default-features = false }
-plsql-lineage = { version = "0.7.0", optional = true, default-features = false }
-plsql-ir = { version = "0.7.0", optional = true, default-features = false }
-plsql-parser-antlr = { version = "0.7.0", optional = true, default-features = false }
-plsql-cicd = { version = "0.7.0", optional = true, default-features = false }
-plsql-doc = { version = "0.7.0", optional = true, default-features = false }
-plsql-sast = { version = "0.7.0", optional = true, default-features = false }
-plsql-output = { version = "0.7.0", optional = true, default-features = false }
+plsql-core = { workspace = true, optional = true }
+plsql-engine = { workspace = true, optional = true }
+plsql-catalog = { workspace = true, optional = true }
+plsql-depgraph = { workspace = true, optional = true }
+plsql-lineage = { workspace = true, optional = true }
+plsql-ir = { workspace = true, optional = true }
+plsql-parser-antlr = { workspace = true, optional = true }
+plsql-symbols = { workspace = true, optional = true }
+plsql-cicd = { workspace = true, optional = true }
+plsql-doc = { workspace = true, optional = true }
+plsql-sast = { workspace = true, optional = true }
+plsql-output = { workspace = true, optional = true }
 
 [dev-dependencies]
 rcgen = "0.13"
