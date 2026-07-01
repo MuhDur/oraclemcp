@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use asupersync::Outcome;
+use asupersync::cx::NoCaps;
+use asupersync::{Cx, Outcome};
 use oraclemcp_audit::{
     AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord, AuditSubject, Auditor, DbEvidence,
     GENESIS_HASH,
@@ -35,9 +36,9 @@ use sha2::{Digest, Sha256};
 
 use crate::admin_auth::OperatorAuthorityPolicy;
 use crate::admission::{
-    CapacitySnapshot, DEFAULT_DOCTOR_RESERVED_LANES, DEFAULT_GLOBAL_HOST_CAP,
-    DEFAULT_OPERATOR_RESERVED_LANES, DEFAULT_READ_PER_PROFILE_CAP, DEFAULT_RETRY_AFTER_MS,
-    DEFAULT_STATEFUL_PER_PROFILE_CAP,
+    AdmissionController, AdmissionPermit, CapacitySnapshot, DEFAULT_DOCTOR_RESERVED_LANES,
+    DEFAULT_GLOBAL_HOST_CAP, DEFAULT_OPERATOR_RESERVED_LANES, DEFAULT_READ_PER_PROFILE_CAP,
+    DEFAULT_RETRY_AFTER_MS, DEFAULT_STATEFUL_PER_PROFILE_CAP,
 };
 use crate::capabilities::PROTOCOL_VERSION;
 use crate::client_credentials::{
@@ -75,6 +76,9 @@ const STATEFUL_IDLE_REAP_INTERVAL: Duration = Duration::from_secs(1);
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const STATEFUL_SESSION_COOKIE: &str = "oraclemcp_mcp_session";
 const CONFIG_DRAFT_MAX_BYTES: usize = 256 * 1024;
+const HTTP_TRANSPORT_CAPACITY_SCOPE: &str = "http_transport_connection";
+const HTTP_TRANSPORT_CAPACITY_SUBJECT: &str = "accepted-connections";
+const HTTP_SSE_CAPACITY_SCOPE: &str = "http_sse_subscriber";
 
 /// A cheap, synchronous DB-reachability check for the `/readyz` probe.
 ///
@@ -176,6 +180,14 @@ pub struct HttpTransportConfig {
     /// watchdog. The watchdog closes stale lanes through [`HttpSessionLifecycle`]
     /// and never touches dispatcher/connection state directly.
     pub stateful_idle_ttl: Duration,
+    /// Transport-layer admission for accepted HTTP(S) connection workers. This
+    /// runs before the listener spawns a per-connection thread, so slow readers
+    /// cannot create unbounded workers before Oracle/session admission exists.
+    pub transport_admission: Arc<AdmissionController>,
+    /// Admission for long-lived Streamable HTTP GET/SSE subscribers. These are
+    /// transport consumers, not Oracle lanes, so they are capped separately from
+    /// lane/session admission.
+    pub sse_admission: Arc<AdmissionController>,
     /// The RFC 9728 protected-resource metadata document to serve, if OAuth is
     /// enabled (from [`oraclemcp_auth::oauth_rs::ResourceServerConfig`]).
     pub resource_metadata: Option<Value>,
@@ -242,6 +254,14 @@ impl std::fmt::Debug for HttpTransportConfig {
             .field("json_response", &self.json_response)
             .field("stateful", &self.stateful)
             .field("stateful_idle_ttl", &self.stateful_idle_ttl)
+            .field(
+                "transport_regular_global_cap",
+                &self.transport_admission.regular_global_cap(),
+            )
+            .field(
+                "sse_regular_global_cap",
+                &self.sse_admission.regular_global_cap(),
+            )
             .field("resource_metadata", &self.resource_metadata.is_some())
             .field("oauth", &self.oauth.is_some())
             .field("mtls_client_count", &self.mtls_clients.fingerprints.len())
@@ -279,6 +299,8 @@ impl Default for HttpTransportConfig {
             json_response: false,
             stateful: false,
             stateful_idle_ttl: Duration::from_secs(DEFAULT_STATEFUL_IDLE_TTL_SECONDS),
+            transport_admission: default_transport_admission(),
+            sse_admission: default_sse_admission(),
             resource_metadata: None,
             oauth: None,
             mtls_clients: MtlsClientRegistry::default(),
@@ -297,6 +319,24 @@ impl Default for HttpTransportConfig {
             observability: ObservabilityState::default(),
         }
     }
+}
+
+fn default_transport_admission() -> Arc<AdmissionController> {
+    Arc::new(AdmissionController::with_reserved(
+        DEFAULT_GLOBAL_HOST_CAP,
+        DEFAULT_GLOBAL_HOST_CAP,
+        DEFAULT_OPERATOR_RESERVED_LANES,
+        DEFAULT_DOCTOR_RESERVED_LANES,
+    ))
+}
+
+fn default_sse_admission() -> Arc<AdmissionController> {
+    Arc::new(AdmissionController::with_reserved(
+        DEFAULT_GLOBAL_HOST_CAP,
+        DEFAULT_STATEFUL_PER_PROFILE_CAP,
+        DEFAULT_OPERATOR_RESERVED_LANES,
+        DEFAULT_DOCTOR_RESERVED_LANES,
+    ))
 }
 
 /// Redacted stateful lane summary exposed to the operator API.
@@ -1576,6 +1616,14 @@ mod tests {
         assert_eq!(
             metrics_body["data"]["capacity"]["stateful_lanes"]["retry_after_ms"],
             serde_json::json!(250)
+        );
+        assert_eq!(
+            metrics_body["data"]["capacity"]["transport"]["accepted_connection_workers"]["regular_global_cap"],
+            serde_json::json!(62)
+        );
+        assert_eq!(
+            metrics_body["data"]["capacity"]["transport"]["sse_subscribers"]["per_subject_cap"],
+            serde_json::json!(8)
         );
         assert_eq!(
             metrics_body["data"]["capacity"]["idle_reaping"]["ttl_seconds"],
@@ -4320,6 +4368,129 @@ mod tests {
         );
     }
 
+    #[test]
+    fn serve_http_until_bounds_connection_workers_before_request_parse() {
+        let transport_admission = Arc::new(AdmissionController::new(1, 1));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback test listener");
+        let addr = listener.local_addr().expect("listener has local addr");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = Arc::clone(&shutdown);
+        let config = HttpTransportConfig {
+            json_response: true,
+            transport_admission: Arc::clone(&transport_admission),
+            ..Default::default()
+        };
+        let handle = std::thread::spawn(move || {
+            serve_http_until(listener, test_server(), &config, server_shutdown)
+                .expect("bounded native HTTP server exits cleanly")
+        });
+
+        let stalled = TcpStream::connect(addr).expect("connect stalled reader");
+        for _ in 0..100 {
+            if transport_admission.available_global() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            transport_admission.available_global(),
+            0,
+            "first accepted socket must hold the only transport worker permit"
+        );
+
+        let mut rejected = TcpStream::connect(addr).expect("connect rejected reader");
+        rejected
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set rejected read timeout");
+        let mut response = String::new();
+        rejected
+            .read_to_string(&mut response)
+            .expect("read transport capacity rejection");
+        assert!(response.starts_with("HTTP/1.1 429 Too Many Requests"));
+        assert!(response.contains("retry-after: 1"));
+        assert!(response.contains("\"error_class\":\"AT_CAPACITY\""));
+        assert!(response.contains("http_transport_connection"));
+        assert!(response.contains("capacity_snapshot"));
+
+        drop(stalled);
+        shutdown.store(true, Ordering::SeqCst);
+        handle.join().expect("bounded server thread joins");
+    }
+
+    #[test]
+    fn served_stateful_get_sse_subscribers_are_capped() {
+        fn read_until(stream: &mut TcpStream, raw: &mut Vec<u8>, needle: &[u8]) {
+            let mut buf = [0_u8; 512];
+            while !raw.windows(needle.len()).any(|window| window == needle) {
+                let n = stream.read(&mut buf).expect("SSE response is readable");
+                assert_ne!(n, 0, "SSE response ended before expected data");
+                raw.extend_from_slice(&buf[..n]);
+            }
+        }
+
+        let sse_admission = Arc::new(AdmissionController::new(1, 1));
+        let session_store = Arc::new(HttpSessionStore::default());
+        let result_store = Arc::new(HttpResultStore::new());
+        let session_id = "subscriber-cap-session";
+        session_store.insert(session_id.to_owned(), "anonymous-http".to_owned());
+        result_store.ensure_session(session_id);
+        let config = HttpTransportConfig {
+            stateful: true,
+            session_store: Some(Arc::clone(&session_store)),
+            result_store: Some(Arc::clone(&result_store)),
+            sse_admission: Arc::clone(&sse_admission),
+            ..Default::default()
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind SSE cap listener");
+        let addr = listener.local_addr().expect("SSE cap listener address");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_shutdown = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || {
+            serve_http_until(listener, test_server(), &config, thread_shutdown)
+                .expect("SSE cap HTTP listener exits cleanly");
+        });
+
+        let request = format!(
+            "GET {MCP_PATH} HTTP/1.1\r\nhost: 127.0.0.1\r\naccept: text/event-stream\r\nmcp-session-id: {session_id}\r\ncontent-length: 0\r\n\r\n"
+        );
+        let mut first = TcpStream::connect(addr).expect("connect first SSE subscriber");
+        first
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set first SSE read timeout");
+        first
+            .write_all(request.as_bytes())
+            .expect("write first SSE GET");
+        let mut first_raw = Vec::new();
+        read_until(&mut first, &mut first_raw, b"\r\n\r\n");
+        assert_eq!(
+            sse_admission.available_global(),
+            0,
+            "streaming GET must hold the only SSE subscriber permit"
+        );
+
+        let mut second = TcpStream::connect(addr).expect("connect second SSE subscriber");
+        second
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set second SSE read timeout");
+        second
+            .write_all(request.as_bytes())
+            .expect("write second SSE GET");
+        let mut response = String::new();
+        second
+            .read_to_string(&mut response)
+            .expect("read SSE capacity rejection");
+        assert!(response.starts_with("HTTP/1.1 429 Too Many Requests"));
+        assert!(response.contains("retry-after: 1"));
+        assert!(response.contains("\"error_class\":\"AT_CAPACITY\""));
+        assert!(response.contains("http_sse_subscriber"));
+        assert!(response.contains("capacity_snapshot"));
+
+        result_store.remove_session(session_id);
+        shutdown.store(true, Ordering::SeqCst);
+        drop(first);
+        handle.join().expect("SSE cap listener thread joins");
+    }
+
     fn self_signed_cert() -> (Vec<u8>, Vec<u8>) {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
         (
@@ -6206,6 +6377,13 @@ fn operator_capacity_data(
         .session_lifecycle
         .as_ref()
         .and_then(|lifecycle| lifecycle.capacity_snapshot("stateful_lane", "operator"));
+    let transport_snapshot = config.transport_admission.snapshot(
+        HTTP_TRANSPORT_CAPACITY_SCOPE,
+        HTTP_TRANSPORT_CAPACITY_SUBJECT,
+    );
+    let sse_snapshot = config
+        .sse_admission
+        .snapshot(HTTP_SSE_CAPACITY_SCOPE, "operator");
     let read_pool_effective = PoolSettings::default().resolved().max_size;
     let active_lanes = metrics_snapshot
         .and_then(|snapshot| usize::try_from(snapshot.active_lanes).ok())
@@ -6317,6 +6495,25 @@ fn operator_capacity_data(
                 {
                     "name": "memory_budget",
                     "status": "monitoring_unavailable",
+                },
+            ],
+        },
+        "transport": {
+            "source": "admission",
+            "accepted_connection_workers": transport_snapshot,
+            "sse_subscribers": sse_snapshot,
+            "limit_sources": [
+                {
+                    "name": "configured_transport_worker_caps",
+                    "status": "applied",
+                },
+                {
+                    "name": "configured_sse_subscriber_caps",
+                    "status": "applied",
+                },
+                {
+                    "name": "operator_doctor_reserve",
+                    "status": "applied",
                 },
             ],
         },
@@ -7650,6 +7847,7 @@ fn handle_mcp_get(
         Err(response) => return HttpExchange::Buffered(response),
     };
     let session_id = session.session_id;
+    let session_principal_key = session.principal_key;
     let cursor = request
         .query_param("cursor")
         .or_else(|| request.header("last-event-id"));
@@ -7664,11 +7862,21 @@ fn handle_mcp_get(
         Err(response) => return HttpExchange::Buffered(response),
     };
     if allow_streaming {
+        let sse_permit = match try_admit_http_capacity(
+            &config.sse_admission,
+            &session_principal_key,
+            HTTP_SSE_CAPACITY_SCOPE,
+            "retry after retry_after_ms, or close an existing SSE subscriber",
+        ) {
+            Ok(permit) => permit,
+            Err(response) => return HttpExchange::Buffered(response),
+        };
         return HttpExchange::SseStream(HttpSseStream::new(
             Arc::clone(store),
             session_id.to_owned(),
             parse_stream_cursor(cursor).unwrap_or(0),
             events,
+            sse_permit,
         ));
     }
     HttpExchange::Buffered(buffered_sse_response(&events))
@@ -7850,6 +8058,27 @@ fn retry_after_header_seconds(ms: u64) -> String {
     (ms.saturating_add(999) / 1000).max(1).to_string()
 }
 
+fn detached_admission_cx() -> Cx<NoCaps> {
+    Cx::<NoCaps>::detached_cancel_context()
+}
+
+fn try_admit_http_capacity(
+    controller: &AdmissionController,
+    subject: &str,
+    scope: &str,
+    next_step: &str,
+) -> Result<AdmissionPermit, HttpResponse> {
+    let cx = detached_admission_cx();
+    controller.try_admit(&cx, subject).map_err(|_| {
+        let envelope = controller
+            .at_capacity_envelope(scope, subject)
+            .with_next_step(next_step);
+        let retry_after =
+            retry_after_header_seconds(envelope.retry_after_ms.unwrap_or(DEFAULT_RETRY_AFTER_MS));
+        json_response(429, &envelope.to_json()).with_header("retry-after", &retry_after)
+    })
+}
+
 fn content_type_is_json(request: &HttpRequest) -> bool {
     request.header("content-type").is_some_and(|value| {
         value
@@ -8019,6 +8248,7 @@ struct HttpSseStream {
     session_id: String,
     after_seq: u64,
     initial_events: Vec<HttpBufferedEvent>,
+    _permit: AdmissionPermit,
 }
 
 impl HttpSseStream {
@@ -8027,12 +8257,14 @@ impl HttpSseStream {
         session_id: String,
         after_seq: u64,
         initial_events: Vec<HttpBufferedEvent>,
+        permit: AdmissionPermit,
     ) -> Self {
         Self {
             store,
             session_id,
             after_seq,
             initial_events,
+            _permit: permit,
         }
     }
 
@@ -8289,15 +8521,35 @@ pub fn serve_http_until(
     let mut last_idle_reap = Instant::now();
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
     while !shutdown.load(Ordering::SeqCst) {
+        reap_finished_workers(&mut workers);
         if last_idle_reap.elapsed() >= STATEFUL_IDLE_REAP_INTERVAL {
             reap_idle_stateful_sessions(&config);
             last_idle_reap = Instant::now();
         }
         match listener.accept() {
-            Ok((stream, _addr)) => {
+            Ok((mut stream, _addr)) => {
+                let transport_permit = match try_admit_http_capacity(
+                    &config.transport_admission,
+                    HTTP_TRANSPORT_CAPACITY_SUBJECT,
+                    HTTP_TRANSPORT_CAPACITY_SCOPE,
+                    "retry after retry_after_ms; accepted connection workers are bounded to preserve operator and doctor reserve",
+                ) {
+                    Ok(permit) => permit,
+                    Err(response) => {
+                        let _ = stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT));
+                        if let Err(e) = write_http_response(&mut stream, &response) {
+                            tracing::debug!(
+                                error = %e,
+                                "native HTTP capacity rejection failed"
+                            );
+                        }
+                        continue;
+                    }
+                };
                 let server = server.clone();
                 let config = Arc::clone(&config);
                 workers.push(std::thread::spawn(move || {
+                    let _transport_permit = transport_permit;
                     if let Err(e) = handle_connection(stream, &server, &config) {
                         tracing::debug!(error = %e, "native HTTP connection failed");
                     }
@@ -8350,16 +8602,30 @@ pub fn serve_https_until(
     let mut last_idle_reap = Instant::now();
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
     while !shutdown.load(Ordering::SeqCst) {
+        reap_finished_workers(&mut workers);
         if last_idle_reap.elapsed() >= STATEFUL_IDLE_REAP_INTERVAL {
             reap_idle_stateful_sessions(&config);
             last_idle_reap = Instant::now();
         }
         match listener.accept() {
             Ok((stream, _addr)) => {
+                let transport_permit = match try_admit_http_capacity(
+                    &config.transport_admission,
+                    HTTP_TRANSPORT_CAPACITY_SUBJECT,
+                    HTTP_TRANSPORT_CAPACITY_SCOPE,
+                    "retry after retry_after_ms; accepted TLS connection workers are bounded to preserve operator and doctor reserve",
+                ) {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        tracing::debug!("native HTTPS connection rejected at transport capacity");
+                        continue;
+                    }
+                };
                 let server = server.clone();
                 let config = Arc::clone(&config);
                 let tls = Arc::clone(&tls);
                 workers.push(std::thread::spawn(move || {
+                    let _transport_permit = transport_permit;
                     if let Err(e) = handle_tls_connection(stream, &server, &config, tls) {
                         tracing::debug!(error = %e, "native HTTPS connection failed");
                     }
@@ -8376,6 +8642,18 @@ pub fn serve_https_until(
         let _ = worker.join();
     }
     Ok(())
+}
+
+fn reap_finished_workers(workers: &mut Vec<JoinHandle<()>>) {
+    let mut index = 0;
+    while index < workers.len() {
+        if workers[index].is_finished() {
+            let worker = workers.swap_remove(index);
+            let _ = worker.join();
+        } else {
+            index += 1;
+        }
+    }
 }
 
 fn listener_config(config: &HttpTransportConfig) -> HttpTransportConfig {

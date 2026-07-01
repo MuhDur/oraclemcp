@@ -1872,40 +1872,34 @@ fn http_transport_config_from_merged(
         None => (None, None),
     };
 
-    Ok(ResolvedHttpTransportConfig {
-        transport: HttpTransportConfig {
-            allowed_hosts: http.allowed_hosts,
-            allowed_origins: http.allowed_origins,
-            json_response: http.json_response,
-            stateful: http.stateful,
-            stateful_idle_ttl: std::time::Duration::from_secs(http.stateful_idle_ttl_seconds),
-            resource_metadata,
-            oauth,
-            mtls_clients: MtlsClientRegistry::from_fingerprints(http.mtls.client_fingerprints),
-            client_credentials: None,
-            session_store: None,
-            result_store: None,
-            session_lifecycle: None,
-            single_principal_guard: Some(SinglePrincipalGuard::new()),
-            operator_authority: OperatorAuthorityPolicy {
-                allow_loopback_owner: http.operator.allow_loopback_owner,
-                local_owner_stable_id: local_operator_stable_id(),
-                allowed_subjects: http
-                    .operator
-                    .allowed_subjects
-                    .into_iter()
-                    .map(|subject| subject.trim().to_owned())
-                    .collect(),
-            },
-            dashboard_auth: Some(Arc::new(DashboardAuth::new(default_dashboard_ticket_dir()))),
-            operator_auditor: None,
-            operator_audit_tail_path: None,
-            config_ops: None,
-            operator_idempotency: Arc::new(oraclemcp_core::OperatorIdempotencyLedger::new()),
-            operator_events: Arc::new(oraclemcp_core::OperatorEventStore::new()),
-            // Observability is wired in run_serve (HealthState/Metrics/probe).
-            observability: ObservabilityState::default(),
+    let transport = HttpTransportConfig {
+        allowed_hosts: http.allowed_hosts,
+        allowed_origins: http.allowed_origins,
+        json_response: http.json_response,
+        stateful: http.stateful,
+        stateful_idle_ttl: std::time::Duration::from_secs(http.stateful_idle_ttl_seconds),
+        resource_metadata,
+        oauth,
+        mtls_clients: MtlsClientRegistry::from_fingerprints(http.mtls.client_fingerprints),
+        single_principal_guard: Some(SinglePrincipalGuard::new()),
+        operator_authority: OperatorAuthorityPolicy {
+            allow_loopback_owner: http.operator.allow_loopback_owner,
+            local_owner_stable_id: local_operator_stable_id(),
+            allowed_subjects: http
+                .operator
+                .allowed_subjects
+                .into_iter()
+                .map(|subject| subject.trim().to_owned())
+                .collect(),
         },
+        dashboard_auth: Some(Arc::new(DashboardAuth::new(default_dashboard_ticket_dir()))),
+        // Observability is wired in run_serve (HealthState/Metrics/probe).
+        observability: ObservabilityState::default(),
+        ..Default::default()
+    };
+
+    Ok(ResolvedHttpTransportConfig {
+        transport,
         tls,
         mtls_required,
     })

@@ -221,13 +221,19 @@ rustls TLS and optional mTLS. stdio's trust boundary is the parent process.
 *Threat.* Unbounded sessions, runaway queries, or telemetry backpressure starve
 the server or the database.
 
-*Mitigation.* Per-DB session ceiling and lease accounting; request budgets and
-timeouts; the OTLP export pump is bounded with newest-drop load shedding and a
-bounded shutdown budget (telemetry failure never blocks the request path).
+*Mitigation.* Per-DB session ceiling and lease accounting; served HTTP lane
+admission before Oracle sessions open; accepted connection-worker admission
+before spawning per-connection threads; separate caps for long-lived
+Streamable HTTP GET/SSE subscribers; request budgets and timeouts; the OTLP
+export pump is bounded with newest-drop load shedding and a bounded shutdown
+budget (telemetry failure never blocks the request path).
 
 *Evidence (green; CI):*
 - `crates/oraclemcp-db/tests/load_soak.rs` — bounded / zero-leak invariants.
 - `crates/oraclemcp-core/src/request_budget.rs` — request budget with tests.
+- `crates/oraclemcp-core/src/http.rs` —
+  `serve_http_until_bounds_connection_workers_before_request_parse`,
+  `served_stateful_get_sse_subscribers_are_capped`.
 - `crates/oraclemcp-telemetry/src/otlp/pump.rs` —
   `submit_is_non_blocking_and_shutdown_is_bounded`, `overflow_drops_newest_and_counts`.
 

@@ -505,21 +505,26 @@ asserts `open ≤ max_size`. These are the invariants the B3 load/soak harness
 checks (see `docs/performance-footprint.md`).
 
 Served stateful HTTP lanes have a separate N4 admission gate before the lane
-thread or lane-owned Oracle connection can be opened. The current served
-defaults are upper bounds: 8 stateful lanes per principal bucket, 64 total
-host slots, with 1 operator slot and 1 doctor/readiness slot held out of
-regular agent admission. N4b finalized those shipped upper bounds from the
-CX-I6 Phase-0 measurement recorded in
+thread or lane-owned Oracle connection can be opened. The HTTP listener also
+admits accepted connection workers before spawning the per-connection thread,
+and long-lived Streamable HTTP GET/SSE subscribers have their own transport cap
+because they are not Oracle lanes. The current served defaults are upper
+bounds: 8 stateful lanes or SSE subscribers per principal bucket, 64 total host
+slots, with 1 operator slot and 1 doctor/readiness slot held out of regular
+agent admission; accepted connection workers share the same 64-slot host budget
+with the same reserve. N4b finalized those shipped upper bounds from the CX-I6
+Phase-0 measurement recorded in
 `tests/artifacts/perf/20260630-cx-i6-phase0-capacity/RESULTS.md`, which observed
 2.00 OS threads and 4.00 file descriptors per warmed stateful lane and enough
 finite fd/task headroom for the 64-slot host candidate on the measured dev host.
-When regular capacity is exhausted, the request returns the typed `AT_CAPACITY`
-error with `retry_after_ms`, HTTP 429, `Retry-After`, and a redacted capacity
-snapshot. The snapshot reports capacities and redacted subject length only; it
-does not echo bearer tokens, raw principals, profiles, connect strings, or
-credentials. Runtime effective-cap surfaces still clamp the configured caps by
-the service context's visible DB/session, fd, task, and memory budgets when
-those values are available.
+When regular capacity is exhausted, HTTP paths that can speak HTTP return the
+typed `AT_CAPACITY` error with `retry_after_ms`, HTTP 429, `Retry-After`, and a
+redacted capacity snapshot; HTTPS sockets rejected before the TLS handshake are
+closed at the transport boundary. The snapshot reports capacities and redacted
+subject length only; it does not echo bearer tokens, raw principals, profiles,
+connect strings, or credentials. Runtime effective-cap surfaces still clamp the
+configured caps by the service context's visible DB/session, fd, task, and
+memory budgets when those values are available.
 
 `oraclemcp --json service install --dry-run` includes the generated service-unit
 hardening. On Linux systemd user units are `Type=notify`/`NotifyAccess=main`,
