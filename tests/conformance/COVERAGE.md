@@ -89,7 +89,7 @@ Total tracked requirements: 50 MUST, 2 SHOULD, 52 tested.
 | MCP-STDIO-002 | MUST | Notifications | `notifications/initialized` produces no response. |
 | MCP-STDIO-003 | MUST | Tools | `tools/list` returns MCP `inputSchema` objects. |
 | MCP-STDIO-009 | MUST | Tools | `tools/list` returns non-empty titles and explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint` annotations. |
-| MCP-STDIO-010 | MUST | Tools | `tools/list` preserves declared `outputSchema` for structured-content validation. |
+| MCP-STDIO-010 | MUST | Tools | `tools/list` preserves declared `outputSchema`, and `tools/call` `structuredContent` validates against the advertised schema. |
 | MCP-STDIO-004 | MUST | Tools | `tools/call` returns `content`, `structuredContent`, and `isError`. |
 | MCP-STDIO-005 | MUST | Tools | Unknown tools are MCP tool errors, not transport crashes. |
 | MCP-STDIO-006 | MUST | Initialize | Initialize capabilities advertise resources only after resource handlers are served. |

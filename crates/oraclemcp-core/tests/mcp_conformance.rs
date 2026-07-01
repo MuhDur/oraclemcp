@@ -362,6 +362,148 @@ fn run_script(requests: Vec<Value>) -> Vec<Value> {
     run_frames(StdioAuthPolicy::Disabled, frames)
 }
 
+fn validate_schema_subset(schema: &Value, value: &Value, context: &str) -> Result<(), String> {
+    if let Some(options) = schema.get("oneOf").and_then(Value::as_array) {
+        let matches = options
+            .iter()
+            .filter(|option| validate_schema_subset(option, value, context).is_ok())
+            .count();
+        return if matches == 1 {
+            Ok(())
+        } else {
+            Err(format!(
+                "{context}: oneOf expected exactly one matching schema, got {matches}"
+            ))
+        };
+    }
+
+    if let Some(expected) = schema.get("const")
+        && value != expected
+    {
+        return Err(format!("{context}: expected const {expected}, got {value}"));
+    }
+
+    if let Some(allowed) = schema.get("enum").and_then(Value::as_array)
+        && !allowed.iter().any(|candidate| candidate == value)
+    {
+        return Err(format!(
+            "{context}: value {value} is not in enum {allowed:?}"
+        ));
+    }
+
+    if let Some(schema_type) = schema.get("type") {
+        validate_schema_type(schema_type, value, context)?;
+    }
+
+    if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64) {
+        let actual = value
+            .as_f64()
+            .ok_or_else(|| format!("{context}: minimum applies to a non-number {value}"))?;
+        if actual < minimum {
+            return Err(format!(
+                "{context}: value {actual} is below minimum {minimum}"
+            ));
+        }
+    }
+
+    if schema.get("required").is_some() || schema.get("properties").is_some() {
+        let object = value
+            .as_object()
+            .ok_or_else(|| format!("{context}: object keywords apply to non-object {value}"))?;
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
+            for field in required {
+                let field = field
+                    .as_str()
+                    .ok_or_else(|| format!("{context}: required entries must be strings"))?;
+                if !object.contains_key(field) {
+                    return Err(format!("{context}: missing required field {field:?}"));
+                }
+            }
+        }
+        if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+            for (field, field_schema) in properties {
+                if let Some(field_value) = object.get(field) {
+                    validate_schema_subset(
+                        field_schema,
+                        field_value,
+                        &format!("{context}.{field}"),
+                    )?;
+                }
+            }
+            match schema.get("additionalProperties") {
+                Some(Value::Bool(false)) => {
+                    for field in object.keys() {
+                        if !properties.contains_key(field) {
+                            return Err(format!(
+                                "{context}: unexpected additional field {field:?}"
+                            ));
+                        }
+                    }
+                }
+                Some(Value::Object(additional_schema)) => {
+                    let additional_schema = Value::Object(additional_schema.clone());
+                    for (field, field_value) in object {
+                        if !properties.contains_key(field) {
+                            validate_schema_subset(
+                                &additional_schema,
+                                field_value,
+                                &format!("{context}.{field}"),
+                            )?;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(items) = schema.get("items") {
+        let array = value
+            .as_array()
+            .ok_or_else(|| format!("{context}: items applies to non-array {value}"))?;
+        for (idx, item) in array.iter().enumerate() {
+            validate_schema_subset(items, item, &format!("{context}[{idx}]"))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_schema_type(schema_type: &Value, value: &Value, context: &str) -> Result<(), String> {
+    let matches = match schema_type {
+        Value::String(name) => json_type_matches(name, value),
+        Value::Array(names) => names.iter().any(|name| {
+            name.as_str()
+                .is_some_and(|name| json_type_matches(name, value))
+        }),
+        other => {
+            return Err(format!(
+                "{context}: schema type must be a string or string array, got {other}"
+            ));
+        }
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(format!(
+            "{context}: value {value} does not match type {schema_type}"
+        ))
+    }
+}
+
+fn json_type_matches(name: &str, value: &Value) -> bool {
+    match name {
+        "array" => value.is_array(),
+        "boolean" => value.is_boolean(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "null" => value.is_null(),
+        "number" => value.is_number(),
+        "object" => value.is_object(),
+        "string" => value.is_string(),
+        _ => false,
+    }
+}
+
 #[test]
 fn conformance_requirement_matrix_is_accounted_for() {
     assert_eq!(REQUIREMENTS.len(), 25);
@@ -727,6 +869,49 @@ fn tools_list_returns_input_schema_annotations_and_echoes_string_ids() {
     assert_eq!(execute["annotations"]["readOnlyHint"], json!(false));
     assert_eq!(execute["annotations"]["destructiveHint"], json!(true));
     assert_eq!(execute["annotations"]["idempotentHint"], json!(false));
+}
+
+#[test]
+fn output_schema_validates_structured_content() {
+    let replies = run_script(vec![
+        json!({
+            "jsonrpc": "2.0",
+            "id": "tools-1",
+            "method": "tools/list"
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": "call-1",
+            "method": "tools/call",
+            "params": {
+                "name": "oracle_schema_inspect",
+                "arguments": { "owner": "HR" }
+            }
+        }),
+    ]);
+    let tools = replies
+        .iter()
+        .find(|reply| reply["id"] == json!("tools-1"))
+        .expect("tools/list reply")["result"]["tools"]
+        .as_array()
+        .expect("tools/list result contains tools array");
+    let schema = tools
+        .iter()
+        .find(|tool| tool["name"] == json!("oracle_schema_inspect"))
+        .expect("oracle_schema_inspect descriptor is advertised")
+        .get("outputSchema")
+        .expect("changed tool advertises outputSchema");
+    let structured = &replies
+        .iter()
+        .find(|reply| reply["id"] == json!("call-1"))
+        .expect("tools/call reply")["result"]["structuredContent"];
+
+    validate_schema_subset(
+        schema,
+        structured,
+        "oracle_schema_inspect.structuredContent",
+    )
+    .unwrap_or_else(|err| panic!("structuredContent violates outputSchema: {err}"));
 }
 
 #[test]

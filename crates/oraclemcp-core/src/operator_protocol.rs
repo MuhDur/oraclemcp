@@ -586,6 +586,20 @@ mod tests {
             schema["routes"].as_array().expect("routes array").len(),
             OPERATOR_ROUTE_SPECS.len()
         );
+        let defs = schema["$defs"].as_object().expect("schema defs object");
+        for spec in OPERATOR_ROUTE_SPECS {
+            assert!(
+                defs.contains_key(spec.schema),
+                "{} {} advertises resolvable response schema {}",
+                spec.method,
+                spec.path,
+                spec.schema
+            );
+        }
+        assert!(
+            defs.contains_key("operatorEvent"),
+            "SSE events advertise a resolvable operatorEvent schema"
+        );
         assert!(
             schema["$defs"]["operatorEvent"]["required"]
                 .as_array()
