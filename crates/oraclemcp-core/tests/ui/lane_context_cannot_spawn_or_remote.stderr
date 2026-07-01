@@ -1,0 +1,44 @@
+error[E0277]: the trait bound `CapSet<false, true, false, true, false>: PrivilegedEffect` is not satisfied
+  --> tests/ui/lane_context_cannot_spawn_or_remote.rs:11:32
+   |
+11 |     requires_privileged_effect(cx);
+   |     -------------------------- ^^ the trait `HasRemote` is not implemented for `CapSet<false, true, false, true, false>`
+   |     |
+   |     required by a bound introduced by this call
+   |
+help: the trait `HasRemote` is implemented for `CapSet<SPAWN, TIME, RANDOM, IO, true>`
+  --> $CARGO/asupersync-$VERSION/src/cx/cap.rs
+   |
+   | / impl<const SPAWN: bool, const TIME: bool, const RANDOM: bool, const IO: bool> HasRemote
+   | |     for CapSet<SPAWN, TIME, RANDOM, IO, true>
+   | |_____________________________________________^
+   = note: required for `CapSet<false, true, false, true, false>` to implement `PrivilegedEffect`
+note: required by a bound in `requires_privileged_effect`
+  --> src/capability.rs
+   |
+   | pub fn requires_privileged_effect<Caps>(_cx: &Cx<Caps>)
+   |        -------------------------- required by a bound in this function
+   | where
+   |     Caps: PrivilegedEffect,
+   |           ^^^^^^^^^^^^^^^^ required by this bound in `requires_privileged_effect`
+
+error[E0277]: the trait bound `CapSet<false, true, false, true, false>: HasRemote` is not satisfied
+  --> tests/ui/lane_context_cannot_spawn_or_remote.rs:12:16
+   |
+12 |     let _ = cx.remote();
+   |                ^^^^^^ the trait `HasRemote` is not implemented for `CapSet<false, true, false, true, false>`
+   |
+help: the trait `HasRemote` is implemented for `CapSet<SPAWN, TIME, RANDOM, IO, true>`
+  --> $CARGO/asupersync-$VERSION/src/cx/cap.rs
+   |
+   | / impl<const SPAWN: bool, const TIME: bool, const RANDOM: bool, const IO: bool> HasRemote
+   | |     for CapSet<SPAWN, TIME, RANDOM, IO, true>
+   | |_____________________________________________^
+note: required by a bound in `asupersync::Cx::<Caps>::remote`
+  --> $CARGO/asupersync-$VERSION/src/cx/cx.rs
+   |
+   |     pub fn remote(&self) -> Option<&RemoteCap>
+   |            ------ required by a bound in this associated function
+   |     where
+   |         Caps: cap::HasRemote,
+   |               ^^^^^^^^^^^^^^ required by this bound in `Cx::<Caps>::remote`

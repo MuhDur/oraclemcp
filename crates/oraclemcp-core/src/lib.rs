@@ -75,7 +75,8 @@ pub use capabilities::{
     CapabilitiesReport, ConnectionStatus, FeatureTiers, OperatingLevelReport, PROTOCOL_VERSION,
 };
 pub use capability::{
-    PrivilegedEffect, ReadPathCaps, narrow_to_read_path, requires_privileged_effect,
+    LaneCaps, PrivilegedEffect, ReadPathCaps, narrow_to_lane, narrow_to_read_path,
+    requires_privileged_effect,
 };
 pub use client_credentials::{
     AuthenticatedClientCredential, ClientCredentialError, ClientCredentialIssueRequest,

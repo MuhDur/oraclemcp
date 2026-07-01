@@ -34,6 +34,7 @@ use serde_json::Value;
 use crate::admission::{
     AdmissionController, AdmissionPermit, CapacitySnapshot, DEFAULT_RETRY_AFTER_MS,
 };
+use crate::capability::narrow_to_lane;
 use crate::http::{HttpLaneBinding, HttpLaneSnapshot, HttpSessionLifecycle};
 use crate::operator_protocol::operator_subject_id_hash;
 use crate::server::{
@@ -1065,6 +1066,10 @@ async fn run_lane_loop_with_factory(
     let Some(cx) = Cx::current() else {
         return;
     };
+    // A9: lane-shell checkpoints and mailbox receives use TIME+IO only. The
+    // dispatcher/DB trait calls below keep the full Cx as the documented
+    // object-safe IO exception.
+    let lane_cx = narrow_to_lane(&cx);
     let mut dispatcher: Option<Arc<dyn ToolDispatch>> = None;
 
     loop {
@@ -1072,11 +1077,11 @@ async fn run_lane_loop_with_factory(
             close_lane_dispatcher(dispatcher.as_deref(), &cx, &lane_context, reason).await;
             break;
         }
-        if cx.checkpoint().is_err() {
+        if lane_cx.checkpoint().is_err() {
             break;
         }
 
-        let command = match receiver.recv(&cx).await {
+        let command = match receiver.recv(&lane_cx).await {
             Ok(command) => command,
             Err(_) => {
                 if let Some(reason) = close_state.requested_reason() {

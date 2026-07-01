@@ -37,6 +37,11 @@
 //!      marker (spawn / remote / privileged) requires a capability row that
 //!      [`ReadPathCaps`] is not — calling [`requires_privileged_effect`] with a
 //!      read context does not type-check.
+//!   4. The lane runtime's own scaffolding (checkpoint + mailbox receive) is
+//!      narrowed to [`LaneCaps`], the same TIME+IO row, before it enters any
+//!      lane-owned dispatcher. The dispatcher/DB trait calls remain the
+//!      documented object-safe IO exception; the lane shell itself cannot name
+//!      SPAWN/REMOTE/RANDOM effects.
 //!
 //! - **Runtime-enforced (the primary boundary, unchanged):** which *statements*
 //!   a session may run is decided by the fail-closed classifier + the
@@ -63,6 +68,14 @@ use asupersync::cx::{CapSet, HasRemote, SubsetOf};
 /// full row, so narrowing to it always type-checks; the reverse never does.
 pub type ReadPathCaps = CapSet<false, true, false, true, false>;
 
+/// The capability row used by the per-lane runtime shell.
+///
+/// Lanes need time/cancellation and their own bounded IO/mailbox work. They do
+/// not need spawn, remote dispatch, or ambient randomness. This aliases the
+/// read-path row deliberately: both are the release-train least-privilege shape
+/// `[SPAWN=false, TIME=true, RANDOM=false, IO=true, REMOTE=false]`.
+pub type LaneCaps = ReadPathCaps;
+
 /// Narrow a full-authority context to the read-path capability row.
 ///
 /// This is a zero-cost, type-level restriction (`Cx::restrict`): it shares the
@@ -76,6 +89,15 @@ where
     ReadPathCaps: SubsetOf<Caps>,
 {
     cx.restrict::<ReadPathCaps>()
+}
+
+/// Narrow a runtime context to the per-lane shell capability row.
+#[must_use]
+pub fn narrow_to_lane<Caps>(cx: &Cx<Caps>) -> Cx<LaneCaps>
+where
+    LaneCaps: SubsetOf<Caps>,
+{
+    cx.restrict::<LaneCaps>()
 }
 
 mod sealed {
@@ -164,6 +186,18 @@ mod tests {
         // exercising the actual `restrict` call path monotonically.
         let none = Cx::<NoCaps>::detached_cancel_context();
         let _floor: Cx<NoCaps> = none.restrict::<NoCaps>();
+    }
+
+    #[test]
+    fn lane_helper_is_the_same_narrow_time_io_row() {
+        fn assert_lane(_: &Cx<LaneCaps>) {}
+        fn witness(cx: &Cx<AllCaps>) -> Cx<LaneCaps> {
+            narrow_to_lane(cx)
+        }
+        assert_subset::<LaneCaps, AllCaps>();
+        assert_subset::<NoCaps, LaneCaps>();
+        let _witness: fn(&Cx<AllCaps>) -> Cx<LaneCaps> = witness;
+        let _assert_lane: fn(&Cx<LaneCaps>) = assert_lane;
     }
 
     /// `PrivilegedEffect` is implemented for rows carrying REMOTE and NOT for the
