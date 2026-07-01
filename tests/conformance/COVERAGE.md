@@ -55,6 +55,14 @@ Harnesses:
   `crates/oraclemcp/tests/e2e_http_oauth.rs`,
   `crates/oraclemcp-db/tests/{cancel_correctness,load_soak,multi_lane_live_xe}.rs`,
   and `crates/oraclemcp/src/dispatch/tests.rs`
+- B.13 cross-cutting edge/negative catalog:
+  `crates/oraclemcp-core/tests/concurrency_contract.rs`,
+  `crates/oraclemcp-guard/tests/{adversarial_corpus,proptest_invariants}.rs`,
+  `crates/oraclemcp/src/plsql_tools.rs`,
+  `crates/oraclemcp-db/tests/{type_fidelity,oracledb_contract,structured_schema_golden,live_oracle}.rs`,
+  `crates/oraclemcp-db/src/serialize.rs`,
+  `crates/oraclemcp-core/tests/mcp_conformance.rs`,
+  `crates/oraclemcp-core/src/{http,server}.rs`
 - Native listener TLS tests: `crates/oraclemcp-core/src/http.rs`
 - Transports under test:
   - stdio: `OracleMcpServer::serve_stdio_with_io`
@@ -201,6 +209,40 @@ Total tracked requirements: 61 MUST, 2 SHOULD, 63 tested.
 | WPN-H-001 | `crates/oraclemcp-core/tests/phase0_capacity.rs::phase0_capacity_spike`; `crates/oraclemcp-db/tests/load_soak.rs::load_soak_zero_leaked_sessions_clean_drain_bounded`; `crates/oraclemcp-db/tests/load_soak.rs::live_xe_load_soak_pool_accounting_and_latency` |
 | WPN-J-001 | `crates/oraclemcp-core/src/http.rs::tests::stateful_get_replays_buffered_lane_results_by_cursor`; `crates/oraclemcp-core/src/http.rs::tests::stateful_get_last_event_id_reports_gap_marker_for_slow_consumer`; `crates/oraclemcp-core/src/http.rs::tests::principal_session_close_clears_sessions_buffers_and_lanes` |
 | WPN-K-001 | `crates/oraclemcp-core/tests/lane_state_machine.rs::switch_generation_invalidates_stale_grants_and_subject_mix`; `crates/oraclemcp/src/dispatch/tests.rs::set_session_level_cannot_exceed_profile_ceiling`; `crates/oraclemcp/src/dispatch/tests.rs::oauth_read_scope_does_not_persistently_lower_session_level` |
+
+## B.13 Cross-Cutting Negative Catalog
+
+B.13 is a coverage index over other acceptance beads, not a separate runtime
+surface. Rows marked `covered` are backed by closed dependencies
+N9-edge/TB3/TB6. Rows marked `owned by follow-up` are intentionally tracked by
+the dependent hardening bead `oraclemcp-epic-060-f4xo.11.13`, so they stay
+visible without over-claiming coverage in this index bead.
+
+| ID | Concern | Status | Primary proof |
+| --- | --- | --- | --- |
+| B13-CLASSIFIER-001 | Classifier danger-adding transforms never lower danger. | covered | `crates/oraclemcp-guard/tests/proptest_invariants.rs::danger_adding_transforms_never_lower_classifier_danger` |
+| B13-CLASSIFIER-002 | Classifier reclassification is idempotent under canonical whitespace. | covered | `crates/oraclemcp-guard/tests/proptest_invariants.rs::classification_is_idempotent_under_canonical_whitespace` |
+| B13-CLASSIFIER-003 | Unicode literal forms remain data while confusable keywords fail closed. | covered | `crates/oraclemcp-guard/tests/adversarial_corpus.rs::unicode_literal_forms_remain_data_but_confusable_keywords_do_not_parse_safe` |
+| B13-CLASSIFIER-004 | Unbalanced quote/comment desync fails closed. | covered | `crates/oraclemcp-guard/tests/adversarial_corpus.rs::unbalanced_quote_or_comment_is_forbidden_desync` |
+| B13-CLASSIFIER-005 | PL/SQL side-effect oracle binding never loosens without read-only proof. | covered | `crates/oraclemcp/src/plsql_tools.rs::tests::sideeffect_oracle_binding_never_loosens_without_readonly_proof`; `select_side_effecting_trigger_tightens_plain_select`; `select_vpd_policy_function_is_part_of_statement_purity` |
+| B13-LANE-001 | Close requested just before park wakes the lane mailbox. | covered | `crates/oraclemcp-core/src/lane.rs::tests::idle_lane_mailbox_wakes_for_cross_thread_close` |
+| B13-LANE-002 | Full mailbox close request preempts queued work. | covered | `crates/oraclemcp-core/src/lane.rs::tests::close_requested_with_full_mailbox_preempts_queued_work` |
+| B13-LANE-003 | Registry/lane AB-BA lock ordering is unconstructible. | covered | `crates/oraclemcp-core/src/lane.rs::tests::registry_lane_lock_order_ab_ba_unconstructible` |
+| B13-LANE-004 | Panic terminal path releases capacity without touching siblings. | covered | `crates/oraclemcp-core/tests/lane_state_machine.rs::panic_terminal_path_releases_capacity_without_touching_sibling_lane` |
+| B13-LANE-005 | Capacity refusal occurs before the connection factory opens a connection. | covered | `crates/oraclemcp-core/src/lane.rs::tests::stateful_lane_capacity_refuses_before_factory_opens_connection` |
+| B13-LANE-006 | Profile switch at capacity keeps the old connection. | covered | `crates/oraclemcp/src/dispatch/tests.rs::switch_profile_at_capacity_keeps_old_conn` |
+| B13-LANE-007 | Idle/abandoned reaping closes through the mailbox/session path and clears buffers. | covered | `crates/oraclemcp-core/src/http.rs::tests::stateful_idle_reaper_closes_by_timeout_and_clears_buffers` |
+| B13-SERIALIZER-001 | SQL NULL remains JSON null for every covered scalar family. | covered | `crates/oraclemcp-db/tests/type_fidelity.rs::null_is_json_null_for_every_type`; `crates/oraclemcp-db/tests/oracledb_contract.rs::contract_type_null_is_json_null`; `crates/oraclemcp-db/src/serialize.rs::tests::null_is_json_null` |
+| B13-SERIALIZER-002 | Structured ARRAY/JSON/VECTOR/TSTZ/object markers match the published schema and goldens. | covered | `crates/oraclemcp-db/tests/structured_schema_golden.rs::published_schema_parses_and_declares_structured_variants`; `structured_goldens_match_schema_and_serializer_contract`; `crates/oraclemcp-db/tests/type_fidelity.rs::tstz_round_trips_with_offset_in_structured_carrier` |
+| B13-SERIALIZER-003 | LOB, BLOB, base64 modulo, byte cap, and cap+1 truncation edges are explicit. | covered | `crates/oraclemcp-db/tests/type_fidelity.rs::blob_base64_boundary_lengths_cover_modulo_classes`; `lob_caps_cover_exact_boundary_and_cap_plus_one`; `crates/oraclemcp-db/tests/live_oracle.rs::live_query_materializes_lob_locators_with_caps` |
+| B13-SERIALIZER-004 | NUMBER, native float, interval, and timestamp boundary values stay lossless or explicit. | covered | `crates/oraclemcp-db/tests/type_fidelity.rs::number_boundary_values_include_negative_scale`; `binary_double_edge_values_are_explicit`; `interval_boundary_values_are_text_not_reinterpreted`; `date_and_timestamp_are_iso_8601` |
+| B13-SERIALIZER-005 | Unsupported object/UDT and nested cursor/implicit result caps are explicit. | covered | `crates/oraclemcp-db/tests/oracledb_contract.rs::contract_type_unsupported_is_explicit_marker_never_silent`; `crates/oraclemcp-db/src/serialize.rs::tests::nested_result_byte_cap_marks_truncated`; `crates/oraclemcp-db/tests/live_oracle.rs::live_implicit_resultset_serializes_ref_cursor_with_caps`; `live_cursor_expression_serializes_ref_cursor_with_caps` |
+| B13-PROTOCOL-001 | Malformed, unknown, invalid-param, oversized, and batch JSON-RPC frames fail closed. | covered | `crates/oraclemcp-core/tests/mcp_conformance.rs::malformed_json_unknown_method_invalid_params_and_oversized_frames_fail_closed`; `batch_requests_are_explicitly_rejected_for_stdio`; `crates/oraclemcp-core/src/server.rs::tests::native_stdio_rejects_malformed_unknown_invalid_and_oversized_frames` |
+| B13-PROTOCOL-002 | HTTP negotiation, stateless DELETE, operator route precedence, and query filters are typed. | covered | `crates/oraclemcp-core/src/http.rs::tests::mcp_post_enforces_accept_and_content_type_negotiation`; `stateless_delete_is_method_not_allowed_not_false_accepted`; `operator_api_routes_are_typed_json_404_and_parse_query`; `dashboard_bundle_serves_html_without_api_fallback` |
+| B13-PROTOCOL-003 | MCP and operator SSE slow consumers receive bounded gap markers. | covered | `crates/oraclemcp-core/src/http.rs::tests::stateful_get_last_event_id_reports_gap_marker_for_slow_consumer`; `operator_events_last_event_id_reports_gap_for_slow_consumer` |
+| B13-RECOVERY-001 | SEC-1 recovery paths re-run classifier, level, grant, audit, and idempotency. | owned by follow-up | `oraclemcp-epic-060-f4xo.11.13` |
+| B13-INSTALLER-001 | Installer/doctor idempotency, audit tamper detect-never-repair, and exit-4 edges. | owned by follow-up | `oraclemcp-epic-060-f4xo.11.13` |
+| B13-STDIO-001 | stdio byte-identical non-regression and no lane/registry reachability. | owned by follow-up | `oraclemcp-epic-060-f4xo.11.13` |
 
 ## Provenance
 

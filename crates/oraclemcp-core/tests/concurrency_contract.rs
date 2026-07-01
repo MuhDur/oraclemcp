@@ -228,6 +228,32 @@ const EDGE_PROOFS: &[EdgeProof] = &[
     },
 ];
 
+const B13_COVERAGE_IDS: &[&str] = &[
+    "B13-CLASSIFIER-001",
+    "B13-CLASSIFIER-002",
+    "B13-CLASSIFIER-003",
+    "B13-CLASSIFIER-004",
+    "B13-CLASSIFIER-005",
+    "B13-LANE-001",
+    "B13-LANE-002",
+    "B13-LANE-003",
+    "B13-LANE-004",
+    "B13-LANE-005",
+    "B13-LANE-006",
+    "B13-LANE-007",
+    "B13-SERIALIZER-001",
+    "B13-SERIALIZER-002",
+    "B13-SERIALIZER-003",
+    "B13-SERIALIZER-004",
+    "B13-SERIALIZER-005",
+    "B13-PROTOCOL-001",
+    "B13-PROTOCOL-002",
+    "B13-PROTOCOL-003",
+    "B13-RECOVERY-001",
+    "B13-INSTALLER-001",
+    "B13-STDIO-001",
+];
+
 fn artifact_text(artifact: &str) -> &'static str {
     match artifact {
         "guard_proptest" => include_str!(concat!(
@@ -334,4 +360,27 @@ fn wp_n_edge_negative_catalog_names_every_b13_proof() {
             })
         );
     }
+}
+
+#[test]
+fn b13_cross_cutting_catalog_is_indexed_in_conformance_coverage() {
+    let coverage = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/conformance/COVERAGE.md"
+    ));
+
+    assert!(
+        coverage.contains("## B.13 Cross-Cutting Negative Catalog"),
+        "tests/conformance/COVERAGE.md must keep the B.13 index section"
+    );
+    for id in B13_COVERAGE_IDS {
+        assert!(
+            coverage.contains(id),
+            "{id} must stay named in the B.13 conformance index"
+        );
+    }
+    assert!(
+        coverage.contains("oraclemcp-epic-060-f4xo.11.13"),
+        "open B.13 hardening/stdio tails must stay assigned to their follow-up bead"
+    );
 }
