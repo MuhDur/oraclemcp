@@ -15,6 +15,15 @@ struct Requirement {
     grant: &'static str,
 }
 
+#[derive(Clone, Copy)]
+struct EdgeProof {
+    id: &'static str,
+    domain: &'static str,
+    proof: &'static str,
+    artifact: &'static str,
+    description: &'static str,
+}
+
 const REQUIREMENTS: &[Requirement] = &[
     Requirement {
         id: "WPN-A-001",
@@ -139,6 +148,110 @@ const REQUIREMENTS: &[Requirement] = &[
     },
 ];
 
+const EDGE_PROOFS: &[EdgeProof] = &[
+    EdgeProof {
+        id: "B13-CLASSIFIER-001",
+        domain: "classifier",
+        proof: "danger_adding_transforms_never_lower_classifier_danger",
+        artifact: "guard_proptest",
+        description: "danger-adding transforms are monotone",
+    },
+    EdgeProof {
+        id: "B13-CLASSIFIER-002",
+        domain: "classifier",
+        proof: "classification_is_idempotent_under_canonical_whitespace",
+        artifact: "guard_proptest",
+        description: "canonical whitespace reclassification is idempotent",
+    },
+    EdgeProof {
+        id: "B13-CLASSIFIER-003",
+        domain: "classifier",
+        proof: "unicode_literal_forms_remain_data_but_confusable_keywords_do_not_parse_safe",
+        artifact: "guard_adversarial",
+        description: "Unicode literals are data while confusable keywords fail closed",
+    },
+    EdgeProof {
+        id: "B13-CLASSIFIER-004",
+        domain: "classifier",
+        proof: "unbalanced_quote_or_comment_is_forbidden_desync",
+        artifact: "guard_adversarial",
+        description: "unbalanced quotes and comments are forbidden desyncs",
+    },
+    EdgeProof {
+        id: "B13-LANE-001",
+        domain: "lane",
+        proof: "idle_lane_mailbox_wakes_for_cross_thread_close",
+        artifact: "lane_runtime",
+        description: "cross-thread close wakes an idle lane mailbox",
+    },
+    EdgeProof {
+        id: "B13-LANE-002",
+        domain: "lane",
+        proof: "close_requested_with_full_mailbox_preempts_queued_work",
+        artifact: "lane_runtime",
+        description: "close is level-triggered and preempts queued work",
+    },
+    EdgeProof {
+        id: "B13-LANE-003",
+        domain: "lane",
+        proof: "registry_lane_lock_order_ab_ba_unconstructible",
+        artifact: "lane_runtime",
+        description: "registry-to-lane AB-BA lock order is unconstructible",
+    },
+    EdgeProof {
+        id: "B13-LANE-004",
+        domain: "lane",
+        proof: "panic_terminal_path_releases_capacity_without_touching_sibling_lane",
+        artifact: "lane_state_machine",
+        description: "panic terminal path releases its bulkhead permit only",
+    },
+    EdgeProof {
+        id: "B13-LANE-005",
+        domain: "lane",
+        proof: "stateful_lane_capacity_refuses_before_factory_opens_connection",
+        artifact: "lane_runtime",
+        description: "capacity refusal happens before opening a connection",
+    },
+    EdgeProof {
+        id: "B13-LANE-006",
+        domain: "lane",
+        proof: "switch_profile_at_capacity_keeps_old_conn",
+        artifact: "oraclemcp_dispatch",
+        description: "profile switch at capacity keeps the old connection",
+    },
+    EdgeProof {
+        id: "B13-LANE-007",
+        domain: "lane",
+        proof: "stateful_idle_reaper_closes_by_timeout_and_clears_buffers",
+        artifact: "http_runtime",
+        description: "idle/abandoned lane reaping routes through session close",
+    },
+];
+
+fn artifact_text(artifact: &str) -> &'static str {
+    match artifact {
+        "guard_proptest" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../oraclemcp-guard/tests/proptest_invariants.rs"
+        )),
+        "guard_adversarial" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../oraclemcp-guard/tests/adversarial_corpus.rs"
+        )),
+        "lane_runtime" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lane.rs")),
+        "lane_state_machine" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/lane_state_machine.rs"
+        )),
+        "oraclemcp_dispatch" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../oraclemcp/src/dispatch/tests.rs"
+        )),
+        "http_runtime" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/http.rs")),
+        _ => "",
+    }
+}
+
 #[test]
 fn wp_n_concurrency_contract_matrix_is_complete_and_jsonl_logged() {
     let coverage = include_str!(concat!(
@@ -187,6 +300,37 @@ fn wp_n_concurrency_contract_matrix_is_complete_and_jsonl_logged() {
                 "outcome": "pass",
                 "primary_proof": requirement.primary_proof,
                 "description": requirement.description
+            })
+        );
+    }
+}
+
+#[test]
+fn wp_n_edge_negative_catalog_names_every_b13_proof() {
+    assert_eq!(
+        EDGE_PROOFS.len(),
+        11,
+        "B.13 edge catalog pins four classifier and seven lane negative proofs"
+    );
+
+    for proof in EDGE_PROOFS {
+        assert!(
+            artifact_text(proof.artifact).contains(proof.proof),
+            "{} must be backed by named proof {} in {}",
+            proof.id,
+            proof.proof,
+            proof.artifact
+        );
+        eprintln!(
+            "{}",
+            json!({
+                "contract": "B.13",
+                "requirement_id": proof.id,
+                "domain": proof.domain,
+                "artifact": proof.artifact,
+                "primary_proof": proof.proof,
+                "outcome": "pass",
+                "description": proof.description
             })
         );
     }

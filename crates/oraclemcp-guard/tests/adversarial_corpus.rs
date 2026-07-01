@@ -22,6 +22,7 @@ const CORPUS: &[(&str, DangerLevel)] = &[
         "WITH d AS (SELECT * FROM dept) SELECT * FROM d",
         DangerLevel::Safe,
     ),
+    ("SELECT /*+ index(emp) */ * FROM emp", DangerLevel::Safe),
     ("SELECT COUNT(*), MAX(sal) FROM emp", DangerLevel::Safe),
     // A q-quoted literal containing DROP/;/END is data, not a statement: stays a
     // single Safe SELECT — the splitter must not invent a phantom boundary.
@@ -169,6 +170,20 @@ const CORPUS: &[(&str, DangerLevel)] = &[
         "INSERT INTO t\nWITH c AS (SELECT 1 FROM dual)\nSELECT * FROM c",
         DangerLevel::Guarded,
     ),
+    // A line comment eats the apparent terminator/dangerous text until newline.
+    ("SELECT 1 FROM dual -- ; DROP TABLE t", DangerLevel::Safe),
+    // Once the newline ends the comment, the following DROP is real top-level
+    // SQL and must govern the batch danger.
+    (
+        "SELECT 1 FROM dual -- comment\n; DROP TABLE t",
+        DangerLevel::Destructive,
+    ),
+    // Nested comment-looking text is not a license to clear the statement. If
+    // the parser cannot prove the shape, the classifier must fail closed.
+    (
+        "SELECT 1 FROM dual /* outer /* inner */ dangling */",
+        DangerLevel::Guarded,
+    ),
 ];
 
 #[test]
@@ -310,6 +325,55 @@ fn dangerous_markers_are_forbidden_anywhere_in_a_block() {
             classifier.classify(&sql).danger,
             DangerLevel::Forbidden,
             "marker not Forbidden: {sql:?}"
+        );
+    }
+}
+
+#[test]
+fn unicode_literal_forms_remain_data_but_confusable_keywords_do_not_parse_safe() {
+    let classifier = Classifier::default();
+
+    for sql in [
+        r"SELECT U&'\0045\0058\0045\0043\0055\0054\0045\0020\0049\004D\004D\0045\0044\0049\0041\0054\0045; DROP TABLE t' AS p FROM dual",
+        "SELECT N'EXECUTE IMMEDIATE; DROP TABLE t' AS p FROM dual",
+    ] {
+        let d = classifier.classify(sql);
+        assert_eq!(
+            d.danger,
+            DangerLevel::Safe,
+            "Oracle national/Unicode literal contents are data, not executable SQL: {sql:?} -> {d:?}"
+        );
+    }
+
+    for sql in [
+        "ＳＥＬＥＣＴ * FROM dual",
+        "SEL\u{200d}ECT * FROM dual",
+        "DR\u{200d}OP TABLE t",
+        "\u{202e}DROP TABLE t",
+    ] {
+        let d = classifier.classify(sql);
+        assert!(
+            d.danger > DangerLevel::Safe,
+            "confusable or directional-control keywords must not classify as Safe: {sql:?} -> {d:?}"
+        );
+    }
+}
+
+#[test]
+fn unbalanced_quote_or_comment_is_forbidden_desync() {
+    let classifier = Classifier::default();
+    for sql in [
+        "'unterminated",
+        "SELECT 'unterminated FROM dual",
+        "/* unterminated",
+        "SELECT /* unterminated FROM dual",
+        "SELECT q'[unterminated FROM dual",
+    ] {
+        let d = classifier.classify(sql);
+        assert_eq!(
+            d.danger,
+            DangerLevel::Forbidden,
+            "unbalanced quote/comment input must fail closed as Forbidden: {sql:?} -> {d:?}"
         );
     }
 }

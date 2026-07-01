@@ -213,6 +213,97 @@ fn join_with_comments(parts: &[&str], comments: &[Option<String>]) -> String {
     out
 }
 
+fn canonical_whitespace(sql: &str) -> String {
+    sql.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+#[test]
+fn danger_adding_transforms_never_lower_classifier_danger() {
+    let classifier = Classifier::default();
+    let cases = [
+        (
+            "SELECT * FROM employees",
+            &[
+                ("append FOR UPDATE", "SELECT * FROM employees FOR UPDATE"),
+                (
+                    "append DROP",
+                    "SELECT * FROM employees; DROP TABLE employees",
+                ),
+                ("wrap block", "BEGIN SELECT * FROM employees; END;"),
+                (
+                    "writing CTE",
+                    "INSERT INTO audit_log WITH c AS (SELECT * FROM employees) SELECT * FROM c",
+                ),
+            ][..],
+        ),
+        (
+            "UPDATE orders SET status = 'X' WHERE id = 1",
+            &[
+                (
+                    "append DROP",
+                    "UPDATE orders SET status = 'X' WHERE id = 1; DROP TABLE orders",
+                ),
+                (
+                    "wrap block",
+                    "BEGIN UPDATE orders SET status = 'X' WHERE id = 1; END;",
+                ),
+            ][..],
+        ),
+        (
+            "SELECT app.recalc(id) FROM orders",
+            &[
+                (
+                    "append DROP",
+                    "SELECT app.recalc(id) FROM orders; DROP TABLE orders",
+                ),
+                (
+                    "append FOR UPDATE",
+                    "SELECT app.recalc(id) FROM orders FOR UPDATE",
+                ),
+            ][..],
+        ),
+    ];
+
+    for (base_sql, transforms) in cases {
+        let base_danger = classifier.classify(base_sql).danger;
+        for (label, transformed_sql) in transforms {
+            let transformed = classifier.classify(transformed_sql).danger;
+            assert!(
+                transformed >= base_danger,
+                "danger-adding transform {label} lowered danger {base_danger:?} -> {transformed:?}\n  base: {base_sql:?}\n  transformed: {transformed_sql:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn classification_is_idempotent_under_canonical_whitespace() {
+    let classifier = Classifier::default();
+    for sql in [
+        "  SELECT   id,  name   FROM   employees   WHERE dept = 10  ",
+        "SELECT   app.recalc(id)   FROM   orders",
+        "UPDATE   orders   SET status = 'X'   WHERE id = 1",
+        "BEGIN   EXECUTE   IMMEDIATE   'DROP TABLE x';   END;",
+        "SELECT   *   FROM   t   FOR   UPDATE",
+        "INSERT   INTO t WITH c AS (SELECT 1 FROM dual) SELECT * FROM c",
+    ] {
+        let once = canonical_whitespace(sql);
+        let twice = canonical_whitespace(&once);
+        assert_eq!(once, twice, "test canonicalizer must be idempotent");
+
+        let original = classifier.classify(sql);
+        let normalized = classifier.classify(&once);
+        assert_eq!(
+            (original.danger, original.required_level),
+            (normalized.danger, normalized.required_level),
+            "canonical whitespace reclassification changed the decision\n  original: {sql:?} -> {original:?}\n  normalized: {once:?} -> {normalized:?}"
+        );
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
 

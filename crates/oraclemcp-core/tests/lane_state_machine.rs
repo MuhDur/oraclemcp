@@ -20,6 +20,7 @@ enum TerminalPath {
     Delete,
     Reaper,
     Shutdown,
+    Panic,
 }
 
 struct ModelLane {
@@ -53,6 +54,7 @@ fn permit_released_exactly_once_for_every_terminal_lane_path() {
         TerminalPath::Delete,
         TerminalPath::Reaper,
         TerminalPath::Shutdown,
+        TerminalPath::Panic,
     ] {
         let cx = Cx::<NoCaps>::detached_cancel_context();
         let admission = AdmissionController::new(1, 1);
@@ -77,6 +79,47 @@ fn permit_released_exactly_once_for_every_terminal_lane_path() {
             "{path:?} is idempotent and cannot double-release"
         );
     }
+}
+
+#[test]
+fn panic_terminal_path_releases_capacity_without_touching_sibling_lane() {
+    let cx = Cx::<NoCaps>::detached_cancel_context();
+    let admission = AdmissionController::new(2, 1);
+    let panicking_permit = admission
+        .try_admit(&cx, "panic-subject")
+        .expect("panic lane admitted");
+    let sibling_permit = admission
+        .try_admit(&cx, "sibling-subject")
+        .expect("sibling lane admitted");
+    assert_eq!(admission.available_global(), 0);
+
+    let mut panicking = ModelLane::new(panicking_permit);
+    let mut sibling = ModelLane::new(sibling_permit);
+
+    panicking.terminal_transition(TerminalPath::Panic);
+    assert_eq!(
+        admission.available_global(),
+        1,
+        "a panicked lane must release its bulkhead permit"
+    );
+
+    let replacement = admission
+        .try_admit(&cx, "replacement-subject")
+        .expect("capacity released by panic admits a replacement lane");
+    assert_eq!(admission.available_global(), 0);
+    assert!(
+        sibling.terminal.is_none(),
+        "panic terminal path must not mutate a sibling lane"
+    );
+
+    sibling.terminal_transition(TerminalPath::Success);
+    assert_eq!(
+        admission.available_global(),
+        1,
+        "sibling release is independent while replacement is still held"
+    );
+    drop(replacement);
+    assert_eq!(admission.available_global(), 2);
 }
 
 struct CountingExecutor {
