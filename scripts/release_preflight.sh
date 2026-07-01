@@ -26,6 +26,7 @@ bash "$ROOT/scripts/oraclemcp_agent_surface_lint.sh"
 bash "$ROOT/scripts/oraclemcp_concurrency_lint.sh"
 bash "$ROOT/scripts/dashboard_bundle_check.sh"
 bash "$ROOT/scripts/dashboard_skin_lint.sh"
+bash "$ROOT/scripts/installer_lint_and_offline_smoke.sh"
 
 metadata="$(cargo metadata --no-deps --format-version 1)"
 

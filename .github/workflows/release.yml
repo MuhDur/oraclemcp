@@ -348,11 +348,62 @@ jobs:
             artifacts/*.zip
             artifacts/oraclemcp-${{ steps.version.outputs.version }}.cdx.json
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.10.1
+      # Downloadable cosign blob attestations for the installer and for
+      # operators who want a cosign-only archive verification path. The GitHub
+      # attestation above remains the canonical hosted provenance record.
+      - name: Generate cosign blob attestations
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in artifacts/*.tar.gz artifacts/*.zip artifacts/*.cdx.json; do
+            predicate="$(mktemp)"
+            jq -n \
+              --arg artifact "$(basename "$f")" \
+              --arg repo "$GITHUB_REPOSITORY" \
+              --arg ref "$GITHUB_REF" \
+              --arg sha "$GITHUB_SHA" \
+              --arg workflow "$GITHUB_WORKFLOW" \
+              --arg run_id "$GITHUB_RUN_ID" \
+              --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+              '{
+                buildDefinition: {
+                  buildType: "https://github.com/MuhDur/oraclemcp/.github/workflows/release.yml",
+                  externalParameters: {
+                    repository: ("https://github.com/" + $repo),
+                    ref: $ref,
+                    workflow: $workflow,
+                    run_id: $run_id,
+                    run_attempt: $run_attempt,
+                    artifact: $artifact
+                  },
+                  internalParameters: {
+                    github_sha: $sha
+                  }
+                },
+                runDetails: {
+                  builder: {
+                    id: ("https://github.com/" + $repo + "/actions/runs/" + $run_id)
+                  },
+                  metadata: {
+                    invocationId: ($run_id + "-" + $run_attempt)
+                  }
+                }
+              }' > "$predicate"
+            cosign attest-blob \
+              --yes \
+              --type slsaprovenance1 \
+              --predicate "$predicate" \
+              --bundle "$f.attestation.sigstore.json" \
+              "$f"
+          done
+
       # Keyless (Fulcio/Rekor) signatures over each archive. cosign binds the
       # signature to this workflow's OIDC identity; the .sig/.crt pair is what
       # `cosign verify-blob` checks against that identity at verification time.
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3.10.1
       - name: Sign release archives (keyless)
         env:
           COSIGN_YES: "true"
@@ -374,13 +425,16 @@ jobs:
             artifacts/*.tar.gz.sha256
             artifacts/*.tar.gz.sig
             artifacts/*.tar.gz.crt
+            artifacts/*.tar.gz.attestation.sigstore.json
             artifacts/*.zip
             artifacts/*.zip.sha256
             artifacts/*.zip.sig
             artifacts/*.zip.crt
+            artifacts/*.zip.attestation.sigstore.json
             artifacts/*.cdx.json
             artifacts/*.cdx.json.sig
             artifacts/*.cdx.json.crt
+            artifacts/*.cdx.json.attestation.sigstore.json
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
 

@@ -753,7 +753,8 @@ platform archive (`.tar.gz` / `.zip`):
 - a keyless [cosign](https://docs.sigstore.dev/) signature + certificate
   (`*.sig` / `*.crt`), bound to the release workflow's OIDC identity, and
 - a [SLSA-style build provenance attestation](https://slsa.dev/) recorded in the
-  repository's attestation store.
+  repository's attestation store, plus a downloadable cosign blob-attestation
+  bundle (`*.attestation.sigstore.json`) for archive-first installers.
 
 The binary archive matrix is:
 
@@ -774,7 +775,7 @@ attestation.
 Set these once; every command below uses them:
 
 ```sh
-VERSION=0.4.1                                   # the release you are verifying
+VERSION=<version>                               # the release you are verifying
 IDENTITY="https://github.com/MuhDur/oraclemcp/.github/workflows/release.yml@refs/tags/v${VERSION}"
 OIDC_ISSUER="https://token.actions.githubusercontent.com"
 ```
@@ -809,7 +810,22 @@ cosign verify-blob \
 that tag and has not changed since. The same command verifies the SBOM
 (`oraclemcp-${VERSION}.cdx.json` with its `.sig`/`.crt`).
 
-### 6.3 Verify binary build provenance (GitHub attestation)
+### 6.3 Verify binary build provenance (cosign blob attestation)
+
+```sh
+cosign verify-blob-attestation \
+  --bundle "oraclemcp-x86_64-unknown-linux-gnu.tar.gz.attestation.sigstore.json" \
+  --type slsaprovenance1 \
+  --certificate-identity "$IDENTITY" \
+  --certificate-oidc-issuer "$OIDC_ISSUER" \
+  "oraclemcp-x86_64-unknown-linux-gnu.tar.gz"
+```
+
+This checks the signed provenance bundle attached to the archive itself. The
+installer runs this after the checksum and `cosign verify-blob` checks and
+before extracting the binary.
+
+### 6.4 Verify binary build provenance (GitHub attestation)
 
 ```sh
 gh attestation verify "oraclemcp-x86_64-unknown-linux-gnu.tar.gz" \
@@ -820,7 +836,7 @@ This checks the SLSA provenance predicate that records the source repo, commit,
 and workflow that built the archive. It works offline against a downloaded
 bundle with `--bundle <file>` once you have fetched it.
 
-### 6.4 Verify the container image (signature + provenance)
+### 6.5 Verify the container image (signature + provenance)
 
 ```sh
 IMAGE="ghcr.io/muhdur/oraclemcp:${VERSION}"
@@ -841,7 +857,7 @@ mutable tag) in production:
 docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest.Digest}}'
 ```
 
-### 6.5 Inspect the SBOM
+### 6.6 Inspect the SBOM
 
 The attached CycloneDX SBOM enumerates every crate (and version) compiled into
 the binary, so you can cross-check it against your own advisory feed:

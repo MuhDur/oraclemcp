@@ -44,6 +44,22 @@ Live database access is built in through the pure-Rust thin `oracledb` driver:
 cargo +nightly-2026-05-11 install oraclemcp
 ```
 
+Release builds also ship with a verified installer in this repository:
+
+```sh
+VERSION=<version>
+bash install.sh --dry-run --version "$VERSION"  # print every file/unit/command first
+bash install.sh --version "$VERSION"            # install the verified prebuilt archive
+```
+
+`install.sh` defaults to Linux musl/macOS prebuilt archives, verifies the
+release checksum, cosign blob signature, and cosign blob attestation before
+extracting, installs the `om` alias and shell completions, and never installs a
+service unless you pass `--service` or answer yes to the interactive prompt.
+The checksum proves transport integrity only; cosign is the authenticity and
+provenance check. Use `--source` only when you intentionally want to compile
+with the pinned Rust toolchain instead of using a release artifact.
+
 **Runtime requirements** for live database access:
 
 - Optionally `TNS_ADMIN` pointing at a directory with `tnsnames.ora` if you connect by net-service name.
