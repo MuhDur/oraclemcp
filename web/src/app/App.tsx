@@ -81,12 +81,14 @@ import {
   type AuditTailFilters,
   type AuditTailRecord,
   type ActiveLane,
+  type CapacityLimitSource,
   type ExplorerCacheStatus,
   type ExplorerDetailLevel,
   type ExplorerMetadataCacheKey,
   type ExplorerObjectRef,
   type LaneRequestDuration,
   type MetricsSnapshot,
+  type OperatorCapacityData,
   type OperatorEventEnvelope,
   sessionsProbes,
   cachedExplorerMetadata,
@@ -122,6 +124,7 @@ type NavItem = {
 const navItems: NavItem[] = [
   { to: "/", label: "Overview", icon: Activity },
   { to: "/sessions", label: "Sessions", icon: Database },
+  { to: "/capacity", label: "Capacity", icon: Gauge },
   { to: "/explorer", label: "Explorer", icon: Search },
   { to: "/workbench", label: "Workbench", icon: SquarePen },
   { to: "/audit", label: "Audit", icon: FileClock },
@@ -142,6 +145,12 @@ const sessionsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/sessions",
   component: SessionsPage
+});
+
+const capacityRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/capacity",
+  component: CapacityPage
 });
 
 const auditRoute = createRoute({
@@ -172,6 +181,7 @@ const router = createRouter({
   routeTree: rootRoute.addChildren([
     overviewRoute,
     sessionsRoute,
+    capacityRoute,
     explorerRoute,
     workbenchRoute,
     auditRoute,
@@ -375,6 +385,331 @@ function SessionsPage(): React.ReactElement {
     >
       <ProbeDashboard probes={sessionsProbes} compact />
     </PageFrame>
+  );
+}
+
+function CapacityPage(): React.ReactElement {
+  const metrics = useQuery({
+    queryKey: ["operator-metrics"],
+    queryFn: fetchOperatorMetrics,
+    refetchInterval: 5_000
+  });
+  const activeLanes = useQuery({
+    queryKey: ["active-lanes"],
+    queryFn: fetchActiveLanes,
+    refetchInterval: 5_000
+  });
+  const snapshot = metrics.data?.data.snapshot ?? null;
+  const capacity = metrics.data?.data.capacity ?? null;
+  const lanes = activeLanes.data?.data.lanes ?? [];
+  const pending = metrics.isFetching || activeLanes.isFetching;
+  const model = capacityModel(capacity, snapshot, lanes);
+
+  return (
+    <PageFrame
+      title="Capacity"
+      eyebrow="Admission"
+      description="Effective read-pool and stateful-lane ceilings from the operator service."
+    >
+      <div className="space-y-4">
+        <CapacityMetricTiles model={model} pending={pending} />
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          <ReadPoolCapacityPanel model={model} />
+          <StatefulCapacityPanel model={model} />
+        </div>
+        <div className="grid gap-4 xl:grid-cols-[minmax(320px,0.6fr)_minmax(0,1.4fr)]">
+          <AtCapacityPanel model={model} />
+          <CapacityLimitSourcesPanel rows={model.limitRows} />
+        </div>
+      </div>
+    </PageFrame>
+  );
+}
+
+type CapacityLimitRow = {
+  key: string;
+  scope: "read_pool" | "stateful_lanes";
+  source: CapacityLimitSource;
+};
+
+type CapacityUiModel = {
+  read: {
+    source: string;
+    configured: number;
+    effective: number;
+    active: number;
+  };
+  stateful: {
+    source: string;
+    configuredGlobal: number;
+    configuredPerSubject: number;
+    effectiveGlobal: number;
+    effectiveRegular: number;
+    regularAvailable: number;
+    regularInUse: number;
+    active: number;
+    perSubjectCap: number;
+    perSubjectAvailable: number;
+    operatorReserve: number;
+    doctorReserve: number;
+  };
+  atCapacityEvents: number;
+  retryAfterMs: number;
+  idleReaping: {
+    enabled: boolean;
+    ttlSeconds: number;
+  };
+  limitRows: CapacityLimitRow[];
+};
+
+const CAPACITY_DEFAULTS = {
+  readPerProfile: 16,
+  statefulGlobal: 64,
+  statefulPerSubject: 8,
+  operatorReserve: 1,
+  doctorReserve: 1,
+  retryAfterMs: 250,
+  idleTtlSeconds: 900
+} as const;
+
+function CapacityMetricTiles({
+  model,
+  pending
+}: {
+  model: CapacityUiModel;
+  pending: boolean;
+}): React.ReactElement {
+  return (
+    <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4" aria-label="capacity metrics">
+      <MetricTile
+        icon={Database}
+        label="Read active"
+        value={model.read.active}
+        suffix={`/${formatNumber(model.read.effective)}`}
+        tone={capacityUsageTone(model.read.active, model.read.effective)}
+        pending={pending}
+      />
+      <MetricTile
+        icon={Radio}
+        label="Lane active"
+        value={model.stateful.active}
+        suffix={`/${formatNumber(model.stateful.effectiveRegular)}`}
+        tone={capacityUsageTone(model.stateful.active, model.stateful.effectiveRegular)}
+        pending={pending}
+      />
+      <MetricTile
+        icon={ShieldCheck}
+        label="Reserve"
+        value={model.stateful.operatorReserve + model.stateful.doctorReserve}
+        suffix=""
+        tone="info"
+        pending={pending}
+      />
+      <MetricTile
+        icon={AlertTriangle}
+        label="AtCapacity"
+        value={model.atCapacityEvents}
+        suffix=""
+        tone={model.atCapacityEvents > 0 ? "warn" : "ok"}
+        pending={pending}
+      />
+    </section>
+  );
+}
+
+function ReadPoolCapacityPanel({ model }: { model: CapacityUiModel }): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={Database}
+        title="Read Pool"
+        meta={`${formatNumber(model.read.active)}/${formatNumber(model.read.effective)} active`}
+        tone={capacityUsageTone(model.read.active, model.read.effective)}
+      />
+      <div className="space-y-4 p-4">
+        <CapacityBar
+          label="Active"
+          value={model.read.active}
+          max={model.read.effective}
+          tone={capacityUsageTone(model.read.active, model.read.effective)}
+        />
+        <div className="grid gap-3 sm:grid-cols-3">
+          <CapacityFact label="Configured" value={model.read.configured} />
+          <CapacityFact label="Effective" value={model.read.effective} />
+          <CapacityFact label="Source" value={model.read.source} mono />
+        </div>
+      </div>
+    </Surface>
+  );
+}
+
+function StatefulCapacityPanel({ model }: { model: CapacityUiModel }): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={Radio}
+        title="Stateful Lanes"
+        meta={`${formatNumber(model.stateful.regularInUse)}/${formatNumber(model.stateful.effectiveRegular)} regular`}
+        tone={capacityUsageTone(model.stateful.regularInUse, model.stateful.effectiveRegular)}
+      />
+      <div className="space-y-4 p-4">
+        <CapacityBar
+          label="Regular in use"
+          value={model.stateful.regularInUse}
+          max={model.stateful.effectiveRegular}
+          tone={capacityUsageTone(model.stateful.regularInUse, model.stateful.effectiveRegular)}
+        />
+        <div className="grid gap-3 sm:grid-cols-3">
+          <CapacityFact label="Configured" value={model.stateful.configuredGlobal} />
+          <CapacityFact label="Effective" value={model.stateful.effectiveGlobal} />
+          <CapacityFact label="Cfg subject" value={model.stateful.configuredPerSubject} />
+          <CapacityFact label="Available" value={model.stateful.regularAvailable} />
+          <CapacityFact label="Subject cap" value={model.stateful.perSubjectCap} />
+          <CapacityFact label="Subject avail" value={model.stateful.perSubjectAvailable} />
+          <CapacityFact label="Operator" value={model.stateful.operatorReserve} />
+          <CapacityFact label="Doctor" value={model.stateful.doctorReserve} />
+          <CapacityFact label="Source" value={model.stateful.source} mono />
+        </div>
+      </div>
+    </Surface>
+  );
+}
+
+function AtCapacityPanel({ model }: { model: CapacityUiModel }): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={AlertTriangle}
+        title="Backpressure"
+        meta={`${formatNumber(model.retryAfterMs)}ms retry`}
+        tone={model.atCapacityEvents > 0 ? "warn" : "ok"}
+      />
+      <div className="grid gap-3 p-4 sm:grid-cols-3 xl:grid-cols-1">
+        <CapacityFact label="Events" value={model.atCapacityEvents} />
+        <CapacityFact label="Retry" value={`${formatNumber(model.retryAfterMs)}ms`} mono />
+        <CapacityFact
+          label="Idle reap"
+          value={model.idleReaping.enabled ? `${formatNumber(model.idleReaping.ttlSeconds)}s` : "off"}
+          mono
+        />
+      </div>
+    </Surface>
+  );
+}
+
+function CapacityLimitSourcesPanel({
+  rows
+}: {
+  rows: CapacityLimitRow[];
+}): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={Gauge}
+        title="Limit Sources"
+        meta={`${rows.length} checks`}
+        tone={rows.some((row) => row.source.status === "monitoring_unavailable") ? "info" : "ok"}
+      />
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[760px] border-collapse text-left">
+          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+            <tr>
+              <th className="px-4 py-3 font-bold">Surface</th>
+              <th className="px-4 py-3 font-bold">Limit</th>
+              <th className="px-4 py-3 font-bold">Status</th>
+              <th className="px-4 py-3 font-bold">Configured</th>
+              <th className="px-4 py-3 font-bold">Effective</th>
+              <th className="px-4 py-3 font-bold">Reason</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-100">
+            {rows.length === 0 ? (
+              <tr>
+                <td className="px-4 py-8 text-center text-sm font-semibold text-zinc-500" colSpan={6}>
+                  No capacity sources
+                </td>
+              </tr>
+            ) : (
+              rows.map((row) => (
+                <tr key={row.key} className="bg-white">
+                  <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
+                    {row.scope}
+                  </td>
+                  <td className="px-4 py-4 align-top font-mono text-sm font-semibold text-zinc-950">
+                    {row.source.name}
+                  </td>
+                  <td className="px-4 py-4 align-top">
+                    <Badge tone={limitStatusTone(row.source.status)}>{row.source.status}</Badge>
+                  </td>
+                  <td className="px-4 py-4 align-top font-mono text-sm text-zinc-700">
+                    {formatOptionalNumber(row.source.configured)}
+                  </td>
+                  <td className="px-4 py-4 align-top font-mono text-sm text-zinc-700">
+                    {formatOptionalNumber(row.source.effective)}
+                  </td>
+                  <td className="px-4 py-4 align-top text-sm text-zinc-600">
+                    {row.source.reason ?? ""}
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </Surface>
+  );
+}
+
+function CapacityBar({
+  label,
+  value,
+  max,
+  tone
+}: {
+  label: string;
+  value: number;
+  max: number;
+  tone: "neutral" | "ok" | "warn" | "off" | "info";
+}): React.ReactElement {
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <p className="text-sm font-bold text-zinc-700">{label}</p>
+        <p className="font-mono text-sm font-semibold text-zinc-900">
+          {formatNumber(value)} / {formatNumber(max)}
+        </p>
+      </div>
+      <div className="h-3 rounded-full bg-zinc-100">
+        <div
+          className={cn("h-3 rounded-full", capacityFillClass(tone))}
+          style={{ width: `${capacityBarWidth(value, max)}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function CapacityFact({
+  label,
+  value,
+  mono = false
+}: {
+  label: string;
+  value: string | number;
+  mono?: boolean;
+}): React.ReactElement {
+  return (
+    <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
+      <p className="text-xs font-bold uppercase text-zinc-500">{label}</p>
+      <p
+        className={cn(
+          "mt-2 break-all text-sm font-semibold text-zinc-950",
+          mono ? "font-mono" : "font-sans"
+        )}
+      >
+        {typeof value === "number" ? formatNumber(value) : value}
+      </p>
+    </div>
   );
 }
 
@@ -728,6 +1063,74 @@ type LaneMetricRow = {
   active: boolean;
 };
 
+function capacityModel(
+  capacity: OperatorCapacityData | null,
+  snapshot: MetricsSnapshot | null,
+  lanes: ActiveLane[]
+): CapacityUiModel {
+  const configuredGlobal =
+    capacity?.stateful_lanes.configured.global ?? CAPACITY_DEFAULTS.statefulGlobal;
+  const operatorReserve =
+    capacity?.stateful_lanes.reserve.operator ?? CAPACITY_DEFAULTS.operatorReserve;
+  const doctorReserve =
+    capacity?.stateful_lanes.reserve.doctor ?? CAPACITY_DEFAULTS.doctorReserve;
+  const defaultRegular = Math.max(0, configuredGlobal - operatorReserve - doctorReserve);
+  const effective = capacity?.stateful_lanes.effective ?? null;
+  const effectiveRegular =
+    effective?.regular_global_cap ??
+    capacity?.stateful_lanes.reserve.regular_global_cap ??
+    defaultRegular;
+  const active = capacity?.stateful_lanes.active ?? snapshot?.active_lanes ?? lanes.length;
+  const regularInUse =
+    capacity?.stateful_lanes.regular_in_use ?? Math.min(active, effectiveRegular);
+  const limitRows: CapacityLimitRow[] = [
+    ...(capacity?.read_pool.limit_sources ?? []).map((source) => ({
+      key: `read_pool:${source.name}`,
+      scope: "read_pool" as const,
+      source
+    })),
+    ...(capacity?.stateful_lanes.limit_sources ?? []).map((source) => ({
+      key: `stateful_lanes:${source.name}`,
+      scope: "stateful_lanes" as const,
+      source
+    }))
+  ];
+
+  return {
+    read: {
+      source: capacity?.read_pool.source ?? "monitoring_unavailable",
+      configured: capacity?.read_pool.configured_per_profile ?? CAPACITY_DEFAULTS.readPerProfile,
+      effective: capacity?.read_pool.effective_per_profile ?? CAPACITY_DEFAULTS.readPerProfile,
+      active: capacity?.read_pool.active ?? snapshot?.pool_active_connections ?? 0
+    },
+    stateful: {
+      source: capacity?.stateful_lanes.source ?? "monitoring_unavailable",
+      configuredGlobal,
+      configuredPerSubject:
+        capacity?.stateful_lanes.configured.per_subject ?? CAPACITY_DEFAULTS.statefulPerSubject,
+      effectiveGlobal: effective?.global_cap ?? configuredGlobal,
+      effectiveRegular,
+      regularAvailable:
+        effective?.regular_global_available ?? Math.max(0, effectiveRegular - regularInUse),
+      regularInUse,
+      active,
+      perSubjectCap: effective?.per_subject_cap ?? CAPACITY_DEFAULTS.statefulPerSubject,
+      perSubjectAvailable:
+        effective?.per_subject_available ?? CAPACITY_DEFAULTS.statefulPerSubject,
+      operatorReserve,
+      doctorReserve
+    },
+    atCapacityEvents:
+      capacity?.stateful_lanes.at_capacity_events ?? atCapacityCountFromSnapshot(snapshot),
+    retryAfterMs: capacity?.stateful_lanes.retry_after_ms ?? CAPACITY_DEFAULTS.retryAfterMs,
+    idleReaping: {
+      enabled: capacity?.idle_reaping.enabled ?? true,
+      ttlSeconds: capacity?.idle_reaping.ttl_seconds ?? CAPACITY_DEFAULTS.idleTtlSeconds
+    },
+    limitRows
+  };
+}
+
 function overviewSummary(snapshot: MetricsSnapshot | null, lanes: ActiveLane[]): OverviewSummary {
   const durations = snapshot?.lane_request_duration_ms ?? [];
   const latency = aggregateDurations(durations);
@@ -827,6 +1230,10 @@ function aggregateDurations(
 
 function sumCounts(rows: Array<{ count: number }>): number {
   return rows.reduce((total, row) => total + row.count, 0);
+}
+
+function atCapacityCountFromSnapshot(snapshot: MetricsSnapshot | null): number {
+  return sumCounts((snapshot?.requests ?? []).filter((row) => row.status === "at_capacity"));
 }
 
 function healthPosture(verdict: GoNoGoVerdict, blocked: number): HealthPosture {
@@ -933,6 +1340,62 @@ function requestBarWidth(count: number, max: number): number {
     return 2;
   }
   return Math.min(100, Math.max(8, Math.round((count / max) * 100)));
+}
+
+function capacityBarWidth(value: number, max: number): number {
+  if (max <= 0) {
+    return 2;
+  }
+  return Math.min(100, Math.max(value > 0 ? 8 : 2, Math.round((value / max) * 100)));
+}
+
+function capacityUsageTone(
+  value: number,
+  max: number
+): "neutral" | "ok" | "warn" | "off" | "info" {
+  if (max <= 0) {
+    return "off";
+  }
+  if (value >= max) {
+    return "warn";
+  }
+  if (value / max >= 0.85) {
+    return "info";
+  }
+  return value > 0 ? "ok" : "off";
+}
+
+function capacityFillClass(tone: "neutral" | "ok" | "warn" | "off" | "info"): string {
+  switch (tone) {
+    case "warn":
+      return "bg-amber-500";
+    case "info":
+      return "bg-sky-600";
+    case "ok":
+      return "bg-emerald-600";
+    case "off":
+      return "bg-zinc-300";
+    case "neutral":
+      return "bg-zinc-500";
+  }
+}
+
+function limitStatusTone(status: string): "neutral" | "ok" | "warn" | "off" | "info" {
+  switch (status) {
+    case "applied":
+      return "ok";
+    case "monitoring_unavailable":
+      return "info";
+    case "rejected":
+    case "error":
+      return "warn";
+    default:
+      return "neutral";
+  }
+}
+
+function formatOptionalNumber(value: number | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) ? formatNumber(value) : "";
 }
 
 function formatMs(ms: number): string {

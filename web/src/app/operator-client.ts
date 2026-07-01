@@ -101,10 +101,67 @@ export type MetricsSnapshot = {
   active_lane_gauges?: ActiveLaneGauge[];
 };
 
+export type CapacityLimitSource = {
+  name: string;
+  status: string;
+  reason?: string;
+  configured?: number;
+  effective?: number;
+};
+
+export type CapacitySnapshot = {
+  scope: string;
+  subject: string;
+  global_cap: number;
+  regular_global_cap: number;
+  regular_global_available: number;
+  operator_reserved: number;
+  doctor_reserved: number;
+  per_subject_cap: number;
+  per_subject_available: number;
+  retry_after_ms: number;
+};
+
+export type OperatorCapacityData = {
+  source: string;
+  read_pool: {
+    source: string;
+    configured_per_profile: number;
+    effective_per_profile: number;
+    active: number;
+    limit_sources: CapacityLimitSource[];
+  };
+  stateful_lanes: {
+    source: string;
+    configured: {
+      global: number;
+      per_subject: number;
+      operator_reserved: number;
+      doctor_reserved: number;
+    };
+    effective: CapacitySnapshot | null;
+    active: number;
+    regular_in_use: number;
+    reserve: {
+      operator: number;
+      doctor: number;
+      regular_global_cap: number;
+    };
+    at_capacity_events: number;
+    retry_after_ms: number;
+    limit_sources: CapacityLimitSource[];
+  };
+  idle_reaping: {
+    enabled: boolean;
+    ttl_seconds: number;
+  };
+};
+
 export type OperatorMetricsData = {
   source: string;
   reason?: string;
   snapshot: MetricsSnapshot | null;
+  capacity?: OperatorCapacityData | null;
 };
 
 export type OperatorHealthData = {

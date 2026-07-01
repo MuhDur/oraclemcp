@@ -28,7 +28,9 @@ use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use parking_lot::Mutex;
 use serde_json::Value;
 
-use crate::admission::{AdmissionController, AdmissionPermit, DEFAULT_RETRY_AFTER_MS};
+use crate::admission::{
+    AdmissionController, AdmissionPermit, CapacitySnapshot, DEFAULT_RETRY_AFTER_MS,
+};
 use crate::http::{HttpLaneBinding, HttpLaneSnapshot, HttpSessionLifecycle};
 use crate::operator_protocol::operator_subject_id_hash;
 use crate::server::{
@@ -693,6 +695,12 @@ impl HttpSessionLifecycle for StatefulLaneDispatch {
                 subject_id_hash: operator_subject_id_hash(&key.principal_key),
             })
             .collect()
+    }
+
+    fn capacity_snapshot(&self, scope: &str, subject: &str) -> Option<CapacitySnapshot> {
+        self.admission
+            .as_ref()
+            .map(|admission| admission.snapshot(scope, subject))
     }
 
     fn lane_binding(&self, lane_id: &str) -> Option<HttpLaneBinding> {

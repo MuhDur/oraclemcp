@@ -26,13 +26,19 @@ use oraclemcp_auth::{
     HttpGuardError, HttpGuardPolicy, ResourceServerConfig, SignatureVerifier, TokenError,
     extract_bearer,
 };
-use oraclemcp_telemetry::{HealthState, Metrics};
+use oraclemcp_db::PoolSettings;
+use oraclemcp_telemetry::{HealthState, Metrics, MetricsSnapshot};
 use parking_lot::{Condvar, Mutex};
 use rustls::{ServerConnection, StreamOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::admin_auth::OperatorAuthorityPolicy;
+use crate::admission::{
+    CapacitySnapshot, DEFAULT_DOCTOR_RESERVED_LANES, DEFAULT_GLOBAL_HOST_CAP,
+    DEFAULT_OPERATOR_RESERVED_LANES, DEFAULT_READ_PER_PROFILE_CAP, DEFAULT_RETRY_AFTER_MS,
+    DEFAULT_STATEFUL_PER_PROFILE_CAP,
+};
 use crate::capabilities::PROTOCOL_VERSION;
 use crate::dashboard_auth::{
     DASHBOARD_ACTION_TICKET_HEADER, DASHBOARD_CSRF_HEADER, DASHBOARD_PAIR_PATH,
@@ -567,6 +573,11 @@ pub trait HttpSessionLifecycle: std::fmt::Debug + Send + Sync {
     /// Redacted lane summaries for `/operator/v1/active-lanes`.
     fn active_lanes(&self) -> Vec<HttpLaneSnapshot> {
         Vec::new()
+    }
+
+    /// Redaction-safe capacity facts for operator diagnostics.
+    fn capacity_snapshot(&self, _scope: &str, _subject: &str) -> Option<CapacitySnapshot> {
+        None
     }
 
     /// Resolve a lane id for an operator-triggered action. Implementations
@@ -1408,6 +1419,13 @@ mod tests {
         fn active_lanes(&self) -> Vec<HttpLaneSnapshot> {
             self.lanes.clone()
         }
+
+        fn capacity_snapshot(&self, scope: &str, subject: &str) -> Option<CapacitySnapshot> {
+            Some(
+                crate::admission::AdmissionController::n4_stateful_defaults()
+                    .snapshot(scope, subject),
+            )
+        }
     }
 
     #[test]
@@ -1499,6 +1517,30 @@ mod tests {
         assert_eq!(
             metrics_body["data"]["snapshot"]["active_lane_gauges"][0]["subject_id_hash"],
             serde_json::json!("subject-sha256:abc")
+        );
+        assert_eq!(
+            metrics_body["data"]["capacity"]["read_pool"]["configured_per_profile"],
+            serde_json::json!(16)
+        );
+        assert_eq!(
+            metrics_body["data"]["capacity"]["stateful_lanes"]["configured"]["global"],
+            serde_json::json!(64)
+        );
+        assert_eq!(
+            metrics_body["data"]["capacity"]["stateful_lanes"]["effective"]["regular_global_cap"],
+            serde_json::json!(62)
+        );
+        assert_eq!(
+            metrics_body["data"]["capacity"]["stateful_lanes"]["reserve"]["operator"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            metrics_body["data"]["capacity"]["stateful_lanes"]["retry_after_ms"],
+            serde_json::json!(250)
+        );
+        assert_eq!(
+            metrics_body["data"]["capacity"]["idle_reaping"]["ttl_seconds"],
+            serde_json::json!(900)
         );
 
         let events = handle_http_request(
@@ -5566,16 +5608,164 @@ fn operator_health_data(obs: &ObservabilityState) -> Value {
 fn operator_metrics_data(config: &HttpTransportConfig) -> Value {
     refresh_active_lane_metrics(config);
     match &config.observability.metrics {
-        Some(metrics) => json!({
-            "source": "self_lane",
-            "snapshot": metrics.snapshot(),
-        }),
+        Some(metrics) => {
+            let snapshot = metrics.snapshot();
+            let capacity = operator_capacity_data(config, Some(&snapshot));
+            json!({
+                "source": "self_lane",
+                "snapshot": snapshot,
+                "capacity": capacity,
+            })
+        }
         None => json!({
             "source": "unavailable",
             "reason": "metrics provider is not configured",
             "snapshot": null,
+            "capacity": operator_capacity_data(config, None),
         }),
     }
+}
+
+fn operator_capacity_data(
+    config: &HttpTransportConfig,
+    metrics_snapshot: Option<&MetricsSnapshot>,
+) -> Value {
+    let stateful_snapshot = config
+        .session_lifecycle
+        .as_ref()
+        .and_then(|lifecycle| lifecycle.capacity_snapshot("stateful_lane", "operator"));
+    let read_pool_effective = PoolSettings::default().resolved().max_size;
+    let active_lanes = metrics_snapshot
+        .and_then(|snapshot| usize::try_from(snapshot.active_lanes).ok())
+        .unwrap_or_else(|| active_lane_snapshots(config).len());
+    let pool_active = metrics_snapshot
+        .map(|snapshot| snapshot.pool_active_connections)
+        .unwrap_or(0);
+    let at_capacity_events = at_capacity_events(metrics_snapshot);
+    let (regular_in_use, retry_after_ms, reserve) = match stateful_snapshot.as_ref() {
+        Some(snapshot) => (
+            snapshot
+                .regular_global_cap
+                .saturating_sub(snapshot.regular_global_available),
+            snapshot.retry_after_ms,
+            json!({
+                "operator": snapshot.operator_reserved,
+                "doctor": snapshot.doctor_reserved,
+                "regular_global_cap": snapshot.regular_global_cap,
+            }),
+        ),
+        None => (
+            0,
+            DEFAULT_RETRY_AFTER_MS,
+            json!({
+                "operator": DEFAULT_OPERATOR_RESERVED_LANES,
+                "doctor": DEFAULT_DOCTOR_RESERVED_LANES,
+                "regular_global_cap": DEFAULT_GLOBAL_HOST_CAP
+                    .saturating_sub(DEFAULT_OPERATOR_RESERVED_LANES)
+                    .saturating_sub(DEFAULT_DOCTOR_RESERVED_LANES),
+            }),
+        ),
+    };
+    let stateful_source = if stateful_snapshot.is_some() {
+        "admission"
+    } else {
+        "monitoring_unavailable"
+    };
+    let metrics_source = if metrics_snapshot.is_some() {
+        "metrics"
+    } else {
+        "monitoring_unavailable"
+    };
+
+    json!({
+        "source": if stateful_snapshot.is_some() || metrics_snapshot.is_some() {
+            "self_lane"
+        } else {
+            "monitoring_unavailable"
+        },
+        "read_pool": {
+            "source": metrics_source,
+            "configured_per_profile": DEFAULT_READ_PER_PROFILE_CAP,
+            "effective_per_profile": read_pool_effective,
+            "active": pool_active,
+            "limit_sources": [
+                {
+                    "name": "configured_max_size",
+                    "status": "applied",
+                    "configured": DEFAULT_READ_PER_PROFILE_CAP,
+                    "effective": DEFAULT_READ_PER_PROFILE_CAP,
+                },
+                {
+                    "name": "cpu_parallelism",
+                    "status": "applied",
+                    "effective": read_pool_effective,
+                },
+                {
+                    "name": "profile_override",
+                    "status": "monitoring_unavailable",
+                    "reason": "selected profile pool settings are not carried on the HTTP transport",
+                },
+                {
+                    "name": "db_session_limit",
+                    "status": "monitoring_unavailable",
+                },
+            ],
+        },
+        "stateful_lanes": {
+            "source": stateful_source,
+            "configured": {
+                "global": DEFAULT_GLOBAL_HOST_CAP,
+                "per_subject": DEFAULT_STATEFUL_PER_PROFILE_CAP,
+                "operator_reserved": DEFAULT_OPERATOR_RESERVED_LANES,
+                "doctor_reserved": DEFAULT_DOCTOR_RESERVED_LANES,
+            },
+            "effective": stateful_snapshot,
+            "active": active_lanes,
+            "regular_in_use": regular_in_use,
+            "reserve": reserve,
+            "at_capacity_events": at_capacity_events,
+            "retry_after_ms": retry_after_ms,
+            "limit_sources": [
+                {
+                    "name": "configured_stateful_caps",
+                    "status": "applied",
+                },
+                {
+                    "name": "operator_doctor_reserve",
+                    "status": "applied",
+                },
+                {
+                    "name": "db_session_limit",
+                    "status": "monitoring_unavailable",
+                },
+                {
+                    "name": "fd_limit",
+                    "status": "monitoring_unavailable",
+                },
+                {
+                    "name": "memory_budget",
+                    "status": "monitoring_unavailable",
+                },
+            ],
+        },
+        "idle_reaping": {
+            "enabled": !config.stateful_idle_ttl.is_zero(),
+            "ttl_seconds": config.stateful_idle_ttl.as_secs(),
+        },
+    })
+}
+
+fn at_capacity_events(metrics_snapshot: Option<&MetricsSnapshot>) -> u64 {
+    metrics_snapshot
+        .map(|snapshot| {
+            snapshot
+                .requests
+                .iter()
+                .filter(|request| request.status == "at_capacity")
+                .map(|request| request.count)
+                .sum()
+        })
+        .unwrap_or(0)
 }
 
 fn active_lane_snapshots(config: &HttpTransportConfig) -> Vec<HttpLaneSnapshot> {
