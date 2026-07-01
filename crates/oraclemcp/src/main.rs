@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use asupersync::Cx;
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use oraclemcp::dispatch::{
     McpExposurePolicy, OracleDispatcher, ProfileConnector, ProfileDrainState,
     ProfileStatelessConnector, StatelessReadStrategy, profile_draining_error,
@@ -81,6 +81,8 @@ const CUSTOM_TOOLS_HMAC_KEY_ENV: &str = "ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY";
 /// Fallback environment variable for the audit signing key when the config's
 /// `[audit].key_ref` is not set.
 const AUDIT_KEY_ENV: &str = "ORACLEMCP_AUDIT_KEY";
+const DEFAULT_BINARY_NAME: &str = "oraclemcp";
+const SHORT_BINARY_ALIAS: &str = "om";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -340,18 +342,51 @@ enum RobotDocsCommand {
     Guide,
 }
 
+fn display_binary_name_from_argv0(argv0: Option<&std::ffi::OsStr>) -> &'static str {
+    let Some(argv0) = argv0 else {
+        return DEFAULT_BINARY_NAME;
+    };
+    let Some(stem) = Path::new(argv0).file_stem().and_then(|name| name.to_str()) else {
+        return DEFAULT_BINARY_NAME;
+    };
+    if stem.eq_ignore_ascii_case(SHORT_BINARY_ALIAS) {
+        SHORT_BINARY_ALIAS
+    } else {
+        DEFAULT_BINARY_NAME
+    }
+}
+
+fn current_display_binary_name() -> &'static str {
+    let argv0 = std::env::args_os().next();
+    display_binary_name_from_argv0(argv0.as_deref())
+}
+
+fn cli_command(binary_name: &'static str) -> clap::Command {
+    Cli::command().name(binary_name).bin_name(binary_name)
+}
+
+fn parse_cli(binary_name: &'static str) -> Cli {
+    let matches = cli_command(binary_name).get_matches();
+    Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit())
+}
+
+fn bare_invocation_hint(binary_name: &str) -> String {
+    format!(
+        "no subcommand given — try `{binary_name} serve`, `{binary_name} doctor`, or `{binary_name} capabilities`."
+    )
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let binary_name = current_display_binary_name();
+    let cli = parse_cli(binary_name);
     let robot_json = cli.robot_json;
 
     let Some(command) = cli.command else {
         // Bare invocation: help to stderr, exit 2. stdout stays empty so a
         // launcher piping JSON-RPC never mistakes the hint for data.
-        let mut cmd = Cli::command();
+        let mut cmd = cli_command(binary_name);
         let _ = cmd.write_long_help(&mut std::io::stderr());
-        eprintln!(
-            "\nno subcommand given — try `oraclemcp serve`, `oraclemcp doctor`, or `oraclemcp capabilities`."
-        );
+        eprintln!("\n{}", bare_invocation_hint(binary_name));
         return ExitCode::from(2);
     };
 
@@ -379,7 +414,9 @@ fn main() -> ExitCode {
         Command::Profiles => run_profiles(robot_json),
         Command::Capabilities => run_capabilities(robot_json),
         Command::Service { command } => run_service_cmd(robot_json, command),
-        Command::Dashboard { url, no_open } => run_dashboard_cmd(robot_json, &url, no_open),
+        Command::Dashboard { url, no_open } => {
+            run_dashboard_cmd(robot_json, binary_name, &url, no_open)
+        }
         Command::RobotDocs { command } => match command {
             None | Some(RobotDocsCommand::Guide) => run_robot_docs_guide(robot_json),
         },
@@ -2358,7 +2395,12 @@ fn emit_status_error(robot_json: bool, code: &str, message: &str) {
     }
 }
 
-fn run_dashboard_cmd(robot_json: bool, base_url: &str, no_open: bool) -> ExitCode {
+fn run_dashboard_cmd(
+    robot_json: bool,
+    binary_name: &str,
+    base_url: &str,
+    no_open: bool,
+) -> ExitCode {
     let ticket_dir = default_dashboard_ticket_dir();
     let ticket = match mint_dashboard_pairing_ticket(&ticket_dir, base_url) {
         Ok(ticket) => ticket,
@@ -2373,7 +2415,7 @@ fn run_dashboard_cmd(robot_json: bool, base_url: &str, no_open: bool) -> ExitCod
                     })
                 );
             } else {
-                eprintln!("oraclemcp dashboard: failed to create pairing ticket: {e}");
+                eprintln!("{binary_name} dashboard: failed to create pairing ticket: {e}");
             }
             return ExitCode::from(2);
         }
@@ -2395,7 +2437,7 @@ fn run_dashboard_cmd(robot_json: bool, base_url: &str, no_open: bool) -> ExitCod
                     );
                 } else {
                     eprintln!(
-                        "oraclemcp dashboard: browser launch failed; open the printed URL manually"
+                        "{binary_name} dashboard: browser launch failed; open the printed URL manually"
                     );
                 }
                 false
@@ -4253,6 +4295,54 @@ mod tests {
                 no_open: true,
             }) if url == "http://127.0.0.1:7777"
         ));
+    }
+
+    #[test]
+    fn om_dashboard_alias_is_argv0_aware() {
+        assert_eq!(
+            display_binary_name_from_argv0(Some(std::ffi::OsStr::new("/usr/local/bin/om"))),
+            "om"
+        );
+        assert_eq!(
+            display_binary_name_from_argv0(Some(std::ffi::OsStr::new("OM.exe"))),
+            "om"
+        );
+        assert_eq!(
+            display_binary_name_from_argv0(Some(std::ffi::OsStr::new("/usr/local/bin/oraclemcp",))),
+            "oraclemcp"
+        );
+        assert_eq!(display_binary_name_from_argv0(None), "oraclemcp");
+
+        let matches = cli_command("om")
+            .try_get_matches_from([
+                "om",
+                "--json",
+                "dashboard",
+                "--url",
+                "http://127.0.0.1:7777",
+                "--no-open",
+            ])
+            .expect("parse om dashboard");
+        let dashboard = Cli::from_arg_matches(&matches).expect("build cli from alias matches");
+        assert!(dashboard.robot_json);
+        assert!(matches!(
+            dashboard.command,
+            Some(Command::Dashboard {
+                ref url,
+                no_open: true,
+            }) if url == "http://127.0.0.1:7777"
+        ));
+
+        let mut help = Vec::new();
+        cli_command("om")
+            .write_long_help(&mut help)
+            .expect("render om help");
+        let help = String::from_utf8(help).expect("help is utf8");
+        assert!(help.contains("Usage: om "));
+        assert!(!help.contains("Usage: oraclemcp"));
+        assert!(bare_invocation_hint("om").contains("`om serve`"));
+        assert!(bare_invocation_hint("om").contains("`om doctor`"));
+        assert!(bare_invocation_hint("om").contains("`om capabilities`"));
     }
 
     #[test]

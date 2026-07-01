@@ -144,6 +144,11 @@ oraclemcp dashboard                   # open the local dashboard through a one-t
 `--json` is a visible alias for `--robot-json` and keeps stdout as a single
 machine-readable JSON object.
 
+Release archives also include `om` (`om.exe` on Windows) as an argv0-aware
+short alias. `om dashboard` is equivalent to `oraclemcp dashboard` and uses the
+short name in CLI help and dashboard diagnostics when invoked through that
+alias.
+
 `oraclemcp service install` targets the platform user service manager: systemd
 `--user` on Linux, launchd on macOS, and Windows services on Windows. Mutating
 service operations (`install`, `uninstall`, `restart`) require `--yes`;
