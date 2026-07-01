@@ -23,7 +23,11 @@ SERVICE_NAME="oraclemcp"
 SERVICE_LISTEN="127.0.0.1:7070"
 SERVICE_PROFILE=""
 SERVICE_ALLOW_NO_AUTH=0
+SERVICE_CLIENT_CREDENTIALS=0
 SERVICE_SKIP_LINGER=0
+CLIENT_REGISTER=0
+CLIENT_LABEL=""
+CLIENT_SCOPES=()
 
 usage() {
   cat <<'USAGE'
@@ -48,6 +52,9 @@ Options:
   --listen <addr:port>      Service listen address (default: 127.0.0.1:7070)
   --profile <name>          Service profile passed to oraclemcp service install
   --allow-no-auth           Service dev-mode auth opt-in; loopback only
+  --client-credentials      Enable service-owned per-client HTTP credentials
+  --register-client <label> Issue one per-client HTTP bearer after install
+  --client-scope <scope>    Scope for --register-client (repeat; default oracle:read)
   --skip-linger             Skip optional loginctl enable-linger on Linux
   --yes                     Answer yes to explicit prompts
   --force                   Replace existing installed files
@@ -153,6 +160,21 @@ parse_args() {
       --allow-no-auth)
         SERVICE_ALLOW_NO_AUTH=1
         shift
+        ;;
+      --client-credentials)
+        SERVICE_CLIENT_CREDENTIALS=1
+        shift
+        ;;
+      --register-client)
+        [ "$#" -ge 2 ] || fail "--register-client requires a value"
+        CLIENT_REGISTER=1
+        CLIENT_LABEL="$2"
+        shift 2
+        ;;
+      --client-scope)
+        [ "$#" -ge 2 ] || fail "--client-scope requires a value"
+        CLIENT_SCOPES+=("$2")
+        shift 2
         ;;
       --skip-linger)
         SERVICE_SKIP_LINGER=1
@@ -330,8 +352,24 @@ service_install_args() {
   if [ "$SERVICE_ALLOW_NO_AUTH" -eq 1 ]; then
     args+=("--allow-no-auth")
   fi
+  if [ "$SERVICE_CLIENT_CREDENTIALS" -eq 1 ] || [ "$CLIENT_REGISTER" -eq 1 ]; then
+    args+=("--client-credentials")
+  fi
   if [ "$SERVICE_SKIP_LINGER" -eq 1 ]; then
     args+=("--skip-linger")
+  fi
+  printf '%s\0' "${args[@]}"
+}
+
+client_issue_args() {
+  local args=("clients" "issue" "--label" "$CLIENT_LABEL")
+  if [ "${#CLIENT_SCOPES[@]}" -eq 0 ]; then
+    args+=("--scope" "oracle:read")
+  else
+    local scope
+    for scope in "${CLIENT_SCOPES[@]}"; do
+      args+=("--scope" "$scope")
+    done
   fi
   printf '%s\0' "${args[@]}"
 }
@@ -388,6 +426,20 @@ print_plan() {
     printf '    readyz_gate: curl --fail --silent --show-error %s\n' "$(readyz_url)"
   else
     printf '  service: not requested; no service-manager files or units will be touched\n'
+  fi
+
+  if [ "$CLIENT_REGISTER" -eq 1 ]; then
+    printf '  client_registration:\n'
+    printf '    command: %s/oraclemcp ' "$BIN_DIR"
+    local client_args=()
+    while IFS= read -r -d '' arg; do
+      client_args+=("$arg")
+    done < <(client_issue_args)
+    printf '%q ' "${client_args[@]}"
+    printf '\n'
+    printf '    secret_rule: bearer is printed once by the command; do not write it to profiles.toml or committed client config\n'
+  else
+    printf '  client_registration: not requested; no clients.json credential will be issued\n'
   fi
 }
 
@@ -485,6 +537,16 @@ install_completions() {
   install_completion "$BIN_DIR/om" fish "$PREFIX/share/fish/vendor_completions.d/om.fish"
   install_completion "$BIN_DIR/oraclemcp" powershell "$PREFIX/share/powershell/Completions/oraclemcp.ps1"
   install_completion "$BIN_DIR/om" powershell "$PREFIX/share/powershell/Completions/om.ps1"
+}
+
+register_client() {
+  [ "$CLIENT_REGISTER" -eq 1 ] || return
+  local args=()
+  while IFS= read -r -d '' arg; do
+    args+=("$arg")
+  done < <(client_issue_args)
+  printf 'oraclemcp installer: issuing per-client credential for %s; bearer is shown once below\n' "$CLIENT_LABEL" >&2
+  "$BIN_DIR/oraclemcp" --json "${args[@]}"
 }
 
 install_prebuilt() {
@@ -599,6 +661,12 @@ wait_readyz() {
 main() {
   parse_args "$@"
   [ -n "$PREFIX" ] || fail "HOME is unset; pass --prefix"
+  if [ "$CLIENT_REGISTER" -eq 0 ] && [ "${#CLIENT_SCOPES[@]}" -gt 0 ]; then
+    fail "--client-scope requires --register-client"
+  fi
+  if [ "$CLIENT_REGISTER" -eq 1 ] && [ -z "$CLIENT_LABEL" ]; then
+    fail "--register-client label must not be empty"
+  fi
   if [ -z "$BIN_DIR" ]; then
     BIN_DIR="$PREFIX/bin"
   fi
@@ -619,6 +687,7 @@ main() {
   fi
   install_om_alias
   install_completions
+  register_client
 
   if [ "$SERVICE_REQUESTED" -eq 1 ] || maybe_prompt_for_service; then
     install_service

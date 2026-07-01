@@ -80,6 +80,7 @@ pub(crate) struct ServiceInstallOptions {
     pub(crate) listen: String,
     pub(crate) profile: Option<String>,
     pub(crate) allow_no_auth: bool,
+    pub(crate) client_credentials: bool,
     pub(crate) skip_linger: bool,
     pub(crate) yes: bool,
     pub(crate) dry_run: bool,
@@ -680,6 +681,9 @@ fn serve_args(options: &ServiceInstallOptions) -> Vec<String> {
     if options.allow_no_auth {
         args.push("--allow-no-auth".to_owned());
     }
+    if options.client_credentials {
+        args.push("--client-credentials".to_owned());
+    }
     if let Some(profile) = options.profile.as_ref() {
         args.push("--profile".to_owned());
         args.push(profile.clone());
@@ -1137,6 +1141,7 @@ mod tests {
                 listen: "127.0.0.1:7070".to_owned(),
                 profile: None,
                 allow_no_auth: false,
+                client_credentials: false,
                 skip_linger: false,
                 yes: false,
                 dry_run: false,
@@ -1157,7 +1162,8 @@ mod tests {
                 name: "oraclemcp".to_owned(),
                 listen: "127.0.0.1:7070".to_owned(),
                 profile: Some("dev_ro".to_owned()),
-                allow_no_auth: true,
+                allow_no_auth: false,
+                client_credentials: true,
                 skip_linger: false,
                 yes: false,
                 dry_run: true,
@@ -1198,7 +1204,7 @@ mod tests {
         assert!(
             result
                 .text
-                .contains("serve --listen 127.0.0.1:7070 --allow-no-auth --profile dev_ro"),
+                .contains("serve --listen 127.0.0.1:7070 --client-credentials --profile dev_ro"),
             "{}",
             result.text
         );
@@ -1273,6 +1279,7 @@ mod tests {
                 listen: "127.0.0.1:7070".to_owned(),
                 profile: None,
                 allow_no_auth: false,
+                client_credentials: false,
                 skip_linger: true,
                 yes: false,
                 dry_run: true,
@@ -1309,6 +1316,7 @@ mod tests {
                 listen: "127.0.0.1:7070".to_owned(),
                 profile: None,
                 allow_no_auth: false,
+                client_credentials: false,
                 skip_linger: true,
                 yes: false,
                 dry_run: true,

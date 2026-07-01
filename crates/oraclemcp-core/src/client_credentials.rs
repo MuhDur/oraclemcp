@@ -421,6 +421,12 @@ impl ClientCredentialStore {
     }
 }
 
+/// Whether `bearer` has the service-owned per-client token prefix.
+#[must_use]
+pub fn looks_like_client_bearer(bearer: &str) -> bool {
+    bearer.trim_start().starts_with(TOKEN_PREFIX)
+}
+
 fn load_file(path: &Path) -> Result<ClientCredentialFile, ClientCredentialError> {
     let bytes = fs::read(path)
         .map_err(|e| ClientCredentialError::Store(FileStoreError::Io(e.to_string())))?;

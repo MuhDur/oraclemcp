@@ -58,7 +58,9 @@ contains "$dry_output" "$PREFIX/share/zsh/site-functions/_om"
 contains "$dry_output" "$PREFIX/share/fish/vendor_completions.d/om.fish"
 contains "$dry_output" "$PREFIX/share/powershell/Completions/oraclemcp.ps1"
 contains "$dry_output" "service: not requested; no service-manager files or units will be touched"
+contains "$dry_output" "client_registration: not requested; no clients.json credential will be issued"
 not_contains "$dry_output" "service install --yes"
+not_contains "$dry_output" "clients issue"
 
 if [ -e "$PREFIX/bin/oraclemcp" ] || [ -e "$PREFIX/bin/om" ]; then
   fail "dry-run created installed files under $PREFIX"
@@ -80,6 +82,26 @@ service_output="$(
 contains "$service_output" "unit: $CONFIG_HOME/systemd/user/oraclemcp.service"
 contains "$service_output" "$PREFIX/bin/oraclemcp service install --yes --name oraclemcp --listen 127.0.0.1:7070 --profile db_ro"
 contains "$service_output" "readyz_gate: curl --fail --silent --show-error http://127.0.0.1:7070/readyz"
+
+client_service_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+    bash install.sh \
+      --dry-run \
+      --version "$SMOKE_VERSION" \
+      --target x86_64-unknown-linux-musl \
+      --prefix "$PREFIX" \
+      --service \
+      --yes \
+      --profile db_ro \
+      --listen 127.0.0.1:7070 \
+      --register-client codex-cli \
+      --client-scope oracle:read \
+      --client-scope oracle:execute
+)"
+
+contains "$client_service_output" "$PREFIX/bin/oraclemcp service install --yes --name oraclemcp --listen 127.0.0.1:7070 --profile db_ro --client-credentials"
+contains "$client_service_output" "$PREFIX/bin/oraclemcp clients issue --label codex-cli --scope oracle:read --scope oracle:execute"
+contains "$client_service_output" "secret_rule: bearer is printed once by the command"
 
 source_output="$(
   env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \

@@ -315,7 +315,7 @@ This parse-but-fail-closed behavior is covered by the
 | Transport | How | Notes |
 |---|---|---|
 | **stdio** | Default (`oraclemcp serve`). | The parent process is the trust boundary. |
-| **Streamable HTTP** | `serve --listen <addr>` + `[http]`. | **Fails closed**: binds only with OAuth bearer enforcement or `--allow-no-auth`; a non-loopback bind requires `ORACLEMCP_HTTP_ALLOW_REMOTE=1`. `Host`/`Origin` allowlists apply. |
+| **Streamable HTTP** | `serve --listen <addr>` + `[http]` / `--client-credentials`. | **Fails closed**: binds only with service-owned per-client credentials, OAuth bearer enforcement, mTLS client-certificate verification, or `--allow-no-auth`; a non-loopback bind requires `ORACLEMCP_HTTP_ALLOW_REMOTE=1`. `Host`/`Origin` allowlists apply. |
 
 The HTTP router serves MCP only at `/mcp` and reserves `/operator/v1` for the
 versioned operator API; product binaries may also serve the embedded operator
@@ -351,13 +351,14 @@ optional `[http.oauth]` resource-server table, the `[http.mtls]` client
 fingerprint registry, the optional `[http.tls]` rustls material, and the
 `[http.operator]` operator-authority table. Idle
 stateful sessions are reaped by sending a close message to the owning lane; the
-watchdog never touches the Oracle connection from the HTTP thread. When OAuth is
-enabled, granted `oracle:*` scopes can only **lower** the effective ceiling,
-never raise it, and protected profiles stay `READ_ONLY`. Server-only TLS is
-transport encryption, not application authentication — `/mcp` still needs OAuth
-or `--allow-no-auth`. Adding `[http.tls.client_ca_path]` requires mTLS client
-certs, but only leaf DER SHA-256 fingerprints listed in
-`[http.mtls].client_fingerprints` become `mtls:sha256:<hex>` principals.
+watchdog never touches the Oracle connection from the HTTP thread. When OAuth or
+per-client credentials are enabled, granted `oracle:*` scopes can only **lower**
+the effective ceiling, never raise it, and protected profiles stay `READ_ONLY`.
+Server-only TLS is transport encryption, not application authentication —
+`/mcp` still needs per-client credentials, OAuth, mTLS, or `--allow-no-auth`.
+Adding `[http.tls.client_ca_path]` requires mTLS client certs, but only leaf DER
+SHA-256 fingerprints listed in `[http.mtls].client_fingerprints` become
+`mtls:sha256:<hex>` principals.
 
 `[http.operator]` is binary in this line: a request is operator-authorized only
 when it is the unauthenticated loopback local-owner path

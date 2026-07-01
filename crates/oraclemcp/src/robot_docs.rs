@@ -165,8 +165,8 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
                     "argv": ["oraclemcp", "--json", "service", "install", "--dry-run", "--profile", "<profile>"]
                 },
                 "install": {
-                    "command": "oraclemcp service install --yes --profile <profile>",
-                    "argv": ["oraclemcp", "service", "install", "--yes", "--profile", "<profile>"]
+                    "command": "oraclemcp service install --yes --client-credentials --profile <profile>",
+                    "argv": ["oraclemcp", "service", "install", "--yes", "--client-credentials", "--profile", "<profile>"]
                 },
                 "status": {
                     "command": "oraclemcp --json service status",
@@ -180,7 +180,29 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
                     "Use service install --dry-run before --yes; install/uninstall/restart deliberately require --yes.",
                     "The service command writes the platform user service definition for systemd --user, launchd, or Windows services.",
                     "Dry-run JSON includes service hardening: systemd notify readiness plus file/task/memory caps, launchd file/process caps, and Windows restart-on-failure.",
-                    "Streamable HTTP auth rules are unchanged: configure OAuth or mTLS with registered client leaf fingerprints, or use --allow-no-auth only for intentional local development."
+                    "Streamable HTTP auth rules are unchanged: configure per-client credentials, OAuth, or mTLS with registered client leaf fingerprints; use --allow-no-auth only for intentional local development."
+                ]
+            },
+            "http_client_credentials": {
+                "issue": {
+                    "command": "oraclemcp --json clients issue --label <client-label> --scope oracle:read",
+                    "argv": ["oraclemcp", "--json", "clients", "issue", "--label", "<client-label>", "--scope", "oracle:read"]
+                },
+                "serve": {
+                    "command": "oraclemcp serve --listen 127.0.0.1:7070 --client-credentials --profile <profile>",
+                    "argv": ["oraclemcp", "serve", "--listen", "127.0.0.1:7070", "--client-credentials", "--profile", "<profile>"]
+                },
+                "rotate": {
+                    "command": "oraclemcp --json clients rotate <client_id>",
+                    "argv": ["oraclemcp", "--json", "clients", "rotate", "<client_id>"]
+                },
+                "revoke": {
+                    "command": "oraclemcp --json clients revoke <client_id>",
+                    "argv": ["oraclemcp", "--json", "clients", "revoke", "<client_id>"]
+                },
+                "notes": [
+                    "Issue one bearer per MCP client; the bearer is printed once and clients.json stores only salted hashes.",
+                    "Do not put the bearer in profiles.toml, audit data, logs, or committed client config."
                 ]
             },
             "smoke_tests": [
@@ -294,7 +316,7 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
             "custom_tools": "~/.config/oraclemcp/tools.d/*.toml or ORACLEMCP_TOOLS_DIR",
             "custom_tool_signing": "protected profiles and profiles with require_signed_tools=true require ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY plus per-tool signatures from oraclemcp sign-tool",
             "secret_refs": "prefer credential_ref and wallet_password_ref over literal passwords",
-            "http_transport": "use top-level http config or serve --oauth-* / --http-* / --tls-* flags for Streamable HTTP; native rustls TLS and optional mTLS are served directly, mTLS identities require registered leaf fingerprints, and server-only TLS still needs OAuth or explicit --allow-no-auth",
+            "http_transport": "use --client-credentials for service-owned per-client bearers, or top-level http config / serve --oauth-* / --http-* / --tls-* flags for Streamable HTTP; native rustls TLS and optional mTLS are served directly, mTLS identities require registered leaf fingerprints, and server-only TLS still needs per-client credentials, OAuth, or explicit --allow-no-auth",
             "proxy_auth": "use profiles.proxy_auth for thin proxy auth; credential_ref belongs to proxy_user and target_schema is the CONNECT THROUGH client",
             "network_routing": "use top-level sdu and profiles.drcp for validated thin SDU and DRCP server routing instead of raw connect_string query parameters",
             "local_pool": "profiles.pool enables hybrid_pool: stateless catalog/metadata reads can use the bounded local pool, while user SQL, LOB/sample reads, transactions, DBMS_OUTPUT, login setup, and session identity remain on the pinned main session; statement_cache_size reaches the thin driver",
@@ -376,21 +398,21 @@ Client setup
 - Generate generic setup templates with: oraclemcp --json setup --profile <profile>
 - Local stdio command: oraclemcp serve --profile <profile> --allow-no-auth
 - Secure stdio command: ORACLEMCP_STDIO_TOKEN=<token> oraclemcp serve --profile <profile>
-- Streamable HTTP starts only with configured OAuth, mTLS client-certificate verification, or explicit --allow-no-auth; mTLS identities require registered leaf fingerprints via --mtls-client-fingerprint or [http.mtls].client_fingerprints; use --oauth-* / --http-* / --tls-* flags or top-level [http] config, and keep non-loopback binds behind ORACLEMCP_HTTP_ALLOW_REMOTE=1.
+- Streamable HTTP starts only with per-client credentials, configured OAuth, mTLS client-certificate verification, or explicit --allow-no-auth; issue per-client bearers with oraclemcp clients issue and enable them with --client-credentials. mTLS identities require registered leaf fingerprints via --mtls-client-fingerprint or [http.mtls].client_fingerprints; use --oauth-* / --http-* / --tls-* flags or top-level [http] config, and keep non-loopback binds behind ORACLEMCP_HTTP_ALLOW_REMOTE=1.
 - The thin driver does not need Oracle Instant Client, ODPI-C, libclntsh, or a C toolchain.
 - If Oracle Net files need TNS_ADMIN, point every MCP client at the same small wrapper script.
 - After replacing the binary or wrapper, restart or reconnect each MCP client so it imports the fresh tool schema.
 
 Always-on service
 - Preview host changes first: oraclemcp --json service install --dry-run --profile <profile>
-- Install only with explicit consent: oraclemcp service install --yes --profile <profile>
+- Install only with explicit consent: oraclemcp service install --yes --client-credentials --profile <profile>
 - Check state: oraclemcp --json service status
 - Read logs: oraclemcp --json service logs
 - Restart: oraclemcp service restart --yes
 - Uninstall: oraclemcp service uninstall --yes
 - The service command targets the platform user service manager: systemd --user on Linux, launchd on macOS, and Windows services on Windows.
 - Dry-run JSON includes service hardening: systemd notify readiness plus file/task/memory caps, launchd file/process caps, and Windows restart-on-failure.
-- Streamable HTTP auth rules are unchanged: configure OAuth or mTLS with registered client leaf fingerprints, or use --allow-no-auth only for intentional local development.
+- Streamable HTTP auth rules are unchanged: configure per-client credentials, OAuth, or mTLS with registered client leaf fingerprints; use --allow-no-auth only for intentional local development.
 
 Client smoke tests
 1. oraclemcp --json setup --profile <profile>
@@ -405,6 +427,7 @@ First commands
 - oraclemcp --json doctor --online --profile <profile>
 - oraclemcp --json capabilities
 - oraclemcp --json service install --dry-run --profile <profile>
+- oraclemcp --json clients issue --label <client-label> --scope oracle:read
 - oraclemcp serve --profile <profile> --allow-no-auth
 
 MCP read workflow

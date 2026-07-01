@@ -318,9 +318,10 @@ an agent session.
 The stdio transport talks to a single trusted parent process and has no network
 surface. Everything below concerns the HTTP transport (`serve --listen`).
 
-- **Fail-closed start.** The HTTP listener starts **only** when OAuth bearer
-  enforcement is configured or `--allow-no-auth` is explicitly supplied. With
-  neither, it refuses to bind. `--allow-no-auth` is for local development only.
+- **Fail-closed start.** The HTTP listener starts **only** when service-owned
+  per-client credentials, OAuth bearer enforcement, mTLS client-certificate
+  verification, or `--allow-no-auth` is explicitly supplied. With none of
+  those, it refuses to bind. `--allow-no-auth` is for local development only.
 - **Loopback by default.** A non-loopback bind (anything other than
   `127.0.0.1`/`::1`) is refused unless `ORACLEMCP_HTTP_ALLOW_REMOTE=1` is set.
   This is a deliberate guard against accidentally exposing the server; set it
@@ -336,6 +337,12 @@ surface. Everything below concerns the HTTP transport (`serve --listen`).
   `oracle:write`/`oracle:execute` at `READ_WRITE`, `oracle:ddl` at `DDL`,
   `oracle:admin` at `ADMIN`. No scope can raise a profile above its `max_level`,
   and protected profiles stay `READ_ONLY`.
+- **Per-client HTTP bearer.** `oraclemcp clients issue --label <client>
+  --scope oracle:read` creates one opaque bearer for one MCP client and stores
+  only a salted hash under `$XDG_STATE_HOME/oraclemcp/clients.json`. Enable this
+  mode with `serve --client-credentials` or `service install
+  --client-credentials`. Rotate or revoke one `client_id` without changing the
+  others; issue/rotate print the new bearer once.
 - **TLS / mTLS.** Native rustls TLS is enabled with `[http.tls]` or
   `--tls-cert`/`--tls-key`. Adding `[http.tls.client_ca_path]` or
   `--mtls-client-ca` requires client certificates (mTLS) verified against that
@@ -343,14 +350,15 @@ surface. Everything below concerns the HTTP transport (`serve --listen`).
   `[http.mtls].client_fingerprints` or with `--mtls-client-fingerprint`; only
   then does the request get an `mtls:sha256:<hex>` principal. Server-only TLS
   encrypts the transport but is **not** application authentication — `/mcp`
-  still needs OAuth or an explicit `--allow-no-auth` dev opt-in, and a
-  non-loopback bind still needs `ORACLEMCP_HTTP_ALLOW_REMOTE=1` even with TLS.
+  still needs per-client credentials, OAuth, or an explicit `--allow-no-auth`
+  dev opt-in, and a non-loopback bind still needs `ORACLEMCP_HTTP_ALLOW_REMOTE=1`
+  even with TLS.
 
 Recommended production posture: bind behind a reverse proxy or service mesh,
-require OAuth with the narrowest scope each client needs (`oracle:read` for
-read-only agents), enable mTLS with registered leaf fingerprints for
-service-to-service callers, and keep `max_level` pinned at the lowest level the
-workload requires.
+use one scoped credential per MCP client or require OAuth with the narrowest
+scope each client needs (`oracle:read` for read-only agents), enable mTLS with
+registered leaf fingerprints for service-to-service callers, and keep
+`max_level` pinned at the lowest level the workload requires.
 
 ---
 
@@ -378,7 +386,11 @@ export ORACLE_APP_PASSWORD='...'          # the profile's credential_ref source
 # stdio (an MCP client launches this; --allow-no-auth because the peer is trusted)
 oraclemcp serve --profile db_ro --allow-no-auth
 
-# HTTP (fail-closed; needs OAuth or --allow-no-auth, plus remote opt-in if non-loopback)
+# HTTP (fail-closed; needs per-client credentials, OAuth, or --allow-no-auth)
+oraclemcp --json clients issue --label claude --scope oracle:read
+oraclemcp serve --profile db_ro --listen 127.0.0.1:7070 --client-credentials
+
+# HTTP with OAuth (remote binds also need ORACLEMCP_HTTP_ALLOW_REMOTE=1)
 export ORACLEMCP_OAUTH_HS256_SECRET='...'
 export ORACLEMCP_HTTP_ALLOW_REMOTE=1      # only for a non-loopback bind
 oraclemcp serve --profile db_ro --listen 0.0.0.0:7070 \
@@ -612,8 +624,11 @@ still the write-intent/audit path, not this HTTP-edge cache.
 - **Per-client HTTP access credential:** service-owned client credentials live
   in `$XDG_STATE_HOME/oraclemcp/clients.json` (or
   `$HOME/.local/state/oraclemcp/clients.json`) as salted hashes only. Issued
-  bearer values are shown once; rotate or revoke a client credential and close
-  that client's active lanes so in-memory grants are revoked.
+  bearer values are shown once:
+  `oraclemcp --json clients rotate <client_id>` prints the replacement bearer
+  once, and `oraclemcp --json clients revoke <client_id>` revokes that client.
+  Close that client's active lanes or restart the service so in-memory grants
+  are revoked.
 - **Audit signing key:** add the new key under `[audit].key_ref` with a new
   `key_id`, restart, and keep the old `key_id` available to `audit verify` so
   historical records still verify.

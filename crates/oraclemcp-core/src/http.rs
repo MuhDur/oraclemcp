@@ -40,6 +40,9 @@ use crate::admission::{
     DEFAULT_STATEFUL_PER_PROFILE_CAP,
 };
 use crate::capabilities::PROTOCOL_VERSION;
+use crate::client_credentials::{
+    ClientCredentialError, ClientCredentialStore, looks_like_client_bearer,
+};
 use crate::config_ops::{ConfigOpsError, ConfigOpsService};
 use crate::dashboard_auth::{
     DASHBOARD_ACTION_TICKET_HEADER, DASHBOARD_CSRF_HEADER, DASHBOARD_PAIR_PATH,
@@ -184,6 +187,10 @@ pub struct HttpTransportConfig {
     /// Registered mTLS clients. A CA-verified client certificate becomes an
     /// authenticated principal only when its leaf fingerprint appears here.
     pub mtls_clients: MtlsClientRegistry,
+    /// Service-owned per-client bearer credentials. When set, `ocmcp_*`
+    /// Authorization bearers authenticate as isolated HTTP principals and their
+    /// stored scopes flow through the existing scope-grant lowering path.
+    pub client_credentials: Option<Arc<ClientCredentialStore>>,
     /// Issued stateful Streamable HTTP session ids. Listener wrappers install a
     /// store automatically when `stateful` is true.
     pub session_store: Option<Arc<HttpSessionStore>>,
@@ -238,6 +245,7 @@ impl std::fmt::Debug for HttpTransportConfig {
             .field("resource_metadata", &self.resource_metadata.is_some())
             .field("oauth", &self.oauth.is_some())
             .field("mtls_client_count", &self.mtls_clients.fingerprints.len())
+            .field("client_credentials", &self.client_credentials.is_some())
             .field("session_store", &self.session_store.is_some())
             .field("result_store", &self.result_store.is_some())
             .field("session_lifecycle", &self.session_lifecycle.is_some())
@@ -274,6 +282,7 @@ impl Default for HttpTransportConfig {
             resource_metadata: None,
             oauth: None,
             mtls_clients: MtlsClientRegistry::default(),
+            client_credentials: None,
             session_store: None,
             result_store: None,
             session_lifecycle: None,
@@ -1200,6 +1209,18 @@ mod tests {
             .expect("system time after epoch")
             .as_nanos();
         dir.push(format!("{name}-{}-{nanos}.jsonl", std::process::id()));
+        dir
+    }
+
+    fn client_credential_fixture_path(name: &str) -> PathBuf {
+        let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        dir.push("../../target/tmp/client-credential-http-tests");
+        std::fs::create_dir_all(&dir).expect("create client credential fixture dir");
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos();
+        dir.push(format!("{name}-{}-{nanos}", std::process::id()));
         dir
     }
 
@@ -4744,6 +4765,155 @@ mod tests {
     }
 
     #[test]
+    fn client_credentials_are_scoped_principals_and_rotate_independently() {
+        let store = Arc::new(
+            ClientCredentialStore::open(client_credential_fixture_path("http-scope"))
+                .expect("credential store opens"),
+        );
+        let read = store
+            .issue(
+                crate::client_credentials::ClientCredentialIssueRequest::new(
+                    "Claude Desktop",
+                    vec!["oracle:read".to_owned()],
+                ),
+            )
+            .expect("issue read client");
+        let execute = store
+            .issue(
+                crate::client_credentials::ClientCredentialIssueRequest::new(
+                    "Codex CLI",
+                    vec!["oracle:execute".to_owned()],
+                ),
+            )
+            .expect("issue execute client");
+        let read_bearer = read.bearer.expose().to_owned();
+        let execute_bearer = execute.bearer.expose().to_owned();
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            stateful: false,
+            client_credentials: Some(Arc::clone(&store)),
+            ..Default::default()
+        };
+        let call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "oracle_preview_sql",
+                "arguments": { "sql": "SELECT 1 FROM dual" }
+            }
+        });
+        let request_with_bearer = |bearer: &str| {
+            HttpRequest::new(
+                "POST",
+                MCP_PATH,
+                [
+                    ("host", "127.0.0.1"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json, text/event-stream"),
+                    ("authorization", &format!("Bearer {bearer}")),
+                ],
+                call.to_string().into_bytes(),
+            )
+            .with_peer_addr(Some("127.0.0.1:49152".to_owned()))
+        };
+
+        let read_response = handle_http_request(
+            &scope_echo_server(),
+            &cfg,
+            request_with_bearer(&read_bearer),
+        );
+        assert_eq!(read_response.status, 200);
+        let read_body = response_json(&read_response);
+        assert_eq!(
+            read_body["result"]["structuredContent"]["scopes"],
+            serde_json::json!(["oracle:read"])
+        );
+        assert_eq!(
+            read_body["result"]["structuredContent"]["principal_key"],
+            serde_json::json!(read.principal_key)
+        );
+        assert!(
+            !String::from_utf8_lossy(&read_response.body).contains(&read_bearer),
+            "dispatch response must not echo the bearer"
+        );
+
+        let execute_response = handle_http_request(
+            &scope_echo_server(),
+            &cfg,
+            request_with_bearer(&execute_bearer),
+        );
+        assert_eq!(execute_response.status, 200);
+        let execute_body = response_json(&execute_response);
+        assert_eq!(
+            execute_body["result"]["structuredContent"]["scopes"],
+            serde_json::json!(["oracle:execute"])
+        );
+        assert_eq!(
+            execute_body["result"]["structuredContent"]["principal_key"],
+            serde_json::json!(execute.principal_key)
+        );
+
+        let (rotated_read, lifecycle) = store.rotate(&read.client_id).expect("rotate read client");
+        assert_eq!(lifecycle.principal_key, read.principal_key);
+        assert_eq!(
+            handle_http_request(
+                &scope_echo_server(),
+                &cfg,
+                request_with_bearer(&read_bearer)
+            )
+            .status,
+            401,
+            "rotating one client invalidates only its old bearer"
+        );
+        assert_eq!(
+            handle_http_request(
+                &scope_echo_server(),
+                &cfg,
+                request_with_bearer(&execute_bearer)
+            )
+            .status,
+            200,
+            "another client's bearer remains valid after the rotation"
+        );
+        assert_eq!(
+            handle_http_request(
+                &scope_echo_server(),
+                &cfg,
+                request_with_bearer(rotated_read.bearer.expose())
+            )
+            .status,
+            200,
+            "the rotated one-time bearer is admitted"
+        );
+
+        let revoked = store
+            .revoke(&execute.client_id)
+            .expect("revoke execute client");
+        assert_eq!(revoked.principal_key, execute.principal_key);
+        assert_eq!(
+            handle_http_request(
+                &scope_echo_server(),
+                &cfg,
+                request_with_bearer(&execute_bearer)
+            )
+            .status,
+            401,
+            "revoking one client blocks that client"
+        );
+        assert_eq!(
+            handle_http_request(
+                &scope_echo_server(),
+                &cfg,
+                request_with_bearer(rotated_read.bearer.expose())
+            )
+            .status,
+            200,
+            "revoking a different client leaves the rotated client valid"
+        );
+    }
+
+    #[test]
     fn scoped_principal_cannot_act_as_operator_without_allowlist_and_operator_action_is_audited() {
         let token = jwt_with_scope("oracle:read");
         let principal_key = oauth_principal_key_from_validated_token(&token);
@@ -4827,6 +4997,32 @@ struct ValidatedOAuthRequest {
 struct AuthenticatedHttpRequest {
     scope_grant: Option<ScopeGrant>,
     principal_key: String,
+}
+
+fn authenticate_client_credential_request(
+    request: &HttpRequest,
+    store: &ClientCredentialStore,
+) -> Result<Option<AuthenticatedHttpRequest>, HttpResponse> {
+    let Some(header) = request.header("authorization") else {
+        return Ok(None);
+    };
+    let bearer = match extract_bearer(Some(header)) {
+        Ok(bearer) => bearer,
+        Err(_) => return Ok(None),
+    };
+    if !looks_like_client_bearer(bearer) {
+        return Ok(None);
+    }
+    match store.authenticate_bearer(bearer, request.peer_addr.as_deref()) {
+        Ok(authenticated) => Ok(Some(AuthenticatedHttpRequest {
+            scope_grant: Some(ScopeGrant(authenticated.scopes)),
+            principal_key: authenticated.principal_key,
+        })),
+        Err(ClientCredentialError::AuthenticationFailed | ClientCredentialError::Revoked(_)) => {
+            Err(client_credential_unauthorized_response())
+        }
+        Err(_) => Err(client_credential_unavailable_response()),
+    }
 }
 
 /// A parsed native HTTP request. Header names are stored lowercase.
@@ -5048,6 +5244,12 @@ fn authenticate_http_request(
     request: &HttpRequest,
     allow_unauthenticated_cookie_get: bool,
 ) -> Result<Option<AuthenticatedHttpRequest>, HttpResponse> {
+    if let Some(store) = &config.client_credentials
+        && let Some(authenticated) = authenticate_client_credential_request(request, store)?
+    {
+        return Ok(Some(authenticated));
+    }
+
     if let Some(enforcement) = &config.oauth
         && request.header("authorization").is_some()
     {
@@ -5079,7 +5281,33 @@ fn authenticate_http_request(
         return Err(oauth_error_response(enforcement, None));
     }
 
+    if config.client_credentials.is_some() {
+        return Err(client_credential_unauthorized_response());
+    }
+
     Ok(None)
+}
+
+fn client_credential_unauthorized_response() -> HttpResponse {
+    json_response(
+        401,
+        &json!({
+            "error": "client_credential_required",
+            "message": "valid per-client bearer credential required",
+        }),
+    )
+    .with_header("cache-control", "no-store")
+}
+
+fn client_credential_unavailable_response() -> HttpResponse {
+    json_response(
+        503,
+        &json!({
+            "error": "client_credential_store_unavailable",
+            "message": "client credential store is unavailable",
+        }),
+    )
+    .with_header("cache-control", "no-store")
 }
 
 fn oauth_error_response(enforcement: &OAuthEnforcement, err: Option<TokenError>) -> HttpResponse {

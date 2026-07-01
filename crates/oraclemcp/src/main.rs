@@ -50,7 +50,8 @@ use oraclemcp_auth::{
 use oraclemcp_config::{AuditConfig, CONFIG_PATH_ENV, HttpConfig, HttpTlsConfig, OracleMcpConfig};
 use oraclemcp_core::http::SinglePrincipalGuard;
 use oraclemcp_core::{
-    AdmissionController, CapabilitiesReport, ConfigOpsBackend, ConfigOpsService,
+    AdmissionController, CapabilitiesReport, ClientCredentialError, ClientCredentialIssueRequest,
+    ClientCredentialLifecycle, ClientCredentialStore, ConfigOpsBackend, ConfigOpsService,
     ConfigReloadApplier, ConfigReloadApplyReport, CustomToolCatalog, CustomToolDef, DashboardAuth,
     DispatchFuture, DispatchOutcome, DoctorAuthCapabilities, DoctorAuthModeKind, DoctorContext,
     DoctorLevelCaps, DoctorProfileCaps, ExportRegistry, FeatureTiers, HttpSessionLifecycle,
@@ -114,9 +115,9 @@ enum Command {
     /// Start the MCP server (stdio by default; --listen <ADDR> for HTTP).
     Serve {
         /// Bind a Streamable HTTP listener at <ADDR> (e.g. 127.0.0.1:7070)
-        /// instead of stdio. HTTP starts only with configured OAuth, mTLS
-        /// client-certificate verification, or explicit --allow-no-auth; mTLS
-        /// identities require registered leaf fingerprints.
+        /// instead of stdio. HTTP starts only with --client-credentials,
+        /// configured OAuth, mTLS client-certificate verification, or explicit
+        /// --allow-no-auth; mTLS identities require registered leaf fingerprints.
         #[arg(long)]
         listen: Option<String>,
         /// Run stdio without an init token (development only). Without this and
@@ -162,6 +163,12 @@ enum Command {
     Service {
         #[command(subcommand)]
         command: ServiceCliCommand,
+    },
+    /// Issue, list, rotate, and revoke per-client HTTP bearer credentials.
+    #[command(name = "clients", alias = "client-credentials")]
+    Clients {
+        #[command(subcommand)]
+        command: ClientCredentialCliCommand,
     },
     /// Open the local browser dashboard through a one-time pairing ticket.
     Dashboard {
@@ -241,6 +248,34 @@ enum ServiceCliCommand {
     Restart(ServiceMutationCliArgs),
 }
 
+#[derive(Subcommand, Debug)]
+enum ClientCredentialCliCommand {
+    /// Issue one scoped bearer for one MCP client. The bearer is printed once.
+    Issue(ClientCredentialIssueCliArgs),
+    /// List redacted client credential metadata.
+    List,
+    /// Rotate one client's bearer. The new bearer is printed once.
+    Rotate(ClientCredentialIdCliArgs),
+    /// Revoke one client credential.
+    Revoke(ClientCredentialIdCliArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct ClientCredentialIssueCliArgs {
+    /// Human label for this MCP client.
+    #[arg(long)]
+    label: String,
+    /// Granted scope. Repeat for multiple scopes.
+    #[arg(long = "scope", default_value = "oracle:read")]
+    scopes: Vec<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+struct ClientCredentialIdCliArgs {
+    /// Client id returned by `oraclemcp clients issue`.
+    client_id: String,
+}
+
 #[derive(Args, Debug, Clone)]
 struct ServiceInstallCliArgs {
     /// Service name / label. Keep this stable; it determines the unit/plist/service id.
@@ -255,6 +290,9 @@ struct ServiceInstallCliArgs {
     /// Start HTTP without OAuth or registered mTLS (local development only).
     #[arg(long)]
     allow_no_auth: bool,
+    /// Enable service-owned per-client bearer credentials for HTTP.
+    #[arg(long)]
+    client_credentials: bool,
     /// Do not run the optional Linux `loginctl enable-linger <user>` step.
     #[arg(long)]
     skip_linger: bool,
@@ -340,6 +378,9 @@ struct HttpServeArgs {
     /// Registered mTLS client leaf certificate SHA-256 fingerprint.
     #[arg(long = "mtls-client-fingerprint")]
     mtls_client_fingerprints: Vec<String>,
+    /// Accept service-owned per-client `ocmcp_*` bearer credentials.
+    #[arg(long = "client-credentials")]
+    client_credentials: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -430,6 +471,7 @@ fn main() -> ExitCode {
         Command::Capabilities => run_capabilities(robot_json),
         Command::Completions { shell } => run_completions_cmd(binary_name, shell),
         Command::Service { command } => run_service_cmd(robot_json, command),
+        Command::Clients { command } => run_client_credentials_cmd(robot_json, command),
         Command::Dashboard { url, no_open } => {
             run_dashboard_cmd(robot_json, binary_name, &url, no_open)
         }
@@ -1840,6 +1882,7 @@ fn http_transport_config_from_merged(
             resource_metadata,
             oauth,
             mtls_clients: MtlsClientRegistry::from_fingerprints(http.mtls.client_fingerprints),
+            client_credentials: None,
             session_store: None,
             result_store: None,
             session_lifecycle: None,
@@ -2075,9 +2118,25 @@ fn run_serve(
                         return ExitCode::from(2);
                     }
                 };
+            if http.client_credentials {
+                let store = match ClientCredentialStore::open_default() {
+                    Ok(store) => store,
+                    Err(error) => {
+                        emit_status_error(
+                            robot_json,
+                            "ORACLEMCP_CLIENT_CREDENTIAL_STORE_UNAVAILABLE",
+                            &client_credential_error_message(&error),
+                        );
+                        return ExitCode::from(2);
+                    }
+                };
+                resolved_http.transport.client_credentials = Some(Arc::new(store));
+            }
             let oauth_enabled = resolved_http.transport.oauth.is_some();
             let tls_enabled = resolved_http.tls.is_some();
-            let auth_enabled = oauth_enabled || resolved_http.mtls_required;
+            let client_credentials_enabled = resolved_http.transport.client_credentials.is_some();
+            let auth_enabled =
+                oauth_enabled || resolved_http.mtls_required || client_credentials_enabled;
             let allow_remote = std::env::var("ORACLEMCP_HTTP_ALLOW_REMOTE")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
@@ -2098,14 +2157,16 @@ fn run_serve(
                         " with mTLS client-certificate verification"
                     } else if oauth_enabled {
                         " with OAuth bearer enforcement"
+                    } else if client_credentials_enabled {
+                        " with per-client bearer credential enforcement"
                     } else {
                         ""
                     }
                 );
-                if !oauth_enabled && !resolved_http.mtls_required {
+                if !oauth_enabled && !resolved_http.mtls_required && !client_credentials_enabled {
                     eprintln!(
                         "oraclemcp serve: WARNING — HTTPS transport on {addr} has TLS \
-                         encryption but no OAuth or mTLS client authentication."
+                         encryption but no per-client credential, OAuth, or mTLS client authentication."
                     );
                 }
             } else if oauth_enabled {
@@ -2113,6 +2174,12 @@ fn run_serve(
                     "oraclemcp serve: HTTP transport on {addr} has OAuth bearer enforcement \
                      enabled. The native listener is still plaintext; bind loopback or front it \
                      with a TLS-terminating proxy for off-box clients."
+                );
+            } else if client_credentials_enabled {
+                eprintln!(
+                    "oraclemcp serve: HTTP transport on {addr} has per-client bearer credential \
+                     enforcement enabled. The native listener is still plaintext; bind loopback \
+                     or front it with a TLS-terminating proxy for off-box clients."
                 );
             } else {
                 eprintln!(
@@ -2356,7 +2423,7 @@ fn emit_serve_status(robot_json: bool, transport: &str, addr: Option<&str>, tool
 /// `Err((code, message))` = refuse with exit code 2.
 ///
 /// Fail-closed parity with stdio (§7.1): `/mcp` must either have OAuth bearer
-/// enforcement/mTLS verification or the operator must explicitly accept
+/// enforcement/mTLS verification/per-client credentials or the operator must explicitly accept
 /// unauthenticated local dev mode with `--allow-no-auth`. Binding a routable
 /// (non-loopback) address still needs a second deliberate opt-in.
 fn http_listen_guard(
@@ -2369,11 +2436,12 @@ fn http_listen_guard(
     if !auth_enabled && !allow_no_auth {
         return Err((
             "ORACLEMCP_AUTH_REQUIRED",
-            "the HTTP transport (--listen) has no OAuth enforcement or mTLS \
-             client-certificate verification configured; configure [http.oauth] / \
+            "the HTTP transport (--listen) has no OAuth enforcement, mTLS \
+             client-certificate verification, or per-client credentials configured; configure [http.oauth] / \
              --oauth-* / [http.tls.client_ca_path], and register mTLS clients with \
-             [http.mtls].client_fingerprints or --mtls-client-fingerprint; or re-run \
-             with --allow-no-auth to accept unauthenticated development mode explicitly"
+             [http.mtls].client_fingerprints or --mtls-client-fingerprint; use \
+             --client-credentials for service-owned per-client bearers; or re-run with \
+             --allow-no-auth to accept unauthenticated development mode explicitly"
                 .to_owned(),
         ));
     }
@@ -2586,6 +2654,15 @@ fn setup_payload(
             "args": ["serve", "--profile", profile],
             "note": "Use secure stdio when the MCP client can provide the init token; otherwise keep stdio local and use --allow-no-auth intentionally."
         },
+        "http_client_credentials": {
+            "issue_once": ["oraclemcp", "clients", "issue", "--label", "Claude Desktop", "--scope", "oracle:read"],
+            "serve_args": ["serve", "--listen", "127.0.0.1:7070", "--client-credentials", "--profile", profile],
+            "service_install": ["oraclemcp", "service", "install", "--yes", "--client-credentials", "--profile", profile],
+            "claude_mcp_add": ["claude", "mcp", "add", "oracle", "--transport", "http", "http://127.0.0.1:7070/mcp"],
+            "secret_rule": "The issued bearer is shown once by the clients command; put it only in the MCP client's secret/header store, never in profiles.toml, audit, logs, or committed config.",
+            "rotation": ["oraclemcp", "clients", "rotate", "<client_id>"],
+            "revocation": ["oraclemcp", "clients", "revoke", "<client_id>"]
+        },
         "validation_commands": [
             ["oraclemcp", "--json", "info"],
             ["oraclemcp", "--json", "setup", "--profile", profile],
@@ -2597,7 +2674,8 @@ fn setup_payload(
         "next_actions": [
             format!("write the profiles template to {config_path} after replacing placeholders"),
             format!("write the wrapper template to {wrapper_path} and make it executable if Oracle client environment setup is needed"),
-            "configure every MCP client to call the same wrapper and args",
+            "for HTTP clients, issue one per-client bearer and configure --client-credentials on the service",
+            "configure every stdio MCP client to call the same wrapper and args",
             "restart each MCP client after changing the binary, wrapper, or profile",
             "run the validation commands before allowing agents to use live database tools"
         ]
@@ -2648,6 +2726,43 @@ fn run_setup(
         output.push_str(&format!(
             "Codex config TOML:\n{}",
             payload["codex_config_toml"].as_str().unwrap_or("")
+        ));
+        output.push_str("\nHTTP per-client credentials:\n");
+        output.push_str(&format!(
+            "  issue: {}\n",
+            payload["http_client_credentials"]["issue_once"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|part| part.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        output.push_str(&format!(
+            "  service: {}\n",
+            payload["http_client_credentials"]["service_install"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|part| part.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        output.push_str(&format!(
+            "  claude: {}\n",
+            payload["http_client_credentials"]["claude_mcp_add"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|part| part.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        output.push_str(&format!(
+            "  note: {}\n",
+            payload["http_client_credentials"]["secret_rule"]
+                .as_str()
+                .unwrap_or("")
         ));
         output.push_str("Validation commands:\n");
         for command in payload["validation_commands"]
@@ -2861,6 +2976,7 @@ fn run_service_cmd(robot_json: bool, command: ServiceCliCommand) -> ExitCode {
                 listen: args.listen,
                 profile: args.profile,
                 allow_no_auth: args.allow_no_auth,
+                client_credentials: args.client_credentials,
                 skip_linger: args.skip_linger,
                 yes: args.yes,
                 dry_run: args.dry_run,
@@ -2914,6 +3030,170 @@ fn run_service_cmd(robot_json: bool, command: ServiceCliCommand) -> ExitCode {
             }
             ExitCode::from(e.exit_code)
         }
+    }
+}
+
+fn run_client_credentials_cmd(robot_json: bool, command: ClientCredentialCliCommand) -> ExitCode {
+    let store = match ClientCredentialStore::open_default() {
+        Ok(store) => store,
+        Err(error) => {
+            emit_status_error(
+                robot_json,
+                "ORACLEMCP_CLIENT_CREDENTIAL_STORE_UNAVAILABLE",
+                &client_credential_error_message(&error),
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let store_path = store.path().display().to_string();
+    let result = match command {
+        ClientCredentialCliCommand::Issue(args) => store
+            .issue(ClientCredentialIssueRequest::new(args.label, args.scopes))
+            .map(|issued| {
+                let client_id = issued.client_id.clone();
+                let bearer = issued.bearer.expose().to_owned();
+                serde_json::json!({
+                    "kind": "client_credential_issued",
+                    "store_path": store_path,
+                    "client": issued.view,
+                    "bearer": bearer,
+                    "bearer_shown_once": true,
+                    "serve_args": ["serve", "--listen", "127.0.0.1:7070", "--client-credentials"],
+                    "rotation_command": ["oraclemcp", "clients", "rotate", client_id],
+                    "revocation_command": ["oraclemcp", "clients", "revoke", issued.client_id],
+                })
+            }),
+        ClientCredentialCliCommand::List => Ok(serde_json::json!({
+            "kind": "client_credentials",
+            "store_path": store_path,
+            "clients": store.list(),
+        })),
+        ClientCredentialCliCommand::Rotate(args) => store.rotate(&args.client_id).map(
+            |(issued, lifecycle)| {
+                let bearer = issued.bearer.expose().to_owned();
+                serde_json::json!({
+                    "kind": "client_credential_rotated",
+                    "store_path": store_path,
+                    "client": issued.view,
+                    "bearer": bearer,
+                    "bearer_shown_once": true,
+                    "closed_principal": client_lifecycle_json(&lifecycle),
+                    "next_step": "restart or close active sessions for this client so old in-memory grants are gone",
+                })
+            },
+        ),
+        ClientCredentialCliCommand::Revoke(args) => {
+            store.revoke(&args.client_id).map(|lifecycle| {
+                serde_json::json!({
+                    "kind": "client_credential_revoked",
+                    "store_path": store_path,
+                    "closed_principal": client_lifecycle_json(&lifecycle),
+                    "next_step": "restart or close active sessions for this client so in-memory grants are gone",
+                })
+            })
+        }
+    };
+
+    match result {
+        Ok(value) if robot_json => {
+            stdout_exit(write_stdout_line(&value.to_string()), ExitCode::SUCCESS)
+        }
+        Ok(value) => stdout_exit(
+            write_stdout_text(&client_credential_text(&value)),
+            ExitCode::SUCCESS,
+        ),
+        Err(error) => {
+            emit_status_error(
+                robot_json,
+                "ORACLEMCP_CLIENT_CREDENTIAL_FAILED",
+                &client_credential_error_message(&error),
+            );
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn client_lifecycle_json(lifecycle: &ClientCredentialLifecycle) -> serde_json::Value {
+    serde_json::json!({
+        "client_id": &lifecycle.client_id,
+        "subject_id_hash": operator_subject_id_hash(&lifecycle.principal_key),
+        "generation": lifecycle.generation,
+    })
+}
+
+fn client_credential_text(value: &serde_json::Value) -> String {
+    let mut out = String::new();
+    let kind = value["kind"].as_str().unwrap_or("client_credentials");
+    out.push_str(kind);
+    out.push('\n');
+    if let Some(path) = value["store_path"].as_str() {
+        out.push_str(&format!("store: {path}\n"));
+    }
+    if let Some(client) = value.get("client") {
+        out.push_str(&format!(
+            "client_id: {}\nlabel: {}\nstatus: {}\ngeneration: {}\nsubject_id_hash: {}\nscopes: {}\n",
+            client["client_id"].as_str().unwrap_or(""),
+            client["label"].as_str().unwrap_or(""),
+            client["status"].as_str().unwrap_or(""),
+            client["generation"].as_u64().unwrap_or(0),
+            client["subject_id_hash"].as_str().unwrap_or(""),
+            client["scopes"]
+                .as_array()
+                .map(|scopes| scopes
+                    .iter()
+                    .filter_map(|scope| scope.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "))
+                .unwrap_or_default()
+        ));
+    }
+    if let Some(bearer) = value["bearer"].as_str() {
+        out.push_str("bearer (shown once): ");
+        out.push_str(bearer);
+        out.push('\n');
+    }
+    if let Some(closed) = value.get("closed_principal") {
+        out.push_str(&format!(
+            "closed_principal: client_id={} subject_id_hash={} generation={}\n",
+            closed["client_id"].as_str().unwrap_or(""),
+            closed["subject_id_hash"].as_str().unwrap_or(""),
+            closed["generation"].as_u64().unwrap_or(0)
+        ));
+    }
+    if let Some(clients) = value["clients"].as_array() {
+        for client in clients {
+            out.push_str(&format!(
+                "{}\t{}\t{}\tgeneration={}\tscopes={}\tsubject={}\n",
+                client["client_id"].as_str().unwrap_or(""),
+                client["status"].as_str().unwrap_or(""),
+                client["label"].as_str().unwrap_or(""),
+                client["generation"].as_u64().unwrap_or(0),
+                client["scopes"]
+                    .as_array()
+                    .map(|scopes| scopes
+                        .iter()
+                        .filter_map(|scope| scope.as_str())
+                        .collect::<Vec<_>>()
+                        .join(","))
+                    .unwrap_or_default(),
+                client["subject_id_hash"].as_str().unwrap_or("")
+            ));
+        }
+    }
+    if let Some(next_step) = value["next_step"].as_str() {
+        out.push_str("next: ");
+        out.push_str(next_step);
+        out.push('\n');
+    }
+    out
+}
+
+fn client_credential_error_message(error: &ClientCredentialError) -> String {
+    match error {
+        ClientCredentialError::Store(oraclemcp_core::file_store::FileStoreError::Locked) => {
+            "client credential store is locked by the service; stop the service before offline mutation".to_owned()
+        }
+        _ => error.to_string(),
     }
 }
 
@@ -4259,6 +4539,35 @@ mod tests {
                 .expect("codex config")
                 .contains("tenant_ro")
         );
+        assert_eq!(
+            out["http_client_credentials"]["serve_args"],
+            serde_json::json!([
+                "serve",
+                "--listen",
+                "127.0.0.1:7070",
+                "--client-credentials",
+                "--profile",
+                "tenant_ro"
+            ])
+        );
+        assert_eq!(
+            out["http_client_credentials"]["claude_mcp_add"],
+            serde_json::json!([
+                "claude",
+                "mcp",
+                "add",
+                "oracle",
+                "--transport",
+                "http",
+                "http://127.0.0.1:7070/mcp"
+            ])
+        );
+        assert!(
+            out["http_client_credentials"]["secret_rule"]
+                .as_str()
+                .expect("secret rule")
+                .contains("never in profiles.toml")
+        );
         assert!(
             out["custom_tool_toml"]
                 .as_str()
@@ -4402,6 +4711,7 @@ mod tests {
             "--profile",
             "dev_ro",
             "--allow-no-auth",
+            "--client-credentials",
             "--skip-linger",
         ])
         .expect("parse service install");
@@ -4413,6 +4723,7 @@ mod tests {
                     ref listen,
                     ref profile,
                     allow_no_auth: true,
+                    client_credentials: true,
                     skip_linger: true,
                     dry_run: true,
                     ..
@@ -4458,6 +4769,79 @@ mod tests {
     }
 
     #[test]
+    fn client_credential_commands_parse() {
+        let issue = Cli::try_parse_from([
+            "oraclemcp",
+            "--json",
+            "clients",
+            "issue",
+            "--label",
+            "Claude Desktop",
+            "--scope",
+            "oracle:read",
+            "--scope",
+            "oracle:execute",
+        ])
+        .expect("parse client issue");
+        assert!(issue.robot_json);
+        assert!(matches!(
+            issue.command,
+            Some(Command::Clients {
+                command: ClientCredentialCliCommand::Issue(ClientCredentialIssueCliArgs {
+                    ref label,
+                    ref scopes,
+                })
+            }) if label == "Claude Desktop"
+                && scopes == &vec!["oracle:read".to_owned(), "oracle:execute".to_owned()]
+        ));
+
+        let issue_default_scope =
+            Cli::try_parse_from(["oraclemcp", "clients", "issue", "--label", "Claude Desktop"])
+                .expect("parse client issue with default scope");
+        assert!(matches!(
+            issue_default_scope.command,
+            Some(Command::Clients {
+                command: ClientCredentialCliCommand::Issue(ClientCredentialIssueCliArgs {
+                    ref scopes,
+                    ..
+                })
+            }) if scopes == &vec!["oracle:read".to_owned()]
+        ));
+
+        let rotate = Cli::try_parse_from([
+            "oraclemcp",
+            "client-credentials",
+            "rotate",
+            "client-0123456789abcdef0123456789abcdef",
+        ])
+        .expect("parse client rotate");
+        assert!(matches!(
+            rotate.command,
+            Some(Command::Clients {
+                command: ClientCredentialCliCommand::Rotate(ClientCredentialIdCliArgs {
+                    ref client_id,
+                })
+            }) if client_id == "client-0123456789abcdef0123456789abcdef"
+        ));
+
+        let revoke = Cli::try_parse_from([
+            "oraclemcp",
+            "clients",
+            "revoke",
+            "client-0123456789abcdef0123456789abcdef",
+        ])
+        .expect("parse client revoke");
+        assert!(matches!(
+            revoke.command,
+            Some(Command::Clients {
+                command: ClientCredentialCliCommand::Revoke(ClientCredentialIdCliArgs {
+                    ref client_id,
+                })
+            }) if client_id == "client-0123456789abcdef0123456789abcdef"
+        ));
+    }
+
+    #[test]
     fn robot_docs_guide_is_available_with_or_without_guide_subcommand() {
         let bare = Cli::try_parse_from(["oraclemcp", "robot-docs"]).expect("parse");
         assert!(matches!(
@@ -4492,7 +4876,11 @@ mod tests {
         assert!(text.contains("oraclemcp --json setup --profile <profile>"));
         assert!(text.contains("Always-on service"));
         assert!(text.contains("oraclemcp --json service install --dry-run --profile <profile>"));
-        assert!(text.contains("oraclemcp service install --yes --profile <profile>"));
+        assert!(
+            text.contains(
+                "oraclemcp service install --yes --client-credentials --profile <profile>"
+            )
+        );
         assert!(text.contains("Thin diagnostics"));
         assert!(text.contains("does not need Oracle Instant Client"));
         assert!(text.contains("Result materialization"));

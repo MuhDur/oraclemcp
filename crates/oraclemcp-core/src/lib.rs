@@ -80,7 +80,7 @@ pub use capability::{
 pub use client_credentials::{
     AuthenticatedClientCredential, ClientCredentialError, ClientCredentialIssueRequest,
     ClientCredentialLifecycle, ClientCredentialStatus, ClientCredentialStore, ClientCredentialView,
-    IssuedClientCredential,
+    IssuedClientCredential, looks_like_client_bearer,
 };
 pub use config_ops::{
     ConfigApplyOutcome, ConfigApplyReport, ConfigDraftPlan, ConfigDraftPreview, ConfigFieldChange,

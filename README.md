@@ -56,6 +56,8 @@ bash install.sh --version "$VERSION"            # install the verified prebuilt 
 release checksum, cosign blob signature, and cosign blob attestation before
 extracting, installs the `om` alias and shell completions, and never installs a
 service unless you pass `--service` or answer yes to the interactive prompt.
+Pass `--register-client <label>` to issue one scoped HTTP client bearer during
+install; the bearer is printed once and is not written to generated configs.
 The checksum proves transport integrity only; cosign is the authenticity and
 provenance check. Use `--source` only when you intentionally want to compile
 with the pinned Rust toolchain instead of using a release artifact.
@@ -141,6 +143,8 @@ Or run it directly:
 
 ```sh
 oraclemcp serve                      # stdio (default); --allow-no-auth for local dev
+oraclemcp --json clients issue --label claude --scope oracle:read  # shown-once HTTP bearer
+oraclemcp serve --listen 127.0.0.1:7070 --client-credentials --profile db_ro
 oraclemcp serve --listen 127.0.0.1:7070 --allow-no-auth   # local HTTP dev only
 oraclemcp --json setup --profile db_ro    # generic onboarding templates
 oraclemcp capabilities               # the advertised tool surface + feature tiers (JSON)
@@ -152,7 +156,7 @@ oraclemcp info                       # build info: version, tools, transports, t
 oraclemcp robot-docs guide           # compact in-binary guide for agents
 oraclemcp completions bash           # shell completions: bash, zsh, fish, powershell
 oraclemcp --json service install --dry-run --profile db_ro  # preview systemd/launchd/Windows service changes
-oraclemcp service install --yes --profile db_ro              # install the persistent local service
+oraclemcp service install --yes --client-credentials --profile db_ro
 oraclemcp --json service status       # inspect service-manager state
 oraclemcp --json service logs         # inspect recent service logs
 oraclemcp dashboard                   # open the local dashboard through a one-time pairing URL
@@ -178,9 +182,9 @@ systemd uses `Type=notify`, `NotifyAccess=main`, `Restart=on-failure`,
 through `sc.exe`. `oraclemcp --json doctor` reports those configured caps plus
 the effective open-file, task, memory-cgroup, and OOM caps visible to the
 current process.
-Streamable HTTP auth rules are unchanged for service mode: configure OAuth or
-mTLS with registered client leaf fingerprints, or pass `--allow-no-auth` only
-for intentional local development.
+Streamable HTTP auth rules are unchanged for service mode: configure
+service-owned per-client credentials, OAuth, or mTLS with registered client leaf
+fingerprints, or pass `--allow-no-auth` only for intentional local development.
 
 The browser dashboard is paired separately even on loopback. `oraclemcp
 dashboard` creates a 0600 one-time ticket under the user runtime directory,
@@ -197,11 +201,22 @@ DDL/Admin apply is release-gated; DDL can be previewed, but applying it requires
 a non-browser operator path until a profile-level dashboard DDL opt-in exists.
 
 The Streamable HTTP transport (`--listen`) fails closed. It starts only when
-OAuth bearer enforcement, mTLS client-certificate verification, or
-`--allow-no-auth` is supplied, and mTLS requests become application principals
-only through registered leaf fingerprints. It refuses any non-loopback bind
-unless `ORACLEMCP_HTTP_ALLOW_REMOTE=1` is set. OAuth configuration can come from
-`profiles.toml` or CLI flags:
+service-owned per-client credentials, OAuth bearer enforcement, mTLS
+client-certificate verification, or `--allow-no-auth` is supplied, and mTLS
+requests become application principals only through registered leaf
+fingerprints. It refuses any non-loopback bind unless
+`ORACLEMCP_HTTP_ALLOW_REMOTE=1` is set. Per-client credentials are one bearer
+per MCP client; the bearer is shown once by `oraclemcp clients issue` or
+`oraclemcp clients rotate`, while `clients.json` stores only salted hashes:
+
+```sh
+oraclemcp --json clients issue --label claude --scope oracle:read
+oraclemcp serve --listen 127.0.0.1:7070 --client-credentials --profile db_ro
+oraclemcp --json clients rotate <client_id>
+oraclemcp --json clients revoke <client_id>
+```
+
+OAuth configuration can come from `profiles.toml` or CLI flags:
 
 ```sh
 export ORACLEMCP_OAUTH_HS256_SECRET='replace-with-a-long-random-secret'
@@ -228,9 +243,10 @@ client certificates (mTLS) verified against that CA, but a CA-verified cert is
 not an application identity until its leaf DER SHA-256 fingerprint is listed in
 `[http.mtls].client_fingerprints` or passed with `--mtls-client-fingerprint`.
 The resulting principal key is `mtls:sha256:<hex>`. Server-only TLS encrypts the
-transport but is not application authentication, so `/mcp` still needs OAuth or
-an explicit `--allow-no-auth` development opt-in. Non-loopback binds require
-`ORACLEMCP_HTTP_ALLOW_REMOTE=1` even with TLS.
+transport but is not application authentication, so `/mcp` still needs
+per-client credentials, OAuth, or an explicit `--allow-no-auth` development
+opt-in. Non-loopback binds require `ORACLEMCP_HTTP_ALLOW_REMOTE=1` even with
+TLS.
 
 Connection profiles are resolved from layered configuration (`oraclemcp-config`); select one with `serve --profile <name>`.
 
