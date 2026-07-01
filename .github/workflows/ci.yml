@@ -183,7 +183,7 @@ jobs:
   # completed 0.2.2 -> 0.5.x bump) touches exactly one file. Mirrored by the
   # `driver_seam` test in crates/oraclemcp-db so `cargo test` catches a leak too.
   boundary:
-    name: engine-free boundary + driver-seam + honesty lint
+    name: engine-free boundary + surface + driver-seam + honesty lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -193,6 +193,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - run: bash scripts/oraclemcp_boundary_lint.sh
+      - run: bash scripts/oraclemcp_agent_surface_lint.sh
       - run: bash scripts/oraclemcp_driver_seam_lint.sh
       - run: bash scripts/oraclemcp_concurrency_lint.sh
       - run: bash scripts/oraclemcp_honesty_grep.sh

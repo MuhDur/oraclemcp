@@ -28,12 +28,13 @@ evidence is the CI run for that commit (linked below at release time).
 | Pinned-nightly build | `cargo build --workspace` | `pinned-nightly` |
 | Supply chain | `cargo deny check` (advisories, licenses, bans, sources) | `supply-chain` |
 | Engine-free boundary + forbidden-deps | `scripts/oraclemcp_boundary_lint.sh` | `boundary` |
+| Agent surface lint | `scripts/oraclemcp_agent_surface_lint.sh` | `boundary` |
 | Driver-adapter seam | `scripts/oraclemcp_driver_seam_lint.sh` | `boundary` |
 | Honesty framing | `scripts/oraclemcp_honesty_grep.sh` | `boundary` |
 | Sensitive-data lint | `scripts/sensitive_data_lint.sh` | `sensitive-data` |
 | Release metadata sync | `scripts/release_preflight.sh` | `release-metadata` |
 
-All ten run on the pinned nightly (every toolchain-bearing job derives its
+All eleven run on the pinned nightly (every toolchain-bearing job derives its
 toolchain from `env.RUST_TOOLCHAIN` in `ci.yml`).
 
 ### Advisory (not release-blocking)

@@ -95,3 +95,37 @@ fn no_overclaiming_framing_in_release_visible_text() {
         violations.join("\n")
     );
 }
+
+#[test]
+fn call_routine_absent_from_agent_surface() {
+    let root = workspace_root();
+    let mut files = vec![
+        root.join("crates/oraclemcp/Cargo.toml"),
+        root.join("crates/oraclemcp-core/Cargo.toml"),
+    ];
+    collect(&root.join("crates/oraclemcp/src"), &mut files);
+    collect(&root.join("crates/oraclemcp-core/src"), &mut files);
+
+    let mut violations = Vec::new();
+    for f in &files {
+        let s = f.to_string_lossy();
+        if s.contains("/tests/") || s.ends_with("tests.rs") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(f) else {
+            continue;
+        };
+        for (i, line) in text.lines().enumerate() {
+            if line.contains("call_routine") {
+                violations.push(format!("{}:{}: {}", f.display(), i + 1, line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "`call_routine` is adapter-internal oraclemcp-db plumbing and must not \
+         appear in the oraclemcp/oraclemcp-core agent-facing surface:\n{}",
+        violations.join("\n")
+    );
+}

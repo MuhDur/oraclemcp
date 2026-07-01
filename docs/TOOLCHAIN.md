@@ -130,6 +130,7 @@ cargo +nightly-YYYY-MM-DD build --workspace
 cargo +nightly-YYYY-MM-DD doc --workspace --no-deps
 
 bash scripts/oraclemcp_boundary_lint.sh      # incl. the opentelemetry-sdk rt-tokio early-warning
+bash scripts/oraclemcp_agent_surface_lint.sh
 bash scripts/oraclemcp_driver_seam_lint.sh
 bash scripts/oraclemcp_honesty_grep.sh
 bash scripts/sensitive_data_lint.sh

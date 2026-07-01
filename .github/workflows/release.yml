@@ -92,6 +92,7 @@ jobs:
       - run: cargo test --workspace --doc
       - run: cargo doc --workspace --no-deps
       - run: bash scripts/oraclemcp_boundary_lint.sh
+      - run: bash scripts/oraclemcp_agent_surface_lint.sh
       - run: bash scripts/oraclemcp_concurrency_lint.sh
       - run: bash scripts/sensitive_data_lint.sh
       - uses: taiki-e/install-action@cargo-deny

@@ -608,6 +608,7 @@ Before a release, the same gates CI enforces must pass on the pinned toolchain
 cargo fmt --all -- --check                                  # formatting
 cargo clippy --workspace --all-targets -- -D warnings       # lint, warnings = errors
 cargo deny check                                            # advisories / licenses / bans / sources
+bash scripts/oraclemcp_agent_surface_lint.sh                # no arbitrary routine MCP surface
 bash scripts/oraclemcp_driver_seam_lint.sh                  # driver-adapter seam stays one file
 bash scripts/oraclemcp_honesty_grep.sh                      # no over-claiming framing
 bash scripts/oraclemcp_api_lock.sh                          # public API lock (no unreviewed surface drift)
