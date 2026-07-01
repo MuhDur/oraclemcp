@@ -51,6 +51,7 @@ required=(
   tests/golden/PROVENANCE.md
   scripts/ui_fixtures_validate_against_rust_schema.sh
   scripts/oraclemcp_arch_fitness_lint.sh
+  scripts/oraclemcp_feature_powerset.sh
 )
 missing=0
 for path in "${required[@]}"; do

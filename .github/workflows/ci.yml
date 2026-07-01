@@ -102,6 +102,29 @@ jobs:
       - run: cargo test --workspace --doc
       - run: cargo test -p oraclemcp-core --features dashboard-bundle dashboard
 
+  feature-powerset:
+    name: feature powerset (cargo hack)
+    needs: web-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - run: bash scripts/oraclemcp_feature_powerset.sh
+
   # The thin-native line is pinned to nightly because asupersync requires
   # nightly-only language features (oracledb 0.5.1 is stable-clean). This is a
   # build-only ratchet separate from the test job so toolchain installation

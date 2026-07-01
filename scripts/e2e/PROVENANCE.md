@@ -8,6 +8,7 @@ Current generated evidence:
 | Artifact | Generator | Version source | Command |
 |----------|-----------|----------------|---------|
 | JSON-line script contract | `scripts/e2e/lib.sh` | current git checkout | `bash scripts/e2e/run_all.sh --log --dry-run` |
+| Curated feature-powerset CI | `cargo-hack` | current git checkout | `bash scripts/oraclemcp_feature_powerset.sh` |
 | Architecture fitness dependency lint | `cargo metadata --locked --no-deps` | current git checkout | `bash scripts/oraclemcp_arch_fitness_lint.sh` |
 | Doctor fixture/accounting gate | `crates/oraclemcp-core/src/doctor.rs` | current git checkout | `bash scripts/e2e/doctor_fixtures.sh --log` |
 | Offline stdio protocol coverage | `crates/oraclemcp/tests/e2e_stdio.rs` | current git checkout | `cargo test -p oraclemcp --test e2e_stdio -- --nocapture` |
