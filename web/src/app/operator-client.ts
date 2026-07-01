@@ -107,6 +107,22 @@ export type OperatorMetricsData = {
   snapshot: MetricsSnapshot | null;
 };
 
+export type OperatorHealthData = {
+  source: string;
+  liveness?: {
+    status?: string;
+    live?: boolean;
+    ready?: boolean;
+    version?: string | null;
+  };
+  readiness?: {
+    status?: string;
+    ready?: boolean;
+    db_reachable?: boolean;
+    draining?: boolean;
+  };
+};
+
 export type ActiveLane = {
   lane_id: string;
   generation: number;
@@ -324,6 +340,10 @@ export async function fetchDashboardSession(): Promise<DashboardSession> {
 
 export async function fetchOperatorMetrics(): Promise<OperatorResponse<OperatorMetricsData>> {
   return operatorGet("/operator/v1/metrics");
+}
+
+export async function fetchOperatorHealth(): Promise<OperatorResponse<OperatorHealthData>> {
+  return operatorGet("/operator/v1/health");
 }
 
 export async function fetchActiveLanes(): Promise<OperatorResponse<ActiveLanesData>> {

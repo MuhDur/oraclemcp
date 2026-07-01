@@ -52,6 +52,7 @@ import {
   executeWorkbenchSql,
   fetchActiveLanes,
   fetchDashboardSession,
+  fetchOperatorHealth,
   fetchOperatorMetrics,
   fetchProbe,
   overviewProbes,
@@ -168,7 +169,7 @@ function RootLayout(): React.ReactElement {
               <ShieldCheck className="size-5" aria-hidden="true" />
             </div>
             <div>
-              <p className="text-xs font-semibold uppercase text-zinc-500">Operator</p>
+              <p className="text-xs font-semibold uppercase text-zinc-500">Ground Control</p>
               <h1 className="text-xl font-bold tracking-normal">oraclemcp</h1>
             </div>
           </div>
@@ -178,7 +179,8 @@ function RootLayout(): React.ReactElement {
             ))}
           </nav>
         </aside>
-        <main className="min-w-0 flex-1">
+        <main className="min-w-0 flex-1 space-y-4">
+          <GroundControlStrip />
           <Outlet />
         </main>
       </div>
@@ -196,6 +198,126 @@ function NavLink({ item }: { item: NavItem }): React.ReactElement {
       <Icon className="size-4" aria-hidden="true" />
       <span>{item.label}</span>
     </Link>
+  );
+}
+
+const clearanceSteps = [
+  { level: "READ_ONLY", className: "border-emerald-200 bg-emerald-50 text-emerald-900" },
+  { level: "READ_WRITE", className: "border-sky-200 bg-sky-50 text-sky-900" },
+  { level: "DDL", className: "border-amber-200 bg-amber-50 text-amber-900" },
+  { level: "ADMIN", className: "border-rose-200 bg-rose-50 text-rose-900" }
+] as const;
+
+const logbookFilters: AuditTailFilters = {
+  limit: 1,
+  subjectIdHash: "",
+  tool: "",
+  dangerLevel: "",
+  exportProofBundle: false
+};
+
+function GroundControlStrip(): React.ReactElement {
+  const health = useQuery({
+    queryKey: ["operator-health"],
+    queryFn: fetchOperatorHealth,
+    refetchInterval: 5_000
+  });
+  const metrics = useQuery({
+    queryKey: ["operator-metrics"],
+    queryFn: fetchOperatorMetrics,
+    refetchInterval: 5_000
+  });
+  const logbook = useQuery({
+    queryKey: ["audit-tail", "logbook"],
+    queryFn: () => fetchAuditTail(logbookFilters),
+    refetchInterval: 15_000
+  });
+  const readiness = health.data?.data.readiness;
+  const go = readiness?.ready === true && readiness.db_reachable !== false;
+  const snapshot = metrics.data?.data.snapshot ?? null;
+  const activeLanes = snapshot?.active_lanes ?? 0;
+  const blocked = sumCounts(snapshot?.lane_blocked ?? []);
+  const chainStatus =
+    nestedString(logbook.data?.data.proof, ["verification", "hash_chain", "status"]) ??
+    logbook.data?.data.source ??
+    "unavailable";
+  const goValue = health.isFetching && !health.data ? "SYNC" : go ? "GO" : "NO-GO";
+  return (
+    <section
+      className="grid gap-3 rounded-lg border border-zinc-200 bg-white px-4 py-3 shadow-sm xl:grid-cols-[minmax(150px,0.65fr)_minmax(360px,1.4fr)_minmax(140px,0.55fr)_minmax(170px,0.7fr)]"
+      aria-label="ground control"
+    >
+      <SignatureCell
+        icon={ShieldCheck}
+        label="GO/NO-GO"
+        value={goValue}
+        detail={readiness?.status ?? "unavailable"}
+        tone={go ? "ok" : health.isFetching ? "info" : "warn"}
+      />
+      <div className="min-w-0 border-t border-zinc-100 pt-3 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-xs font-bold uppercase text-zinc-500">Clearance Ladder</p>
+          <Badge tone={blocked > 0 ? "warn" : "ok"}>{blocked > 0 ? "blocked" : "clear"}</Badge>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {clearanceSteps.map((step) => (
+            <span
+              key={step.level}
+              className={cn(
+                "inline-flex h-7 items-center rounded-md border px-2 font-mono text-xs font-bold",
+                step.className
+              )}
+            >
+              {step.level}
+            </span>
+          ))}
+        </div>
+      </div>
+      <SignatureCell
+        icon={Timer}
+        label="Countdown"
+        value="idle"
+        detail={`${formatNumber(activeLanes)} lanes`}
+        tone={activeLanes > 0 ? "info" : "off"}
+      />
+      <SignatureCell
+        icon={FileClock}
+        label="Logbook"
+        value={chainStatus}
+        detail={logbook.isFetching && !logbook.data ? "sync" : "audit"}
+        tone={chainStatus === "ok" ? "ok" : chainStatus === "broken" ? "warn" : "info"}
+      />
+    </section>
+  );
+}
+
+function SignatureCell({
+  icon: Icon,
+  label,
+  value,
+  detail,
+  tone
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  value: string;
+  detail: string;
+  tone: "neutral" | "ok" | "warn" | "off" | "info";
+}): React.ReactElement {
+  return (
+    <div className="flex min-w-0 items-center gap-3 border-t border-zinc-100 pt-3 first:border-t-0 first:pt-0 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0 xl:first:border-l-0 xl:first:pl-0">
+      <div className="flex size-10 shrink-0 items-center justify-center rounded-md border border-zinc-200 bg-zinc-50 text-zinc-700">
+        <Icon className="size-5" aria-hidden="true" />
+      </div>
+      <div className="min-w-0">
+        <p className="text-xs font-bold uppercase text-zinc-500">{label}</p>
+        <div className="mt-1 flex min-w-0 items-center gap-2">
+          <p className="truncate font-mono text-sm font-bold text-zinc-950">{value}</p>
+          <Badge tone={tone}>{tone}</Badge>
+        </div>
+        <p className="mt-1 truncate text-xs font-semibold text-zinc-500">{detail}</p>
+      </div>
+    </div>
   );
 }
 
