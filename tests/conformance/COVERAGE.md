@@ -43,6 +43,10 @@ Harnesses:
   `crates/oraclemcp-core/src/operator_protocol.rs`,
   `scripts/ui_fixtures_validate_against_rust_schema.sh`, and
   `tests/fixtures/ui/operator-v1/*.json`
+- Durable SQL idempotency and cross-restart replay protection:
+  `crates/oraclemcp-core/src/write_intent.rs`,
+  `crates/oraclemcp/src/main.rs`, and
+  `crates/oraclemcp/src/dispatch/tests.rs`
 - Native listener TLS tests: `crates/oraclemcp-core/src/http.rs`
 - Transports under test:
   - stdio: `OracleMcpServer::serve_stdio_with_io`
@@ -73,8 +77,9 @@ Harnesses:
 | Operator v1 | 8 | 0 | 8 | 8 | 0 | 100% |
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
 | Oracle structured cells | 6 | 0 | 6 | 6 | 0 | 100% |
+| Durable SQL idempotency | 1 | 0 | 1 | 1 | 0 | 100% |
 
-Total tracked requirements: 49 MUST, 2 SHOULD, 51 tested.
+Total tracked requirements: 50 MUST, 2 SHOULD, 52 tested.
 
 ## Requirement IDs
 
@@ -131,6 +136,7 @@ Total tracked requirements: 49 MUST, 2 SHOULD, 51 tested.
 | DB-SER-004 | MUST | Oracle structured cells | Legacy silent-flattening shapes are rejected by the schema contract test. |
 | DB-SER-005 | MUST | Oracle structured cells | `OracleCell::structured` carries the structured contract version, the published schema declares it, and metadata cache keys include it. |
 | DB-SER-006 | MUST | Oracle structured cells | Structured ARRAY/JSON/VECTOR decode is capped by row, cell, byte, and depth budgets; larger query budgets require `deep_decode=true`. |
+| WRITE-INTENT-001 | MUST | Durable SQL idempotency | Committing tools write a durable pre-execute intent, unresolved in-doubt intents fail writable startup closed, and recovered terminal history rejects exact confirmation-grant plus SQL replay after restart. |
 
 ## HTTP Proof Map
 
@@ -156,6 +162,7 @@ Total tracked requirements: 49 MUST, 2 SHOULD, 51 tested.
 | OPERATOR-V1-008 | `crates/oraclemcp-core/src/http.rs::tests::operator_events_resume_is_lane_scoped`; `crates/oraclemcp-core/src/http.rs::tests::operator_events_last_event_id_reports_gap_for_slow_consumer` |
 | HTTPS-001 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_accepts_tls_handshake` |
 | HTTPS-002 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_requires_client_certificate_when_mtls_is_configured` |
+| WRITE-INTENT-001 | `crates/oraclemcp-core/src/write_intent.rs::tests::resolved_intent_survives_reopen_and_rejects_same_grant_sql_replay`; `crates/oraclemcp/src/main.rs::tests::build_write_intent_log_fails_closed_on_unresolved_restart_intent`; `crates/oraclemcp/src/dispatch/tests.rs::execute_commit_in_doubt_leaves_durable_intent_unresolved` |
 
 ## Provenance
 
