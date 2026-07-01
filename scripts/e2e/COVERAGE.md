@@ -16,3 +16,9 @@ their own rows or generated reports instead of replacing this base contract.
 | Summary | MUST total | Tested | Passing | XFAIL | Score |
 |---------|------------|--------|---------|-------|-------|
 | MUST coverage | 6 | 6 | 6 | 0 | 1.00 |
+
+## Scenario Acceptance Gates
+
+| Scenario | Release bead | Covered by | Status |
+|----------|--------------|------------|--------|
+| 0.6.0 read-only dashboard | `oraclemcp-epic-060-f4xo.8.26` | `scripts/e2e/dashboard_readonly.sh`, `crates/oraclemcp/tests/dashboard_e2e.rs` | PASS |
