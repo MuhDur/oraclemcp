@@ -688,6 +688,18 @@ export async function fetchExplorerConnection(
   });
 }
 
+export async function fetchLaneCapabilities(
+  session: DashboardSession,
+  laneId?: string
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId("session-capabilities"),
+    lane_id: laneIdValue(laneId),
+    tool: "oracle_capabilities",
+    arguments: {}
+  });
+}
+
 export async function fetchExplorerSchemas(
   session: DashboardSession,
   request: ExplorerSchemasRequest

@@ -111,6 +111,7 @@ import {
   fetchExplorerObjects,
   fetchExplorerSchemas,
   fetchExplorerSource,
+  fetchLaneCapabilities,
   explorerMetadataCacheSummary,
   ORACLE_METADATA_SERIALIZATION_CONTRACT_VERSION,
   type WorkbenchActionData,
@@ -410,6 +411,7 @@ function SessionsPage(): React.ReactElement {
   const [ttlSeconds, setTtlSeconds] = React.useState(900);
   const [confirm, setConfirm] = React.useState("");
   const [lastResult, setLastResult] = React.useState<SessionLevelResult | null>(null);
+  const capabilities = useDashboardCapabilities();
   const session = useQuery({
     queryKey: ["dashboard-session"],
     queryFn: fetchDashboardSession,
@@ -422,8 +424,39 @@ function SessionsPage(): React.ReactElement {
     queryFn: fetchActiveLanes,
     refetchInterval: 5_000
   });
+  const metrics = useQuery({
+    queryKey: ["operator-metrics"],
+    queryFn: fetchOperatorMetrics,
+    refetchInterval: 5_000
+  });
   const lanes = activeLanes.data?.data.lanes ?? [];
   const selectedLane = lanes.find((lane) => lane.lane_id === selectedLaneId) ?? lanes[0] ?? null;
+  const selectedLaneKey = selectedLane?.lane_id ?? "";
+  const eventLog = useOperatorEventLog(selectedLaneKey || "operator");
+  const selectedCapabilities = useQuery({
+    queryKey: ["sessions", "capabilities", selectedLaneKey],
+    queryFn: async () => {
+      if (!session.data || !selectedLaneKey) {
+        throw new Error("dashboard session is not ready");
+      }
+      return fetchLaneCapabilities(session.data, selectedLaneKey);
+    },
+    enabled: session.status === "success" && Boolean(selectedLaneKey),
+    refetchInterval: 10_000,
+    retry: 1
+  });
+  const selectedConnection = useQuery({
+    queryKey: ["sessions", "connection", selectedLaneKey],
+    queryFn: async () => {
+      if (!session.data || !selectedLaneKey) {
+        throw new Error("dashboard session is not ready");
+      }
+      return fetchExplorerConnection(session.data, selectedLaneKey);
+    },
+    enabled: session.status === "success" && Boolean(selectedLaneKey),
+    refetchInterval: 10_000,
+    retry: 1
+  });
 
   React.useEffect(() => {
     if (!selectedLaneId && lanes.length > 0) {
@@ -458,6 +491,7 @@ function SessionsPage(): React.ReactElement {
       }
       queryClient.invalidateQueries({ queryKey: ["active-lanes"] });
       queryClient.invalidateQueries({ queryKey: ["operator-metrics"] });
+      queryClient.invalidateQueries({ queryKey: ["sessions", "capabilities", selectedLaneKey] });
     },
     onError: (error, action) => {
       setLastResult({
@@ -471,38 +505,78 @@ function SessionsPage(): React.ReactElement {
   const sessionTone =
     session.status === "success" ? "ok" : session.status === "error" ? "warn" : "info";
   const canAct = session.status === "success" && Boolean(selectedLane) && !levelMutation.isPending;
-  const pending = activeLanes.isFetching || session.isFetching || levelMutation.isPending;
+  const pending =
+    activeLanes.isFetching ||
+    metrics.isFetching ||
+    session.isFetching ||
+    selectedCapabilities.isFetching ||
+    selectedConnection.isFetching ||
+    levelMutation.isPending;
+  const snapshot = metrics.data?.data.snapshot ?? null;
+  const summary = overviewSummary(snapshot, lanes);
+  const laneRows = sessionLaneRows(
+    snapshot,
+    lanes,
+    selectedLaneKey,
+    selectedCapabilities.data,
+    selectedConnection.data
+  );
+  const fleet = fleetViewModel(summary, laneRows, pending);
+  const groundControl = sessionGroundControlModel(summary, eventLog.status, pending);
+  const selectedDetail = selectedLaneDetail(
+    selectedLane,
+    laneRows,
+    selectedCapabilities.data,
+    selectedConnection.data,
+    selectedCapabilities.error instanceof Error ? selectedCapabilities.error.message : null,
+    selectedConnection.error instanceof Error ? selectedConnection.error.message : null,
+    eventLog.events
+  );
 
   return (
     <PageFrame
       title="Sessions"
-      eyebrow="Active Lanes"
-      description="Lane state and operating-level control."
+      eyebrow="Mission Control"
+      description="Live lane state, activity, and per-lane clearance."
     >
       <div className="space-y-4">
+        <SessionMissionHeader
+          model={groundControl}
+          summary={summary}
+          eventStatus={eventLog.status}
+          source={activeLanes.data?.data.source ?? "unavailable"}
+          pending={pending}
+        />
+        <BigBoardSurface capabilities={capabilities} model={fleet} skin={GROUND_CONTROL_SKIN} />
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)]">
           <SessionLaneTable
-            lanes={lanes}
+            rows={laneRows}
             selectedLaneId={selectedLane?.lane_id ?? selectedLaneId}
-            pending={activeLanes.isFetching}
+            pending={pending}
             onSelect={(laneId) => setSelectedLaneId(laneId)}
           />
-          <SessionLevelControlPanel
-            canAct={canAct}
-            confirm={confirm}
-            pending={pending}
-            result={lastResult}
-            selectedLane={selectedLane}
-            sessionTone={sessionTone}
-            targetLevel={targetLevel}
-            ttlSeconds={ttlSeconds}
-            onConfirmChange={setConfirm}
-            onLevelChange={setTargetLevel}
-            onTtlChange={setTtlSeconds}
-            onAction={(action) => levelMutation.mutate(action)}
-          />
+          <div className="space-y-4">
+            <SessionLaneDetailPanel detail={selectedDetail} />
+            <SessionLevelControlPanel
+              canAct={canAct}
+              confirm={confirm}
+              pending={pending}
+              result={lastResult}
+              selectedLane={selectedLane}
+              sessionTone={sessionTone}
+              targetLevel={targetLevel}
+              ttlSeconds={ttlSeconds}
+              onConfirmChange={setConfirm}
+              onLevelChange={setTargetLevel}
+              onTtlChange={setTtlSeconds}
+              onAction={(action) => levelMutation.mutate(action)}
+            />
+          </div>
         </div>
-        <ProbeDashboard probes={sessionsProbes} compact />
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.8fr)]">
+          <OperatorEventLogPanel status={eventLog.status} events={eventLog.events} />
+          <ProbeDashboard probes={sessionsProbes} compact />
+        </div>
       </div>
     </PageFrame>
   );
@@ -524,13 +598,92 @@ type SessionLevelResult =
 
 const operatingLevels: OperatingLevel[] = ["READ_WRITE", "DDL", "ADMIN"];
 
+type SessionLaneRow = LaneMetricRow & {
+  generation: number;
+  statusLabel: string;
+  currentLevel: string;
+  maxLevel: string;
+  activeProfile: string;
+  dbFingerprint: string;
+  connected: string;
+  selected: boolean;
+};
+
+type SessionLaneDetail = {
+  laneId: string;
+  subjectIdHash: string;
+  generation: number;
+  status: string;
+  currentLevel: string;
+  maxLevel: string;
+  protectedProfile: string;
+  activeProfile: string;
+  dbFingerprint: string;
+  visibleSchema: string;
+  connected: string;
+  connectionStrategy: string;
+  serverVersion: string;
+  databaseRole: string;
+  openMode: string;
+  requests: number;
+  blocked: number;
+  meanLatencyMs: number;
+  maxLatencyMs: number;
+  lastEvent: string;
+  detailState: string;
+};
+
+type SessionCapabilitiesSummary = {
+  currentLevel: string;
+  maxLevel: string;
+  protectedProfile: string;
+  activeProfile: string;
+  connected: string;
+};
+
+function SessionMissionHeader({
+  model,
+  summary,
+  eventStatus,
+  source,
+  pending
+}: {
+  model: GroundControlViewModel;
+  summary: OverviewSummary;
+  eventStatus: EventStreamStatus;
+  source: string;
+  pending: boolean;
+}): React.ReactElement {
+  const GroundControl = GROUND_CONTROL_SKIN.renderers.GroundControl;
+  return (
+    <div className="grid gap-4 xl:grid-cols-[minmax(360px,0.9fr)_minmax(0,1.1fr)]">
+      <GroundControl model={model} />
+      <Surface className="overflow-hidden">
+        <PanelHeader
+          icon={Radio}
+          title="Live Sessions"
+          meta={pending ? "sync" : source}
+          tone={pending ? "info" : summary.activeLanes > 0 ? "ok" : "off"}
+        />
+        <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-5">
+          <CapacityFact label="Lanes" value={summary.activeLanes} />
+          <CapacityFact label="Requests" value={summary.totalRequests} />
+          <CapacityFact label="Blocked" value={summary.blocked} />
+          <CapacityFact label="Errors" value={summary.errors} />
+          <CapacityFact label="Events" value={eventStatus} mono />
+        </div>
+      </Surface>
+    </div>
+  );
+}
+
 function SessionLaneTable({
-  lanes,
+  rows,
   selectedLaneId,
   pending,
   onSelect
 }: {
-  lanes: ActiveLane[];
+  rows: SessionLaneRow[];
   selectedLaneId: string;
   pending: boolean;
   onSelect: (laneId: string) => void;
@@ -540,54 +693,77 @@ function SessionLaneTable({
       <PanelHeader
         icon={Database}
         title="Active Lanes"
-        meta={pending ? "sync" : `${lanes.length} lanes`}
-        tone={pending ? "info" : lanes.length > 0 ? "ok" : "off"}
+        meta={pending ? "sync" : `${rows.length} lanes`}
+        tone={pending ? "info" : rows.length > 0 ? "ok" : "off"}
       />
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[760px] border-collapse text-left">
+        <table className="w-full min-w-[980px] border-collapse text-left">
           <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
             <tr>
               <th className="px-4 py-3 font-bold">Lane</th>
-              <th className="px-4 py-3 font-bold">Status</th>
+              <th className="px-4 py-3 font-bold">Agent</th>
+              <th className="px-4 py-3 font-bold">Profile</th>
+              <th className="px-4 py-3 font-bold">Level</th>
+              <th className="px-4 py-3 font-bold">Activity</th>
               <th className="px-4 py-3 font-bold">Generation</th>
-              <th className="px-4 py-3 font-bold">Subject</th>
-              <th className="px-4 py-3 font-bold">Control</th>
+              <th className="px-4 py-3 font-bold">Detail</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-100">
-            {lanes.length === 0 ? (
+            {rows.length === 0 ? (
               <tr>
-                <td className="px-4 py-8 text-center text-sm font-semibold text-zinc-500" colSpan={5}>
+                <td className="px-4 py-8 text-center text-sm font-semibold text-zinc-500" colSpan={7}>
                   No active lanes
                 </td>
               </tr>
             ) : (
-              lanes.map((lane) => {
-                const selected = lane.lane_id === selectedLaneId;
+              rows.map((row) => {
+                const selected = row.laneId === selectedLaneId;
                 return (
-                  <tr key={lane.lane_id} className={selected ? "bg-emerald-50" : "bg-white"}>
+                  <tr key={`${row.laneId}:${row.subjectIdHash}`} className={selected ? "bg-emerald-50" : "bg-white"}>
                     <td className="px-4 py-4 align-top font-mono text-sm font-semibold text-zinc-950">
-                      {lane.lane_id}
+                      <div className="flex flex-col gap-2">
+                        <span>{row.laneId}</span>
+                        <Badge tone={row.active ? "ok" : "off"}>{row.statusLabel}</Badge>
+                      </div>
                     </td>
                     <td className="px-4 py-4 align-top">
-                      <Badge tone={lane.status === "active" ? "ok" : "off"}>{lane.status}</Badge>
+                      <p className="max-w-[280px] break-all font-mono text-xs text-zinc-600">
+                        {row.subjectIdHash}
+                      </p>
                     </td>
                     <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
-                      {formatNumber(lane.generation)}
+                      <div className="max-w-[180px] break-all">{row.activeProfile}</div>
+                      <p className="mt-1 max-w-[180px] break-all text-xs text-zinc-500">{row.dbFingerprint}</p>
                     </td>
                     <td className="px-4 py-4 align-top">
-                      <p className="max-w-[360px] break-all font-mono text-xs text-zinc-600">
-                        {lane.subject_id_hash}
+                      <span
+                        className={cn(
+                          "inline-flex rounded-md border px-2 py-1 font-mono text-xs font-bold",
+                          sessionLevelBadgeClass(row.currentLevel)
+                        )}
+                      >
+                        {row.currentLevel}
+                      </span>
+                      <p className="mt-1 font-mono text-xs text-zinc-500">max {row.maxLevel}</p>
+                    </td>
+                    <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
+                      <p>{formatNumber(row.requests)} req</p>
+                      <p className="mt-1 text-xs text-zinc-500">
+                        {formatNumber(row.blocked)} blocked · {Math.round(row.meanLatencyMs)} ms
                       </p>
+                    </td>
+                    <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
+                      {formatNumber(row.generation)}
                     </td>
                     <td className="px-4 py-4 align-top">
                       <Button
                         type="button"
                         variant={selected ? "primary" : "secondary"}
-                        onClick={() => onSelect(lane.lane_id)}
+                        onClick={() => onSelect(row.laneId)}
                       >
                         <SlidersHorizontal className="size-4" aria-hidden="true" />
-                        Select
+                        Expand
                       </Button>
                     </td>
                   </tr>
@@ -596,6 +772,44 @@ function SessionLaneTable({
             )}
           </tbody>
         </table>
+      </div>
+    </Surface>
+  );
+}
+
+function SessionLaneDetailPanel({
+  detail
+}: {
+  detail: SessionLaneDetail | null;
+}): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={Activity}
+        title="Lane Detail"
+        meta={detail?.laneId ?? "no lane"}
+        tone={detail ? "ok" : "off"}
+      />
+      <div className="grid gap-3 p-4 sm:grid-cols-2">
+        <CapacityFact label="Lane" value={detail?.laneId ?? "none"} mono />
+        <CapacityFact label="Agent" value={detail?.subjectIdHash ?? "none"} mono />
+        <CapacityFact label="Profile" value={detail?.activeProfile ?? "unknown"} mono />
+        <CapacityFact label="DB" value={detail?.dbFingerprint ?? "unknown"} mono />
+        <CapacityFact label="Level" value={detail?.currentLevel ?? "unknown"} mono />
+        <CapacityFact label="Ceiling" value={detail?.maxLevel ?? "unknown"} mono />
+        <CapacityFact label="Protected" value={detail?.protectedProfile ?? "unknown"} mono />
+        <CapacityFact label="Schema" value={detail?.visibleSchema ?? "unknown"} mono />
+        <CapacityFact label="Connected" value={detail?.connected ?? "unknown"} mono />
+        <CapacityFact label="Strategy" value={detail?.connectionStrategy ?? "unknown"} mono />
+        <CapacityFact label="Server" value={detail?.serverVersion ?? "unknown"} mono />
+        <CapacityFact label="Role" value={detail?.databaseRole ?? "unknown"} mono />
+        <CapacityFact label="Open Mode" value={detail?.openMode ?? "unknown"} mono />
+        <CapacityFact label="Requests" value={detail?.requests ?? 0} />
+        <CapacityFact label="Blocked" value={detail?.blocked ?? 0} />
+        <CapacityFact label="Mean Latency" value={`${Math.round(detail?.meanLatencyMs ?? 0)} ms`} mono />
+        <CapacityFact label="Max Latency" value={`${Math.round(detail?.maxLatencyMs ?? 0)} ms`} mono />
+        <CapacityFact label="Last Event" value={detail?.lastEvent ?? "none"} mono />
+        <CapacityFact label="Detail State" value={detail?.detailState ?? "unknown"} mono />
       </div>
     </Surface>
   );
@@ -2257,6 +2471,166 @@ function laneMetricRows(snapshot: MetricsSnapshot | null, lanes: ActiveLane[]): 
     }
     return b.requests - a.requests || a.laneId.localeCompare(b.laneId);
   });
+}
+
+function sessionLaneRows(
+  snapshot: MetricsSnapshot | null,
+  lanes: ActiveLane[],
+  selectedLaneId: string,
+  capabilities: OperatorResponse<WorkbenchActionData> | undefined,
+  connection: OperatorResponse<WorkbenchActionData> | undefined
+): SessionLaneRow[] {
+  const metrics = laneMetricRows(snapshot, lanes);
+  const laneById = new Map(lanes.map((lane) => [lane.lane_id, lane]));
+  const selectedCapabilities = sessionCapabilitiesSummary(capabilities);
+  const selectedConnection = nativeConnectionInfo(connection, null);
+  const selectedCacheKey = metadataCacheKeyFromResponse(connection);
+  return metrics.map((row) => {
+    const lane = laneById.get(row.laneId);
+    const selected = row.laneId === selectedLaneId;
+    return {
+      ...row,
+      generation: lane?.generation ?? 0,
+      statusLabel: lane?.status ?? (row.active ? "active" : "idle"),
+      currentLevel: selected ? selectedCapabilities.currentLevel : "expand",
+      maxLevel: selected ? selectedCapabilities.maxLevel : "inspect",
+      activeProfile: selected
+        ? selectedConnection.activeProfile || selectedCapabilities.activeProfile
+        : "expand",
+      dbFingerprint: selected ? selectedCacheKey?.db_fingerprint ?? "unknown" : "inspect",
+      connected: selected ? selectedConnection.connected ? "yes" : selectedCapabilities.connected : "inspect",
+      selected
+    };
+  });
+}
+
+function selectedLaneDetail(
+  lane: ActiveLane | null,
+  rows: SessionLaneRow[],
+  capabilities: OperatorResponse<WorkbenchActionData> | undefined,
+  connection: OperatorResponse<WorkbenchActionData> | undefined,
+  capabilitiesError: string | null,
+  connectionError: string | null,
+  events: OperatorEventEnvelope[]
+): SessionLaneDetail | null {
+  if (!lane) {
+    return null;
+  }
+  const row = rows.find((candidate) => candidate.laneId === lane.lane_id);
+  const caps = sessionCapabilitiesSummary(capabilities);
+  const db = nativeConnectionInfo(connection, connectionError);
+  const cacheKey = metadataCacheKeyFromResponse(connection);
+  return {
+    laneId: lane.lane_id,
+    subjectIdHash: lane.subject_id_hash,
+    generation: lane.generation,
+    status: lane.status,
+    currentLevel: caps.currentLevel,
+    maxLevel: caps.maxLevel,
+    protectedProfile: caps.protectedProfile,
+    activeProfile: db.activeProfile || caps.activeProfile,
+    dbFingerprint: cacheKey?.db_fingerprint ?? "unknown",
+    visibleSchema: cacheKey?.visible_schema ?? "unknown",
+    connected: db.connected ? "yes" : caps.connected,
+    connectionStrategy: db.strategy,
+    serverVersion: db.serverVersion,
+    databaseRole: db.databaseRole,
+    openMode: db.openMode,
+    requests: row?.requests ?? 0,
+    blocked: row?.blocked ?? 0,
+    meanLatencyMs: row?.meanLatencyMs ?? 0,
+    maxLatencyMs: row?.maxLatencyMs ?? 0,
+    lastEvent: events[0]?.event_type ?? "none",
+    detailState: capabilitiesError ?? connectionError ?? db.error
+  };
+}
+
+function sessionCapabilitiesSummary(
+  response: OperatorResponse<WorkbenchActionData> | undefined
+): SessionCapabilitiesSummary {
+  const result = mcpResult(response?.data.mcp_response);
+  const resultRecord = isRecord(result) ? result : {};
+  const operating = isRecord(resultRecord["operating_level"])
+    ? resultRecord["operating_level"]
+    : {};
+  const connection = isRecord(resultRecord["connection"]) ? resultRecord["connection"] : {};
+  return {
+    currentLevel: stringValue(operating["current"], "unknown"),
+    maxLevel: stringValue(operating["max"], "unknown"),
+    protectedProfile: stringValue(operating["protected"], "unknown"),
+    activeProfile: stringValue(connection["profile"], "unknown"),
+    connected: stringValue(connection["connected"], "unknown")
+  };
+}
+
+function sessionGroundControlModel(
+  summary: OverviewSummary,
+  eventStatus: EventStreamStatus,
+  pending: boolean
+): GroundControlViewModel {
+  const verdict: GoNoGoVerdict =
+    pending ? "SYNC" : summary.blocked > 0 || summary.errors > 0 ? "NO-GO" : "GO";
+  return {
+    grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+    verdict,
+    health: healthPosture(verdict, summary.blocked),
+    clearanceLadder: CLEARANCE_LADDER,
+    clearanceStatus: {
+      blocked: summary.blocked,
+      label: summary.blocked > 0 ? "blocked" : "clear",
+      tone: summary.blocked > 0 ? "warn" : "ok"
+    },
+    signatures: [
+      {
+        id: "go_no_go",
+        label: "GO/NO-GO",
+        value: verdict,
+        detail: summary.errors > 0 ? `${formatNumber(summary.errors)} errors` : "session board",
+        tone: verdict === "GO" ? "ok" : verdict === "SYNC" ? "info" : "warn",
+        activity: verdict === "GO" ? 1 : 0.25
+      },
+      {
+        id: "countdown",
+        label: "Countdown",
+        value: summary.activeLanes > 0 ? "live" : "idle",
+        detail: `${formatNumber(summary.activeLanes)} lanes`,
+        tone: summary.activeLanes > 0 ? "info" : "off",
+        activity: clampActivity(summary.activeLanes / 8)
+      },
+      {
+        id: "logbook",
+        label: "Logbook",
+        value: eventStatus,
+        detail: "SSE",
+        tone: eventStatusTone(eventStatus),
+        activity: eventStatus === "live" ? 1 : eventStatus === "connecting" ? 0.5 : 0
+      }
+    ] satisfies readonly SignatureViewModel[]
+  };
+}
+
+function clearanceLevel(value: string): OperatingLevel {
+  return value === "READ_WRITE" || value === "DDL" || value === "ADMIN" ? value : "READ_ONLY";
+}
+
+function sessionClearanceClass(level: OperatingLevel): string {
+  switch (level) {
+    case "READ_ONLY":
+      return "border-emerald-200 bg-emerald-50 text-emerald-800";
+    case "READ_WRITE":
+      return "border-sky-200 bg-sky-50 text-sky-800";
+    case "DDL":
+      return "border-amber-200 bg-amber-50 text-amber-800";
+    case "ADMIN":
+      return "border-rose-200 bg-rose-50 text-rose-800";
+  }
+}
+
+function sessionLevelBadgeClass(value: string): string {
+  if (value === "READ_ONLY" || value === "READ_WRITE" || value === "DDL" || value === "ADMIN") {
+    return sessionClearanceClass(clearanceLevel(value));
+  }
+  return "border-zinc-200 bg-zinc-50 text-zinc-600";
 }
 
 function aggregateDurations(
