@@ -2715,6 +2715,7 @@ table adds the **primitive-level + Phase-0 + security-corpus** tests that wrap i
 | `workbench_no_bypass_guard_is_the_feature` | C/MR/E | `trust_safety.rs` + `dashboard_e2e.rs` | W8: all four modes route through the **same** classifier→ceiling→preview/confirm→audit path agents use; **equivalence MR:** workbench-classify == agent-classify for identical SQL; DDL only with `dashboard_ddl_workbench`; no raw PTY | DoD-4 (behind `dashboard_workbench`) |
 | `cp_apply_reclassifies_never_trusts_stored_verdict` | E | `dashboard_e2e.rs` | **SEC-1:** Change-Review apply re-classifies + re-checks level/grants/Subject at apply time | DoD-4 (SEC-1) |
 | `skin_conformance_2d_fallback_a11y` | Web/C | `dashboard_e2e.rs` | D16: grammar-is-a-contract across skins; mandatory **2D/no-WebGL** fallback renders; a11y suite passes; Orrery 3D lazy-loaded within bundle-size budget; **credential secret never rendered** | DoD-4 |
+| `audit_proof_bundle_is_redacted_and_exportable` | C/Web | `crates/oraclemcp-core/src/http.rs` + `dashboard_e2e.rs` | W8b: audit-tail `export=proof-bundle` emits `oraclemcp.audit.proof-bundle.v1` with subject hashes, SQL hashes, DB evidence, chain/signature metadata, and no raw SQL, bind values, subject ids, or secrets; dashboard exposes the export without a second data path | DoD-4/W8b |
 
 ### B.9 WP-E — Installer (broad, explicit-consent)
 | Test | Mode | Extends / new file | Asserts | Gate |

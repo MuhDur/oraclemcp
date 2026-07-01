@@ -271,6 +271,89 @@ fn wd_search_global_explorer_uses_guarded_dictionary_tools() {
 }
 
 #[test]
+fn w8b_proof_bundle_is_redacted_and_exportable() {
+    let app = read_repo_file("web/src/app/App.tsx");
+    let client = read_repo_file("web/src/app/operator-client.ts");
+    let http = read_repo_file("crates/oraclemcp-core/src/http.rs");
+    let operations = read_repo_file("docs/operations.md");
+    let conformance = read_repo_file("tests/conformance/COVERAGE.md");
+    let e2e_coverage = read_repo_file("scripts/e2e/COVERAGE.md");
+
+    assert_contains_all(
+        "operator proof-bundle export",
+        &http,
+        &[
+            "audit_tail_filters_exports_redacted_proof_bundle",
+            "export=proof-bundle",
+            "oraclemcp.audit.proof-bundle.v1",
+            "\"subject_id_hash\"",
+            "\"sql_sha256\"",
+            "\"db_evidence\"",
+            "\"bind_values\"",
+            "sql_sha256_only",
+            "subject_id_hash_only",
+            "not_stored_redacted_by_default",
+            "human@example.test",
+            "sensitive-bind-value",
+            "UPDATE accounts",
+        ],
+    );
+    assert_contains_all(
+        "dashboard proof-bundle UI",
+        &app,
+        &[
+            "exportProofBundle",
+            "AuditProofBundlePanel",
+            "Proof Bundle",
+            "data?.export",
+            "<Download className=\"size-4\"",
+            "prettyJson(bundle)",
+        ],
+    );
+    assert_contains_all(
+        "dashboard proof-bundle client",
+        &client,
+        &[
+            "exportProofBundle: boolean",
+            "params.set(\"export\", \"proof-bundle\")",
+            "fetch(`/operator/v1/audit-tail",
+            "credentials: \"same-origin\"",
+        ],
+    );
+    assert_contains_all(
+        "operations proof-bundle docs",
+        &operations,
+        &[
+            "export=proof-bundle",
+            "allow-list-first",
+            "raw subject ids, SQL",
+            "bind values, and secrets are not exported",
+            "`sql_sha256`, DB-evidence columns, chain hashes/signature metadata",
+        ],
+    );
+    assert_contains_all(
+        "conformance proof-bundle coverage",
+        &conformance,
+        &[
+            "DASHBOARD-B8-008",
+            "audit_tail_filters_exports_redacted_proof_bundle",
+            "w8b_proof_bundle_is_redacted_and_exportable",
+            "AuditProofBundlePanel",
+            "fetchAuditTail",
+        ],
+    );
+    assert_contains_all(
+        "e2e proof-bundle coverage",
+        &e2e_coverage,
+        &[
+            "W8b proof bundle for gated actions",
+            "oraclemcp-epic-060-f4xo.8.10",
+            "audit_tail_filters_exports_redacted_proof_bundle",
+        ],
+    );
+}
+
+#[test]
 fn skin_conformance_2d_fallback_a11y() {
     let app = read_repo_file("web/src/app/App.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");
@@ -354,6 +437,7 @@ fn b8_dashboard_acceptance_suite_is_accounted() {
             "workbench_no_bypass_guard_is_the_feature",
             "cp_apply_reclassifies_never_trusts_stored_verdict",
             "skin_conformance_2d_fallback_a11y",
+            "audit_proof_bundle_is_redacted_and_exportable",
         ],
     );
     assert_contains_all(
@@ -366,6 +450,7 @@ fn b8_dashboard_acceptance_suite_is_accounted() {
             "workbench_no_bypass_guard_is_the_feature",
             "dashboard_workbench_ddl_apply_is_release_gated",
             "cp_apply_reclassifies_never_trusts_stored_verdict",
+            "audit_tail_filters_exports_redacted_proof_bundle",
             "dashboard_csp",
             "frame-ancestors 'none'",
             "x-frame-options",
@@ -402,6 +487,8 @@ fn b8_dashboard_acceptance_suite_is_accounted() {
             "DASHBOARD-B8-004",
             "DASHBOARD-B8-005",
             "DASHBOARD-B8-006",
+            "DASHBOARD-B8-007",
+            "DASHBOARD-B8-008",
         ],
     );
     assert_contains_all(
@@ -410,6 +497,8 @@ fn b8_dashboard_acceptance_suite_is_accounted() {
         &[
             "WP-W B.8 dashboard acceptance suite",
             "oraclemcp-epic-060-f4xo.8.20",
+            "W8b proof bundle for gated actions",
+            "oraclemcp-epic-060-f4xo.8.10",
         ],
     );
 }
