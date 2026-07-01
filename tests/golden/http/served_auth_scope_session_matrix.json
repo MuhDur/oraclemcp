@@ -300,7 +300,7 @@
         "path": "/mcp"
       },
       "response": {
-        "body": "Unknown mcp-session-id",
+        "body": "Invalid mcp-session-id",
         "headers": {},
         "status": 404
       }

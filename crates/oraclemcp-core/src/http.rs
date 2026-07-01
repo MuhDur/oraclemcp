@@ -47,7 +47,7 @@ use crate::client_credentials::{
 use crate::config_ops::{ConfigOpsError, ConfigOpsService};
 use crate::dashboard_auth::{
     DASHBOARD_ACTION_TICKET_HEADER, DASHBOARD_CSRF_HEADER, DASHBOARD_PAIR_PATH,
-    DASHBOARD_SESSION_PATH, DashboardAuth, DashboardAuthError,
+    DASHBOARD_SESSION_PATH, DashboardAuth,
 };
 use crate::operator_protocol::{
     OPERATOR_PROTOCOL_VERSION, operator_event, operator_response, operator_route_index,
@@ -2987,10 +2987,10 @@ mod tests {
             )
             .with_peer_loopback(true),
         );
-        assert_eq!(missing_csrf.status, 403);
+        assert_eq!(missing_csrf.status, 401);
         assert_eq!(
             response_json(&missing_csrf)["error"],
-            serde_json::json!("dashboard_csrf_required")
+            serde_json::json!("dashboard_auth_required")
         );
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
 
@@ -4311,7 +4311,7 @@ mod tests {
         assert_eq!(forged.status, 404);
         assert_eq!(
             String::from_utf8_lossy(&forged.body),
-            "Unknown mcp-session-id"
+            "Invalid mcp-session-id"
         );
 
         let valid = HttpRequest::new(
@@ -4371,6 +4371,10 @@ mod tests {
         );
         let stale = handle_http_request(&scope_echo_server(), &cfg, stale);
         assert_eq!(stale.status, 404);
+        assert_eq!(
+            String::from_utf8_lossy(&stale.body),
+            "Invalid mcp-session-id"
+        );
     }
 
     #[test]
@@ -5334,6 +5338,229 @@ mod tests {
     }
 
     #[test]
+    fn uniform_auth_errors_no_enumeration_oracle() {
+        let auth_fingerprint = |response: &HttpResponse| {
+            (
+                response.status,
+                response.header("cache-control").map(str::to_owned),
+                String::from_utf8_lossy(&response.body).into_owned(),
+            )
+        };
+
+        let store = Arc::new(
+            ClientCredentialStore::open(client_credential_fixture_path("uniform-auth"))
+                .expect("credential store opens"),
+        );
+        let issued = store
+            .issue(
+                crate::client_credentials::ClientCredentialIssueRequest::new(
+                    "Codex CLI",
+                    vec!["oracle:read".to_owned()],
+                ),
+            )
+            .expect("issue client");
+        let bearer = issued.bearer.expose().to_owned();
+        let unknown_bearer = concat!(
+            "ocmcp_client-11111111111111111111111111111111_",
+            "2222222222222222222222222222222222222222222222222222222222222222"
+        );
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            client_credentials: Some(Arc::clone(&store)),
+            ..Default::default()
+        };
+        let call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "oracle_preview_sql",
+                "arguments": { "sql": "SELECT 1 FROM dual" }
+            }
+        });
+        let client_request = |authorization: Option<&str>| {
+            let mut request = post(&call);
+            if let Some(value) = authorization {
+                request
+                    .headers
+                    .push(("authorization".to_owned(), format!("Bearer {value}")));
+            }
+            request
+        };
+        let missing_client = handle_http_request(&test_server(), &cfg, client_request(None));
+        let unknown_client =
+            handle_http_request(&test_server(), &cfg, client_request(Some(unknown_bearer)));
+        store.revoke(&issued.client_id).expect("revoke client");
+        let revoked_client =
+            handle_http_request(&test_server(), &cfg, client_request(Some(&bearer)));
+        assert_eq!(
+            auth_fingerprint(&unknown_client),
+            auth_fingerprint(&missing_client)
+        );
+        assert_eq!(
+            auth_fingerprint(&revoked_client),
+            auth_fingerprint(&missing_client)
+        );
+        assert_eq!(
+            response_json(&missing_client)["error"],
+            serde_json::json!("client_credential_required")
+        );
+
+        let dir = dashboard_test_dir("uniform-auth");
+        let auth = Arc::new(DashboardAuth::new(dir.clone()));
+        let dashboard_cfg = HttpTransportConfig {
+            dashboard_auth: Some(Arc::clone(&auth)),
+            ..Default::default()
+        };
+        let missing_pairing = handle_http_request(
+            &test_server(),
+            &dashboard_cfg,
+            HttpRequest::new(
+                "GET",
+                DASHBOARD_PAIR_PATH,
+                [("host", "127.0.0.1"), ("accept", "text/html")],
+                Vec::new(),
+            )
+            .with_peer_loopback(true),
+        );
+        let invalid_pairing = handle_http_request(
+            &test_server(),
+            &dashboard_cfg,
+            HttpRequest::new(
+                "GET",
+                format!("{DASHBOARD_PAIR_PATH}?ticket=invalid-bootstrap-secret"),
+                [("host", "127.0.0.1"), ("accept", "text/html")],
+                Vec::new(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(
+            auth_fingerprint(&invalid_pairing),
+            auth_fingerprint(&missing_pairing)
+        );
+        assert_eq!(
+            response_json(&missing_pairing)["error"],
+            serde_json::json!("dashboard_pairing_required")
+        );
+
+        let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
+            .expect("ticket mints");
+        let login = auth
+            .exchange_ticket(ticket_from_pairing_url(&ticket.url))
+            .expect("login works");
+        let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
+        let view = auth
+            .session_view(Some(cookie_pair))
+            .expect("session view works");
+        let dashboard_body = serde_json::json!({
+            "tool": "oracle_preview_sql",
+            "arguments": { "sql": "SELECT 1 FROM dual" }
+        });
+        let missing_session = handle_http_request(
+            &test_server(),
+            &dashboard_cfg,
+            HttpRequest::new(
+                "POST",
+                "/operator/v1/actions/preview",
+                [
+                    ("host", "127.0.0.1"),
+                    ("origin", "http://127.0.0.1"),
+                    ("sec-fetch-site", "same-origin"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json"),
+                ],
+                dashboard_body.to_string().into_bytes(),
+            )
+            .with_peer_loopback(true),
+        );
+        let missing_csrf = handle_http_request(
+            &test_server(),
+            &dashboard_cfg,
+            HttpRequest::new(
+                "POST",
+                "/operator/v1/actions/preview",
+                [
+                    ("host", "127.0.0.1"),
+                    ("origin", "http://127.0.0.1"),
+                    ("sec-fetch-site", "same-origin"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json"),
+                    ("cookie", cookie_pair),
+                ],
+                dashboard_body.to_string().into_bytes(),
+            )
+            .with_peer_loopback(true),
+        );
+        let missing_action_ticket = handle_http_request(
+            &test_server(),
+            &dashboard_cfg,
+            HttpRequest::new(
+                "POST",
+                "/operator/v1/actions/preview",
+                [
+                    ("host", "127.0.0.1"),
+                    ("origin", "http://127.0.0.1"),
+                    ("sec-fetch-site", "same-origin"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json"),
+                    ("cookie", cookie_pair),
+                    (DASHBOARD_CSRF_HEADER, view.csrf_token.as_str()),
+                ],
+                dashboard_body.to_string().into_bytes(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(
+            auth_fingerprint(&missing_csrf),
+            auth_fingerprint(&missing_session)
+        );
+        assert_eq!(
+            auth_fingerprint(&missing_action_ticket),
+            auth_fingerprint(&missing_session)
+        );
+        assert_eq!(
+            response_json(&missing_session)["error"],
+            serde_json::json!("dashboard_auth_required")
+        );
+
+        let session_store = Arc::new(HttpSessionStore::default());
+        session_store.insert("known-session".to_owned(), "oauth:owner".to_owned());
+        let stateful_cfg = HttpTransportConfig {
+            stateful: true,
+            session_store: Some(session_store),
+            ..Default::default()
+        };
+        let unknown_session = HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [("host", "127.0.0.1"), ("mcp-session-id", "unknown-session")],
+            Vec::new(),
+        );
+        let cross_principal_session = HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [("host", "127.0.0.1"), ("mcp-session-id", "known-session")],
+            Vec::new(),
+        );
+        let unknown =
+            validate_stateful_session(&stateful_cfg, &unknown_session, Some("oauth:other"), false)
+                .err()
+                .expect("unknown session rejected");
+        let cross_principal = validate_stateful_session(
+            &stateful_cfg,
+            &cross_principal_session,
+            Some("oauth:other"),
+            false,
+        )
+        .err()
+        .expect("cross-principal session rejected");
+        assert_eq!(
+            auth_fingerprint(&cross_principal),
+            auth_fingerprint(&unknown)
+        );
+    }
+
+    #[test]
     fn scoped_principal_cannot_act_as_operator_without_allowlist_and_operator_action_is_audited() {
         let token = jwt_with_scope("oracle:read");
         let principal_key = oauth_principal_key_from_validated_token(&token);
@@ -6155,7 +6382,7 @@ fn handle_dashboard_pairing_route(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
-        return dashboard_auth_error_response(401, "dashboard_pairing_ticket_missing");
+        return dashboard_pairing_auth_required_response();
     };
     match auth.exchange_ticket(ticket) {
         Ok(login) => with_dashboard_security_headers(
@@ -6164,10 +6391,7 @@ fn handle_dashboard_pairing_route(
                 .with_header("set-cookie", &login.session_cookie)
                 .with_header("cache-control", "no-store"),
         ),
-        Err(DashboardAuthError::ExpiredTicket) => {
-            dashboard_auth_error_response(401, "dashboard_pairing_ticket_expired")
-        }
-        Err(_) => dashboard_auth_error_response(401, "dashboard_pairing_ticket_invalid"),
+        Err(_) => dashboard_pairing_auth_required_response(),
     }
 }
 
@@ -6200,7 +6424,7 @@ fn handle_dashboard_session_route(
             &serde_json::to_value(view).unwrap_or(Value::Null),
         ))
         .with_header("cache-control", "no-store"),
-        Err(_) => dashboard_auth_error_response(401, "dashboard_session_required"),
+        Err(_) => dashboard_auth_required_response(),
     }
 }
 
@@ -6225,19 +6449,7 @@ fn enforce_dashboard_operator_auth(
             &request.path,
         ) {
             Ok(()) => None,
-            Err(DashboardAuthError::MissingSession | DashboardAuthError::InvalidSession) => Some(
-                dashboard_auth_error_response(401, "dashboard_session_required"),
-            ),
-            Err(DashboardAuthError::MissingCsrf | DashboardAuthError::InvalidCsrf) => Some(
-                dashboard_auth_error_response(403, "dashboard_csrf_required"),
-            ),
-            Err(
-                DashboardAuthError::MissingActionTicket | DashboardAuthError::InvalidActionTicket,
-            ) => Some(dashboard_auth_error_response(
-                403,
-                "dashboard_action_ticket_required",
-            )),
-            Err(_) => Some(dashboard_auth_error_response(403, "dashboard_auth_failed")),
+            Err(_) => Some(dashboard_auth_required_response()),
         };
     }
     if let Some(response) = enforce_dashboard_get_headers(request) {
@@ -6245,10 +6457,7 @@ fn enforce_dashboard_operator_auth(
     }
     match auth.session_view(request.header("cookie")) {
         Ok(_) => None,
-        Err(_) => Some(dashboard_auth_error_response(
-            401,
-            "dashboard_session_required",
-        )),
+        Err(_) => Some(dashboard_auth_required_response()),
     }
 }
 
@@ -6313,6 +6522,14 @@ fn dashboard_auth_error_response(status: u16, error: &'static str) -> HttpRespon
         }),
     ))
     .with_header("cache-control", "no-store")
+}
+
+fn dashboard_auth_required_response() -> HttpResponse {
+    dashboard_auth_error_response(401, "dashboard_auth_required")
+}
+
+fn dashboard_pairing_auth_required_response() -> HttpResponse {
+    dashboard_auth_error_response(401, "dashboard_pairing_required")
 }
 
 fn with_dashboard_security_headers(response: HttpResponse) -> HttpResponse {
@@ -7979,10 +8196,7 @@ fn handle_dashboard_route(
         if let Some(auth) = &config.dashboard_auth
             && auth.session_view(request.header("cookie")).is_err()
         {
-            return Some(dashboard_auth_error_response(
-                401,
-                "dashboard_session_required",
-            ));
+            return Some(dashboard_auth_required_response());
         }
     }
     let asset = crate::dashboard_bundle::dashboard_asset_for(&request.path)?;
@@ -8386,16 +8600,15 @@ fn validate_stateful_session<'a>(
                 principal_key: owner.to_owned(),
             })
         }
-        Some(_) => Err(HttpResponse {
-            status: 403,
-            headers: vec![],
-            body: b"mcp-session-id is bound to another principal".to_vec(),
-        }),
-        None => Err(HttpResponse {
-            status: 404,
-            headers: vec![],
-            body: b"Unknown mcp-session-id".to_vec(),
-        }),
+        Some(_) | None => Err(invalid_stateful_session_response()),
+    }
+}
+
+fn invalid_stateful_session_response() -> HttpResponse {
+    HttpResponse {
+        status: 404,
+        headers: vec![],
+        body: b"Invalid mcp-session-id".to_vec(),
     }
 }
 

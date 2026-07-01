@@ -416,12 +416,11 @@ fn unix_now() -> u64 {
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (left, right) in a.iter().zip(b) {
-        diff |= left ^ right;
+    let mut diff = a.len() ^ b.len();
+    let max = a.len().max(b.len());
+    for index in 0..max {
+        diff |=
+            usize::from(a.get(index).copied().unwrap_or(0) ^ b.get(index).copied().unwrap_or(0));
     }
     diff == 0
 }

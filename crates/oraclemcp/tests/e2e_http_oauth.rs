@@ -1046,8 +1046,8 @@ fn binary_http_rejects_bad_origin_and_forged_stateful_sessions() {
         ],
         Some(tools_list.to_string().as_bytes()),
     );
-    assert_eq!(status, 403);
-    assert_eq!(body, json!("mcp-session-id is bound to another principal"));
+    assert_eq!(status, 404);
+    assert_eq!(body, json!("Invalid mcp-session-id"));
     assert!(
         !body.to_string().contains("agent-b"),
         "session owner rejection must not leak the replaying subject"
@@ -1066,5 +1066,5 @@ fn binary_http_rejects_bad_origin_and_forged_stateful_sessions() {
         Some(tools_list.to_string().as_bytes()),
     );
     assert_eq!(status, 404);
-    assert_eq!(body, json!("Unknown mcp-session-id"));
+    assert_eq!(body, json!("Invalid mcp-session-id"));
 }

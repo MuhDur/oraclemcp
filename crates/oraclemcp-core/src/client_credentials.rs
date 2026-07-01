@@ -27,6 +27,9 @@ const HASH_SALT_BYTES: usize = 16;
 const TOKEN_PREFIX: &str = "ocmcp_";
 const HASH_DOMAIN: &[u8] = b"oraclemcp.client-credential.v1\0";
 const PRINCIPAL_DOMAIN: &[u8] = b"oraclemcp.client-principal.v1\0";
+const DUMMY_CREDENTIAL_SALT: &str = "00000000000000000000000000000000";
+const DUMMY_CREDENTIAL_HASH: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 const MAX_LABEL_LEN: usize = 128;
 const MAX_SCOPE_LEN: usize = 128;
 const MAX_SCOPES: usize = 32;
@@ -336,14 +339,37 @@ impl ClientCredentialStore {
     ) -> Result<AuthenticatedClientCredential, ClientCredentialError> {
         let client_id = parse_bearer_client_id(bearer)?;
         let mut file = self.file.lock();
-        let Some(record) = file.clients.iter_mut().find(|c| c.client_id == client_id) else {
+        let record_index = file
+            .clients
+            .iter()
+            .enumerate()
+            .fold(None, |found, (index, record)| {
+                if constant_time_eq(record.client_id.as_bytes(), client_id.as_bytes()) {
+                    Some(index)
+                } else {
+                    found
+                }
+            });
+        let (salt, hash, revoked) = record_index
+            .and_then(|index| file.clients.get(index))
+            .map(|record| {
+                (
+                    record.credential_salt.as_str(),
+                    record.credential_hash.as_str(),
+                    record.revoked_at.is_some(),
+                )
+            })
+            .unwrap_or((DUMMY_CREDENTIAL_SALT, DUMMY_CREDENTIAL_HASH, false));
+        let credential_ok = credential_matches(salt, hash, bearer);
+        let Some(index) = record_index else {
             return Err(ClientCredentialError::AuthenticationFailed);
         };
-        if record.revoked_at.is_some() {
-            return Err(ClientCredentialError::Revoked(record.client_id.clone()));
-        }
-        if !credential_matches(&record.credential_salt, &record.credential_hash, bearer) {
+        if !credential_ok {
             return Err(ClientCredentialError::AuthenticationFailed);
+        }
+        let record = &mut file.clients[index];
+        if revoked {
+            return Err(ClientCredentialError::Revoked(record.client_id.clone()));
         }
         record.last_used_at = Some(unix_timestamp());
         record.last_source_addr = source_addr
