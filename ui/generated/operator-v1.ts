@@ -39,3 +39,18 @@ export interface OperatorLaneSummary {
   status: "starting" | "running" | "stopped" | "quarantined";
   subject_id_hash: string;
 }
+
+export interface OperatorIdempotency {
+  request_id: string;
+  idempotency_key_sha256: string;
+  fingerprint_sha256: string;
+  lane_id: string | null;
+  lane_generation: number | null;
+  subject_id_hash: string;
+  grant_sha256: string | null;
+  sql_sha256: string | null;
+  operator_audit_seq: number;
+  started_at: string;
+  completed_at: string | null;
+  outcome: "in_progress" | "forwarded" | "accepted" | "conflict" | string;
+}

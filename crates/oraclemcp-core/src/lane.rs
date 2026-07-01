@@ -612,6 +612,7 @@ impl HttpSessionLifecycle for StatefulLaneDispatch {
                 lane_id: lane.name().to_owned(),
                 mcp_session_id: key.mcp_session_id.clone(),
                 principal_key: key.principal_key.clone(),
+                generation: lane.generation(),
             })
         })
     }

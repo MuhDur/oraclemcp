@@ -143,6 +143,10 @@ pub struct HttpTransportConfig {
     /// Optional audit JSONL path used by `/operator/v1/audit-tail`. The route
     /// summarizes records and never exposes bind values or raw identities.
     pub operator_audit_tail_path: Option<PathBuf>,
+    /// In-memory idempotency ledger for `/operator/v1` gated-action routes.
+    /// It caches only redacted operator envelopes and never bypasses the
+    /// dispatcher's grant or write-intent checks.
+    pub operator_idempotency: Arc<OperatorIdempotencyLedger>,
     /// Health/metrics observability endpoints (D1; off by default — `None`
     /// fields make the corresponding route return 404 / not be advertised).
     pub observability: ObservabilityState,
@@ -174,6 +178,7 @@ impl std::fmt::Debug for HttpTransportConfig {
                     .as_ref()
                     .map(|_| "<configured>"),
             )
+            .field("operator_idempotency", &true)
             .field("observability", &self.observability)
             .finish()
     }
@@ -196,6 +201,7 @@ impl Default for HttpTransportConfig {
             operator_authority: OperatorAuthorityPolicy::default(),
             operator_auditor: None,
             operator_audit_tail_path: None,
+            operator_idempotency: Arc::new(OperatorIdempotencyLedger::new()),
             observability: ObservabilityState::default(),
         }
     }
@@ -216,6 +222,159 @@ pub struct HttpLaneBinding {
     pub lane_id: String,
     pub mcp_session_id: String,
     pub principal_key: String,
+    pub generation: u64,
+}
+
+const OPERATOR_IDEMPOTENCY_TTL: Duration = Duration::from_secs(15 * 60);
+const OPERATOR_IDEMPOTENCY_MAX_ENTRIES: usize = 1024;
+
+/// In-memory idempotency ledger for `/operator/v1` gated actions.
+///
+/// The ledger protects the operator HTTP edge from duplicate action retries by
+/// caching the exact redacted operator response for a request key. It is not a
+/// persistence mechanism and does not replace dispatcher-side single-use
+/// grants or durable write-ahead intents.
+#[derive(Debug, Default)]
+pub struct OperatorIdempotencyLedger {
+    entries: Mutex<HashMap<String, OperatorIdempotencyEntry>>,
+}
+
+impl OperatorIdempotencyLedger {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn begin(&self, route: &str, facts: OperatorIdempotencyFacts) -> OperatorIdempotencyBegin {
+        let mut entries = self.entries.lock();
+        prune_operator_idempotency_entries(&mut entries);
+        match entries.get(&facts.storage_key) {
+            Some(entry) if entry.facts.fingerprint_sha256 != facts.fingerprint_sha256 => {
+                OperatorIdempotencyBegin::Conflict(operator_json_response(
+                    409,
+                    route,
+                    json!({
+                        "error": "operator_idempotency_key_conflict",
+                        "message": "idempotency key was already used with different operator action material",
+                        "idempotency": entry.facts.as_json("conflict"),
+                    }),
+                ))
+            }
+            Some(entry) => match &entry.response {
+                Some(response) => OperatorIdempotencyBegin::Replay(response.clone()),
+                None => OperatorIdempotencyBegin::InProgress(operator_json_response(
+                    409,
+                    route,
+                    json!({
+                        "error": "operator_idempotency_in_progress",
+                        "message": "idempotency key is already in progress",
+                        "idempotency": entry.facts.as_json("in_progress"),
+                    }),
+                )),
+            },
+            None => {
+                let storage_key = facts.storage_key.clone();
+                entries.insert(
+                    storage_key.clone(),
+                    OperatorIdempotencyEntry {
+                        facts,
+                        response: None,
+                        created_at: Instant::now(),
+                    },
+                );
+                OperatorIdempotencyBegin::Fresh(OperatorIdempotencyLease { storage_key })
+            }
+        }
+    }
+
+    fn complete(
+        &self,
+        lease: OperatorIdempotencyLease,
+        completed_facts: OperatorIdempotencyFacts,
+        response: HttpResponse,
+    ) -> HttpResponse {
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.get_mut(&lease.storage_key) {
+            entry.facts = completed_facts;
+            entry.response = Some(response.clone());
+        }
+        response
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OperatorIdempotencyFacts {
+    storage_key: String,
+    request_id: String,
+    idempotency_key_sha256: String,
+    fingerprint_sha256: String,
+    lane_id: Option<String>,
+    lane_generation: Option<u64>,
+    subject_id_hash: String,
+    grant_sha256: Option<String>,
+    sql_sha256: Option<String>,
+    operator_audit_seq: u64,
+    started_at: String,
+    completed_at: Option<String>,
+}
+
+impl OperatorIdempotencyFacts {
+    fn as_json(&self, outcome: &str) -> Value {
+        json!({
+            "request_id": self.request_id,
+            "idempotency_key_sha256": self.idempotency_key_sha256,
+            "fingerprint_sha256": self.fingerprint_sha256,
+            "lane_id": self.lane_id,
+            "lane_generation": self.lane_generation,
+            "subject_id_hash": self.subject_id_hash,
+            "grant_sha256": self.grant_sha256,
+            "sql_sha256": self.sql_sha256,
+            "operator_audit_seq": self.operator_audit_seq,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "outcome": outcome,
+        })
+    }
+
+    fn completed(&self, completed_at: String) -> Self {
+        let mut facts = self.clone();
+        facts.completed_at = Some(completed_at);
+        facts
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OperatorIdempotencyEntry {
+    facts: OperatorIdempotencyFacts,
+    response: Option<HttpResponse>,
+    created_at: Instant,
+}
+
+#[derive(Clone, Debug)]
+struct OperatorIdempotencyLease {
+    storage_key: String,
+}
+
+enum OperatorIdempotencyBegin {
+    Fresh(OperatorIdempotencyLease),
+    Replay(HttpResponse),
+    InProgress(HttpResponse),
+    Conflict(HttpResponse),
+}
+
+fn prune_operator_idempotency_entries(entries: &mut HashMap<String, OperatorIdempotencyEntry>) {
+    let now = Instant::now();
+    entries.retain(|_, entry| now.duration_since(entry.created_at) <= OPERATOR_IDEMPOTENCY_TTL);
+    while entries.len() >= OPERATOR_IDEMPOTENCY_MAX_ENTRIES {
+        let Some(oldest) = entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.created_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        entries.remove(&oldest);
+    }
 }
 
 /// Lifecycle hook for stateful Streamable HTTP sessions.
@@ -529,6 +688,7 @@ mod tests {
     use oraclemcp_guard::OperatingLevel;
     use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     struct NoopDispatch;
     impl ToolDispatch for NoopDispatch {
@@ -624,7 +784,31 @@ mod tests {
         }
     }
 
-    fn test_server() -> OracleMcpServer {
+    struct CountingDispatch {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ToolDispatch for CountingDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            name: &'a str,
+            args: Value,
+        ) -> DispatchFuture<'a> {
+            let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            let tool = name.to_owned();
+            Box::pin(async move {
+                Ok(serde_json::json!({
+                    "tool": tool,
+                    "call": call,
+                    "args": args,
+                }))
+            })
+        }
+    }
+
+    fn server_with_dispatch(dispatcher: Arc<dyn ToolDispatch>) -> OracleMcpServer {
         let report = CapabilitiesReport::new(
             "0.1.0",
             vec![],
@@ -635,7 +819,11 @@ mod tests {
                 http_transport: true,
             },
         );
-        OracleMcpServer::new("0.1.0", ToolRegistry::new(), report, Arc::new(NoopDispatch))
+        OracleMcpServer::new("0.1.0", ToolRegistry::new(), report, dispatcher)
+    }
+
+    fn test_server() -> OracleMcpServer {
+        server_with_dispatch(Arc::new(NoopDispatch))
     }
 
     fn scope_echo_server() -> OracleMcpServer {
@@ -974,6 +1162,154 @@ mod tests {
         assert_eq!(records[1].sql_preview, "GET /operator/v1/health");
         assert_eq!(records[2].sql_preview, "GET /operator/v1/events");
         assert_eq!(records[3].sql_preview, "POST /operator/v1/actions/preview");
+    }
+
+    #[test]
+    fn operator_action_idempotency_replays_same_response_and_conflicts_on_drift() {
+        let (auditor, _sink) = operator_auditor();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = server_with_dispatch(Arc::new(CountingDispatch {
+            calls: Arc::clone(&calls),
+        }));
+        let cfg = HttpTransportConfig {
+            operator_auditor: Some(auditor),
+            ..Default::default()
+        };
+        let first_body = serde_json::json!({
+            "idempotency_key": "operator-request-1",
+            "tool": "oracle_preview_sql",
+            "arguments": { "sql": "UPDATE t SET x = 1 WHERE id = 42" }
+        });
+        let action_request = |body: &Value| {
+            HttpRequest::new(
+                "POST",
+                "/operator/v1/actions/preview",
+                [
+                    ("host", "127.0.0.1"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json"),
+                ],
+                body.to_string().into_bytes(),
+            )
+            .with_peer_loopback(true)
+        };
+
+        let first = handle_http_request(&server, &cfg, action_request(&first_body));
+        assert_eq!(first.status, 200);
+        let second = handle_http_request(&server, &cfg, action_request(&first_body));
+        assert_eq!(second.status, 200);
+        assert_eq!(
+            response_json(&second),
+            response_json(&first),
+            "same idempotency key and request material replays the original response"
+        );
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            1,
+            "retry must not re-enter guarded dispatch"
+        );
+        let first_json = response_json(&first);
+        assert_eq!(
+            first_json["data"]["idempotency"]["request_id"],
+            serde_json::json!("operator-request-1")
+        );
+        assert!(
+            first_json["data"]["idempotency"]["grant_sha256"].is_null(),
+            "preview has no consumed confirmation grant"
+        );
+        assert!(
+            first_json["data"]["idempotency"]["sql_sha256"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+
+        let drifted = serde_json::json!({
+            "idempotency_key": "operator-request-1",
+            "tool": "oracle_preview_sql",
+            "arguments": { "sql": "UPDATE t SET x = 2 WHERE id = 42" }
+        });
+        let conflict = handle_http_request(&server, &cfg, action_request(&drifted));
+        assert_eq!(conflict.status, 409);
+        let conflict_json = response_json(&conflict);
+        assert_eq!(
+            conflict_json["data"]["error"],
+            serde_json::json!("operator_idempotency_key_conflict")
+        );
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            1,
+            "conflicting replay must not re-enter guarded dispatch"
+        );
+    }
+
+    #[test]
+    fn operator_idempotency_ledger_reports_in_progress_before_completion() {
+        let ledger = OperatorIdempotencyLedger::new();
+        let subject = AuditSubject::new("local-owner", "fixture");
+        let request = HttpRequest::new(
+            "POST",
+            "/operator/v1/actions/execute",
+            [
+                ("host", "127.0.0.1"),
+                ("content-type", "application/json"),
+                ("accept", "application/json"),
+                ("idempotency-key", "execute-once"),
+            ],
+            Vec::new(),
+        )
+        .with_peer_loopback(true);
+        let payload = serde_json::json!({
+            "tool": "oracle_execute",
+            "arguments": {
+                "sql": "UPDATE t SET x = 1 WHERE id = 7",
+                "confirm": "grant-ref"
+            }
+        });
+        let payload = payload.as_object().expect("payload object");
+        let arguments = payload.get("arguments").cloned().expect("arguments");
+        let facts = operator_idempotency_facts(OperatorIdempotencyInput {
+            request: &request,
+            payload,
+            operator_subject: &subject,
+            route: OperatorRouteKind::ActionExecute,
+            tool: "oracle_execute",
+            arguments: &arguments,
+            binding: None,
+            operator_audit_seq: 9,
+        });
+
+        let lease = match ledger.begin(&request.path, facts.clone()) {
+            OperatorIdempotencyBegin::Fresh(lease) => lease,
+            _ => panic!("first reservation must be fresh"),
+        };
+        let in_progress = match ledger.begin(&request.path, facts.clone()) {
+            OperatorIdempotencyBegin::InProgress(response) => response,
+            _ => panic!("duplicate before completion must be typed in-progress"),
+        };
+        assert_eq!(in_progress.status, 409);
+        let in_progress_json = response_json(&in_progress);
+        assert_eq!(
+            in_progress_json["data"]["error"],
+            serde_json::json!("operator_idempotency_in_progress")
+        );
+        assert!(
+            in_progress_json["data"]["idempotency"]["grant_sha256"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+
+        let completed = facts.completed("unix:42".to_owned());
+        let original = operator_json_response(
+            200,
+            &request.path,
+            json!({ "status": "forwarded", "idempotency": completed.as_json("forwarded") }),
+        );
+        ledger.complete(lease, completed, original.clone());
+        let replay = match ledger.begin(&request.path, facts) {
+            OperatorIdempotencyBegin::Replay(response) => response,
+            _ => panic!("duplicate after completion must replay"),
+        };
+        assert_eq!(replay, original);
     }
 
     fn sse_json_events(response: &HttpResponse) -> Vec<Value> {
@@ -3096,15 +3432,18 @@ fn handle_http_exchange(
             else {
                 return HttpExchange::Buffered(operator_authority_required_response());
             };
-            if let Err(response) = append_operator_audit(config, &operator_subject, &request) {
-                return HttpExchange::Buffered(response);
-            }
+            let operator_audit_seq =
+                match append_operator_audit(config, &operator_subject, &request) {
+                    Ok(seq) => seq,
+                    Err(response) => return HttpExchange::Buffered(response),
+                };
             return HttpExchange::Buffered(handle_operator_api_route(
                 server,
                 config,
                 &request,
                 &operator_subject,
                 operator_route,
+                operator_audit_seq,
             ));
         }
         HttpRoute::NotFound => {
@@ -3235,7 +3574,7 @@ fn append_operator_audit(
     config: &HttpTransportConfig,
     subject: &AuditSubject,
     request: &HttpRequest,
-) -> Result<(), HttpResponse> {
+) -> Result<u64, HttpResponse> {
     let Some(auditor) = &config.operator_auditor else {
         return Err(operator_audit_required_response());
     };
@@ -3252,7 +3591,7 @@ fn append_operator_audit(
     };
     auditor
         .append(&draft, audit_timestamp(), true)
-        .map(|_| ())
+        .map(|record| record.seq)
         .map_err(|_| operator_audit_failed_response())
 }
 
@@ -3312,6 +3651,7 @@ fn handle_operator_api_route(
     request: &HttpRequest,
     operator_subject: &AuditSubject,
     route: OperatorRouteKind,
+    operator_audit_seq: u64,
 ) -> HttpResponse {
     if route == OperatorRouteKind::NotFound {
         return operator_not_found_response(request);
@@ -3349,9 +3689,14 @@ fn handle_operator_api_route(
         | OperatorRouteKind::ActionConfirm
         | OperatorRouteKind::ActionExecute
         | OperatorRouteKind::SetLevel
-        | OperatorRouteKind::SwitchProfile => {
-            handle_operator_action_route(server, config, request, operator_subject, route)
-        }
+        | OperatorRouteKind::SwitchProfile => handle_operator_action_route(
+            server,
+            config,
+            request,
+            operator_subject,
+            route,
+            operator_audit_seq,
+        ),
         OperatorRouteKind::NotFound => unreachable!("handled above"),
     }
 }
@@ -3598,6 +3943,7 @@ fn handle_operator_action_route(
     request: &HttpRequest,
     operator_subject: &AuditSubject,
     route: OperatorRouteKind,
+    operator_audit_seq: u64,
 ) -> HttpResponse {
     if !content_type_is_json(request) {
         return empty_response(415);
@@ -3631,6 +3977,25 @@ fn handle_operator_action_route(
         Ok(binding) => binding,
         Err(response) => return operator_json_response(response.0, &request.path, response.1),
     };
+    let idempotency_facts = operator_idempotency_facts(OperatorIdempotencyInput {
+        request,
+        payload: &payload,
+        operator_subject,
+        route,
+        tool,
+        arguments: &arguments,
+        binding: binding.as_ref(),
+        operator_audit_seq,
+    });
+    let idempotency_lease = match config
+        .operator_idempotency
+        .begin(&request.path, idempotency_facts.clone())
+    {
+        OperatorIdempotencyBegin::Fresh(lease) => lease,
+        OperatorIdempotencyBegin::Replay(response)
+        | OperatorIdempotencyBegin::InProgress(response)
+        | OperatorIdempotencyBegin::Conflict(response) => return response,
+    };
     let operator_key;
     let mut context = DispatchContext::default();
     if let Some(binding) = binding.as_ref() {
@@ -3652,7 +4017,12 @@ fn handle_operator_action_route(
         }
     });
     let response = server.handle_jsonrpc_request_with_context(rpc, None, context);
-    let data = json!({
+    let status = if response.is_some() {
+        "forwarded"
+    } else {
+        "accepted"
+    };
+    let mut data = json!({
         "status": if response.is_some() { "forwarded" } else { "accepted" },
         "lane_id": binding
             .as_ref()
@@ -3661,15 +4031,18 @@ fn handle_operator_action_route(
         "mcp_tool": tool,
         "mcp_response": response,
     });
-    operator_json_response(
-        if data["status"] == "accepted" {
-            202
-        } else {
-            200
-        },
+    let completed_facts = idempotency_facts.completed(audit_timestamp());
+    if let Value::Object(data) = &mut data {
+        data.insert("idempotency".to_owned(), completed_facts.as_json(status));
+    }
+    let response = operator_json_response(
+        if status == "accepted" { 202 } else { 200 },
         &request.path,
         data,
-    )
+    );
+    config
+        .operator_idempotency
+        .complete(idempotency_lease, completed_facts, response)
 }
 
 fn operator_action_target(
@@ -3712,8 +4085,103 @@ fn operator_arguments_from_payload(payload: &serde_json::Map<String, Value>) -> 
         let mut args = payload.clone();
         args.remove("lane_id");
         args.remove("tool");
+        args.remove("idempotency_key");
+        args.remove("request_id");
+        args.remove("idempotency_sequence");
         Value::Object(args)
     })
+}
+
+struct OperatorIdempotencyInput<'a> {
+    request: &'a HttpRequest,
+    payload: &'a serde_json::Map<String, Value>,
+    operator_subject: &'a AuditSubject,
+    route: OperatorRouteKind,
+    tool: &'a str,
+    arguments: &'a Value,
+    binding: Option<&'a HttpLaneBinding>,
+    operator_audit_seq: u64,
+}
+
+fn operator_idempotency_facts(input: OperatorIdempotencyInput<'_>) -> OperatorIdempotencyFacts {
+    let lane_id = input
+        .binding
+        .map(|binding| binding.lane_id.clone())
+        .or_else(|| {
+            input
+                .payload
+                .get("lane_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+    let lane_generation = input.binding.map(|binding| binding.generation).or_else(|| {
+        input
+            .payload
+            .get("idempotency_sequence")
+            .and_then(Value::as_u64)
+    });
+    let subject_key = input.operator_subject.legacy_agent_identity();
+    let subject_id_hash = operator_subject_id_hash(&subject_key);
+    let explicit_key = input
+        .request
+        .header("idempotency-key")
+        .or_else(|| input.payload.get("idempotency_key").and_then(Value::as_str))
+        .or_else(|| input.payload.get("request_id").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let derivation = json!({
+        "protocol": OPERATOR_PROTOCOL_VERSION,
+        "route": input.request.path,
+        "route_kind": format!("{:?}", input.route),
+        "tool": input.tool,
+        "lane_id": lane_id,
+        "lane_generation": lane_generation.unwrap_or(0),
+        "subject_id_hash": subject_id_hash,
+        "arguments": input.arguments,
+    });
+    let derived_key = format!("derived:{}", prefixed_sha256_hex(&json_bytes(&derivation)));
+    let request_id = explicit_key.unwrap_or(&derived_key).to_owned();
+    let idempotency_key_sha256 = prefixed_sha256_hex(request_id.as_bytes());
+    let fingerprint_sha256 = prefixed_sha256_hex(&json_bytes(&derivation));
+    let storage_key = prefixed_sha256_hex(
+        format!("{subject_key}\0{}\0{request_id}", input.request.path).as_bytes(),
+    );
+    OperatorIdempotencyFacts {
+        storage_key,
+        request_id,
+        idempotency_key_sha256,
+        fingerprint_sha256,
+        lane_id,
+        lane_generation,
+        subject_id_hash,
+        grant_sha256: operator_grant_sha256(input.arguments),
+        sql_sha256: operator_sql_sha256(input.arguments),
+        operator_audit_seq: input.operator_audit_seq,
+        started_at: audit_timestamp(),
+        completed_at: None,
+    }
+}
+
+fn json_bytes(value: &Value) -> Vec<u8> {
+    serde_json::to_vec(value).unwrap_or_else(|_| b"<json-serialization-failed>".to_vec())
+}
+
+fn prefixed_sha256_hex(bytes: &[u8]) -> String {
+    format!("sha256:{}", sha256_hex(bytes))
+}
+
+fn operator_grant_sha256(arguments: &Value) -> Option<String> {
+    ["confirm", "token", "confirmation_token"]
+        .into_iter()
+        .find_map(|name| arguments.get(name).and_then(Value::as_str))
+        .map(|grant| prefixed_sha256_hex(grant.as_bytes()))
+}
+
+fn operator_sql_sha256(arguments: &Value) -> Option<String> {
+    ["sql", "source_code", "ddl"]
+        .into_iter()
+        .find_map(|name| arguments.get(name).and_then(Value::as_str))
+        .map(|sql| prefixed_sha256_hex(sql.as_bytes()))
 }
 
 fn allowed_operator_action_tool(route: OperatorRouteKind, tool: &str) -> Option<&'static str> {

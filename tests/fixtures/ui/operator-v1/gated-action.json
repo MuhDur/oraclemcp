@@ -1,5 +1,19 @@
 {
   "data": {
+    "idempotency": {
+      "completed_at": "unix:2",
+      "fingerprint_sha256": "sha256:55da6dc2ff734041469afe5c7be784c2733368389fa97dbb9e1e2f287257b156",
+      "grant_sha256": null,
+      "idempotency_key_sha256": "sha256:1f8b10508c06b6d97931f83be25776c3bb82cd6cdf1374ee05bed0dde144f86c",
+      "lane_generation": 1,
+      "lane_id": "http-lane-1",
+      "operator_audit_seq": 4,
+      "outcome": "forwarded",
+      "request_id": "operator-fixture-1",
+      "sql_sha256": "sha256:e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5",
+      "started_at": "unix:1",
+      "subject_id_hash": "subject-sha256:fbb4a1e284731d21e1a8b010638855af3f13be2a422fb4d4f34bd325e7ca900f"
+    },
     "lane_id": "http-lane-1",
     "mcp_response": {
       "id": "operator-v1",

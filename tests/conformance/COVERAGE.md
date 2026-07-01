@@ -70,11 +70,11 @@ Harnesses:
 | HTTP sessions | 2 | 0 | 2 | 2 | 0 | 100% |
 | HTTP routing | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTP negotiation | 2 | 0 | 2 | 2 | 0 | 100% |
-| Operator v1 | 6 | 0 | 6 | 6 | 0 | 100% |
+| Operator v1 | 7 | 0 | 7 | 7 | 0 | 100% |
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
 | Oracle structured cells | 6 | 0 | 6 | 6 | 0 | 100% |
 
-Total tracked requirements: 47 MUST, 2 SHOULD, 49 tested.
+Total tracked requirements: 48 MUST, 2 SHOULD, 50 tested.
 
 ## Requirement IDs
 
@@ -121,6 +121,7 @@ Total tracked requirements: 47 MUST, 2 SHOULD, 49 tested.
 | OPERATOR-V1-004 | MUST | Operator v1 | Gated-action operator routes forward to existing MCP `tools/call` dispatch mappings rather than bypassing the guarded dispatcher. |
 | OPERATOR-V1-005 | MUST | Operator v1 | Generated operator TypeScript types and UI fixtures are checked against the Rust schema source of truth. |
 | OPERATOR-V1-006 | MUST | Operator v1 | B.6 `mcp_and_operator_v1_conformance_matrix` records 1.00 MUST coverage and runs the UI fixture schema validator. |
+| OPERATOR-V1-007 | MUST | Operator v1 | Gated-action operator routes accept or derive idempotency keys, return typed in-progress/conflict responses, and replay the original redacted response for same-key retries without re-entering guarded dispatch. |
 | HTTPS-001 | MUST | HTTPS / mTLS | Server-only native TLS accepts a valid HTTPS handshake. |
 | HTTPS-002 | MUST | HTTPS / mTLS | Native mTLS rejects clients without a certificate and accepts a client certificate signed by the configured CA. |
 | DB-SER-001 | MUST | Oracle structured cells | A published JSON Schema exists for `OracleCell::structured` and declares ARRAY, JSON/OSON, VECTOR, TSTZ, object marker, and generic unsupported variants. |
@@ -150,6 +151,7 @@ Total tracked requirements: 47 MUST, 2 SHOULD, 49 tested.
 | OPERATOR-V1-004 | `crates/oraclemcp-core/src/http.rs::tests::operator_v1_serves_schema_health_events_and_action_mapping` |
 | OPERATOR-V1-005 | `scripts/ui_fixtures_validate_against_rust_schema.sh`; `crates/oraclemcp-core/src/operator_protocol.rs::tests::generated_operator_schema_artifacts_match_rust_contract` |
 | OPERATOR-V1-006 | `scripts/e2e/mcp_and_operator_v1_conformance_matrix.sh` |
+| OPERATOR-V1-007 | `crates/oraclemcp-core/src/http.rs::tests::operator_action_idempotency_replays_same_response_and_conflicts_on_drift`; `crates/oraclemcp-core/src/http.rs::tests::operator_idempotency_ledger_reports_in_progress_before_completion` |
 | HTTPS-001 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_accepts_tls_handshake` |
 | HTTPS-002 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_requires_client_certificate_when_mtls_is_configured` |
 

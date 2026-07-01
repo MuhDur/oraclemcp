@@ -51,13 +51,13 @@ if [ "$missing" -ne 0 ]; then
   e2e_finish_fail "$missing required B.6 file(s) missing"
 fi
 
-if ! grep -F "| Operator v1 | 6 | 0 | 6 | 6 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
-  e2e_finish_fail "Operator v1 MUST coverage must be 6/6 score=1.00"
+if ! grep -F "| Operator v1 | 7 | 0 | 7 | 7 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "Operator v1 MUST coverage must be 7/7 score=1.00"
 fi
 if ! grep -F "| HTTP negotiation | 2 | 0 | 2 | 2 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "HTTP negotiation coverage must include MCP-Protocol-Version"
 fi
-if ! grep -F "Total tracked requirements: 47 MUST, 2 SHOULD, 49 tested." tests/conformance/COVERAGE.md >/dev/null; then
+if ! grep -F "Total tracked requirements: 48 MUST, 2 SHOULD, 50 tested." tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "B.6 coverage totals are stale"
 fi
 if grep -RInE '(^|[^A-Z])SKIP([^A-Z]|$)' tests/conformance/COVERAGE.md >/dev/null; then
@@ -68,5 +68,5 @@ e2e_run_command "assert" scripts/ui_fixtures_validate_against_rust_schema.sh
 e2e_run_command "assert" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
   cargo test -p oraclemcp-core --lib mcp_protocol_version_header_is_enforced_before_dispatch
 
-e2e_log_event "coverage_summary" "assert" "pass" 0 "B.6 MUST coverage 47/47 score=1.00"
+e2e_log_event "coverage_summary" "assert" "pass" 0 "B.6 MUST coverage 48/48 score=1.00"
 e2e_finish_pass

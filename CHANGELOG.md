@@ -26,6 +26,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `400 unsupported_protocol_version`. `/operator/v1` now serves a generated
   schema bundle, REST/SSE read-only operator routes, and guarded action routes
   that forward through the existing MCP dispatcher.
+- `/operator/v1` gated-action routes now accept or derive idempotency keys,
+  replay same-key retries, and return typed in-progress/conflict responses
+  without bypassing dispatcher-side confirmation grants or durable write intents.
 
 ## [0.4.1] — 2026-06-29
 

@@ -359,7 +359,13 @@ carries `event_seq`, `event_id`, `lane_id`, `subject_id_hash`,
 `/operator/v1/actions/*` plus `/operator/v1/session/set-level` and
 `/operator/v1/session/switch-profile` forward to the existing MCP guarded
 `tools/call` path; they do not bypass SQL classification, profile ceilings, or
-confirmation-token checks.
+confirmation-token checks. These gated-action routes accept an
+`Idempotency-Key` header or body `idempotency_key` / `request_id`; when absent,
+the server derives a key from the route, tool, redacted subject, lane id,
+lane generation, and action arguments. Same-key retries replay the original
+redacted operator response, concurrent duplicates return typed
+`operator_idempotency_in_progress`, and drift under the same key returns
+`operator_idempotency_key_conflict`.
 
 ---
 

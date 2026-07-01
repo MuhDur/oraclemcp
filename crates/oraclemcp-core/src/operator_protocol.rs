@@ -331,6 +331,21 @@ export interface OperatorLaneSummary {{
   status: "starting" | "running" | "stopped" | "quarantined";
   subject_id_hash: string;
 }}
+
+export interface OperatorIdempotency {{
+  request_id: string;
+  idempotency_key_sha256: string;
+  fingerprint_sha256: string;
+  lane_id: string | null;
+  lane_generation: number | null;
+  subject_id_hash: string;
+  grant_sha256: string | null;
+  sql_sha256: string | null;
+  operator_audit_seq: number;
+  started_at: string;
+  completed_at: string | null;
+  outcome: "in_progress" | "forwarded" | "accepted" | "conflict" | string;
+}}
 "#,
         protocol_version = OPERATOR_PROTOCOL_VERSION,
         schema_version = OPERATOR_SCHEMA_VERSION,
@@ -459,6 +474,20 @@ pub fn operator_fixture_values() -> Vec<(&'static str, Value)> {
                     "mcp_tool": "oracle_preview_sql",
                     "lane_id": "http-lane-1",
                     "status": "forwarded",
+                    "idempotency": {
+                        "request_id": "operator-fixture-1",
+                        "idempotency_key_sha256": "sha256:1f8b10508c06b6d97931f83be25776c3bb82cd6cdf1374ee05bed0dde144f86c",
+                        "fingerprint_sha256": "sha256:55da6dc2ff734041469afe5c7be784c2733368389fa97dbb9e1e2f287257b156",
+                        "lane_id": "http-lane-1",
+                        "lane_generation": 1,
+                        "subject_id_hash": operator_subject_id_hash("oauth:fixture"),
+                        "grant_sha256": null,
+                        "sql_sha256": "sha256:e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5",
+                        "operator_audit_seq": 4,
+                        "started_at": "unix:1",
+                        "completed_at": "unix:2",
+                        "outcome": "forwarded"
+                    },
                     "mcp_response": { "jsonrpc": "2.0", "id": "operator-v1", "result": {} }
                 }),
             ),

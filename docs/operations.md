@@ -539,6 +539,13 @@ health, metrics, audit-tail summaries, active lane summaries, and unavailable
 `event_id`, `lane_id`, `subject_id_hash`, `redaction_level`, and
 `schema_version`. Gated-action routes forward to the existing MCP `tools/call`
 dispatcher so all SQL guards and confirmation-token checks remain in one place.
+They also carry an in-memory idempotency ledger: send `Idempotency-Key`,
+`idempotency_key`, or `request_id` for explicit retry identity, or let the
+server derive a key from the route/tool/subject/lane generation/arguments.
+Same-key retries replay the original redacted response; concurrent duplicates
+return `operator_idempotency_in_progress`; same-key request drift returns
+`operator_idempotency_key_conflict`. Durable crash safety for committing SQL is
+still the write-intent/audit path, not this HTTP-edge cache.
 
 ### 5.5 Rotate credentials and keys
 
