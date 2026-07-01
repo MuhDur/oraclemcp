@@ -139,6 +139,8 @@ fn is_known_safe_key(key_lc: &str) -> bool {
             | "rowcount"
             | "cache_hit"
             | "ora_code"
+            | "lane_id"
+            | "subject_id_hash"
             | "request_id"
             | "target"
             | "service.name"

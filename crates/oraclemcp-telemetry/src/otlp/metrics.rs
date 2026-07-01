@@ -62,6 +62,51 @@ pub fn build_request(
         ));
     }
 
+    // mcp.server.lane.request.count {lane_id, subject_id_hash, tool, status}
+    // — monotonic counter. `subject_id_hash` is already redacted at the HTTP
+    // lane boundary; no raw principal key reaches telemetry.
+    for r in &snapshot.lane_requests {
+        let attrs = redact_labels(
+            redactor,
+            &[
+                ("lane_id", &r.lane_id),
+                ("subject_id_hash", &r.subject_id_hash),
+                ("tool", &r.tool),
+                ("status", &r.status),
+            ],
+        );
+        metrics.push(sum_metric(
+            "mcp.server.lane.request.count",
+            "Count of MCP tool dispatches by lane, subject hash, tool, and status.",
+            "1",
+            attrs,
+            i64::try_from(r.count).unwrap_or(i64::MAX),
+            start_unix_nano,
+            now_unix_nano,
+        ));
+    }
+
+    // mcp.server.lane.blocked.count {lane_id, subject_id_hash} — monotonic
+    // counter for policy/capacity/classifier refusals.
+    for r in &snapshot.lane_blocked {
+        let attrs = redact_labels(
+            redactor,
+            &[
+                ("lane_id", &r.lane_id),
+                ("subject_id_hash", &r.subject_id_hash),
+            ],
+        );
+        metrics.push(sum_metric(
+            "mcp.server.lane.blocked.count",
+            "Count of blocked MCP dispatches by lane and subject hash.",
+            "1",
+            attrs,
+            i64::try_from(r.count).unwrap_or(i64::MAX),
+            start_unix_nano,
+            now_unix_nano,
+        ));
+    }
+
     // db.errors {db.response.status_code} — monotonic counter, db.* conventions.
     for e in &snapshot.errors {
         let code = e.ora_code.to_string();
@@ -96,6 +141,30 @@ pub fn build_request(
         now_unix_nano,
     ));
 
+    // mcp.server.lane.request.duration — histogram (ms) by lane, subject hash,
+    // and tool.
+    for r in &snapshot.lane_request_duration_ms {
+        let attrs = redact_labels(
+            redactor,
+            &[
+                ("lane_id", &r.lane_id),
+                ("subject_id_hash", &r.subject_id_hash),
+                ("tool", &r.tool),
+            ],
+        );
+        metrics.push(histogram_metric(
+            "mcp.server.lane.request.duration",
+            "MCP tool dispatch duration by lane, subject hash, and tool.",
+            "ms",
+            attrs,
+            r.histogram.count,
+            r.histogram.sum,
+            r.histogram.max,
+            start_unix_nano,
+            now_unix_nano,
+        ));
+    }
+
     // db.client.connection.wait_time — histogram (ms) for pool checkout wait.
     metrics.push(histogram_metric(
         "db.client.connection.wait_time",
@@ -121,6 +190,34 @@ pub fn build_request(
         i64::try_from(snapshot.pool_active_connections).unwrap_or(i64::MAX),
         now_unix_nano,
     ));
+
+    // mcp.server.active_lanes — gauge of active stateful HTTP lanes.
+    metrics.push(gauge_metric(
+        "mcp.server.active_lanes",
+        "Current active stateful HTTP lanes.",
+        "1",
+        Vec::new(),
+        i64::try_from(snapshot.active_lanes).unwrap_or(i64::MAX),
+        now_unix_nano,
+    ));
+
+    for lane in &snapshot.active_lane_gauges {
+        let attrs = redact_labels(
+            redactor,
+            &[
+                ("lane_id", &lane.lane_id),
+                ("subject_id_hash", &lane.subject_id_hash),
+            ],
+        );
+        metrics.push(gauge_metric(
+            "mcp.server.active_lane",
+            "Per-lane active state gauge.",
+            "1",
+            attrs,
+            i64::try_from(lane.active).unwrap_or(i64::MAX),
+            now_unix_nano,
+        ));
+    }
 
     ExportMetricsServiceRequest {
         resource_metrics: vec![ResourceMetrics {
@@ -287,6 +384,9 @@ mod tests {
     use crate::metrics::Metrics;
     use prost::Message;
 
+    const SUBJECT_HASH: &str =
+        "subject-sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     fn cfg() -> OtlpConfig {
         OtlpConfig::from_lookup(|k| {
             (k == "OTEL_EXPORTER_OTLP_ENDPOINT").then(|| "http://c:4318".to_owned())
@@ -294,11 +394,27 @@ mod tests {
         .expect("on")
     }
 
+    fn attr_value<'a>(attrs: &'a [super::super::proto::KeyValue], key: &str) -> Option<&'a str> {
+        attrs.iter().find_map(|kv| {
+            if kv.key != key {
+                return None;
+            }
+            let value = kv.value.as_ref()?.value.as_ref()?;
+            match value {
+                super::super::proto::any_value::Value::StringValue(value) => Some(value.as_str()),
+            }
+        })
+    }
+
     #[test]
     fn maps_snapshot_to_db_semantic_conventions_and_roundtrips() {
         let m = Metrics::new();
         m.record_request("oracle_query", "ok");
         m.record_request("oracle_query", "error");
+        m.record_lane_request("lane-a", SUBJECT_HASH, "oracle_query", "blocked");
+        m.record_lane_blocked("lane-a", SUBJECT_HASH);
+        m.record_lane_request_duration_ms("lane-a", SUBJECT_HASH, "oracle_query", 42);
+        m.set_active_lanes(&[("lane-a".to_owned(), SUBJECT_HASH.to_owned())]);
         m.record_error(942);
         m.record_query_duration_ms(10);
         m.record_query_duration_ms(30);
@@ -317,6 +433,11 @@ mod tests {
             .map(|metric| metric.name.as_str())
             .collect();
         assert!(names.contains(&"mcp.server.request.count"));
+        assert!(names.contains(&"mcp.server.lane.request.count"));
+        assert!(names.contains(&"mcp.server.lane.blocked.count"));
+        assert!(names.contains(&"mcp.server.lane.request.duration"));
+        assert!(names.contains(&"mcp.server.active_lanes"));
+        assert!(names.contains(&"mcp.server.active_lane"));
         assert!(names.contains(&"db.client.errors"));
         assert!(names.contains(&"db.client.operation.duration"));
         assert!(names.contains(&"db.client.connection.count"));
@@ -337,6 +458,19 @@ mod tests {
             assert!(keys.contains(&"db.response.status_code"));
         } else {
             panic!("errors metric must be a Sum");
+        }
+
+        let lane_metric = decoded.resource_metrics[0].scope_metrics[0]
+            .metrics
+            .iter()
+            .find(|metric| metric.name == "mcp.server.lane.request.count")
+            .expect("lane request metric");
+        if let Some(metric::Data::Sum(sum)) = &lane_metric.data {
+            let attrs = &sum.data_points[0].attributes;
+            assert_eq!(attr_value(attrs, "lane_id"), Some("lane-a"));
+            assert_eq!(attr_value(attrs, "subject_id_hash"), Some(SUBJECT_HASH));
+        } else {
+            panic!("lane request metric must be a Sum");
         }
     }
 

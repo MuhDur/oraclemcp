@@ -30,6 +30,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Instant;
 
 use asupersync::Cx;
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -50,14 +51,14 @@ use oraclemcp_config::{AuditConfig, HttpConfig, HttpTlsConfig, OracleMcpConfig};
 use oraclemcp_core::http::SinglePrincipalGuard;
 use oraclemcp_core::{
     AdmissionController, CapabilitiesReport, CustomToolCatalog, CustomToolDef, DashboardAuth,
-    DoctorContext, ExportRegistry, FeatureTiers, HttpSessionLifecycle, HttpTransportConfig,
-    LaneContext, LaneDispatchFactory, LaneRuntime, MCP_PATH, OAuthEnforcement, ObservabilityState,
-    OperatorAuthorityPolicy, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport,
-    ShutdownCoordinator, SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy,
-    TlsMaterial, TlsServerConfig, ToolDispatch, WriteIntentLog, build_server_config,
-    default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
-    mint_dashboard_pairing_ticket, parse_tools_file, requires_mtls, run_doctor, sign,
-    start_oraclemcp_service_app_with_transport,
+    DispatchFuture, DispatchOutcome, DoctorContext, ExportRegistry, FeatureTiers,
+    HttpSessionLifecycle, HttpTransportConfig, LaneContext, LaneDispatchFactory, LaneRuntime,
+    MCP_PATH, OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy, OracleMcpServer,
+    PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport, ShutdownCoordinator, SiemFormat,
+    SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial, TlsServerConfig,
+    ToolDispatch, WriteIntentLog, build_server_config, default_dashboard_ticket_dir, load_tools,
+    load_tools_for_profile, mint_dashboard_pairing_ticket, operator_subject_id_hash,
+    parse_tools_file, requires_mtls, run_doctor, sign, start_oraclemcp_service_app_with_transport,
 };
 use oraclemcp_db::{
     DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
@@ -1276,9 +1277,106 @@ async fn open_lane_runtime_connections(
     }
 }
 
-fn stateful_lane_factory(wiring: DispatcherWiring) -> Arc<LaneDispatchFactory> {
+struct MetricsDispatch {
+    inner: Arc<dyn ToolDispatch>,
+    metrics: Arc<Metrics>,
+}
+
+impl MetricsDispatch {
+    fn new(inner: Arc<dyn ToolDispatch>, metrics: Arc<Metrics>) -> Self {
+        Self { inner, metrics }
+    }
+}
+
+impl ToolDispatch for MetricsDispatch {
+    fn dispatch<'a>(
+        &'a self,
+        cx: &'a Cx,
+        context: oraclemcp_core::DispatchContext<'a>,
+        name: &'a str,
+        args: serde_json::Value,
+    ) -> DispatchFuture<'a> {
+        Box::pin(async move {
+            let started = Instant::now();
+            let lane_id = context.lane_id().unwrap_or("process").to_owned();
+            let subject_id_hash = context
+                .principal_key()
+                .map(operator_subject_id_hash)
+                .unwrap_or_else(|| operator_subject_id_hash("process"));
+            let result = self.inner.dispatch(cx, context, name, args).await;
+            let status = metrics_status(&result);
+            self.metrics
+                .record_lane_request(&lane_id, &subject_id_hash, name, status);
+            self.metrics.record_lane_request_duration_ms(
+                &lane_id,
+                &subject_id_hash,
+                name,
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            );
+            if metrics_is_blocked(&result) {
+                self.metrics.record_lane_blocked(&lane_id, &subject_id_hash);
+            }
+            result
+        })
+    }
+
+    fn close<'a>(
+        &'a self,
+        cx: &'a Cx,
+        reason: oraclemcp_core::DispatchCloseReason,
+    ) -> oraclemcp_core::DispatchCloseFuture<'a> {
+        self.inner.close(cx, reason)
+    }
+}
+
+fn metrics_status(outcome: &DispatchOutcome) -> &'static str {
+    match outcome {
+        asupersync::Outcome::Ok(_) => "ok",
+        asupersync::Outcome::Err(envelope) => match envelope.error_class {
+            ErrorClass::Busy => "busy",
+            ErrorClass::AtCapacity => "at_capacity",
+            ErrorClass::PolicyDenied
+            | ErrorClass::ForbiddenStatement
+            | ErrorClass::OperatingLevelTooLow => "blocked",
+            _ => "error",
+        },
+        asupersync::Outcome::Cancelled(_) => "cancelled",
+        asupersync::Outcome::Panicked(_) => "panicked",
+    }
+}
+
+fn metrics_is_blocked(outcome: &DispatchOutcome) -> bool {
+    matches!(
+        outcome,
+        asupersync::Outcome::Err(envelope)
+            if matches!(
+                envelope.error_class,
+                ErrorClass::Busy
+                    | ErrorClass::AtCapacity
+                    | ErrorClass::PolicyDenied
+                    | ErrorClass::ForbiddenStatement
+                    | ErrorClass::OperatingLevelTooLow
+            )
+    )
+}
+
+fn maybe_wrap_metrics_dispatch(
+    dispatcher: Arc<dyn ToolDispatch>,
+    metrics: Option<&Arc<Metrics>>,
+) -> Arc<dyn ToolDispatch> {
+    match metrics {
+        Some(metrics) => Arc::new(MetricsDispatch::new(dispatcher, Arc::clone(metrics))),
+        None => dispatcher,
+    }
+}
+
+fn stateful_lane_factory(
+    wiring: DispatcherWiring,
+    metrics: Option<Arc<Metrics>>,
+) -> Arc<LaneDispatchFactory> {
     Arc::new(move |cx: &Cx, lane_context: &LaneContext| {
         let wiring = wiring.clone();
+        let metrics = metrics.clone();
         let principal_key = lane_context.principal_key().to_owned();
         Box::pin(async move {
             let connections = open_lane_runtime_connections(
@@ -1291,7 +1389,8 @@ fn stateful_lane_factory(wiring: DispatcherWiring) -> Arc<LaneDispatchFactory> {
             let dispatcher =
                 build_oracle_dispatcher(connections.session, connections.stateless, &wiring)
                     .with_default_audit_subject(audit_subject_from_principal_key(&principal_key));
-            Ok(Arc::new(dispatcher) as Arc<dyn ToolDispatch>)
+            let dispatcher: Arc<dyn ToolDispatch> = Arc::new(dispatcher);
+            Ok(maybe_wrap_metrics_dispatch(dispatcher, metrics.as_ref()))
         })
     })
 }
@@ -1316,6 +1415,7 @@ struct ServerBuildOptions {
     write_intents: Option<Arc<WriteIntentLog>>,
     secret_resolver: Arc<dyn SecretResolver>,
     request_timeout: Option<std::time::Duration>,
+    metrics: Option<Arc<Metrics>>,
 }
 
 struct BuiltServer {
@@ -1391,7 +1491,7 @@ fn build_server_with_lifecycle(
         if matches!(options.transport, ServerTransportMode::HttpStateful) {
             let stateful = Arc::new(
                 StatefulLaneDispatch::with_dispatch_factory(
-                    stateful_lane_factory(wiring.clone()),
+                    stateful_lane_factory(wiring.clone(), options.metrics.clone()),
                     wiring.auditor.clone(),
                 )
                 .with_admission_controller(Arc::new(AdmissionController::n4_stateful_defaults())),
@@ -1400,10 +1500,12 @@ fn build_server_with_lifecycle(
             stateful
         } else {
             let dispatcher = build_oracle_dispatcher(conn, stateless_conn, &wiring);
+            let dispatcher =
+                maybe_wrap_metrics_dispatch(Arc::new(dispatcher), options.metrics.as_ref());
             let lane: Arc<dyn ToolDispatch> =
                 Arc::new(LaneRuntime::spawn_default_with_panic_auditor(
                     "served-http-stateless",
-                    Arc::new(dispatcher),
+                    dispatcher,
                     wiring.auditor.clone(),
                 ));
             lane
@@ -1814,6 +1916,7 @@ fn run_serve(
                     write_intents,
                     secret_resolver: Arc::clone(&secret_resolver),
                     request_timeout,
+                    metrics: None,
                 },
             );
             emit_serve_status(robot_json, "stdio", None, &advertised_tools);
@@ -1885,6 +1988,7 @@ fn run_serve(
             if http_stateful {
                 resolved_http.transport.single_principal_guard = None;
             }
+            let metrics = Arc::new(Metrics::new());
             let built = build_server_with_lifecycle(
                 connections.session,
                 connections.stateless,
@@ -1901,6 +2005,7 @@ fn run_serve(
                     write_intents,
                     secret_resolver: Arc::clone(&secret_resolver),
                     request_timeout,
+                    metrics: Some(Arc::clone(&metrics)),
                 },
             );
             let server = built.server;
@@ -1920,7 +2025,6 @@ fn run_serve(
             // ── D1 observability wiring (health + metrics + graceful drain) ──
             let version = env!("CARGO_PKG_VERSION");
             let health = HealthState::new(version);
-            let metrics = Arc::new(Metrics::new());
             let shutdown_coordinator = ShutdownCoordinator::new(health.clone());
 
             // /readyz DB-reachability probe: a background pinger on a dedicated
@@ -4041,6 +4145,7 @@ mod tests {
                 write_intents: None,
                 secret_resolver: Arc::new(SystemSecretResolver),
                 request_timeout: OracleConnectOptions::default().call_timeout,
+                metrics: None,
             },
         );
         // The capabilities report carries the registry's tools.

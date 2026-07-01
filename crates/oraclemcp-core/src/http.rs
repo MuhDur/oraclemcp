@@ -1307,6 +1307,34 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct StaticLaneLifecycle {
+        lanes: Vec<HttpLaneSnapshot>,
+    }
+
+    impl StaticLaneLifecycle {
+        fn one_lane() -> Self {
+            Self {
+                lanes: vec![HttpLaneSnapshot {
+                    lane_id: "lane-a".to_owned(),
+                    generation: 7,
+                    status: "active",
+                    subject_id_hash: "subject-sha256:abc".to_owned(),
+                }],
+            }
+        }
+    }
+
+    impl HttpSessionLifecycle for StaticLaneLifecycle {
+        fn close_session(&self, _session_id: &str, _principal_key: &str) -> bool {
+            false
+        }
+
+        fn active_lanes(&self) -> Vec<HttpLaneSnapshot> {
+            self.lanes.clone()
+        }
+    }
+
     #[test]
     fn operator_v1_serves_schema_health_events_and_action_mapping() {
         let (auditor, sink) = operator_auditor();
@@ -1316,6 +1344,7 @@ mod tests {
         metrics.record_request("oracle_query", "ok");
         let cfg = HttpTransportConfig {
             operator_auditor: Some(auditor),
+            session_lifecycle: Some(Arc::new(StaticLaneLifecycle::one_lane())),
             observability: ObservabilityState {
                 health: Some(health),
                 metrics: Some(metrics),
@@ -1369,6 +1398,32 @@ mod tests {
         assert_eq!(
             health_body["data"]["readiness"]["db_reachable"],
             serde_json::json!(true)
+        );
+
+        let metrics_response = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                "/operator/v1/metrics",
+                [("host", "127.0.0.1"), ("accept", "application/json")],
+                Vec::new(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(metrics_response.status, 200);
+        let metrics_body = response_json(&metrics_response);
+        assert_eq!(
+            metrics_body["data"]["snapshot"]["active_lanes"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            metrics_body["data"]["snapshot"]["active_lane_gauges"][0]["lane_id"],
+            serde_json::json!("lane-a")
+        );
+        assert_eq!(
+            metrics_body["data"]["snapshot"]["active_lane_gauges"][0]["subject_id_hash"],
+            serde_json::json!("subject-sha256:abc")
         );
 
         let events = handle_http_request(
@@ -1426,13 +1481,14 @@ mod tests {
 
         let records = sink.records();
         assert!(
-            records.len() >= 4,
-            "schema, health, events, and action routes are audited"
+            records.len() >= 5,
+            "schema, health, metrics, events, and action routes are audited"
         );
         assert_eq!(records[0].sql_preview, "GET /operator/v1/schema");
         assert_eq!(records[1].sql_preview, "GET /operator/v1/health");
-        assert_eq!(records[2].sql_preview, "GET /operator/v1/events");
-        assert_eq!(records[3].sql_preview, "POST /operator/v1/actions/preview");
+        assert_eq!(records[2].sql_preview, "GET /operator/v1/metrics");
+        assert_eq!(records[3].sql_preview, "GET /operator/v1/events");
+        assert_eq!(records[4].sql_preview, "POST /operator/v1/actions/preview");
     }
 
     #[test]
@@ -2992,7 +3048,8 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         metrics.record_request("oracle_query", "ok");
         metrics.set_pool_active(2);
-        let cfg = obs_config(HealthState::new("0.1.0"), Some(metrics), None);
+        let mut cfg = obs_config(HealthState::new("0.1.0"), Some(metrics), None);
+        cfg.session_lifecycle = Some(Arc::new(StaticLaneLifecycle::one_lane()));
         let resp = handle_http_request(&test_server(), &cfg, get(METRICS_PATH));
         assert_eq!(resp.status, 200);
         assert_eq!(
@@ -3001,6 +3058,10 @@ mod tests {
         );
         let body = String::from_utf8(resp.body).expect("utf-8");
         assert!(body.contains("mcp_requests_total{tool=\"oracle_query\",status=\"ok\"} 1"));
+        assert!(body.contains("mcp_active_lanes 1"));
+        assert!(body.contains(
+            "mcp_active_lane{lane_id=\"lane-a\",subject_id_hash=\"subject-sha256:abc\"} 1"
+        ));
         assert!(body.contains("db_pool_active_connections 2"));
     }
 
@@ -4487,8 +4548,7 @@ fn handle_http_exchange(
         // secrets and no DB data.
         HttpRoute::Observability => {
             return HttpExchange::Buffered(
-                handle_observability_route(&config.observability, &request)
-                    .unwrap_or_else(|| empty_response(404)),
+                handle_observability_route(config, &request).unwrap_or_else(|| empty_response(404)),
             );
         }
         HttpRoute::DashboardPairing => {
@@ -4968,11 +5028,9 @@ fn handle_operator_api_route(
             &request.path,
             operator_health_data(&config.observability),
         ),
-        OperatorRouteKind::Metrics => operator_json_response(
-            200,
-            &request.path,
-            operator_metrics_data(&config.observability),
-        ),
+        OperatorRouteKind::Metrics => {
+            operator_json_response(200, &request.path, operator_metrics_data(config))
+        }
         OperatorRouteKind::AuditTail => operator_json_response(
             200,
             &request.path,
@@ -5067,8 +5125,9 @@ fn operator_health_data(obs: &ObservabilityState) -> Value {
     })
 }
 
-fn operator_metrics_data(obs: &ObservabilityState) -> Value {
-    match &obs.metrics {
+fn operator_metrics_data(config: &HttpTransportConfig) -> Value {
+    refresh_active_lane_metrics(config);
+    match &config.observability.metrics {
         Some(metrics) => json!({
             "source": "self_lane",
             "snapshot": metrics.snapshot(),
@@ -5081,12 +5140,36 @@ fn operator_metrics_data(obs: &ObservabilityState) -> Value {
     }
 }
 
-fn operator_active_lanes_data(config: &HttpTransportConfig) -> Value {
-    let lanes = config
+fn active_lane_snapshots(config: &HttpTransportConfig) -> Vec<HttpLaneSnapshot> {
+    config
         .session_lifecycle
         .as_ref()
         .map(|lifecycle| lifecycle.active_lanes())
         .unwrap_or_default()
+}
+
+fn refresh_active_lane_metrics(config: &HttpTransportConfig) {
+    let lanes = active_lane_snapshots(config);
+    set_active_lane_metrics_from_snapshots(config, &lanes);
+}
+
+fn set_active_lane_metrics_from_snapshots(
+    config: &HttpTransportConfig,
+    lanes: &[HttpLaneSnapshot],
+) {
+    if let Some(metrics) = &config.observability.metrics {
+        let labels = lanes
+            .iter()
+            .map(|lane| (lane.lane_id.clone(), lane.subject_id_hash.clone()))
+            .collect::<Vec<_>>();
+        metrics.set_active_lanes(&labels);
+    }
+}
+
+fn operator_active_lanes_data(config: &HttpTransportConfig) -> Value {
+    let lane_snapshots = active_lane_snapshots(config);
+    set_active_lane_metrics_from_snapshots(config, &lane_snapshots);
+    let lanes = lane_snapshots
         .into_iter()
         .map(|lane| {
             json!({
@@ -5488,7 +5571,7 @@ fn operator_events_response(
             "protocol_version": OPERATOR_PROTOCOL_VERSION,
             "active_lanes": lane_count,
             "health": operator_health_data(&config.observability),
-            "metrics": operator_metrics_data(&config.observability),
+            "metrics": operator_metrics_data(config),
         }),
     ) {
         Ok(events) => events,
@@ -6074,9 +6157,10 @@ fn dashboard_html_fallback_path(path: &str) -> bool {
 ///   shutdown** (the R4 acceptance criterion).
 /// - `/metrics`: Prometheus text exposition (no labels carry secrets/binds).
 fn handle_observability_route(
-    obs: &ObservabilityState,
+    config: &HttpTransportConfig,
     request: &HttpRequest,
 ) -> Option<HttpResponse> {
+    let obs = &config.observability;
     match request.path.as_str() {
         HEALTHZ_PATH => {
             let health = obs.health.as_ref()?;
@@ -6117,6 +6201,7 @@ fn handle_observability_route(
             if request.method != "GET" {
                 return Some(empty_response(405).with_header("allow", "GET"));
             }
+            refresh_active_lane_metrics(config);
             Some(HttpResponse {
                 status: 200,
                 headers: vec![(

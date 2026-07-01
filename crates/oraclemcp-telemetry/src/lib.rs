@@ -22,7 +22,10 @@ pub mod otlp;
 
 pub use health::{HealthReport, HealthState};
 pub use logging::{TelemetryGuard, init_json_logging, init_telemetry};
-pub use metrics::{ErrorCount, HistogramSnapshot, Metrics, MetricsSnapshot, RequestCount};
+pub use metrics::{
+    ActiveLaneGauge, ErrorCount, HistogramSnapshot, LaneBlockedCount, LaneRequestCount,
+    LaneRequestDuration, Metrics, MetricsSnapshot, RequestCount,
+};
 pub use otlp::{ExportPump, OtlpConfig, PumpHandle, Redactor};
 
 /// Re-export the shared agent-facing error envelope.
