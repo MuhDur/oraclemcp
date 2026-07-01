@@ -44,7 +44,7 @@
 use crate::error::DbError;
 use crate::serialize::SerializeOptions;
 use crate::types::{
-    OracleBackend, OracleBind, OracleConnectOptions, OracleConnectionInfo, OracleRow,
+    OracleBackend, OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow,
 };
 use asupersync::Cx;
 use asupersync::sync::Mutex as AsyncMutex;
@@ -169,7 +169,6 @@ impl OracleRoutineArg {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn into_driver_bind(self) -> oracledb::protocol::thin::BindValue {
         self.bind
     }
@@ -181,6 +180,50 @@ impl std::fmt::Debug for OracleRoutineArg {
             .field("kind", &self.bind.variant_name())
             .field("value", &"<driver-output-bind>")
             .finish()
+    }
+}
+
+/// Result of adapter-internal PL/SQL routine execution.
+///
+/// Routine execution is deliberately a DB-crate adapter capability, not an
+/// agent-facing tool. OUT, IN-OUT, and return values are exposed as
+/// [`OracleCell`]s in the same positional order as the caller-declared
+/// [`OracleRoutineArg`] list, independent of the driver's raw OUT-bind return
+/// order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ExecuteOutcome {
+    rows_affected: u64,
+    out_binds: Vec<OracleCell>,
+}
+
+impl ExecuteOutcome {
+    /// Build an execution outcome from an affected-row count and already
+    /// ordered OUT-bind cells.
+    #[must_use]
+    pub fn new(rows_affected: u64, out_binds: Vec<OracleCell>) -> Self {
+        Self {
+            rows_affected,
+            out_binds,
+        }
+    }
+
+    /// Rows affected as reported by Oracle for the executed PL/SQL block.
+    #[must_use]
+    pub const fn rows_affected(&self) -> u64 {
+        self.rows_affected
+    }
+
+    /// OUT, IN-OUT, and return values in declared routine-argument order.
+    #[must_use]
+    pub fn out_binds(&self) -> &[OracleCell] {
+        &self.out_binds
+    }
+
+    /// Consume the outcome and return its ordered OUT-bind cells.
+    #[must_use]
+    pub fn into_out_binds(self) -> Vec<OracleCell> {
+        self.out_binds
     }
 }
 
@@ -258,6 +301,27 @@ pub trait OracleConnection: Send + Sync {
     /// If this observes cancellation after Oracle has returned success, callers
     /// must treat the session as dirty and run cleanup rollback/discard logic.
     async fn execute(&self, cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError>;
+
+    /// Execute an adapter-internal PL/SQL routine block with positional OUT,
+    /// IN-OUT, or return bind slots.
+    ///
+    /// This is intentionally not an agent-facing routine tool. The caller
+    /// supplies the exact PL/SQL block and a positional [`OracleRoutineArg`]
+    /// list; returned OUT cells are ordered by that list, not by the driver's
+    /// raw OUT-bind vector. A called routine may execute `COMMIT` internally;
+    /// callers that need transactional guarantees must account for that Oracle
+    /// behavior before invoking this adapter path.
+    async fn call_routine(
+        &self,
+        cx: &Cx,
+        plsql_block: &str,
+        args: &[OracleRoutineArg],
+    ) -> Result<ExecuteOutcome, DbError> {
+        let _ = (cx, plsql_block, args);
+        Err(DbError::Execute(
+            "routine execution is not supported by this Oracle backend".to_owned(),
+        ))
+    }
 
     /// Current Oracle per-round-trip call timeout, when supported by the backend.
     fn call_timeout(&self) -> Result<Option<Duration>, DbError> {
@@ -387,7 +451,7 @@ fn duration_to_millis(duration: Duration) -> u32 {
 }
 
 mod driver {
-    use super::{DbmsOutput, RustOracleConnection};
+    use super::{DbmsOutput, ExecuteOutcome, OracleRoutineArg, RustOracleConnection};
     use crate::auth_adapter::AuthAdapter;
     use crate::error::DbError;
     use crate::serialize::{SerializeOptions, StructuredDecodeCaps, json_byte_len};
@@ -799,6 +863,95 @@ mod driver {
             .out_values
             .iter()
             .find_map(|(index, value)| (*index == bind_index).then_some(value.as_ref()).flatten())
+    }
+
+    fn output_value_entry(result: &QueryResult, bind_index: usize) -> Option<Option<&QueryValue>> {
+        result
+            .out_values
+            .iter()
+            .find_map(|(index, value)| (*index == bind_index).then_some(value.as_ref()))
+    }
+
+    pub(super) fn ordered_routine_out_values(
+        result: &QueryResult,
+        arg_count: usize,
+    ) -> Result<Vec<Option<QueryValue>>, DbError> {
+        (0..arg_count)
+            .map(|index| {
+                output_value_entry(result, index)
+                    .map(|value| value.cloned())
+                    .ok_or_else(|| {
+                        DbError::Execute(format!(
+                            "routine OUT bind at position {} was not returned by the driver",
+                            index + 1
+                        ))
+                    })
+            })
+            .collect()
+    }
+
+    fn routine_arg_metadata(index: usize, arg: &OracleRoutineArg) -> ColumnMetadata {
+        let name = format!("OUT_{}", index + 1);
+        match &arg.bind {
+            BindValue::Output {
+                ora_type_num,
+                csfrm,
+                buffer_size,
+            }
+            | BindValue::ReturnOutput {
+                ora_type_num,
+                csfrm,
+                buffer_size,
+            } => ColumnMetadata::new(name, *ora_type_num)
+                .with_csfrm(*csfrm)
+                .with_buffer_size(*buffer_size)
+                .with_max_size(*buffer_size),
+            BindValue::ObjectOutput {
+                schema,
+                type_name,
+                buffer_size,
+                ..
+            } => ColumnMetadata::new(name, ORA_TYPE_NUM_OBJECT)
+                .with_csfrm(CS_FORM_IMPLICIT)
+                .with_buffer_size(*buffer_size)
+                .with_max_size(*buffer_size)
+                .with_object_schema(Some(schema.clone()))
+                .with_object_type_name(Some(type_name.clone())),
+            other => unreachable!(
+                "OracleRoutineArg must wrap only output bind variants, got {}",
+                other.variant_name()
+            ),
+        }
+    }
+
+    async fn routine_out_binds(
+        cx: &Cx,
+        inner: &mut oracledb::Connection,
+        result: &QueryResult,
+        args: &[OracleRoutineArg],
+        opts: &OracleConnectOptions,
+        serialize_opts: &SerializeOptions,
+        timeout_ms: Option<u32>,
+    ) -> Result<Vec<OracleCell>, DbError> {
+        let ordered = ordered_routine_out_values(result, args.len())?;
+        let mut out = Vec::with_capacity(args.len());
+        for (index, (arg, value)) in args.iter().zip(ordered).enumerate() {
+            let metadata = routine_arg_metadata(index, arg);
+            out.push(
+                value_to_cell(
+                    cx,
+                    inner,
+                    &metadata,
+                    value,
+                    opts,
+                    serialize_opts,
+                    timeout_ms,
+                    0,
+                )
+                .await?,
+            );
+        }
+        Ok(out)
     }
 
     fn order_named_binds_for_driver(sql: &str, named: Vec<(String, BindValue)>) -> Vec<BindValue> {
@@ -3378,6 +3531,52 @@ mod driver {
             Ok(result.row_count)
         }
 
+        async fn call_routine(
+            &self,
+            cx: &Cx,
+            plsql_block: &str,
+            args: &[OracleRoutineArg],
+        ) -> Result<ExecuteOutcome, DbError> {
+            super::db_checkpoint(cx, "oracle_db.call_routine.before")?;
+            let binds: Vec<BindValue> = args
+                .iter()
+                .cloned()
+                .map(OracleRoutineArg::into_driver_bind)
+                .collect();
+            let timeout = self.timeout_ms()?;
+            let serialize_opts = SerializeOptions::default();
+            let mut inner = self.lock_inner(cx).await?;
+            let result = execute_with_timeout(
+                cx,
+                &mut inner,
+                plsql_block,
+                0,
+                &binds,
+                timeout,
+                &self.opts,
+                "routine",
+            )
+            .await
+            .map_err(|err| match err {
+                DbError::Query(msg) => DbError::Execute(msg),
+                other => other,
+            })?;
+            let rows_affected = result.row_count;
+            let out_binds = routine_out_binds(
+                cx,
+                &mut inner,
+                &result,
+                args,
+                &self.opts,
+                &serialize_opts,
+                timeout,
+            )
+            .await?;
+            drop(inner);
+            super::db_checkpoint(cx, "oracle_db.call_routine.after")?;
+            Ok(ExecuteOutcome::new(rows_affected, out_binds))
+        }
+
         fn call_timeout(&self) -> Result<Option<std::time::Duration>, DbError> {
             self.call_timeout
                 .lock()
@@ -3595,6 +3794,53 @@ mod tests {
             }
             other => panic!("expected ObjectOutput bind, got {}", other.variant_name()),
         }
+    }
+
+    #[test]
+    fn routine_out_values_follow_declared_order() {
+        let result = oracledb::protocol::thin::QueryResult {
+            out_values: vec![
+                (
+                    1,
+                    Some(oracledb::protocol::thin::QueryValue::number_from_text(
+                        "42", true,
+                    )),
+                ),
+                (
+                    0,
+                    Some(oracledb::protocol::thin::QueryValue::Text(
+                        "first".to_owned(),
+                    )),
+                ),
+                (2, None),
+            ],
+            ..Default::default()
+        };
+
+        let ordered = driver::ordered_routine_out_values(&result, 3).expect("ordered values");
+        assert_eq!(
+            ordered,
+            vec![
+                Some(oracledb::protocol::thin::QueryValue::Text(
+                    "first".to_owned()
+                )),
+                Some(oracledb::protocol::thin::QueryValue::number_from_text(
+                    "42", true
+                )),
+                None,
+            ]
+        );
+
+        let missing = oracledb::protocol::thin::QueryResult {
+            out_values: vec![(1, None)],
+            ..Default::default()
+        };
+        let err = driver::ordered_routine_out_values(&missing, 2)
+            .expect_err("missing declared out bind is an adapter error");
+        assert!(
+            matches!(err, DbError::Execute(ref msg) if msg.contains("position 1")),
+            "{err:?}"
+        );
     }
 
     #[test]

@@ -49,8 +49,9 @@
 use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
-    DbError, OracleBackend, OracleBind, OracleCell, OracleConnection, OracleConnectionInfo,
-    OracleRow, SerializeOptions, serialize_cell, serialize_row,
+    DbError, ExecuteOutcome, OracleBackend, OracleBind, OracleCell, OracleConnection,
+    OracleConnectionInfo, OracleRoutineArg, OracleRow, SerializeOptions, serialize_cell,
+    serialize_row,
 };
 use oraclemcp_error::{
     ErrorClass, classify_ora_code, envelope_from_oracle_message, parse_ora_code,
@@ -109,6 +110,10 @@ enum Call {
         sql: String,
         binds: Vec<OracleBind>,
     },
+    Routine {
+        plsql_block: String,
+        args: Vec<OracleRoutineArg>,
+    },
     Commit,
     Rollback,
 }
@@ -118,6 +123,8 @@ struct ScriptedConn {
     rows: Vec<OracleRow>,
     /// Rowcount returned by `execute`.
     rowcount: u64,
+    /// Ordered OUT cells returned by `call_routine`.
+    routine_out_binds: Vec<OracleCell>,
     /// Recorded calls, in order.
     calls: Mutex<Vec<Call>>,
 }
@@ -127,8 +134,14 @@ impl ScriptedConn {
         ScriptedConn {
             rows,
             rowcount,
+            routine_out_binds: Vec::new(),
             calls: Mutex::new(Vec::new()),
         }
+    }
+
+    fn with_routine_out_binds(mut self, out_binds: Vec<OracleCell>) -> Self {
+        self.routine_out_binds = out_binds;
+        self
     }
 
     fn record(&self, call: Call) {
@@ -189,6 +202,22 @@ impl OracleConnection for ScriptedConn {
             binds: binds.to_vec(),
         });
         Ok(self.rowcount)
+    }
+    async fn call_routine(
+        &self,
+        cx: &Cx,
+        plsql_block: &str,
+        args: &[OracleRoutineArg],
+    ) -> Result<ExecuteOutcome, DbError> {
+        contract_checkpoint(cx)?;
+        self.record(Call::Routine {
+            plsql_block: plsql_block.to_owned(),
+            args: args.to_vec(),
+        });
+        Ok(ExecuteOutcome::new(
+            self.rowcount,
+            self.routine_out_binds.clone(),
+        ))
     }
     async fn commit(&self, cx: &Cx) -> Result<(), DbError> {
         contract_checkpoint(cx)?;
@@ -719,6 +748,43 @@ fn contract_execute_returns_rowcount() {
 }
 
 #[test]
+fn contract_call_routine_returns_ordered_out_binds() {
+    // call_routine is an adapter-internal routine seam, not an agent tool. Its
+    // public contract is ordered OUT cells: callers see OUT / IN-OUT / return
+    // values in their declared positional argument order.
+    let conn = ScriptedConn::new(vec![], 0).with_routine_out_binds(vec![
+        OracleCell::new("VARCHAR2", Some("first".to_owned())),
+        OracleCell::new("NUMBER", Some("42".to_owned())),
+    ]);
+    let args = vec![
+        OracleRoutineArg::output(1, 1, 32_767),
+        OracleRoutineArg::return_output(2, 1, 22),
+    ];
+    let c = &conn;
+    let a = &args;
+    let outcome = run_with_cx(|cx| async move {
+        c.call_routine(&cx, "BEGIN pkg.contract_probe(:1, :2); END;", a)
+            .await
+            .expect("routine call")
+    });
+    assert_eq!(outcome.rows_affected(), 0);
+    assert_eq!(
+        outcome.out_binds(),
+        &[
+            OracleCell::new("VARCHAR2", Some("first".to_owned())),
+            OracleCell::new("NUMBER", Some("42".to_owned())),
+        ]
+    );
+    assert_eq!(
+        conn.calls(),
+        vec![Call::Routine {
+            plsql_block: "BEGIN pkg.contract_probe(:1, :2); END;".to_owned(),
+            args,
+        }]
+    );
+}
+
+#[test]
 fn contract_named_binds_default_rejects_explicitly_not_silently() {
     // A backend without named-bind support must FAIL EXPLICITLY rather than
     // silently rewrite SQL — pinned via the trait's default method on a backend
@@ -770,6 +836,18 @@ fn contract_named_binds_default_rejects_explicitly_not_silently() {
             .read_dbms_output(&cx, 10, 100)
             .await
             .expect_err("default dbms_output rejects");
+        assert!(matches!(err, DbError::Execute(_)), "{err:?}");
+
+        // Adapter-internal routine execution is also an explicit opt-in backend
+        // capability. A backend that does not implement it must fail closed.
+        let err = conn
+            .call_routine(
+                &cx,
+                "BEGIN pkg.contract_probe(:1); END;",
+                &[OracleRoutineArg::output(1, 1, 32_767)],
+            )
+            .await
+            .expect_err("default routine call rejects");
         assert!(matches!(err, DbError::Execute(_)), "{err:?}");
     });
 }
@@ -1017,6 +1095,51 @@ mod live {
                  execute_raw OUT-bind path"
             );
             assert!(!out.truncated, "two short lines must not truncate");
+        });
+    }
+
+    #[test]
+    fn live_contract_call_routine_out_bind_order_deterministic() {
+        // Pins the R2 adapter routine path against a real server. The two OUT
+        // values are declared as line text then status; the returned
+        // ExecuteOutcome must keep that order regardless of the driver's raw
+        // OUT-bind vector ordering.
+        run_with_cx(|cx| async move {
+            let Some(conn) = connect_or_skip(
+                &cx,
+                "live_contract_call_routine_out_bind_order_deterministic",
+            )
+            .await
+            else {
+                return;
+            };
+            conn.enable_dbms_output(&cx, None)
+                .await
+                .expect("enable dbms_output");
+            conn.execute(
+                &cx,
+                "BEGIN DBMS_OUTPUT.PUT_LINE('r2 routine line'); END;",
+                &[],
+            )
+            .await
+            .expect("emit dbms_output line");
+
+            let outcome = conn
+                .call_routine(
+                    &cx,
+                    "BEGIN DBMS_OUTPUT.GET_LINE(:1, :2); END;",
+                    &[
+                        // ORA_TYPE_NUM_VARCHAR + CS_FORM_IMPLICIT.
+                        OracleRoutineArg::output(1, 1, 32_767),
+                        // ORA_TYPE_NUM_NUMBER + CS_FORM_IMPLICIT.
+                        OracleRoutineArg::output(2, 1, 22),
+                    ],
+                )
+                .await
+                .expect("call routine");
+            assert_eq!(outcome.out_binds().len(), 2);
+            assert_eq!(outcome.out_binds()[0].text(), Some("r2 routine line"));
+            assert_eq!(outcome.out_binds()[1].text(), Some("0"));
         });
     }
 }
