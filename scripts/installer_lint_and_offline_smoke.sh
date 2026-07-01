@@ -117,4 +117,93 @@ contains "$source_output" "mode: source"
 contains "$source_output" "cargo +nightly-2026-05-11 install oraclemcp --locked --version $SMOKE_VERSION --root $PREFIX"
 contains "$source_output" "source builds are explicit opt-in"
 
+OFFLINE_DIR="$SMOKE_ROOT/offline"
+OFFLINE_ARCHIVE="$OFFLINE_DIR/oraclemcp-x86_64-unknown-linux-musl.tar.gz"
+mkdir -p "$OFFLINE_DIR"
+
+offline_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+    bash install.sh \
+      --dry-run \
+      --offline "$OFFLINE_ARCHIVE" \
+      --version "$SMOKE_VERSION" \
+      --target x86_64-unknown-linux-musl \
+      --prefix "$PREFIX"
+)"
+
+contains "$offline_output" "mode: offline"
+contains "$offline_output" "offline_archive: $OFFLINE_ARCHIVE"
+contains "$offline_output" "offline_checksum: $OFFLINE_ARCHIVE.sha256"
+contains "$offline_output" "offline_cosign_signature: $OFFLINE_ARCHIVE.sig + $OFFLINE_ARCHIVE.crt"
+contains "$offline_output" "offline_cosign_attestation: $OFFLINE_ARCHIVE.attestation.sigstore.json"
+not_contains "$offline_output" "archive: https://github.com"
+
+: >"$OFFLINE_ARCHIVE"
+set +e
+offline_missing_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+    bash install.sh \
+      --offline "$OFFLINE_ARCHIVE" \
+      --version "$SMOKE_VERSION" \
+      --target x86_64-unknown-linux-musl \
+      --prefix "$PREFIX" 2>&1
+)"
+offline_missing_status=$?
+set -e
+[ "$offline_missing_status" -ne 0 ] || fail "offline install without bundle metadata unexpectedly succeeded"
+contains "$offline_missing_output" "ORACLEMCP_INSTALL_OFFLINE_BUNDLE_MISSING"
+
+UNINSTALL_PREFIX="$SMOKE_ROOT/uninstall-prefix-$$"
+UNINSTALL_BIN="$UNINSTALL_PREFIX/bin"
+mkdir -p \
+  "$UNINSTALL_BIN" \
+  "$UNINSTALL_PREFIX/share/bash-completion/completions" \
+  "$UNINSTALL_PREFIX/share/zsh/site-functions" \
+  "$UNINSTALL_PREFIX/share/fish/vendor_completions.d" \
+  "$UNINSTALL_PREFIX/share/powershell/Completions"
+printf '#!/bin/sh\n' >"$UNINSTALL_BIN/oraclemcp"
+printf 'alias\n' >"$UNINSTALL_BIN/om"
+printf 'complete\n' >"$UNINSTALL_PREFIX/share/bash-completion/completions/oraclemcp"
+printf 'complete\n' >"$UNINSTALL_PREFIX/share/bash-completion/completions/om"
+printf 'complete\n' >"$UNINSTALL_PREFIX/share/zsh/site-functions/_oraclemcp"
+printf 'complete\n' >"$UNINSTALL_PREFIX/share/zsh/site-functions/_om"
+printf 'complete\n' >"$UNINSTALL_PREFIX/share/fish/vendor_completions.d/oraclemcp.fish"
+printf 'complete\n' >"$UNINSTALL_PREFIX/share/fish/vendor_completions.d/om.fish"
+printf 'complete\n' >"$UNINSTALL_PREFIX/share/powershell/Completions/oraclemcp.ps1"
+printf 'complete\n' >"$UNINSTALL_PREFIX/share/powershell/Completions/om.ps1"
+
+uninstall_dry_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+    bash install.sh \
+      --uninstall \
+      --dry-run \
+      --no-service \
+      --prefix "$UNINSTALL_PREFIX"
+)"
+
+contains "$uninstall_dry_output" "oraclemcp uninstall plan"
+contains "$uninstall_dry_output" "remove if present: $UNINSTALL_BIN/oraclemcp"
+contains "$uninstall_dry_output" "service: not requested; no service-manager files or units will be touched"
+[ -e "$UNINSTALL_BIN/oraclemcp" ] || fail "uninstall dry-run removed oraclemcp"
+
+env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+  bash install.sh --uninstall --yes --no-service --prefix "$UNINSTALL_PREFIX" >/dev/null
+env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+  bash install.sh --uninstall --yes --no-service --prefix "$UNINSTALL_PREFIX" >/dev/null
+
+for removed in \
+  "$UNINSTALL_BIN/oraclemcp" \
+  "$UNINSTALL_BIN/om" \
+  "$UNINSTALL_PREFIX/share/bash-completion/completions/oraclemcp" \
+  "$UNINSTALL_PREFIX/share/bash-completion/completions/om" \
+  "$UNINSTALL_PREFIX/share/zsh/site-functions/_oraclemcp" \
+  "$UNINSTALL_PREFIX/share/zsh/site-functions/_om" \
+  "$UNINSTALL_PREFIX/share/fish/vendor_completions.d/oraclemcp.fish" \
+  "$UNINSTALL_PREFIX/share/fish/vendor_completions.d/om.fish" \
+  "$UNINSTALL_PREFIX/share/powershell/Completions/oraclemcp.ps1" \
+  "$UNINSTALL_PREFIX/share/powershell/Completions/om.ps1"
+do
+  [ ! -e "$removed" ] && [ ! -L "$removed" ] || fail "uninstall left installed file: $removed"
+done
+
 printf 'installer-smoke: OK\n'

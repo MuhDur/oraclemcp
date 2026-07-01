@@ -31,6 +31,24 @@ curl -fsSL https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh \
   | bash -s -- --version <version>
 ```
 
+For air-gapped hosts, download the release archive plus its `.sha256`, `.sig`,
+`.crt`, and `.attestation.sigstore.json` siblings, then run a downloaded copy
+of the installer:
+
+```sh
+bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz \
+  --version <version>
+```
+
+Uninstall is preview-first and idempotent. Service removal remains an explicit
+service-manager mutation:
+
+```sh
+bash install.sh --uninstall --dry-run
+bash install.sh --uninstall --yes
+bash install.sh --uninstall --service --yes
+```
+
 Install the local service only with explicit consent. Keep it on loopback unless
 you deliberately configure remote HTTP, and use service-owned client credentials,
 OAuth, or mTLS for HTTP MCP clients.

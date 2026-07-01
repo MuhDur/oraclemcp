@@ -16,6 +16,8 @@ DRY_RUN=0
 YES=0
 FORCE=0
 SOURCE=0
+UNINSTALL=0
+OFFLINE_ARCHIVE=""
 INSTALL_COMPLETIONS=1
 SERVICE_REQUESTED=0
 PROMPT_SERVICE=1
@@ -45,6 +47,8 @@ Options:
   --bin-dir <dir>           Binary directory (default: <prefix>/bin)
   --repo <owner/repo>       GitHub repository (default: MuhDur/oraclemcp)
   --source                  Build with cargo instead of downloading a release archive
+  --offline <archive>       Install from a local release archive plus sibling verification files
+  --uninstall               Remove installed oraclemcp files; add --service to remove the service
   --no-completions          Do not install shell completions
   --service                 Install/start the local service after binary install
   --no-service              Never prompt for service install
@@ -63,6 +67,9 @@ Options:
 
 The installer never mutates the service manager unless --service is supplied or
 an interactive user answers yes to the service prompt.
+Uninstall is also explicit: use --uninstall --dry-run to inspect, then
+--uninstall --yes to remove installed files. Add --service to remove the local
+service unit through oraclemcp service uninstall.
 USAGE
 }
 
@@ -127,6 +134,15 @@ parse_args() {
         ;;
       --source)
         SOURCE=1
+        shift
+        ;;
+      --offline)
+        [ "$#" -ge 2 ] || fail "--offline requires a release archive path"
+        OFFLINE_ARCHIVE="$2"
+        shift 2
+        ;;
+      --uninstall)
+        UNINSTALL=1
         shift
         ;;
       --no-completions)
@@ -376,10 +392,16 @@ client_issue_args() {
 
 print_plan() {
   local asset base mode
+  if [ "$UNINSTALL" -eq 1 ]; then
+    print_uninstall_plan
+    return
+  fi
+
   asset="$(archive_name)"
   base="$(release_base_url)"
   mode="prebuilt"
   [ "$SOURCE" -eq 1 ] && mode="source"
+  [ -n "$OFFLINE_ARCHIVE" ] && mode="offline"
 
   printf 'oraclemcp installer plan\n'
   printf '  mode: %s\n' "$mode"
@@ -399,10 +421,17 @@ print_plan() {
     fi
     printf '  verification: source builds are explicit opt-in; release archive checksum/cosign verification is skipped\n'
   else
-    printf '  archive: %s/%s\n' "$base" "$asset"
-    printf '  checksum: %s/%s.sha256\n' "$base" "$asset"
-    printf '  cosign_signature: %s/%s.sig + %s/%s.crt\n' "$base" "$asset" "$base" "$asset"
-    printf '  cosign_attestation: %s/%s.attestation.sigstore.json\n' "$base" "$asset"
+    if [ -n "$OFFLINE_ARCHIVE" ]; then
+      printf '  offline_archive: %s\n' "$OFFLINE_ARCHIVE"
+      printf '  offline_checksum: %s.sha256\n' "$OFFLINE_ARCHIVE"
+      printf '  offline_cosign_signature: %s.sig + %s.crt\n' "$OFFLINE_ARCHIVE" "$OFFLINE_ARCHIVE"
+      printf '  offline_cosign_attestation: %s.attestation.sigstore.json\n' "$OFFLINE_ARCHIVE"
+    else
+      printf '  archive: %s/%s\n' "$base" "$asset"
+      printf '  checksum: %s/%s.sha256\n' "$base" "$asset"
+      printf '  cosign_signature: %s/%s.sig + %s/%s.crt\n' "$base" "$asset" "$base" "$asset"
+      printf '  cosign_attestation: %s/%s.attestation.sigstore.json\n' "$base" "$asset"
+    fi
     printf '  sha256_note: checksum verifies transport integrity only; cosign verifies authenticity and provenance\n'
   fi
 
@@ -440,6 +469,24 @@ print_plan() {
     printf '    secret_rule: bearer is printed once by the command; do not write it to profiles.toml or committed client config\n'
   else
     printf '  client_registration: not requested; no clients.json credential will be issued\n'
+  fi
+}
+
+print_uninstall_plan() {
+  printf 'oraclemcp uninstall plan\n'
+  printf '  prefix: %s\n' "$PREFIX"
+  printf '  bin_dir: %s\n' "$BIN_DIR"
+  printf '  files:\n'
+  printf '    remove if present: %s/oraclemcp\n' "$BIN_DIR"
+  printf '    remove if present: %s/om\n' "$BIN_DIR"
+  completion_paths | sed 's/^/    remove if present: /'
+
+  if [ "$SERVICE_REQUESTED" -eq 1 ]; then
+    printf '  service:\n'
+    printf '    unit: %s\n' "$(service_unit_path)"
+    printf '    command: %s/oraclemcp service uninstall --dry-run --name %q\n' "$BIN_DIR" "$SERVICE_NAME"
+  else
+    printf '  service: not requested; no service-manager files or units will be touched\n'
   fi
 }
 
@@ -492,6 +539,22 @@ verify_cosign() {
     "$archive"
 }
 
+require_offline_bundle() {
+  local archive="$1" expected
+  expected="$(archive_name)"
+  [ "$(basename "$archive")" = "$expected" ] || fail "ORACLEMCP_INSTALL_OFFLINE_TARGET_MISMATCH: expected offline archive named $expected for target $TARGET"
+  for path in \
+    "$archive" \
+    "$archive.sha256" \
+    "$archive.sig" \
+    "$archive.crt" \
+    "$archive.attestation.sigstore.json"
+  do
+    [ -f "$path" ] || fail "ORACLEMCP_INSTALL_OFFLINE_BUNDLE_MISSING: required offline bundle file is missing: $path"
+    [ -r "$path" ] || fail "ORACLEMCP_INSTALL_OFFLINE_BUNDLE_UNREADABLE: required offline bundle file is not readable: $path"
+  done
+}
+
 ensure_parent_dir() {
   mkdir -p "$(dirname "$1")"
 }
@@ -528,7 +591,9 @@ install_completion() {
 }
 
 install_completions() {
-  [ "$INSTALL_COMPLETIONS" -eq 1 ] || return
+  if [ "$INSTALL_COMPLETIONS" -ne 1 ]; then
+    return 0
+  fi
   install_completion "$BIN_DIR/oraclemcp" bash "$PREFIX/share/bash-completion/completions/oraclemcp"
   install_completion "$BIN_DIR/om" bash "$PREFIX/share/bash-completion/completions/om"
   install_completion "$BIN_DIR/oraclemcp" zsh "$PREFIX/share/zsh/site-functions/_oraclemcp"
@@ -540,7 +605,9 @@ install_completions() {
 }
 
 register_client() {
-  [ "$CLIENT_REGISTER" -eq 1 ] || return
+  if [ "$CLIENT_REGISTER" -ne 1 ]; then
+    return 0
+  fi
   local args=()
   while IFS= read -r -d '' arg; do
     args+=("$arg")
@@ -553,22 +620,33 @@ install_prebuilt() {
   local work_dir asset base archive checksum signature certificate attestation extracted
   need tar
   need install
+  if [ -n "$OFFLINE_ARCHIVE" ]; then
+    require_offline_bundle "$OFFLINE_ARCHIVE"
+  fi
   asset="$(archive_name)"
   base="$(release_base_url)"
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/oraclemcp-install.XXXXXX")"
   trap 'if [ -n "${work_dir:-}" ] && [ -d "$work_dir" ]; then rm -rf -- "$work_dir"; fi' EXIT
 
-  archive="$work_dir/$asset"
-  checksum="$archive.sha256"
-  signature="$archive.sig"
-  certificate="$archive.crt"
-  attestation="$archive.attestation.sigstore.json"
+  if [ -n "$OFFLINE_ARCHIVE" ]; then
+    archive="$OFFLINE_ARCHIVE"
+    checksum="$archive.sha256"
+    signature="$archive.sig"
+    certificate="$archive.crt"
+    attestation="$archive.attestation.sigstore.json"
+  else
+    archive="$work_dir/$asset"
+    checksum="$archive.sha256"
+    signature="$archive.sig"
+    certificate="$archive.crt"
+    attestation="$archive.attestation.sigstore.json"
 
-  download_file "$base/$asset" "$archive"
-  download_file "$base/$asset.sha256" "$checksum"
-  download_file "$base/$asset.sig" "$signature"
-  download_file "$base/$asset.crt" "$certificate"
-  download_file "$base/$asset.attestation.sigstore.json" "$attestation"
+    download_file "$base/$asset" "$archive"
+    download_file "$base/$asset.sha256" "$checksum"
+    download_file "$base/$asset.sig" "$signature"
+    download_file "$base/$asset.crt" "$certificate"
+    download_file "$base/$asset.attestation.sigstore.json" "$attestation"
+  fi
 
   verify_checksum "$checksum"
   verify_cosign "$archive" "$signature" "$certificate" "$attestation"
@@ -577,6 +655,85 @@ install_prebuilt() {
   extracted="$work_dir/oraclemcp-$TARGET/oraclemcp"
   [ -x "$extracted" ] || fail "release archive did not contain executable $extracted"
   install_binary "$extracted"
+}
+
+service_uninstall_args() {
+  local args=("service" "uninstall" "--yes" "--name" "$SERVICE_NAME")
+  printf '%s\0' "${args[@]}"
+}
+
+direct_uninstall_service() {
+  local unit label plist_path
+  case "$(uname -s)" in
+    Linux)
+      unit="$SERVICE_NAME"
+      case "$unit" in
+        *.service) ;;
+        *) unit="${unit}.service" ;;
+      esac
+      if have systemctl; then
+        systemctl --user disable --now "$unit" >/dev/null 2>&1 || true
+      fi
+      rm -f -- "$(service_unit_path)"
+      if have systemctl; then
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+      fi
+      ;;
+    Darwin)
+      label="$SERVICE_NAME"
+      case "$label" in
+        *.*) ;;
+        *) label="io.github.MuhDur.${label}" ;;
+      esac
+      if have launchctl; then
+        launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+      fi
+      plist_path="$(service_unit_path)"
+      rm -f -- "$plist_path"
+      ;;
+    *)
+      fail "ORACLEMCP_INSTALL_UNINSTALL_SERVICE_UNSUPPORTED: service uninstall fallback supports Linux and macOS only"
+      ;;
+  esac
+}
+
+uninstall_service() {
+  if [ "$SERVICE_REQUESTED" -ne 1 ]; then
+    return 0
+  fi
+  [ "$YES" -eq 1 ] || fail "uninstalling the service requires --service --yes or --service --dry-run"
+  if [ -x "$BIN_DIR/oraclemcp" ]; then
+    local args=()
+    while IFS= read -r -d '' arg; do
+      args+=("$arg")
+    done < <(service_uninstall_args)
+    "$BIN_DIR/oraclemcp" "${args[@]}"
+  else
+    printf 'oraclemcp installer: installed binary missing; falling back to direct service-unit removal for %s\n' "$SERVICE_NAME" >&2
+    direct_uninstall_service
+  fi
+}
+
+remove_if_present() {
+  local path="$1"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    rm -f -- "$path"
+  fi
+}
+
+uninstall_files() {
+  remove_if_present "$BIN_DIR/oraclemcp"
+  remove_if_present "$BIN_DIR/om"
+  while IFS= read -r path; do
+    remove_if_present "$path"
+  done < <(completion_paths)
+}
+
+uninstall_oraclemcp() {
+  [ "$YES" -eq 1 ] || fail "uninstall requires --dry-run to inspect or --yes to remove files"
+  uninstall_service
+  uninstall_files
+  printf 'oraclemcp installer: removed installed files under %s\n' "$PREFIX"
 }
 
 install_source() {
@@ -670,6 +827,18 @@ main() {
   if [ -z "$BIN_DIR" ]; then
     BIN_DIR="$PREFIX/bin"
   fi
+  if [ "$SOURCE" -eq 1 ] && [ -n "$OFFLINE_ARCHIVE" ]; then
+    fail "--source and --offline cannot be used together"
+  fi
+  if [ "$UNINSTALL" -eq 1 ] && [ "$SOURCE" -eq 1 ]; then
+    fail "--uninstall cannot be combined with --source"
+  fi
+  if [ "$UNINSTALL" -eq 1 ] && [ -n "$OFFLINE_ARCHIVE" ]; then
+    fail "--uninstall cannot be combined with --offline"
+  fi
+  if [ "$UNINSTALL" -eq 1 ] && [ "$CLIENT_REGISTER" -eq 1 ]; then
+    fail "--uninstall cannot be combined with --register-client"
+  fi
   if [ -z "$TARGET" ]; then
     TARGET="$(detect_target)"
   fi
@@ -677,6 +846,11 @@ main() {
 
   if [ "$DRY_RUN" -eq 1 ]; then
     print_plan
+    exit 0
+  fi
+
+  if [ "$UNINSTALL" -eq 1 ]; then
+    uninstall_oraclemcp
     exit 0
   fi
 
