@@ -102,7 +102,13 @@ const SHORT_BINARY_ALIAS: &str = "om";
                   sample_rows, read_clob, explain_plan, compile_object, compile_with_warnings, \
                   create_or_replace, patch_source, guarded execute) plus the \
                   zero-arg oracle_capabilities discovery tool. No PL/SQL engine, \
-                  no environment-specific workflow engine."
+                  no environment-specific workflow engine.",
+    after_long_help = "Agent surfaces:\n  \
+                       - Use --json (alias for --robot-json) for machine-readable stdout.\n  \
+                       - Inspect the stable contract with: oraclemcp --json capabilities\n  \
+                       - Read the in-tool guide with: oraclemcp robot-docs guide\n  \
+                       - Preview host changes with: oraclemcp --json service install --dry-run\n  \
+                       - Local service mutations require --yes; guarded SQL writes require preview confirmation."
 )]
 struct Cli {
     /// Emit a single JSON object on stdout instead of human text.
@@ -5370,8 +5376,22 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_payload_pins_cli_contract_and_parity_matrix() {
+    fn agent_ergonomics_drift_guard_pins_capabilities_schema() {
         let out = capabilities_payload();
+        for key in [
+            "server_name",
+            "server_version",
+            "protocol_version",
+            "tools",
+            "operating_level",
+            "transports",
+            "connection",
+            "features",
+            "cli_contract",
+            "mcp_cli_dashboard_parity",
+        ] {
+            assert!(out.get(key).is_some(), "missing capabilities key {key}");
+        }
         assert_eq!(
             out["cli_contract"]["contract_version"],
             serde_json::json!(1)
@@ -5428,6 +5448,24 @@ mod tests {
                     "{id} has no {face} surface"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn agent_ergonomics_drift_guard_pins_help_footer() {
+        for binary_name in ["oraclemcp", "om"] {
+            let mut help = Vec::new();
+            cli_command(binary_name)
+                .write_long_help(&mut help)
+                .expect("render help");
+            let help = String::from_utf8(help).expect("help utf8");
+            assert!(help.contains(&format!("Usage: {binary_name} ")));
+            assert!(help.contains("Agent surfaces:"));
+            assert!(help.contains("--json"));
+            assert!(help.contains("oraclemcp --json capabilities"));
+            assert!(help.contains("oraclemcp robot-docs guide"));
+            assert!(help.contains("oraclemcp --json service install --dry-run"));
+            assert!(help.contains("service mutations require --yes"));
         }
     }
 

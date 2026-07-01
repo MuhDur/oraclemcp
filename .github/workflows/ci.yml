@@ -125,6 +125,19 @@ jobs:
           tool: cargo-hack
       - run: bash scripts/oraclemcp_feature_powerset.sh
 
+  ergonomics:
+    name: agent ergonomics drift guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: bash scripts/oraclemcp_ergonomics_lint.sh
+
   # The thin-native line is pinned to nightly because asupersync requires
   # nightly-only language features (oracledb 0.5.1 is stable-clean). This is a
   # build-only ratchet separate from the test job so toolchain installation

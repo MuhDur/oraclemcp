@@ -24,6 +24,7 @@ need jq
 bash "$ROOT/scripts/oraclemcp_boundary_lint.sh"
 bash "$ROOT/scripts/oraclemcp_arch_fitness_lint.sh"
 bash "$ROOT/scripts/oraclemcp_agent_surface_lint.sh"
+bash "$ROOT/scripts/oraclemcp_ergonomics_lint.sh"
 bash "$ROOT/scripts/oraclemcp_concurrency_lint.sh"
 bash "$ROOT/scripts/dashboard_bundle_check.sh"
 bash "$ROOT/scripts/dashboard_skin_lint.sh"

@@ -52,6 +52,7 @@ required=(
   scripts/ui_fixtures_validate_against_rust_schema.sh
   scripts/oraclemcp_arch_fitness_lint.sh
   scripts/oraclemcp_feature_powerset.sh
+  scripts/oraclemcp_ergonomics_lint.sh
 )
 missing=0
 for path in "${required[@]}"; do
@@ -93,6 +94,12 @@ if ! grep -F "UPDATE_GOLDENS=1 cargo test -p oraclemcp --test golden_behavior" t
 fi
 if ! grep -F "UPDATE_GOLDENS=1 cargo test -p oraclemcp-db --test structured_schema_golden" tests/golden/PROVENANCE.md >/dev/null; then
   e2e_finish_fail "golden provenance must document the structured schema golden rebless command"
+fi
+if ! grep -F "Agent ergonomics drift guard" scripts/e2e/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "COVERAGE.md must account for the ERG-10 drift guard"
+fi
+if ! grep -F "scripts/oraclemcp_ergonomics_lint.sh" scripts/e2e/PROVENANCE.md >/dev/null; then
+  e2e_finish_fail "PROVENANCE.md must document the ERG-10 drift guard command"
 fi
 
 e2e_log_event "coverage_summary" "assert" "pass" 0 "MUST coverage 6/6 score=1.00 xfail=0"
