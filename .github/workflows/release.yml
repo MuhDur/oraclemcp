@@ -127,9 +127,38 @@ jobs:
       - run: cargo build --workspace
       - run: cargo build -p oraclemcp --features dashboard-bundle
 
+  release-acceptance:
+    name: release acceptance suite (B.12)
+    needs: [checks, web-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - run: bash scripts/release_acceptance_ci_suite.sh
+
   build:
     name: build ${{ matrix.target }}
-    needs: [checks, pinned-nightly, web-build]
+    needs: [checks, release-acceptance, pinned-nightly, web-build]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:

@@ -53,6 +53,7 @@ required=(
   scripts/oraclemcp_arch_fitness_lint.sh
   scripts/oraclemcp_feature_powerset.sh
   scripts/oraclemcp_ergonomics_lint.sh
+  scripts/release_acceptance_ci_suite.sh
 )
 missing=0
 for path in "${required[@]}"; do
@@ -100,6 +101,12 @@ if ! grep -F "Agent ergonomics drift guard" scripts/e2e/COVERAGE.md >/dev/null; 
 fi
 if ! grep -F "scripts/oraclemcp_ergonomics_lint.sh" scripts/e2e/PROVENANCE.md >/dev/null; then
   e2e_finish_fail "PROVENANCE.md must document the ERG-10 drift guard command"
+fi
+if ! grep -F "Release acceptance CI suite" scripts/e2e/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "COVERAGE.md must account for the HCI release acceptance suite"
+fi
+if ! grep -F "scripts/release_acceptance_ci_suite.sh" scripts/e2e/PROVENANCE.md >/dev/null; then
+  e2e_finish_fail "PROVENANCE.md must document the HCI release acceptance suite command"
 fi
 
 e2e_log_event "coverage_summary" "assert" "pass" 0 "MUST coverage 6/6 score=1.00 xfail=0"

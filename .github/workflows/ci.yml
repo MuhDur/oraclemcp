@@ -138,6 +138,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: bash scripts/oraclemcp_ergonomics_lint.sh
 
+  release-acceptance:
+    name: release acceptance suite (B.12)
+    needs: [web-build, test, feature-powerset, ergonomics, boundary]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: bash scripts/release_acceptance_ci_suite.sh --skip-feature-powerset
+
   # The thin-native line is pinned to nightly because asupersync requires
   # nightly-only language features (oracledb 0.5.1 is stable-clean). This is a
   # build-only ratchet separate from the test job so toolchain installation

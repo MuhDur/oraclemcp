@@ -104,6 +104,49 @@ fn e2e_orchestrator_aggregates_dry_run_scenarios() {
 }
 
 #[test]
+fn release_acceptance_suite_schedules_hci_component_gates() {
+    let output = run_script(
+        "scripts/release_acceptance_ci_suite.sh",
+        &["--log", "--dry-run"],
+    );
+    assert!(
+        output.status.success(),
+        "release acceptance dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = json_lines(&output.stderr);
+    let command_messages = events
+        .iter()
+        .filter(|event| event["event"] == "command_start")
+        .filter_map(|event| event["message"].as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "scripts/oraclemcp_concurrency_lint.sh",
+        "scripts/oraclemcp_ergonomics_lint.sh",
+        "scripts/e2e/doctor_fixtures.sh --log",
+        "scripts/dashboard_bundle_check.sh",
+        "scripts/oraclemcp_feature_powerset.sh",
+        "scripts/oraclemcp_arch_fitness_lint.sh",
+    ] {
+        assert!(
+            command_messages
+                .iter()
+                .any(|message| message.contains(expected)),
+            "release acceptance suite did not schedule {expected}: {command_messages:?}"
+        );
+    }
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "pass"
+                && event["scenario"] == "release_acceptance_ci_suite"),
+        "missing passing release-acceptance completion: {events:?}"
+    );
+}
+
+#[test]
 fn e2e_live_scripts_refuse_production_looking_targets() {
     let root = repo_root();
     let output = Command::new("bash")

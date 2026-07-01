@@ -32,9 +32,10 @@ evidence is the CI run for that commit (linked below at release time).
 | Driver-adapter seam | `scripts/oraclemcp_driver_seam_lint.sh` | `boundary` |
 | Honesty framing | `scripts/oraclemcp_honesty_grep.sh` | `boundary` |
 | Sensitive-data lint | `scripts/sensitive_data_lint.sh` | `sensitive-data` |
+| Release acceptance suite | `scripts/release_acceptance_ci_suite.sh` | `release-acceptance` |
 | Release metadata sync | `scripts/release_preflight.sh` | `release-metadata` |
 
-All eleven run on the pinned nightly (every toolchain-bearing job derives its
+All twelve run on the pinned nightly (every toolchain-bearing job derives its
 toolchain from `env.RUST_TOOLCHAIN` in `ci.yml`).
 
 ### Advisory (not release-blocking)
@@ -99,6 +100,7 @@ Required gates green on the RC commit:
 - [ ] supply-chain     (cargo deny check)
 - [ ] boundary         (engine-free + forbidden-deps + driver-seam + honesty)
 - [ ] sensitive-data   (sensitive_data_lint.sh)
+- [ ] release-acceptance (B.12: DL-9 + ERG-10 + DOC-10 + E0 + feature-powerset + arch-fitness)
 - [ ] release-metadata (release_preflight.sh)
 ```
 
