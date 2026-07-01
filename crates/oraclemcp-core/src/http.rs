@@ -502,6 +502,17 @@ pub trait HttpSessionLifecycle: std::fmt::Debug + Send + Sync {
     /// Close every live stateful session during listener shutdown.
     fn close_all_sessions(&self) {}
 
+    /// Close every live session/lane owned by one principal. Credential
+    /// revoke/rotate uses this to force grant revocation without needing the
+    /// client's individual MCP session ids.
+    fn close_principal_sessions(
+        &self,
+        _principal_key: &str,
+        _reason: DispatchCloseReason,
+    ) -> usize {
+        0
+    }
+
     /// Redacted lane summaries for `/operator/v1/active-lanes`.
     fn active_lanes(&self) -> Vec<HttpLaneSnapshot> {
         Vec::new()
@@ -598,6 +609,19 @@ impl HttpSessionStore {
 
     fn remove(&self, id: &str) -> bool {
         self.owners.lock().remove(id).is_some()
+    }
+
+    fn remove_principal(&self, principal_key: &str) -> Vec<String> {
+        let mut owners = self.owners.lock();
+        let session_ids = owners
+            .iter()
+            .filter(|(_, entry)| entry.principal_key == principal_key)
+            .map(|(session_id, _)| session_id.clone())
+            .collect::<Vec<_>>();
+        for session_id in &session_ids {
+            owners.remove(session_id);
+        }
+        session_ids
     }
 
     fn reap_idle(&self, idle_ttl: Duration) -> Vec<(String, String)> {
@@ -2929,6 +2953,87 @@ mod tests {
             reap_idle_stateful_sessions(&cfg),
             0,
             "reaping the same idle session is idempotent"
+        );
+    }
+
+    #[test]
+    fn principal_session_close_clears_sessions_buffers_and_lanes() {
+        #[derive(Debug, Default)]
+        struct RecordingLifecycle {
+            closed: std::sync::Mutex<Vec<(String, DispatchCloseReason)>>,
+        }
+
+        impl HttpSessionLifecycle for RecordingLifecycle {
+            fn close_session(&self, _session_id: &str, _principal_key: &str) -> bool {
+                false
+            }
+
+            fn close_principal_sessions(
+                &self,
+                principal_key: &str,
+                reason: DispatchCloseReason,
+            ) -> usize {
+                self.closed
+                    .lock()
+                    .expect("test lifecycle mutex")
+                    .push((principal_key.to_owned(), reason));
+                2
+            }
+        }
+
+        let session_store = Arc::new(HttpSessionStore::default());
+        let result_store = Arc::new(HttpResultStore::new());
+        let lifecycle = Arc::new(RecordingLifecycle::default());
+        session_store.insert("sess-a".to_owned(), "client:sha256:aaa".to_owned());
+        session_store.insert("sess-b".to_owned(), "client:sha256:aaa".to_owned());
+        session_store.insert("sess-c".to_owned(), "client:sha256:bbb".to_owned());
+        result_store.append_response("sess-a", serde_json::json!({ "a": true }));
+        result_store.append_response("sess-b", serde_json::json!({ "b": true }));
+        result_store.append_response("sess-c", serde_json::json!({ "c": true }));
+        let cfg = HttpTransportConfig {
+            stateful: true,
+            session_store: Some(Arc::clone(&session_store)),
+            result_store: Some(Arc::clone(&result_store)),
+            session_lifecycle: Some(lifecycle.clone()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            close_http_principal_sessions(
+                &cfg,
+                "client:sha256:aaa",
+                DispatchCloseReason::SessionDelete,
+            ),
+            2
+        );
+        assert!(session_store.principal_for("sess-a").is_none());
+        assert!(session_store.principal_for("sess-b").is_none());
+        assert_eq!(
+            session_store.principal_for("sess-c").as_deref(),
+            Some("client:sha256:bbb")
+        );
+        assert!(
+            result_store
+                .events_after("sess-a", None, false)
+                .expect("removed principal session has no buffered events")
+                .is_empty()
+        );
+        assert!(
+            result_store
+                .events_after("sess-b", None, false)
+                .expect("removed principal session has no buffered events")
+                .is_empty()
+        );
+        assert_eq!(
+            lifecycle
+                .closed
+                .lock()
+                .expect("test lifecycle mutex")
+                .as_slice(),
+            &[(
+                "client:sha256:aaa".to_owned(),
+                DispatchCloseReason::SessionDelete
+            )]
         );
     }
 
@@ -7082,6 +7187,35 @@ fn close_stateful_sessions_for_shutdown(config: &HttpTransportConfig) {
     if let Some(result_store) = &config.result_store {
         result_store.close_all();
     }
+}
+
+/// Close all stateful HTTP sessions and dispatch lanes for one principal.
+///
+/// Per-client credential rotate/revoke calls this after mutating
+/// `clients.json`: the transport-facing session ids are removed, buffered SSE
+/// results are closed, and the lane dispatch cleanup path revokes any in-memory
+/// grants.
+pub fn close_http_principal_sessions(
+    config: &HttpTransportConfig,
+    principal_key: &str,
+    reason: DispatchCloseReason,
+) -> usize {
+    let session_ids = config
+        .session_store
+        .as_ref()
+        .map(|store| store.remove_principal(principal_key))
+        .unwrap_or_default();
+    if let Some(result_store) = &config.result_store {
+        for session_id in &session_ids {
+            result_store.remove_session(session_id);
+        }
+    }
+    let closed_lanes = config
+        .session_lifecycle
+        .as_ref()
+        .map(|lifecycle| lifecycle.close_principal_sessions(principal_key, reason))
+        .unwrap_or(0);
+    closed_lanes.max(session_ids.len())
 }
 
 fn reap_idle_stateful_sessions(config: &HttpTransportConfig) -> usize {

@@ -588,6 +588,11 @@ still the write-intent/audit path, not this HTTP-edge cache.
   credential.
 - **OAuth HS256 secret:** rotate the value behind `--oauth-hs256-secret-ref` and
   restart; tokens signed with the old secret stop verifying.
+- **Per-client HTTP access credential:** service-owned client credentials live
+  in `$XDG_STATE_HOME/oraclemcp/clients.json` (or
+  `$HOME/.local/state/oraclemcp/clients.json`) as salted hashes only. Issued
+  bearer values are shown once; rotate or revoke a client credential and close
+  that client's active lanes so in-memory grants are revoked.
 - **Audit signing key:** add the new key under `[audit].key_ref` with a new
   `key_id`, restart, and keep the old `key_id` available to `audit verify` so
   historical records still verify.

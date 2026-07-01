@@ -231,6 +231,16 @@ impl FileStore {
             .join(format!("{}.{}", id.as_str(), extension)))
     }
 
+    /// Compute the path for a fixed root-level service file.
+    ///
+    /// This is for code-owned state files named by constants such as
+    /// `clients.json`. Untrusted profile/principal/author material must still
+    /// use [`StoreId::content_hashed`] under a collection.
+    pub fn root_path_for(&self, id: &StoreId, extension: &str) -> Result<PathBuf> {
+        validate_segment("extension", extension)?;
+        Ok(self.root.join(format!("{}.{}", id.as_str(), extension)))
+    }
+
     /// Atomically replace a file with `bytes`.
     pub fn write_atomic(
         &self,
@@ -255,6 +265,31 @@ impl FileStore {
 
         fs::rename(&tmp_path, &final_path).map_err(|e| FileStoreError::Io(e.to_string()))?;
         fsync_dir(&dir)?;
+        Ok(final_path)
+    }
+
+    /// Atomically replace a fixed root-level service file with `bytes`.
+    pub fn write_root_atomic(
+        &self,
+        lock: &ServiceLock,
+        id: &StoreId,
+        extension: &str,
+        bytes: &[u8],
+    ) -> Result<PathBuf> {
+        lock.assert_for(self)?;
+        let _guard = self.mutation_gate.lock();
+        let final_path = self.root_path_for(id, extension)?;
+        let tmp_path = self.tmp_path(&self.root, id, extension);
+
+        let mut tmp =
+            create_new_private_file(&tmp_path).map_err(|e| FileStoreError::Io(e.to_string()))?;
+        tmp.write_all(bytes)
+            .and_then(|()| tmp.sync_all())
+            .map_err(|e| FileStoreError::Io(e.to_string()))?;
+        drop(tmp);
+
+        fs::rename(&tmp_path, &final_path).map_err(|e| FileStoreError::Io(e.to_string()))?;
+        fsync_dir(&self.root)?;
         Ok(final_path)
     }
 
@@ -588,6 +623,25 @@ mod tests {
         assert!(
             StoreId::from_safe_segment("../escape").is_err(),
             "id traversal is rejected"
+        );
+
+        let clients_id = StoreId::from_safe_segment("clients").expect("clients id");
+        let clients_path = store
+            .write_root_atomic(&lock, &clients_id, "json", br#"{"schema_version":1}"#)
+            .expect("root atomic write");
+        assert_eq!(clients_path, store.root().join("clients.json"));
+        assert_eq!(
+            fs::read_to_string(&clients_path).expect("read clients file"),
+            r#"{"schema_version":1}"#
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&clients_path)
+                .expect("clients metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
         );
     }
 

@@ -20,6 +20,7 @@ pub mod admission;
 pub mod audit_shipping;
 pub mod capabilities;
 pub mod capability;
+pub mod client_credentials;
 pub mod connect;
 pub mod custom_tools;
 pub mod dashboard_auth;
@@ -74,6 +75,11 @@ pub use capabilities::{
 pub use capability::{
     PrivilegedEffect, ReadPathCaps, narrow_to_read_path, requires_privileged_effect,
 };
+pub use client_credentials::{
+    AuthenticatedClientCredential, ClientCredentialError, ClientCredentialIssueRequest,
+    ClientCredentialLifecycle, ClientCredentialStatus, ClientCredentialStore, ClientCredentialView,
+    IssuedClientCredential,
+};
 pub use connect::{SessionContext, build_session_context, profile_to_options, session_level_state};
 pub use custom_tools::{
     CustomToolCatalog, CustomToolDef, CustomToolExecutor, LoadError, LoadedTool, OutputMode,
@@ -102,8 +108,9 @@ pub use http::{
     HEALTHZ_PATH, HttpRequest, HttpResponse, HttpResultStore, HttpSessionLifecycle,
     HttpTransportConfig, MCP_PATH, METRICS_PATH, OAuthEnforcement, OPERATOR_API_PREFIX,
     ObservabilityState, OperatorEventStore, OperatorIdempotencyLedger,
-    PROTECTED_RESOURCE_METADATA_PATH, READYZ_PATH, ReadinessProbe, ScopeGrant, handle_http_request,
-    serve_http, serve_http_until, serve_https, serve_https_until,
+    PROTECTED_RESOURCE_METADATA_PATH, READYZ_PATH, ReadinessProbe, ScopeGrant,
+    close_http_principal_sessions, handle_http_request, serve_http, serve_http_until, serve_https,
+    serve_https_until,
 };
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
 pub use lane::{

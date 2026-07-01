@@ -606,6 +606,25 @@ impl HttpSessionLifecycle for StatefulLaneDispatch {
         let _ = StatefulLaneDispatch::close_all_sessions(self);
     }
 
+    fn close_principal_sessions(&self, principal_key: &str, reason: DispatchCloseReason) -> usize {
+        let lanes = {
+            let mut registered = self.lanes.lock();
+            let keys = registered
+                .keys()
+                .filter(|key| key.principal_key == principal_key)
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| registered.remove(&key))
+                .collect::<Vec<_>>()
+        };
+        let count = lanes.len();
+        for lane in lanes {
+            lane.close_with_reason(reason);
+        }
+        count
+    }
+
     fn active_lanes(&self) -> Vec<HttpLaneSnapshot> {
         self.lanes
             .lock()
