@@ -11,14 +11,17 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use asupersync::Outcome;
-use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor};
+use oraclemcp_audit::{
+    AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord, AuditSubject, Auditor, DbEvidence,
+    GENESIS_HASH,
+};
 use oraclemcp_auth::{
     HttpGuardError, HttpGuardPolicy, ResourceServerConfig, SignatureVerifier, TokenError,
     extract_bearer,
@@ -1096,6 +1099,107 @@ mod tests {
         (auditor, sink)
     }
 
+    fn audit_tail_fixture_path(name: &str) -> PathBuf {
+        let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        dir.push("../../target/tmp/operator-audit-tail-tests");
+        std::fs::create_dir_all(&dir).expect("create audit tail fixture dir");
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos();
+        dir.push(format!("{name}-{}-{nanos}.jsonl", std::process::id()));
+        dir
+    }
+
+    fn audit_tail_draft(
+        subject_id: &str,
+        tool: &str,
+        sql: &str,
+        danger_level: &str,
+        outcome: AuditOutcome,
+        db_evidence: Option<DbEvidence>,
+    ) -> AuditEntryDraft {
+        AuditEntryDraft {
+            subject: AuditSubject::new("operator", subject_id).with_authn_method("loopback"),
+            db_evidence,
+            cancel: None,
+            tool: tool.to_owned(),
+            sql: sql.to_owned(),
+            danger_level: danger_level.to_owned(),
+            decision: AuditDecision::Allowed,
+            rows_affected: Some(3),
+            outcome,
+        }
+    }
+
+    fn write_audit_tail_fixture(name: &str, break_second_hash: bool) -> PathBuf {
+        let key = oraclemcp_audit::SigningKey::new("tail-test", b"tail-test-key".to_vec());
+        let db_evidence = DbEvidence {
+            availability: Some("captured".to_owned()),
+            db_unique_name: Some("ORCLPDB1".to_owned()),
+            service_name: Some("orclpdb1".to_owned()),
+            instance_name: Some("orcl".to_owned()),
+            session_user: Some("APP_USER".to_owned()),
+            current_user: Some("APP_USER".to_owned()),
+            current_schema: Some("APP".to_owned()),
+            sid: Some("123".to_owned()),
+            serial_number: Some("456".to_owned()),
+            client_identifier: Some("operator-dashboard".to_owned()),
+            module: Some("oraclemcp".to_owned()),
+            action: Some("oracle_execute".to_owned()),
+            database_role: Some("PRIMARY".to_owned()),
+            open_mode: Some("READ WRITE".to_owned()),
+            ..Default::default()
+        };
+        let drafts = [
+            audit_tail_draft(
+                "human@example.test",
+                "oracle_execute",
+                "UPDATE accounts SET flag=:1 WHERE id=:2",
+                "GUARDED",
+                AuditOutcome::Succeeded,
+                Some(db_evidence),
+            ),
+            audit_tail_draft(
+                "other@example.test",
+                "oracle_query",
+                "SELECT * FROM accounts WHERE id=:1",
+                "SAFE",
+                AuditOutcome::Succeeded,
+                None,
+            ),
+        ];
+        let mut previous_hash = GENESIS_HASH.to_owned();
+        let records: Vec<AuditRecord> = drafts
+            .iter()
+            .enumerate()
+            .map(|(index, draft)| {
+                let record = AuditRecord::chained_signed(
+                    draft,
+                    u64::try_from(index + 1).expect("fixture index fits u64"),
+                    &previous_hash,
+                    format!("2026-06-30T12:00:0{index}Z"),
+                    &key,
+                );
+                previous_hash = record.entry_hash.clone();
+                record
+            })
+            .collect();
+        let path = audit_tail_fixture_path(name);
+        let mut file = std::fs::File::create(&path).expect("create audit tail fixture");
+        for (index, record) in records.iter().enumerate() {
+            let mut value = serde_json::to_value(record).expect("serialize audit fixture");
+            if index == 0 {
+                value["bind_values"] = serde_json::json!(["sensitive-bind-value"]);
+            }
+            if break_second_hash && index == 1 {
+                value["entry_hash"] = serde_json::json!("sha256:broken");
+            }
+            writeln!(file, "{value}").expect("write audit fixture line");
+        }
+        path
+    }
+
     #[test]
     fn request_target_preserves_and_decodes_query_string() {
         let request = HttpRequest::new(
@@ -1329,6 +1433,150 @@ mod tests {
         assert_eq!(records[1].sql_preview, "GET /operator/v1/health");
         assert_eq!(records[2].sql_preview, "GET /operator/v1/events");
         assert_eq!(records[3].sql_preview, "POST /operator/v1/actions/preview");
+    }
+
+    #[test]
+    fn audit_tail_filters_exports_redacted_proof_bundle() {
+        let path = write_audit_tail_fixture("filters", false);
+        let (auditor, _sink) = operator_auditor();
+        let cfg = HttpTransportConfig {
+            operator_auditor: Some(auditor),
+            operator_audit_tail_path: Some(path.clone()),
+            ..Default::default()
+        };
+
+        let response = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                "/operator/v1/audit-tail?limit=5&tool=oracle_execute&level=GUARDED&export=proof-bundle",
+                [("host", "127.0.0.1"), ("accept", "application/json")],
+                Vec::new(),
+            )
+            .with_peer_loopback(true),
+        );
+
+        assert_eq!(response.status, 200);
+        let body = response_json(&response);
+        let data = &body["data"];
+        assert_eq!(data["source"], serde_json::json!("self_lane"));
+        assert_eq!(data["scanned_records"], serde_json::json!(2));
+        assert_eq!(data["selected_records"], serde_json::json!(1));
+        assert_eq!(
+            data["proof"]["verification"]["hash_chain"]["status"],
+            serde_json::json!("ok")
+        );
+        assert_eq!(
+            data["proof"]["verification"]["keyed_mac"]["status"],
+            serde_json::json!("not_checked")
+        );
+        assert_eq!(
+            data["export"]["format"],
+            serde_json::json!("oraclemcp.audit.proof-bundle.v1")
+        );
+
+        let record = &data["records"][0];
+        assert_eq!(record["tool"], serde_json::json!("oracle_execute"));
+        assert_eq!(record["danger_level"], serde_json::json!("GUARDED"));
+        assert_eq!(
+            record["db_evidence"]["current_user"],
+            serde_json::json!("APP_USER")
+        );
+        assert_eq!(
+            record["bind_values"]["stored"],
+            serde_json::json!(false),
+            "bind values are never exported from the audit tail"
+        );
+        assert_eq!(
+            record["proof"]["prev_hash"],
+            serde_json::json!(GENESIS_HASH)
+        );
+        assert!(
+            record["proof"]["signature"]
+                .as_str()
+                .expect("signature")
+                .starts_with("hmac-sha256:")
+        );
+
+        let rendered = data.to_string();
+        assert!(
+            !rendered.contains("human@example.test"),
+            "raw subject stable ids must not be serialized"
+        );
+        assert!(
+            !rendered.contains("sensitive-bind-value"),
+            "unknown/raw bind fields in JSONL must be dropped by the allow-list"
+        );
+        assert!(
+            !rendered.contains("UPDATE accounts"),
+            "timeline and proof bundle must not export sql_preview/inlined SQL text"
+        );
+
+        let subject_id_hash = record["subject_id_hash"].as_str().expect("subject hash");
+        let subject_filter_response = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                format!("/operator/v1/audit-tail?subject_id_hash={subject_id_hash}"),
+                [("host", "127.0.0.1"), ("accept", "application/json")],
+                Vec::new(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(subject_filter_response.status, 200);
+        let subject_filter_body = response_json(&subject_filter_response);
+        assert_eq!(
+            subject_filter_body["data"]["selected_records"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            subject_filter_body["data"]["records"][0]["subject_id_hash"],
+            serde_json::json!(subject_id_hash)
+        );
+    }
+
+    #[test]
+    fn audit_tail_reports_broken_hash_chain_without_exposing_raw_json_fields() {
+        let path = write_audit_tail_fixture("broken", true);
+        let (auditor, _sink) = operator_auditor();
+        let cfg = HttpTransportConfig {
+            operator_auditor: Some(auditor),
+            operator_audit_tail_path: Some(path),
+            ..Default::default()
+        };
+
+        let response = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                "/operator/v1/audit-tail?limit=10",
+                [("host", "127.0.0.1"), ("accept", "application/json")],
+                Vec::new(),
+            )
+            .with_peer_loopback(true),
+        );
+
+        assert_eq!(response.status, 200);
+        let body = response_json(&response);
+        assert_eq!(
+            body["data"]["proof"]["verification"]["hash_chain"]["status"],
+            serde_json::json!("broken")
+        );
+        assert_eq!(
+            body["data"]["proof"]["verification"]["hash_chain"]["broken"]["check"],
+            serde_json::json!("entry_hash")
+        );
+        assert_eq!(
+            body["data"]["records"][1]["proof"]["hash_valid"],
+            serde_json::json!(false)
+        );
+        assert!(
+            !body["data"].to_string().contains("sensitive-bind-value"),
+            "proof export path must stay allow-list-only even on broken chains"
+        );
     }
 
     #[test]
@@ -4863,90 +5111,349 @@ fn operator_vsession_data() -> Value {
     })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuditTailQuery {
+    limit: usize,
+    subject_id_hash: Option<String>,
+    danger_level: Option<String>,
+    tool: Option<String>,
+    decision: Option<String>,
+    outcome: Option<String>,
+    export_proof_bundle: bool,
+}
+
+impl AuditTailQuery {
+    fn from_request(request: &HttpRequest) -> Self {
+        Self {
+            limit: request
+                .query_param("limit")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(50)
+                .clamp(1, 200),
+            subject_id_hash: query_param_trimmed(request, "subject_id_hash")
+                .or_else(|| query_param_trimmed(request, "subject")),
+            danger_level: query_param_trimmed(request, "danger_level")
+                .or_else(|| query_param_trimmed(request, "level")),
+            tool: query_param_trimmed(request, "tool"),
+            decision: query_param_trimmed(request, "decision"),
+            outcome: query_param_trimmed(request, "outcome"),
+            export_proof_bundle: request
+                .query_param("export")
+                .or_else(|| request.query_param("format"))
+                .is_some_and(|value| {
+                    value.eq_ignore_ascii_case("proof-bundle")
+                        || value.eq_ignore_ascii_case("proof_bundle")
+                }),
+        }
+    }
+
+    fn matches(&self, record: &AuditRecord) -> bool {
+        if let Some(expected) = self.subject_id_hash.as_deref()
+            && operator_subject_id_hash(&audit_subject_key(record)) != expected
+        {
+            return false;
+        }
+        if let Some(expected) = self.tool.as_deref()
+            && !record.tool.eq_ignore_ascii_case(expected)
+        {
+            return false;
+        }
+        if let Some(expected) = self.danger_level.as_deref()
+            && !record.danger_level.eq_ignore_ascii_case(expected)
+        {
+            return false;
+        }
+        if let Some(expected) = self.decision.as_deref()
+            && !audit_enum_label(&record.decision).eq_ignore_ascii_case(expected)
+        {
+            return false;
+        }
+        if let Some(expected) = self.outcome.as_deref()
+            && !audit_enum_label(&record.outcome).eq_ignore_ascii_case(expected)
+        {
+            return false;
+        }
+        true
+    }
+
+    fn filters_json(&self) -> Value {
+        json!({
+            "subject_id_hash": self.subject_id_hash,
+            "danger_level": self.danger_level,
+            "tool": self.tool,
+            "decision": self.decision,
+            "outcome": self.outcome,
+        })
+    }
+}
+
+struct AuditTailRead {
+    records: Vec<Value>,
+    scanned_records: usize,
+    selected_records: usize,
+    proof: Value,
+}
+
+#[derive(Debug)]
+struct AuditTailProofBuilder {
+    previous_hash: String,
+    previous_seq: Option<u64>,
+    broken: Option<Value>,
+}
+
+impl AuditTailProofBuilder {
+    fn new() -> Self {
+        Self {
+            previous_hash: GENESIS_HASH.to_owned(),
+            previous_seq: None,
+            broken: None,
+        }
+    }
+
+    fn observe(&mut self, record: &AuditRecord, index: usize) {
+        if self.broken.is_some() {
+            return;
+        }
+        if !record.hash_is_valid() {
+            self.broken = Some(json!({
+                "seq": record.seq,
+                "index": index,
+                "check": "entry_hash",
+                "reason": "entry_hash does not match the record content",
+            }));
+            return;
+        }
+        if record.prev_hash != self.previous_hash {
+            self.broken = Some(json!({
+                "seq": record.seq,
+                "index": index,
+                "check": "prev_hash",
+                "reason": "prev_hash does not link to the previous record",
+                "expected": self.previous_hash,
+                "found": record.prev_hash,
+            }));
+            return;
+        }
+        let expected_seq = self.previous_seq.map_or(1, |seq| seq + 1);
+        if record.seq != expected_seq {
+            self.broken = Some(json!({
+                "seq": record.seq,
+                "index": index,
+                "check": "seq",
+                "reason": "seq is not monotonic",
+                "expected": expected_seq,
+                "found": record.seq,
+            }));
+            return;
+        }
+        self.previous_hash = record.entry_hash.clone();
+        self.previous_seq = Some(record.seq);
+    }
+
+    fn finish(self, scanned_records: usize, selected_records: usize) -> Value {
+        let hash_chain = match self.broken {
+            Some(broken) => json!({
+                "status": "broken",
+                "records": scanned_records,
+                "selected_records": selected_records,
+                "broken": broken,
+            }),
+            None => json!({
+                "status": "ok",
+                "records": scanned_records,
+                "selected_records": selected_records,
+                "last_seq": self.previous_seq,
+                "last_entry_hash": if scanned_records == 0 {
+                    Value::Null
+                } else {
+                    Value::String(self.previous_hash)
+                },
+            }),
+        };
+        json!({
+            "verification": {
+                "hash_chain": hash_chain,
+                "keyed_mac": {
+                    "status": "not_checked",
+                    "reason": "operator audit tail does not load signing keys; run `oraclemcp audit verify` with the audit signing key for keyed MAC verification"
+                }
+            },
+            "redaction": audit_tail_redaction_policy(),
+        })
+    }
+}
+
 fn operator_audit_tail_data(config: &HttpTransportConfig, request: &HttpRequest) -> Value {
-    let limit = request
-        .query_param("limit")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(50)
-        .clamp(1, 200);
+    let query = AuditTailQuery::from_request(request);
     let Some(path) = config.operator_audit_tail_path.as_ref() else {
         return json!({
             "source": "unavailable",
             "reason": "audit tail provider is not configured",
+            "limit": query.limit,
+            "filters": query.filters_json(),
             "records": [],
         });
     };
-    match read_redacted_audit_tail(path, limit) {
-        Ok(records) => json!({
-            "source": "self_lane",
-            "limit": limit,
-            "records": records,
-        }),
+    match read_redacted_audit_tail(path, &query) {
+        Ok(view) => {
+            let export = query
+                .export_proof_bundle
+                .then(|| audit_tail_proof_bundle(path, &query, &view));
+            json!({
+                "source": "self_lane",
+                "limit": query.limit,
+                "filters": query.filters_json(),
+                "scanned_records": view.scanned_records,
+                "selected_records": view.selected_records,
+                "records": view.records,
+                "proof": view.proof,
+                "export": export,
+            })
+        }
         Err(reason) => json!({
             "source": "unavailable",
             "reason": reason,
+            "limit": query.limit,
+            "filters": query.filters_json(),
             "records": [],
         }),
     }
 }
 
-fn read_redacted_audit_tail(path: &PathBuf, limit: usize) -> Result<Vec<Value>, String> {
+fn read_redacted_audit_tail(path: &Path, query: &AuditTailQuery) -> Result<AuditTailRead, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("audit tail unavailable: {e}"))?;
     let reader = BufReader::new(file);
-    let mut tail = VecDeque::with_capacity(limit);
-    for line in reader.lines() {
+    let mut tail = VecDeque::with_capacity(query.limit);
+    let mut proof = AuditTailProofBuilder::new();
+    let mut scanned_records = 0usize;
+    let mut selected_records = 0usize;
+    for (line_index, line) in reader.lines().enumerate() {
         let line = line.map_err(|e| format!("audit tail read failed: {e}"))?;
         if line.trim().is_empty() {
             continue;
         }
-        if tail.len() == limit {
+        let record: AuditRecord =
+            serde_json::from_str(&line).map_err(|e| format!("audit tail parse failed: {e}"))?;
+        proof.observe(&record, line_index);
+        scanned_records += 1;
+        if !query.matches(&record) {
+            continue;
+        }
+        selected_records += 1;
+        if tail.len() == query.limit {
             tail.pop_front();
         }
-        tail.push_back(line);
+        tail.push_back(redacted_audit_record(&record));
     }
-    let mut records = Vec::with_capacity(tail.len());
-    for line in tail {
-        let value: Value =
-            serde_json::from_str(&line).map_err(|e| format!("audit tail parse failed: {e}"))?;
-        records.push(redacted_audit_record(&value));
-    }
-    Ok(records)
+    Ok(AuditTailRead {
+        records: tail.into_iter().collect(),
+        scanned_records,
+        selected_records,
+        proof: proof.finish(scanned_records, selected_records),
+    })
 }
 
-fn redacted_audit_record(value: &Value) -> Value {
-    let subject_key = value
-        .get("subject")
-        .and_then(Value::as_object)
-        .and_then(|subject| {
-            let kind = subject.get("kind").and_then(Value::as_str)?;
-            let stable_id = subject.get("stable_id").and_then(Value::as_str)?;
-            Some(format!("{kind}:{stable_id}"))
-        })
-        .or_else(|| {
-            value
-                .get("agent_identity")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| "unknown:unknown".to_owned());
+fn query_param_trimmed(request: &HttpRequest, key: &str) -> Option<String> {
+    request
+        .query_param(key)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn audit_enum_label<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "UNKNOWN".to_owned())
+}
+
+fn audit_subject_key(record: &AuditRecord) -> String {
+    if record.subject != AuditSubject::default() {
+        return record.subject.legacy_agent_identity();
+    }
+    if !record.agent_identity.is_empty() {
+        return record.agent_identity.clone();
+    }
+    "unknown:unknown".to_owned()
+}
+
+fn redacted_audit_record(record: &AuditRecord) -> Value {
+    let subject_key = audit_subject_key(record);
     json!({
-        "schema_version": value.get("schema_version").cloned().unwrap_or(Value::Null),
-        "seq": value.get("seq").cloned().unwrap_or(Value::Null),
-        "timestamp": value.get("timestamp").cloned().unwrap_or(Value::Null),
+        "schema_version": record.schema_version,
+        "seq": record.seq,
+        "timestamp": record.timestamp,
         "subject_id_hash": operator_subject_id_hash(&subject_key),
-        "tool": value.get("tool").cloned().unwrap_or(Value::Null),
-        "danger_level": value.get("danger_level").cloned().unwrap_or(Value::Null),
-        "decision": value.get("decision").cloned().unwrap_or(Value::Null),
-        "outcome": value.get("outcome").cloned().unwrap_or(Value::Null),
-        "sql_sha256": value.get("sql_sha256").cloned().unwrap_or(Value::Null),
-        "db_evidence": value.get("db_evidence").map(|db| {
-            json!({
-                "availability": db.get("availability").cloned().unwrap_or(Value::Null),
-                "db_unique_name": db.get("db_unique_name").cloned().unwrap_or(Value::Null),
-                "service_name": db.get("service_name").cloned().unwrap_or(Value::Null),
-                "instance_name": db.get("instance_name").cloned().unwrap_or(Value::Null),
-            })
-        }),
+        "tool": record.tool,
+        "danger_level": record.danger_level,
+        "decision": record.decision,
+        "outcome": record.outcome,
+        "rows_affected": record.rows_affected,
+        "sql_sha256": record.sql_sha256,
+        "sql_text": {
+            "availability": "not_exported",
+            "reason": "timeline and proof bundle expose sql_sha256 only; SQL text may contain inlined literals"
+        },
+        "bind_values": {
+            "status": "redacted",
+            "stored": false,
+            "reveal": "unavailable_no_bind_values_stored"
+        },
+        "db_evidence": db_evidence_json(record.db_evidence.as_ref()),
+        "proof": {
+            "prev_hash": record.prev_hash,
+            "entry_hash": record.entry_hash,
+            "hash_valid": record.hash_is_valid(),
+            "key_id": record.key_id,
+            "signature": record.signature,
+        },
+    })
+}
+
+fn db_evidence_json(evidence: Option<&DbEvidence>) -> Value {
+    let Some(evidence) = evidence else {
+        return Value::Null;
+    };
+    json!({
+        "availability": evidence.availability,
+        "db_unique_name": evidence.db_unique_name,
+        "service_name": evidence.service_name,
+        "instance_name": evidence.instance_name,
+        "session_user": evidence.session_user,
+        "current_user": evidence.current_user,
+        "proxy_user": evidence.proxy_user,
+        "current_schema": evidence.current_schema,
+        "sid": evidence.sid,
+        "serial_number": evidence.serial_number,
+        "client_identifier": evidence.client_identifier,
+        "module": evidence.module,
+        "action": evidence.action,
+        "database_role": evidence.database_role,
+        "open_mode": evidence.open_mode,
+    })
+}
+
+fn audit_tail_redaction_policy() -> Value {
+    json!({
+        "subject": "subject_id_hash_only",
+        "sql": "sql_sha256_only",
+        "bind_values": "not_stored_redacted_by_default",
+        "secrets": "never_serialized",
+    })
+}
+
+fn audit_tail_proof_bundle(path: &Path, query: &AuditTailQuery, view: &AuditTailRead) -> Value {
+    json!({
+        "format": "oraclemcp.audit.proof-bundle.v1",
+        "source": "audit_tail",
+        "file": path.display().to_string(),
+        "limit": query.limit,
+        "filters": query.filters_json(),
+        "scanned_records": view.scanned_records,
+        "selected_records": view.selected_records,
+        "records": view.records,
+        "proof": view.proof,
     })
 }
 

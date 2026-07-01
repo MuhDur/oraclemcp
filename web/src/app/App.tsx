@@ -26,6 +26,7 @@ import {
   CheckCircle2,
   Code2,
   Database,
+  Download,
   FileClock,
   Play,
   RefreshCcw,
@@ -51,7 +52,11 @@ import {
   type OperatorResponse,
   type ProbeDefinition,
   type ProbeResult,
+  type AuditTailData,
+  type AuditTailFilters,
+  type AuditTailRecord,
   sessionsProbes,
+  fetchAuditTail,
   type WorkbenchActionData,
   type WorkbenchMode
 } from "./operator-client";
@@ -409,15 +414,351 @@ function WorkbenchPage(): React.ReactElement {
 }
 
 function AuditPage(): React.ReactElement {
+  const [subjectIdHash, setSubjectIdHash] = React.useState("");
+  const [tool, setTool] = React.useState("");
+  const [dangerLevel, setDangerLevel] = React.useState("");
+  const [limit, setLimit] = React.useState(50);
+  const [exportProofBundle, setExportProofBundle] = React.useState(false);
+  const filters = React.useMemo<AuditTailFilters>(
+    () => ({
+      limit,
+      subjectIdHash,
+      tool,
+      dangerLevel,
+      exportProofBundle
+    }),
+    [dangerLevel, exportProofBundle, limit, subjectIdHash, tool]
+  );
+  const auditTail = useQuery({
+    queryKey: ["audit-tail", filters],
+    queryFn: () => fetchAuditTail(filters)
+  });
+  const data = auditTail.data?.data ?? null;
+
   return (
     <PageFrame
       title="Audit"
       eyebrow="Hash Chain"
-      description="Audit route availability and schema posture."
+      description="Signed audit-chain timeline, DB evidence, filters, and redacted proof export."
     >
-      <ProbeDashboard probes={auditProbes} compact />
+      <div className="space-y-4">
+        <Surface className="p-4">
+          <div className="grid gap-3 lg:grid-cols-[minmax(220px,1fr)_180px_160px_120px_auto_auto] lg:items-end">
+            <label className="block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Subject Hash</span>
+              <input
+                className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                value={subjectIdHash}
+                onChange={(event) => setSubjectIdHash(event.target.value)}
+                placeholder="subject-sha256:"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Tool</span>
+              <select
+                className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                value={tool}
+                onChange={(event) => setTool(event.target.value)}
+              >
+                <option value="">All</option>
+                <option value="operator_api">operator_api</option>
+                <option value="oracle_query">oracle_query</option>
+                <option value="oracle_execute">oracle_execute</option>
+                <option value="oracle_compile_object">compile_object</option>
+                <option value="oracle_patch_source">patch_source</option>
+                <option value="oracle_set_session_level">set_session_level</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Level</span>
+              <select
+                className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                value={dangerLevel}
+                onChange={(event) => setDangerLevel(event.target.value)}
+              >
+                <option value="">All</option>
+                <option value="SAFE">SAFE</option>
+                <option value="GUARDED">GUARDED</option>
+                <option value="DESTRUCTIVE">DESTRUCTIVE</option>
+                <option value="ADMIN">ADMIN</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Limit</span>
+              <input
+                className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                min={1}
+                max={200}
+                type="number"
+                value={limit}
+                onChange={(event) => setLimit(clampAuditLimit(event.target.valueAsNumber))}
+              />
+            </label>
+            <Button
+              type="button"
+              variant={exportProofBundle ? "primary" : "secondary"}
+              onClick={() => setExportProofBundle((enabled) => !enabled)}
+            >
+              <Download className="size-4" aria-hidden="true" />
+              Bundle
+            </Button>
+            <Button type="button" variant="ghost" onClick={() => auditTail.refetch()}>
+              <RefreshCcw className="size-4" aria-hidden="true" />
+              Refresh
+            </Button>
+          </div>
+        </Surface>
+
+        <AuditProofSummary
+          data={data}
+          pending={auditTail.isFetching}
+          error={auditTail.error instanceof Error ? auditTail.error.message : null}
+        />
+        <AuditTimelineTable records={data?.records ?? []} />
+        {exportProofBundle ? <AuditProofBundlePanel bundle={data?.export ?? null} /> : null}
+        <ProbeDashboard probes={auditProbes} compact />
+      </div>
     </PageFrame>
   );
+}
+
+function AuditProofSummary({
+  data,
+  pending,
+  error
+}: {
+  data: AuditTailData | null;
+  pending: boolean;
+  error: string | null;
+}): React.ReactElement {
+  const chainStatus = nestedString(data?.proof, ["verification", "hash_chain", "status"]);
+  const macStatus = nestedString(data?.proof, ["verification", "keyed_mac", "status"]);
+  const chainTone = chainStatus === "ok" ? "ok" : chainStatus === "broken" ? "warn" : "off";
+  return (
+    <Surface className="p-4">
+      <div className="grid gap-3 md:grid-cols-4">
+        <AuditFactTile
+          label="Chain"
+          value={pending ? "checking" : chainStatus ?? data?.source ?? "unavailable"}
+          tone={pending ? "info" : chainTone}
+        />
+        <AuditFactTile
+          label="MAC"
+          value={macStatus ?? "not checked"}
+          tone={macStatus === "not_checked" ? "info" : "ok"}
+        />
+        <AuditFactTile
+          label="Scanned"
+          value={String(data?.scanned_records ?? 0)}
+          tone="neutral"
+        />
+        <AuditFactTile
+          label="Selected"
+          value={String(data?.selected_records ?? data?.records.length ?? 0)}
+          tone="neutral"
+        />
+      </div>
+      {error ? (
+        <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+          {error}
+        </p>
+      ) : null}
+    </Surface>
+  );
+}
+
+function AuditFactTile({
+  label,
+  value,
+  tone
+}: {
+  label: string;
+  value: string;
+  tone: "neutral" | "ok" | "warn" | "off" | "info";
+}): React.ReactElement {
+  return (
+    <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-xs font-bold uppercase text-zinc-500">{label}</p>
+        <Badge tone={tone}>{tone}</Badge>
+      </div>
+      <p className="mt-3 break-all font-mono text-sm font-semibold text-zinc-950">{value}</p>
+    </div>
+  );
+}
+
+function AuditTimelineTable({ records }: { records: AuditTailRecord[] }): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+        <div>
+          <h3 className="text-base font-bold text-zinc-950">Timeline</h3>
+          <p className="mt-1 text-sm text-zinc-500">{records.length} records</p>
+        </div>
+        <Badge tone={records.length > 0 ? "ok" : "off"}>{records.length > 0 ? "ready" : "empty"}</Badge>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[1080px] border-collapse text-left">
+          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+            <tr>
+              <th className="px-4 py-3 font-bold">Seq</th>
+              <th className="px-4 py-3 font-bold">Time</th>
+              <th className="px-4 py-3 font-bold">Tool</th>
+              <th className="px-4 py-3 font-bold">SQL Hash</th>
+              <th className="px-4 py-3 font-bold">DB Evidence</th>
+              <th className="px-4 py-3 font-bold">Proof</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-100">
+            {records.length === 0 ? (
+              <tr>
+                <td className="px-4 py-8 text-center text-sm font-semibold text-zinc-500" colSpan={6}>
+                  No audit records
+                </td>
+              </tr>
+            ) : (
+              records.map((record) => (
+                <tr key={`${record.seq}-${record.sql_sha256}`} className="bg-white">
+                  <td className="px-4 py-4 align-top font-mono text-sm text-zinc-900">{record.seq}</td>
+                  <td className="px-4 py-4 align-top text-sm text-zinc-700">
+                    <p className="font-semibold text-zinc-900">{record.timestamp}</p>
+                    <p className="mt-1 break-all font-mono text-xs text-zinc-500">
+                      {record.subject_id_hash}
+                    </p>
+                  </td>
+                  <td className="px-4 py-4 align-top text-sm">
+                    <p className="font-semibold text-zinc-950">{record.tool}</p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <Badge tone="info">{record.danger_level}</Badge>
+                      <Badge tone={record.outcome === "SUCCEEDED" ? "ok" : "warn"}>{record.outcome}</Badge>
+                    </div>
+                  </td>
+                  <td className="px-4 py-4 align-top text-sm">
+                    <p className="max-w-[360px] break-words font-mono text-xs leading-5 text-zinc-900">
+                      {record.sql_sha256}
+                    </p>
+                    <p className="mt-2 text-xs font-semibold text-zinc-500">binds redacted</p>
+                  </td>
+                  <td className="px-4 py-4 align-top text-sm text-zinc-700">
+                    <AuditEvidenceList evidence={record.db_evidence} />
+                  </td>
+                  <td className="px-4 py-4 align-top text-sm">
+                    <AuditRecordProof proof={record.proof} />
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </Surface>
+  );
+}
+
+function AuditEvidenceList({
+  evidence
+}: {
+  evidence: AuditTailRecord["db_evidence"];
+}): React.ReactElement {
+  const entries = compactEvidence(evidence);
+  if (entries.length === 0) {
+    return <span className="text-zinc-500">unavailable</span>;
+  }
+  return (
+    <dl className="grid gap-1">
+      {entries.map(([key, value]) => (
+        <div key={key} className="grid grid-cols-[96px_minmax(0,1fr)] gap-2">
+          <dt className="text-xs font-bold uppercase text-zinc-500">{key}</dt>
+          <dd className="break-all font-mono text-xs text-zinc-900">{String(value)}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function AuditRecordProof({ proof }: { proof: AuditTailRecord["proof"] }): React.ReactElement {
+  const hashValid = proof?.["hash_valid"] === true;
+  return (
+    <div className="space-y-2">
+      <Badge tone={hashValid ? "ok" : "warn"}>{hashValid ? "hash ok" : "hash fail"}</Badge>
+      <p className="break-all font-mono text-xs text-zinc-500">
+        {shortHash(typeof proof?.["entry_hash"] === "string" ? proof["entry_hash"] : null)}
+      </p>
+      <p className="break-all font-mono text-xs text-zinc-500">
+        {typeof proof?.["key_id"] === "string" ? proof["key_id"] : "unsigned"}
+      </p>
+    </div>
+  );
+}
+
+function AuditProofBundlePanel({
+  bundle
+}: {
+  bundle: Record<string, unknown> | null;
+}): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+        <div>
+          <h3 className="text-base font-bold text-zinc-950">Proof Bundle</h3>
+          <p className="mt-1 text-sm text-zinc-500">
+            {bundle ? String(bundle["format"] ?? "bundle") : "unavailable"}
+          </p>
+        </div>
+        <Badge tone={bundle ? "ok" : "off"}>{bundle ? "export" : "empty"}</Badge>
+      </div>
+      <pre className="max-h-[460px] overflow-auto bg-zinc-950 p-4 text-xs leading-5 text-zinc-50">
+        {bundle ? prettyJson(bundle) : "{}"}
+      </pre>
+    </Surface>
+  );
+}
+
+function compactEvidence(evidence: AuditTailRecord["db_evidence"]): Array<[string, unknown]> {
+  if (!isRecord(evidence)) {
+    return [];
+  }
+  return [
+    "availability",
+    "db_unique_name",
+    "service_name",
+    "instance_name",
+    "session_user",
+    "current_user",
+    "sid",
+    "serial_number",
+    "client_identifier"
+  ]
+    .map((key) => [key, evidence[key]] as [string, unknown])
+    .filter(([, value]) => value !== null && value !== undefined && value !== "");
+}
+
+function nestedString(value: unknown, path: string[]): string | null {
+  let current = value;
+  for (const segment of path) {
+    if (!isRecord(current)) {
+      return null;
+    }
+    current = current[segment];
+  }
+  return typeof current === "string" ? current : null;
+}
+
+function shortHash(value: string | null): string {
+  if (!value) {
+    return "hash unavailable";
+  }
+  if (value.length <= 28) {
+    return value;
+  }
+  return `${value.slice(0, 19)}...${value.slice(-8)}`;
+}
+
+function clampAuditLimit(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 50;
+  }
+  return Math.min(200, Math.max(1, Math.trunc(value)));
 }
 
 function DoctorPage(): React.ReactElement {

@@ -535,6 +535,14 @@ fixtures in `tests/fixtures/ui/operator-v1/` are validated by
 `scripts/ui_fixtures_validate_against_rust_schema.sh`. REST routes expose
 health, metrics, audit-tail summaries, active lane summaries, and unavailable
 `v$session` status until a monitor profile is configured. `GET
+/operator/v1/audit-tail` accepts `limit`, `subject_id_hash` (or `subject`),
+`tool`, `level`/`danger_level`, `decision`, and `outcome` filters. Its timeline
+and `export=proof-bundle` response are allow-list-first: raw subject ids, SQL
+text/previews, bind values, and secrets are not exported. Records include
+`sql_sha256`, DB-evidence columns, chain hashes/signature metadata, and a
+structural hash-chain status for the full file. Keyed MAC verification still
+requires the audit signing key and remains the offline
+`oraclemcp audit verify` path. `GET
 /operator/v1/events` streams redacted SSE event envelopes with `event_seq`,
 `event_id`, `lane_id`, `subject_id_hash`, `redaction_level`, and
 `schema_version`. It accepts `cursor` or `Last-Event-ID` to resume from a

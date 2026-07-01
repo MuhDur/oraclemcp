@@ -169,10 +169,12 @@ independent destination ([ADR 0003](adr/0003-keyed-mac-audit-chain.md)).
 an OTLP export, or an agent-facing error.
 
 *Mitigation.* The audit record stores only the SQL **SHA-256 + a truncated
-preview**, never bind values. `OracleBind` and `OracleConnectionInfo` have
-redacting `Debug` implementations plus explicit redacted serializers for
-audit/proof/log/protocol surfaces. Telemetry redaction drops sensitive keys and
-redacts secret-shaped values before export. Secrets are resolved from
+preview**, never bind values; operator timeline/proof-bundle surfaces export
+`sql_sha256` instead of that preview because inlined literals can enter SQL
+text. `OracleBind` and `OracleConnectionInfo` have redacting `Debug`
+implementations plus explicit redacted serializers for audit/proof/log/protocol
+surfaces. Telemetry redaction drops sensitive keys and redacts secret-shaped
+values before export. Secrets are resolved from
 `env:`/`file:`/`keyring:` refs (dev-only `literal:` is rejected on `protected` profiles;
 `vault:` is a future fail-closed backend seam).
 `SigningKey` redacts its bytes in `Debug`.

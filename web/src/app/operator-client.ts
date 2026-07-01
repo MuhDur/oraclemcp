@@ -69,6 +69,43 @@ export type WorkbenchExecuteRequest = WorkbenchSqlRequest & {
   captureDbmsOutput: boolean;
 };
 
+export type AuditTailFilters = {
+  limit: number;
+  subjectIdHash: string;
+  tool: string;
+  dangerLevel: string;
+  exportProofBundle: boolean;
+};
+
+export type AuditTailRecord = {
+  schema_version: number;
+  seq: number;
+  timestamp: string;
+  subject_id_hash: string;
+  tool: string;
+  danger_level: string;
+  decision: string;
+  outcome: string;
+  rows_affected?: number | null;
+  sql_sha256: string;
+  sql_text?: Record<string, unknown>;
+  db_evidence?: Record<string, unknown> | null;
+  proof?: Record<string, unknown>;
+  bind_values?: Record<string, unknown>;
+};
+
+export type AuditTailData = {
+  source: string;
+  reason?: string;
+  limit: number;
+  filters: Record<string, unknown>;
+  scanned_records?: number;
+  selected_records?: number;
+  records: AuditTailRecord[];
+  proof?: Record<string, unknown>;
+  export?: Record<string, unknown> | null;
+};
+
 export const overviewProbes: ProbeDefinition[] = [
   {
     id: "healthz",
@@ -242,6 +279,37 @@ export async function executeWorkbenchSql(
       capture_dbms_output: request.captureDbmsOutput
     }
   });
+}
+
+export async function fetchAuditTail(
+  filters: AuditTailFilters
+): Promise<OperatorResponse<AuditTailData>> {
+  const params = new URLSearchParams();
+  params.set("limit", String(filters.limit));
+  setOptionalParam(params, "subject_id_hash", filters.subjectIdHash);
+  setOptionalParam(params, "tool", filters.tool);
+  setOptionalParam(params, "level", filters.dangerLevel);
+  if (filters.exportProofBundle) {
+    params.set("export", "proof-bundle");
+  }
+  const suffix = params.toString();
+  const response = await fetch(`/operator/v1/audit-tail${suffix ? `?${suffix}` : ""}`, {
+    headers: { accept: "application/json" },
+    cache: "no-store",
+    credentials: "same-origin"
+  });
+  const parsed = (await response.json()) as unknown;
+  if (!response.ok) {
+    throw new Error(errorMessage(parsed, response.status));
+  }
+  return parsed as OperatorResponse<AuditTailData>;
+}
+
+function setOptionalParam(params: URLSearchParams, key: string, value: string): void {
+  const trimmed = value.trim();
+  if (trimmed) {
+    params.set(key, trimmed);
+  }
 }
 
 function stateForStatus(status: number, ok: boolean): ProbeState {
