@@ -83,3 +83,78 @@ fn npx_verifies_binary_no_postinstall_side_effects() {
         );
     }
 }
+
+#[test]
+fn cargo_binstall_metadata_matches_release_assets() {
+    let root = repo_root();
+    let manifest =
+        fs::read_to_string(root.join("crates/oraclemcp/Cargo.toml")).expect("read Cargo.toml");
+
+    for needle in [
+        "[package.metadata.binstall]",
+        "pkg-url = \"{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }\"",
+        "bin-dir = \"{ name }-{ target }/{ bin }{ binary-ext }\"",
+        "pkg-fmt = \"tgz\"",
+        "disabled-strategies = [\"quick-install\", \"compile\"]",
+        "[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]",
+        "pkg-fmt = \"zip\"",
+    ] {
+        assert!(
+            manifest.contains(needle),
+            "Cargo.toml binstall metadata must contain {needle}"
+        );
+    }
+
+    let release_assets = fs::read_to_string(root.join("docs/operations.md"))
+        .expect("read documented release asset matrix");
+    for (target, archive_suffix, binary_ext) in [
+        ("x86_64-unknown-linux-gnu", ".tar.gz", ""),
+        ("x86_64-unknown-linux-musl", ".tar.gz", ""),
+        ("aarch64-unknown-linux-gnu", ".tar.gz", ""),
+        ("aarch64-unknown-linux-musl", ".tar.gz", ""),
+        ("x86_64-apple-darwin", ".tar.gz", ""),
+        ("aarch64-apple-darwin", ".tar.gz", ""),
+        ("x86_64-pc-windows-msvc", ".zip", ".exe"),
+    ] {
+        let asset = format!("oraclemcp-{target}{archive_suffix}");
+        let binary = format!("oraclemcp-{target}/oraclemcp{binary_ext}");
+        assert!(
+            release_assets.contains(&asset),
+            "release asset matrix must document {asset}"
+        );
+        assert_eq!(
+            expand_binstall_template(
+                "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }",
+                target,
+                archive_suffix,
+                binary_ext,
+            ),
+            format!("https://github.com/MuhDur/oraclemcp/releases/download/v9.9.9-test/{asset}")
+        );
+        assert_eq!(
+            expand_binstall_template(
+                "{ name }-{ target }/{ bin }{ binary-ext }",
+                target,
+                archive_suffix,
+                binary_ext,
+            ),
+            binary
+        );
+    }
+}
+
+fn expand_binstall_template(
+    template: &str,
+    target: &str,
+    archive_suffix: &str,
+    binary_ext: &str,
+) -> String {
+    template
+        .replace("{ repo }", "https://github.com/MuhDur/oraclemcp")
+        .replace("{ version }", "9.9.9-test")
+        .replace("{ name }", "oraclemcp")
+        .replace("{ target }", target)
+        .replace("{ archive-suffix }", archive_suffix)
+        .replace("{ bin }", "oraclemcp")
+        .replace("{ binary-ext }", binary_ext)
+}
