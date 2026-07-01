@@ -55,19 +55,19 @@ use oraclemcp_config::{
 use oraclemcp_core::admission::DEFAULT_READ_PER_PROFILE_CAP;
 use oraclemcp_core::http::SinglePrincipalGuard;
 use oraclemcp_core::{
-    AdmissionController, CapabilitiesReport, ClientCredentialError, ClientCredentialIssueRequest,
-    ClientCredentialLifecycle, ClientCredentialStore, ConfigApplyOutcome, ConfigDraftPreview,
-    ConfigOpsBackend, ConfigOpsError, ConfigOpsService, ConfigOpsStatus, ConfigReloadApplier,
-    ConfigReloadApplyReport, CustomToolCatalog, CustomToolDef, DashboardAuth, DispatchCloseReason,
-    DispatchContext, DispatchFuture, DispatchOutcome, DoctorAuthCapabilities, DoctorAuthModeKind,
-    DoctorContext, DoctorLevelCaps, DoctorProfileCaps, DoctorStateLayout, ExportRegistry,
-    FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext, LaneDispatchFactory,
-    LaneRuntime, MCP_PATH, McpSurfaceDetail, McpSurfaceFuture, MtlsClientRegistry,
-    OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy, OracleMcpServer,
-    PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport, ShutdownCoordinator, SiemFormat,
-    SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial, TlsServerConfig,
-    ToolDispatch, WriteIntentLog, apply_legacy_state_migration, build_server_config,
-    default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
+    AdmissionController, CapabilitiesReport, ChangeProposalStore, ClientCredentialError,
+    ClientCredentialIssueRequest, ClientCredentialLifecycle, ClientCredentialStore,
+    ConfigApplyOutcome, ConfigDraftPreview, ConfigOpsBackend, ConfigOpsError, ConfigOpsService,
+    ConfigOpsStatus, ConfigReloadApplier, ConfigReloadApplyReport, CustomToolCatalog,
+    CustomToolDef, DashboardAuth, DispatchCloseReason, DispatchContext, DispatchFuture,
+    DispatchOutcome, DoctorAuthCapabilities, DoctorAuthModeKind, DoctorContext, DoctorLevelCaps,
+    DoctorProfileCaps, DoctorStateLayout, ExportRegistry, FeatureTiers, HttpSessionLifecycle,
+    HttpTransportConfig, LaneContext, LaneDispatchFactory, LaneRuntime, MCP_PATH, McpSurfaceDetail,
+    McpSurfaceFuture, MtlsClientRegistry, OAuthEnforcement, ObservabilityState,
+    OperatorAuthorityPolicy, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport,
+    ShutdownCoordinator, SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy,
+    TlsMaterial, TlsServerConfig, ToolDispatch, WriteIntentLog, apply_legacy_state_migration,
+    build_server_config, default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
     mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file, requires_mtls,
     run_doctor, service_app_doctor_snapshot, sign, start_oraclemcp_service_app_with_transport,
 };
@@ -2588,6 +2588,18 @@ fn run_serve(
                     profile_drain: profile_drain.clone(),
                 })),
             )));
+            let change_proposals = match ChangeProposalStore::open_default() {
+                Ok(store) => store,
+                Err(e) => {
+                    emit_status_error(
+                        robot_json,
+                        "ORACLEMCP_CHANGE_PROPOSALS_UNAVAILABLE",
+                        &format!("failed to initialize change proposal store: {e}"),
+                    );
+                    return ExitCode::from(2);
+                }
+            };
+            transport.change_proposals = Some(Arc::new(change_proposals));
 
             // ── D1 observability wiring (health + metrics + graceful drain) ──
             let version = env!("CARGO_PKG_VERSION");

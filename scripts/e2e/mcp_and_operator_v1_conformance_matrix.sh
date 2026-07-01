@@ -39,6 +39,7 @@ required=(
   ui/generated/operator-v1.ts
   scripts/ui_fixtures_validate_against_rust_schema.sh
   tests/fixtures/ui/operator-v1/route-index.json
+  tests/fixtures/ui/operator-v1/change-proposals.json
   tests/fixtures/ui/operator-v1/event-snapshot.json
 )
 missing=0
@@ -52,8 +53,8 @@ if [ "$missing" -ne 0 ]; then
   e2e_finish_fail "$missing required B.6 file(s) missing"
 fi
 
-if ! grep -F "| Operator v1 | 8 | 0 | 8 | 8 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
-  e2e_finish_fail "Operator v1 MUST coverage must be 8/8 score=1.00"
+if ! grep -F "| Operator v1 | 9 | 0 | 9 | 9 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "Operator v1 MUST coverage must be 9/9 score=1.00"
 fi
 if ! grep -F "| HTTP negotiation | 2 | 0 | 2 | 2 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "HTTP negotiation coverage must include MCP-Protocol-Version"
@@ -64,7 +65,7 @@ fi
 if ! grep -F "| WP-N concurrency/session | 11 | 0 | 11 | 11 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "WP-N concurrency/session coverage must include the N9 contract"
 fi
-if ! grep -F "Total tracked requirements: 61 MUST, 2 SHOULD, 63 tested." tests/conformance/COVERAGE.md >/dev/null; then
+if ! grep -F "Total tracked requirements: 62 MUST, 2 SHOULD, 64 tested." tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "B.6 coverage totals are stale"
 fi
 if grep -RInE '(^|[^A-Z])SKIP([^A-Z]|$)' tests/conformance/COVERAGE.md >/dev/null; then

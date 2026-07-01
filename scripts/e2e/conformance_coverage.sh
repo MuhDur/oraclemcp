@@ -74,13 +74,13 @@ fi
 if ! grep -F "| MUST coverage | 6 | 6 | 6 | 0 | 1.00 |" scripts/e2e/COVERAGE.md >/dev/null; then
   e2e_finish_fail "COVERAGE.md must record 1.00 MUST coverage for the harness standard"
 fi
-if ! grep -F "| Operator v1 | 8 | 0 | 8 | 8 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
+if ! grep -F "| Operator v1 | 9 | 0 | 9 | 9 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "tests/conformance/COVERAGE.md must record 1.00 MUST coverage for operator v1"
 fi
 if ! grep -F "| WP-N concurrency/session | 11 | 0 | 11 | 11 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "tests/conformance/COVERAGE.md must record 1.00 MUST coverage for WP-N"
 fi
-if ! grep -F "Total tracked requirements: 61 MUST, 2 SHOULD, 63 tested." tests/conformance/COVERAGE.md >/dev/null; then
+if ! grep -F "Total tracked requirements: 62 MUST, 2 SHOULD, 64 tested." tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "tests/conformance/COVERAGE.md totals are stale"
 fi
 if ! grep -F "| JSON-RPC errors | 3 | 2 | 5 | 5 | 1 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then

@@ -317,13 +317,17 @@ alternate SQL path: preview routes through `oracle_preview_sql`, reads through
 `oracle_query`, and guarded DML through `oracle_execute` with the same
 classifier, profile ceiling, rollback, confirmation, idempotency, and audit path
 used by MCP. Browser-originated DDL/Admin apply remains behind both the global
-dashboard workbench flag and a per-profile opt-in.
+dashboard workbench flag and a per-profile opt-in. The Reviews board stores
+profile-scoped Change Proposals as service-owned templates plus captured binds;
+apply re-classifies every template and forwards through the same gated action
+route, so a stale stored proposal verdict cannot authorize execution.
 
 *Evidence (green; CI):*
 - `crates/oraclemcp-core/src/http.rs` tests —
   `dashboard_pairing_sets_strict_cookie_and_session_view`,
   `malicious_page_cannot_trigger_dashboard_gated_action`,
-  `dashboard_workbench_ddl_apply_is_release_gated`, and
+  `dashboard_workbench_ddl_apply_is_release_gated`,
+  `cp_apply_reclassifies_never_trusts_stored_verdict`, and
   `workbench_no_bypass_guard_is_the_feature`.
 - `crates/oraclemcp/tests/dashboard_e2e.rs` — read-only dashboard acceptance
   contracts and structured dry-run coverage.

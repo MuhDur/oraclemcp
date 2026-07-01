@@ -42,6 +42,8 @@ pub const DASHBOARD_ACTION_ROUTES: &[(&str, &str)] = &[
     ("POST", "/operator/v1/config/draft"),
     ("POST", "/operator/v1/config/apply"),
     ("POST", "/operator/v1/config/rollback"),
+    ("POST", "/operator/v1/change-proposals/draft"),
+    ("POST", "/operator/v1/change-proposals/apply"),
     ("POST", "/operator/v1/session/set-level"),
     ("POST", "/operator/v1/session/switch-profile"),
 ];

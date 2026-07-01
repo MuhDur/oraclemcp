@@ -124,6 +124,27 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         mcp_tool: None,
     },
     OperatorRouteSpec {
+        method: "GET",
+        path: "/operator/v1/change-proposals",
+        schema: "changeProposalListResponse",
+        sse: false,
+        mcp_tool: None,
+    },
+    OperatorRouteSpec {
+        method: "POST",
+        path: "/operator/v1/change-proposals/draft",
+        schema: "changeProposalDraftResponse",
+        sse: false,
+        mcp_tool: None,
+    },
+    OperatorRouteSpec {
+        method: "POST",
+        path: "/operator/v1/change-proposals/apply",
+        schema: "changeProposalApplyResponse",
+        sse: false,
+        mcp_tool: Some("proposal-selected apply tool"),
+    },
+    OperatorRouteSpec {
         method: "POST",
         path: "/operator/v1/actions/preview",
         schema: "gatedActionResponse",
@@ -303,6 +324,9 @@ pub fn operator_schema_bundle() -> Value {
             "configDraftResponse": { "$ref": "#/$defs/versionedResponse" },
             "configApplyResponse": { "$ref": "#/$defs/versionedResponse" },
             "configRollbackResponse": { "$ref": "#/$defs/versionedResponse" },
+            "changeProposalListResponse": { "$ref": "#/$defs/versionedResponse" },
+            "changeProposalDraftResponse": { "$ref": "#/$defs/versionedResponse" },
+            "changeProposalApplyResponse": { "$ref": "#/$defs/versionedResponse" },
             "gatedActionResponse": { "$ref": "#/$defs/versionedResponse" },
             "operatorSchemaBundle": {
                 "type": "object",
@@ -496,6 +520,42 @@ pub fn operator_fixture_values() -> Vec<(&'static str, Value)> {
                 "local-owner:fixture",
                 "operator.snapshot",
                 json!({ "active_lanes": 1 }),
+            ),
+        ),
+        (
+            "change-proposals",
+            operator_response(
+                "/operator/v1/change-proposals",
+                json!({
+                    "source": "change_proposals",
+                    "proposals": [{
+                        "schema_version": 1,
+                        "id": "cp-fixture",
+                        "profile": "prod",
+                        "author": "agent",
+                        "author_id_hash": operator_subject_id_hash("oauth:fixture"),
+                        "title": "Review fixture",
+                        "created_at": "unix:00000000000000000001",
+                        "updated_at": "unix:00000000000000000001",
+                        "statement_count": 1,
+                        "stored_verdict_present": true,
+                        "statements": [{
+                            "id": "stmt-fixture",
+                            "unit": "dml",
+                            "sql_template": "UPDATE accounts SET status = :1 WHERE id = :2",
+                            "sql_sha256": "sha256:e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5",
+                            "bind_count": 2,
+                            "commit": false,
+                            "capture_dbms_output": false,
+                            "stored_verdict_present": true,
+                            "draft_verdict": {
+                                "required_level": "READ_WRITE",
+                                "danger": "GUARDED",
+                                "reason": "fixture"
+                            }
+                        }]
+                    }]
+                }),
             ),
         ),
         (

@@ -86,6 +86,27 @@
         "sse": false
       },
       {
+        "mcp_tool": null,
+        "method": "GET",
+        "path": "/operator/v1/change-proposals",
+        "schema": "changeProposalListResponse",
+        "sse": false
+      },
+      {
+        "mcp_tool": null,
+        "method": "POST",
+        "path": "/operator/v1/change-proposals/draft",
+        "schema": "changeProposalDraftResponse",
+        "sse": false
+      },
+      {
+        "mcp_tool": "proposal-selected apply tool",
+        "method": "POST",
+        "path": "/operator/v1/change-proposals/apply",
+        "schema": "changeProposalApplyResponse",
+        "sse": false
+      },
+      {
         "mcp_tool": "operator-selected preview tool",
         "method": "POST",
         "path": "/operator/v1/actions/preview",

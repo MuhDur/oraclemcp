@@ -1,0 +1,40 @@
+{
+  "data": {
+    "proposals": [
+      {
+        "author": "agent",
+        "author_id_hash": "subject-sha256:fbb4a1e284731d21e1a8b010638855af3f13be2a422fb4d4f34bd325e7ca900f",
+        "created_at": "unix:00000000000000000001",
+        "id": "cp-fixture",
+        "profile": "prod",
+        "schema_version": 1,
+        "statement_count": 1,
+        "statements": [
+          {
+            "bind_count": 2,
+            "capture_dbms_output": false,
+            "commit": false,
+            "draft_verdict": {
+              "danger": "GUARDED",
+              "reason": "fixture",
+              "required_level": "READ_WRITE"
+            },
+            "id": "stmt-fixture",
+            "sql_sha256": "sha256:e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5",
+            "sql_template": "UPDATE accounts SET status = :1 WHERE id = :2",
+            "stored_verdict_present": true,
+            "unit": "dml"
+          }
+        ],
+        "stored_verdict_present": true,
+        "title": "Review fixture",
+        "updated_at": "unix:00000000000000000001"
+      }
+    ],
+    "source": "change_proposals"
+  },
+  "protocol_version": "operator.v1",
+  "redaction_level": "operator_redacted",
+  "route": "/operator/v1/change-proposals",
+  "schema_version": 1
+}

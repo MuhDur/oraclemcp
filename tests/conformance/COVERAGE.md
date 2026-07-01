@@ -90,13 +90,13 @@ Harnesses:
 | HTTP sessions | 2 | 0 | 2 | 2 | 0 | 100% |
 | HTTP routing | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTP negotiation | 2 | 0 | 2 | 2 | 0 | 100% |
-| Operator v1 | 8 | 0 | 8 | 8 | 0 | 100% |
+| Operator v1 | 9 | 0 | 9 | 9 | 0 | 100% |
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
 | Oracle structured cells | 6 | 0 | 6 | 6 | 0 | 100% |
 | Durable SQL idempotency | 1 | 0 | 1 | 1 | 0 | 100% |
 | WP-N concurrency/session | 11 | 0 | 11 | 11 | 0 | 100% |
 
-Total tracked requirements: 61 MUST, 2 SHOULD, 63 tested.
+Total tracked requirements: 62 MUST, 2 SHOULD, 64 tested.
 
 ## Requirement IDs
 
@@ -145,6 +145,7 @@ Total tracked requirements: 61 MUST, 2 SHOULD, 63 tested.
 | OPERATOR-V1-006 | MUST | Operator v1 | B.6 `mcp_and_operator_v1_conformance_matrix` records 1.00 MUST coverage and runs the UI fixture schema validator. |
 | OPERATOR-V1-007 | MUST | Operator v1 | Gated-action operator routes accept or derive idempotency keys, return typed in-progress/conflict responses, and replay the original redacted response for same-key retries without re-entering guarded dispatch. |
 | OPERATOR-V1-008 | MUST | Operator v1 | `/operator/v1/events` resumes by `cursor` / `Last-Event-ID` from a bounded subject+lane ring, emits gap markers or typed expiry for stale cursors, and rejects cross-lane cursors before replay. |
+| OPERATOR-V1-009 | MUST | Operator v1 | B.8 change proposal apply re-classifies stored SQL templates and re-checks level/grants/subject at apply time instead of trusting stored proposal verdicts. |
 | HTTP-SURFACE-001 | MUST | HTTP auth/no-leak | The surface inventory asserts per-surface authn/gating for `/mcp`, stateful SSE GET, `/operator/v1`, dashboard pairing/POSTs, config apply, `/readyz`, and `/metrics`; unauthenticated infra probes expose no DB identity, SQL text, bind values, wallet, credential, or password markers. |
 | HTTPS-001 | MUST | HTTPS / mTLS | Server-only native TLS accepts a valid HTTPS handshake. |
 | HTTPS-002 | MUST | HTTPS / mTLS | Native mTLS rejects clients without a certificate and accepts a client certificate signed by the configured CA. |
@@ -189,6 +190,7 @@ Total tracked requirements: 61 MUST, 2 SHOULD, 63 tested.
 | OPERATOR-V1-006 | `scripts/e2e/mcp_and_operator_v1_conformance_matrix.sh` |
 | OPERATOR-V1-007 | `crates/oraclemcp-core/src/http.rs::tests::operator_action_idempotency_replays_same_response_and_conflicts_on_drift`; `crates/oraclemcp-core/src/http.rs::tests::operator_idempotency_ledger_reports_in_progress_before_completion` |
 | OPERATOR-V1-008 | `crates/oraclemcp-core/src/http.rs::tests::operator_events_resume_is_lane_scoped`; `crates/oraclemcp-core/src/http.rs::tests::operator_events_last_event_id_reports_gap_for_slow_consumer` |
+| OPERATOR-V1-009 | `crates/oraclemcp-core/src/http.rs::tests::cp_apply_reclassifies_never_trusts_stored_verdict` |
 | HTTP-SURFACE-001 | `crates/oraclemcp-core/src/http.rs::tests::surface_inventory_authn_no_leak`; `docs/behavior-inventory.md` |
 | HTTPS-001 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_accepts_tls_handshake` |
 | HTTPS-002 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_requires_client_certificate_when_mtls_is_configured` |

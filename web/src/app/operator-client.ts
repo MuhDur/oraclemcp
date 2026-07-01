@@ -307,6 +307,86 @@ export type OperatorEventEnvelope = {
   data: Record<string, unknown>;
 };
 
+export type ChangeProposalAuthorKind = "agent" | "human";
+
+export type ChangeProposalApplyUnit = "read" | "dml" | "ddl";
+
+export type ChangeProposalClassifierView = {
+  required_level?: string | null;
+  danger: string;
+  reason: string;
+};
+
+export type ChangeProposalStatementView = {
+  id: string;
+  unit: ChangeProposalApplyUnit;
+  sql_template: string;
+  sql_sha256: string;
+  bind_count: number;
+  commit: boolean;
+  capture_dbms_output: boolean;
+  draft_verdict: ChangeProposalClassifierView;
+  stored_verdict_present: boolean;
+};
+
+export type ChangeProposalView = {
+  schema_version: number;
+  id: string;
+  profile: string;
+  author: ChangeProposalAuthorKind;
+  author_id_hash: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  statement_count: number;
+  statements: ChangeProposalStatementView[];
+  stored_verdict_present: boolean;
+};
+
+export type ChangeProposalListData = {
+  source: string;
+  proposals: ChangeProposalView[];
+};
+
+export type ChangeProposalDraftStatement = {
+  sql_template: string;
+  binds?: unknown[];
+  unit?: ChangeProposalApplyUnit;
+  commit?: boolean;
+  capture_dbms_output?: boolean;
+  stored_verdict?: Record<string, unknown>;
+};
+
+export type ChangeProposalDraftRequest = {
+  profile: string;
+  author: ChangeProposalAuthorKind;
+  title?: string;
+  statements: ChangeProposalDraftStatement[];
+  stored_verdict?: Record<string, unknown>;
+};
+
+export type ChangeProposalDraftData = {
+  source: string;
+  status: string;
+  proposal: ChangeProposalView;
+};
+
+export type ChangeProposalApplyRequest = {
+  proposalId: string;
+  laneId?: string;
+  confirm?: string;
+  commit?: boolean;
+};
+
+export type ChangeProposalApplyData = {
+  source: string;
+  status: string;
+  proposal: ChangeProposalView;
+  lane_id?: string | null;
+  atomicity?: Record<string, unknown>;
+  results: Array<Record<string, unknown>>;
+};
+
 export type WorkbenchActionData = {
   status?: string;
   lane_id?: string | null;
@@ -571,6 +651,10 @@ export async function fetchActiveLanes(): Promise<OperatorResponse<ActiveLanesDa
   return operatorGet("/operator/v1/active-lanes");
 }
 
+export async function fetchChangeProposals(): Promise<OperatorResponse<ChangeProposalListData>> {
+  return operatorGet("/operator/v1/change-proposals");
+}
+
 export async function previewConfigDraft(
   session: DashboardSession,
   draftToml: string
@@ -597,6 +681,32 @@ export async function rollbackConfigDraft(
 ): Promise<OperatorResponse<ConfigRollbackData>> {
   return operatorPost("/operator/v1/config/rollback", session, {
     rollback_id: rollbackId
+  });
+}
+
+export async function draftChangeProposal(
+  session: DashboardSession,
+  request: ChangeProposalDraftRequest
+): Promise<OperatorResponse<ChangeProposalDraftData>> {
+  return operatorPost("/operator/v1/change-proposals/draft", session, {
+    profile: request.profile,
+    author: request.author,
+    title: request.title,
+    statements: request.statements,
+    stored_verdict: request.stored_verdict
+  });
+}
+
+export async function applyChangeProposal(
+  session: DashboardSession,
+  request: ChangeProposalApplyRequest
+): Promise<OperatorResponse<ChangeProposalApplyData>> {
+  return operatorPost("/operator/v1/change-proposals/apply", session, {
+    proposal_id: request.proposalId,
+    lane_id: laneIdValue(request.laneId),
+    confirm: request.confirm?.trim() || undefined,
+    commit: request.commit,
+    idempotency_key: requestId("change-proposal-apply")
   });
 }
 

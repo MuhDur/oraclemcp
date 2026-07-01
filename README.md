@@ -290,6 +290,10 @@ actions forward to `oracle_preview_sql`, read execution forwards to
 single-use confirmation grant and audit path agents use. Browser-originated
 DDL/Admin apply is release-gated; DDL can be previewed, but applying it requires
 a non-browser operator path until a profile-level dashboard DDL opt-in exists.
+The Reviews board stores profile-scoped Change Proposals as service-owned SQL
+templates plus captured binds, then applies them by re-classifying each
+template and forwarding through the same guarded action route; stored proposal
+verdicts are never authorization inputs.
 
 The Streamable HTTP transport (`--listen`) fails closed. It starts only when
 service-owned per-client credentials, OAuth bearer enforcement, mTLS

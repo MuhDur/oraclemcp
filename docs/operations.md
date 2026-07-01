@@ -639,8 +639,17 @@ checks remain in one place. The browser Workbench uses this surface directly:
 `oracle_preview_sql` for classify/preview, `oracle_query` for read execution,
 and `oracle_execute` for guarded DML. Browser-originated DDL/Admin apply is
 release-gated and rejected before MCP dispatch; DDL preview remains available,
-and non-browser operator API callers keep the normal profile-ceiling path. They
-also carry an in-memory idempotency ledger:
+and non-browser operator API callers keep the normal profile-ceiling path.
+`/operator/v1/change-proposals` backs the dashboard Reviews board. Drafted
+proposals are profile-scoped service-state files keyed by `(profile, author)`;
+they store SQL as `sql_template` plus captured `binds`, expose redacted board
+views, and do not bind or acquire a lane until apply. Apply loads the stored
+proposal, re-runs the classifier on each current template, then forwards each
+statement through the same gated action route. Stored verdicts are treated as
+review metadata only and are never trusted for authorization. Multi-statement
+apply is reported honestly as sequential stop-on-failure, with per-statement
+DML / per-object DDL semantics rather than a false all-or-nothing DDL claim.
+Gated action and proposal apply calls carry an in-memory idempotency ledger:
 send `Idempotency-Key`, `idempotency_key`, or `request_id` for explicit retry
 identity, or let the server derive a key from the
 route/tool/subject/lane generation/arguments. Same-key retries replay the

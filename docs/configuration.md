@@ -352,6 +352,15 @@ be previewed, and applying it through the dashboard requires both
 active profile. Those flags do not raise the profile ceiling or bypass
 confirmation, rollback, idempotency, or audit.
 
+The Reviews board uses `/operator/v1/change-proposals`,
+`/operator/v1/change-proposals/draft`, and
+`/operator/v1/change-proposals/apply`. A proposal is scoped to one profile and
+is stored as service-owned state without a lane binding; apply chooses the lane
+at request time, re-classifies every stored `sql_template`, re-checks the active
+level/grants/subject through the existing action route, and ignores any stored
+proposal verdict. Agent DML proposals store parameterized SQL templates plus
+captured binds rather than inlined literal SQL.
+
 `[http]` fields: `allowed_hosts`, `allowed_origins` (both default `[]`,
 loopback-only), `json_response` (default `false`), `stateful` (default `false`),
 `stateful_idle_ttl_seconds` (default `900`, `0` disables idle reaping),

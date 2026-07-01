@@ -20,6 +20,7 @@ pub mod admission;
 pub mod audit_shipping;
 pub mod capabilities;
 pub mod capability;
+pub mod change_proposal;
 pub mod client_credentials;
 pub mod config_ops;
 pub mod connect;
@@ -77,6 +78,12 @@ pub use capabilities::{
 pub use capability::{
     LaneCaps, PrivilegedEffect, ReadPathCaps, narrow_to_lane, narrow_to_read_path,
     requires_privileged_effect,
+};
+pub use change_proposal::{
+    ChangeProposal, ChangeProposalApplyRequest, ChangeProposalApplyUnit, ChangeProposalAuthorKind,
+    ChangeProposalClassifierView, ChangeProposalDraftOutcome, ChangeProposalDraftRequest,
+    ChangeProposalError, ChangeProposalStatement, ChangeProposalStatementDraft,
+    ChangeProposalStatementView, ChangeProposalStore, ChangeProposalView,
 };
 pub use client_credentials::{
     AuthenticatedClientCredential, ClientCredentialError, ClientCredentialIssueRequest,

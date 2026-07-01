@@ -41,6 +41,10 @@ use crate::admission::{
     DEFAULT_RETRY_AFTER_MS, DEFAULT_STATEFUL_PER_PROFILE_CAP,
 };
 use crate::capabilities::PROTOCOL_VERSION;
+use crate::change_proposal::{
+    ChangeProposalApplyRequest, ChangeProposalApplyUnit, ChangeProposalError,
+    ChangeProposalStatement, ChangeProposalStore,
+};
 use crate::client_credentials::{
     ClientCredentialError, ClientCredentialStore, looks_like_client_bearer,
 };
@@ -49,6 +53,7 @@ use crate::dashboard_auth::{
     DASHBOARD_ACTION_TICKET_HEADER, DASHBOARD_CSRF_HEADER, DASHBOARD_PAIR_PATH,
     DASHBOARD_SESSION_PATH, DashboardAuth,
 };
+use crate::file_store::FileStoreError;
 use crate::operator_protocol::{
     OPERATOR_PROTOCOL_VERSION, operator_event, operator_response, operator_route_index,
     operator_schema_bundle, operator_subject_id_hash, validate_operator_event,
@@ -234,6 +239,10 @@ pub struct HttpTransportConfig {
     pub operator_audit_tail_path: Option<PathBuf>,
     /// Safe config draft/apply backend for `/operator/v1/config/*`.
     pub config_ops: Option<Arc<ConfigOpsService>>,
+    /// Durable change proposal board for `/operator/v1/change-proposals/*`.
+    /// Draft/list are lane-free; apply acquires a lane only by forwarding to the
+    /// existing gated action route.
+    pub change_proposals: Option<Arc<ChangeProposalStore>>,
     /// In-memory idempotency ledger for `/operator/v1` gated-action routes.
     /// It caches only redacted operator envelopes and never bypasses the
     /// dispatcher's grant or write-intent checks.
@@ -284,6 +293,7 @@ impl std::fmt::Debug for HttpTransportConfig {
                     .map(|_| "<configured>"),
             )
             .field("config_ops", &self.config_ops.is_some())
+            .field("change_proposals", &self.change_proposals.is_some())
             .field("operator_idempotency", &true)
             .field("operator_events", &true)
             .field("observability", &self.observability)
@@ -314,6 +324,7 @@ impl Default for HttpTransportConfig {
             operator_auditor: None,
             operator_audit_tail_path: None,
             config_ops: None,
+            change_proposals: None,
             operator_idempotency: Arc::new(OperatorIdempotencyLedger::new()),
             operator_events: Arc::new(OperatorEventStore::new()),
             observability: ObservabilityState::default(),
@@ -2601,6 +2612,129 @@ mod tests {
             calls.load(AtomicOrdering::SeqCst),
             0,
             "browser DDL apply must fail before MCP dispatch"
+        );
+    }
+
+    #[test]
+    fn cp_apply_reclassifies_never_trusts_stored_verdict() {
+        let (auditor, _sink) = operator_auditor();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = server_with_dispatch(Arc::new(WorkbenchDispatch {
+            calls: Arc::clone(&calls),
+        }));
+        let dir = dashboard_test_dir("cp-reclassify");
+        let store = Arc::new(crate::change_proposal::ChangeProposalStore::new(
+            crate::file_store::FileStore::open(dir.join("state")).expect("file store"),
+        ));
+        let cfg = HttpTransportConfig {
+            operator_auditor: Some(auditor),
+            change_proposals: Some(store),
+            ..Default::default()
+        };
+        let write_sql = "UPDATE accounts SET status = :1 WHERE id = :2";
+        let read_sql = "SELECT status FROM accounts WHERE id = :1";
+        let draft = handle_http_request(
+            &server,
+            &cfg,
+            operator_json_post(
+                "/operator/v1/change-proposals/draft",
+                &serde_json::json!({
+                    "profile": "prod",
+                    "author": "agent",
+                    "title": "Hold account",
+                    "stored_verdict": { "marker": "never-serialize-stored-verdict" },
+                    "statements": [{
+                        "sql_template": write_sql,
+                        "binds": ["HOLD", 42],
+                        "stored_verdict": { "marker": "never-serialize-stored-verdict" }
+                    }, {
+                        "sql_template": read_sql,
+                        "binds": [42],
+                        "unit": "read",
+                        "stored_verdict": { "marker": "never-serialize-stored-verdict" }
+                    }]
+                }),
+            ),
+        );
+        assert_eq!(draft.status, 200);
+        let draft_json = response_json(&draft);
+        let proposal_id = draft_json["data"]["proposal"]["id"]
+            .as_str()
+            .expect("proposal id");
+        assert_eq!(
+            draft_json["data"]["proposal"]["statements"][0]["draft_verdict"]["required_level"],
+            serde_json::json!("READ_WRITE")
+        );
+        assert!(
+            !draft_json
+                .to_string()
+                .contains("never-serialize-stored-verdict"),
+            "proposal views must not serialize stored verdict payloads"
+        );
+        assert!(
+            !draft_json.to_string().contains("HOLD"),
+            "proposal views must not serialize captured bind values"
+        );
+
+        let apply = handle_http_request(
+            &server,
+            &cfg,
+            operator_json_post(
+                "/operator/v1/change-proposals/apply",
+                &serde_json::json!({
+                    "proposal_id": proposal_id,
+                    "confirm": "opaque-preview-grant",
+                    "commit": true,
+                    "idempotency_key": "cp-apply"
+                }),
+            ),
+        );
+        assert_eq!(apply.status, 200);
+        let apply_json = response_json(&apply);
+        let write_result = &apply_json["data"]["results"][0];
+        let read_result = &apply_json["data"]["results"][1];
+        assert_eq!(apply_json["data"]["status"], serde_json::json!("applied"));
+        assert_eq!(
+            write_result["reclassified"]["required_level"],
+            serde_json::json!("READ_WRITE"),
+            "apply must classify the current SQL template, not trust stored verdicts"
+        );
+        assert_eq!(
+            read_result["reclassified"]["required_level"],
+            serde_json::json!("READ_ONLY"),
+            "read proposal apply must also classify the current SQL template"
+        );
+        assert_eq!(
+            write_result["stored_verdict_ignored"],
+            serde_json::json!(true)
+        );
+        let dispatched_write =
+            &write_result["action_response"]["data"]["mcp_response"]["result"]["structuredContent"];
+        let dispatched_read =
+            &read_result["action_response"]["data"]["mcp_response"]["result"]["structuredContent"];
+        assert_eq!(
+            dispatched_write["tool"],
+            serde_json::json!("oracle_execute")
+        );
+        assert_eq!(
+            dispatched_write["classification"]["required_level"],
+            serde_json::json!("READ_WRITE")
+        );
+        assert_eq!(
+            dispatched_write["args"]["sql"],
+            serde_json::json!(write_sql)
+        );
+        assert_eq!(
+            dispatched_write["args"]["binds"],
+            serde_json::json!(["HOLD", 42])
+        );
+        assert_eq!(dispatched_read["tool"], serde_json::json!("oracle_query"));
+        assert_eq!(dispatched_read["args"]["sql"], serde_json::json!(read_sql));
+        assert_eq!(dispatched_read["args"]["binds"], serde_json::json!([42]));
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            2,
+            "proposal apply should enter dispatch once per statement after reclassification"
         );
     }
 
@@ -6642,6 +6776,9 @@ enum OperatorRouteKind {
     ConfigDraft,
     ConfigApply,
     ConfigRollback,
+    ChangeProposalsList,
+    ChangeProposalsDraft,
+    ChangeProposalsApply,
     ActionPreview,
     ActionConfirm,
     ActionExecute,
@@ -6664,6 +6801,9 @@ fn operator_route_kind(path: &str) -> OperatorRouteKind {
         "/operator/v1/config/draft" => OperatorRouteKind::ConfigDraft,
         "/operator/v1/config/apply" => OperatorRouteKind::ConfigApply,
         "/operator/v1/config/rollback" => OperatorRouteKind::ConfigRollback,
+        "/operator/v1/change-proposals" => OperatorRouteKind::ChangeProposalsList,
+        "/operator/v1/change-proposals/draft" => OperatorRouteKind::ChangeProposalsDraft,
+        "/operator/v1/change-proposals/apply" => OperatorRouteKind::ChangeProposalsApply,
         "/operator/v1/actions/preview" => OperatorRouteKind::ActionPreview,
         "/operator/v1/actions/confirm" => OperatorRouteKind::ActionConfirm,
         "/operator/v1/actions/execute" => OperatorRouteKind::ActionExecute,
@@ -6682,6 +6822,8 @@ impl OperatorRouteKind {
             | Self::ConfigDraft
             | Self::ConfigApply
             | Self::ConfigRollback
+            | Self::ChangeProposalsDraft
+            | Self::ChangeProposalsApply
             | Self::SetLevel
             | Self::SwitchProfile => "POST",
             _ => "GET",
@@ -6732,6 +6874,17 @@ fn handle_operator_api_route(
         | OperatorRouteKind::ConfigDraft
         | OperatorRouteKind::ConfigApply
         | OperatorRouteKind::ConfigRollback => handle_operator_config_route(config, request, route),
+        OperatorRouteKind::ChangeProposalsList
+        | OperatorRouteKind::ChangeProposalsDraft
+        | OperatorRouteKind::ChangeProposalsApply => handle_operator_change_proposal_route(
+            server,
+            config,
+            request,
+            operator_subject,
+            route,
+            operator_audit_seq,
+            dashboard_browser,
+        ),
         OperatorRouteKind::ActionPreview
         | OperatorRouteKind::ActionConfirm
         | OperatorRouteKind::ActionExecute
@@ -7161,6 +7314,301 @@ fn handle_operator_config_route(
         }
         _ => unreachable!("non-config route"),
     }
+}
+
+fn handle_operator_change_proposal_route(
+    server: &OracleMcpServer,
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+    operator_subject: &AuditSubject,
+    route: OperatorRouteKind,
+    operator_audit_seq: u64,
+    dashboard_browser: bool,
+) -> HttpResponse {
+    let Some(store) = config.change_proposals.as_ref() else {
+        return operator_json_response(
+            503,
+            &request.path,
+            json!({
+                "source": "change_proposals",
+                "error": "change_proposals_unavailable",
+                "message": "change proposal store is not configured for this transport",
+            }),
+        );
+    };
+
+    match route {
+        OperatorRouteKind::ChangeProposalsList => match store.list() {
+            Ok(proposals) => operator_json_response(
+                200,
+                &request.path,
+                json!({
+                    "source": "change_proposals",
+                    "proposals": proposals,
+                }),
+            ),
+            Err(error) => operator_change_proposal_error_response(&request.path, error),
+        },
+        OperatorRouteKind::ChangeProposalsDraft => {
+            if !content_type_is_json(request) {
+                return empty_response(415);
+            }
+            let payload = match serde_json::from_slice(&request.body) {
+                Ok(payload) => payload,
+                Err(_) => {
+                    return operator_json_response(
+                        400,
+                        &request.path,
+                        json!({
+                            "source": "change_proposals",
+                            "error": "invalid_change_proposal",
+                            "message": "change proposal draft body must be valid JSON",
+                        }),
+                    );
+                }
+            };
+            let author_id_hash =
+                operator_subject_id_hash(&operator_subject.legacy_agent_identity());
+            match store.draft(payload, author_id_hash) {
+                Ok(outcome) => operator_json_response(
+                    200,
+                    &request.path,
+                    json!({
+                        "source": "change_proposals",
+                        "status": "drafted",
+                        "proposal": outcome.proposal,
+                    }),
+                ),
+                Err(error) => operator_change_proposal_error_response(&request.path, error),
+            }
+        }
+        OperatorRouteKind::ChangeProposalsApply => {
+            if !content_type_is_json(request) {
+                return empty_response(415);
+            }
+            let apply = match serde_json::from_slice::<ChangeProposalApplyRequest>(&request.body) {
+                Ok(apply) => apply,
+                Err(_) => {
+                    return operator_json_response(
+                        400,
+                        &request.path,
+                        json!({
+                            "source": "change_proposals",
+                            "error": "invalid_change_proposal_apply",
+                            "message": "change proposal apply body must include a valid proposal_id",
+                        }),
+                    );
+                }
+            };
+            let proposal = match store.load(&apply.proposal_id) {
+                Ok(proposal) => proposal,
+                Err(error) => return operator_change_proposal_error_response(&request.path, error),
+            };
+            let context = ChangeProposalApplyContext {
+                server,
+                config,
+                original_request: request,
+                operator_subject,
+                operator_audit_seq,
+                dashboard_browser,
+            };
+            operator_json_response(
+                200,
+                &request.path,
+                apply_change_proposal(&context, &proposal, &apply),
+            )
+        }
+        _ => unreachable!("non-change-proposal route"),
+    }
+}
+
+struct ChangeProposalApplyContext<'a> {
+    server: &'a OracleMcpServer,
+    config: &'a HttpTransportConfig,
+    original_request: &'a HttpRequest,
+    operator_subject: &'a AuditSubject,
+    operator_audit_seq: u64,
+    dashboard_browser: bool,
+}
+
+fn apply_change_proposal(
+    context: &ChangeProposalApplyContext<'_>,
+    proposal: &crate::change_proposal::ChangeProposal,
+    apply: &ChangeProposalApplyRequest,
+) -> Value {
+    let mut results = Vec::new();
+    let mut failed = false;
+    for (index, statement) in proposal.statements.iter().enumerate() {
+        let response = apply_change_proposal_statement(context, proposal, apply, statement);
+        let response_body: Value = serde_json::from_slice(&response.body).unwrap_or_else(|_| {
+            json!({
+                "error": "invalid_operator_action_response",
+                "message": "operator action response was not valid JSON",
+            })
+        });
+        let statement_failed = operator_action_response_failed(response.status, &response_body);
+        failed |= statement_failed;
+        results.push(json!({
+            "statement_index": index,
+            "statement_id": statement.id,
+            "unit": statement.unit,
+            "sql_sha256": prefixed_sha256_hex(statement.sql_template.as_bytes()),
+            "bind_count": statement.binds.len(),
+            "reclassified": statement.reclassified_view(),
+            "stored_verdict_ignored": statement.stored_verdict.is_some() || proposal.stored_verdict.is_some(),
+            "action_status": response.status,
+            "action_response": response_body,
+        }));
+        if statement_failed {
+            break;
+        }
+    }
+    let status = if failed {
+        "stopped_on_failure"
+    } else if results.len() == proposal.statements.len() {
+        "applied"
+    } else {
+        "not_started"
+    };
+    json!({
+        "source": "change_proposals",
+        "status": status,
+        "proposal": proposal.view(),
+        "lane_id": apply.lane_id.as_deref().map(str::trim).filter(|value| !value.is_empty()),
+        "atomicity": {
+            "unit": "per_statement_or_object",
+            "mode": "sequential_stop_on_failure",
+            "all_or_nothing": false,
+        },
+        "results": results,
+    })
+}
+
+fn apply_change_proposal_statement(
+    context: &ChangeProposalApplyContext<'_>,
+    proposal: &crate::change_proposal::ChangeProposal,
+    apply: &ChangeProposalApplyRequest,
+    statement: &ChangeProposalStatement,
+) -> HttpResponse {
+    let (tool, arguments) = change_proposal_action_arguments(statement, apply);
+    let key_prefix = apply
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("change-proposal-apply");
+    let body = json!({
+        "idempotency_key": format!("{key_prefix}:{}:{}", proposal.id, statement.id),
+        "lane_id": apply.lane_id.as_deref().map(str::trim).filter(|value| !value.is_empty()),
+        "tool": tool,
+        "arguments": arguments,
+    });
+    let host = context
+        .original_request
+        .header("host")
+        .unwrap_or("127.0.0.1");
+    let action_request = HttpRequest::new(
+        "POST",
+        "/operator/v1/actions/execute",
+        [
+            ("host", host),
+            ("content-type", "application/json"),
+            ("accept", "application/json"),
+        ],
+        body.to_string().into_bytes(),
+    )
+    .with_peer_loopback(context.original_request.peer_is_loopback)
+    .with_peer_addr(context.original_request.peer_addr.clone())
+    .with_peer_cert_fingerprint_sha256(
+        context
+            .original_request
+            .peer_cert_fingerprint_sha256
+            .clone(),
+    );
+    handle_operator_action_route(
+        context.server,
+        context.config,
+        &action_request,
+        context.operator_subject,
+        OperatorRouteKind::ActionExecute,
+        context.operator_audit_seq,
+        context.dashboard_browser,
+    )
+}
+
+fn change_proposal_action_arguments(
+    statement: &ChangeProposalStatement,
+    apply: &ChangeProposalApplyRequest,
+) -> (&'static str, Value) {
+    match statement.unit {
+        ChangeProposalApplyUnit::Read => (
+            "oracle_query",
+            json!({
+                "sql": statement.sql_template.as_str(),
+                "binds": &statement.binds,
+                "max_rows": 100,
+            }),
+        ),
+        ChangeProposalApplyUnit::Dml | ChangeProposalApplyUnit::Ddl => {
+            let confirm = apply
+                .confirm
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            (
+                "oracle_execute",
+                json!({
+                    "sql": statement.sql_template.as_str(),
+                    "binds": &statement.binds,
+                    "commit": apply.commit.unwrap_or(statement.commit),
+                    "confirm": confirm,
+                    "capture_dbms_output": statement.capture_dbms_output,
+                }),
+            )
+        }
+    }
+}
+
+fn operator_action_response_failed(status: u16, body: &Value) -> bool {
+    if status >= 400 {
+        return true;
+    }
+    let Some(mcp_response) = body.pointer("/data/mcp_response") else {
+        return false;
+    };
+    mcp_response.get("error").is_some()
+        || mcp_response
+            .pointer("/result/isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+fn operator_change_proposal_error_response(
+    route: &str,
+    error: ChangeProposalError,
+) -> HttpResponse {
+    let (status, code) = match &error {
+        ChangeProposalError::Invalid(_) => (400, "invalid_change_proposal"),
+        ChangeProposalError::UnknownProposal => (404, "unknown_change_proposal"),
+        ChangeProposalError::FileStore(FileStoreError::InvalidSegment { .. }) => {
+            (400, "invalid_change_proposal")
+        }
+        ChangeProposalError::FileStore(FileStoreError::Locked) => {
+            (409, "change_proposal_store_locked")
+        }
+        ChangeProposalError::FileStore(_)
+        | ChangeProposalError::Io(_)
+        | ChangeProposalError::Json(_) => (500, "change_proposal_store_failed"),
+    };
+    operator_json_response(
+        status,
+        route,
+        json!({
+            "source": "change_proposals",
+            "error": code,
+            "message": error.to_string(),
+        }),
+    )
 }
 
 fn config_draft_toml_from_request(request: &HttpRequest) -> Result<String, (u16, Value)> {

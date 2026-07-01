@@ -31,6 +31,7 @@ import {
   Download,
   FileClock,
   Gauge,
+  GitPullRequest,
   Play,
   Radio,
   RefreshCcw,
@@ -64,11 +65,14 @@ import {
 } from "./presentation-model";
 import {
   auditProbes,
+  applyChangeProposal,
   doctorProbes,
+  draftChangeProposal,
   executeWorkbenchSql,
   applyConfigDraft,
   fetchActiveLanes,
   fetchDashboardSession,
+  fetchChangeProposals,
   fetchOperatorConfig,
   fetchOperatorHealth,
   fetchOperatorMetrics,
@@ -88,6 +92,9 @@ import {
   type AuditTailRecord,
   type ActiveLane,
   type CapacityLimitSource,
+  type ChangeProposalApplyUnit,
+  type ChangeProposalAuthorKind,
+  type ChangeProposalView,
   type ExplorerCacheStatus,
   type ExplorerDetailLevel,
   type ExplorerMetadataCacheKey,
@@ -141,6 +148,7 @@ const navItems: NavItem[] = [
   { to: "/capacity", label: "Capacity", icon: Gauge },
   { to: "/config", label: "Config", icon: SlidersHorizontal },
   { to: "/explorer", label: "Explorer", icon: Search },
+  { to: "/reviews", label: "Reviews", icon: GitPullRequest },
   { to: "/workbench", label: "Workbench", icon: SquarePen },
   { to: "/audit", label: "Audit", icon: FileClock },
   { to: "/doctor", label: "Doctor", icon: Stethoscope }
@@ -198,6 +206,12 @@ const workbenchRoute = createRoute({
   component: WorkbenchPage
 });
 
+const reviewsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/reviews",
+  component: ReviewsPage
+});
+
 const doctorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/doctor",
@@ -212,6 +226,7 @@ const router = createRouter({
     capacityRoute,
     configRoute,
     explorerRoute,
+    reviewsRoute,
     workbenchRoute,
     auditRoute,
     doctorRoute
@@ -370,6 +385,11 @@ function OverviewPage(): React.ReactElement {
     queryFn: fetchActiveLanes,
     refetchInterval: 5_000
   });
+  const reviews = useQuery({
+    queryKey: ["change-proposals"],
+    queryFn: fetchChangeProposals,
+    refetchInterval: 15_000
+  });
   const eventLog = useOperatorEventLog("operator");
   const snapshot = metrics.data?.data.snapshot ?? null;
   const lanes = activeLanes.data?.data.lanes ?? [];
@@ -398,7 +418,24 @@ function OverviewPage(): React.ReactElement {
         </div>
         <div className="grid gap-4 xl:grid-cols-[minmax(0,0.85fr)_minmax(360px,1.15fr)]">
           <ToolMetricsPanel snapshot={snapshot} />
+          <OverviewReviewsPanel
+            proposals={reviews.data?.data.proposals ?? []}
+            pending={reviews.isFetching}
+          />
+        </div>
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,0.85fr)_minmax(360px,1.15fr)]">
           <ProbeDashboard probes={overviewProbes} compact />
+          <Surface className="min-h-32 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <p className="text-sm font-semibold text-zinc-600">Review Source</p>
+              <Badge tone={reviews.isError ? "warn" : reviews.data ? "ok" : "info"}>
+                {reviews.isError ? "blocked" : reviews.data ? "ready" : "sync"}
+              </Badge>
+            </div>
+            <strong className="mt-5 block break-all font-mono text-sm leading-5 text-zinc-950">
+              /operator/v1/change-proposals
+            </strong>
+          </Surface>
         </div>
       </div>
     </PageFrame>
@@ -1963,6 +2000,59 @@ function OverviewMetricTiles({
         pending={pending}
       />
     </section>
+  );
+}
+
+function OverviewReviewsPanel({
+  proposals,
+  pending
+}: {
+  proposals: ChangeProposalView[];
+  pending: boolean;
+}): React.ReactElement {
+  const visible = proposals.slice(0, 3);
+  return (
+    <Surface className="overflow-hidden">
+      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+        <div className="min-w-0">
+          <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
+            <GitPullRequest className="size-4" aria-hidden="true" />
+            Reviews
+          </h3>
+          <p className="mt-1 truncate text-sm text-zinc-500">
+            {pending ? "sync" : `${formatNumber(proposals.length)} open`}
+          </p>
+        </div>
+        <Link
+          to="/reviews"
+          className="inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-zinc-300 bg-white px-3 text-sm font-semibold text-zinc-900 transition-colors hover:bg-zinc-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-500"
+        >
+          <Search className="size-4" aria-hidden="true" />
+          Open
+        </Link>
+      </div>
+      <div className="divide-y divide-zinc-200">
+        {visible.length === 0 ? (
+          <div className="px-4 py-6 text-sm font-semibold text-zinc-500">No proposals</div>
+        ) : (
+          visible.map((proposal) => (
+            <div key={proposal.id} className="grid gap-2 px-4 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="min-w-0 truncate text-sm font-bold text-zinc-950">{proposal.title}</p>
+                <Badge tone={proposal.stored_verdict_present ? "warn" : "ok"}>
+                  {proposal.stored_verdict_present ? "stale verdict" : "fresh"}
+                </Badge>
+              </div>
+              <div className="flex flex-wrap gap-2 text-xs font-semibold text-zinc-500">
+                <span>{proposal.profile}</span>
+                <span>{proposal.author}</span>
+                <span>{formatNumber(proposal.statement_count)} stmt</span>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </Surface>
   );
 }
 
@@ -3674,6 +3764,469 @@ function clampChars(value: number): number {
     return 40_000;
   }
   return Math.min(1_000_000, Math.max(1_000, Math.trunc(value)));
+}
+
+const reviewUnits: Array<{ id: ChangeProposalApplyUnit; label: string }> = [
+  { id: "dml", label: "DML" },
+  { id: "ddl", label: "DDL" },
+  { id: "read", label: "Read" }
+];
+
+type ReviewResult =
+  | {
+      state: "ok";
+      label: string;
+      response: unknown;
+    }
+  | {
+      state: "error";
+      label: string;
+      message: string;
+    };
+
+function ReviewsPage(): React.ReactElement {
+  const [filter, setFilter] = React.useState("");
+  const [selectedId, setSelectedId] = React.useState("");
+  const [profile, setProfile] = React.useState("prod");
+  const [author, setAuthor] = React.useState<ChangeProposalAuthorKind>("agent");
+  const [title, setTitle] = React.useState("Change proposal");
+  const [unit, setUnit] = React.useState<ChangeProposalApplyUnit>("dml");
+  const [sqlTemplate, setSqlTemplate] = React.useState(
+    "UPDATE accounts SET status = :1 WHERE id = :2"
+  );
+  const [bindsJson, setBindsJson] = React.useState('[\"HOLD\", 42]');
+  const [draftCommit, setDraftCommit] = React.useState(false);
+  const [captureDbmsOutput, setCaptureDbmsOutput] = React.useState(false);
+  const [laneId, setLaneId] = React.useState("");
+  const [confirm, setConfirm] = React.useState("");
+  const [applyCommit, setApplyCommit] = React.useState(true);
+  const [lastResult, setLastResult] = React.useState<ReviewResult | null>(null);
+
+  const session = useQuery({
+    queryKey: ["dashboard-session"],
+    queryFn: fetchDashboardSession,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    retry: 1
+  });
+  const proposalsQuery = useQuery({
+    queryKey: ["change-proposals"],
+    queryFn: fetchChangeProposals,
+    refetchInterval: 10_000
+  });
+  const proposals = proposalsQuery.data?.data.proposals ?? [];
+  const filtered = React.useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    if (!needle) {
+      return proposals;
+    }
+    return proposals.filter((proposal) => proposalSearchText(proposal).includes(needle));
+  }, [filter, proposals]);
+  const selected =
+    proposals.find((proposal) => proposal.id === selectedId) ?? filtered[0] ?? proposals[0] ?? null;
+  const needsConfirm = selected?.statements.some((statement) => statement.unit !== "read") ?? false;
+
+  React.useEffect(() => {
+    if (!selectedId && filtered[0]) {
+      setSelectedId(filtered[0].id);
+    }
+  }, [filtered, selectedId]);
+
+  const draftMutation = useMutation({
+    mutationFn: async () => {
+      if (!session.data) {
+        throw new Error("dashboard session is not ready");
+      }
+      const binds = parseBindsJson(bindsJson);
+      return draftChangeProposal(session.data, {
+        profile: profile.trim(),
+        author,
+        title: title.trim() || undefined,
+        statements: [
+          {
+            sql_template: sqlTemplate.trim(),
+            binds,
+            unit,
+            commit: draftCommit,
+            capture_dbms_output: captureDbmsOutput
+          }
+        ]
+      });
+    },
+    onSuccess: (response) => {
+      setLastResult({ state: "ok", label: "Draft", response });
+      setSelectedId(response.data.proposal.id);
+      queryClient.invalidateQueries({ queryKey: ["change-proposals"] });
+    },
+    onError: (error) => {
+      setLastResult({
+        state: "error",
+        label: "Draft",
+        message: error instanceof Error ? error.message : "proposal draft failed"
+      });
+    }
+  });
+
+  const applyMutation = useMutation({
+    mutationFn: async () => {
+      if (!session.data) {
+        throw new Error("dashboard session is not ready");
+      }
+      if (!selected) {
+        throw new Error("select a proposal");
+      }
+      return applyChangeProposal(session.data, {
+        proposalId: selected.id,
+        laneId,
+        confirm,
+        commit: applyCommit
+      });
+    },
+    onSuccess: (response) => {
+      setLastResult({ state: "ok", label: "Apply", response });
+      clearExplorerMetadataCache();
+      queryClient.invalidateQueries({ queryKey: ["explorer"] });
+      queryClient.invalidateQueries({ queryKey: ["operator-metrics"] });
+      queryClient.invalidateQueries({ queryKey: ["audit-tail"] });
+    },
+    onError: (error) => {
+      setLastResult({
+        state: "error",
+        label: "Apply",
+        message: error instanceof Error ? error.message : "proposal apply failed"
+      });
+    }
+  });
+
+  const canDraft =
+    session.status === "success" &&
+    profile.trim().length > 0 &&
+    sqlTemplate.trim().length > 0 &&
+    !draftMutation.isPending;
+  const canApply =
+    session.status === "success" &&
+    Boolean(selected) &&
+    !applyMutation.isPending &&
+    (!needsConfirm || confirm.trim().length > 0);
+
+  return (
+    <PageFrame
+      title="Reviews"
+      eyebrow="Change Review"
+      description="Profile-scoped SQL proposals with apply-time guard checks."
+    >
+      <div className="grid gap-4 xl:grid-cols-[minmax(320px,0.8fr)_minmax(0,1.2fr)]">
+        <Surface className="overflow-hidden">
+          <div className="border-b border-zinc-200 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
+                  <GitPullRequest className="size-4" aria-hidden="true" />
+                  Proposals
+                </h3>
+                <p className="mt-1 truncate text-sm text-zinc-500">
+                  {proposalsQuery.isFetching ? "sync" : `${formatNumber(filtered.length)} visible`}
+                </p>
+              </div>
+              <Badge tone={proposalsQuery.isError ? "warn" : proposalsQuery.data ? "ok" : "info"}>
+                {proposalsQuery.isError ? "blocked" : proposalsQuery.data ? "ready" : "sync"}
+              </Badge>
+            </div>
+            <label className="mt-4 block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Filter</span>
+              <input
+                className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                value={filter}
+                onChange={(event) => setFilter(event.target.value)}
+                placeholder="profile, title, SQL"
+              />
+            </label>
+          </div>
+          <div className="max-h-[720px] overflow-auto">
+            {filtered.length === 0 ? (
+              <div className="px-4 py-8 text-sm font-semibold text-zinc-500">No proposals</div>
+            ) : (
+              filtered.map((proposal) => (
+                <button
+                  key={proposal.id}
+                  type="button"
+                  className={cn(
+                    "block w-full border-b border-zinc-200 px-4 py-3 text-left transition-colors hover:bg-zinc-50",
+                    selected?.id === proposal.id ? "bg-emerald-50" : "bg-white"
+                  )}
+                  onClick={() => setSelectedId(proposal.id)}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="min-w-0 truncate text-sm font-bold text-zinc-950">
+                      {proposal.title}
+                    </span>
+                    <Badge tone={proposalLevelTone(proposal)}>{proposal.profile}</Badge>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold text-zinc-500">
+                    <span>{proposal.author}</span>
+                    <span>{formatNumber(proposal.statement_count)} stmt</span>
+                    <span>{proposal.updated_at}</span>
+                  </div>
+                </button>
+              ))
+            )}
+          </div>
+        </Surface>
+
+        <div className="space-y-4">
+          <Surface className="p-4">
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_180px]">
+              <label className="block">
+                <span className="mb-2 block text-sm font-bold text-zinc-700">Title</span>
+                <input
+                  className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                  value={title}
+                  onChange={(event) => setTitle(event.target.value)}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-bold text-zinc-700">Profile</span>
+                <input
+                  className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                  value={profile}
+                  onChange={(event) => setProfile(event.target.value)}
+                />
+              </label>
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2" role="tablist" aria-label="proposal author">
+              {(["agent", "human"] as ChangeProposalAuthorKind[]).map((item) => (
+                <Button
+                  key={item}
+                  type="button"
+                  variant={author === item ? "primary" : "secondary"}
+                  onClick={() => setAuthor(item)}
+                >
+                  {item}
+                </Button>
+              ))}
+            </div>
+            <label className="mt-4 block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">SQL Template</span>
+              <textarea
+                className="min-h-[220px] w-full resize-y rounded-md border border-zinc-300 bg-zinc-950 p-3 font-mono text-sm leading-6 text-zinc-50 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                spellCheck={false}
+                value={sqlTemplate}
+                onChange={(event) => setSqlTemplate(event.target.value)}
+              />
+            </label>
+            <label className="mt-4 block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Binds</span>
+              <textarea
+                className="min-h-[92px] w-full resize-y rounded-md border border-zinc-300 p-3 font-mono text-sm leading-5 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                spellCheck={false}
+                value={bindsJson}
+                onChange={(event) => setBindsJson(event.target.value)}
+              />
+            </label>
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <div className="flex flex-wrap gap-2" role="tablist" aria-label="proposal unit">
+                {reviewUnits.map((item) => (
+                  <Button
+                    key={item.id}
+                    type="button"
+                    variant={unit === item.id ? "primary" : "secondary"}
+                    onClick={() => setUnit(item.id)}
+                  >
+                    {item.label}
+                  </Button>
+                ))}
+              </div>
+              <label className="flex min-h-9 items-center gap-2 text-sm font-semibold text-zinc-700">
+                <input
+                  className="size-4 rounded border-zinc-300 text-emerald-700 focus:ring-emerald-600"
+                  type="checkbox"
+                  checked={draftCommit}
+                  onChange={(event) => setDraftCommit(event.target.checked)}
+                />
+                Commit
+              </label>
+              <label className="flex min-h-9 items-center gap-2 text-sm font-semibold text-zinc-700">
+                <input
+                  className="size-4 rounded border-zinc-300 text-emerald-700 focus:ring-emerald-600"
+                  type="checkbox"
+                  checked={captureDbmsOutput}
+                  onChange={(event) => setCaptureDbmsOutput(event.target.checked)}
+                />
+                DBMS_OUTPUT
+              </label>
+              <Button
+                type="button"
+                variant="primary"
+                disabled={!canDraft}
+                onClick={() => draftMutation.mutate()}
+              >
+                <GitPullRequest className="size-4" aria-hidden="true" />
+                Draft
+              </Button>
+            </div>
+          </Surface>
+
+          <Surface className="p-4">
+            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              <label className="block">
+                <span className="mb-2 block text-sm font-bold text-zinc-700">Lane</span>
+                <input
+                  className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                  value={laneId}
+                  onChange={(event) => setLaneId(event.target.value)}
+                  placeholder="operator"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-sm font-bold text-zinc-700">Confirm</span>
+                <input
+                  className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                  value={confirm}
+                  onChange={(event) => setConfirm(event.target.value)}
+                  placeholder="preview grant"
+                />
+              </label>
+            </div>
+            {selected ? <ProposalStatementTable proposal={selected} /> : null}
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <label className="flex min-h-9 items-center gap-2 text-sm font-semibold text-zinc-700">
+                <input
+                  className="size-4 rounded border-zinc-300 text-emerald-700 focus:ring-emerald-600"
+                  type="checkbox"
+                  checked={applyCommit}
+                  onChange={(event) => setApplyCommit(event.target.checked)}
+                />
+                Commit
+              </label>
+              <Button
+                type="button"
+                variant="primary"
+                disabled={!canApply}
+                onClick={() => applyMutation.mutate()}
+              >
+                <CheckCircle2 className="size-4" aria-hidden="true" />
+                Apply
+              </Button>
+              <Badge tone={session.status === "success" ? "ok" : session.status === "error" ? "warn" : "info"}>
+                {session.status === "success" ? "paired" : session.status === "error" ? "blocked" : "pairing"}
+              </Badge>
+            </div>
+          </Surface>
+
+          <ReviewResultPanel result={lastResult} pending={draftMutation.isPending || applyMutation.isPending} />
+        </div>
+      </div>
+    </PageFrame>
+  );
+}
+
+function ProposalStatementTable({ proposal }: { proposal: ChangeProposalView }): React.ReactElement {
+  return (
+    <div className="mt-4 overflow-hidden rounded-md border border-zinc-200">
+      <table className="w-full border-collapse text-sm">
+        <thead className="bg-zinc-50 text-left text-xs uppercase text-zinc-500">
+          <tr>
+            <th className="px-3 py-2 font-bold">Unit</th>
+            <th className="px-3 py-2 font-bold">Template</th>
+            <th className="px-3 py-2 font-bold">Level</th>
+            <th className="px-3 py-2 font-bold">Binds</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-zinc-200">
+          {proposal.statements.map((statement) => (
+            <tr key={statement.id}>
+              <td className="px-3 py-2">
+                <Badge tone={statement.unit === "ddl" ? "warn" : statement.unit === "dml" ? "info" : "ok"}>
+                  {statement.unit}
+                </Badge>
+              </td>
+              <td className="max-w-[360px] truncate px-3 py-2 font-mono text-xs text-zinc-900">
+                {statement.sql_template}
+              </td>
+              <td className="px-3 py-2 font-semibold text-zinc-700">
+                {statement.draft_verdict.required_level ?? "none"}
+              </td>
+              <td className="px-3 py-2 font-semibold text-zinc-700">
+                {formatNumber(statement.bind_count)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ReviewResultPanel({
+  result,
+  pending
+}: {
+  result: ReviewResult | null;
+  pending: boolean;
+}): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+        <div className="min-w-0">
+          <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
+            <Code2 className="size-4" aria-hidden="true" />
+            Result
+          </h3>
+          <p className="mt-1 truncate text-sm text-zinc-500">
+            {pending ? "request in flight" : result ? result.label : "idle"}
+          </p>
+        </div>
+        <Badge tone={pending ? "info" : result?.state === "error" ? "warn" : result ? "ok" : "off"}>
+          {pending ? "running" : result?.state ?? "empty"}
+        </Badge>
+      </div>
+      <div className="p-4">
+        {result?.state === "error" ? (
+          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+            {result.message}
+          </div>
+        ) : (
+          <pre className="max-h-[560px] overflow-auto rounded-md bg-zinc-950 p-3 text-xs leading-5 text-zinc-50">
+            {result?.state === "ok" ? prettyJson(result.response) : "{}"}
+          </pre>
+        )}
+      </div>
+    </Surface>
+  );
+}
+
+function parseBindsJson(text: string): unknown[] {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return [];
+  }
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error("binds must be a JSON array");
+  }
+  return parsed;
+}
+
+function proposalSearchText(proposal: ChangeProposalView): string {
+  return [
+    proposal.title,
+    proposal.profile,
+    proposal.author,
+    proposal.id,
+    ...proposal.statements.map((statement) => statement.sql_template)
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function proposalLevelTone(proposal: ChangeProposalView): "neutral" | "ok" | "warn" | "off" | "info" {
+  if (proposal.statements.some((statement) => statement.unit === "ddl")) {
+    return "warn";
+  }
+  if (proposal.statements.some((statement) => statement.unit === "dml")) {
+    return "info";
+  }
+  return "ok";
 }
 
 const workbenchModes: Array<{ id: WorkbenchMode; label: string }> = [
