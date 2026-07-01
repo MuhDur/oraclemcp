@@ -29,6 +29,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `/operator/v1` gated-action routes now accept or derive idempotency keys,
   replay same-key retries, and return typed in-progress/conflict responses
   without bypassing dispatcher-side confirmation grants or durable write intents.
+- `/operator/v1/events` now keeps a bounded per-subject/per-lane replay ring and
+  supports `cursor` / `Last-Event-ID` resume without crossing lanes.
 
 ## [0.4.1] — 2026-06-29
 

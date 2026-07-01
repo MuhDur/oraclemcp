@@ -94,9 +94,9 @@ pub use file_store::{
 pub use http::{
     HEALTHZ_PATH, HttpRequest, HttpResponse, HttpResultStore, HttpSessionLifecycle,
     HttpTransportConfig, MCP_PATH, METRICS_PATH, OAuthEnforcement, OPERATOR_API_PREFIX,
-    ObservabilityState, OperatorIdempotencyLedger, PROTECTED_RESOURCE_METADATA_PATH, READYZ_PATH,
-    ReadinessProbe, ScopeGrant, handle_http_request, serve_http, serve_http_until, serve_https,
-    serve_https_until,
+    ObservabilityState, OperatorEventStore, OperatorIdempotencyLedger,
+    PROTECTED_RESOURCE_METADATA_PATH, READYZ_PATH, ReadinessProbe, ScopeGrant, handle_http_request,
+    serve_http, serve_http_until, serve_https, serve_https_until,
 };
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
 pub use lane::{

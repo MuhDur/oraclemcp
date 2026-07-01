@@ -1529,6 +1529,7 @@ fn http_transport_config_from_merged(
             operator_auditor: None,
             operator_audit_tail_path: None,
             operator_idempotency: Arc::new(oraclemcp_core::OperatorIdempotencyLedger::new()),
+            operator_events: Arc::new(oraclemcp_core::OperatorEventStore::new()),
             // Observability is wired in run_serve (HealthState/Metrics/probe).
             observability: ObservabilityState::default(),
         },

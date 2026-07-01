@@ -61,7 +61,7 @@ fi
 if ! grep -F "| MUST coverage | 6 | 6 | 6 | 0 | 1.00 |" scripts/e2e/COVERAGE.md >/dev/null; then
   e2e_finish_fail "COVERAGE.md must record 1.00 MUST coverage for the harness standard"
 fi
-if ! grep -F "| Operator v1 | 7 | 0 | 7 | 7 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
+if ! grep -F "| Operator v1 | 8 | 0 | 8 | 8 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "tests/conformance/COVERAGE.md must record 1.00 MUST coverage for operator v1"
 fi
 if grep -RInE '(^|[^A-Z])SKIP([^A-Z]|$)' scripts/e2e/COVERAGE.md scripts/e2e/DISCREPANCIES.md >/dev/null; then

@@ -147,6 +147,9 @@ pub struct HttpTransportConfig {
     /// It caches only redacted operator envelopes and never bypasses the
     /// dispatcher's grant or write-intent checks.
     pub operator_idempotency: Arc<OperatorIdempotencyLedger>,
+    /// Bounded replay buffer for `/operator/v1/events`, partitioned by
+    /// server-derived subject hash and lane id so a resume cannot cross streams.
+    pub operator_events: Arc<OperatorEventStore>,
     /// Health/metrics observability endpoints (D1; off by default — `None`
     /// fields make the corresponding route return 404 / not be advertised).
     pub observability: ObservabilityState,
@@ -179,6 +182,7 @@ impl std::fmt::Debug for HttpTransportConfig {
                     .map(|_| "<configured>"),
             )
             .field("operator_idempotency", &true)
+            .field("operator_events", &true)
             .field("observability", &self.observability)
             .finish()
     }
@@ -202,6 +206,7 @@ impl Default for HttpTransportConfig {
             operator_auditor: None,
             operator_audit_tail_path: None,
             operator_idempotency: Arc::new(OperatorIdempotencyLedger::new()),
+            operator_events: Arc::new(OperatorEventStore::new()),
             observability: ObservabilityState::default(),
         }
     }
@@ -223,6 +228,89 @@ pub struct HttpLaneBinding {
     pub mcp_session_id: String,
     pub principal_key: String,
     pub generation: u64,
+}
+
+const MAX_OPERATOR_EVENTS_PER_STREAM: usize = 128;
+
+/// Bounded `/operator/v1/events` replay buffer.
+///
+/// Events are keyed by the redacted subject hash plus lane id. That makes resume
+/// isolation structural: even identical cursor numbers on two lanes or two
+/// operators consult different rings.
+#[derive(Debug, Default)]
+pub struct OperatorEventStore {
+    streams: Mutex<HashMap<OperatorEventStreamKey, Vec<HttpBufferedEvent>>>,
+}
+
+impl OperatorEventStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn append_snapshot_and_resume(
+        &self,
+        subject_key: &str,
+        lane_id: &str,
+        cursor: Option<&str>,
+        after_seq: Option<u64>,
+        gap_on_expired_cursor: bool,
+        data: Value,
+    ) -> Result<Vec<HttpBufferedEvent>, OperatorEventReplayError> {
+        let subject_id_hash = operator_subject_id_hash(subject_key);
+        let key = OperatorEventStreamKey {
+            subject_id_hash,
+            lane_id: lane_id.to_owned(),
+        };
+        let mut streams = self.streams.lock();
+        let stream = streams.entry(key).or_default();
+        let previous_seq = stream
+            .last()
+            .and_then(|event| operator_event_sequence(&event.id))
+            .unwrap_or(0);
+        let next_seq = previous_seq.saturating_add(1);
+        let event = operator_event(next_seq, lane_id, subject_key, "operator.snapshot", data);
+        debug_assert!(
+            validate_operator_event(&event).is_ok(),
+            "operator SSE event must match the Rust contract"
+        );
+        let event_id = event
+            .get("event_id")
+            .and_then(Value::as_str)
+            .unwrap_or("operator/0")
+            .to_owned();
+        stream.push(HttpBufferedEvent {
+            id: event_id,
+            event: Some("operator.snapshot"),
+            data: event,
+        });
+        if stream.len() > MAX_OPERATOR_EVENTS_PER_STREAM {
+            let overflow = stream.len() - MAX_OPERATOR_EVENTS_PER_STREAM;
+            stream.drain(..overflow);
+        }
+        operator_events_after_sequence(
+            stream,
+            after_seq.unwrap_or(previous_seq),
+            cursor,
+            gap_on_expired_cursor,
+            lane_id,
+            subject_key,
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct OperatorEventStreamKey {
+    subject_id_hash: String,
+    lane_id: String,
+}
+
+#[derive(Debug)]
+enum OperatorEventReplayError {
+    Expired {
+        cursor: String,
+        oldest_event_id: String,
+    },
 }
 
 const OPERATOR_IDEMPOTENCY_TTL: Duration = Duration::from_secs(15 * 60);
@@ -1162,6 +1250,184 @@ mod tests {
         assert_eq!(records[1].sql_preview, "GET /operator/v1/health");
         assert_eq!(records[2].sql_preview, "GET /operator/v1/events");
         assert_eq!(records[3].sql_preview, "POST /operator/v1/actions/preview");
+    }
+
+    #[test]
+    fn operator_events_resume_is_lane_scoped() {
+        let (auditor, _sink) = operator_auditor();
+        let cfg = HttpTransportConfig {
+            operator_auditor: Some(auditor),
+            operator_events: Arc::new(OperatorEventStore::new()),
+            ..Default::default()
+        };
+        let event_request = |target: &'static str, last_event_id: Option<&'static str>| {
+            let mut headers = vec![
+                ("host".to_owned(), "127.0.0.1".to_owned()),
+                ("accept".to_owned(), "text/event-stream".to_owned()),
+            ];
+            if let Some(last_event_id) = last_event_id {
+                headers.push(("last-event-id".to_owned(), last_event_id.to_owned()));
+            }
+            HttpRequest::new("GET", target, headers, Vec::new()).with_peer_loopback(true)
+        };
+
+        let first_a = handle_http_request(
+            &test_server(),
+            &cfg,
+            event_request("/operator/v1/events?lane_id=lane-a", None),
+        );
+        assert_eq!(first_a.status, 200);
+        let first_a_body = String::from_utf8(first_a.body).expect("operator SSE utf-8");
+        assert!(first_a_body.contains("id: lane-a/1"));
+
+        let first_b = handle_http_request(
+            &test_server(),
+            &cfg,
+            event_request("/operator/v1/events?lane_id=lane-b", None),
+        );
+        assert_eq!(first_b.status, 200);
+        let first_b_body = String::from_utf8(first_b.body).expect("operator SSE utf-8");
+        assert!(first_b_body.contains("id: lane-b/1"));
+
+        let replay_a = handle_http_request(
+            &test_server(),
+            &cfg,
+            event_request("/operator/v1/events?lane_id=lane-a", Some("lane-a/1")),
+        );
+        assert_eq!(replay_a.status, 200);
+        let replay_a_body = String::from_utf8(replay_a.body.clone()).expect("operator SSE utf-8");
+        assert!(replay_a_body.contains("id: lane-a/2"));
+        assert!(
+            !replay_a_body.contains("lane-b"),
+            "lane-a resume must not replay lane-b events"
+        );
+        let replayed = sse_json_events(&replay_a);
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0]["event_id"], serde_json::json!("lane-a/2"));
+        assert_eq!(replayed[0]["lane_id"], serde_json::json!("lane-a"));
+        assert_eq!(
+            replayed[0]["redaction_level"],
+            serde_json::json!("operator_redacted")
+        );
+
+        let mismatch = handle_http_request(
+            &test_server(),
+            &cfg,
+            event_request("/operator/v1/events?lane_id=lane-a", Some("lane-b/1")),
+        );
+        assert_eq!(mismatch.status, 400);
+        assert_eq!(
+            response_json(&mismatch)["data"]["error"],
+            serde_json::json!("operator_event_cursor_lane_mismatch")
+        );
+
+        let subject_a = "operator:subject-a";
+        let subject_b = "operator:subject-b";
+        let subject_b_hash = operator_subject_id_hash(subject_b);
+        cfg.operator_events
+            .append_snapshot_and_resume(
+                subject_a,
+                "shared-lane",
+                None,
+                None,
+                false,
+                serde_json::json!({ "source": "subject-a-1" }),
+            )
+            .expect("append subject-a event");
+        cfg.operator_events
+            .append_snapshot_and_resume(
+                subject_b,
+                "shared-lane",
+                None,
+                None,
+                false,
+                serde_json::json!({ "source": "subject-b-1" }),
+            )
+            .expect("append subject-b event");
+        let subject_a_resume = cfg
+            .operator_events
+            .append_snapshot_and_resume(
+                subject_a,
+                "shared-lane",
+                Some("shared-lane/1"),
+                Some(1),
+                false,
+                serde_json::json!({ "source": "subject-a-2" }),
+            )
+            .expect("resume subject-a stream");
+        assert_eq!(subject_a_resume.len(), 1);
+        assert_eq!(subject_a_resume[0].id, "shared-lane/2");
+        assert_eq!(
+            subject_a_resume[0].data["subject_id_hash"],
+            serde_json::json!(operator_subject_id_hash(subject_a))
+        );
+        assert_ne!(
+            subject_a_resume[0].data["subject_id_hash"],
+            serde_json::json!(subject_b_hash),
+            "subject-a resume must not replay subject-b events on the same lane id"
+        );
+    }
+
+    #[test]
+    fn operator_events_last_event_id_reports_gap_for_slow_consumer() {
+        let (auditor, _sink) = operator_auditor();
+        let cfg = HttpTransportConfig {
+            operator_auditor: Some(auditor),
+            operator_events: Arc::new(OperatorEventStore::new()),
+            ..Default::default()
+        };
+        let event_request = |target: &'static str, last_event_id: Option<&'static str>| {
+            let mut headers = vec![
+                ("host".to_owned(), "127.0.0.1".to_owned()),
+                ("accept".to_owned(), "text/event-stream".to_owned()),
+            ];
+            if let Some(last_event_id) = last_event_id {
+                headers.push(("last-event-id".to_owned(), last_event_id.to_owned()));
+            }
+            HttpRequest::new("GET", target, headers, Vec::new()).with_peer_loopback(true)
+        };
+
+        for _ in 0..=MAX_OPERATOR_EVENTS_PER_STREAM {
+            let response = handle_http_request(
+                &test_server(),
+                &cfg,
+                event_request("/operator/v1/events?lane_id=lane-a", None),
+            );
+            assert_eq!(response.status, 200);
+        }
+
+        let gap = handle_http_request(
+            &test_server(),
+            &cfg,
+            event_request("/operator/v1/events?lane_id=lane-a", Some("lane-a/1")),
+        );
+        assert_eq!(gap.status, 200);
+        let body = String::from_utf8(gap.body.clone()).expect("operator SSE utf-8");
+        assert!(body.contains("event: operator.stream_gap"));
+        assert!(body.contains("id: lane-a/2"));
+        assert!(body.contains("\"type\":\"stream_gap\""));
+        assert!(body.contains("\"oldest_event_id\":\"lane-a/3\""));
+        assert!(
+            !body.contains("lane-b"),
+            "slow-consumer replay must stay within the requested lane"
+        );
+        let events = sse_json_events(&gap);
+        assert_eq!(
+            events[0]["event_type"],
+            serde_json::json!("operator.stream_gap")
+        );
+        assert_eq!(events[0]["lane_id"], serde_json::json!("lane-a"));
+
+        let expired_cursor = handle_http_request(
+            &test_server(),
+            &cfg,
+            event_request("/operator/v1/events?lane_id=lane-a&cursor=lane-a/1", None),
+        );
+        assert_eq!(expired_cursor.status, 410);
+        assert_eq!(
+            response_json(&expired_cursor)["data"]["error"],
+            serde_json::json!("operator_stream_cursor_expired")
+        );
     }
 
     #[test]
@@ -3684,7 +3950,7 @@ fn handle_operator_api_route(
         OperatorRouteKind::Vsession => {
             operator_json_response(200, &request.path, operator_vsession_data())
         }
-        OperatorRouteKind::Events => operator_events_response(config, operator_subject),
+        OperatorRouteKind::Events => operator_events_response(config, request, operator_subject),
         OperatorRouteKind::ActionPreview
         | OperatorRouteKind::ActionConfirm
         | OperatorRouteKind::ActionExecute
@@ -3899,34 +4165,178 @@ fn redacted_audit_record(value: &Value) -> Value {
 
 fn operator_events_response(
     config: &HttpTransportConfig,
+    request: &HttpRequest,
     operator_subject: &AuditSubject,
 ) -> HttpResponse {
+    let lane_id = match operator_event_lane_id(request) {
+        Ok(lane_id) => lane_id,
+        Err(data) => return operator_json_response(400, &request.path, data),
+    };
+    let cursor = request
+        .query_param("cursor")
+        .or_else(|| request.header("last-event-id"));
+    let cursor_seq = match parse_operator_event_cursor(cursor, &lane_id) {
+        Ok(cursor_seq) => cursor_seq,
+        Err(data) => return operator_json_response(400, &request.path, data),
+    };
+    let gap_on_expired_cursor =
+        request.query_param("cursor").is_none() && request.header("last-event-id").is_some();
     let active_lanes = operator_active_lanes_data(config);
     let lane_count = active_lanes["lanes"].as_array().map_or(0, Vec::len);
-    let event = operator_event(
-        1,
-        "operator",
-        operator_subject.legacy_agent_identity(),
-        "operator.snapshot",
+    let subject_key = operator_subject.legacy_agent_identity();
+    let events = match config.operator_events.append_snapshot_and_resume(
+        &subject_key,
+        &lane_id,
+        cursor,
+        cursor_seq,
+        gap_on_expired_cursor,
         json!({
             "protocol_version": OPERATOR_PROTOCOL_VERSION,
             "active_lanes": lane_count,
             "health": operator_health_data(&config.observability),
             "metrics": operator_metrics_data(&config.observability),
         }),
-    );
-    debug_assert!(
-        validate_operator_event(&event).is_ok(),
-        "operator SSE event must match the Rust contract"
-    );
+    ) {
+        Ok(events) => events,
+        Err(OperatorEventReplayError::Expired {
+            cursor,
+            oldest_event_id,
+        }) => {
+            return operator_json_response(
+                410,
+                &request.path,
+                json!({
+                    "error": "operator_stream_cursor_expired",
+                    "message": "requested operator event cursor is older than the retained event buffer",
+                    "cursor": cursor,
+                    "oldest_event_id": oldest_event_id,
+                    "lane_id": lane_id,
+                    "next_step": "restart the operator event stream; the missing event range is no longer available for replay",
+                }),
+            );
+        }
+    };
+    operator_sse_response(&events)
+}
+
+fn operator_event_lane_id(request: &HttpRequest) -> Result<String, Value> {
+    let lane_id = request
+        .query_param("lane_id")
+        .or_else(|| request.query_param("lane"))
+        .unwrap_or("operator")
+        .trim();
+    if lane_id.is_empty() || lane_id.contains('/') || lane_id.len() > 128 {
+        return Err(json!({
+            "error": "invalid_operator_event_lane",
+            "message": "operator event lane_id must be non-empty, at most 128 bytes, and must not contain /",
+        }));
+    }
+    Ok(lane_id.to_owned())
+}
+
+fn parse_operator_event_cursor(
+    cursor: Option<&str>,
+    expected_lane_id: &str,
+) -> Result<Option<u64>, Value> {
+    let Some(cursor) = cursor.map(str::trim).filter(|cursor| !cursor.is_empty()) else {
+        return Ok(None);
+    };
+    if let Ok(seq) = cursor.parse::<u64>() {
+        return Ok(Some(seq));
+    }
+    let Some((lane_id, seq)) = cursor.rsplit_once('/') else {
+        return Err(json!({
+            "error": "invalid_operator_event_cursor",
+            "message": "cursor must be an operator event id such as operator/1 or a sequence number",
+        }));
+    };
+    if lane_id != expected_lane_id {
+        return Err(json!({
+            "error": "operator_event_cursor_lane_mismatch",
+            "message": "cursor lane_id does not match the requested operator event stream",
+            "cursor_lane_id": lane_id,
+            "lane_id": expected_lane_id,
+        }));
+    }
+    seq.parse::<u64>().map(Some).map_err(|_| {
+        json!({
+            "error": "invalid_operator_event_cursor",
+            "message": "cursor must be an operator event id such as operator/1 or a sequence number",
+        })
+    })
+}
+
+fn operator_event_sequence(id: &str) -> Option<u64> {
+    id.rsplit('/').next()?.parse().ok()
+}
+
+fn operator_events_after_sequence(
+    events: &[HttpBufferedEvent],
+    after_seq: u64,
+    cursor: Option<&str>,
+    gap_on_expired_cursor: bool,
+    lane_id: &str,
+    subject_key: &str,
+) -> Result<Vec<HttpBufferedEvent>, OperatorEventReplayError> {
+    if let Some(oldest_event) = events.first()
+        && let Some(oldest_seq) = operator_event_sequence(&oldest_event.id)
+        && after_seq < oldest_seq.saturating_sub(1)
+    {
+        if !gap_on_expired_cursor {
+            return Err(OperatorEventReplayError::Expired {
+                cursor: cursor.unwrap_or("").to_owned(),
+                oldest_event_id: oldest_event.id.clone(),
+            });
+        }
+        let gap_seq = oldest_seq.saturating_sub(1);
+        let gap_event = operator_event(
+            gap_seq,
+            lane_id,
+            subject_key,
+            "operator.stream_gap",
+            json!({
+                "type": "stream_gap",
+                "message": "one or more operator events were dropped before this resume point",
+                "requested_last_event_id": cursor.unwrap_or(""),
+                "oldest_event_id": oldest_event.id.as_str(),
+                "next_step": "continue from the retained events in this stream; restart the operator event stream if the missing range is required",
+            }),
+        );
+        debug_assert!(
+            validate_operator_event(&gap_event).is_ok(),
+            "operator stream gap event must match the Rust contract"
+        );
+        let mut resumed = Vec::with_capacity(events.len().saturating_add(1));
+        resumed.push(HttpBufferedEvent {
+            id: gap_event
+                .get("event_id")
+                .and_then(Value::as_str)
+                .unwrap_or("operator/0")
+                .to_owned(),
+            event: Some("operator.stream_gap"),
+            data: gap_event,
+        });
+        resumed.extend(events.iter().cloned());
+        return Ok(resumed);
+    }
+    Ok(events
+        .iter()
+        .filter(|event| operator_event_sequence(&event.id).is_some_and(|seq| seq > after_seq))
+        .cloned()
+        .collect())
+}
+
+fn operator_sse_response(events: &[HttpBufferedEvent]) -> HttpResponse {
     let mut body = Vec::new();
-    write_sse_event(
-        &mut body,
-        Some("operator.snapshot"),
-        event.get("event_id").and_then(Value::as_str),
-        Some(3000),
-        Some(&event),
-    );
+    for (idx, event) in events.iter().enumerate() {
+        write_sse_event(
+            &mut body,
+            event.event,
+            Some(&event.id),
+            (idx == 0).then_some(3000),
+            Some(&event.data),
+        );
+    }
     HttpResponse {
         status: 200,
         headers: vec![
