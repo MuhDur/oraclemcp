@@ -1250,7 +1250,11 @@ fn profile_response_omits_connection_and_secret_material() {
     )
     .expect("valid config");
 
-    let out = profiles_response(&cfg, &McpExposurePolicy::AllowAll);
+    let out = profiles_response(
+        &cfg,
+        &McpExposurePolicy::AllowAll,
+        &ProfileDrainState::default(),
+    );
     assert_eq!(out["profiles"][0]["name"], json!("prod"));
     assert_eq!(out["profiles"][0]["is_default"], json!(true));
 
@@ -1448,7 +1452,7 @@ fn e5_list_profiles_omits_non_exposed_profiles() {
     .expect("valid config");
 
     let exposed = McpExposurePolicy::AllowList(["agent_ro".to_owned()].into_iter().collect());
-    let out = profiles_response(&cfg, &exposed);
+    let out = profiles_response(&cfg, &exposed, &ProfileDrainState::default());
     let names: Vec<&str> = out["profiles"]
         .as_array()
         .expect("profiles array")
@@ -1465,6 +1469,82 @@ fn e5_list_profiles_omits_non_exposed_profiles() {
         !serialized.contains("prod_admin"),
         "a non-exposed profile name must never be surfaced"
     );
+}
+
+#[test]
+fn s5_draining_profiles_are_not_listed_or_switchable() {
+    let cfg = OracleMcpConfig::from_toml_str(
+        r#"
+            [[profiles]]
+            name = "agent_ro"
+            connect_string = "ro:1521/svc"
+
+            [[profiles]]
+            name = "rotated"
+            connect_string = "rotated:1521/svc"
+            "#,
+    )
+    .expect("valid config");
+    let after = OracleMcpConfig::from_toml_str(
+        r#"
+            [[profiles]]
+            name = "agent_ro"
+            connect_string = "ro:1521/svc"
+            "#,
+    )
+    .expect("valid reloaded config");
+    let plan = ConfigReloadPlan::between(&cfg, &after);
+    let drain = ProfileDrainState::default();
+    drain.apply_config_reload_plan(&plan);
+
+    let out = profiles_response(&cfg, &McpExposurePolicy::AllowAll, &drain);
+    let names: Vec<&str> = out["profiles"]
+        .as_array()
+        .expect("profiles array")
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["agent_ro"]);
+
+    let dispatcher = OracleDispatcher::new_switchable(
+        Box::new(OneRowMock),
+        Some("agent_ro".to_owned()),
+        default_read_only_level(),
+        Arc::new(|_cx, _profile| {
+            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
+        }),
+    )
+    .with_profile_drain_state(drain);
+    let err = dispatcher
+        .dispatch("oracle_switch_profile", json!({ "profile": "rotated" }))
+        .expect_err("draining profile is refused before reconnect");
+    assert_eq!(err.error_class, ErrorClass::RuntimeStateRequired);
+    assert!(err.message.contains("draining"));
+
+    let current = dispatcher
+        .dispatch("oracle_connection_info", json!({}))
+        .expect("failed switch does not replace active profile");
+    assert_eq!(current["active_profile"], json!("agent_ro"));
+}
+
+#[test]
+fn s5_active_drained_profile_refuses_non_diagnostic_work() {
+    let drain = ProfileDrainState::default();
+    drain.replace_draining_profiles(["old_profile"]);
+    let dispatcher =
+        OracleDispatcher::new_with_profile(Box::new(OneRowMock), Some("old_profile".to_owned()))
+            .with_profile_drain_state(drain);
+
+    let info = dispatcher
+        .dispatch("oracle_connection_info", json!({}))
+        .expect("diagnostic connection info remains available during drain");
+    assert_eq!(info["active_profile"], json!("old_profile"));
+
+    let err = dispatcher
+        .dispatch("oracle_query", json!({ "sql": "select 1 from dual" }))
+        .expect_err("drained profile refuses new work");
+    assert_eq!(err.error_class, ErrorClass::RuntimeStateRequired);
+    assert!(err.message.contains("draining"));
 }
 
 #[test]

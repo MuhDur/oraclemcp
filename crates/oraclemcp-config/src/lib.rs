@@ -11,6 +11,7 @@
 
 mod profile;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use figment::Figment;
@@ -578,6 +579,171 @@ impl OracleMcpConfig {
             .filter(|metadata| metadata.mcp_exposed)
             .collect()
     }
+}
+
+/// Per-profile action a hot config reload may take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReloadProfileAction {
+    /// Existing lanes may keep using the profile.
+    Retain,
+    /// The profile is new and may be used by future lanes.
+    Add,
+    /// Existing lanes using this profile must drain; new lanes/switches are
+    /// refused until they use a fresh compatible profile.
+    Drain,
+}
+
+/// Why a profile received its reload action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReloadProfileReason {
+    /// No effective fields changed.
+    Unchanged,
+    /// Only compatible local metadata changed.
+    CompatibleMetadataChanged,
+    /// The profile exists only in the new config.
+    NewProfile,
+    /// The profile was removed from the new config.
+    Removed,
+    /// Connection/session/security fields changed and require lane drain.
+    IncompatibleChange,
+}
+
+/// One profile's reload decision.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ReloadProfileDecision {
+    /// Profile name.
+    pub profile: String,
+    /// Action to apply for active/new lanes.
+    pub action: ReloadProfileAction,
+    /// Reason for the action.
+    pub reason: ReloadProfileReason,
+}
+
+/// A validated config-to-config reload plan.
+///
+/// This plan is deliberately conservative: profile changes that can affect the
+/// Oracle connection, session setup, pool, served exposure, or operating-level
+/// ceiling drain the profile. Cosmetic discovery metadata may be retained.
+/// HTTP/audit/default-profile changes are not hot-applied by the current
+/// service process; callers should reject those reloads and ask for restart
+/// rather than silently mutating live state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ConfigReloadPlan {
+    /// Whether this config transition may be hot-applied.
+    pub hot_reloadable: bool,
+    /// Reasons this transition requires a process restart instead of reload.
+    pub restart_required: Vec<&'static str>,
+    /// Stable profile decisions sorted by profile name.
+    pub profiles: Vec<ReloadProfileDecision>,
+}
+
+impl ConfigReloadPlan {
+    /// Build a reload plan between two already validated config snapshots.
+    #[must_use]
+    pub fn between(current: &OracleMcpConfig, next: &OracleMcpConfig) -> Self {
+        let mut restart_required = Vec::new();
+        if current.http != next.http {
+            restart_required.push("http transport config changed");
+        }
+        if current.audit != next.audit {
+            restart_required.push("audit config changed");
+        }
+        if current.default_profile != next.default_profile {
+            restart_required.push("default_profile changed");
+        }
+
+        let current_profiles = profile_map(current);
+        let next_profiles = profile_map(next);
+        let names: BTreeSet<_> = current_profiles
+            .keys()
+            .chain(next_profiles.keys())
+            .copied()
+            .collect();
+        let profiles = names
+            .into_iter()
+            .map(
+                |name| match (current_profiles.get(name), next_profiles.get(name)) {
+                    (Some(before), Some(after)) if before == after => ReloadProfileDecision {
+                        profile: name.to_owned(),
+                        action: ReloadProfileAction::Retain,
+                        reason: ReloadProfileReason::Unchanged,
+                    },
+                    (Some(before), Some(after)) if profile_hot_reload_compatible(before, after) => {
+                        ReloadProfileDecision {
+                            profile: name.to_owned(),
+                            action: ReloadProfileAction::Retain,
+                            reason: ReloadProfileReason::CompatibleMetadataChanged,
+                        }
+                    }
+                    (Some(_), Some(_)) => ReloadProfileDecision {
+                        profile: name.to_owned(),
+                        action: ReloadProfileAction::Drain,
+                        reason: ReloadProfileReason::IncompatibleChange,
+                    },
+                    (Some(_), None) => ReloadProfileDecision {
+                        profile: name.to_owned(),
+                        action: ReloadProfileAction::Drain,
+                        reason: ReloadProfileReason::Removed,
+                    },
+                    (None, Some(_)) => ReloadProfileDecision {
+                        profile: name.to_owned(),
+                        action: ReloadProfileAction::Add,
+                        reason: ReloadProfileReason::NewProfile,
+                    },
+                    (None, None) => unreachable!("profile name came from one side"),
+                },
+            )
+            .collect();
+
+        Self {
+            hot_reloadable: restart_required.is_empty(),
+            restart_required,
+            profiles,
+        }
+    }
+
+    /// Profile names that must be marked draining.
+    #[must_use]
+    pub fn draining_profiles(&self) -> Vec<String> {
+        self.profiles
+            .iter()
+            .filter(|decision| decision.action == ReloadProfileAction::Drain)
+            .map(|decision| decision.profile.clone())
+            .collect()
+    }
+}
+
+fn profile_map(cfg: &OracleMcpConfig) -> BTreeMap<&str, &ConnectionProfile> {
+    cfg.profiles
+        .iter()
+        .map(|profile| (profile.name.as_str(), profile))
+        .collect()
+}
+
+fn profile_hot_reload_compatible(before: &ConnectionProfile, after: &ConnectionProfile) -> bool {
+    before.name == after.name
+        && before.connect_string == after.connect_string
+        && before.username == after.username
+        && before.credential_ref == after.credential_ref
+        && before.login_script == after.login_script
+        && before.login_statements == after.login_statements
+        && before.trusted_session_statements == after.trusted_session_statements
+        && before.call_timeout_seconds == after.call_timeout_seconds
+        && before.sdu == after.sdu
+        && before.max_level == after.max_level
+        && before.default_level == after.default_level
+        && before.protected == after.protected
+        && before.require_signed_tools == after.require_signed_tools
+        && before.read_only_standby == after.read_only_standby
+        && before.mcp_exposed == after.mcp_exposed
+        && before.session_identity == after.session_identity
+        && before.pool == after.pool
+        && before.oci == after.oci
+        && before.drcp == after.drcp
+        && before.proxy_auth == after.proxy_auth
+        && before.app_context == after.app_context
 }
 
 /// Configuration load / validation error.
@@ -1271,5 +1437,177 @@ mod tests {
             cfg.mcp_profile("overrides_exposed").is_some(),
             "child override re-exposes"
         );
+    }
+
+    fn reload_decision<'a>(plan: &'a ConfigReloadPlan, profile: &str) -> &'a ReloadProfileDecision {
+        plan.profiles
+            .iter()
+            .find(|decision| decision.profile == profile)
+            .unwrap_or_else(|| panic!("missing reload decision for {profile}"))
+    }
+
+    #[test]
+    fn safe_config_reload_retains_cosmetic_profile_changes() {
+        let before = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod_ro"
+            description = "old label"
+            connect_string = "prod:1521/svc"
+            username = "APP"
+            credential_ref = "env:APP_PASSWORD"
+            "#,
+        )
+        .expect("before config");
+        let after = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod_ro"
+            description = "new label"
+            connect_string = "prod:1521/svc"
+            username = "APP"
+            credential_ref = "env:APP_PASSWORD"
+            "#,
+        )
+        .expect("after config");
+
+        let plan = ConfigReloadPlan::between(&before, &after);
+
+        assert!(plan.hot_reloadable);
+        assert!(plan.draining_profiles().is_empty());
+        let decision = reload_decision(&plan, "prod_ro");
+        assert_eq!(decision.action, ReloadProfileAction::Retain);
+        assert_eq!(
+            decision.reason,
+            ReloadProfileReason::CompatibleMetadataChanged
+        );
+    }
+
+    #[test]
+    fn safe_config_reload_drains_removed_or_incompatible_profiles_only() {
+        let before = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "kept"
+            connect_string = "kept:1521/svc"
+
+            [[profiles]]
+            name = "changed"
+            connect_string = "old:1521/svc"
+            credential_ref = "env:OLD_PASSWORD"
+
+            [[profiles]]
+            name = "removed"
+            connect_string = "removed:1521/svc"
+            "#,
+        )
+        .expect("before config");
+        let after = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "kept"
+            connect_string = "kept:1521/svc"
+
+            [[profiles]]
+            name = "changed"
+            connect_string = "new:1521/svc"
+            credential_ref = "env:NEW_PASSWORD"
+
+            [[profiles]]
+            name = "added"
+            connect_string = "added:1521/svc"
+            "#,
+        )
+        .expect("after config");
+
+        let plan = ConfigReloadPlan::between(&before, &after);
+
+        assert!(plan.hot_reloadable);
+        assert_eq!(
+            plan.draining_profiles(),
+            vec!["changed".to_owned(), "removed".to_owned()]
+        );
+        assert_eq!(
+            reload_decision(&plan, "kept").action,
+            ReloadProfileAction::Retain
+        );
+        assert_eq!(
+            reload_decision(&plan, "changed").reason,
+            ReloadProfileReason::IncompatibleChange
+        );
+        assert_eq!(
+            reload_decision(&plan, "removed").reason,
+            ReloadProfileReason::Removed
+        );
+        assert_eq!(
+            reload_decision(&plan, "added").action,
+            ReloadProfileAction::Add
+        );
+    }
+
+    #[test]
+    fn safe_config_reload_drains_profile_exposure_or_ceiling_changes() {
+        let before = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "agent_ro"
+            connect_string = "ro:1521/svc"
+            max_level = "READ_ONLY"
+            mcp_exposed = true
+            "#,
+        )
+        .expect("before config");
+        let after = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "agent_ro"
+            connect_string = "ro:1521/svc"
+            max_level = "READ_WRITE"
+            mcp_exposed = false
+            "#,
+        )
+        .expect("after config");
+
+        let plan = ConfigReloadPlan::between(&before, &after);
+
+        assert_eq!(
+            reload_decision(&plan, "agent_ro").action,
+            ReloadProfileAction::Drain
+        );
+        assert_eq!(plan.draining_profiles(), vec!["agent_ro".to_owned()]);
+    }
+
+    #[test]
+    fn safe_config_reload_rejects_top_level_hot_mutations() {
+        let before = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "dev:1521/svc"
+            "#,
+        )
+        .expect("before config");
+        let after = OracleMcpConfig::from_toml_str(
+            r#"
+            default_profile = "dev"
+
+            [http]
+            stateful = true
+
+            [[profiles]]
+            name = "dev"
+            connect_string = "dev:1521/svc"
+            "#,
+        )
+        .expect("after config");
+
+        let plan = ConfigReloadPlan::between(&before, &after);
+
+        assert!(!plan.hot_reloadable);
+        assert_eq!(
+            plan.restart_required,
+            vec!["http transport config changed", "default_profile changed"]
+        );
+        assert!(plan.draining_profiles().is_empty());
     }
 }

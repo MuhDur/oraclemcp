@@ -426,7 +426,23 @@ and hash-covered `cancel.kind` / `cancel.reason` fields such as
 `User/session_delete` for HTTP `DELETE /mcp` or `Shutdown/server_shutdown` for
 listener drain.
 
-### 5.3.1 Connection pool and failover posture
+### 5.3.1 Config reload and profile drain
+
+Reload is validated as a config-to-config diff before any live state changes.
+The hot-reloadable surface is deliberately narrow: profile additions and
+compatible profile metadata changes can apply in place; HTTP transport, audit,
+or `default_profile` changes require a process restart. A profile is retained
+only when its connection, credentials, session setup, pool, exposure, and
+operating-level fields are unchanged. Removed profiles and incompatible profile
+changes are marked **draining**.
+
+Draining is fail-closed and profile-scoped. Drained profiles are omitted from
+the served `oracle_list_profiles` result, `oracle_switch_profile` refuses to
+connect to them before resolving secrets or opening Oracle, and lanes already
+pinned to a drained profile refuse further non-diagnostic work until the MCP
+session is deleted or expires by the stateful idle TTL.
+
+### 5.3.2 Connection pool and failover posture
 
 The stateless-read pool (`oraclemcp-db`, `[profiles.pool]`) is a bounded,
 pure-Rust async pool — no Tokio/r2d2 boundary. Its operating posture:

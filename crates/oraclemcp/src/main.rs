@@ -35,8 +35,8 @@ use std::time::Instant;
 use asupersync::Cx;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use oraclemcp::dispatch::{
-    McpExposurePolicy, OracleDispatcher, ProfileConnector, ProfileStatelessConnector,
-    StatelessReadStrategy,
+    McpExposurePolicy, OracleDispatcher, ProfileConnector, ProfileDrainState,
+    ProfileStatelessConnector, StatelessReadStrategy, profile_draining_error,
 };
 use oraclemcp::registry;
 use oraclemcp_audit::{
@@ -1182,6 +1182,7 @@ struct DispatcherWiring {
     secret_resolver: Arc<dyn SecretResolver>,
     custom_catalog: CustomToolCatalog,
     exposure: McpExposurePolicy,
+    profile_drain: ProfileDrainState,
     auditor: Option<Arc<Auditor>>,
     write_intents: Option<Arc<WriteIntentLog>>,
     exports: Arc<ExportRegistry>,
@@ -1209,6 +1210,7 @@ fn build_oracle_dispatcher(
     )
     .with_request_timeout(wiring.request_timeout)
     .with_mcp_exposure(wiring.exposure.clone())
+    .with_profile_drain_state(wiring.profile_drain.clone())
     .with_exports(Arc::clone(&wiring.exports))
     .with_notifications(Arc::clone(&wiring.notifications));
     if let Some(auditor) = &wiring.auditor {
@@ -1379,6 +1381,11 @@ fn stateful_lane_factory(
         let metrics = metrics.clone();
         let principal_key = lane_context.principal_key().to_owned();
         Box::pin(async move {
+            if let Some(active_profile) = wiring.active_profile.as_deref()
+                && wiring.profile_drain.is_draining(active_profile)
+            {
+                return Err(profile_draining_error(active_profile));
+            }
             let connections = open_lane_runtime_connections(
                 cx,
                 wiring.active_profile.as_deref(),
@@ -1416,6 +1423,7 @@ struct ServerBuildOptions {
     secret_resolver: Arc<dyn SecretResolver>,
     request_timeout: Option<std::time::Duration>,
     metrics: Option<Arc<Metrics>>,
+    profile_drain: ProfileDrainState,
 }
 
 struct BuiltServer {
@@ -1481,6 +1489,7 @@ fn build_server_with_lifecycle(
         secret_resolver: options.secret_resolver,
         custom_catalog: options.custom_catalog,
         exposure,
+        profile_drain: options.profile_drain,
         auditor: options.auditor,
         write_intents: options.write_intents,
         exports: Arc::clone(&exports),
@@ -1917,6 +1926,7 @@ fn run_serve(
                     secret_resolver: Arc::clone(&secret_resolver),
                     request_timeout,
                     metrics: None,
+                    profile_drain: ProfileDrainState::default(),
                 },
             );
             emit_serve_status(robot_json, "stdio", None, &advertised_tools);
@@ -2006,6 +2016,7 @@ fn run_serve(
                     secret_resolver: Arc::clone(&secret_resolver),
                     request_timeout,
                     metrics: Some(Arc::clone(&metrics)),
+                    profile_drain: ProfileDrainState::default(),
                 },
             );
             let server = built.server;
@@ -4146,6 +4157,7 @@ mod tests {
                 secret_resolver: Arc::new(SystemSecretResolver),
                 request_timeout: OracleConnectOptions::default().call_timeout,
                 metrics: None,
+                profile_drain: ProfileDrainState::default(),
             },
         );
         // The capabilities report carries the registry's tools.

@@ -10,7 +10,7 @@
 //! [`ErrorEnvelope`] via `DbError::into_envelope`. The `oracle_capabilities`
 //! discovery tool is answered by the server itself and never reaches here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex as SyncMutex};
@@ -22,7 +22,7 @@ use oraclemcp_audit::{
     AuditCancel, AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor, DbEvidence,
 };
 use oraclemcp_auth::apply_oauth_scopes;
-use oraclemcp_config::OracleMcpConfig;
+use oraclemcp_config::{ConfigReloadPlan, OracleMcpConfig};
 use oraclemcp_core::{
     CustomToolCatalog, CustomToolExecutor, DEFAULT_REQUEST_TIMEOUT, DispatchCloseFuture,
     DispatchCloseReason, DispatchContext, DispatchFuture, RequestBudget, ToolBody, ToolDispatch,
@@ -286,6 +286,10 @@ pub struct OracleDispatcher {
     /// the served binary installs an explicit allow-list snapshotted from the
     /// `mcp_exposed` config flags.
     mcp_exposure: McpExposurePolicy,
+    /// S5 config reload/drain gate: profiles marked draining are omitted from
+    /// runtime discovery, cannot be switched into, and cannot keep accepting
+    /// non-diagnostic work on already-active lanes.
+    profile_drain: ProfileDrainState,
     /// E6 server-initiated notifications hub, shared with the server. When set,
     /// a successful `oracle_switch_profile` enqueues `notifications/tools/list_changed`
     /// because the switch may change the profile-scoped custom-tool catalog (and
@@ -337,6 +341,7 @@ impl OracleDispatcher {
             default_audit_subject: process_audit_subject(),
             exports: None,
             mcp_exposure: McpExposurePolicy::default(),
+            profile_drain: ProfileDrainState::default(),
             notifications: None,
             write_intents: None,
         }
@@ -412,6 +417,7 @@ impl OracleDispatcher {
             default_audit_subject: process_audit_subject(),
             exports: None,
             mcp_exposure: McpExposurePolicy::default(),
+            profile_drain: ProfileDrainState::default(),
             notifications: None,
             write_intents: None,
         }
@@ -437,6 +443,15 @@ impl OracleDispatcher {
     #[must_use]
     pub fn with_mcp_exposure(mut self, exposure: McpExposurePolicy) -> Self {
         self.mcp_exposure = exposure;
+        self
+    }
+
+    /// Install the shared S5 profile-drain state (builder). Reload controllers
+    /// update this gate after validating a config diff; dispatch consults it
+    /// before any target profile reconnect or active-lane work.
+    #[must_use]
+    pub fn with_profile_drain_state(mut self, state: ProfileDrainState) -> Self {
+        self.profile_drain = state;
         self
     }
 
@@ -563,11 +578,17 @@ fn rows_to_json(rows: &[oraclemcp_db::OracleRow]) -> Value {
 /// profile is omitted entirely (not redacted), so an agent never learns it
 /// exists. The CLI/operator path uses `cfg.list_profiles()` directly and still
 /// sees every profile.
-fn profiles_response(cfg: &OracleMcpConfig, exposure: &McpExposurePolicy) -> Value {
+fn profiles_response(
+    cfg: &OracleMcpConfig,
+    exposure: &McpExposurePolicy,
+    drain: &ProfileDrainState,
+) -> Value {
     let profiles: Vec<_> = cfg
         .list_profiles()
         .into_iter()
-        .filter(|metadata| exposure.is_exposed(&metadata.name))
+        .filter(|metadata| {
+            exposure.is_exposed(&metadata.name) && !drain.is_draining(&metadata.name)
+        })
         .collect();
     json!({ "profiles": profiles })
 }
@@ -582,6 +603,75 @@ fn profile_not_available(profile: &str) -> ErrorEnvelope {
     ))
     .with_suggested_tool("oracle_list_profiles")
     .with_next_step("call oracle_list_profiles to see the profiles this server exposes")
+}
+
+/// Fail-closed envelope for profiles drained by an accepted config reload.
+pub fn profile_draining_error(profile: &str) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::RuntimeStateRequired,
+        format!("connection profile `{profile}` is draining after config reload"),
+    )
+    .with_suggested_tool("oracle_list_profiles")
+    .with_next_step("open a new lane on a listed profile")
+    .with_next_step("delete this MCP session to close a lane pinned to the drained profile")
+}
+
+/// Shared hot-reload drain gate for profile-scoped dispatch.
+#[derive(Clone, Default)]
+pub struct ProfileDrainState {
+    profiles: Arc<SyncMutex<HashSet<String>>>,
+}
+
+impl std::fmt::Debug for ProfileDrainState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProfileDrainState")
+            .field("profiles", &self.draining_profiles())
+            .finish()
+    }
+}
+
+impl ProfileDrainState {
+    /// Create an empty drain gate.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace the draining profile set atomically.
+    pub fn replace_draining_profiles<I, S>(&self, profiles: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut guard = self.profiles.lock().unwrap_or_else(|err| err.into_inner());
+        *guard = profiles.into_iter().map(Into::into).collect();
+    }
+
+    /// Apply the drain set from a validated config reload plan.
+    pub fn apply_config_reload_plan(&self, plan: &ConfigReloadPlan) {
+        self.replace_draining_profiles(plan.draining_profiles());
+    }
+
+    /// Whether a profile is currently draining. A poisoned lock fails closed.
+    #[must_use]
+    pub fn is_draining(&self, profile: &str) -> bool {
+        self.profiles
+            .lock()
+            .map(|profiles| profiles.contains(profile))
+            .unwrap_or(true)
+    }
+
+    /// Sorted draining profile names for diagnostics and tests.
+    #[must_use]
+    pub fn draining_profiles(&self) -> Vec<String> {
+        let mut profiles: Vec<_> = self
+            .profiles
+            .lock()
+            .map(|profiles| profiles.iter().cloned().collect())
+            .unwrap_or_default();
+        profiles.sort();
+        profiles
+    }
 }
 
 /// The E5 connection-scope isolation policy: which profiles the *served*
@@ -4639,6 +4729,9 @@ impl OracleDispatcher {
             if !self.mcp_exposure.is_exposed(&profile) {
                 return Err(profile_not_available(&profile));
             }
+            if self.profile_drain.is_draining(&profile) {
+                return Err(profile_draining_error(&profile));
+            }
             let Some(connector) = &self.connector else {
                 return Err(ErrorEnvelope::new(
                     ErrorClass::RuntimeStateRequired,
@@ -4734,6 +4827,13 @@ impl OracleDispatcher {
         let request_subject = audit_subject(context, &self.default_audit_subject);
         let scoped_level = scoped_session_level(&state.level, context);
         let scoped = context.scope_grant().is_some();
+        if tool != "oracle_list_profiles"
+            && tool != "oracle_connection_info"
+            && let Some(active_profile) = state.active_profile.as_deref()
+            && self.profile_drain.is_draining(active_profile)
+        {
+            return Err(profile_draining_error(active_profile));
+        }
         if tool == "oracle_set_session_level" {
             let a: SetSessionLevelArgs = parse_args(name, args)?;
             let active_profile = state.active_profile.clone();
@@ -5061,7 +5161,7 @@ impl OracleDispatcher {
             "oracle_list_profiles" => {
                 ensure_no_args(name, args)?;
                 OracleMcpConfig::load(None)
-                    .map(|cfg| profiles_response(&cfg, &self.mcp_exposure))
+                    .map(|cfg| profiles_response(&cfg, &self.mcp_exposure, &self.profile_drain))
                     .map_err(|e| {
                         DbError::UnsupportedAuth(format!("config load failed: {e}")).into_envelope()
                     })
