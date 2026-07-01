@@ -24,6 +24,7 @@ import {
 import {
   Activity,
   AlertTriangle,
+  Ban,
   BarChart3,
   CheckCircle2,
   Code2,
@@ -32,6 +33,7 @@ import {
   FileClock,
   Gauge,
   GitPullRequest,
+  KeyRound,
   Play,
   Radio,
   RefreshCcw,
@@ -71,6 +73,7 @@ import {
   executeWorkbenchSql,
   applyConfigDraft,
   fetchActiveLanes,
+  fetchClientCredentials,
   fetchDashboardSession,
   fetchChangeProposals,
   fetchOperatorConfig,
@@ -82,6 +85,8 @@ import {
   previewConfigDraft,
   previewWorkbenchSql,
   readWorkbenchSql,
+  revokeClientCredential,
+  rotateClientCredential,
   rollbackConfigDraft,
   setSessionLevel,
   type OperatorResponse,
@@ -95,6 +100,9 @@ import {
   type ChangeProposalApplyUnit,
   type ChangeProposalAuthorKind,
   type ChangeProposalView,
+  type ClientCredentialRotateData,
+  type ClientCredentialStatus,
+  type ClientCredentialView,
   type ExplorerCacheStatus,
   type ExplorerDetailLevel,
   type ExplorerMetadataCacheKey,
@@ -148,6 +156,7 @@ const navItems: NavItem[] = [
   { to: "/health", label: "Health", icon: CheckCircle2 },
   { to: "/capacity", label: "Capacity", icon: Gauge },
   { to: "/config", label: "Config", icon: SlidersHorizontal },
+  { to: "/clients", label: "Clients", icon: KeyRound },
   { to: "/explorer", label: "Explorer", icon: Search },
   { to: "/reviews", label: "Reviews", icon: GitPullRequest },
   { to: "/workbench", label: "Workbench", icon: SquarePen },
@@ -189,6 +198,12 @@ const configRoute = createRoute({
   component: ConfigPage
 });
 
+const clientsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/clients",
+  component: ClientsPage
+});
+
 const auditRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/audit",
@@ -226,6 +241,7 @@ const router = createRouter({
     healthRoute,
     capacityRoute,
     configRoute,
+    clientsRoute,
     explorerRoute,
     reviewsRoute,
     workbenchRoute,
@@ -1606,6 +1622,289 @@ function ConfigApplyPanel({
       </div>
     </Surface>
   );
+}
+
+function ClientsPage(): React.ReactElement {
+  const [rotated, setRotated] = React.useState<ClientCredentialRotateData | null>(null);
+  const [lastError, setLastError] = React.useState<string | null>(null);
+  const session = useQuery({
+    queryKey: ["dashboard-session"],
+    queryFn: fetchDashboardSession,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    retry: 1
+  });
+  const clients = useQuery({
+    queryKey: ["client-credentials"],
+    queryFn: fetchClientCredentials,
+    refetchInterval: 10_000
+  });
+  const rotateMutation = useMutation({
+    mutationFn: async (client: ClientCredentialView) => {
+      if (!session.data) {
+        throw new Error("dashboard session is not ready");
+      }
+      return rotateClientCredential(session.data, client.client_id);
+    },
+    onSuccess: (response) => {
+      setRotated(response.data);
+      setLastError(null);
+      queryClient.invalidateQueries({ queryKey: ["client-credentials"] });
+    },
+    onError: (error) => {
+      setLastError(error instanceof Error ? error.message : "rotate failed");
+    }
+  });
+  const revokeMutation = useMutation({
+    mutationFn: async (client: ClientCredentialView) => {
+      if (!session.data) {
+        throw new Error("dashboard session is not ready");
+      }
+      return revokeClientCredential(session.data, client.client_id);
+    },
+    onSuccess: () => {
+      setLastError(null);
+      queryClient.invalidateQueries({ queryKey: ["client-credentials"] });
+    },
+    onError: (error) => {
+      setLastError(error instanceof Error ? error.message : "revoke failed");
+    }
+  });
+  const rows = clients.data?.data.clients ?? [];
+  const busy = rotateMutation.isPending || revokeMutation.isPending;
+
+  return (
+    <PageFrame
+      title="Clients"
+      eyebrow="HTTP Auth"
+      description="Service-owned MCP client credentials and their current lifecycle state."
+    >
+      <div className="space-y-4">
+        <ClientCredentialSummary
+          rows={rows}
+          pending={clients.isFetching}
+          source={clients.data?.data.source ?? (clients.isError ? "unavailable" : "pending")}
+        />
+        {rotated ? (
+          <ClientCredentialBearerPanel rotated={rotated} onDismiss={() => setRotated(null)} />
+        ) : null}
+        <ClientCredentialTable
+          rows={rows}
+          sessionReady={session.status === "success"}
+          pending={clients.isFetching}
+          busy={busy}
+          rotatingClientId={rotateMutation.variables?.client_id ?? null}
+          revokingClientId={revokeMutation.variables?.client_id ?? null}
+          onRotate={(client) => rotateMutation.mutate(client)}
+          onRevoke={(client) => revokeMutation.mutate(client)}
+        />
+        {lastError || clients.isError ? (
+          <Badge tone="warn" className="max-w-full whitespace-normal break-all">
+            {lastError ?? (clients.error instanceof Error ? clients.error.message : "client credentials unavailable")}
+          </Badge>
+        ) : null}
+      </div>
+    </PageFrame>
+  );
+}
+
+function ClientCredentialSummary({
+  rows,
+  pending,
+  source
+}: {
+  rows: ClientCredentialView[];
+  pending: boolean;
+  source: string;
+}): React.ReactElement {
+  const active = rows.filter((client) => client.status === "active").length;
+  const revoked = rows.filter((client) => client.status === "revoked").length;
+  const used = rows.filter((client) => Boolean(client.last_used_at)).length;
+  return (
+    <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4" aria-label="client credentials">
+      <MetricTile icon={KeyRound} label="Registered" value={rows.length} suffix="" tone={rows.length > 0 ? "ok" : "off"} pending={pending} />
+      <MetricTile icon={ShieldCheck} label="Active" value={active} suffix="" tone={active > 0 ? "ok" : "off"} pending={pending} />
+      <MetricTile icon={Ban} label="Revoked" value={revoked} suffix="" tone={revoked > 0 ? "warn" : "ok"} pending={pending} />
+      <MetricTile icon={Wifi} label="Used" value={used} suffix="" tone={source === "client_credentials" ? "info" : "off"} pending={pending} />
+    </section>
+  );
+}
+
+function ClientCredentialBearerPanel({
+  rotated,
+  onDismiss
+}: {
+  rotated: ClientCredentialRotateData;
+  onDismiss: () => void;
+}): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={KeyRound}
+        title="Rotated Bearer"
+        meta={rotated.client.client_id}
+        tone={rotated.bearer_shown_once ? "ok" : "warn"}
+      />
+      <div className="space-y-3 p-4">
+        <div className="grid gap-3 sm:grid-cols-3">
+          <CapacityFact label="Generation" value={rotated.client.generation} />
+          <CapacityFact label="Closed" value={rotated.closed_sessions} />
+          <CapacityFact label="Subject" value={shortHash(rotated.closed_principal.subject_id_hash)} mono />
+        </div>
+        <pre className="max-h-32 overflow-auto rounded-md bg-zinc-950 p-3 font-mono text-xs leading-5 text-zinc-50">
+          {rotated.bearer}
+        </pre>
+        <Button type="button" variant="secondary" onClick={onDismiss}>
+          <Ban className="size-4" aria-hidden="true" />
+          Clear
+        </Button>
+      </div>
+    </Surface>
+  );
+}
+
+function ClientCredentialTable({
+  rows,
+  sessionReady,
+  pending,
+  busy,
+  rotatingClientId,
+  revokingClientId,
+  onRotate,
+  onRevoke
+}: {
+  rows: ClientCredentialView[];
+  sessionReady: boolean;
+  pending: boolean;
+  busy: boolean;
+  rotatingClientId: string | null;
+  revokingClientId: string | null;
+  onRotate: (client: ClientCredentialView) => void;
+  onRevoke: (client: ClientCredentialView) => void;
+}): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={Users}
+        title="Registered Clients"
+        meta={`${rows.length} clients`}
+        tone={pending ? "info" : rows.length > 0 ? "ok" : "off"}
+      />
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[940px] border-collapse text-left">
+          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+            <tr>
+              <th className="px-4 py-3 font-bold">Client</th>
+              <th className="px-4 py-3 font-bold">Status</th>
+              <th className="px-4 py-3 font-bold">Scopes</th>
+              <th className="px-4 py-3 font-bold">Subject</th>
+              <th className="px-4 py-3 font-bold">Last Used</th>
+              <th className="px-4 py-3 font-bold">Source</th>
+              <th className="px-4 py-3 font-bold">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-100">
+            {rows.length === 0 ? (
+              <tr>
+                <td className="px-4 py-4 text-sm text-zinc-500" colSpan={7}>
+                  No registered clients
+                </td>
+              </tr>
+            ) : (
+              rows.map((client) => (
+                <ClientCredentialRow
+                  key={client.client_id}
+                  client={client}
+                  sessionReady={sessionReady}
+                  busy={busy}
+                  rotating={rotatingClientId === client.client_id}
+                  revoking={revokingClientId === client.client_id}
+                  onRotate={onRotate}
+                  onRevoke={onRevoke}
+                />
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </Surface>
+  );
+}
+
+function ClientCredentialRow({
+  client,
+  sessionReady,
+  busy,
+  rotating,
+  revoking,
+  onRotate,
+  onRevoke
+}: {
+  client: ClientCredentialView;
+  sessionReady: boolean;
+  busy: boolean;
+  rotating: boolean;
+  revoking: boolean;
+  onRotate: (client: ClientCredentialView) => void;
+  onRevoke: (client: ClientCredentialView) => void;
+}): React.ReactElement {
+  const disabled = busy || !sessionReady || client.status !== "active";
+  return (
+    <tr className="bg-white">
+      <td className="px-4 py-4 align-top">
+        <p className="font-mono text-sm font-semibold text-zinc-950">{client.client_id}</p>
+        <p className="mt-1 truncate text-xs text-zinc-500">{client.label}</p>
+      </td>
+      <td className="px-4 py-4 align-top">
+        <Badge tone={clientCredentialStatusTone(client.status)}>{client.status}</Badge>
+        <p className="mt-2 font-mono text-xs text-zinc-500">gen {client.generation}</p>
+      </td>
+      <td className="px-4 py-4 align-top">
+        <div className="flex flex-wrap gap-1">
+          {client.scopes.map((scope) => (
+            <Badge key={scope} tone="neutral">{scope}</Badge>
+          ))}
+        </div>
+      </td>
+      <td className="px-4 py-4 align-top font-mono text-xs text-zinc-600">
+        {shortHash(client.subject_id_hash)}
+      </td>
+      <td className="px-4 py-4 align-top font-mono text-xs text-zinc-600">
+        {client.last_used_at ?? "never"}
+      </td>
+      <td className="px-4 py-4 align-top font-mono text-xs text-zinc-600">
+        {client.last_source_addr ?? "unseen"}
+      </td>
+      <td className="px-4 py-4 align-top">
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={disabled}
+            onClick={() => onRotate(client)}
+          >
+            <RotateCcw className="size-4" aria-hidden="true" />
+            {rotating ? "Rotating" : "Rotate"}
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={disabled}
+            onClick={() => onRevoke(client)}
+          >
+            <Ban className="size-4" aria-hidden="true" />
+            {revoking ? "Revoking" : "Revoke"}
+          </Button>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function clientCredentialStatusTone(
+  status: ClientCredentialStatus
+): "neutral" | "ok" | "warn" | "off" | "info" {
+  return status === "active" ? "ok" : "off";
 }
 
 type CapacityLimitRow = {

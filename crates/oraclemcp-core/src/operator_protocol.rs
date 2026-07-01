@@ -145,6 +145,27 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         mcp_tool: Some("proposal-selected apply tool"),
     },
     OperatorRouteSpec {
+        method: "GET",
+        path: "/operator/v1/client-credentials",
+        schema: "clientCredentialsResponse",
+        sse: false,
+        mcp_tool: None,
+    },
+    OperatorRouteSpec {
+        method: "POST",
+        path: "/operator/v1/client-credentials/rotate",
+        schema: "clientCredentialRotateResponse",
+        sse: false,
+        mcp_tool: None,
+    },
+    OperatorRouteSpec {
+        method: "POST",
+        path: "/operator/v1/client-credentials/revoke",
+        schema: "clientCredentialRevokeResponse",
+        sse: false,
+        mcp_tool: None,
+    },
+    OperatorRouteSpec {
         method: "POST",
         path: "/operator/v1/actions/preview",
         schema: "gatedActionResponse",
@@ -327,6 +348,9 @@ pub fn operator_schema_bundle() -> Value {
             "changeProposalListResponse": { "$ref": "#/$defs/versionedResponse" },
             "changeProposalDraftResponse": { "$ref": "#/$defs/versionedResponse" },
             "changeProposalApplyResponse": { "$ref": "#/$defs/versionedResponse" },
+            "clientCredentialsResponse": { "$ref": "#/$defs/versionedResponse" },
+            "clientCredentialRotateResponse": { "$ref": "#/$defs/versionedResponse" },
+            "clientCredentialRevokeResponse": { "$ref": "#/$defs/versionedResponse" },
             "gatedActionResponse": { "$ref": "#/$defs/versionedResponse" },
             "operatorSchemaBundle": {
                 "type": "object",
@@ -581,6 +605,27 @@ pub fn operator_fixture_values() -> Vec<(&'static str, Value)> {
                         "outcome": "forwarded"
                     },
                     "mcp_response": { "jsonrpc": "2.0", "id": "operator-v1", "result": {} }
+                }),
+            ),
+        ),
+        (
+            "client-credentials",
+            operator_response(
+                "/operator/v1/client-credentials",
+                json!({
+                    "source": "client_credentials",
+                    "clients": [{
+                        "client_id": "client-0123456789abcdef0123456789abcdef",
+                        "label": "Codex CLI",
+                        "scopes": ["oracle:read"],
+                        "status": "active",
+                        "subject_id_hash": operator_subject_id_hash("client:fixture"),
+                        "generation": 1,
+                        "created_at": "unix:1",
+                        "last_used_at": "unix:2",
+                        "last_source_addr": "127.0.0.1:49152"
+                    }],
+                    "redaction": "bearer tokens are never returned by list",
                 }),
             ),
         ),

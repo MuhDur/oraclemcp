@@ -516,6 +516,56 @@ export type AuditTailData = {
   export?: Record<string, unknown> | null;
 };
 
+export type ClientCredentialStatus = "active" | "revoked";
+
+export type ClientCredentialView = {
+  client_id: string;
+  label: string;
+  scopes: string[];
+  status: ClientCredentialStatus;
+  subject_id_hash: string;
+  generation: number;
+  created_at: string;
+  last_used_at?: string;
+  last_source_addr?: string;
+  rotated_at?: string;
+  revoked_at?: string;
+};
+
+export type ClientCredentialsData = {
+  source: string;
+  error?: string;
+  message?: string;
+  clients: ClientCredentialView[];
+  redaction?: string;
+};
+
+export type ClientCredentialLifecycle = {
+  client_id: string;
+  subject_id_hash: string;
+  generation: number;
+};
+
+export type ClientCredentialRotateData = {
+  source: string;
+  status: "rotated";
+  client: ClientCredentialView;
+  bearer: string;
+  bearer_shown_once: boolean;
+  closed_principal: ClientCredentialLifecycle;
+  closed_sessions: number;
+  redaction: string;
+};
+
+export type ClientCredentialRevokeData = {
+  source: string;
+  status: "revoked";
+  client?: ClientCredentialView | null;
+  closed_principal: ClientCredentialLifecycle;
+  closed_sessions: number;
+  redaction: string;
+};
+
 export const overviewProbes: ProbeDefinition[] = [
   {
     id: "healthz",
@@ -662,6 +712,28 @@ export async function fetchActiveLanes(): Promise<OperatorResponse<ActiveLanesDa
 
 export async function fetchChangeProposals(): Promise<OperatorResponse<ChangeProposalListData>> {
   return operatorGet("/operator/v1/change-proposals");
+}
+
+export async function fetchClientCredentials(): Promise<OperatorResponse<ClientCredentialsData>> {
+  return operatorGet("/operator/v1/client-credentials");
+}
+
+export async function rotateClientCredential(
+  session: DashboardSession,
+  clientId: string
+): Promise<OperatorResponse<ClientCredentialRotateData>> {
+  return operatorPost("/operator/v1/client-credentials/rotate", session, {
+    client_id: clientId
+  });
+}
+
+export async function revokeClientCredential(
+  session: DashboardSession,
+  clientId: string
+): Promise<OperatorResponse<ClientCredentialRevokeData>> {
+  return operatorPost("/operator/v1/client-credentials/revoke", session, {
+    client_id: clientId
+  });
 }
 
 export async function previewConfigDraft(

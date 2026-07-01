@@ -107,6 +107,27 @@
         "sse": false
       },
       {
+        "mcp_tool": null,
+        "method": "GET",
+        "path": "/operator/v1/client-credentials",
+        "schema": "clientCredentialsResponse",
+        "sse": false
+      },
+      {
+        "mcp_tool": null,
+        "method": "POST",
+        "path": "/operator/v1/client-credentials/rotate",
+        "schema": "clientCredentialRotateResponse",
+        "sse": false
+      },
+      {
+        "mcp_tool": null,
+        "method": "POST",
+        "path": "/operator/v1/client-credentials/revoke",
+        "schema": "clientCredentialRevokeResponse",
+        "sse": false
+      },
+      {
         "mcp_tool": "operator-selected preview tool",
         "method": "POST",
         "path": "/operator/v1/actions/preview",

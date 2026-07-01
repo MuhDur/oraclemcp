@@ -56,6 +56,12 @@ fi
 if ! grep -F "| Operator v1 | 9 | 0 | 9 | 9 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "Operator v1 MUST coverage must be 9/9 score=1.00"
 fi
+if ! grep -F "| HTTP client credentials | 1 | 0 | 1 | 1 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "HTTP client credential coverage must include isolated rotate/revoke"
+fi
+if ! grep -F "| Dashboard B.8 | 9 | 0 | 9 | 9 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "Dashboard B.8 coverage must include W10 client credentials"
+fi
 if ! grep -F "| HTTP negotiation | 2 | 0 | 2 | 2 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "HTTP negotiation coverage must include MCP-Protocol-Version"
 fi
@@ -65,7 +71,7 @@ fi
 if ! grep -F "| WP-N concurrency/session | 11 | 0 | 11 | 11 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "WP-N concurrency/session coverage must include the N9 contract"
 fi
-if ! grep -F "Total tracked requirements: 70 MUST, 2 SHOULD, 72 tested." tests/conformance/COVERAGE.md >/dev/null; then
+if ! grep -F "Total tracked requirements: 72 MUST, 2 SHOULD, 74 tested." tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "B.6 coverage totals are stale"
 fi
 if grep -RInE '(^|[^A-Z])SKIP([^A-Z]|$)' tests/conformance/COVERAGE.md >/dev/null; then
@@ -88,5 +94,5 @@ e2e_run_command "assert" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/targe
 e2e_run_command "assert" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
   cargo test -p oraclemcp execute_commit_in_doubt_leaves_durable_intent_unresolved
 
-e2e_log_event "coverage_summary" "assert" "pass" 0 "B.6 + dashboard + WP-N MUST coverage 70/70 score=1.00"
+e2e_log_event "coverage_summary" "assert" "pass" 0 "B.6 + dashboard + WP-N MUST coverage 72/72 score=1.00"
 e2e_finish_pass

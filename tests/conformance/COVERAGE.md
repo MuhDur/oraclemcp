@@ -86,17 +86,19 @@ Harnesses:
 | JSON-RPC errors | 3 | 2 | 5 | 5 | 1 | 100% |
 | Security | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTP OAuth | 4 | 0 | 4 | 4 | 0 | 100% |
+| HTTP client credentials | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTP guards | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTP sessions | 2 | 0 | 2 | 2 | 0 | 100% |
 | HTTP routing | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTP negotiation | 2 | 0 | 2 | 2 | 0 | 100% |
 | Operator v1 | 9 | 0 | 9 | 9 | 0 | 100% |
+| Dashboard B.8 | 9 | 0 | 9 | 9 | 0 | 100% |
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
 | Oracle structured cells | 6 | 0 | 6 | 6 | 0 | 100% |
 | Durable SQL idempotency | 1 | 0 | 1 | 1 | 0 | 100% |
 | WP-N concurrency/session | 11 | 0 | 11 | 11 | 0 | 100% |
 
-Total tracked requirements: 70 MUST, 2 SHOULD, 72 tested.
+Total tracked requirements: 72 MUST, 2 SHOULD, 74 tested.
 
 ## Requirement IDs
 
@@ -131,6 +133,7 @@ Total tracked requirements: 70 MUST, 2 SHOULD, 72 tested.
 | HTTP-AUTH-002 | MUST | HTTP OAuth | A valid bearer token admits a served HTTP request and forwards the validated OAuth scope grant to tool dispatch. |
 | HTTP-AUTH-003 | MUST | HTTP OAuth | A valid bearer token without the configured required scope returns `403` with `error="insufficient_scope"`. |
 | HTTP-AUTH-004 | MUST | HTTP OAuth | Narrow, broad, and profile-protected OAuth scope ceilings are enforced at dispatch through the binary HTTP transport. |
+| HTTP-AUTH-005 | MUST | HTTP client credentials | Service-owned per-client MCP bearer credentials are hashed at rest, authenticate as scoped isolated principals, and rotate/revoke one client without affecting another. |
 | HTTP-GUARD-001 | MUST | HTTP guards | A disallowed browser `Origin` is rejected with `403` before MCP dispatch. |
 | HTTP-SESSION-001 | MUST | HTTP sessions | Stateful HTTP rejects forged or unknown `mcp-session-id` values before MCP dispatch. |
 | HTTP-SESSION-002 | MUST | HTTP sessions | Stateful GET replays buffered SSE responses after `cursor` / `Last-Event-ID`; stateless DELETE returns 405 instead of a false session-close acceptance. |
@@ -154,6 +157,7 @@ Total tracked requirements: 70 MUST, 2 SHOULD, 72 tested.
 | DASHBOARD-B8-006 | MUST | Dashboard B.8 | Dashboard skin grammar is a contract: 2D and table no-WebGL fallbacks stay available, Orrery remains lazy/quarantined, a11y anchors stay present, and credential secrets are never rendered. |
 | DASHBOARD-B8-007 | MUST | Dashboard B.8 | Explorer global search spans all visible schemas and object types for object-name matches and source text matches through the existing guarded `oracle_search_objects` and `oracle_search_source` action routes. |
 | DASHBOARD-B8-008 | MUST | Dashboard B.8 | Audit proof-bundle export is allow-list-first: dashboard requests `export=proof-bundle`, the operator response includes subject hashes, SQL hashes, DB evidence, chain/signature metadata, and no raw SQL, bind values, raw subject ids, or secrets. |
+| DASHBOARD-B8-009 | MUST | Dashboard B.8 | Client-credential screen lists only redacted per-client metadata, shows a rotated bearer once, and revoke/rotate closes only the affected principal's sessions/grants. |
 | HTTP-SURFACE-001 | MUST | HTTP auth/no-leak | The surface inventory asserts per-surface authn/gating for `/mcp`, stateful SSE GET, `/operator/v1`, dashboard pairing/POSTs, config apply, `/readyz`, and `/metrics`; unauthenticated infra probes expose no DB identity, SQL text, bind values, wallet, credential, or password markers. |
 | HTTPS-001 | MUST | HTTPS / mTLS | Server-only native TLS accepts a valid HTTPS handshake. |
 | HTTPS-002 | MUST | HTTPS / mTLS | Native mTLS rejects clients without a certificate and accepts a client certificate signed by the configured CA. |
@@ -184,6 +188,7 @@ Total tracked requirements: 70 MUST, 2 SHOULD, 72 tested.
 | HTTP-AUTH-002 | `crates/oraclemcp-core/tests/golden_behavior.rs::golden_http_served_auth_scope_and_session_matrix` |
 | HTTP-AUTH-003 | `crates/oraclemcp/tests/e2e_http_oauth.rs::binary_http_oauth_rejects_missing_invalid_and_insufficient_tokens` |
 | HTTP-AUTH-004 | `crates/oraclemcp/tests/e2e_http_oauth.rs::binary_http_oauth_serves_metadata_and_applies_scope_ceilings` |
+| HTTP-AUTH-005 | `crates/oraclemcp-core/src/client_credentials.rs::tests::clients_json_is_private_and_never_contains_issued_bearer`; `crates/oraclemcp-core/src/client_credentials.rs::tests::authenticate_rotate_and_revoke_update_lifecycle_without_storing_secret`; `crates/oraclemcp-core/src/http.rs::tests::client_credentials_are_scoped_principals_and_rotate_independently`; `crates/oraclemcp-core/src/http.rs::tests::operator_client_credentials_screen_lists_rotates_revokes_without_token_leak` |
 | HTTP-GUARD-001 | `crates/oraclemcp/tests/e2e_http_oauth.rs::binary_http_rejects_bad_origin_and_forged_stateful_sessions`; `tests/golden/http/served_auth_scope_session_matrix.json` |
 | HTTP-SESSION-001 | `crates/oraclemcp/tests/e2e_http_oauth.rs::binary_http_rejects_bad_origin_and_forged_stateful_sessions`; `tests/golden/http/served_auth_scope_session_matrix.json` |
 | HTTP-SESSION-002 | `crates/oraclemcp-core/src/http.rs::tests::stateful_get_replays_buffered_lane_results_by_cursor`; `crates/oraclemcp-core/src/http.rs::tests::stateless_delete_is_method_not_allowed_not_false_accepted` |
@@ -207,6 +212,7 @@ Total tracked requirements: 70 MUST, 2 SHOULD, 72 tested.
 | DASHBOARD-B8-006 | `crates/oraclemcp/tests/dashboard_e2e.rs::skin_conformance_2d_fallback_a11y`; `scripts/dashboard_skin_lint.sh`; `scripts/sensitive_data_lint.sh` |
 | DASHBOARD-B8-007 | `crates/oraclemcp/tests/dashboard_e2e.rs::wd_search_global_explorer_uses_guarded_dictionary_tools`; `web/src/app/App.tsx::ExplorerGlobalSearchPanel`; `web/src/app/operator-client.ts::fetchExplorerSourceSearch` |
 | DASHBOARD-B8-008 | `crates/oraclemcp-core/src/http.rs::tests::audit_tail_filters_exports_redacted_proof_bundle`; `crates/oraclemcp/tests/dashboard_e2e.rs::w8b_proof_bundle_is_redacted_and_exportable`; `web/src/app/App.tsx::AuditProofBundlePanel`; `web/src/app/operator-client.ts::fetchAuditTail`; `docs/operations.md` |
+| DASHBOARD-B8-009 | `crates/oraclemcp-core/src/http.rs::tests::operator_client_credentials_screen_lists_rotates_revokes_without_token_leak`; `crates/oraclemcp/tests/dashboard_e2e.rs::w10_client_credentials_screen_is_redacted_and_isolated`; `web/src/app/App.tsx::ClientsPage`; `web/src/app/operator-client.ts::fetchClientCredentials`; `web/src/app/operator-client.ts::rotateClientCredential`; `web/src/app/operator-client.ts::revokeClientCredential` |
 | HTTP-SURFACE-001 | `crates/oraclemcp-core/src/http.rs::tests::surface_inventory_authn_no_leak`; `docs/behavior-inventory.md` |
 | HTTPS-001 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_accepts_tls_handshake` |
 | HTTPS-002 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_requires_client_certificate_when_mtls_is_configured` |

@@ -5472,6 +5472,213 @@ mod tests {
     }
 
     #[test]
+    fn operator_client_credentials_screen_lists_rotates_revokes_without_token_leak() {
+        #[derive(Debug, Default)]
+        struct RecordingLifecycle {
+            closed: std::sync::Mutex<Vec<(String, DispatchCloseReason)>>,
+        }
+
+        impl HttpSessionLifecycle for RecordingLifecycle {
+            fn close_session(&self, _session_id: &str, _principal_key: &str) -> bool {
+                false
+            }
+
+            fn close_principal_sessions(
+                &self,
+                principal_key: &str,
+                reason: DispatchCloseReason,
+            ) -> usize {
+                self.closed
+                    .lock()
+                    .expect("test lifecycle mutex")
+                    .push((principal_key.to_owned(), reason));
+                1
+            }
+        }
+
+        let (auditor, _sink) = operator_auditor();
+        let store = Arc::new(
+            ClientCredentialStore::open(client_credential_fixture_path("operator-screen"))
+                .expect("credential store opens"),
+        );
+        let read = store
+            .issue(
+                crate::client_credentials::ClientCredentialIssueRequest::new(
+                    "Claude Desktop",
+                    vec!["oracle:read".to_owned()],
+                ),
+            )
+            .expect("issue read client");
+        let execute = store
+            .issue(
+                crate::client_credentials::ClientCredentialIssueRequest::new(
+                    "Codex CLI",
+                    vec!["oracle:execute".to_owned()],
+                ),
+            )
+            .expect("issue execute client");
+        let read_client_id = read.client_id.clone();
+        let read_principal = read.principal_key.clone();
+        let read_bearer = read.bearer.expose().to_owned();
+        let execute_client_id = execute.client_id.clone();
+        let execute_principal = execute.principal_key.clone();
+        let execute_bearer = execute.bearer.expose().to_owned();
+        store
+            .authenticate_bearer(&read_bearer, Some("127.0.0.1:49152"))
+            .expect("last-use metadata records");
+
+        let session_store = Arc::new(HttpSessionStore::default());
+        let result_store = Arc::new(HttpResultStore::new());
+        let lifecycle = Arc::new(RecordingLifecycle::default());
+        session_store.insert("read-session".to_owned(), read_principal.clone());
+        session_store.insert("execute-session".to_owned(), execute_principal.clone());
+        result_store.append_response("read-session", serde_json::json!({ "stale": "read" }));
+        result_store.append_response("execute-session", serde_json::json!({ "stale": "execute" }));
+
+        let dir = dashboard_test_dir("operator-client-credentials");
+        let auth = Arc::new(DashboardAuth::new(dir.clone()));
+        let cfg = HttpTransportConfig {
+            dashboard_auth: Some(Arc::clone(&auth)),
+            operator_auditor: Some(auditor),
+            client_credentials: Some(Arc::clone(&store)),
+            session_store: Some(Arc::clone(&session_store)),
+            result_store: Some(Arc::clone(&result_store)),
+            session_lifecycle: Some(lifecycle.clone()),
+            ..Default::default()
+        };
+        let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
+            .expect("ticket mints");
+        let login = auth
+            .exchange_ticket(ticket_from_pairing_url(&ticket.url))
+            .expect("login works");
+        let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
+        let view = auth
+            .session_view(Some(cookie_pair))
+            .expect("session view works");
+        let route_ticket = |path: &str| {
+            view.action_tickets
+                .iter()
+                .find(|ticket| ticket.path == path)
+                .unwrap_or_else(|| panic!("missing dashboard action ticket for {path}"))
+                .ticket
+                .clone()
+        };
+        let rotate_ticket = route_ticket("/operator/v1/client-credentials/rotate");
+        let revoke_ticket = route_ticket("/operator/v1/client-credentials/revoke");
+        let dashboard_post = |path: &'static str, ticket: &str, body: Value| -> HttpRequest {
+            HttpRequest::new(
+                "POST",
+                path,
+                [
+                    ("host", "127.0.0.1"),
+                    ("origin", "http://127.0.0.1"),
+                    ("sec-fetch-site", "same-origin"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json"),
+                    ("cookie", cookie_pair),
+                    (DASHBOARD_CSRF_HEADER, view.csrf_token.as_str()),
+                    (DASHBOARD_ACTION_TICKET_HEADER, ticket),
+                ],
+                body.to_string().into_bytes(),
+            )
+            .with_peer_loopback(true)
+        };
+
+        let list = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                "/operator/v1/client-credentials",
+                [
+                    ("host", "127.0.0.1"),
+                    ("accept", "application/json"),
+                    ("cookie", cookie_pair),
+                    ("sec-fetch-site", "same-origin"),
+                ],
+                Vec::new(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(list.status, 200);
+        let list_text = String::from_utf8(list.body.clone()).expect("list body UTF-8");
+        assert!(list_text.contains(&read_client_id));
+        assert!(list_text.contains("127.0.0.1:49152"));
+        assert!(!list_text.contains(&read_bearer));
+        assert!(!list_text.contains(&execute_bearer));
+        assert!(!list_text.contains("credential_hash"));
+        assert!(!list_text.contains("credential_salt"));
+
+        let rotate = handle_http_request(
+            &test_server(),
+            &cfg,
+            dashboard_post(
+                "/operator/v1/client-credentials/rotate",
+                &rotate_ticket,
+                serde_json::json!({ "client_id": read_client_id }),
+            ),
+        );
+        assert_eq!(rotate.status, 200);
+        let rotate_body = response_json(&rotate);
+        let rotated_bearer = rotate_body["data"]["bearer"]
+            .as_str()
+            .expect("rotated bearer is shown once");
+        assert!(rotated_bearer.starts_with("ocmcp_"));
+        assert_eq!(
+            rotate_body["data"]["bearer_shown_once"],
+            serde_json::json!(true)
+        );
+        let rotate_text = String::from_utf8(rotate.body.clone()).expect("rotate body UTF-8");
+        assert!(!rotate_text.contains(&read_bearer));
+        assert!(!rotate_text.contains(&execute_bearer));
+        assert!(session_store.principal_for("read-session").is_none());
+        assert_eq!(
+            session_store.principal_for("execute-session").as_deref(),
+            Some(execute_principal.as_str())
+        );
+        assert!(
+            result_store
+                .events_after("read-session", None, false)
+                .expect("rotated principal buffer removed")
+                .is_empty()
+        );
+
+        let revoke = handle_http_request(
+            &test_server(),
+            &cfg,
+            dashboard_post(
+                "/operator/v1/client-credentials/revoke",
+                &revoke_ticket,
+                serde_json::json!({ "client_id": execute_client_id }),
+            ),
+        );
+        assert_eq!(revoke.status, 200);
+        let revoke_body = response_json(&revoke);
+        assert_eq!(revoke_body["data"]["status"], serde_json::json!("revoked"));
+        assert!(revoke_body["data"].get("bearer").is_none());
+        let revoke_text = String::from_utf8(revoke.body.clone()).expect("revoke body UTF-8");
+        assert!(!revoke_text.contains(&execute_bearer));
+        assert!(session_store.principal_for("execute-session").is_none());
+        assert!(
+            result_store
+                .events_after("execute-session", None, false)
+                .expect("revoked principal buffer removed")
+                .is_empty()
+        );
+        assert_eq!(
+            lifecycle
+                .closed
+                .lock()
+                .expect("test lifecycle mutex")
+                .as_slice(),
+            &[
+                (read_principal, DispatchCloseReason::SessionDelete),
+                (execute_principal, DispatchCloseReason::SessionDelete),
+            ]
+        );
+    }
+
+    #[test]
     fn uniform_auth_errors_no_enumeration_oracle() {
         let auth_fingerprint = |response: &HttpResponse| {
             (
@@ -6394,10 +6601,14 @@ fn handle_http_exchange(
             if !accepts_media(request.header("accept"), required_media) {
                 return HttpExchange::Buffered(empty_response(406));
             }
-            let authenticated = match authenticate_http_request(config, &request, false) {
-                Ok(authenticated) => authenticated,
-                Err(response) => return HttpExchange::Buffered(response),
-            };
+            let allow_dashboard_session = config.dashboard_auth.is_some()
+                && request.peer_is_loopback
+                && request.header("authorization").is_none();
+            let authenticated =
+                match authenticate_http_request(config, &request, allow_dashboard_session) {
+                    Ok(authenticated) => authenticated,
+                    Err(response) => return HttpExchange::Buffered(response),
+                };
             let principal_key = authenticated
                 .as_ref()
                 .map(|auth| auth.principal_key.as_str());
@@ -6779,6 +6990,9 @@ enum OperatorRouteKind {
     ChangeProposalsList,
     ChangeProposalsDraft,
     ChangeProposalsApply,
+    ClientCredentials,
+    ClientCredentialRotate,
+    ClientCredentialRevoke,
     ActionPreview,
     ActionConfirm,
     ActionExecute,
@@ -6804,6 +7018,9 @@ fn operator_route_kind(path: &str) -> OperatorRouteKind {
         "/operator/v1/change-proposals" => OperatorRouteKind::ChangeProposalsList,
         "/operator/v1/change-proposals/draft" => OperatorRouteKind::ChangeProposalsDraft,
         "/operator/v1/change-proposals/apply" => OperatorRouteKind::ChangeProposalsApply,
+        "/operator/v1/client-credentials" => OperatorRouteKind::ClientCredentials,
+        "/operator/v1/client-credentials/rotate" => OperatorRouteKind::ClientCredentialRotate,
+        "/operator/v1/client-credentials/revoke" => OperatorRouteKind::ClientCredentialRevoke,
         "/operator/v1/actions/preview" => OperatorRouteKind::ActionPreview,
         "/operator/v1/actions/confirm" => OperatorRouteKind::ActionConfirm,
         "/operator/v1/actions/execute" => OperatorRouteKind::ActionExecute,
@@ -6824,6 +7041,8 @@ impl OperatorRouteKind {
             | Self::ConfigRollback
             | Self::ChangeProposalsDraft
             | Self::ChangeProposalsApply
+            | Self::ClientCredentialRotate
+            | Self::ClientCredentialRevoke
             | Self::SetLevel
             | Self::SwitchProfile => "POST",
             _ => "GET",
@@ -6885,6 +7104,11 @@ fn handle_operator_api_route(
             operator_audit_seq,
             dashboard_browser,
         ),
+        OperatorRouteKind::ClientCredentials
+        | OperatorRouteKind::ClientCredentialRotate
+        | OperatorRouteKind::ClientCredentialRevoke => {
+            handle_operator_client_credentials_route(config, request, route)
+        }
         OperatorRouteKind::ActionPreview
         | OperatorRouteKind::ActionConfirm
         | OperatorRouteKind::ActionExecute
@@ -7605,6 +7829,183 @@ fn operator_change_proposal_error_response(
         route,
         json!({
             "source": "change_proposals",
+            "error": code,
+            "message": error.to_string(),
+        }),
+    )
+}
+
+fn handle_operator_client_credentials_route(
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+    route: OperatorRouteKind,
+) -> HttpResponse {
+    let Some(store) = config.client_credentials.as_ref() else {
+        return operator_json_response(
+            503,
+            &request.path,
+            json!({
+                "source": "client_credentials",
+                "error": "client_credentials_unavailable",
+                "message": "client credential store is not configured for this transport",
+            }),
+        );
+    };
+
+    match route {
+        OperatorRouteKind::ClientCredentials => operator_json_response(
+            200,
+            &request.path,
+            json!({
+                "source": "client_credentials",
+                "clients": store.list(),
+                "redaction": "bearer tokens are never returned by list",
+            }),
+        ),
+        OperatorRouteKind::ClientCredentialRotate => {
+            let client_id = match operator_client_credential_client_id(request) {
+                Ok(client_id) => client_id,
+                Err((status, data)) => return operator_json_response(status, &request.path, data),
+            };
+            match store.rotate(&client_id) {
+                Ok((issued, lifecycle)) => {
+                    let closed_sessions = close_http_principal_sessions(
+                        config,
+                        &lifecycle.principal_key,
+                        DispatchCloseReason::SessionDelete,
+                    );
+                    operator_json_response(
+                        200,
+                        &request.path,
+                        json!({
+                            "source": "client_credentials",
+                            "status": "rotated",
+                            "client": issued.view,
+                            "bearer": issued.bearer.expose(),
+                            "bearer_shown_once": true,
+                            "closed_principal": client_credential_lifecycle_json(&lifecycle),
+                            "closed_sessions": closed_sessions,
+                            "redaction": "stored credential metadata is redacted; the rotated bearer is returned once",
+                        }),
+                    )
+                }
+                Err(error) => operator_client_credential_error_response(&request.path, error),
+            }
+        }
+        OperatorRouteKind::ClientCredentialRevoke => {
+            let client_id = match operator_client_credential_client_id(request) {
+                Ok(client_id) => client_id,
+                Err((status, data)) => return operator_json_response(status, &request.path, data),
+            };
+            match store.revoke(&client_id) {
+                Ok(lifecycle) => {
+                    let closed_sessions = close_http_principal_sessions(
+                        config,
+                        &lifecycle.principal_key,
+                        DispatchCloseReason::SessionDelete,
+                    );
+                    let client = store
+                        .list()
+                        .into_iter()
+                        .find(|client| client.client_id == lifecycle.client_id);
+                    operator_json_response(
+                        200,
+                        &request.path,
+                        json!({
+                            "source": "client_credentials",
+                            "status": "revoked",
+                            "client": client,
+                            "closed_principal": client_credential_lifecycle_json(&lifecycle),
+                            "closed_sessions": closed_sessions,
+                            "redaction": "bearer tokens are never returned by revoke",
+                        }),
+                    )
+                }
+                Err(error) => operator_client_credential_error_response(&request.path, error),
+            }
+        }
+        _ => unreachable!("non-client-credentials route"),
+    }
+}
+
+fn operator_client_credential_client_id(request: &HttpRequest) -> Result<String, (u16, Value)> {
+    let payload = operator_client_credential_json_payload(request)?;
+    let Some(client_id) = payload
+        .get("client_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|client_id| !client_id.is_empty())
+    else {
+        return Err((
+            400,
+            json!({
+                "source": "client_credentials",
+                "error": "invalid_client_credential_request",
+                "message": "client credential requests must include client_id",
+            }),
+        ));
+    };
+    Ok(client_id.to_owned())
+}
+
+fn operator_client_credential_json_payload(
+    request: &HttpRequest,
+) -> Result<serde_json::Map<String, Value>, (u16, Value)> {
+    if !content_type_is_json(request) {
+        return Err((
+            415,
+            json!({
+                "source": "client_credentials",
+                "error": "invalid_client_credential_request",
+                "message": "client credential requests must use application/json",
+            }),
+        ));
+    }
+    match serde_json::from_slice::<Value>(&request.body) {
+        Ok(Value::Object(payload)) => Ok(payload),
+        Ok(_) | Err(_) => Err((
+            400,
+            json!({
+                "source": "client_credentials",
+                "error": "invalid_client_credential_request",
+                "message": "client credential request body must be a JSON object",
+            }),
+        )),
+    }
+}
+
+fn client_credential_lifecycle_json(
+    lifecycle: &crate::client_credentials::ClientCredentialLifecycle,
+) -> Value {
+    json!({
+        "client_id": &lifecycle.client_id,
+        "subject_id_hash": operator_subject_id_hash(&lifecycle.principal_key),
+        "generation": lifecycle.generation,
+    })
+}
+
+fn operator_client_credential_error_response(
+    route: &str,
+    error: ClientCredentialError,
+) -> HttpResponse {
+    let (status, code) = match &error {
+        ClientCredentialError::InvalidRequest(_) => (400, "invalid_client_credential_request"),
+        ClientCredentialError::AuthenticationFailed => (401, "client_credential_auth_failed"),
+        ClientCredentialError::UnknownClient(_) => (404, "unknown_client_credential"),
+        ClientCredentialError::Revoked(_) => (409, "client_credential_revoked"),
+        ClientCredentialError::Store(FileStoreError::Locked) => {
+            (409, "client_credential_store_locked")
+        }
+        ClientCredentialError::Store(_)
+        | ClientCredentialError::Serialization(_)
+        | ClientCredentialError::Parse(_)
+        | ClientCredentialError::Random(_) => (500, "client_credential_store_failed"),
+    };
+    operator_json_response(
+        status,
+        route,
+        json!({
+            "source": "client_credentials",
             "error": code,
             "message": error.to_string(),
         }),

@@ -2716,12 +2716,13 @@ table adds the **primitive-level + Phase-0 + security-corpus** tests that wrap i
 | `cp_apply_reclassifies_never_trusts_stored_verdict` | E | `dashboard_e2e.rs` | **SEC-1:** Change-Review apply re-classifies + re-checks level/grants/Subject at apply time | DoD-4 (SEC-1) |
 | `skin_conformance_2d_fallback_a11y` | Web/C | `dashboard_e2e.rs` | D16: grammar-is-a-contract across skins; mandatory **2D/no-WebGL** fallback renders; a11y suite passes; Orrery 3D lazy-loaded within bundle-size budget; **credential secret never rendered** | DoD-4 |
 | `audit_proof_bundle_is_redacted_and_exportable` | C/Web | `crates/oraclemcp-core/src/http.rs` + `dashboard_e2e.rs` | W8b: audit-tail `export=proof-bundle` emits `oraclemcp.audit.proof-bundle.v1` with subject hashes, SQL hashes, DB evidence, chain/signature metadata, and no raw SQL, bind values, subject ids, or secrets; dashboard exposes the export without a second data path | DoD-4/W8b |
+| `client_credentials_screen_is_redacted_and_isolated` | C/Web | `crates/oraclemcp-core/src/http.rs` + `dashboard_e2e.rs` | W10: dashboard lists per-client MCP credentials with scopes, last-use metadata, and source address; rotate/revoke one client closes only that principal's lanes/grants; list/revoke never return bearer/hash/salt; rotate returns the new bearer once | DoD-4/W10 |
 
 ### B.9 WP-E — Installer (broad, explicit-consent)
 | Test | Mode | Extends / new file | Asserts | Gate |
 |---|---|---|---|---|
 | `installer_lint_and_offline_smoke` | E | new `tests/installer_smoke.rs` + CI (`installer-workmanship`) | E2/E3/E7: shellcheck/PSSA clean; installs the **built** artifact via `--offline`; **no service/client mutation without `--service`/consent**; dry-run prints every file/unit | DoD-7 |
-| `per_client_scoped_creds_isolated` | E | `installer_smoke.rs` + `e2e_http_oauth.rs` | E4: each client = unique id + scoped bearer; revoke/rotate one **without** affecting others; no secret after creation | DoD-7 |
+| `per_client_scoped_creds_isolated` | E | `client_credentials.rs` + `http.rs` + `e2e_http_oauth.rs` | E4: each client = unique id + scoped bearer; revoke/rotate one **without** affecting others; no secret after creation; operator rotate/revoke closes the mutated principal's sessions/grants | DoD-7 |
 | `cosign_and_provenance_verify` | E | `installer_smoke.rs` | SHA256 + cosign verify-blob **+verify-attestation**; triples match assets | DoD-7 |
 
 ### B.10 WP-F — Distribution channels

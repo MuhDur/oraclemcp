@@ -135,6 +135,7 @@ fn read_only_dashboard_surface_contracts_are_registered() {
         "Health",
         "Capacity",
         "Config",
+        "Clients",
         "Explorer",
         "Reviews",
         "Workbench",
@@ -152,6 +153,7 @@ fn read_only_dashboard_surface_contracts_are_registered() {
         "function HealthPage",
         "function CapacityPage",
         "function ConfigPage",
+        "function ClientsPage",
         "function ExplorerPage",
         "function ReviewsPage",
         "function WorkbenchPage",
@@ -354,6 +356,89 @@ fn w8b_proof_bundle_is_redacted_and_exportable() {
 }
 
 #[test]
+fn w10_client_credentials_screen_is_redacted_and_isolated() {
+    let app = read_repo_file("web/src/app/App.tsx");
+    let client = read_repo_file("web/src/app/operator-client.ts");
+    let http = read_repo_file("crates/oraclemcp-core/src/http.rs");
+    let dashboard_auth = read_repo_file("crates/oraclemcp-core/src/dashboard_auth.rs");
+    let conformance = read_repo_file("tests/conformance/COVERAGE.md");
+    let e2e_coverage = read_repo_file("scripts/e2e/COVERAGE.md");
+
+    assert_contains_all(
+        "operator client credential routes",
+        &http,
+        &[
+            "operator_client_credentials_screen_lists_rotates_revokes_without_token_leak",
+            "/operator/v1/client-credentials",
+            "/operator/v1/client-credentials/rotate",
+            "/operator/v1/client-credentials/revoke",
+            "bearer_shown_once",
+            "close_http_principal_sessions",
+            "credential_hash",
+            "credential_salt",
+            "client_credentials_unavailable",
+        ],
+    );
+    assert_contains_all(
+        "dashboard client credential tickets",
+        &dashboard_auth,
+        &[
+            "(\"POST\", \"/operator/v1/client-credentials/rotate\")",
+            "(\"POST\", \"/operator/v1/client-credentials/revoke\")",
+        ],
+    );
+    assert_contains_all(
+        "dashboard client credential API",
+        &client,
+        &[
+            "export type ClientCredentialView",
+            "export async function fetchClientCredentials",
+            "operatorGet(\"/operator/v1/client-credentials\")",
+            "export async function rotateClientCredential",
+            "operatorPost(\"/operator/v1/client-credentials/rotate\"",
+            "export async function revokeClientCredential",
+            "operatorPost(\"/operator/v1/client-credentials/revoke\"",
+            "credentials: \"same-origin\"",
+        ],
+    );
+    assert_contains_all(
+        "dashboard client credential UI",
+        &app,
+        &[
+            "label: \"Clients\"",
+            "function ClientsPage",
+            "function ClientCredentialTable",
+            "function ClientCredentialBearerPanel",
+            "fetchClientCredentials",
+            "rotateClientCredential",
+            "revokeClientCredential",
+            "Rotated Bearer",
+            "bearer_shown_once",
+            "last_source_addr",
+        ],
+    );
+    assert_contains_all(
+        "client credential conformance",
+        &conformance,
+        &[
+            "HTTP-AUTH-005",
+            "DASHBOARD-B8-009",
+            "operator_client_credentials_screen_lists_rotates_revokes_without_token_leak",
+            "w10_client_credentials_screen_is_redacted_and_isolated",
+        ],
+    );
+    assert_contains_all(
+        "client credential e2e coverage",
+        &e2e_coverage,
+        &[
+            "W10 client-credentials dashboard",
+            "oraclemcp-epic-060-f4xo.8.12",
+            "w10_client_credentials_screen_is_redacted_and_isolated",
+        ],
+    );
+}
+
+#[test]
 fn skin_conformance_2d_fallback_a11y() {
     let app = read_repo_file("web/src/app/App.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");
@@ -438,6 +523,7 @@ fn b8_dashboard_acceptance_suite_is_accounted() {
             "cp_apply_reclassifies_never_trusts_stored_verdict",
             "skin_conformance_2d_fallback_a11y",
             "audit_proof_bundle_is_redacted_and_exportable",
+            "client_credentials_screen_is_redacted_and_isolated",
         ],
     );
     assert_contains_all(
@@ -451,6 +537,7 @@ fn b8_dashboard_acceptance_suite_is_accounted() {
             "dashboard_workbench_ddl_apply_is_release_gated",
             "cp_apply_reclassifies_never_trusts_stored_verdict",
             "audit_tail_filters_exports_redacted_proof_bundle",
+            "operator_client_credentials_screen_lists_rotates_revokes_without_token_leak",
             "dashboard_csp",
             "frame-ancestors 'none'",
             "x-frame-options",
@@ -489,6 +576,7 @@ fn b8_dashboard_acceptance_suite_is_accounted() {
             "DASHBOARD-B8-006",
             "DASHBOARD-B8-007",
             "DASHBOARD-B8-008",
+            "DASHBOARD-B8-009",
         ],
     );
     assert_contains_all(
@@ -499,6 +587,8 @@ fn b8_dashboard_acceptance_suite_is_accounted() {
             "oraclemcp-epic-060-f4xo.8.20",
             "W8b proof bundle for gated actions",
             "oraclemcp-epic-060-f4xo.8.10",
+            "W10 client-credentials dashboard",
+            "oraclemcp-epic-060-f4xo.8.12",
         ],
     );
 }
