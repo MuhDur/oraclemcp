@@ -3158,6 +3158,69 @@ pub type oraclemcp_db::OraclePool::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OraclePool where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OraclePool where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::OraclePool::vzip(self) -> V
+pub struct oraclemcp_db::OracleRoutineArg
+impl oraclemcp_db::OracleRoutineArg
+pub fn oraclemcp_db::OracleRoutineArg::object_output(alloc::string::String, alloc::string::String, alloc::vec::Vec<u8>, u32, u32) -> Self
+pub fn oraclemcp_db::OracleRoutineArg::object_return_output(alloc::string::String, alloc::string::String, alloc::vec::Vec<u8>, u32, u32) -> Self
+pub fn oraclemcp_db::OracleRoutineArg::output(u8, u8, u32) -> Self
+pub fn oraclemcp_db::OracleRoutineArg::return_output(u8, u8, u32) -> Self
+impl core::clone::Clone for oraclemcp_db::OracleRoutineArg
+pub fn oraclemcp_db::OracleRoutineArg::clone(&self) -> oraclemcp_db::OracleRoutineArg
+impl core::cmp::PartialEq for oraclemcp_db::OracleRoutineArg
+pub fn oraclemcp_db::OracleRoutineArg::eq(&self, &oraclemcp_db::OracleRoutineArg) -> bool
+impl core::fmt::Debug for oraclemcp_db::OracleRoutineArg
+pub fn oraclemcp_db::OracleRoutineArg::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::OracleRoutineArg
+impl core::marker::Freeze for oraclemcp_db::OracleRoutineArg
+impl core::marker::Send for oraclemcp_db::OracleRoutineArg
+impl core::marker::Sync for oraclemcp_db::OracleRoutineArg
+impl core::marker::Unpin for oraclemcp_db::OracleRoutineArg
+impl core::marker::UnsafeUnpin for oraclemcp_db::OracleRoutineArg
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OracleRoutineArg
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OracleRoutineArg
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OracleRoutineArg where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OracleRoutineArg where T: 'a
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OracleRoutineArg where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OracleRoutineArg where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OracleRoutineArg where U: core::convert::From<T>
+pub fn oraclemcp_db::OracleRoutineArg::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OracleRoutineArg where U: core::convert::Into<T>
+pub type oraclemcp_db::OracleRoutineArg::Error = core::convert::Infallible
+pub fn oraclemcp_db::OracleRoutineArg::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OracleRoutineArg where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OracleRoutineArg::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OracleRoutineArg::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::OracleRoutineArg where T: core::clone::Clone
+pub type oraclemcp_db::OracleRoutineArg::Owned = T
+pub fn oraclemcp_db::OracleRoutineArg::clone_into(&self, &mut T)
+pub fn oraclemcp_db::OracleRoutineArg::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OracleRoutineArg
+impl<T> core::any::Any for oraclemcp_db::OracleRoutineArg where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OracleRoutineArg::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OracleRoutineArg where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleRoutineArg::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OracleRoutineArg where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleRoutineArg::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::OracleRoutineArg where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::OracleRoutineArg::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::OracleRoutineArg
+pub fn oraclemcp_db::OracleRoutineArg::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::OracleRoutineArg
+pub type oraclemcp_db::OracleRoutineArg::Init = T
+pub const oraclemcp_db::OracleRoutineArg::ALIGN: usize
+pub unsafe fn oraclemcp_db::OracleRoutineArg::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::OracleRoutineArg::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::OracleRoutineArg::drop(usize)
+pub unsafe fn oraclemcp_db::OracleRoutineArg::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::OracleRoutineArg
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleRoutineArg
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleRoutineArg
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleRoutineArg
+impl<T> typenum::type_operators::Same for oraclemcp_db::OracleRoutineArg
+pub type oraclemcp_db::OracleRoutineArg::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleRoutineArg where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleRoutineArg where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OracleRoutineArg::vzip(self) -> V
 pub struct oraclemcp_db::OracleRow
 pub oraclemcp_db::OracleRow::columns: alloc::vec::Vec<(alloc::string::String, oraclemcp_db::OracleCell)>
 impl oraclemcp_db::OracleRow

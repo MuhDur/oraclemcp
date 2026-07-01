@@ -87,7 +87,7 @@ pub use catalog_extract::{
     CatalogExtractReport, CatalogExtractRequest, CatalogExtractWarning, CatalogRowBatch,
     CatalogRowSetName, CatalogSchemaFilter, catalog_extract_rowsets, extract_catalog_rowsets,
 };
-pub use connection::{DbmsOutput, OracleConnection, RustOracleConnection};
+pub use connection::{DbmsOutput, OracleConnection, OracleRoutineArg, RustOracleConnection};
 pub use doctor::{OracleDriverPosture, detect_oracle_driver, oracle_driver_compiled};
 pub use drcp::{DrcpConfig, SessionPurity};
 pub use error::{DbError, QuarantineOutcome};

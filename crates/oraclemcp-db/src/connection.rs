@@ -82,6 +82,108 @@ pub struct DbmsOutput {
     pub truncated: bool,
 }
 
+/// Adapter-layer PL/SQL routine argument for OUT, IN-OUT, and return values.
+///
+/// This type is intentionally **not** deserializable: routine execution is an
+/// internal adapter capability, not an agent-facing tool argument surface. It
+/// wraps the thin driver's output bind variants privately so callers can name
+/// routine output slots without exposing driver types across the public API.
+#[derive(Clone, PartialEq)]
+pub struct OracleRoutineArg {
+    bind: oracledb::protocol::thin::BindValue,
+}
+
+impl OracleRoutineArg {
+    /// Build a scalar OUT or IN-OUT argument. The pinned driver has no separate
+    /// IN-OUT bind variant; its `Output` bind covers both cases.
+    #[must_use]
+    pub fn output(ora_type_num: u8, csfrm: u8, buffer_size: u32) -> Self {
+        Self {
+            bind: oracledb::protocol::thin::BindValue::Output {
+                ora_type_num,
+                csfrm,
+                buffer_size,
+            },
+        }
+    }
+
+    /// Build a scalar return-value argument.
+    #[must_use]
+    pub fn return_output(ora_type_num: u8, csfrm: u8, buffer_size: u32) -> Self {
+        Self {
+            bind: oracledb::protocol::thin::BindValue::ReturnOutput {
+                ora_type_num,
+                csfrm,
+                buffer_size,
+            },
+        }
+    }
+
+    /// Build an object OUT or IN-OUT argument.
+    ///
+    /// `oid` and `version` are the Oracle object type identity metadata already
+    /// discovered by the adapter before routine execution.
+    #[must_use]
+    pub fn object_output(
+        schema: String,
+        type_name: String,
+        oid: Vec<u8>,
+        version: u32,
+        buffer_size: u32,
+    ) -> Self {
+        Self::object_output_inner(schema, type_name, oid, version, buffer_size, false)
+    }
+
+    /// Build an object return-value argument.
+    ///
+    /// `oid` and `version` are the Oracle object type identity metadata already
+    /// discovered by the adapter before routine execution.
+    #[must_use]
+    pub fn object_return_output(
+        schema: String,
+        type_name: String,
+        oid: Vec<u8>,
+        version: u32,
+        buffer_size: u32,
+    ) -> Self {
+        Self::object_output_inner(schema, type_name, oid, version, buffer_size, true)
+    }
+
+    fn object_output_inner(
+        schema: String,
+        type_name: String,
+        oid: Vec<u8>,
+        version: u32,
+        buffer_size: u32,
+        is_return: bool,
+    ) -> Self {
+        Self {
+            bind: oracledb::protocol::thin::BindValue::ObjectOutput {
+                schema,
+                type_name,
+                oid,
+                version,
+                buffer_size,
+                is_return,
+            },
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn into_driver_bind(self) -> oracledb::protocol::thin::BindValue {
+        self.bind
+    }
+}
+
+impl std::fmt::Debug for OracleRoutineArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OracleRoutineArg")
+            .field("kind", &self.bind.variant_name())
+            .field("value", &"<driver-output-bind>")
+            .finish()
+    }
+}
+
 /// An async, `Cx`-first Oracle connection (B1).
 ///
 /// Every method is `async` and takes an explicit `&Cx` so cancellation and the
@@ -3418,6 +3520,81 @@ mod tests {
     fn duration_to_millis_saturates() {
         assert_eq!(duration_to_millis(Duration::from_millis(42)), 42);
         assert_eq!(duration_to_millis(Duration::from_secs(u64::MAX)), u32::MAX);
+    }
+
+    #[test]
+    fn routine_arg_wraps_driver_output_variants() {
+        match OracleRoutineArg::output(1, 2, 3).into_driver_bind() {
+            oracledb::protocol::thin::BindValue::Output {
+                ora_type_num,
+                csfrm,
+                buffer_size,
+            } => {
+                assert_eq!((ora_type_num, csfrm, buffer_size), (1, 2, 3));
+            }
+            other => panic!("expected Output bind, got {}", other.variant_name()),
+        }
+
+        match OracleRoutineArg::return_output(4, 5, 6).into_driver_bind() {
+            oracledb::protocol::thin::BindValue::ReturnOutput {
+                ora_type_num,
+                csfrm,
+                buffer_size,
+            } => {
+                assert_eq!((ora_type_num, csfrm, buffer_size), (4, 5, 6));
+            }
+            other => panic!("expected ReturnOutput bind, got {}", other.variant_name()),
+        }
+
+        match OracleRoutineArg::object_output(
+            "APP".to_owned(),
+            "OBJ_T".to_owned(),
+            vec![1, 2, 3],
+            7,
+            8,
+        )
+        .into_driver_bind()
+        {
+            oracledb::protocol::thin::BindValue::ObjectOutput {
+                schema,
+                type_name,
+                oid,
+                version,
+                buffer_size,
+                is_return,
+            } => {
+                assert_eq!(schema, "APP");
+                assert_eq!(type_name, "OBJ_T");
+                assert_eq!(oid, vec![1, 2, 3]);
+                assert_eq!((version, buffer_size, is_return), (7, 8, false));
+            }
+            other => panic!("expected ObjectOutput bind, got {}", other.variant_name()),
+        }
+
+        match OracleRoutineArg::object_return_output(
+            "APP".to_owned(),
+            "OBJ_T".to_owned(),
+            vec![4, 5, 6],
+            9,
+            10,
+        )
+        .into_driver_bind()
+        {
+            oracledb::protocol::thin::BindValue::ObjectOutput {
+                schema,
+                type_name,
+                oid,
+                version,
+                buffer_size,
+                is_return,
+            } => {
+                assert_eq!(schema, "APP");
+                assert_eq!(type_name, "OBJ_T");
+                assert_eq!(oid, vec![4, 5, 6]);
+                assert_eq!((version, buffer_size, is_return), (9, 10, true));
+            }
+            other => panic!("expected ObjectOutput bind, got {}", other.variant_name()),
+        }
     }
 
     #[test]

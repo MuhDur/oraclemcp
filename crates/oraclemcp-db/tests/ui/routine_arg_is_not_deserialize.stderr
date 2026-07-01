@@ -1,0 +1,26 @@
+error[E0277]: the trait bound `OracleRoutineArg: serde::Deserialize<'de>` is not satisfied
+  --> tests/ui/routine_arg_is_not_deserialize.rs:13:26
+   |
+13 |     assert_deserialize::<OracleRoutineArg>();
+   |                          ^^^^^^^^^^^^^^^^ the trait `Deserialize<'_>` is not implemented for `OracleRoutineArg`
+   |
+   = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `OracleRoutineArg` type
+   = note: for types from other crates check whether the crate offers a `serde` feature flag
+   = help: the following other types implement trait `Deserialize<'de>`:
+             `&'a Path` implements `Deserialize<'de>`
+             `&'a [u8]` implements `Deserialize<'de>`
+             `&'a str` implements `Deserialize<'de>`
+             `()` implements `Deserialize<'de>`
+             `(T,)` implements `Deserialize<'de>`
+             `(T0, T1)` implements `Deserialize<'de>`
+             `(T0, T1, T2)` implements `Deserialize<'de>`
+             `(T0, T1, T2, T3)` implements `Deserialize<'de>`
+           and $N others
+note: required by a bound in `assert_deserialize`
+  --> tests/ui/routine_arg_is_not_deserialize.rs:8:8
+   |
+ 6 | fn assert_deserialize<'de, T>()
+   |    ------------------ required by a bound in this function
+ 7 | where
+ 8 |     T: Deserialize<'de>,
+   |        ^^^^^^^^^^^^^^^^ required by this bound in `assert_deserialize`
