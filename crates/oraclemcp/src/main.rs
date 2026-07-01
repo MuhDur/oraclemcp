@@ -2130,6 +2130,7 @@ fn run_serve(
                     return ExitCode::from(1);
                 }
             };
+            readiness::notify_systemd_ready();
             emit_serve_status(
                 robot_json,
                 if tls_enabled { "https" } else { "http" },

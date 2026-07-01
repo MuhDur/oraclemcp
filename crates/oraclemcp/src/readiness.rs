@@ -12,6 +12,8 @@
 //! never contends with live tool dispatch. When no live DB is configured (the
 //! stub connection), every `ping` fails and `/readyz` correctly reports 503.
 
+use std::ffi::OsStr;
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -25,6 +27,7 @@ use oraclemcp_db::OracleConnection;
 const PROBE_INTERVAL: Duration = Duration::from_secs(5);
 /// Per-probe ping timeout budget (the ping itself is cancellation-aware).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const SYSTEMD_READY_MESSAGE: &[u8] = b"READY=1\nSTATUS=oraclemcp service ready\n";
 
 /// Shared, lock-free DB-reachability flag the `/readyz` handler reads.
 #[derive(Debug, Default)]
@@ -145,6 +148,60 @@ fn probe_once(connection: &dyn OracleConnection) -> bool {
     })
 }
 
+/// Notify systemd that the HTTP service is accepting work, when launched under
+/// a `Type=notify` unit. The stronger DB health gate remains `/readyz`.
+pub fn notify_systemd_ready() {
+    match notify_systemd_ready_from_env() {
+        Ok(true) => tracing::debug!("oraclemcp-readyz: sent systemd READY=1 notification"),
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "oraclemcp-readyz: failed to send systemd READY=1");
+        }
+    }
+}
+
+fn notify_systemd_ready_from_env() -> io::Result<bool> {
+    let Some(socket) = std::env::var_os("NOTIFY_SOCKET") else {
+        return Ok(false);
+    };
+    if socket.is_empty() {
+        return Ok(false);
+    }
+    notify_systemd_ready_to(&socket)?;
+    Ok(true)
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn notify_systemd_ready_to(socket: &OsStr) -> io::Result<()> {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::net::{SocketAddr, UnixDatagram};
+    use std::path::Path;
+
+    let socket_bytes = socket.as_bytes();
+    let datagram = UnixDatagram::unbound()?;
+    if let Some(abstract_name) = socket_bytes.strip_prefix(b"@") {
+        let addr = SocketAddr::from_abstract_name(abstract_name)?;
+        datagram.connect_addr(&addr)?;
+    } else {
+        datagram.connect(Path::new(socket))?;
+    }
+    let sent = datagram.send(SYSTEMD_READY_MESSAGE)?;
+    if sent == SYSTEMD_READY_MESSAGE.len() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "short write to NOTIFY_SOCKET",
+        ))
+    }
+}
+
+#[cfg(not(all(unix, target_os = "linux")))]
+fn notify_systemd_ready_to(_socket: &OsStr) -> io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +220,36 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         assert!(!probe.is_db_reachable(), "stub DB never reachable");
         pinger.shutdown();
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
+    fn systemd_ready_notify_sends_ready_datagram_to_path_socket() {
+        use std::os::unix::net::UnixDatagram;
+
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "omcp-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        ));
+        let receiver = UnixDatagram::bind(&path).expect("bind notify socket");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("set notify socket timeout");
+
+        notify_systemd_ready_to(path.as_os_str()).expect("notify ready");
+
+        let mut buf = [0u8; 128];
+        let len = receiver.recv(&mut buf).expect("receive READY=1");
+        let payload = std::str::from_utf8(&buf[..len]).expect("utf8 notify payload");
+        assert!(payload.contains("READY=1"), "{payload}");
+        assert!(
+            payload.contains("STATUS=oraclemcp service ready"),
+            "{payload}"
+        );
     }
 }
