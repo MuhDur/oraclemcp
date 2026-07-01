@@ -40,6 +40,7 @@ use crate::admission::{
     DEFAULT_STATEFUL_PER_PROFILE_CAP,
 };
 use crate::capabilities::PROTOCOL_VERSION;
+use crate::config_ops::{ConfigOpsError, ConfigOpsService};
 use crate::dashboard_auth::{
     DASHBOARD_ACTION_TICKET_HEADER, DASHBOARD_CSRF_HEADER, DASHBOARD_PAIR_PATH,
     DASHBOARD_SESSION_PATH, DashboardAuth, DashboardAuthError,
@@ -70,6 +71,7 @@ pub const DEFAULT_STATEFUL_IDLE_TTL_SECONDS: u64 = 900;
 const STATEFUL_IDLE_REAP_INTERVAL: Duration = Duration::from_secs(1);
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const STATEFUL_SESSION_COOKIE: &str = "oraclemcp_mcp_session";
+const CONFIG_DRAFT_MAX_BYTES: usize = 256 * 1024;
 
 /// A cheap, synchronous DB-reachability check for the `/readyz` probe.
 ///
@@ -211,6 +213,8 @@ pub struct HttpTransportConfig {
     /// Optional audit JSONL path used by `/operator/v1/audit-tail`. The route
     /// summarizes records and never exposes bind values or raw identities.
     pub operator_audit_tail_path: Option<PathBuf>,
+    /// Safe config draft/apply backend for `/operator/v1/config/*`.
+    pub config_ops: Option<Arc<ConfigOpsService>>,
     /// In-memory idempotency ledger for `/operator/v1` gated-action routes.
     /// It caches only redacted operator envelopes and never bypasses the
     /// dispatcher's grant or write-intent checks.
@@ -251,6 +255,7 @@ impl std::fmt::Debug for HttpTransportConfig {
                     .as_ref()
                     .map(|_| "<configured>"),
             )
+            .field("config_ops", &self.config_ops.is_some())
             .field("operator_idempotency", &true)
             .field("operator_events", &true)
             .field("observability", &self.observability)
@@ -277,6 +282,7 @@ impl Default for HttpTransportConfig {
             dashboard_auth: None,
             operator_auditor: None,
             operator_audit_tail_path: None,
+            config_ops: None,
             operator_idempotency: Arc::new(OperatorIdempotencyLedger::new()),
             operator_events: Arc::new(OperatorEventStore::new()),
             observability: ObservabilityState::default(),
@@ -2401,6 +2407,74 @@ mod tests {
         dir
     }
 
+    #[derive(Clone)]
+    struct TestConfigReloadApplier {
+        applied: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl crate::config_ops::ConfigReloadApplier for TestConfigReloadApplier {
+        fn apply_config_reload_plan(
+            &self,
+            plan: &oraclemcp_config::ConfigReloadPlan,
+        ) -> crate::config_ops::ConfigReloadApplyReport {
+            let draining = plan.draining_profiles();
+            self.applied.lock().push(draining.clone());
+            crate::config_ops::ConfigReloadApplyReport {
+                status: "applied".to_owned(),
+                hot_reloadable: true,
+                restart_required: Vec::new(),
+                draining_profiles: draining,
+                message: "test reload applied".to_owned(),
+            }
+        }
+    }
+
+    type TestConfigOps = (
+        Arc<crate::config_ops::ConfigOpsService>,
+        PathBuf,
+        Arc<Mutex<Vec<Vec<String>>>>,
+    );
+
+    fn config_ops_for_test(name: &str, current_toml: &str) -> TestConfigOps {
+        let dir = dashboard_test_dir(name);
+        let target = dir.join("profiles.toml");
+        std::fs::write(&target, current_toml).expect("write current config");
+        let store = crate::file_store::FileStore::open(dir.join("state")).expect("file store");
+        let applied = Arc::new(Mutex::new(Vec::new()));
+        let service = crate::config_ops::ConfigOpsService::new(
+            crate::config_ops::ConfigOpsBackend::new(store),
+            target.clone(),
+            Some(Arc::new(TestConfigReloadApplier {
+                applied: Arc::clone(&applied),
+            })),
+        );
+        (Arc::new(service), target, applied)
+    }
+
+    fn operator_json_post(path: &'static str, body: &Value) -> HttpRequest {
+        HttpRequest::new(
+            "POST",
+            path,
+            [
+                ("host", "127.0.0.1"),
+                ("content-type", "application/json"),
+                ("accept", "application/json"),
+            ],
+            body.to_string().into_bytes(),
+        )
+        .with_peer_loopback(true)
+    }
+
+    fn operator_json_get(path: &'static str) -> HttpRequest {
+        HttpRequest::new(
+            "GET",
+            path,
+            [("host", "127.0.0.1"), ("accept", "application/json")],
+            Vec::new(),
+        )
+        .with_peer_loopback(true)
+    }
+
     fn ticket_from_pairing_url(url: &str) -> &str {
         url.split_once("ticket=")
             .map(|(_, token)| token)
@@ -2503,6 +2577,121 @@ mod tests {
                 .expect("action tickets")
                 .iter()
                 .any(|ticket| ticket["path"] == "/operator/v1/actions/preview")
+        );
+        assert!(
+            session_json["action_tickets"]
+                .as_array()
+                .expect("action tickets")
+                .iter()
+                .any(|ticket| ticket["path"] == "/operator/v1/config/apply")
+        );
+    }
+
+    #[test]
+    fn operator_config_draft_apply_and_rollback_are_redacted_and_audited() {
+        let current = r#"
+            [[profiles]]
+            name = "prod"
+            description = "old safe label"
+            connect_string = "prod-old:1521/svc"
+            credential_ref = "env:OLD_SECRET"
+            "#;
+        let draft = r#"
+            [[profiles]]
+            name = "prod"
+            description = "new safe label"
+            connect_string = "prod-new:1521/svc"
+            credential_ref = "env:NEW_SECRET"
+            "#;
+        let (config_ops, target, applied_plans) = config_ops_for_test("config-ops", current);
+        let (auditor, sink) = operator_auditor();
+        let cfg = HttpTransportConfig {
+            operator_auditor: Some(auditor),
+            config_ops: Some(config_ops),
+            ..Default::default()
+        };
+
+        let status = handle_http_request(
+            &test_server(),
+            &cfg,
+            operator_json_get("/operator/v1/config"),
+        );
+        assert_eq!(status.status, 200);
+        let status_json = response_json(&status);
+        let current_sha = status_json["data"]["status"]["current_sha256"]
+            .as_str()
+            .expect("current hash")
+            .to_owned();
+
+        let preview = handle_http_request(
+            &test_server(),
+            &cfg,
+            operator_json_post(
+                "/operator/v1/config/draft",
+                &serde_json::json!({ "draft_toml": draft }),
+            ),
+        );
+        assert_eq!(preview.status, 200);
+        let preview_body = String::from_utf8(preview.body.clone()).expect("preview utf8");
+        for forbidden in [
+            "prod-old:1521/svc",
+            "prod-new:1521/svc",
+            "env:OLD_SECRET",
+            "env:NEW_SECRET",
+        ] {
+            assert!(
+                !preview_body.contains(forbidden),
+                "config preview leaked {forbidden}: {preview_body}"
+            );
+        }
+        let preview_json = response_json(&preview);
+        assert_eq!(
+            preview_json["data"]["preview"]["current_sha256"],
+            serde_json::json!(current_sha)
+        );
+
+        let apply = handle_http_request(
+            &test_server(),
+            &cfg,
+            operator_json_post(
+                "/operator/v1/config/apply",
+                &serde_json::json!({
+                    "draft_toml": draft,
+                    "expected_current_sha256": current_sha,
+                }),
+            ),
+        );
+        assert_eq!(apply.status, 200);
+        assert_eq!(std::fs::read_to_string(&target).expect("target"), draft);
+        let apply_body = String::from_utf8(apply.body.clone()).expect("apply utf8");
+        assert!(!apply_body.contains("env:NEW_SECRET"));
+        let apply_json = response_json(&apply);
+        assert_eq!(
+            apply_json["data"]["outcome"]["reload"]["status"],
+            serde_json::json!("applied")
+        );
+        assert_eq!(
+            applied_plans.lock().last().cloned(),
+            Some(vec!["prod".to_owned()])
+        );
+        let rollback_id = apply_json["data"]["outcome"]["rollback_id"]
+            .as_str()
+            .expect("rollback id")
+            .to_owned();
+
+        let rollback = handle_http_request(
+            &test_server(),
+            &cfg,
+            operator_json_post(
+                "/operator/v1/config/rollback",
+                &serde_json::json!({ "rollback_id": rollback_id }),
+            ),
+        );
+        assert_eq!(rollback.status, 200);
+        assert_eq!(std::fs::read_to_string(&target).expect("target"), current);
+        assert!(
+            sink.records().len() >= 4,
+            "status, preview, apply, and rollback should all be operator-audited"
         );
     }
 
@@ -5444,6 +5633,10 @@ enum OperatorRouteKind {
     ActiveLanes,
     Vsession,
     Events,
+    ConfigStatus,
+    ConfigDraft,
+    ConfigApply,
+    ConfigRollback,
     ActionPreview,
     ActionConfirm,
     ActionExecute,
@@ -5462,6 +5655,10 @@ fn operator_route_kind(path: &str) -> OperatorRouteKind {
         "/operator/v1/active-lanes" => OperatorRouteKind::ActiveLanes,
         "/operator/v1/vsession" => OperatorRouteKind::Vsession,
         "/operator/v1/events" => OperatorRouteKind::Events,
+        "/operator/v1/config" => OperatorRouteKind::ConfigStatus,
+        "/operator/v1/config/draft" => OperatorRouteKind::ConfigDraft,
+        "/operator/v1/config/apply" => OperatorRouteKind::ConfigApply,
+        "/operator/v1/config/rollback" => OperatorRouteKind::ConfigRollback,
         "/operator/v1/actions/preview" => OperatorRouteKind::ActionPreview,
         "/operator/v1/actions/confirm" => OperatorRouteKind::ActionConfirm,
         "/operator/v1/actions/execute" => OperatorRouteKind::ActionExecute,
@@ -5477,6 +5674,9 @@ impl OperatorRouteKind {
             Self::ActionPreview
             | Self::ActionConfirm
             | Self::ActionExecute
+            | Self::ConfigDraft
+            | Self::ConfigApply
+            | Self::ConfigRollback
             | Self::SetLevel
             | Self::SwitchProfile => "POST",
             _ => "GET",
@@ -5523,6 +5723,10 @@ fn handle_operator_api_route(
             operator_json_response(200, &request.path, operator_vsession_data())
         }
         OperatorRouteKind::Events => operator_events_response(config, request, operator_subject),
+        OperatorRouteKind::ConfigStatus
+        | OperatorRouteKind::ConfigDraft
+        | OperatorRouteKind::ConfigApply
+        | OperatorRouteKind::ConfigRollback => handle_operator_config_route(config, request, route),
         OperatorRouteKind::ActionPreview
         | OperatorRouteKind::ActionConfirm
         | OperatorRouteKind::ActionExecute
@@ -5820,6 +6024,219 @@ fn operator_vsession_data() -> Value {
         "reason": "v$session summary requires a configured monitor profile; this provider is not configured",
         "sessions": [],
     })
+}
+
+fn handle_operator_config_route(
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+    route: OperatorRouteKind,
+) -> HttpResponse {
+    let Some(config_ops) = config.config_ops.as_ref() else {
+        return operator_json_response(
+            503,
+            &request.path,
+            json!({
+                "source": "unavailable",
+                "error": "config_ops_unavailable",
+                "message": "operator config workflow is not configured for this transport",
+            }),
+        );
+    };
+
+    match route {
+        OperatorRouteKind::ConfigStatus => match config_ops.status() {
+            Ok(status) => operator_json_response(
+                200,
+                &request.path,
+                json!({
+                    "source": "config_ops",
+                    "status": status,
+                }),
+            ),
+            Err(error) => operator_config_error_response(&request.path, error),
+        },
+        OperatorRouteKind::ConfigDraft => match config_draft_toml_from_request(request)
+            .and_then(|draft| config_ops.stage(&draft).map_err(config_error_value))
+        {
+            Ok(preview) => operator_json_response(
+                200,
+                &request.path,
+                json!({
+                    "source": "config_ops",
+                    "preview": preview,
+                    "redaction": "draft TOML and secret references are not echoed",
+                }),
+            ),
+            Err((status, data)) => operator_json_response(status, &request.path, data),
+        },
+        OperatorRouteKind::ConfigApply => {
+            let payload = match operator_config_json_payload(request) {
+                Ok(payload) => payload,
+                Err((status, data)) => {
+                    return operator_json_response(status, &request.path, data);
+                }
+            };
+            let Some(draft) = payload.get("draft_toml").and_then(Value::as_str) else {
+                return operator_json_response(
+                    400,
+                    &request.path,
+                    missing_config_field("draft_toml"),
+                );
+            };
+            if draft.len() > CONFIG_DRAFT_MAX_BYTES {
+                return operator_json_response(413, &request.path, config_draft_too_large());
+            }
+            let expected = payload
+                .get("expected_current_sha256")
+                .and_then(Value::as_str);
+            match config_ops.apply(draft, expected) {
+                Ok(outcome) => operator_json_response(
+                    200,
+                    &request.path,
+                    json!({
+                        "source": "config_ops",
+                        "outcome": outcome,
+                        "redaction": "draft TOML and secret references are not echoed",
+                    }),
+                ),
+                Err(error) => operator_config_error_response(&request.path, error),
+            }
+        }
+        OperatorRouteKind::ConfigRollback => {
+            let payload = match operator_config_json_payload(request) {
+                Ok(payload) => payload,
+                Err((status, data)) => {
+                    return operator_json_response(status, &request.path, data);
+                }
+            };
+            let Some(rollback_id) = payload.get("rollback_id").and_then(Value::as_str) else {
+                return operator_json_response(
+                    400,
+                    &request.path,
+                    missing_config_field("rollback_id"),
+                );
+            };
+            match config_ops.rollback(rollback_id) {
+                Ok(outcome) => operator_json_response(
+                    200,
+                    &request.path,
+                    json!({
+                        "source": "config_ops",
+                        "outcome": outcome,
+                    }),
+                ),
+                Err(error) => operator_config_error_response(&request.path, error),
+            }
+        }
+        _ => unreachable!("non-config route"),
+    }
+}
+
+fn config_draft_toml_from_request(request: &HttpRequest) -> Result<String, (u16, Value)> {
+    let payload = operator_config_json_payload(request)?;
+    let Some(draft) = payload.get("draft_toml").and_then(Value::as_str) else {
+        return Err((400, missing_config_field("draft_toml")));
+    };
+    if draft.len() > CONFIG_DRAFT_MAX_BYTES {
+        return Err((413, config_draft_too_large()));
+    }
+    Ok(draft.to_owned())
+}
+
+fn operator_config_json_payload(
+    request: &HttpRequest,
+) -> Result<serde_json::Map<String, Value>, (u16, Value)> {
+    if !content_type_is_json(request) {
+        return Err((
+            415,
+            json!({
+                "error": "invalid_config_request",
+                "message": "config workflow requests must use application/json",
+            }),
+        ));
+    }
+    match serde_json::from_slice::<Value>(&request.body) {
+        Ok(Value::Object(payload)) => Ok(payload),
+        Ok(_) | Err(_) => Err((
+            400,
+            json!({
+                "error": "invalid_config_request",
+                "message": "config workflow body must be a JSON object",
+            }),
+        )),
+    }
+}
+
+fn missing_config_field(field: &str) -> Value {
+    json!({
+        "error": "invalid_config_request",
+        "message": format!("config workflow body must include {field}"),
+    })
+}
+
+fn config_draft_too_large() -> Value {
+    json!({
+        "error": "config_draft_too_large",
+        "message": "config draft exceeds the operator API size limit",
+        "max_bytes": CONFIG_DRAFT_MAX_BYTES,
+    })
+}
+
+fn operator_config_error_response(route: &str, error: ConfigOpsError) -> HttpResponse {
+    let (status, data) = config_error_value(error);
+    operator_json_response(status, route, data)
+}
+
+fn config_error_value(error: ConfigOpsError) -> (u16, Value) {
+    match error {
+        ConfigOpsError::CurrentChanged {
+            expected_sha256,
+            actual_sha256,
+        } => (
+            409,
+            json!({
+                "error": "config_current_changed",
+                "message": "config target changed after the draft was previewed",
+                "expected_sha256": expected_sha256,
+                "actual_sha256": actual_sha256,
+            }),
+        ),
+        ConfigOpsError::InvalidTargetPath(reason) => (
+            400,
+            json!({
+                "error": "config_target_invalid",
+                "message": reason,
+            }),
+        ),
+        ConfigOpsError::InvalidUtf8 { .. } => (
+            400,
+            json!({
+                "error": "config_invalid_utf8",
+                "message": "config file is not valid UTF-8",
+            }),
+        ),
+        ConfigOpsError::Config(_) => (
+            400,
+            json!({
+                "error": "config_validation_failed",
+                "message": "draft failed strict config validation",
+            }),
+        ),
+        ConfigOpsError::UnknownRollbackId => (
+            404,
+            json!({
+                "error": "config_rollback_unknown",
+                "message": "rollback id is unknown or already consumed",
+            }),
+        ),
+        ConfigOpsError::FileStore(_) | ConfigOpsError::Io(_) => (
+            500,
+            json!({
+                "error": "config_ops_failed",
+                "message": "config workflow failed before completion",
+            }),
+        ),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

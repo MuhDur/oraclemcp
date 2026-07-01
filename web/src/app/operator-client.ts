@@ -180,6 +180,105 @@ export type OperatorHealthData = {
   };
 };
 
+export type ConfigProfileMetadata = {
+  name: string;
+  description?: string | null;
+  is_default?: boolean;
+  max_level?: string;
+  default_level?: string;
+  protected?: boolean;
+  require_signed_tools?: boolean;
+  read_only_standby?: boolean;
+  mcp_exposed?: boolean;
+  pool?: Record<string, unknown> | null;
+};
+
+export type ConfigOpsStatus = {
+  target_path: string;
+  target_exists: boolean;
+  current_sha256: string;
+  default_profile?: string | null;
+  profiles: ConfigProfileMetadata[];
+};
+
+export type ConfigFieldChange = {
+  path: string;
+  before: unknown;
+  after: unknown;
+};
+
+export type ConfigReloadDecision = {
+  profile: string;
+  action: string;
+  reason: string;
+};
+
+export type ConfigReloadPlan = {
+  hot_reloadable: boolean;
+  restart_required: string[];
+  profiles: ConfigReloadDecision[];
+};
+
+export type ConfigDraftPreview = {
+  target_path: string;
+  backup_path: string;
+  original_existed: boolean;
+  current_sha256: string;
+  draft_sha256: string;
+  redacted_diff: {
+    changes: ConfigFieldChange[];
+  };
+  reload_plan: ConfigReloadPlan;
+};
+
+export type ConfigOpsStatusData = {
+  source: string;
+  status: ConfigOpsStatus;
+};
+
+export type ConfigDraftData = {
+  source: string;
+  preview: ConfigDraftPreview;
+  redaction?: string;
+};
+
+export type ConfigApplyOutcome = {
+  apply: {
+    target_path: string;
+    backup_path: string;
+    original_existed: boolean;
+    backup_sha256: string;
+    applied_sha256: string;
+    reload_plan: ConfigReloadPlan;
+  };
+  reload: {
+    status: string;
+    hot_reloadable: boolean;
+    restart_required: string[];
+    draining_profiles: string[];
+    message: string;
+  };
+  rollback_id: string;
+};
+
+export type ConfigApplyData = {
+  source: string;
+  outcome: ConfigApplyOutcome;
+  redaction?: string;
+};
+
+export type ConfigRollbackData = {
+  source: string;
+  outcome: {
+    rollback: {
+      target_path: string;
+      backup_path: string;
+      restored_sha256: string;
+    };
+    reload: ConfigApplyOutcome["reload"];
+  };
+};
+
 export type ActiveLane = {
   lane_id: string;
   generation: number;
@@ -452,8 +551,41 @@ export async function fetchOperatorHealth(): Promise<OperatorResponse<OperatorHe
   return operatorGet("/operator/v1/health");
 }
 
+export async function fetchOperatorConfig(): Promise<OperatorResponse<ConfigOpsStatusData>> {
+  return operatorGet("/operator/v1/config");
+}
+
 export async function fetchActiveLanes(): Promise<OperatorResponse<ActiveLanesData>> {
   return operatorGet("/operator/v1/active-lanes");
+}
+
+export async function previewConfigDraft(
+  session: DashboardSession,
+  draftToml: string
+): Promise<OperatorResponse<ConfigDraftData>> {
+  return operatorPost("/operator/v1/config/draft", session, {
+    draft_toml: draftToml
+  });
+}
+
+export async function applyConfigDraft(
+  session: DashboardSession,
+  draftToml: string,
+  expectedCurrentSha256: string
+): Promise<OperatorResponse<ConfigApplyData>> {
+  return operatorPost("/operator/v1/config/apply", session, {
+    draft_toml: draftToml,
+    expected_current_sha256: expectedCurrentSha256
+  });
+}
+
+export async function rollbackConfigDraft(
+  session: DashboardSession,
+  rollbackId: string
+): Promise<OperatorResponse<ConfigRollbackData>> {
+  return operatorPost("/operator/v1/config/rollback", session, {
+    rollback_id: rollbackId
+  });
 }
 
 export async function previewWorkbenchSql(

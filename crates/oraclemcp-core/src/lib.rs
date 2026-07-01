@@ -83,8 +83,9 @@ pub use client_credentials::{
     IssuedClientCredential,
 };
 pub use config_ops::{
-    ConfigApplyReport, ConfigDraftPlan, ConfigDraftPreview, ConfigFieldChange, ConfigOpsBackend,
-    ConfigOpsError, ConfigRedactedDiff, ConfigRollbackReport,
+    ConfigApplyOutcome, ConfigApplyReport, ConfigDraftPlan, ConfigDraftPreview, ConfigFieldChange,
+    ConfigOpsBackend, ConfigOpsError, ConfigOpsService, ConfigOpsStatus, ConfigRedactedDiff,
+    ConfigReloadApplier, ConfigReloadApplyReport, ConfigRollbackOutcome, ConfigRollbackReport,
 };
 pub use connect::{SessionContext, build_session_context, profile_to_options, session_level_state};
 pub use custom_tools::{

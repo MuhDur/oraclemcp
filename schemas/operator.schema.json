@@ -6,6 +6,18 @@
     "auditTailResponse": {
       "$ref": "#/$defs/versionedResponse"
     },
+    "configApplyResponse": {
+      "$ref": "#/$defs/versionedResponse"
+    },
+    "configDraftResponse": {
+      "$ref": "#/$defs/versionedResponse"
+    },
+    "configRollbackResponse": {
+      "$ref": "#/$defs/versionedResponse"
+    },
+    "configStatusResponse": {
+      "$ref": "#/$defs/versionedResponse"
+    },
     "gatedActionResponse": {
       "$ref": "#/$defs/versionedResponse"
     },
@@ -221,6 +233,34 @@
       "path": "/operator/v1/events",
       "schema": "operatorEvent",
       "sse": true
+    },
+    {
+      "mcp_tool": null,
+      "method": "GET",
+      "path": "/operator/v1/config",
+      "schema": "configStatusResponse",
+      "sse": false
+    },
+    {
+      "mcp_tool": null,
+      "method": "POST",
+      "path": "/operator/v1/config/draft",
+      "schema": "configDraftResponse",
+      "sse": false
+    },
+    {
+      "mcp_tool": null,
+      "method": "POST",
+      "path": "/operator/v1/config/apply",
+      "schema": "configApplyResponse",
+      "sse": false
+    },
+    {
+      "mcp_tool": null,
+      "method": "POST",
+      "path": "/operator/v1/config/rollback",
+      "schema": "configRollbackResponse",
+      "sse": false
     },
     {
       "mcp_tool": "operator-selected preview tool",

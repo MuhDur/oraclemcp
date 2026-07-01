@@ -5,14 +5,16 @@
 //! timestamped backup, then replaces the target with same-directory
 //! write-temp-and-rename while holding the service lock.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use oraclemcp_config::{ConfigError, ConfigReloadPlan, OracleMcpConfig, ProfileMetadata};
+use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
@@ -52,6 +54,9 @@ pub enum ConfigOpsError {
         /// Hash read immediately before apply.
         actual_sha256: String,
     },
+    /// The requested rollback id is unknown to this process.
+    #[error("unknown config rollback id")]
+    UnknownRollbackId,
 }
 
 /// Redacted before/after field change.
@@ -154,6 +159,93 @@ pub struct ConfigRollbackReport {
     pub backup_path: PathBuf,
     /// SHA-256 now present at the target.
     pub restored_sha256: String,
+}
+
+/// Redacted current-config status for the operator UI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ConfigOpsStatus {
+    /// File managed by this config-ops service.
+    pub target_path: PathBuf,
+    /// Whether the target exists on disk.
+    pub target_exists: bool,
+    /// SHA-256 of the current target bytes.
+    pub current_sha256: String,
+    /// Configured default profile, if any.
+    pub default_profile: Option<String>,
+    /// Redacted, agent-safe profile metadata.
+    pub profiles: Vec<ProfileMetadata>,
+}
+
+/// Result of asking the live service to consume a config reload plan.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ConfigReloadApplyReport {
+    /// `applied`, `restart_required`, or `not_configured`.
+    pub status: String,
+    /// Whether the config transition is hot-reloadable by design.
+    pub hot_reloadable: bool,
+    /// Restart-required reasons for non-hot transitions.
+    pub restart_required: Vec<String>,
+    /// Profiles currently marked draining by the live service.
+    pub draining_profiles: Vec<String>,
+    /// Operator-facing summary.
+    pub message: String,
+}
+
+impl ConfigReloadApplyReport {
+    fn restart_required(plan: &ConfigReloadPlan) -> Self {
+        Self {
+            status: "restart_required".to_owned(),
+            hot_reloadable: false,
+            restart_required: plan
+                .restart_required
+                .iter()
+                .map(|reason| (*reason).to_owned())
+                .collect(),
+            draining_profiles: Vec::new(),
+            message: "config file was updated; restart the service to apply non-profile changes"
+                .to_owned(),
+        }
+    }
+
+    fn not_configured(plan: &ConfigReloadPlan) -> Self {
+        Self {
+            status: "not_configured".to_owned(),
+            hot_reloadable: plan.hot_reloadable,
+            restart_required: plan
+                .restart_required
+                .iter()
+                .map(|reason| (*reason).to_owned())
+                .collect(),
+            draining_profiles: plan.draining_profiles(),
+            message: "config file was updated; no live reload applier is installed".to_owned(),
+        }
+    }
+}
+
+/// Live service hook that consumes validated reload plans.
+pub trait ConfigReloadApplier: Send + Sync {
+    /// Apply a hot-reloadable plan to live process state.
+    fn apply_config_reload_plan(&self, plan: &ConfigReloadPlan) -> ConfigReloadApplyReport;
+}
+
+/// Apply result retained for safe one-click rollback.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ConfigApplyOutcome {
+    /// File write report.
+    pub apply: ConfigApplyReport,
+    /// Live reload/drain report.
+    pub reload: ConfigReloadApplyReport,
+    /// Opaque id accepted by [`ConfigOpsService::rollback`].
+    pub rollback_id: String,
+}
+
+/// Rollback result plus live reload/drain report for the restored config.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ConfigRollbackOutcome {
+    /// File restore report.
+    pub rollback: ConfigRollbackReport,
+    /// Live reload/drain report for the restored config.
+    pub reload: ConfigReloadApplyReport,
 }
 
 /// Shared config-ops backend.
@@ -260,6 +352,138 @@ impl ConfigOpsBackend {
             restored_sha256: oraclemcp_audit::sha256_hex(&backup),
         })
     }
+}
+
+/// Operator-facing config workflow service.
+///
+/// Raw draft TOML is never stored in this service. The browser submits the
+/// draft for preview and again for apply; only redacted previews and apply
+/// reports are serializable.
+pub struct ConfigOpsService {
+    backend: ConfigOpsBackend,
+    target_path: PathBuf,
+    reload_applier: Option<Arc<dyn ConfigReloadApplier>>,
+    rollback_reports: Mutex<BTreeMap<String, ConfigApplyReport>>,
+}
+
+impl ConfigOpsService {
+    /// Build a service for a single operator-controlled target file.
+    #[must_use]
+    pub fn new(
+        backend: ConfigOpsBackend,
+        target_path: PathBuf,
+        reload_applier: Option<Arc<dyn ConfigReloadApplier>>,
+    ) -> Self {
+        Self {
+            backend,
+            target_path,
+            reload_applier,
+            rollback_reports: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Current target status, redacted for UI/protocol use.
+    pub fn status(&self) -> Result<ConfigOpsStatus, ConfigOpsError> {
+        let current_bytes = read_or_empty(&self.target_path)?;
+        let current_toml = bytes_to_toml(&self.target_path, &current_bytes)?;
+        let current = OracleMcpConfig::from_toml_str(current_toml)?;
+        let mut profiles = current.list_profiles();
+        profiles.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(ConfigOpsStatus {
+            target_path: self.target_path.clone(),
+            target_exists: self.target_path.exists(),
+            current_sha256: oraclemcp_audit::sha256_hex(&current_bytes),
+            default_profile: current.default_profile,
+            profiles,
+        })
+    }
+
+    /// Stage a draft and return a redacted preview.
+    pub fn stage(&self, draft_toml: &str) -> Result<ConfigDraftPreview, ConfigOpsError> {
+        self.backend
+            .stage_config_draft(&self.target_path, draft_toml)
+            .map(|plan| plan.preview().clone())
+    }
+
+    /// Apply a draft after validating that the previewed base hash still
+    /// matches, then ask the live service to consume the reload plan.
+    pub fn apply(
+        &self,
+        draft_toml: &str,
+        expected_current_sha256: Option<&str>,
+    ) -> Result<ConfigApplyOutcome, ConfigOpsError> {
+        let plan = self
+            .backend
+            .stage_config_draft(&self.target_path, draft_toml)?;
+        if let Some(expected) = expected_current_sha256
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            && expected != plan.preview().current_sha256
+        {
+            return Err(ConfigOpsError::CurrentChanged {
+                expected_sha256: expected.to_owned(),
+                actual_sha256: plan.preview().current_sha256.clone(),
+            });
+        }
+        let report = self.backend.apply_config_draft(&plan)?;
+        let reload = self.reload_outcome(&report.reload_plan);
+        let rollback_id = rollback_id_for(&report);
+        self.rollback_reports
+            .lock()
+            .insert(rollback_id.clone(), report.clone());
+        Ok(ConfigApplyOutcome {
+            apply: report,
+            reload,
+            rollback_id,
+        })
+    }
+
+    /// Restore a previously applied config from its timestamped backup.
+    pub fn rollback(&self, rollback_id: &str) -> Result<ConfigRollbackOutcome, ConfigOpsError> {
+        let report = self
+            .rollback_reports
+            .lock()
+            .get(rollback_id)
+            .cloned()
+            .ok_or(ConfigOpsError::UnknownRollbackId)?;
+        let reverse_plan = reverse_reload_plan(&report)?;
+        let rollback = self.backend.rollback_applied_config(&report)?;
+        let reload = self.reload_outcome(&reverse_plan);
+        self.rollback_reports.lock().remove(rollback_id);
+        Ok(ConfigRollbackOutcome { rollback, reload })
+    }
+
+    fn reload_outcome(&self, plan: &ConfigReloadPlan) -> ConfigReloadApplyReport {
+        if !plan.hot_reloadable {
+            return ConfigReloadApplyReport::restart_required(plan);
+        }
+        match &self.reload_applier {
+            Some(applier) => applier.apply_config_reload_plan(plan),
+            None => ConfigReloadApplyReport::not_configured(plan),
+        }
+    }
+}
+
+fn reverse_reload_plan(report: &ConfigApplyReport) -> Result<ConfigReloadPlan, ConfigOpsError> {
+    let applied_bytes = read_or_empty(&report.target_path)?;
+    let backup = fs::read(&report.backup_path).map_err(|e| ConfigOpsError::Io(e.to_string()))?;
+    let applied_toml = bytes_to_toml(&report.target_path, &applied_bytes)?;
+    let backup_toml = bytes_to_toml(&report.backup_path, &backup)?;
+    let applied = OracleMcpConfig::from_toml_str(applied_toml)?;
+    let restored = OracleMcpConfig::from_toml_str(backup_toml)?;
+    Ok(ConfigReloadPlan::between(&applied, &restored))
+}
+
+fn rollback_id_for(report: &ConfigApplyReport) -> String {
+    let material = format!(
+        "{}\0{}\0{}\0{}",
+        report.target_path.display(),
+        report.backup_path.display(),
+        report.backup_sha256,
+        report.applied_sha256
+    );
+    let digest = oraclemcp_audit::sha256_hex(material.as_bytes());
+    format!("rollback-{}", &digest[..32])
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

@@ -47,10 +47,11 @@ use oraclemcp_auth::{
     Hs256Verifier, ResourceServerConfig, SecretError, SecretResolver, SystemSecretResolver,
     resolve_secret_with,
 };
-use oraclemcp_config::{AuditConfig, HttpConfig, HttpTlsConfig, OracleMcpConfig};
+use oraclemcp_config::{AuditConfig, CONFIG_PATH_ENV, HttpConfig, HttpTlsConfig, OracleMcpConfig};
 use oraclemcp_core::http::SinglePrincipalGuard;
 use oraclemcp_core::{
-    AdmissionController, CapabilitiesReport, CustomToolCatalog, CustomToolDef, DashboardAuth,
+    AdmissionController, CapabilitiesReport, ConfigOpsBackend, ConfigOpsService,
+    ConfigReloadApplier, ConfigReloadApplyReport, CustomToolCatalog, CustomToolDef, DashboardAuth,
     DispatchFuture, DispatchOutcome, DoctorContext, DoctorLevelCaps, DoctorProfileCaps,
     ExportRegistry, FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext,
     LaneDispatchFactory, LaneRuntime, MCP_PATH, McpSurfaceDetail, McpSurfaceFuture,
@@ -1648,6 +1649,45 @@ struct ResolvedHttpTransportConfig {
     mtls_required: bool,
 }
 
+#[derive(Clone)]
+struct HttpConfigReloadApplier {
+    profile_drain: ProfileDrainState,
+}
+
+impl ConfigReloadApplier for HttpConfigReloadApplier {
+    fn apply_config_reload_plan(
+        &self,
+        plan: &oraclemcp_config::ConfigReloadPlan,
+    ) -> ConfigReloadApplyReport {
+        self.profile_drain.apply_config_reload_plan(plan);
+        let draining_profiles = self.profile_drain.draining_profiles();
+        ConfigReloadApplyReport {
+            status: "applied".to_owned(),
+            hot_reloadable: true,
+            restart_required: Vec::new(),
+            message: if draining_profiles.is_empty() {
+                "hot reload applied; no profiles are draining".to_owned()
+            } else {
+                "hot reload applied; changed profiles are draining".to_owned()
+            },
+            draining_profiles,
+        }
+    }
+}
+
+fn operator_config_target_path() -> PathBuf {
+    if let Some(path) = std::env::var_os(CONFIG_PATH_ENV).map(PathBuf::from) {
+        return path;
+    }
+    if let Some(path) = OracleMcpConfig::default_config_path() {
+        return path;
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".config").join("oraclemcp").join("profiles.toml"))
+        .unwrap_or_else(|| PathBuf::from("profiles.toml"))
+}
+
 fn resolve_http_transport_config(
     cli: &HttpServeArgs,
     level: &SessionLevelState,
@@ -1762,6 +1802,7 @@ fn http_transport_config_from_merged(
             dashboard_auth: Some(Arc::new(DashboardAuth::new(default_dashboard_ticket_dir()))),
             operator_auditor: None,
             operator_audit_tail_path: None,
+            config_ops: None,
             operator_idempotency: Arc::new(oraclemcp_core::OperatorIdempotencyLedger::new()),
             operator_events: Arc::new(oraclemcp_core::OperatorEventStore::new()),
             // Observability is wired in run_serve (HealthState/Metrics/probe).
@@ -2030,6 +2071,7 @@ fn run_serve(
                 resolved_http.transport.single_principal_guard = None;
             }
             let metrics = Arc::new(Metrics::new());
+            let profile_drain = ProfileDrainState::default();
             let built = build_server_with_lifecycle(
                 connections.session,
                 connections.stateless,
@@ -2047,7 +2089,7 @@ fn run_serve(
                     secret_resolver: Arc::clone(&secret_resolver),
                     request_timeout,
                     metrics: Some(Arc::clone(&metrics)),
-                    profile_drain: ProfileDrainState::default(),
+                    profile_drain: profile_drain.clone(),
                 },
             );
             let server = built.server;
@@ -2063,6 +2105,24 @@ fn run_serve(
                     .unwrap_or_else(default_audit_path)
             });
             transport.operator_auditor = auditor;
+            let config_ops_backend = match ConfigOpsBackend::open_default() {
+                Ok(backend) => backend,
+                Err(e) => {
+                    emit_status_error(
+                        robot_json,
+                        "ORACLEMCP_CONFIG_OPS_UNAVAILABLE",
+                        &format!("failed to initialize config workflow backend: {e}"),
+                    );
+                    return ExitCode::from(2);
+                }
+            };
+            transport.config_ops = Some(Arc::new(ConfigOpsService::new(
+                config_ops_backend,
+                operator_config_target_path(),
+                Some(Arc::new(HttpConfigReloadApplier {
+                    profile_drain: profile_drain.clone(),
+                })),
+            )));
 
             // ── D1 observability wiring (health + metrics + graceful drain) ──
             let version = env!("CARGO_PKG_VERSION");

@@ -37,6 +37,7 @@ import {
   RotateCcw,
   Search,
   ShieldCheck,
+  SlidersHorizontal,
   SquarePen,
   Stethoscope,
   Timer,
@@ -65,15 +66,19 @@ import {
   auditProbes,
   doctorProbes,
   executeWorkbenchSql,
+  applyConfigDraft,
   fetchActiveLanes,
   fetchDashboardSession,
+  fetchOperatorConfig,
   fetchOperatorHealth,
   fetchOperatorMetrics,
   fetchProbe,
   overviewProbes,
   pendingProbe,
+  previewConfigDraft,
   previewWorkbenchSql,
   readWorkbenchSql,
+  rollbackConfigDraft,
   type OperatorResponse,
   type ProbeDefinition,
   type ProbeResult,
@@ -91,6 +96,10 @@ import {
   type OperatorHealthData,
   type OperatorCapacityData,
   type OperatorEventEnvelope,
+  type ConfigApplyData,
+  type ConfigDraftPreview,
+  type ConfigFieldChange,
+  type ConfigOpsStatusData,
   sessionsProbes,
   cachedExplorerMetadata,
   clearExplorerMetadataCache,
@@ -127,6 +136,7 @@ const navItems: NavItem[] = [
   { to: "/sessions", label: "Sessions", icon: Database },
   { to: "/health", label: "Health", icon: CheckCircle2 },
   { to: "/capacity", label: "Capacity", icon: Gauge },
+  { to: "/config", label: "Config", icon: SlidersHorizontal },
   { to: "/explorer", label: "Explorer", icon: Search },
   { to: "/workbench", label: "Workbench", icon: SquarePen },
   { to: "/audit", label: "Audit", icon: FileClock },
@@ -161,6 +171,12 @@ const capacityRoute = createRoute({
   component: CapacityPage
 });
 
+const configRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/config",
+  component: ConfigPage
+});
+
 const auditRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/audit",
@@ -191,6 +207,7 @@ const router = createRouter({
     sessionsRoute,
     healthRoute,
     capacityRoute,
+    configRoute,
     explorerRoute,
     workbenchRoute,
     auditRoute,
@@ -716,6 +733,302 @@ function CapacityPage(): React.ReactElement {
         </div>
       </div>
     </PageFrame>
+  );
+}
+
+function ConfigPage(): React.ReactElement {
+  const [draftToml, setDraftToml] = React.useState("");
+  const [preview, setPreview] = React.useState<ConfigDraftPreview | null>(null);
+  const [applyOutcome, setApplyOutcome] = React.useState<ConfigApplyData | null>(null);
+  const [lastError, setLastError] = React.useState<string | null>(null);
+  const session = useQuery({
+    queryKey: ["dashboard-session"],
+    queryFn: fetchDashboardSession,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    retry: 1
+  });
+  const config = useQuery({
+    queryKey: ["operator-config"],
+    queryFn: fetchOperatorConfig,
+    refetchInterval: 10_000
+  });
+  const status = config.data?.data ?? null;
+  const activePreview = preview;
+  const previewMutation = useMutation({
+    mutationFn: async () => {
+      if (!session.data) {
+        throw new Error("dashboard session is not ready");
+      }
+      return previewConfigDraft(session.data, draftToml);
+    },
+    onSuccess: (response) => {
+      setPreview(response.data.preview);
+      setApplyOutcome(null);
+      setLastError(null);
+    },
+    onError: (error) => {
+      setLastError(error instanceof Error ? error.message : "preview failed");
+    }
+  });
+  const applyMutation = useMutation({
+    mutationFn: async () => {
+      if (!session.data) {
+        throw new Error("dashboard session is not ready");
+      }
+      const expected =
+        activePreview?.current_sha256 ?? status?.status.current_sha256 ?? "";
+      return applyConfigDraft(session.data, draftToml, expected);
+    },
+    onSuccess: (response) => {
+      setApplyOutcome(response.data);
+      setPreview(null);
+      setLastError(null);
+      queryClient.invalidateQueries({ queryKey: ["operator-config"] });
+    },
+    onError: (error) => {
+      setLastError(error instanceof Error ? error.message : "apply failed");
+    }
+  });
+  const rollbackMutation = useMutation({
+    mutationFn: async (rollbackId: string) => {
+      if (!session.data) {
+        throw new Error("dashboard session is not ready");
+      }
+      return rollbackConfigDraft(session.data, rollbackId);
+    },
+    onSuccess: () => {
+      setApplyOutcome(null);
+      setPreview(null);
+      setLastError(null);
+      queryClient.invalidateQueries({ queryKey: ["operator-config"] });
+    },
+    onError: (error) => {
+      setLastError(error instanceof Error ? error.message : "rollback failed");
+    }
+  });
+  const canSubmit = draftToml.trim().length > 0 && session.status === "success";
+  const busy =
+    previewMutation.isPending || applyMutation.isPending || rollbackMutation.isPending;
+
+  return (
+    <PageFrame
+      title="Config"
+      eyebrow="Profiles"
+      description="Redacted draft/apply workflow for the service profile file."
+    >
+      <div className="space-y-4">
+        <ConfigStatusPanel data={status} pending={config.isFetching} />
+        <Surface className="overflow-hidden">
+          <PanelHeader
+            icon={SlidersHorizontal}
+            title="Draft"
+            meta={session.status === "success" ? "session ready" : "session pending"}
+            tone={session.status === "success" ? "ok" : "info"}
+          />
+          <div className="space-y-3 p-4">
+            <textarea
+              value={draftToml}
+              onChange={(event) => setDraftToml(event.target.value)}
+              spellCheck={false}
+              className="min-h-72 w-full resize-y rounded-md border border-zinc-300 bg-white p-3 font-mono text-sm leading-6 text-zinc-950 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200"
+              aria-label="Config draft TOML"
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={!canSubmit || busy}
+                onClick={() => previewMutation.mutate()}
+              >
+                <RefreshCcw className="size-4" aria-hidden="true" />
+                Preview
+              </Button>
+              <Button
+                type="button"
+                variant="primary"
+                disabled={!canSubmit || busy}
+                onClick={() => applyMutation.mutate()}
+              >
+                <Play className="size-4" aria-hidden="true" />
+                Apply
+              </Button>
+              {applyOutcome ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={busy}
+                  onClick={() => rollbackMutation.mutate(applyOutcome.outcome.rollback_id)}
+                >
+                  <RotateCcw className="size-4" aria-hidden="true" />
+                  Rollback
+                </Button>
+              ) : null}
+              {lastError ? (
+                <Badge tone="warn" className="max-w-full whitespace-normal break-all">
+                  {lastError}
+                </Badge>
+              ) : null}
+            </div>
+          </div>
+        </Surface>
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
+          <ConfigDiffPanel preview={preview} />
+          <ConfigApplyPanel preview={preview} outcome={applyOutcome} />
+        </div>
+      </div>
+    </PageFrame>
+  );
+}
+
+function ConfigStatusPanel({
+  data,
+  pending
+}: {
+  data: ConfigOpsStatusData | null;
+  pending: boolean;
+}): React.ReactElement {
+  const status = data?.status;
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={Database}
+        title="Current Target"
+        meta={status?.target_exists ? "configured" : "new file"}
+        tone={pending ? "info" : status ? "ok" : "warn"}
+      />
+      <div className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-4">
+        <CapacityFact label="Target" value={status?.target_path ?? "unavailable"} mono />
+        <CapacityFact label="Current SHA" value={shortHash(status?.current_sha256 ?? null)} mono />
+        <CapacityFact label="Default" value={status?.default_profile ?? "none"} mono />
+        <CapacityFact label="Profiles" value={status?.profiles.length ?? 0} />
+      </div>
+    </Surface>
+  );
+}
+
+function ConfigDiffPanel({
+  preview
+}: {
+  preview: ConfigDraftPreview | null;
+}): React.ReactElement {
+  const changes = preview?.redacted_diff.changes ?? [];
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={FileClock}
+        title="Redacted Diff"
+        meta={`${changes.length} changes`}
+        tone={changes.length > 0 ? "info" : "off"}
+      />
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[720px] border-collapse text-left">
+          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+            <tr>
+              <th className="px-4 py-3 font-bold">Path</th>
+              <th className="px-4 py-3 font-bold">Before</th>
+              <th className="px-4 py-3 font-bold">After</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-100">
+            {changes.length === 0 ? (
+              <tr>
+                <td className="px-4 py-4 text-sm text-zinc-500" colSpan={3}>
+                  No preview
+                </td>
+              </tr>
+            ) : (
+              changes.map((change) => <ConfigDiffRow key={change.path} change={change} />)
+            )}
+          </tbody>
+        </table>
+      </div>
+    </Surface>
+  );
+}
+
+function ConfigDiffRow({ change }: { change: ConfigFieldChange }): React.ReactElement {
+  return (
+    <tr className="bg-white">
+      <td className="px-4 py-4 align-top font-mono text-sm font-semibold text-zinc-950">
+        {change.path}
+      </td>
+      <td className="px-4 py-4 align-top font-mono text-xs text-zinc-600">
+        {compactJson(change.before)}
+      </td>
+      <td className="px-4 py-4 align-top font-mono text-xs text-zinc-600">
+        {compactJson(change.after)}
+      </td>
+    </tr>
+  );
+}
+
+function ConfigApplyPanel({
+  preview,
+  outcome
+}: {
+  preview: ConfigDraftPreview | null;
+  outcome: ConfigApplyData | null;
+}): React.ReactElement {
+  const plan = outcome?.outcome.apply.reload_plan ?? preview?.reload_plan ?? null;
+  const currentHash = preview?.current_sha256 ?? outcome?.outcome.apply.backup_sha256 ?? null;
+  const draftHash = preview?.draft_sha256 ?? outcome?.outcome.apply.applied_sha256 ?? null;
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={ShieldCheck}
+        title="Reload Plan"
+        meta={outcome?.outcome.reload.status ?? (plan?.hot_reloadable ? "hot" : "restart")}
+        tone={outcome ? reloadTone(outcome.outcome.reload.status) : plan?.hot_reloadable ? "ok" : "info"}
+      />
+      <div className="space-y-3 p-4">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <CapacityFact label="Current" value={shortHash(currentHash)} mono />
+          <CapacityFact label="Draft" value={shortHash(draftHash)} mono />
+          <CapacityFact label="Backup" value={outcome?.outcome.apply.backup_path ?? "pending"} mono />
+          <CapacityFact label="Rollback" value={outcome?.outcome.rollback_id ?? "pending"} mono />
+        </div>
+        {plan ? (
+          <div className="space-y-2">
+            {plan.restart_required.length > 0 ? (
+              <Badge tone="info">{plan.restart_required.join(", ")}</Badge>
+            ) : (
+              <Badge tone="ok">hot_reloadable</Badge>
+            )}
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[420px] border-collapse text-left">
+                <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+                  <tr>
+                    <th className="px-3 py-2 font-bold">Profile</th>
+                    <th className="px-3 py-2 font-bold">Action</th>
+                    <th className="px-3 py-2 font-bold">Reason</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-100">
+                  {plan.profiles.map((decision) => (
+                    <tr key={decision.profile}>
+                      <td className="px-3 py-3 font-mono text-sm font-semibold text-zinc-950">
+                        {decision.profile}
+                      </td>
+                      <td className="px-3 py-3">
+                        <Badge tone={decision.action === "drain" ? "warn" : "ok"}>
+                          {decision.action}
+                        </Badge>
+                      </td>
+                      <td className="px-3 py-3 font-mono text-xs text-zinc-600">
+                        {decision.reason}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-zinc-500">No preview</p>
+        )}
+      </div>
+    </Surface>
   );
 }
 
@@ -1829,6 +2142,28 @@ function stringField(
 function numberField(record: Record<string, unknown>, key: string): number | null {
   const value = record[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function compactJson(value: unknown): string {
+  if (value === null || typeof value === "undefined") {
+    return "null";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  return JSON.stringify(value);
+}
+
+function reloadTone(status: string): "neutral" | "ok" | "warn" | "off" | "info" {
+  switch (status) {
+    case "applied":
+      return "ok";
+    case "restart_required":
+    case "not_configured":
+      return "info";
+    default:
+      return "neutral";
+  }
 }
 
 function formatMs(ms: number): string {
