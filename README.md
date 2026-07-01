@@ -16,6 +16,59 @@
 
 > _An independent open-source project; not affiliated with Oracle. For Oracle's own MCP servers, see [oracle/mcp](https://github.com/oracle/mcp)._
 
+## Install, service, dashboard
+
+Use the verified release installer first. It downloads the platform archive,
+checks the SHA-256 digest, verifies the cosign blob signature and provenance
+attestation, installs `oraclemcp` plus the short `om` alias, and prints the
+service/client mutation plan before it changes the host.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh \
+  | bash -s -- --dry-run --version <version>
+
+curl -fsSL https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh \
+  | bash -s -- --version <version>
+```
+
+Install the local service only with explicit consent. Keep it on loopback unless
+you deliberately configure remote HTTP, and use service-owned client credentials,
+OAuth, or mTLS for HTTP MCP clients.
+
+```sh
+oraclemcp --json service install --dry-run \
+  --profile db_ro --listen 127.0.0.1:7070 --client-credentials
+oraclemcp service install --yes \
+  --profile db_ro --listen 127.0.0.1:7070 --client-credentials
+oraclemcp --json clients issue --label claude --scope oracle:read
+```
+
+Open the operator dashboard through the paired browser flow:
+
+```sh
+om dashboard
+```
+
+The dashboard uses a one-time loopback pairing ticket, then an HttpOnly
+SameSite=Strict cookie plus CSRF and route-scoped action tickets. Browser
+requests do not supply the database Subject: the server derives the Subject from
+the authenticated transport principal, session, and lane context. Authenticated
+HTTP sessions run on isolated per-principal lanes with their own Oracle
+connection, operating level, grants, cancellation, and audit context. Intentional
+`--allow-no-auth` HTTP development uses one anonymous lane; stdio remains the
+single local client path.
+
+Other release channels are available or generated from the same signed archive
+matrix:
+
+```sh
+npx oraclemcp serve --allow-no-auth     # verifies the release archive before run
+cargo binstall oraclemcp                # uses the GitHub release archive metadata
+brew install MuhDur/oraclemcp/oraclemcp # tap formula is generated at release time
+winget install MuhDur.oraclemcp         # community submission may lag the tag
+docker run -i --rm ghcr.io/muhdur/oraclemcp:<version>
+```
+
 ## Why oraclemcp
 
 - **Fail-closed by construction.** A SELECT that an agent dreams up should never silently turn into a `DELETE`. Each raw statement runs through the hardened classifier. Read tools admit only **proven** read-only `SELECT`/`WITH` and dictionary introspection. Non-read execution is isolated in `oracle_execute`, bounded by profile `max_level`/`default_level`, rollback-by-default for DML, and explicit-confirm-before-commit. Temporary elevation through `oracle_set_session_level` can never exceed the profile ceiling. *Forbidden* constructs (multi-statement batches, string-concat dynamic SQL, an unproven function call inside a SELECT) are rejected before touching the database, with an `OperatingLevelTooLow` or `ForbiddenStatement` envelope and a suggested safe alternative.
@@ -25,42 +78,27 @@
   fail-closed auth defaults, optional OAuth bearer enforcement, and native
   rustls TLS/mTLS.
 
-## Quick start
+## Source builds and runtime requirements
 
 This branch is pinned to **`nightly-2026-05-11`**. The thin-native line has no
 stable MSRV because **asupersync 0.3.4** uses nightly-only language features
 (`#![feature(try_trait_v2)]` and `try_trait_v2_residual`); the pinned `oracledb`
 0.5.1 driver itself is stable-clean. The repository's `rust-toolchain.toml`
-selects the pin for local builds; direct `cargo install` users should use the
-same toolchain.
+selects the pin for local builds. Use the release installer above when you want
+the prebuilt binary; use `cargo install` only when you intentionally want a
+source build.
 
 ```sh
 rustup toolchain install nightly-2026-05-11 --component rustfmt --component clippy
 ```
 
-Live database access is built in through the pure-Rust thin `oracledb` driver:
+Direct source install:
 
 ```sh
 cargo +nightly-2026-05-11 install oraclemcp
 ```
 
-Release builds also ship with a verified installer in this repository:
-
-```sh
-VERSION=<version>
-bash install.sh --dry-run --version "$VERSION"  # print every file/unit/command first
-bash install.sh --version "$VERSION"            # install the verified prebuilt archive
-```
-
-`install.sh` defaults to Linux musl/macOS prebuilt archives, verifies the
-release checksum, cosign blob signature, and cosign blob attestation before
-extracting, installs the `om` alias and shell completions, and never installs a
-service unless you pass `--service` or answer yes to the interactive prompt.
-Pass `--register-client <label>` to issue one scoped HTTP client bearer during
-install; the bearer is printed once and is not written to generated configs.
-The checksum proves transport integrity only; cosign is the authenticity and
-provenance check. Use `--source` only when you intentionally want to compile
-with the pinned Rust toolchain instead of using a release artifact.
+Live database access is built in through the pure-Rust thin `oracledb` driver.
 
 **Runtime requirements** for live database access:
 
