@@ -774,6 +774,7 @@ fn profile_hot_reload_compatible(before: &ConnectionProfile, after: &ConnectionP
         && before.login_statements == after.login_statements
         && before.trusted_session_statements == after.trusted_session_statements
         && before.call_timeout_seconds == after.call_timeout_seconds
+        && before.connect_timeout_seconds == after.connect_timeout_seconds
         && before.sdu == after.sdu
         && before.max_level == after.max_level
         && before.default_level == after.default_level

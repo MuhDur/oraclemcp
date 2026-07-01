@@ -549,6 +549,49 @@ mod driver {
             || opts.ssl_server_cert_dn.is_some()
     }
 
+    fn format_transport_connect_timeout(timeout: Duration) -> String {
+        if timeout.subsec_millis() == 0 {
+            timeout.as_secs().max(1).to_string()
+        } else {
+            format!("{}ms", timeout.as_millis().max(1))
+        }
+    }
+
+    fn connect_string_with_transport_timeout(
+        connect_string: &str,
+        timeout: Option<Duration>,
+    ) -> Result<String, DbError> {
+        let Some(timeout) = timeout.filter(|timeout| !timeout.is_zero()) else {
+            return Ok(connect_string.to_owned());
+        };
+        if connect_string.trim_start().starts_with('(') {
+            return Err(DbError::UnsupportedAuth(
+                "connect_timeout_seconds cannot be injected into a full Oracle Net descriptor; \
+                 set TRANSPORT_CONNECT_TIMEOUT inside the descriptor instead"
+                    .to_owned(),
+            ));
+        }
+        let lower = connect_string.to_ascii_lowercase();
+        if lower.contains("transport_connect_timeout=") || lower.contains("tcp_connect_timeout=") {
+            return Err(DbError::UnsupportedAuth(
+                "connect_timeout_seconds conflicts with an existing transport_connect_timeout \
+                 value in connect_string; configure it in only one place"
+                    .to_owned(),
+            ));
+        }
+        let separator = if connect_string.contains('?') {
+            '&'
+        } else {
+            '?'
+        };
+        Ok(format!(
+            "{}{}transport_connect_timeout={}",
+            connect_string,
+            separator,
+            format_transport_connect_timeout(timeout)
+        ))
+    }
+
     pub(super) fn to_connect_options(
         opts: &OracleConnectOptions,
     ) -> Result<oracledb::ConnectOptions, DbError> {
@@ -627,8 +670,10 @@ mod driver {
             })?,
         };
         let identity = client_identity(opts.session_identity.as_ref())?;
+        let connect_string =
+            connect_string_with_transport_timeout(&opts.connect_string, opts.connect_timeout)?;
         let mut connect_options =
-            oracledb::ConnectOptions::new(&opts.connect_string, user, password, identity);
+            oracledb::ConnectOptions::new(&connect_string, user, password, identity);
         if let Some(token) = iam_token {
             connect_options = connect_options.with_access_token(token.to_owned());
         }
@@ -4093,6 +4138,73 @@ mod tests {
         let connect = driver::to_connect_options(&opts).expect("connect options");
 
         assert_eq!(connect.statement_cache_size(), 20);
+    }
+
+    #[test]
+    fn thin_connect_options_apply_transport_connect_timeout() {
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1".to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            connect_timeout: Some(Duration::from_secs(7)),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("connect options");
+
+        assert_eq!(
+            connect.connect_string(),
+            "localhost:1521/FREEPDB1?transport_connect_timeout=7"
+        );
+    }
+
+    #[test]
+    fn thin_connect_options_append_transport_connect_timeout_to_existing_query() {
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1?expire_time=5".to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            connect_timeout: Some(Duration::from_secs(9)),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("connect options");
+
+        assert_eq!(
+            connect.connect_string(),
+            "localhost:1521/FREEPDB1?expire_time=5&transport_connect_timeout=9"
+        );
+    }
+
+    #[test]
+    fn thin_connect_options_reject_ambiguous_connect_timeout_sources() {
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1?transport_connect_timeout=3".to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            connect_timeout: Some(Duration::from_secs(9)),
+            ..Default::default()
+        };
+
+        let err = driver::to_connect_options(&opts).expect_err("conflicting timeout sources");
+        assert!(matches!(err, DbError::UnsupportedAuth(_)));
+        assert!(err.to_string().contains("conflicts"), "{err}");
+    }
+
+    #[test]
+    fn thin_connect_options_reject_descriptor_connect_timeout_injection() {
+        let opts = OracleConnectOptions {
+            connect_string: "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=svc)))"
+                .to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            connect_timeout: Some(Duration::from_secs(9)),
+            ..Default::default()
+        };
+
+        let err = driver::to_connect_options(&opts).expect_err("descriptor injection refused");
+        assert!(matches!(err, DbError::UnsupportedAuth(_)));
+        assert!(err.to_string().contains("descriptor"), "{err}");
     }
 
     #[test]

@@ -260,9 +260,17 @@ fn profile_to_options_for_level(
         app_context: profile_app_context(profile)?,
         sdu: profile.sdu,
         statement_cache_size: profile.pool.as_ref().map(|pool| pool.statement_cache_size),
+        connect_timeout: resolve_connect_timeout(profile.connect_timeout_seconds),
         call_timeout: resolve_call_timeout(profile.call_timeout_seconds),
         session_statements: profile_session_statements(profile, level_state)?,
     })
+}
+
+fn resolve_connect_timeout(connect_timeout_seconds: Option<u64>) -> Option<Duration> {
+    match connect_timeout_seconds {
+        Some(seconds) if seconds > 0 => Some(Duration::from_secs(seconds)),
+        _ => None,
+    }
 }
 
 /// Resolve the per-round-trip Oracle call timeout from a profile's
@@ -531,6 +539,33 @@ mod tests {
         );
         let ctx0 = build_session_context(&p0, None, None, false).expect("context");
         assert_eq!(ctx0.options.call_timeout, None);
+    }
+
+    #[test]
+    fn connect_timeout_threads_to_driver_options_and_zero_uses_driver_default() {
+        let p = profile(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            connect_timeout_seconds = 7
+            call_timeout_seconds = 45
+            "#,
+        );
+        let ctx = build_session_context(&p, None, None, false).expect("context");
+        assert_eq!(ctx.options.connect_timeout, Some(Duration::from_secs(7)));
+        assert_eq!(ctx.options.call_timeout, Some(Duration::from_secs(45)));
+
+        let p0 = profile(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            connect_timeout_seconds = 0
+            "#,
+        );
+        let ctx0 = build_session_context(&p0, None, None, false).expect("context");
+        assert_eq!(ctx0.options.connect_timeout, None);
     }
 
     #[test]

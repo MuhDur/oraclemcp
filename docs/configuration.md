@@ -103,6 +103,7 @@ field is unset after inheritance.
 | Field | Type | Default | Required | Effect |
 |---|---|---|---|---|
 | `call_timeout_seconds` | integer | `30` | no | Oracle call timeout and total request-budget ceiling, in seconds. Omit for the 30s default. Set `0` only to disable the driver call timeout deliberately; `doctor` warns. Tools exposing `timeout_seconds` can tighten the budget for one call but cannot loosen the profile ceiling. |
+| `connect_timeout_seconds` | integer | driver default `20` | no | Oracle Net transport connect timeout, in seconds. Bounds TCP/TLS/TNS connect and authentication reads before a session exists by passing `transport_connect_timeout` to the thin driver. Omit for the 20s driver default. Set a positive value to override; `0` is ignored by the driver and `doctor` warns. |
 | `sdu` | integer | none | no | Thin Session Data Unit request size. Validated as `512..=65535`; omit to keep the negotiated default. |
 | `login_script` | path | none | no | Path to a login script run on lease acquire. Restricted to allowlisted `ALTER SESSION SET …` parameters. |
 | `login_statements` | array of strings | none | no | Inline login statements (allowlist-validated `ALTER SESSION SET …`). |

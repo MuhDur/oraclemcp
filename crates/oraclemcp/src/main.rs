@@ -451,6 +451,7 @@ struct ResolvedProfile {
     level: SessionLevelState,
     pool_settings: Option<PoolSettings>,
     doctor_caps: DoctorProfileCaps,
+    connect_timeout_seconds: Option<u64>,
 }
 
 fn resolve_profile_options(profile: Option<&str>) -> Result<Option<ResolvedProfile>, DbError> {
@@ -509,6 +510,7 @@ fn resolve_profile_options_with(
         level: ctx.level_state,
         pool_settings: ctx.pool_settings,
         doctor_caps,
+        connect_timeout_seconds: chosen.connect_timeout_seconds,
     }))
 }
 
@@ -2851,6 +2853,7 @@ fn profiles_json(cfg: &OracleMcpConfig) -> serde_json::Value {
                 "description": profile.description,
                 "is_default": profile.is_default,
                 "call_timeout_seconds": profile.call_timeout_seconds,
+                "connect_timeout_seconds": profile.connect_timeout_seconds,
                 "pool": profile.pool,
                 "max_level": profile.max_level,
                 "default_level": profile.default_level,
@@ -2955,6 +2958,7 @@ struct DoctorProfileContext {
     connection_strategy: Option<String>,
     call_timeout_resolved: bool,
     call_timeout: Option<std::time::Duration>,
+    connect_timeout_seconds: Option<u64>,
     proxy_user: bool,
     profile_caps: Option<DoctorProfileCaps>,
     auth_capabilities: Option<DoctorAuthCapabilities>,
@@ -2971,6 +2975,7 @@ impl DoctorProfileContext {
             connection_strategy: None,
             call_timeout_resolved: false,
             call_timeout: None,
+            connect_timeout_seconds: None,
             proxy_user: false,
             profile_caps: None,
             auth_capabilities: None,
@@ -3122,6 +3127,7 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
         ),
         call_timeout_resolved: true,
         call_timeout: doctor_call_timeout(chosen.call_timeout_seconds),
+        connect_timeout_seconds: chosen.connect_timeout_seconds,
         proxy_user: chosen
             .proxy_auth
             .as_ref()
@@ -3167,6 +3173,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
             connection_strategy: None,
             call_timeout_resolved: false,
             call_timeout: None,
+            connect_timeout_seconds: None,
             proxy_user: false,
             profile_caps: None,
             auth_capabilities: None,
@@ -3180,6 +3187,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
             connection_strategy: None,
             call_timeout_resolved: false,
             call_timeout: None,
+            connect_timeout_seconds: None,
             proxy_user: false,
             profile_caps: None,
             auth_capabilities: None,
@@ -3199,6 +3207,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
     let proxy_user = resolved.opts.auth_adapter.proxy_connect_user().is_some();
     let sensitive_values = doctor_sensitive_values(&resolved.opts);
     let call_timeout = resolved.opts.call_timeout;
+    let connect_timeout_seconds = resolved.connect_timeout_seconds;
     let connection_strategy = Some(
         if resolved.pool_settings.is_some() {
             "hybrid_pool"
@@ -3218,6 +3227,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
             connection_strategy,
             call_timeout_resolved: true,
             call_timeout,
+            connect_timeout_seconds,
             proxy_user,
             profile_caps,
             auth_capabilities,
@@ -3231,6 +3241,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
             connection_strategy,
             call_timeout_resolved: true,
             call_timeout,
+            connect_timeout_seconds,
             proxy_user,
             profile_caps,
             auth_capabilities,
@@ -3252,6 +3263,7 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
         connection_strategy: profile_ctx.connection_strategy,
         call_timeout_resolved: profile_ctx.call_timeout_resolved,
         call_timeout: profile_ctx.call_timeout,
+        connect_timeout_seconds: profile_ctx.connect_timeout_seconds,
         proxy_user: profile_ctx.proxy_user,
         online,
         profile_caps: profile_ctx.profile_caps,

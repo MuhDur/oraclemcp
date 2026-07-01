@@ -410,6 +410,9 @@ pub struct DoctorContext<'a> {
     /// Resolved Oracle call timeout. `None` with `call_timeout_resolved = true`
     /// means the profile explicitly disabled the driver call timeout.
     pub call_timeout: Option<Duration>,
+    /// Authored Oracle Net transport connect timeout in seconds. `None` keeps
+    /// the thin driver's 20s descriptor/default timeout.
+    pub connect_timeout_seconds: Option<u64>,
     /// Whether a proxy / least-privilege connect user is configured (A2).
     pub proxy_user: bool,
     /// Whether this run was explicitly allowed to open a live connection.
@@ -1307,24 +1310,57 @@ fn check_call_timeout(ctx: &DoctorContext<'_>) -> CheckResult {
         );
     }
 
-    match ctx.call_timeout {
-        Some(timeout) if !timeout.is_zero() => CheckResult::new(
-            ID,
-            NAME,
-            CheckStatus::Pass,
+    let (call_warns, call_detail, call_fix) = match ctx.call_timeout {
+        Some(timeout) if !timeout.is_zero() => (
+            false,
             format!(
                 "Oracle call timeout is {}s; request budget uses the same profile ceiling",
                 timeout.as_secs()
             ),
+            None,
         ),
-        Some(_) | None => CheckResult::new(
-            ID,
-            NAME,
-            CheckStatus::Warn,
-            "Oracle call timeout is disabled; a driver round trip can wait indefinitely",
-        )
-        .with_fix("remove call_timeout_seconds = 0 or set it to a positive value such as 30"),
-    }
+        Some(_) | None => (
+            true,
+            "Oracle call timeout is disabled; a driver round trip can wait indefinitely".to_owned(),
+            Some("remove call_timeout_seconds = 0 or set it to a positive value such as 30"),
+        ),
+    };
+    let (connect_warns, connect_detail, connect_fix) = match ctx.connect_timeout_seconds {
+        Some(0) => (
+            true,
+            "Oracle connect timeout is configured as 0; the thin driver uses its 20s default instead"
+                .to_owned(),
+            Some("remove connect_timeout_seconds = 0 or set it to a positive value such as 20"),
+        ),
+        Some(seconds) => (
+            false,
+            format!("Oracle connect timeout is {seconds}s"),
+            None,
+        ),
+        None => (
+            false,
+            "Oracle connect timeout uses the thin driver default (20s)".to_owned(),
+            None,
+        ),
+    };
+    let mut result = CheckResult::new(
+        ID,
+        NAME,
+        if call_warns || connect_warns {
+            CheckStatus::Warn
+        } else {
+            CheckStatus::Pass
+        },
+        format!("{call_detail}; {connect_detail}"),
+    );
+    result = match (call_fix, connect_fix) {
+        (Some(_), Some(_)) => result.with_fix(
+            "set call_timeout_seconds and connect_timeout_seconds to positive values, or omit connect_timeout_seconds to keep the 20s driver default",
+        ),
+        (Some(fix), None) | (None, Some(fix)) => result.with_fix(fix),
+        (None, None) => result,
+    };
+    result
 }
 
 #[cfg(test)]
@@ -1478,11 +1514,38 @@ mod tests {
         let ctx = DoctorContext {
             call_timeout_resolved: true,
             call_timeout: Some(Duration::from_secs(30)),
+            connect_timeout_seconds: Some(20),
             ..DoctorContext::default()
         };
         let report = doctor(&ctx);
         let timeout = report.checks.iter().find(|c| c.id == 12).unwrap();
         assert_eq!(timeout.status, CheckStatus::Pass, "{}", timeout.detail);
+        assert!(timeout.detail.contains("connect timeout is 20s"));
+    }
+
+    #[test]
+    fn zero_connect_timeout_warns() {
+        let ctx = DoctorContext {
+            call_timeout_resolved: true,
+            call_timeout: Some(Duration::from_secs(30)),
+            connect_timeout_seconds: Some(0),
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let timeout = report.checks.iter().find(|c| c.id == 12).unwrap();
+        assert_eq!(timeout.status, CheckStatus::Warn, "{}", timeout.detail);
+        assert!(
+            timeout
+                .detail
+                .contains("connect timeout is configured as 0")
+        );
+        assert!(
+            timeout
+                .fix
+                .as_deref()
+                .unwrap_or_default()
+                .contains("connect_timeout_seconds")
+        );
     }
 
     #[test]

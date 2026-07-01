@@ -732,6 +732,9 @@ pub struct OracleConnectOptions {
     pub sdu: Option<u32>,
     /// Optional statement-cache size. `None` keeps the driver's default.
     pub statement_cache_size: Option<u32>,
+    /// Optional Oracle Net transport connect timeout. `None` keeps the
+    /// driver's descriptor/default timeout.
+    pub connect_timeout: Option<Duration>,
     /// Oracle per-round-trip call timeout. Defaults to
     /// [`DEFAULT_ORACLE_CALL_TIMEOUT`]; set `None` only for an explicit
     /// operator-controlled opt-out.
@@ -759,6 +762,7 @@ impl Default for OracleConnectOptions {
             app_context: Vec::new(),
             sdu: None,
             statement_cache_size: None,
+            connect_timeout: None,
             call_timeout: Some(DEFAULT_ORACLE_CALL_TIMEOUT),
             session_statements: Vec::new(),
         }
@@ -795,6 +799,7 @@ impl std::fmt::Debug for OracleConnectOptions {
             .field("app_context_count", &app_context_count)
             .field("sdu", &self.sdu)
             .field("statement_cache_size", &self.statement_cache_size)
+            .field("connect_timeout", &self.connect_timeout)
             .field("call_timeout", &self.call_timeout)
             .field("session_statement_count", &session_statement_count)
             .finish()

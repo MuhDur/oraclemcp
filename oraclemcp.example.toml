@@ -145,6 +145,9 @@ mcp_exposed = true
 # deliberately; doctor warns. Tool calls exposing `timeout_seconds` can tighten
 # it for one call.
 call_timeout_seconds = 30
+# Optional Oracle Net transport connect timeout, in seconds. Default: the thin
+# driver's 20s transport_connect_timeout. Set a positive value to override.
+connect_timeout_seconds = 20
 # Optional thin Session Data Unit request size. Default: none (negotiated).
 # Validated as 512..=65535 bytes.
 sdu = 32768

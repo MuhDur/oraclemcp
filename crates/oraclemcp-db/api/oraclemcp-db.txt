@@ -2763,6 +2763,7 @@ pub oraclemcp_db::OracleConnectOptions::app_context: alloc::vec::Vec<(alloc::str
 pub oraclemcp_db::OracleConnectOptions::auth_adapter: oraclemcp_db::AuthAdapter
 pub oraclemcp_db::OracleConnectOptions::call_timeout: core::option::Option<core::time::Duration>
 pub oraclemcp_db::OracleConnectOptions::connect_string: alloc::string::String
+pub oraclemcp_db::OracleConnectOptions::connect_timeout: core::option::Option<core::time::Duration>
 pub oraclemcp_db::OracleConnectOptions::external_auth: bool
 pub oraclemcp_db::OracleConnectOptions::iam_token: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectOptions::password: core::option::Option<alloc::string::String>

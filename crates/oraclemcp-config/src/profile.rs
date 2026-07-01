@@ -484,6 +484,10 @@ pub struct ConnectionProfile {
     /// Optional per-round-trip Oracle call timeout, in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_timeout_seconds: Option<u64>,
+    /// Optional Oracle Net transport connect timeout, in seconds. This bounds
+    /// TCP/TLS/TNS connect and authentication reads before a session exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_timeout_seconds: Option<u64>,
     /// Optional Session Data Unit request size for the thin driver.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sdu: Option<u32>,
@@ -556,6 +560,7 @@ impl std::fmt::Debug for ConnectionProfile {
             .field("login_statement_count", &login_statement_count)
             .field("trusted_statement_count", &trusted_statement_count)
             .field("call_timeout_seconds", &self.call_timeout_seconds)
+            .field("connect_timeout_seconds", &self.connect_timeout_seconds)
             .field("sdu", &self.sdu)
             .field("max_level", &self.max_level)
             .field("default_level", &self.default_level)
@@ -638,6 +643,7 @@ impl ConnectionProfile {
             login_statements,
             trusted_session_statements,
             call_timeout_seconds,
+            connect_timeout_seconds,
             sdu,
             max_level,
             default_level,
@@ -665,6 +671,7 @@ impl ConnectionProfile {
             description: self.description.clone(),
             is_default: false,
             call_timeout_seconds: self.call_timeout_seconds,
+            connect_timeout_seconds: self.connect_timeout_seconds,
             pool: self.pool.clone().map(Into::into),
             max_level: self.max_level(),
             default_level: self.default_level(),
@@ -735,6 +742,8 @@ pub struct ProfileMetadata {
     pub is_default: bool,
     /// Optional per-round-trip Oracle call timeout, in seconds.
     pub call_timeout_seconds: Option<u64>,
+    /// Optional Oracle Net transport connect timeout, in seconds.
+    pub connect_timeout_seconds: Option<u64>,
     /// Safe local pool metadata when `[profiles.pool]` is configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool: Option<PoolMetadata>,
@@ -816,6 +825,7 @@ mod tests {
             login_statements: None,
             trusted_session_statements: None,
             call_timeout_seconds: None,
+            connect_timeout_seconds: None,
             sdu: None,
             max_level: None,
             default_level: None,
@@ -1233,6 +1243,7 @@ mod tests {
         base.connect_string = Some("host:1521/svc".to_owned());
         base.max_level = Some(OperatingLevel::ReadWrite);
         base.call_timeout_seconds = Some(30);
+        base.connect_timeout_seconds = Some(20);
         let mut child = p("dev");
         child.base = Some("shared".to_owned());
         let mut profiles = vec![base, child];
@@ -1241,6 +1252,7 @@ mod tests {
         assert_eq!(dev.connect_string.as_deref(), Some("host:1521/svc"));
         assert_eq!(dev.max_level(), OperatingLevel::ReadWrite);
         assert_eq!(dev.call_timeout_seconds, Some(30));
+        assert_eq!(dev.connect_timeout_seconds, Some(20));
     }
 
     #[test]
