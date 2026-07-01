@@ -785,7 +785,7 @@ mod tests {
     use crate::tools::ToolRegistry;
     use asupersync::{CancelReason, Cx, PanicPayload};
     use oraclemcp_error::{ErrorClass, ErrorEnvelope};
-    use oraclemcp_guard::OperatingLevel;
+    use oraclemcp_guard::{Classifier, OperatingLevel};
     use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -929,6 +929,39 @@ mod tests {
                     "tool": tool,
                     "call": call,
                     "args": args,
+                }))
+            })
+        }
+    }
+
+    struct WorkbenchDispatch {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ToolDispatch for WorkbenchDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            name: &'a str,
+            args: Value,
+        ) -> DispatchFuture<'a> {
+            let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            let tool = name.to_owned();
+            Box::pin(async move {
+                let classification = args.get("sql").and_then(Value::as_str).map(|sql| {
+                    let decision = Classifier::default().classify(sql);
+                    serde_json::json!({
+                        "required_level": decision.required_level,
+                        "danger": decision.danger,
+                        "reason": decision.reason,
+                    })
+                });
+                Outcome::Ok(serde_json::json!({
+                    "tool": tool,
+                    "call": call,
+                    "args": args,
+                    "classification": classification,
                 }))
             })
         }
@@ -1622,6 +1655,218 @@ mod tests {
             _ => panic!("duplicate after completion must replay"),
         };
         assert_eq!(replay, original);
+    }
+
+    #[test]
+    fn workbench_no_bypass_guard_is_the_feature() {
+        let (auditor, _sink) = operator_auditor();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = server_with_dispatch(Arc::new(WorkbenchDispatch {
+            calls: Arc::clone(&calls),
+        }));
+        let cfg = HttpTransportConfig {
+            operator_auditor: Some(auditor),
+            ..Default::default()
+        };
+        let action_request = |path: &'static str, body: &Value| {
+            HttpRequest::new(
+                "POST",
+                path,
+                [
+                    ("host", "127.0.0.1"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json"),
+                ],
+                body.to_string().into_bytes(),
+            )
+            .with_peer_loopback(true)
+        };
+
+        let write_sql = "UPDATE accounts SET status = 'HOLD' WHERE id = :1";
+        let direct_decision = Classifier::default().classify(write_sql);
+        let preview = handle_http_request(
+            &server,
+            &cfg,
+            action_request(
+                "/operator/v1/actions/preview",
+                &serde_json::json!({
+                    "idempotency_key": "workbench-preview",
+                    "tool": "oracle_preview_sql",
+                    "arguments": { "sql": write_sql }
+                }),
+            ),
+        );
+        assert_eq!(preview.status, 200);
+        let preview_result =
+            response_json(&preview)["data"]["mcp_response"]["result"]["structuredContent"].clone();
+        assert_eq!(
+            preview_result["tool"],
+            serde_json::json!("oracle_preview_sql")
+        );
+        assert_eq!(preview_result["args"]["sql"], serde_json::json!(write_sql));
+        assert_eq!(
+            preview_result["classification"]["required_level"],
+            serde_json::to_value(direct_decision.required_level).expect("level serializes"),
+            "workbench classify must be the same MCP classifier decision agents get"
+        );
+
+        let read_sql = "SELECT * FROM dual";
+        let read = handle_http_request(
+            &server,
+            &cfg,
+            action_request(
+                "/operator/v1/actions/execute",
+                &serde_json::json!({
+                    "idempotency_key": "workbench-read",
+                    "tool": "oracle_query",
+                    "arguments": { "sql": read_sql, "max_rows": 100 }
+                }),
+            ),
+        );
+        assert_eq!(read.status, 200);
+        let read_result =
+            response_json(&read)["data"]["mcp_response"]["result"]["structuredContent"].clone();
+        assert_eq!(read_result["tool"], serde_json::json!("oracle_query"));
+        assert_eq!(read_result["args"]["sql"], serde_json::json!(read_sql));
+
+        let execute = handle_http_request(
+            &server,
+            &cfg,
+            action_request(
+                "/operator/v1/actions/execute",
+                &serde_json::json!({
+                    "idempotency_key": "workbench-commit",
+                    "tool": "oracle_execute",
+                    "arguments": {
+                        "sql": write_sql,
+                        "binds": [42],
+                        "commit": true,
+                        "confirm": "opaque-preview-grant"
+                    }
+                }),
+            ),
+        );
+        assert_eq!(execute.status, 200);
+        let execute_result =
+            response_json(&execute)["data"]["mcp_response"]["result"]["structuredContent"].clone();
+        assert_eq!(execute_result["tool"], serde_json::json!("oracle_execute"));
+        assert_eq!(execute_result["args"]["sql"], serde_json::json!(write_sql));
+        assert_eq!(execute_result["args"]["commit"], serde_json::json!(true));
+        assert_eq!(
+            execute_result["args"]["confirm"],
+            serde_json::json!("opaque-preview-grant")
+        );
+
+        let preview_bypass = handle_http_request(
+            &server,
+            &cfg,
+            action_request(
+                "/operator/v1/actions/preview",
+                &serde_json::json!({
+                    "tool": "oracle_execute",
+                    "arguments": { "sql": write_sql, "commit": true, "confirm": "grant" }
+                }),
+            ),
+        );
+        assert_eq!(preview_bypass.status, 400);
+        assert_eq!(
+            response_json(&preview_bypass)["data"]["error"],
+            serde_json::json!("operator_action_tool_not_allowed")
+        );
+
+        let compatibility_bypass = handle_http_request(
+            &server,
+            &cfg,
+            action_request(
+                "/operator/v1/actions/execute",
+                &serde_json::json!({
+                    "tool": "execute_approved",
+                    "arguments": { "sql": write_sql, "token": "legacy-token" }
+                }),
+            ),
+        );
+        assert_eq!(compatibility_bypass.status, 400);
+        assert_eq!(
+            response_json(&compatibility_bypass)["data"]["error"],
+            serde_json::json!("operator_action_tool_not_allowed")
+        );
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            3,
+            "blocked workbench bypass attempts must not enter dispatch"
+        );
+    }
+
+    #[test]
+    fn dashboard_workbench_ddl_apply_is_release_gated() {
+        let (auditor, _sink) = operator_auditor();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = server_with_dispatch(Arc::new(WorkbenchDispatch {
+            calls: Arc::clone(&calls),
+        }));
+        let dir = dashboard_test_dir("ddl-gate");
+        let auth = Arc::new(DashboardAuth::new(dir.clone()));
+        let cfg = HttpTransportConfig {
+            dashboard_auth: Some(Arc::clone(&auth)),
+            operator_auditor: Some(auditor),
+            ..Default::default()
+        };
+        let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
+            .expect("ticket mints");
+        let login = auth
+            .exchange_ticket(ticket_from_pairing_url(&ticket.url))
+            .expect("login works");
+        let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
+        let view = auth
+            .session_view(Some(cookie_pair))
+            .expect("session view works");
+        let execute_ticket = view
+            .action_tickets
+            .iter()
+            .find(|ticket| ticket.path == "/operator/v1/actions/execute")
+            .expect("execute action ticket")
+            .ticket
+            .clone();
+
+        let response = handle_http_request(
+            &server,
+            &cfg,
+            HttpRequest::new(
+                "POST",
+                "/operator/v1/actions/execute",
+                [
+                    ("host", "127.0.0.1"),
+                    ("origin", "http://127.0.0.1"),
+                    ("sec-fetch-site", "same-origin"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json"),
+                    ("cookie", cookie_pair),
+                    (DASHBOARD_CSRF_HEADER, view.csrf_token.as_str()),
+                    (DASHBOARD_ACTION_TICKET_HEADER, execute_ticket.as_str()),
+                ],
+                serde_json::json!({
+                    "tool": "oracle_execute",
+                    "arguments": {
+                        "sql": "CREATE TABLE dashboard_apply_blocked (id NUMBER)",
+                        "commit": true,
+                        "confirm": "opaque-preview-grant"
+                    }
+                })
+                .to_string()
+                .into_bytes(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(response.status, 403);
+        assert_eq!(
+            response_json(&response)["data"]["error"],
+            serde_json::json!("dashboard_ddl_workbench_disabled")
+        );
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            0,
+            "browser DDL apply must fail before MCP dispatch"
+        );
     }
 
     fn dashboard_test_dir(name: &str) -> PathBuf {
@@ -4043,6 +4288,7 @@ fn handle_http_exchange(
                     Ok(seq) => seq,
                     Err(response) => return HttpExchange::Buffered(response),
                 };
+            let dashboard_browser = config.dashboard_auth.is_some() && principal_key.is_none();
             let response = handle_operator_api_route(
                 server,
                 config,
@@ -4050,14 +4296,13 @@ fn handle_http_exchange(
                 &operator_subject,
                 operator_route,
                 operator_audit_seq,
+                dashboard_browser,
             );
-            return HttpExchange::Buffered(
-                if config.dashboard_auth.is_some() && principal_key.is_none() {
-                    with_dashboard_security_headers(response)
-                } else {
-                    response
-                },
-            );
+            return HttpExchange::Buffered(if dashboard_browser {
+                with_dashboard_security_headers(response)
+            } else {
+                response
+            });
         }
         HttpRoute::NotFound => {
             return HttpExchange::Buffered(
@@ -4458,6 +4703,7 @@ fn handle_operator_api_route(
     operator_subject: &AuditSubject,
     route: OperatorRouteKind,
     operator_audit_seq: u64,
+    dashboard_browser: bool,
 ) -> HttpResponse {
     if route == OperatorRouteKind::NotFound {
         return operator_not_found_response(request);
@@ -4502,6 +4748,7 @@ fn handle_operator_api_route(
             operator_subject,
             route,
             operator_audit_seq,
+            dashboard_browser,
         ),
         OperatorRouteKind::NotFound => unreachable!("handled above"),
     }
@@ -4894,6 +5141,7 @@ fn handle_operator_action_route(
     operator_subject: &AuditSubject,
     route: OperatorRouteKind,
     operator_audit_seq: u64,
+    dashboard_browser: bool,
 ) -> HttpResponse {
     if !content_type_is_json(request) {
         return empty_response(415);
@@ -4921,6 +5169,11 @@ fn handle_operator_action_route(
     };
     if route == OperatorRouteKind::ActionPreview {
         force_preview_mode(tool, &mut arguments);
+    }
+    if dashboard_browser
+        && let Some(data) = dashboard_workbench_release_gate(route, tool, &arguments)
+    {
+        return operator_json_response(403, &request.path, data);
     }
 
     let binding = match operator_action_lane_binding(config, lane_id.as_deref()) {
@@ -5028,6 +5281,34 @@ fn operator_action_target(
         }
         _ => unreachable!("non-action route"),
     }
+}
+
+fn dashboard_workbench_release_gate(
+    route: OperatorRouteKind,
+    tool: &str,
+    arguments: &Value,
+) -> Option<Value> {
+    if !matches!(
+        route,
+        OperatorRouteKind::ActionConfirm | OperatorRouteKind::ActionExecute
+    ) || tool != "oracle_execute"
+    {
+        return None;
+    }
+    let sql = arguments.get("sql").and_then(Value::as_str)?;
+    let decision = oraclemcp_guard::Classifier::default().classify(sql);
+    if decision
+        .required_level
+        .is_some_and(|level| level >= oraclemcp_guard::OperatingLevel::Ddl)
+    {
+        return Some(json!({
+            "error": "dashboard_ddl_workbench_disabled",
+            "message": "browser dashboard DDL/Admin apply is release-gated; preview remains available",
+            "required_level": decision.required_level,
+            "next_step": "use /operator/v1/actions/preview to inspect the statement, or use a non-browser operator path with the normal profile ceiling",
+        }));
+    }
+    None
 }
 
 fn operator_arguments_from_payload(payload: &serde_json::Map<String, Value>) -> Value {
@@ -5142,7 +5423,15 @@ fn allowed_operator_action_tool(route: OperatorRouteKind, tool: &str) -> Option<
         "oracle_create_or_replace",
         "oracle_patch_source",
     ];
+    const CONFIRM: &[&str] = &[
+        "oracle_execute",
+        "oracle_set_session_level",
+        "oracle_compile_object",
+        "oracle_create_or_replace",
+        "oracle_patch_source",
+    ];
     const EXECUTE: &[&str] = &[
+        "oracle_query",
         "oracle_execute",
         "oracle_set_session_level",
         "oracle_compile_object",
@@ -5151,7 +5440,8 @@ fn allowed_operator_action_tool(route: OperatorRouteKind, tool: &str) -> Option<
     ];
     let allowed = match route {
         OperatorRouteKind::ActionPreview => PREVIEW,
-        OperatorRouteKind::ActionConfirm | OperatorRouteKind::ActionExecute => EXECUTE,
+        OperatorRouteKind::ActionConfirm => CONFIRM,
+        OperatorRouteKind::ActionExecute => EXECUTE,
         _ => &[],
     };
     allowed.iter().copied().find(|candidate| *candidate == tool)

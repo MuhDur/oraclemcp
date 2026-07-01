@@ -543,7 +543,12 @@ query cursors return typed `410 operator_stream_cursor_expired`, while stale
 `Last-Event-ID` resumes include an `operator.stream_gap` marker. A cursor from
 another lane is rejected before replay. Gated-action routes forward to the
 existing MCP `tools/call` dispatcher so all SQL guards and confirmation-token
-checks remain in one place. They also carry an in-memory idempotency ledger:
+checks remain in one place. The browser Workbench uses this surface directly:
+`oracle_preview_sql` for classify/preview, `oracle_query` for read execution,
+and `oracle_execute` for guarded DML. Browser-originated DDL/Admin apply is
+release-gated and rejected before MCP dispatch; DDL preview remains available,
+and non-browser operator API callers keep the normal profile-ceiling path. They
+also carry an in-memory idempotency ledger:
 send `Idempotency-Key`, `idempotency_key`, or `request_id` for explicit retry
 identity, or let the server derive a key from the
 route/tool/subject/lane generation/arguments. Same-key retries replay the

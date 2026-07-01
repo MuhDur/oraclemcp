@@ -336,6 +336,13 @@ of browser storage. Dashboard-originated `/operator/v1` POSTs additionally
 require exact same-origin headers, a CSRF token, and a route-scoped action
 ticket.
 
+The dashboard Workbench uses those same action routes. It forwards classify
+requests to `oracle_preview_sql`, read execution to `oracle_query`, and guarded
+DML to `oracle_execute`; it does not expose a PTY, SQLcl shell, or alternate SQL
+path. Browser-originated DDL/Admin apply is release-gated in this line: DDL can
+be previewed, but applying it through the dashboard is rejected before MCP
+dispatch until a future profile-level dashboard DDL opt-in is added.
+
 `[http]` fields: `allowed_hosts`, `allowed_origins` (both default `[]`,
 loopback-only), `json_response` (default `false`), `stateful` (default `false`),
 `stateful_idle_ttl_seconds` (default `900`, `0` disables idle reaping), the

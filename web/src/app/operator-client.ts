@@ -19,6 +19,56 @@ export type ProbeResult = ProbeDefinition & {
   checkedAt: string;
 };
 
+export type DashboardActionTicket = {
+  method: string;
+  path: string;
+  ticket: string;
+};
+
+export type DashboardSession = {
+  csrf_token: string;
+  csrf_header: string;
+  action_ticket_header: string;
+  expires_unix: number;
+  action_tickets: DashboardActionTicket[];
+};
+
+export type OperatorResponse<T extends Record<string, unknown> = Record<string, unknown>> = {
+  protocol_version: "operator.v1";
+  schema_version: number;
+  route: string;
+  redaction_level: "operator_redacted";
+  data: T;
+};
+
+export type WorkbenchMode = "classify_only" | "read_query" | "dml_preview_confirm" | "ddl_plan_confirm";
+
+export type WorkbenchActionData = {
+  status?: string;
+  lane_id?: string | null;
+  mcp_tool?: string;
+  mcp_response?: unknown;
+  idempotency?: Record<string, unknown>;
+  error?: string;
+  message?: string;
+};
+
+export type WorkbenchSqlRequest = {
+  sql: string;
+  mode: WorkbenchMode;
+  laneId?: string;
+};
+
+export type WorkbenchReadRequest = WorkbenchSqlRequest & {
+  maxRows: number;
+};
+
+export type WorkbenchExecuteRequest = WorkbenchSqlRequest & {
+  confirm?: string;
+  commit: boolean;
+  captureDbmsOutput: boolean;
+};
+
 export const overviewProbes: ProbeDefinition[] = [
   {
     id: "healthz",
@@ -138,6 +188,62 @@ export async function fetchProbe(definition: ProbeDefinition): Promise<ProbeResu
   }
 }
 
+export async function fetchDashboardSession(): Promise<DashboardSession> {
+  const response = await fetch("/dashboard/session", {
+    headers: { accept: "application/json" },
+    cache: "no-store",
+    credentials: "same-origin"
+  });
+  return parseDashboardSession(response);
+}
+
+export async function previewWorkbenchSql(
+  session: DashboardSession,
+  request: WorkbenchSqlRequest
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/preview", session, {
+    idempotency_key: requestId("workbench-preview"),
+    lane_id: laneIdValue(request.laneId),
+    tool: "oracle_preview_sql",
+    arguments: {
+      sql: request.sql
+    }
+  });
+}
+
+export async function readWorkbenchSql(
+  session: DashboardSession,
+  request: WorkbenchReadRequest
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId("workbench-read"),
+    lane_id: laneIdValue(request.laneId),
+    tool: "oracle_query",
+    arguments: {
+      sql: request.sql,
+      max_rows: request.maxRows
+    }
+  });
+}
+
+export async function executeWorkbenchSql(
+  session: DashboardSession,
+  request: WorkbenchExecuteRequest
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId(request.commit ? "workbench-commit" : "workbench-rollback-preview"),
+    lane_id: laneIdValue(request.laneId),
+    tool: "oracle_execute",
+    arguments: {
+      sql: request.sql,
+      binds: [],
+      commit: request.commit,
+      confirm: request.confirm?.trim() || undefined,
+      capture_dbms_output: request.captureDbmsOutput
+    }
+  });
+}
+
 function stateForStatus(status: number, ok: boolean): ProbeState {
   if (ok) {
     return "ok";
@@ -187,4 +293,85 @@ async function responseDetail(response: Response): Promise<string> {
     }
   }
   return body.replace(/\s+/g, " ").trim().slice(0, 160);
+}
+
+async function parseDashboardSession(response: Response): Promise<DashboardSession> {
+  const parsed = (await response.json()) as unknown;
+  if (!response.ok) {
+    throw new Error(errorMessage(parsed, response.status));
+  }
+  return parsed as DashboardSession;
+}
+
+async function operatorPost<T extends Record<string, unknown>>(
+  path: string,
+  session: DashboardSession,
+  body: Record<string, unknown>
+): Promise<OperatorResponse<T>> {
+  const actionTicket = actionTicketFor(session, path);
+  const headers: Record<string, string> = {
+    accept: "application/json",
+    "content-type": "application/json"
+  };
+  headers[session.csrf_header] = session.csrf_token;
+  headers[session.action_ticket_header] = actionTicket;
+  const response = await fetch(path, {
+    method: "POST",
+    headers,
+    cache: "no-store",
+    credentials: "same-origin",
+    body: JSON.stringify(body)
+  });
+  const parsed = (await response.json()) as unknown;
+  if (!response.ok) {
+    throw new Error(errorMessage(parsed, response.status));
+  }
+  return parsed as OperatorResponse<T>;
+}
+
+function actionTicketFor(session: DashboardSession, path: string): string {
+  const ticket = session.action_tickets.find(
+    (candidate) => candidate.method === "POST" && candidate.path === path
+  );
+  if (!ticket) {
+    throw new Error(`missing dashboard action ticket for ${path}`);
+  }
+  return ticket.ticket;
+}
+
+function laneIdValue(laneId: string | undefined): string | undefined {
+  const trimmed = laneId?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function requestId(prefix: string): string {
+  if (typeof crypto.randomUUID === "function") {
+    return `${prefix}:${crypto.randomUUID()}`;
+  }
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return `${prefix}:${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function errorMessage(parsed: unknown, status: number): string {
+  if (parsed && typeof parsed === "object") {
+    const object = parsed as Record<string, unknown>;
+    const data = object["data"];
+    if (data && typeof data === "object") {
+      const dataObject = data as Record<string, unknown>;
+      if (typeof dataObject["message"] === "string") {
+        return dataObject["message"];
+      }
+      if (typeof dataObject["error"] === "string") {
+        return dataObject["error"];
+      }
+    }
+    if (typeof object["message"] === "string") {
+      return object["message"];
+    }
+    if (typeof object["error"] === "string") {
+      return object["error"];
+    }
+  }
+  return `HTTP ${status}`;
 }

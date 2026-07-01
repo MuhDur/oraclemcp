@@ -155,6 +155,13 @@ an HttpOnly, SameSite=Strict dashboard cookie. The ticket expires in 60 seconds
 and is single-use; dashboard POSTs also require same-origin headers, a CSRF
 token, and a route-scoped action ticket.
 
+The dashboard Workbench is not a terminal or SQL shell. Classify and preview
+actions forward to `oracle_preview_sql`, read execution forwards to
+`oracle_query`, and guarded DML forwards to `oracle_execute` with the same
+single-use confirmation grant and audit path agents use. Browser-originated
+DDL/Admin apply is release-gated; DDL can be previewed, but applying it requires
+a non-browser operator path until a profile-level dashboard DDL opt-in exists.
+
 The Streamable HTTP transport (`--listen`) fails closed. It starts only when
 OAuth bearer enforcement is configured or `--allow-no-auth` is supplied, and it
 refuses any non-loopback bind unless `ORACLEMCP_HTTP_ALLOW_REMOTE=1` is set.
