@@ -816,11 +816,13 @@ The binary archive matrix is:
 - `oraclemcp-aarch64-apple-darwin.tar.gz`
 - `oraclemcp-x86_64-pc-windows-msvc.zip`
 
-A CycloneDX 1.5 SBOM for the binary crate
+A CycloneDX 1.5 release SBOM
 (`oraclemcp-<version>.cdx.json`, plus its own `.sig`/`.crt`) is attached to the
-release. The GHCR image is built with SLSA `provenance: mode=max` and an
-embedded SBOM, signed with cosign by digest, and carries a pushed provenance
-attestation.
+release. It merges the Rust Cargo graph and the dashboard npm graph from the
+lockfile-built SPA bundle, so the embedded browser UI dependencies are covered
+by the same signed release evidence. The GHCR image is built with SLSA
+`provenance: mode=max` and an embedded SBOM, signed with cosign by digest, and
+carries a pushed provenance attestation.
 
 Set these once; every command below uses them:
 
@@ -909,11 +911,12 @@ docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest.Digest}}'
 
 ### 6.6 Inspect the SBOM
 
-The attached CycloneDX SBOM enumerates every crate (and version) compiled into
-the binary, so you can cross-check it against your own advisory feed:
+The attached CycloneDX SBOM enumerates every Rust crate and dashboard npm
+package compiled or bundled into the release, so you can cross-check it against
+your own advisory feed:
 
 ```sh
-jq -r '.components[] | "\(.name) \(.version)"' "oraclemcp-${VERSION}.cdx.json"
+jq -r '.components[] | "\(.purl // .name) \(.version // "")"' "oraclemcp-${VERSION}.cdx.json"
 ```
 
 The image additionally carries an SBOM attestation you can pull directly:

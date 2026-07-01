@@ -317,11 +317,12 @@ jobs:
 
   release:
     name: publish GitHub release
-    needs: [build, publish-crates]
+    needs: [build, publish-crates, web-build]
     if: >-
       ${{
         always() &&
         startsWith(github.ref, 'refs/tags/') &&
+        needs.web-build.result == 'success' &&
         needs.build.result == 'success' &&
         (contains(github.ref_name, '-') || needs.publish-crates.result == 'success')
       }}
@@ -343,28 +344,38 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
+          pattern: oraclemcp-*-*-*
           merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
       - name: Resolve version
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       # ---- Supply-chain integrity (bead D3) ----
-      # Generate a CycloneDX SBOM for the workspace so operators (and a third
-      # party) can enumerate exactly what each release artifact was built from.
+      # Generate a merged CycloneDX SBOM for the Rust workspace and embedded
+      # dashboard SPA so operators (and a third party) can enumerate exactly
+      # what each release artifact was built from.
       - name: Install CycloneDX SBOM generator
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-cyclonedx@0.5.9
-      - name: Generate CycloneDX SBOM
+      - name: Generate Rust CycloneDX SBOM
         run: |
           # Emit one CycloneDX 1.5 JSON SBOM per workspace crate (each adjacent
           # to its Cargo.toml as bom.json), enumerating all transitive deps.
           cargo cyclonedx --all --format json --spec-version 1.5 \
             --override-filename bom
           mkdir -p artifacts
-          # The oraclemcp binary crate's SBOM is what operators verify against
-          # the released binaries; publish it under a release-stable name.
-          cp crates/oraclemcp/bom.json \
+      - name: Merge Rust and dashboard SBOMs
+        run: |
+          bash scripts/merge_release_sbom.sh \
+            crates/oraclemcp/bom.json \
+            web/dist/oraclemcp-dashboard.cyclonedx.json \
+            "artifacts/oraclemcp-${{ steps.version.outputs.version }}.cdx.json"
+          bash scripts/release_sbom_check.sh --artifact \
             "artifacts/oraclemcp-${{ steps.version.outputs.version }}.cdx.json"
 
       # Attach an SLSA-style build provenance attestation to every release

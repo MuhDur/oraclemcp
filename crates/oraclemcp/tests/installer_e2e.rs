@@ -178,6 +178,195 @@ fn installer_ci_runs_built_artifact_and_windows_pssa_gates() {
 }
 
 #[test]
+fn release_sbom_workflow_merges_dashboard_and_rust_sboms() {
+    let root = repo_root();
+    let workflow = fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect("read release workflow");
+    let preflight =
+        fs::read_to_string(root.join("scripts/release_preflight.sh")).expect("read preflight");
+    let release_acceptance =
+        fs::read_to_string(root.join("scripts/release_acceptance_ci_suite.sh"))
+            .expect("read release acceptance");
+    let operations = fs::read_to_string(root.join("docs/operations.md")).expect("read operations");
+
+    for needle in [
+        "pattern: oraclemcp-*-*-*",
+        "name: oraclemcp-dashboard-dist",
+        "path: web/dist",
+        "bash scripts/merge_release_sbom.sh",
+        "web/dist/oraclemcp-dashboard.cyclonedx.json",
+        "bash scripts/release_sbom_check.sh --artifact",
+        "artifacts/oraclemcp-${{ steps.version.outputs.version }}.cdx.json",
+        "artifacts/*.cdx.json.attestation.sigstore.json",
+    ] {
+        assert!(
+            workflow.contains(needle),
+            "release workflow must contain SBOM marker {needle}"
+        );
+    }
+    assert!(
+        preflight.contains("bash \"$ROOT/scripts/release_sbom_check.sh\" --source"),
+        "release preflight must check merged SBOM source wiring"
+    );
+    assert!(
+        release_acceptance.contains("scripts/release_sbom_check.sh --source"),
+        "release acceptance must schedule the SBOM source gate"
+    );
+    assert!(
+        fs::read_to_string(root.join("scripts/release_sbom_check.sh"))
+            .expect("read SBOM check script")
+            .contains("npm sbom --sbom-format cyclonedx --json"),
+        "release SBOM source gate must regenerate the dashboard SBOM from the lockfile"
+    );
+    assert!(
+        operations.contains("Rust Cargo graph and the dashboard npm graph"),
+        "operations docs must describe the merged release SBOM"
+    );
+}
+
+#[test]
+fn release_sbom_merge_script_includes_rust_and_dashboard_components() {
+    let root = repo_root();
+    let fixture_dir = root.join("target/release-sbom-fixtures");
+    fs::create_dir_all(&fixture_dir).expect("create SBOM fixture dir");
+
+    let web_package: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("web/package.json")).expect("read web package"),
+    )
+    .expect("web package parses");
+    let dashboard_version = web_package["version"]
+        .as_str()
+        .expect("dashboard package version");
+    let dashboard_ref = format!("@oraclemcp/dashboard@{dashboard_version}");
+    let dashboard_purl = format!("pkg:npm/%40oraclemcp/dashboard@{dashboard_version}");
+
+    let rust_sbom = fixture_dir.join("rust.cdx.json");
+    let dashboard_sbom = fixture_dir.join("dashboard.cdx.json");
+    let merged_sbom = fixture_dir.join("merged.cdx.json");
+    let rust_doc = serde_json::json!({
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "version": 1,
+        "metadata": {
+            "component": {
+                "type": "application",
+                "name": "oraclemcp",
+                "version": "0.6.0-test",
+                "bom-ref": "pkg:cargo/oraclemcp@0.6.0-test"
+            },
+            "tools": [
+                {"vendor": "CycloneDX", "name": "cargo-cyclonedx", "version": "0.5.9"}
+            ]
+        },
+        "components": [
+            {
+                "type": "library",
+                "name": "serde",
+                "version": "1.0.0",
+                "bom-ref": "pkg:cargo/serde@1.0.0",
+                "purl": "pkg:cargo/serde@1.0.0"
+            }
+        ],
+        "dependencies": [
+            {"ref": "pkg:cargo/oraclemcp@0.6.0-test", "dependsOn": ["pkg:cargo/serde@1.0.0"]}
+        ]
+    });
+    let dashboard_doc = serde_json::json!({
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "version": 1,
+        "metadata": {
+            "component": {
+                "type": "library",
+                "name": "web",
+                "version": dashboard_version,
+                "bom-ref": dashboard_ref,
+                "purl": dashboard_purl
+            },
+            "tools": [
+                {"vendor": "npm", "name": "cli", "version": "10.9.4"}
+            ]
+        },
+        "components": [
+            {
+                "type": "library",
+                "name": "react",
+                "version": "19.2.7",
+                "bom-ref": "react@19.2.7",
+                "purl": "pkg:npm/react@19.2.7"
+            }
+        ],
+        "dependencies": [
+            {"ref": dashboard_ref, "dependsOn": ["react@19.2.7"]}
+        ]
+    });
+    fs::write(
+        &rust_sbom,
+        serde_json::to_vec_pretty(&rust_doc).expect("serialize Rust SBOM"),
+    )
+    .expect("write Rust SBOM fixture");
+    fs::write(
+        &dashboard_sbom,
+        serde_json::to_vec_pretty(&dashboard_doc).expect("serialize dashboard SBOM"),
+    )
+    .expect("write dashboard SBOM fixture");
+
+    let output = Command::new("bash")
+        .arg(root.join("scripts/merge_release_sbom.sh"))
+        .arg(&rust_sbom)
+        .arg(&dashboard_sbom)
+        .arg(&merged_sbom)
+        .current_dir(&root)
+        .output()
+        .expect("run SBOM merge script");
+    assert!(
+        output.status.success(),
+        "SBOM merge failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let merged: Value =
+        serde_json::from_str(&fs::read_to_string(&merged_sbom).expect("read merged SBOM"))
+            .expect("merged SBOM parses");
+    let dashboard_root_ref = format!("npm:{dashboard_ref}");
+    let root_dep = merged["dependencies"]
+        .as_array()
+        .expect("dependencies array")
+        .iter()
+        .find(|dep| dep["ref"] == "pkg:cargo/oraclemcp@0.6.0-test")
+        .expect("root dependency entry");
+
+    assert_eq!(merged["bomFormat"], "CycloneDX");
+    assert!(
+        merged["components"]
+            .as_array()
+            .expect("components array")
+            .iter()
+            .any(|component| component["purl"] == dashboard_purl
+                && component["bom-ref"] == dashboard_root_ref),
+        "merged SBOM must contain dashboard root component"
+    );
+    assert!(
+        merged["components"]
+            .as_array()
+            .expect("components array")
+            .iter()
+            .any(|component| component["purl"] == "pkg:npm/react@19.2.7"
+                && component["bom-ref"] == "npm:react@19.2.7"),
+        "merged SBOM must prefix npm dependency bom-refs"
+    );
+    assert!(
+        root_dep["dependsOn"]
+            .as_array()
+            .expect("root dependsOn")
+            .iter()
+            .any(|dep| dep == &dashboard_root_ref),
+        "Rust release SBOM root must depend on the dashboard component"
+    );
+}
+
+#[test]
 fn npx_verifies_binary_no_postinstall_side_effects() {
     let root = repo_root();
     let package_json = root.join("npm/oraclemcp/package.json");
