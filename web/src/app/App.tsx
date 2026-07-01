@@ -88,6 +88,7 @@ import {
   type ExplorerObjectRef,
   type LaneRequestDuration,
   type MetricsSnapshot,
+  type OperatorHealthData,
   type OperatorCapacityData,
   type OperatorEventEnvelope,
   sessionsProbes,
@@ -124,6 +125,7 @@ type NavItem = {
 const navItems: NavItem[] = [
   { to: "/", label: "Overview", icon: Activity },
   { to: "/sessions", label: "Sessions", icon: Database },
+  { to: "/health", label: "Health", icon: CheckCircle2 },
   { to: "/capacity", label: "Capacity", icon: Gauge },
   { to: "/explorer", label: "Explorer", icon: Search },
   { to: "/workbench", label: "Workbench", icon: SquarePen },
@@ -145,6 +147,12 @@ const sessionsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/sessions",
   component: SessionsPage
+});
+
+const healthRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/health",
+  component: HealthPage
 });
 
 const capacityRoute = createRoute({
@@ -181,6 +189,7 @@ const router = createRouter({
   routeTree: rootRoute.addChildren([
     overviewRoute,
     sessionsRoute,
+    healthRoute,
     capacityRoute,
     explorerRoute,
     workbenchRoute,
@@ -385,6 +394,290 @@ function SessionsPage(): React.ReactElement {
     >
       <ProbeDashboard probes={sessionsProbes} compact />
     </PageFrame>
+  );
+}
+
+function HealthPage(): React.ReactElement {
+  const health = useQuery({
+    queryKey: ["operator-health"],
+    queryFn: fetchOperatorHealth,
+    refetchInterval: 5_000
+  });
+  const metrics = useQuery({
+    queryKey: ["operator-metrics"],
+    queryFn: fetchOperatorMetrics,
+    refetchInterval: 5_000
+  });
+  const session = useQuery({
+    queryKey: ["dashboard-session"],
+    queryFn: fetchDashboardSession,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    retry: 1
+  });
+  const connection = useQuery({
+    queryKey: ["health", "connection"],
+    queryFn: async () => {
+      if (!session.data) {
+        throw new Error("dashboard session is not ready");
+      }
+      return fetchExplorerConnection(session.data);
+    },
+    enabled: session.status === "success",
+    refetchInterval: 10_000,
+    retry: 1
+  });
+  const model = connectionHealthModel(
+    health.data?.data ?? null,
+    metrics.data?.data.snapshot ?? null,
+    connection.data,
+    connection.error instanceof Error
+      ? connection.error.message
+      : session.error instanceof Error
+        ? session.error.message
+        : null
+  );
+  const pending = health.isFetching || metrics.isFetching || connection.isFetching;
+
+  return (
+    <PageFrame
+      title="Health"
+      eyebrow="Connection"
+      description="Process readiness, pool latency, and redacted live database posture."
+    >
+      <div className="space-y-4">
+        <HealthStatusTiles model={model} pending={pending} />
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+          <ServiceReadinessPanel model={model} />
+          <DbNativeStatusPanel model={model} />
+        </div>
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
+          <PoolLatencyPanel model={model} />
+          <HealthSourcePanel rows={model.sources} />
+        </div>
+      </div>
+    </PageFrame>
+  );
+}
+
+type ConnectionHealthSourceRow = {
+  key: string;
+  source: string;
+  status: string;
+  detail: string;
+};
+
+type ConnectionNativeInfo = {
+  source: string;
+  connected: boolean;
+  activeProfile: string;
+  strategy: string;
+  serverVersion: string;
+  databaseRole: string;
+  openMode: string;
+  standby: string;
+  writePosture: string;
+  readOnlyReason: string;
+  poolOpenConnections: number | null;
+  error: string;
+};
+
+type ConnectionHealthUiModel = {
+  readiness: {
+    liveness: string;
+    readiness: string;
+    live: boolean;
+    ready: boolean;
+    dbReachable: boolean;
+    draining: boolean;
+  };
+  pool: {
+    active: number;
+    waitMeanMs: number;
+    waitMaxMs: number;
+    queryMeanMs: number;
+    queryMaxMs: number;
+  };
+  db: ConnectionNativeInfo;
+  sources: ConnectionHealthSourceRow[];
+};
+
+function HealthStatusTiles({
+  model,
+  pending
+}: {
+  model: ConnectionHealthUiModel;
+  pending: boolean;
+}): React.ReactElement {
+  return (
+    <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4" aria-label="connection health">
+      <HealthStatusTile
+        icon={Activity}
+        label="Liveness"
+        value={model.readiness.liveness}
+        meta={model.readiness.live ? "live" : "not live"}
+        tone={model.readiness.live ? "ok" : "warn"}
+        pending={pending}
+      />
+      <HealthStatusTile
+        icon={CheckCircle2}
+        label="Readiness"
+        value={model.readiness.readiness}
+        meta={model.readiness.ready ? "ready" : "unavailable"}
+        tone={model.readiness.ready ? "ok" : "warn"}
+        pending={pending}
+      />
+      <HealthStatusTile
+        icon={Database}
+        label="DB native"
+        value={model.db.connected ? "connected" : "degraded"}
+        meta={model.db.source}
+        tone={model.db.connected ? "ok" : "info"}
+        pending={pending}
+      />
+      <HealthStatusTile
+        icon={ShieldCheck}
+        label="Write posture"
+        value={model.db.writePosture}
+        meta={model.db.openMode}
+        tone={model.db.writePosture === "database_read_only" ? "ok" : "info"}
+        pending={pending}
+      />
+    </section>
+  );
+}
+
+function ServiceReadinessPanel({ model }: { model: ConnectionHealthUiModel }): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={Activity}
+        title="Service Readiness"
+        meta={model.readiness.ready ? "ready" : "unavailable"}
+        tone={model.readiness.ready ? "ok" : "warn"}
+      />
+      <div className="grid gap-3 p-4 sm:grid-cols-2">
+        <CapacityFact label="Liveness" value={model.readiness.liveness} mono />
+        <CapacityFact label="Readiness" value={model.readiness.readiness} mono />
+        <CapacityFact label="DB reachable" value={model.readiness.dbReachable ? "true" : "false"} mono />
+        <CapacityFact label="Draining" value={model.readiness.draining ? "true" : "false"} mono />
+      </div>
+    </Surface>
+  );
+}
+
+function DbNativeStatusPanel({ model }: { model: ConnectionHealthUiModel }): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={Database}
+        title="DB Native Status"
+        meta={model.db.connected ? model.db.activeProfile : model.db.source}
+        tone={model.db.connected ? "ok" : "info"}
+      />
+      <div className="grid gap-3 p-4 sm:grid-cols-3">
+        <CapacityFact label="Role" value={model.db.databaseRole} mono />
+        <CapacityFact label="Open mode" value={model.db.openMode} mono />
+        <CapacityFact label="Standby" value={model.db.standby} mono />
+        <CapacityFact label="Strategy" value={model.db.strategy} mono />
+        <CapacityFact label="Pool open" value={model.db.poolOpenConnections ?? "unavailable"} />
+        <CapacityFact label="Server" value={model.db.serverVersion} mono />
+        <CapacityFact label="Profile" value={model.db.activeProfile} mono />
+        <CapacityFact label="Read-only" value={model.db.readOnlyReason} mono />
+        <CapacityFact label="Error" value={model.db.error} mono />
+      </div>
+    </Surface>
+  );
+}
+
+function PoolLatencyPanel({ model }: { model: ConnectionHealthUiModel }): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={Timer}
+        title="Pool And Latency"
+        meta={`${formatNumber(model.pool.active)} active`}
+        tone={model.pool.waitMeanMs > 500 || model.pool.queryMeanMs > 500 ? "warn" : "ok"}
+      />
+      <div className="grid gap-3 p-4 sm:grid-cols-2">
+        <CapacityFact label="Pool active" value={model.pool.active} />
+        <CapacityFact label="Pool wait avg" value={`${formatNumber(model.pool.waitMeanMs)}ms`} mono />
+        <CapacityFact label="Pool wait max" value={`${formatNumber(model.pool.waitMaxMs)}ms`} mono />
+        <CapacityFact label="Query avg" value={`${formatNumber(model.pool.queryMeanMs)}ms`} mono />
+        <CapacityFact label="Query max" value={`${formatNumber(model.pool.queryMaxMs)}ms`} mono />
+      </div>
+    </Surface>
+  );
+}
+
+function HealthSourcePanel({
+  rows
+}: {
+  rows: ConnectionHealthSourceRow[];
+}): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={Gauge}
+        title="Health Sources"
+        meta={`${rows.length} sources`}
+        tone={rows.some((row) => row.status === "monitoring_unavailable") ? "info" : "ok"}
+      />
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[680px] border-collapse text-left">
+          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+            <tr>
+              <th className="px-4 py-3 font-bold">Source</th>
+              <th className="px-4 py-3 font-bold">Status</th>
+              <th className="px-4 py-3 font-bold">Detail</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-100">
+            {rows.map((row) => (
+              <tr key={row.key} className="bg-white">
+                <td className="px-4 py-4 align-top font-mono text-sm font-semibold text-zinc-950">
+                  {row.source}
+                </td>
+                <td className="px-4 py-4 align-top">
+                  <Badge tone={limitStatusTone(row.status)}>{row.status}</Badge>
+                </td>
+                <td className="px-4 py-4 align-top text-sm text-zinc-600">{row.detail}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Surface>
+  );
+}
+
+function HealthStatusTile({
+  icon: Icon,
+  label,
+  value,
+  meta,
+  tone,
+  pending
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  value: string;
+  meta: string;
+  tone: "neutral" | "ok" | "warn" | "off" | "info";
+  pending: boolean;
+}): React.ReactElement {
+  return (
+    <Surface className="min-h-32 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex size-9 items-center justify-center rounded-md border border-zinc-200 bg-zinc-50 text-zinc-700">
+          <Icon className="size-4" aria-hidden="true" />
+        </div>
+        <Badge tone={pending ? "info" : tone}>{pending ? "sync" : tone}</Badge>
+      </div>
+      <p className="mt-4 text-sm font-semibold text-zinc-600">{label}</p>
+      <strong className="mt-2 block truncate text-2xl leading-tight text-zinc-950">{value}</strong>
+      <p className="mt-2 truncate font-mono text-xs text-zinc-500">{meta}</p>
+    </Surface>
   );
 }
 
@@ -1063,6 +1356,132 @@ type LaneMetricRow = {
   active: boolean;
 };
 
+function connectionHealthModel(
+  health: OperatorHealthData | null,
+  snapshot: MetricsSnapshot | null,
+  connection: OperatorResponse<WorkbenchActionData> | undefined,
+  connectionError: string | null
+): ConnectionHealthUiModel {
+  const db = nativeConnectionInfo(connection, connectionError);
+  const live = health?.liveness?.live === true;
+  const ready = health?.readiness?.ready === true;
+  const dbReachable = health?.readiness?.db_reachable === true;
+  const draining = health?.readiness?.draining === true;
+  const sources: ConnectionHealthSourceRow[] = [
+    {
+      key: "operator-health",
+      source: "/operator/v1/health",
+      status: health ? "applied" : "monitoring_unavailable",
+      detail: health?.readiness?.status ?? "health endpoint has not returned"
+    },
+    {
+      key: "metrics",
+      source: "/operator/v1/metrics",
+      status: snapshot ? "applied" : "monitoring_unavailable",
+      detail: snapshot ? "pool and latency gauges available" : "metrics snapshot unavailable"
+    },
+    {
+      key: "db-native",
+      source: "oracle_connection_info",
+      status: db.connected ? "applied" : "monitoring_unavailable",
+      detail: db.connected ? "redacted lane self-check available" : db.error
+    },
+    {
+      key: "write-posture",
+      source: "write_posture",
+      status: db.writePosture === "monitoring_unavailable" ? "monitoring_unavailable" : "applied",
+      detail:
+        db.writePosture === "monitoring_unavailable"
+          ? "privilege posture is not surfaced by connection_info"
+          : db.writePosture
+    }
+  ];
+
+  return {
+    readiness: {
+      liveness: health?.liveness?.status ?? "unavailable",
+      readiness: health?.readiness?.status ?? "unavailable",
+      live,
+      ready,
+      dbReachable,
+      draining
+    },
+    pool: {
+      active: snapshot?.pool_active_connections ?? 0,
+      waitMeanMs: Math.round(snapshot?.pool_wait_ms.mean ?? 0),
+      waitMaxMs: snapshot?.pool_wait_ms.max ?? 0,
+      queryMeanMs: Math.round(snapshot?.query_duration_ms.mean ?? 0),
+      queryMaxMs: snapshot?.query_duration_ms.max ?? 0
+    },
+    db,
+    sources
+  };
+}
+
+function nativeConnectionInfo(
+  response: OperatorResponse<WorkbenchActionData> | undefined,
+  connectionError: string | null
+): ConnectionNativeInfo {
+  const unavailable = (error: string): ConnectionNativeInfo => ({
+    source: "monitoring_unavailable",
+    connected: false,
+    activeProfile: "unavailable",
+    strategy: "monitoring_unavailable",
+    serverVersion: "monitoring_unavailable",
+    databaseRole: "monitoring_unavailable",
+    openMode: "monitoring_unavailable",
+    standby: "monitoring_unavailable",
+    writePosture: "monitoring_unavailable",
+    readOnlyReason: "monitoring_unavailable",
+    poolOpenConnections: null,
+    error
+  });
+
+  if (!response) {
+    return unavailable(connectionError ?? "connection self-check pending");
+  }
+  const result = mcpResult(response.data.mcp_response);
+  if (!isRecord(result)) {
+    return unavailable(connectionError ?? "connection self-check returned no structured content");
+  }
+  const activeProfile = stringField(result, "active_profile", "unprofiled");
+  if (result["connected"] !== true) {
+    const errorClass = nestedString(result, ["connection_error", "error_class"]);
+    const message = nestedString(result, ["connection_error", "message"]);
+    return {
+      ...unavailable(message ?? connectionError ?? "connection self-check degraded"),
+      activeProfile,
+      error: errorClass ?? message ?? connectionError ?? "connection self-check degraded"
+    };
+  }
+
+  const connection = isRecord(result["connection"]) ? result["connection"] : {};
+  const databaseRole = stringField(connection, "database_role", "monitoring_unavailable");
+  const openMode = stringField(connection, "open_mode", "monitoring_unavailable");
+  const readOnly = connection["read_only"] === true;
+  const readOnlyReason = readOnly
+    ? stringField(connection, "read_only_reason", "read_only")
+    : "none";
+  const roleKnown =
+    databaseRole !== "monitoring_unavailable" || openMode !== "monitoring_unavailable";
+  const poolOpenConnections = numberField(connection, "pool_open_connections");
+
+  return {
+    source: "lane_self_check",
+    connected: true,
+    activeProfile,
+    strategy: stringField(connection, "connection_strategy", "single_session"),
+    serverVersion: stringField(connection, "server_version", "monitoring_unavailable"),
+    databaseRole,
+    openMode,
+    standby: readOnly ? readOnlyReason : roleKnown ? "no" : "monitoring_unavailable",
+    writePosture: readOnly ? "database_read_only" : "monitoring_unavailable",
+    readOnlyReason,
+    poolOpenConnections,
+    error: "none"
+  };
+}
+
 function capacityModel(
   capacity: OperatorCapacityData | null,
   snapshot: MetricsSnapshot | null,
@@ -1396,6 +1815,20 @@ function limitStatusTone(status: string): "neutral" | "ok" | "warn" | "off" | "i
 
 function formatOptionalNumber(value: number | undefined): string {
   return typeof value === "number" && Number.isFinite(value) ? formatNumber(value) : "";
+}
+
+function stringField(
+  record: Record<string, unknown>,
+  key: string,
+  fallback: string
+): string {
+  const value = record[key];
+  return typeof value === "string" && value.trim().length > 0 ? value : fallback;
+}
+
+function numberField(record: Record<string, unknown>, key: string): number | null {
+  const value = record[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function formatMs(ms: number): string {
