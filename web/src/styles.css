@@ -5,8 +5,21 @@
 }
 
 :root {
-  color: #17211f;
-  background: #f6f7f3;
+  color-scheme: light;
+  color: var(--om-text);
+  background: var(--om-bg);
+  --om-bg: #f6f7f3;
+  --om-text: #17211f;
+  --om-surface: #ffffff;
+  --om-surface-muted: #f4f6f5;
+  --om-border: #d8dfdc;
+  --om-focus: #047857;
+  --om-clearance-read-only: #047857;
+  --om-clearance-read-write: #0369a1;
+  --om-clearance-ddl: #b45309;
+  --om-clearance-admin: #be123c;
+  --om-activity: #2563eb;
+  --om-grid: #dbe4e0;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
@@ -14,10 +27,52 @@
   text-rendering: optimizeLegibility;
 }
 
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --om-bg: #111817;
+    --om-text: #e8efec;
+    --om-surface: #17211f;
+    --om-surface-muted: #1f2b29;
+    --om-border: #31413d;
+    --om-grid: #2a3835;
+  }
+}
+
+@media (prefers-contrast: more), (forced-colors: active) {
+  :root {
+    --om-bg: Canvas;
+    --om-text: CanvasText;
+    --om-surface: Canvas;
+    --om-surface-muted: Canvas;
+    --om-border: CanvasText;
+    --om-focus: Highlight;
+    --om-clearance-read-only: CanvasText;
+    --om-clearance-read-write: LinkText;
+    --om-clearance-ddl: Mark;
+    --om-clearance-admin: VisitedText;
+    --om-activity: Highlight;
+    --om-grid: CanvasText;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 body {
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
+  background: var(--om-bg);
+  color: var(--om-text);
 }
 
 #app {

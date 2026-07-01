@@ -47,6 +47,21 @@ import {
 import { Badge, Button, Surface } from "../components/ui/primitives";
 import { cn } from "../lib/utils";
 import {
+  BigBoardSurface,
+  GROUND_CONTROL_SKIN,
+  useDashboardCapabilities
+} from "./skin";
+import {
+  CLEARANCE_LADDER,
+  DASHBOARD_GRAMMAR,
+  clampActivity,
+  type FleetViewModel,
+  type GoNoGoVerdict,
+  type GroundControlViewModel,
+  type HealthPosture,
+  type SignatureViewModel
+} from "./presentation-model";
+import {
   auditProbes,
   doctorProbes,
   executeWorkbenchSql,
@@ -181,12 +196,17 @@ export function bootstrapDashboard(element: HTMLElement): void {
 }
 
 function RootLayout(): React.ReactElement {
+  const skin = GROUND_CONTROL_SKIN;
   return (
-    <div className="min-h-screen bg-[#f6f7f3] text-zinc-950">
-      <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-4 px-4 py-4 md:px-6 lg:flex-row lg:py-6">
-        <aside className="flex shrink-0 flex-col gap-4 border-b border-zinc-200 pb-4 lg:w-64 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-4">
+    <div
+      className={skin.layout.appShell}
+      data-dashboard-skin={skin.name}
+      data-dashboard-theme={skin.theme.name}
+    >
+      <div className={skin.layout.frame}>
+        <aside className={skin.layout.sidebar}>
           <div className="flex items-center gap-3">
-            <div className="flex size-10 items-center justify-center rounded-lg bg-emerald-700 text-white">
+            <div className={skin.layout.logoMark}>
               <ShieldCheck className="size-5" aria-hidden="true" />
             </div>
             <div>
@@ -194,9 +214,9 @@ function RootLayout(): React.ReactElement {
               <h1 className="text-xl font-bold tracking-normal">oraclemcp</h1>
             </div>
           </div>
-          <nav className="flex gap-2 overflow-x-auto lg:flex-col" aria-label="dashboard">
+          <nav className={skin.layout.nav} aria-label="dashboard">
             {navItems.map((item) => (
-              <NavLink key={item.to} item={item} />
+              <NavLink key={item.to} item={item} skin={skin} />
             ))}
           </nav>
         </aside>
@@ -209,25 +229,21 @@ function RootLayout(): React.ReactElement {
   );
 }
 
-function NavLink({ item }: { item: NavItem }): React.ReactElement {
+function NavLink({
+  item,
+  skin
+}: {
+  item: NavItem;
+  skin: typeof GROUND_CONTROL_SKIN;
+}): React.ReactElement {
   const Icon = item.icon;
   return (
-    <Link
-      to={item.to}
-      className="inline-flex min-h-10 items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold text-zinc-700 hover:bg-white hover:text-zinc-950 [&.active]:bg-white [&.active]:text-emerald-800 [&.active]:shadow-sm"
-    >
+    <Link to={item.to} className={skin.layout.navLink}>
       <Icon className="size-4" aria-hidden="true" />
       <span>{item.label}</span>
     </Link>
   );
 }
-
-const clearanceSteps = [
-  { level: "READ_ONLY", className: "border-emerald-200 bg-emerald-50 text-emerald-900" },
-  { level: "READ_WRITE", className: "border-sky-200 bg-sky-50 text-sky-900" },
-  { level: "DDL", className: "border-amber-200 bg-amber-50 text-amber-900" },
-  { level: "ADMIN", className: "border-rose-200 bg-rose-50 text-rose-900" }
-] as const;
 
 const logbookFilters: AuditTailFilters = {
   limit: 1,
@@ -262,84 +278,46 @@ function GroundControlStrip(): React.ReactElement {
     nestedString(logbook.data?.data.proof, ["verification", "hash_chain", "status"]) ??
     logbook.data?.data.source ??
     "unavailable";
-  const goValue = health.isFetching && !health.data ? "SYNC" : go ? "GO" : "NO-GO";
-  return (
-    <section
-      className="grid gap-3 rounded-lg border border-zinc-200 bg-white px-4 py-3 shadow-sm xl:grid-cols-[minmax(150px,0.65fr)_minmax(360px,1.4fr)_minmax(140px,0.55fr)_minmax(170px,0.7fr)]"
-      aria-label="ground control"
-    >
-      <SignatureCell
-        icon={ShieldCheck}
-        label="GO/NO-GO"
-        value={goValue}
-        detail={readiness?.status ?? "unavailable"}
-        tone={go ? "ok" : health.isFetching ? "info" : "warn"}
-      />
-      <div className="min-w-0 border-t border-zinc-100 pt-3 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0">
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-xs font-bold uppercase text-zinc-500">Clearance Ladder</p>
-          <Badge tone={blocked > 0 ? "warn" : "ok"}>{blocked > 0 ? "blocked" : "clear"}</Badge>
-        </div>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {clearanceSteps.map((step) => (
-            <span
-              key={step.level}
-              className={cn(
-                "inline-flex h-7 items-center rounded-md border px-2 font-mono text-xs font-bold",
-                step.className
-              )}
-            >
-              {step.level}
-            </span>
-          ))}
-        </div>
-      </div>
-      <SignatureCell
-        icon={Timer}
-        label="Countdown"
-        value="idle"
-        detail={`${formatNumber(activeLanes)} lanes`}
-        tone={activeLanes > 0 ? "info" : "off"}
-      />
-      <SignatureCell
-        icon={FileClock}
-        label="Logbook"
-        value={chainStatus}
-        detail={logbook.isFetching && !logbook.data ? "sync" : "audit"}
-        tone={chainStatus === "ok" ? "ok" : chainStatus === "broken" ? "warn" : "info"}
-      />
-    </section>
-  );
-}
-
-function SignatureCell({
-  icon: Icon,
-  label,
-  value,
-  detail,
-  tone
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  value: string;
-  detail: string;
-  tone: "neutral" | "ok" | "warn" | "off" | "info";
-}): React.ReactElement {
-  return (
-    <div className="flex min-w-0 items-center gap-3 border-t border-zinc-100 pt-3 first:border-t-0 first:pt-0 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0 xl:first:border-l-0 xl:first:pl-0">
-      <div className="flex size-10 shrink-0 items-center justify-center rounded-md border border-zinc-200 bg-zinc-50 text-zinc-700">
-        <Icon className="size-5" aria-hidden="true" />
-      </div>
-      <div className="min-w-0">
-        <p className="text-xs font-bold uppercase text-zinc-500">{label}</p>
-        <div className="mt-1 flex min-w-0 items-center gap-2">
-          <p className="truncate font-mono text-sm font-bold text-zinc-950">{value}</p>
-          <Badge tone={tone}>{tone}</Badge>
-        </div>
-        <p className="mt-1 truncate text-xs font-semibold text-zinc-500">{detail}</p>
-      </div>
-    </div>
-  );
+  const goValue: GoNoGoVerdict = health.isFetching && !health.data ? "SYNC" : go ? "GO" : "NO-GO";
+  const model: GroundControlViewModel = {
+    grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+    verdict: goValue,
+    health: healthPosture(goValue, blocked),
+    clearanceLadder: CLEARANCE_LADDER,
+    clearanceStatus: {
+      blocked,
+      label: blocked > 0 ? "blocked" : "clear",
+      tone: blocked > 0 ? "warn" : "ok"
+    },
+    signatures: [
+      {
+        id: "go_no_go",
+        label: "GO/NO-GO",
+        value: goValue,
+        detail: readiness?.status ?? "unavailable",
+        tone: go ? "ok" : health.isFetching ? "info" : "warn",
+        activity: go ? 1 : 0
+      },
+      {
+        id: "countdown",
+        label: "Countdown",
+        value: "idle",
+        detail: `${formatNumber(activeLanes)} lanes`,
+        tone: activeLanes > 0 ? "info" : "off",
+        activity: activeLanes > 0 ? 0.5 : 0
+      },
+      {
+        id: "logbook",
+        label: "Logbook",
+        value: chainStatus,
+        detail: logbook.isFetching && !logbook.data ? "sync" : "audit",
+        tone: chainStatus === "ok" ? "ok" : chainStatus === "broken" ? "warn" : "info",
+        activity: logbook.isFetching ? 0.5 : 0
+      }
+    ] satisfies readonly SignatureViewModel[]
+  };
+  const GroundControl = GROUND_CONTROL_SKIN.renderers.GroundControl;
+  return <GroundControl model={model} />;
 }
 
 function OverviewPage(): React.ReactElement {
@@ -356,6 +334,11 @@ function OverviewPage(): React.ReactElement {
   const eventLog = useOperatorEventLog("operator");
   const snapshot = metrics.data?.data.snapshot ?? null;
   const lanes = activeLanes.data?.data.lanes ?? [];
+  const pending = metrics.isFetching || activeLanes.isFetching;
+  const capabilities = useDashboardCapabilities();
+  const summary = overviewSummary(snapshot, lanes);
+  const laneRows = laneMetricRows(snapshot, lanes);
+  const fleet = fleetViewModel(summary, laneRows, pending);
 
   return (
     <PageFrame
@@ -364,10 +347,11 @@ function OverviewPage(): React.ReactElement {
       description="Runtime and operator protocol posture from the active service."
     >
       <div className="space-y-4">
+        <BigBoardSurface capabilities={capabilities} model={fleet} skin={GROUND_CONTROL_SKIN} />
         <OverviewMetricTiles
           snapshot={snapshot}
           lanes={lanes}
-          pending={metrics.isFetching || activeLanes.isFetching}
+          pending={pending}
         />
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
           <LaneMetricsPanel snapshot={snapshot} lanes={lanes} />
@@ -843,6 +827,58 @@ function aggregateDurations(
 
 function sumCounts(rows: Array<{ count: number }>): number {
   return rows.reduce((total, row) => total + row.count, 0);
+}
+
+function healthPosture(verdict: GoNoGoVerdict, blocked: number): HealthPosture {
+  if (verdict === "SYNC") {
+    return "syncing";
+  }
+  if (verdict === "NO-GO" || blocked > 0) {
+    return "blocked";
+  }
+  return "nominal";
+}
+
+function fleetViewModel(
+  summary: OverviewSummary,
+  rows: LaneMetricRow[],
+  pending: boolean
+): FleetViewModel {
+  const verdict: GoNoGoVerdict =
+    pending ? "SYNC" : summary.blocked > 0 || summary.errors > 0 ? "NO-GO" : "GO";
+  const maxRequests = Math.max(1, ...rows.map((row) => row.requests));
+  const activeRows = rows.filter((row) => row.active).length;
+  return {
+    grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
+    verdict,
+    health:
+      verdict === "SYNC"
+        ? "syncing"
+        : verdict === "NO-GO"
+          ? "blocked"
+          : activeRows > 0
+            ? "working"
+            : "idle",
+    activity: clampActivity(activeRows > 0 ? activeRows / Math.max(1, rows.length) : 0),
+    totals: {
+      activeLanes: summary.activeLanes,
+      requests: summary.totalRequests,
+      blocked: summary.blocked,
+      errors: summary.errors,
+      meanLatencyMs: summary.meanLatencyMs,
+      poolActive: summary.poolActive
+    },
+    sessions: rows.slice(0, 9).map((row) => ({
+      laneId: row.laneId,
+      subjectIdHash: row.subjectIdHash,
+      status: row.blocked > 0 ? "blocked" : row.active ? "working" : "idle",
+      clearance: "READ_ONLY",
+      activity: clampActivity(row.requests / maxRequests),
+      requests: row.requests,
+      blocked: row.blocked,
+      latencyMs: Math.round(row.meanLatencyMs)
+    }))
+  };
 }
 
 function parseOperatorEvent(raw: string): OperatorEventEnvelope | null {
