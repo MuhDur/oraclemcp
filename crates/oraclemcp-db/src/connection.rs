@@ -82,18 +82,27 @@ pub struct DbmsOutput {
     pub truncated: bool,
 }
 
-/// Adapter-layer PL/SQL routine argument for OUT, IN-OUT, and return values.
+/// Adapter-layer PL/SQL routine argument for IN, OUT, IN-OUT, and return values.
 ///
 /// This type is intentionally **not** deserializable: routine execution is an
 /// internal adapter capability, not an agent-facing tool argument surface. It
-/// wraps the thin driver's output bind variants privately so callers can name
-/// routine output slots without exposing driver types across the public API.
+/// wraps the thin driver's bind variants privately so callers can mix ordinary
+/// input binds with output slots without exposing driver types across the
+/// public API.
 #[derive(Clone, PartialEq)]
 pub struct OracleRoutineArg {
     bind: oracledb::protocol::thin::BindValue,
 }
 
 impl OracleRoutineArg {
+    /// Build an input-only routine argument.
+    #[must_use]
+    pub fn input(value: OracleBind) -> Self {
+        Self {
+            bind: oracle_bind_to_driver(&value),
+        }
+    }
+
     /// Build a scalar OUT or IN-OUT argument. The pinned driver has no separate
     /// IN-OUT bind variant; its `Output` bind covers both cases.
     #[must_use]
@@ -108,10 +117,15 @@ impl OracleRoutineArg {
     }
 
     /// Build a scalar return-value argument.
+    ///
+    /// Oracle routine function returns are bound by placing a normal output bind
+    /// at the return position (usually `:1 := fn(...)`). The driver's
+    /// `ReturnOutput` variant is for DML `RETURNING` shapes, not this routine
+    /// adapter path.
     #[must_use]
     pub fn return_output(ora_type_num: u8, csfrm: u8, buffer_size: u32) -> Self {
         Self {
-            bind: oracledb::protocol::thin::BindValue::ReturnOutput {
+            bind: oracledb::protocol::thin::BindValue::Output {
                 ora_type_num,
                 csfrm,
                 buffer_size,
@@ -172,6 +186,15 @@ impl OracleRoutineArg {
     pub(crate) fn into_driver_bind(self) -> oracledb::protocol::thin::BindValue {
         self.bind
     }
+
+    fn is_output_bind(&self) -> bool {
+        matches!(
+            self.bind,
+            oracledb::protocol::thin::BindValue::Output { .. }
+                | oracledb::protocol::thin::BindValue::ReturnOutput { .. }
+                | oracledb::protocol::thin::BindValue::ObjectOutput { .. }
+        )
+    }
 }
 
 impl std::fmt::Debug for OracleRoutineArg {
@@ -180,6 +203,37 @@ impl std::fmt::Debug for OracleRoutineArg {
             .field("kind", &self.bind.variant_name())
             .field("value", &"<driver-output-bind>")
             .finish()
+    }
+}
+
+fn oracle_bind_to_driver(bind: &OracleBind) -> oracledb::protocol::thin::BindValue {
+    match bind {
+        OracleBind::Null => oracledb::protocol::thin::BindValue::Null,
+        OracleBind::String(value) => oracledb::protocol::thin::BindValue::Text(value.clone()),
+        OracleBind::I64(value) => oracledb::protocol::thin::BindValue::Number(value.to_string()),
+        OracleBind::F64(value) => oracledb::protocol::thin::BindValue::BinaryDouble(*value),
+        OracleBind::Bool(value) => {
+            oracledb::protocol::thin::BindValue::Number(if *value { "1" } else { "0" }.to_owned())
+        }
+        OracleBind::TimestampTz {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+            offset_minutes,
+        } => oracledb::protocol::thin::BindValue::TimestampTz {
+            year: *year,
+            month: *month,
+            day: *day,
+            hour: *hour,
+            minute: *minute,
+            second: *second,
+            nanosecond: *nanosecond,
+            offset_minutes: *offset_minutes,
+        },
     }
 }
 
@@ -451,7 +505,9 @@ fn duration_to_millis(duration: Duration) -> u32 {
 }
 
 mod driver {
-    use super::{DbmsOutput, ExecuteOutcome, OracleRoutineArg, RustOracleConnection};
+    use super::{
+        DbmsOutput, ExecuteOutcome, OracleRoutineArg, RustOracleConnection, oracle_bind_to_driver,
+    };
     use crate::auth_adapter::AuthAdapter;
     use crate::error::DbError;
     use crate::serialize::{SerializeOptions, StructuredDecodeCaps, json_byte_len};
@@ -805,32 +861,7 @@ mod driver {
     }
 
     fn to_bind(bind: &OracleBind) -> BindValue {
-        match bind {
-            OracleBind::Null => BindValue::Null,
-            OracleBind::String(value) => BindValue::Text(value.clone()),
-            OracleBind::I64(value) => BindValue::Number(value.to_string()),
-            OracleBind::F64(value) => BindValue::BinaryDouble(*value),
-            OracleBind::Bool(value) => BindValue::Number(if *value { "1" } else { "0" }.to_owned()),
-            OracleBind::TimestampTz {
-                year,
-                month,
-                day,
-                hour,
-                minute,
-                second,
-                nanosecond,
-                offset_minutes,
-            } => BindValue::TimestampTz {
-                year: *year,
-                month: *month,
-                day: *day,
-                hour: *hour,
-                minute: *minute,
-                second: *second,
-                nanosecond: *nanosecond,
-                offset_minutes: *offset_minutes,
-            },
-        }
+        oracle_bind_to_driver(bind)
     }
 
     async fn execute_raw(
@@ -919,9 +950,11 @@ mod driver {
 
     pub(super) fn ordered_routine_out_values(
         result: &QueryResult,
-        arg_count: usize,
+        args: &[OracleRoutineArg],
     ) -> Result<Vec<Option<QueryValue>>, DbError> {
-        (0..arg_count)
+        args.iter()
+            .enumerate()
+            .filter_map(|(index, arg)| arg.is_output_bind().then_some(index))
             .map(|index| {
                 output_value_entry(result, index)
                     .map(|value| value.cloned())
@@ -978,9 +1011,14 @@ mod driver {
         serialize_opts: &SerializeOptions,
         timeout_ms: Option<u32>,
     ) -> Result<Vec<OracleCell>, DbError> {
-        let ordered = ordered_routine_out_values(result, args.len())?;
-        let mut out = Vec::with_capacity(args.len());
-        for (index, (arg, value)) in args.iter().zip(ordered).enumerate() {
+        let output_args: Vec<(usize, &OracleRoutineArg)> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, arg)| arg.is_output_bind())
+            .collect();
+        let ordered = ordered_routine_out_values(result, args)?;
+        let mut out = Vec::with_capacity(output_args.len());
+        for ((index, arg), value) in output_args.into_iter().zip(ordered) {
             let metadata = routine_arg_metadata(index, arg);
             out.push(
                 value_to_cell(
@@ -3780,14 +3818,14 @@ mod tests {
         }
 
         match OracleRoutineArg::return_output(4, 5, 6).into_driver_bind() {
-            oracledb::protocol::thin::BindValue::ReturnOutput {
+            oracledb::protocol::thin::BindValue::Output {
                 ora_type_num,
                 csfrm,
                 buffer_size,
             } => {
                 assert_eq!((ora_type_num, csfrm, buffer_size), (4, 5, 6));
             }
-            other => panic!("expected ReturnOutput bind, got {}", other.variant_name()),
+            other => panic!("expected Output bind, got {}", other.variant_name()),
         }
 
         match OracleRoutineArg::object_output(
@@ -3846,44 +3884,54 @@ mod tests {
         let result = oracledb::protocol::thin::QueryResult {
             out_values: vec![
                 (
-                    1,
+                    0,
                     Some(oracledb::protocol::thin::QueryValue::number_from_text(
                         "42", true,
                     )),
                 ),
                 (
-                    0,
+                    2,
                     Some(oracledb::protocol::thin::QueryValue::Text(
                         "first".to_owned(),
                     )),
                 ),
-                (2, None),
             ],
             ..Default::default()
         };
 
-        let ordered = driver::ordered_routine_out_values(&result, 3).expect("ordered values");
+        let args = [
+            OracleRoutineArg::return_output(1, 1, 32_767),
+            OracleRoutineArg::input(OracleBind::String("ignored input".to_owned())),
+            OracleRoutineArg::output(2, 1, 22),
+        ];
+
+        let ordered = driver::ordered_routine_out_values(&result, &args).expect("ordered values");
         assert_eq!(
             ordered,
             vec![
-                Some(oracledb::protocol::thin::QueryValue::Text(
-                    "first".to_owned()
-                )),
                 Some(oracledb::protocol::thin::QueryValue::number_from_text(
                     "42", true
                 )),
-                None,
+                Some(oracledb::protocol::thin::QueryValue::Text(
+                    "first".to_owned()
+                )),
             ]
         );
 
         let missing = oracledb::protocol::thin::QueryResult {
-            out_values: vec![(1, None)],
+            out_values: vec![(0, None)],
             ..Default::default()
         };
-        let err = driver::ordered_routine_out_values(&missing, 2)
-            .expect_err("missing declared out bind is an adapter error");
+        let err = driver::ordered_routine_out_values(
+            &missing,
+            &[
+                OracleRoutineArg::input(OracleBind::String("ignored input".to_owned())),
+                OracleRoutineArg::output(1, 1, 32_767),
+            ],
+        )
+        .expect_err("missing declared out bind is an adapter error");
         assert!(
-            matches!(err, DbError::Execute(ref msg) if msg.contains("position 1")),
+            matches!(err, DbError::Execute(ref msg) if msg.contains("position 2")),
             "{err:?}"
         );
     }

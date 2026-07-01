@@ -3228,6 +3228,7 @@ impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OraclePool where V: ppv_
 pub fn oraclemcp_db::OraclePool::vzip(self) -> V
 pub struct oraclemcp_db::OracleRoutineArg
 impl oraclemcp_db::OracleRoutineArg
+pub fn oraclemcp_db::OracleRoutineArg::input(oraclemcp_db::OracleBind) -> Self
 pub fn oraclemcp_db::OracleRoutineArg::object_output(alloc::string::String, alloc::string::String, alloc::vec::Vec<u8>, u32, u32) -> Self
 pub fn oraclemcp_db::OracleRoutineArg::object_return_output(alloc::string::String, alloc::string::String, alloc::vec::Vec<u8>, u32, u32) -> Self
 pub fn oraclemcp_db::OracleRoutineArg::output(u8, u8, u32) -> Self

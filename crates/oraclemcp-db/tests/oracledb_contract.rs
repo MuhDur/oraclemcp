@@ -750,20 +750,22 @@ fn contract_execute_returns_rowcount() {
 #[test]
 fn contract_call_routine_returns_ordered_out_binds() {
     // call_routine is an adapter-internal routine seam, not an agent tool. Its
-    // public contract is ordered OUT cells: callers see OUT / IN-OUT / return
-    // values in their declared positional argument order.
+    // public contract is ordered OUT cells: callers may mix ordinary input
+    // binds with return / OUT / IN-OUT slots, and out_binds() contains only the
+    // output-producing slots in declared positional order.
     let conn = ScriptedConn::new(vec![], 0).with_routine_out_binds(vec![
-        OracleCell::new("VARCHAR2", Some("first".to_owned())),
         OracleCell::new("NUMBER", Some("42".to_owned())),
+        OracleCell::new("VARCHAR2", Some("first".to_owned())),
     ]);
     let args = vec![
-        OracleRoutineArg::output(1, 1, 32_767),
         OracleRoutineArg::return_output(2, 1, 22),
+        OracleRoutineArg::input(OracleBind::String("input".to_owned())),
+        OracleRoutineArg::output(1, 1, 32_767),
     ];
     let c = &conn;
     let a = &args;
     let outcome = run_with_cx(|cx| async move {
-        c.call_routine(&cx, "BEGIN pkg.contract_probe(:1, :2); END;", a)
+        c.call_routine(&cx, "BEGIN :1 := pkg.contract_probe(:2, :3); END;", a)
             .await
             .expect("routine call")
     });
@@ -771,14 +773,14 @@ fn contract_call_routine_returns_ordered_out_binds() {
     assert_eq!(
         outcome.out_binds(),
         &[
-            OracleCell::new("VARCHAR2", Some("first".to_owned())),
             OracleCell::new("NUMBER", Some("42".to_owned())),
+            OracleCell::new("VARCHAR2", Some("first".to_owned())),
         ]
     );
     assert_eq!(
         conn.calls(),
         vec![Call::Routine {
-            plsql_block: "BEGIN pkg.contract_probe(:1, :2); END;".to_owned(),
+            plsql_block: "BEGIN :1 := pkg.contract_probe(:2, :3); END;".to_owned(),
             args,
         }]
     );
@@ -1140,6 +1142,41 @@ mod live {
             assert_eq!(outcome.out_binds().len(), 2);
             assert_eq!(outcome.out_binds()[0].text(), Some("r2 routine line"));
             assert_eq!(outcome.out_binds()[1].text(), Some("0"));
+        });
+    }
+
+    #[test]
+    fn live_contract_call_routine_mixes_input_return_and_out_binds() {
+        // Pins the #2 closeout shape against a real server: one ordinary input
+        // bind plus a return slot and an OUT slot, with only output-producing
+        // positions returned to the caller.
+        run_with_cx(|cx| async move {
+            let Some(conn) = connect_or_skip(
+                &cx,
+                "live_contract_call_routine_mixes_input_return_and_out_binds",
+            )
+            .await
+            else {
+                return;
+            };
+
+            let outcome = conn
+                .call_routine(
+                    &cx,
+                    "BEGIN :1 := LENGTH(:2); :3 := UPPER(:2); END;",
+                    &[
+                        // ORA_TYPE_NUM_NUMBER + CS_FORM_IMPLICIT.
+                        OracleRoutineArg::return_output(2, 1, 22),
+                        OracleRoutineArg::input(OracleBind::String("r4".to_owned())),
+                        // ORA_TYPE_NUM_VARCHAR + CS_FORM_IMPLICIT.
+                        OracleRoutineArg::output(1, 1, 32_767),
+                    ],
+                )
+                .await
+                .expect("call mixed routine block");
+            assert_eq!(outcome.out_binds().len(), 2);
+            assert_eq!(outcome.out_binds()[0].text(), Some("2"));
+            assert_eq!(outcome.out_binds()[1].text(), Some("R4"));
         });
     }
 }
