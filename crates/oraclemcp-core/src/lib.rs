@@ -102,7 +102,7 @@ pub use dashboard_auth::{
 pub use doctor::{
     AuthModeClass, CheckResult, CheckStatus, DoctorContext, DoctorFixOutcome, DoctorFixPolicy,
     DoctorFixRefusal, DoctorFixReport, DoctorLevelCaps, DoctorProfileCaps, DoctorReport,
-    classify_auth_mode, run_doctor,
+    DoctorServiceUnitCaps, DoctorServiceUnitLimitCaps, classify_auth_mode, run_doctor,
 };
 pub use export::{
     ExportAccess, ExportContents, ExportFormat, ExportHandle, ExportRegistry, export_uri,

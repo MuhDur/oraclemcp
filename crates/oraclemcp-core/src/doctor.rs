@@ -136,6 +136,39 @@ pub struct DoctorProfileCaps {
     pub read_only_standby: bool,
 }
 
+/// Service-manager caps as configured by `oraclemcp service install`, and as
+/// observed for the current process/cgroup by `doctor`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DoctorServiceUnitCaps {
+    /// Service manager family, e.g. `systemd_user`, `launchd_user`, or
+    /// `windows_service`.
+    pub manager: String,
+    /// Caps the generated service definition configures.
+    pub configured: DoctorServiceUnitLimitCaps,
+    /// Caps visible to the current process. When `doctor` is not itself running
+    /// under the generated service, these are still useful host ceilings.
+    pub effective: DoctorServiceUnitLimitCaps,
+    /// Honest caveats about platform-specific limits or unavailable probes.
+    pub notes: Vec<String>,
+}
+
+/// Resource-limit row for service-unit cap reporting.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DoctorServiceUnitLimitCaps {
+    /// systemd `Type=notify` + `NotifyAccess=main`, when configured/effective.
+    pub notify: Option<String>,
+    /// Restart policy, when configured/effective.
+    pub restart_policy: Option<String>,
+    /// Open-file limit.
+    pub limit_nofile: Option<u64>,
+    /// Thread/process task cap (`TasksMax`, `RLIMIT_NPROC`, or cgroup pids).
+    pub tasks_max: Option<u64>,
+    /// Memory cgroup cap, in bytes.
+    pub memory_max_bytes: Option<u64>,
+    /// Linux OOM score adjustment.
+    pub oom_score_adjust: Option<i16>,
+}
+
 /// `doctor --fix` policy summary.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DoctorFixPolicy {
@@ -246,6 +279,8 @@ pub struct DoctorContext<'a> {
     pub profile_caps: Option<DoctorProfileCaps>,
     /// Service/lane health snapshot.
     pub service_health: Option<ServiceAppDoctorSnapshot>,
+    /// Service-manager resource caps snapshot.
+    pub service_unit_caps: Option<DoctorServiceUnitCaps>,
     /// Exact setup values that must never appear in doctor output.
     pub sensitive_values: Vec<String>,
 }
@@ -261,6 +296,9 @@ pub struct DoctorReport {
     /// Service/lane health snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_health: Option<ServiceAppDoctorSnapshot>,
+    /// Service-manager resource caps snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_unit_caps: Option<DoctorServiceUnitCaps>,
     /// `doctor --fix` policy/refusal outcome when requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<DoctorFixReport>,
@@ -299,6 +337,10 @@ impl DoctorReport {
         if let Some(service_health) = &self.service_health {
             value["service_health"] = serde_json::to_value(service_health).unwrap_or(Value::Null);
         }
+        if let Some(service_unit_caps) = &self.service_unit_caps {
+            value["service_unit_caps"] =
+                serde_json::to_value(service_unit_caps).unwrap_or(Value::Null);
+        }
         if let Some(fix) = &self.fix {
             value["fix"] = serde_json::to_value(fix).unwrap_or(Value::Null);
         }
@@ -334,6 +376,20 @@ impl DoctorReport {
                 service_health.task_inspector.active_tasks,
                 service_health.task_inspector.summary.cancelling,
                 service_health.task_inspector.summary.stuck_count,
+            ));
+        }
+        if let Some(service_unit_caps) = &self.service_unit_caps {
+            out.push_str(&format!(
+                "service unit caps: manager={} configured nofile={:?} tasks={:?} memory={:?} oom={:?}; effective nofile={:?} tasks={:?} memory={:?} oom={:?}\n",
+                service_unit_caps.manager,
+                service_unit_caps.configured.limit_nofile,
+                service_unit_caps.configured.tasks_max,
+                service_unit_caps.configured.memory_max_bytes,
+                service_unit_caps.configured.oom_score_adjust,
+                service_unit_caps.effective.limit_nofile,
+                service_unit_caps.effective.tasks_max,
+                service_unit_caps.effective.memory_max_bytes,
+                service_unit_caps.effective.oom_score_adjust,
             ));
         }
         for c in &self.checks {
@@ -490,6 +546,7 @@ pub async fn run_doctor(cx: &Cx, ctx: &DoctorContext<'_>) -> DoctorReport {
         checks,
         profile_caps: ctx.profile_caps.clone(),
         service_health: ctx.service_health.clone(),
+        service_unit_caps: ctx.service_unit_caps.clone(),
         fix: None,
     }
 }
@@ -1431,6 +1488,48 @@ mod tests {
         assert_eq!(j["exit_code"], json!(0));
     }
 
+    #[test]
+    fn service_unit_caps_render_in_json_and_text() {
+        let caps = DoctorServiceUnitCaps {
+            manager: "systemd_user".to_owned(),
+            configured: DoctorServiceUnitLimitCaps {
+                notify: Some("type=notify notify_access=main".to_owned()),
+                restart_policy: Some("on-failure".to_owned()),
+                limit_nofile: Some(65_536),
+                tasks_max: Some(512),
+                memory_max_bytes: Some(2 * 1024 * 1024 * 1024),
+                oom_score_adjust: Some(100),
+            },
+            effective: DoctorServiceUnitLimitCaps {
+                notify: Some("notify_socket_present".to_owned()),
+                restart_policy: None,
+                limit_nofile: Some(1_048_576),
+                tasks_max: Some(32_768),
+                memory_max_bytes: None,
+                oom_score_adjust: Some(0),
+            },
+            notes: vec!["current process limits".to_owned()],
+        };
+        let ctx = DoctorContext {
+            service_unit_caps: Some(caps),
+            ..DoctorContext::default()
+        };
+
+        let report = doctor(&ctx);
+        let json = report.to_json();
+        assert_eq!(
+            json["service_unit_caps"]["configured"]["limit_nofile"],
+            json!(65_536)
+        );
+        assert_eq!(
+            json["service_unit_caps"]["effective"]["tasks_max"],
+            json!(32_768)
+        );
+        let text = report.to_text();
+        assert!(text.contains("service unit caps"), "{text}");
+        assert!(text.contains("manager=systemd_user"), "{text}");
+    }
+
     /// C9 — the DBA-suite preflight is report-only: with a live connection it
     /// reports the resolved tier/feature posture and never `Fail`s the suite,
     /// even when a subcheck would skip or historical perf history is missing.
@@ -1696,6 +1795,7 @@ mod tests {
             ],
             profile_caps: None,
             service_health: None,
+            service_unit_caps: None,
             fix: None,
         }
         .with_fix_report();

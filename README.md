@@ -148,6 +148,14 @@ machine-readable JSON object.
 `--user` on Linux, launchd on macOS, and Windows services on Windows. Mutating
 service operations (`install`, `uninstall`, `restart`) require `--yes`;
 `--dry-run` emits the exact file and command plan without changing the host.
+Generated service definitions include bounded host caps for the 64-lane default:
+systemd uses `Type=notify`, `NotifyAccess=main`, `Restart=on-failure`,
+`LimitNOFILE=65536`, `TasksMax=512`, `MemoryMax=2G`, and
+`OOMScoreAdjust=100`; launchd uses `KeepAlive` plus file/process
+`SoftResourceLimits`; Windows configures automatic start and restart-on-failure
+through `sc.exe`. `oraclemcp --json doctor` reports those configured caps plus
+the effective open-file, task, memory-cgroup, and OOM caps visible to the
+current process.
 Streamable HTTP auth rules are unchanged for service mode: configure OAuth or
 mTLS, or pass `--allow-no-auth` only for intentional local development.
 

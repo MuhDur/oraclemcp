@@ -179,6 +179,7 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
                 "notes": [
                     "Use service install --dry-run before --yes; install/uninstall/restart deliberately require --yes.",
                     "The service command writes the platform user service definition for systemd --user, launchd, or Windows services.",
+                    "Dry-run JSON includes service hardening: systemd notify readiness plus file/task/memory caps, launchd file/process caps, and Windows restart-on-failure.",
                     "Streamable HTTP auth rules are unchanged: configure OAuth or mTLS, or use --allow-no-auth only for intentional local development."
                 ]
             },
@@ -388,6 +389,7 @@ Always-on service
 - Restart: oraclemcp service restart --yes
 - Uninstall: oraclemcp service uninstall --yes
 - The service command targets the platform user service manager: systemd --user on Linux, launchd on macOS, and Windows services on Windows.
+- Dry-run JSON includes service hardening: systemd notify readiness plus file/task/memory caps, launchd file/process caps, and Windows restart-on-failure.
 - Streamable HTTP auth rules are unchanged: configure OAuth or mTLS, or use --allow-no-auth only for intentional local development.
 
 Client smoke tests

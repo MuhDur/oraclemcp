@@ -3159,6 +3159,7 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
         online,
         profile_caps: profile_ctx.profile_caps,
         service_health: service_app_doctor_snapshot().ok(),
+        service_unit_caps: service_lifecycle::doctor_service_unit_caps(),
         sensitive_values: profile_ctx.sensitive_values,
     };
     let mut report = block_on_connect(|cx| async move { run_doctor(&cx, &ctx).await });
@@ -3610,6 +3611,7 @@ mod tests {
             checks: Vec::new(),
             profile_caps: None,
             service_health: None,
+            service_unit_caps: None,
             fix: None,
         };
         assert_eq!(doctor_process_exit_code(&ok), 0);
@@ -3627,6 +3629,7 @@ mod tests {
             }],
             profile_caps: None,
             service_health: None,
+            service_unit_caps: None,
             fix: None,
         };
         let process_code = doctor_process_exit_code(&failed);

@@ -3,7 +3,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use oraclemcp_core::{DoctorServiceUnitCaps, DoctorServiceUnitLimitCaps};
 use serde::Serialize;
+
+const SERVICE_LIMIT_NOFILE: u64 = 65_536;
+const SERVICE_TASKS_MAX: u64 = 512;
+const SERVICE_MEMORY_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const SERVICE_MEMORY_MAX_SYSTEMD: &str = "2G";
+const SERVICE_OOM_SCORE_ADJUST: i16 = 100;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ServiceError {
@@ -124,8 +131,17 @@ pub(crate) struct ServicePlan {
     pub(crate) serve_args: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) service_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hardening: Option<ServiceHardening>,
     pub(crate) steps: Vec<ServiceStep>,
     pub(crate) next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ServiceHardening {
+    pub(crate) manager: ServiceManager,
+    pub(crate) configured: DoctorServiceUnitLimitCaps,
+    pub(crate) notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -182,6 +198,16 @@ pub(crate) fn run_service_command_with(
         ServiceCommand::Status(options) => run_status(manager, &options.name),
         ServiceCommand::Logs(options) => run_logs(manager, &options.name, options.lines),
     }
+}
+
+pub(crate) fn doctor_service_unit_caps() -> Option<DoctorServiceUnitCaps> {
+    let manager = ServiceManager::detect().ok()?;
+    Some(DoctorServiceUnitCaps {
+        manager: manager.as_str().to_owned(),
+        configured: configured_service_unit_caps(manager),
+        effective: effective_service_unit_caps(),
+        notes: service_hardening_notes(manager),
+    })
 }
 
 fn require_confirmed(action: &str, dry_run: bool, yes: bool) -> Result<(), ServiceError> {
@@ -297,6 +323,18 @@ fn install_plan(
             });
             steps.push(ServiceStep::Run {
                 program: "sc.exe".to_owned(),
+                args: vec![
+                    "failure".into(),
+                    options.name.clone(),
+                    "reset=".into(),
+                    "86400".into(),
+                    "actions=".into(),
+                    "restart/5000".into(),
+                ],
+                optional: false,
+            });
+            steps.push(ServiceStep::Run {
+                program: "sc.exe".to_owned(),
                 args: vec!["start".into(), options.name.clone()],
                 optional: false,
             });
@@ -321,6 +359,7 @@ fn install_plan(
         executable: exe_display,
         serve_args,
         service_file,
+        hardening: Some(service_hardening(manager)),
         steps,
         next_actions,
     })
@@ -398,6 +437,7 @@ fn uninstall_plan(
         executable: exe_display,
         serve_args: Vec::new(),
         service_file,
+        hardening: None,
         steps,
         next_actions: vec![
             "re-run `oraclemcp service status --json` to confirm the service is gone".to_owned(),
@@ -458,6 +498,7 @@ fn restart_plan(
         executable: exe_display,
         serve_args: Vec::new(),
         service_file: None,
+        hardening: None,
         steps,
         next_actions: vec!["check service state with `oraclemcp service status --json`".to_owned()],
     })
@@ -771,10 +812,15 @@ fn systemd_unit(exe: &str, serve_args: &[String]) -> String {
          After=network-online.target\n\
          Wants=network-online.target\n\n\
          [Service]\n\
-         Type=simple\n\
+         Type=notify\n\
+         NotifyAccess=main\n\
          ExecStart={exec}\n\
          Restart=on-failure\n\
          RestartSec=3\n\
+         LimitNOFILE={SERVICE_LIMIT_NOFILE}\n\
+         TasksMax={SERVICE_TASKS_MAX}\n\
+         MemoryMax={SERVICE_MEMORY_MAX_SYSTEMD}\n\
+         OOMScoreAdjust={SERVICE_OOM_SCORE_ADJUST}\n\
          Environment=ORACLEMCP_SERVICE=1\n\n\
          [Install]\n\
          WantedBy=default.target\n"
@@ -802,10 +848,19 @@ fn launchd_plist(label: &str, exe: &str, serve_args: &[String]) -> String {
              <true/>\n\
              <key>KeepAlive</key>\n\
              <true/>\n\
+             <key>SoftResourceLimits</key>\n\
+             <dict>\n\
+                 <key>NumberOfFiles</key>\n\
+                 <integer>{}</integer>\n\
+                 <key>NumberOfProcesses</key>\n\
+                 <integer>{}</integer>\n\
+             </dict>\n\
          </dict>\n\
          </plist>\n",
         xml_escape(label),
-        args
+        args,
+        SERVICE_LIMIT_NOFILE,
+        SERVICE_TASKS_MAX
     )
 }
 
@@ -925,6 +980,17 @@ fn render_plan_text(plan: &ServicePlan) -> String {
             plan.serve_args.join(" ")
         ));
     }
+    if let Some(hardening) = &plan.hardening {
+        out.push_str(&format!(
+            "hardening: restart={:?} notify={:?} nofile={:?} tasks={:?} memory={:?} oom={:?}\n",
+            hardening.configured.restart_policy,
+            hardening.configured.notify,
+            hardening.configured.limit_nofile,
+            hardening.configured.tasks_max,
+            hardening.configured.memory_max_bytes,
+            hardening.configured.oom_score_adjust,
+        ));
+    }
     for (index, step) in plan.steps.iter().enumerate() {
         out.push_str(&format!("{}. {}\n", index + 1, render_step(step)));
     }
@@ -956,6 +1022,103 @@ fn render_step(step: &ServiceStep) -> String {
             format!("run {program} {}{optional}", args.join(" "))
         }
     }
+}
+
+fn service_hardening(manager: ServiceManager) -> ServiceHardening {
+    ServiceHardening {
+        manager,
+        configured: configured_service_unit_caps(manager),
+        notes: service_hardening_notes(manager),
+    }
+}
+
+fn configured_service_unit_caps(manager: ServiceManager) -> DoctorServiceUnitLimitCaps {
+    match manager {
+        ServiceManager::SystemdUser => DoctorServiceUnitLimitCaps {
+            notify: Some("type=notify notify_access=main".to_owned()),
+            restart_policy: Some("on-failure".to_owned()),
+            limit_nofile: Some(SERVICE_LIMIT_NOFILE),
+            tasks_max: Some(SERVICE_TASKS_MAX),
+            memory_max_bytes: Some(SERVICE_MEMORY_MAX_BYTES),
+            oom_score_adjust: Some(SERVICE_OOM_SCORE_ADJUST),
+        },
+        ServiceManager::LaunchdUser => DoctorServiceUnitLimitCaps {
+            notify: None,
+            restart_policy: Some("KeepAlive=true".to_owned()),
+            limit_nofile: Some(SERVICE_LIMIT_NOFILE),
+            tasks_max: Some(SERVICE_TASKS_MAX),
+            memory_max_bytes: None,
+            oom_score_adjust: None,
+        },
+        ServiceManager::WindowsService => DoctorServiceUnitLimitCaps {
+            notify: None,
+            restart_policy: Some("sc.exe failure actions=restart/5000".to_owned()),
+            limit_nofile: None,
+            tasks_max: None,
+            memory_max_bytes: None,
+            oom_score_adjust: None,
+        },
+    }
+}
+
+fn effective_service_unit_caps() -> DoctorServiceUnitLimitCaps {
+    DoctorServiceUnitLimitCaps {
+        notify: env::var_os("NOTIFY_SOCKET").map(|_| "notify_socket_present".to_owned()),
+        restart_policy: None,
+        limit_nofile: proc_limit_soft("Max open files"),
+        tasks_max: finite_min([
+            proc_limit_soft("Max processes"),
+            read_cgroup_limit("/sys/fs/cgroup/pids.max"),
+        ]),
+        memory_max_bytes: read_cgroup_limit("/sys/fs/cgroup/memory.max"),
+        oom_score_adjust: read_i16("/proc/self/oom_score_adj"),
+    }
+}
+
+fn service_hardening_notes(manager: ServiceManager) -> Vec<String> {
+    match manager {
+        ServiceManager::SystemdUser => vec![
+            "effective values are read from the current process and cgroup; run doctor under the service to inspect inherited unit caps".to_owned(),
+            "OOMScoreAdjust is positive so an unprivileged user service can apply it without elevated capabilities".to_owned(),
+        ],
+        ServiceManager::LaunchdUser => vec![
+            "launchd agent uses KeepAlive plus SoftResourceLimits for file and process caps; memory and OOM controls are platform-specific".to_owned(),
+        ],
+        ServiceManager::WindowsService => vec![
+            "Windows service install configures automatic start plus restart-on-failure; file, task, and memory caps require external service wrapper or job-object policy".to_owned(),
+        ],
+    }
+}
+
+fn proc_limit_soft(label: &str) -> Option<u64> {
+    let limits = fs::read_to_string("/proc/self/limits").ok()?;
+    for line in limits.lines() {
+        if let Some(rest) = line.strip_prefix(label) {
+            return parse_limit_value(rest.split_whitespace().next()?);
+        }
+    }
+    None
+}
+
+fn read_cgroup_limit(path: &str) -> Option<u64> {
+    let raw = fs::read_to_string(path).ok()?;
+    parse_limit_value(raw.trim())
+}
+
+fn parse_limit_value(raw: &str) -> Option<u64> {
+    if raw.eq_ignore_ascii_case("unlimited") || raw == "max" {
+        None
+    } else {
+        raw.parse().ok()
+    }
+}
+
+fn read_i16(path: &str) -> Option<i16> {
+    fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+fn finite_min(values: impl IntoIterator<Item = Option<u64>>) -> Option<u64> {
+    values.into_iter().flatten().min()
 }
 
 #[cfg(test)]
@@ -1006,7 +1169,26 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.payload["action"], serde_json::json!("install"));
         assert_eq!(result.payload["manager"], serde_json::json!("systemd_user"));
+        assert_eq!(
+            result.payload["hardening"]["configured"]["limit_nofile"],
+            serde_json::json!(SERVICE_LIMIT_NOFILE)
+        );
+        assert_eq!(
+            result.payload["hardening"]["configured"]["tasks_max"],
+            serde_json::json!(SERVICE_TASKS_MAX)
+        );
         let steps = result.payload["steps"].as_array().expect("steps array");
+        let unit = steps
+            .iter()
+            .find_map(|step| step["content"].as_str())
+            .expect("systemd unit content");
+        assert!(unit.contains("Type=notify"));
+        assert!(unit.contains("NotifyAccess=main"));
+        assert!(unit.contains("Restart=on-failure"));
+        assert!(unit.contains("LimitNOFILE=65536"));
+        assert!(unit.contains("TasksMax=512"));
+        assert!(unit.contains("MemoryMax=2G"));
+        assert!(unit.contains("OOMScoreAdjust=100"));
         assert!(steps.iter().any(|step| {
             step["program"] == "systemctl"
                 && step["args"]
@@ -1102,6 +1284,21 @@ mod tests {
         let payload = result.payload.to_string();
         assert!(payload.contains("io.github.MuhDur.oraclemcp.plist"));
         assert!(payload.contains("bootstrap"));
+        let steps = result.payload["steps"].as_array().expect("steps array");
+        let plist = steps
+            .iter()
+            .find_map(|step| step["content"].as_str())
+            .expect("launchd plist content");
+        assert!(plist.contains("<key>SoftResourceLimits</key>"));
+        assert!(plist.contains("<key>NumberOfFiles</key>"));
+        assert!(plist.contains("<integer>65536</integer>"));
+        assert!(plist.contains("<key>NumberOfProcesses</key>"));
+        assert!(
+            result.payload["hardening"]["configured"]["restart_policy"]
+                .as_str()
+                .unwrap()
+                .contains("KeepAlive")
+        );
     }
 
     #[test]
@@ -1124,5 +1321,61 @@ mod tests {
         assert!(payload.contains("sc.exe"));
         assert!(payload.contains("create"));
         assert!(payload.contains("binPath="));
+        assert!(payload.contains("failure"));
+        assert!(payload.contains("restart/5000"));
+        assert!(
+            result.payload["hardening"]["configured"]["restart_policy"]
+                .as_str()
+                .unwrap()
+                .contains("restart/5000")
+        );
+    }
+
+    #[test]
+    fn doctor_service_unit_caps_reports_configured_and_effective_limits() {
+        let caps = doctor_service_unit_caps().expect("supported service manager");
+        assert!(matches!(
+            caps.manager.as_str(),
+            "systemd_user" | "launchd_user" | "windows_service"
+        ));
+        match caps.manager.as_str() {
+            "systemd_user" => {
+                assert_eq!(
+                    caps.configured.notify.as_deref(),
+                    Some("type=notify notify_access=main")
+                );
+                assert_eq!(caps.configured.limit_nofile, Some(SERVICE_LIMIT_NOFILE));
+                assert_eq!(caps.configured.tasks_max, Some(SERVICE_TASKS_MAX));
+                assert_eq!(
+                    caps.configured.memory_max_bytes,
+                    Some(SERVICE_MEMORY_MAX_BYTES)
+                );
+                assert_eq!(
+                    caps.configured.oom_score_adjust,
+                    Some(SERVICE_OOM_SCORE_ADJUST)
+                );
+            }
+            "launchd_user" => {
+                assert_eq!(caps.configured.limit_nofile, Some(SERVICE_LIMIT_NOFILE));
+                assert_eq!(caps.configured.tasks_max, Some(SERVICE_TASKS_MAX));
+            }
+            "windows_service" => {
+                assert!(
+                    caps.configured
+                        .restart_policy
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("restart/5000")
+                );
+            }
+            _ => unreachable!(),
+        }
+        #[cfg(target_os = "linux")]
+        assert!(
+            caps.effective.limit_nofile.is_some()
+                || caps.effective.tasks_max.is_some()
+                || caps.effective.memory_max_bytes.is_some()
+                || caps.effective.oom_score_adjust.is_some()
+        );
     }
 }

@@ -500,6 +500,16 @@ subject length only; it does not echo bearer tokens, raw principals, profiles,
 connect strings, or credentials. The broader N4b work computes effective
 DB/host ceilings from live DB limits, fd limits, task limits, and memory budget.
 
+`oraclemcp --json service install --dry-run` includes the generated service-unit
+hardening. On Linux systemd user units are `Type=notify`/`NotifyAccess=main`,
+restart on failure, and set `LimitNOFILE=65536`, `TasksMax=512`,
+`MemoryMax=2G`, and `OOMScoreAdjust=100`. launchd agents get `KeepAlive` plus
+file/process `SoftResourceLimits`; Windows services get automatic start plus an
+SCM restart-on-failure policy. `oraclemcp --json doctor` reports those
+configured caps alongside the effective limits visible to the current process
+and cgroup. Run doctor from the installed service context when you need the
+service-inherited effective values rather than the invoking shell's limits.
+
 ### 5.3.2 Persistent service file store
 
 Service-owned state uses the shared `oraclemcp-core` file-store primitives under
