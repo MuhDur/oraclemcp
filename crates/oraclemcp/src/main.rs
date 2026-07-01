@@ -76,7 +76,7 @@ use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel, SessionLevel
 use oraclemcp_telemetry::{HealthState, Metrics, OtlpConfig};
 use service_lifecycle::{
     ServiceCommand as ServiceLifecycleCommand, ServiceInstallOptions, ServiceLogsOptions,
-    ServiceMutationOptions, ServiceReadOptions,
+    ServiceMutationOptions, ServiceReadOptions, acquire_service_instance_guard,
 };
 
 /// Whether this build includes live Oracle connectivity.
@@ -2568,6 +2568,15 @@ fn run_serve(
                     pinger.shutdown();
                     drop(telemetry);
                     return ExitCode::from(1);
+                }
+            };
+            let _service_instance_guard = match acquire_service_instance_guard(&addr) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    emit_status_error(robot_json, error.code, &error.message);
+                    pinger.shutdown();
+                    drop(telemetry);
+                    return ExitCode::from(error.exit_code);
                 }
             };
             let service_transport = match tls {

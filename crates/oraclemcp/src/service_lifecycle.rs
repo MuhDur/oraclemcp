@@ -1,16 +1,20 @@
 use std::env;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use oraclemcp_core::{DoctorServiceUnitCaps, DoctorServiceUnitLimitCaps};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const SERVICE_LIMIT_NOFILE: u64 = 65_536;
 const SERVICE_TASKS_MAX: u64 = 512;
 const SERVICE_MEMORY_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const SERVICE_MEMORY_MAX_SYSTEMD: &str = "2G";
 const SERVICE_OOM_SCORE_ADJUST: i16 = 100;
+const SERVICE_INSTANCE_LOCK_FILE: &str = "service-instance.json";
+const SERVICE_INSTANCE_SCHEMA_VERSION: u8 = 1;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ServiceError {
@@ -120,6 +124,51 @@ pub(crate) struct ServiceResult {
     pub(crate) text: String,
 }
 
+#[derive(Debug)]
+pub(crate) struct ServiceInstanceGuard {
+    path: PathBuf,
+    token: String,
+}
+
+impl Drop for ServiceInstanceGuard {
+    fn drop(&mut self) {
+        let owned = fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|body| serde_json::from_str::<ServiceInstanceMetadata>(&body).ok())
+            .is_some_and(|metadata| metadata.token == self.token);
+        if owned && fs::remove_file(&self.path).is_ok() {
+            let _ = sync_parent_dir(&self.path);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct ServiceInstanceMetadata {
+    schema_version: u8,
+    pid: u32,
+    listen: String,
+    started_unix_ms: u64,
+    token: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum ServiceInstanceDiscovery {
+    Missing {
+        lock_path: String,
+    },
+    Present {
+        lock_path: String,
+        pid: u32,
+        listen: String,
+        started_unix_ms: u64,
+    },
+    Unreadable {
+        lock_path: String,
+        error: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ServicePlan {
     pub(crate) ok: bool,
@@ -209,6 +258,12 @@ pub(crate) fn doctor_service_unit_caps() -> Option<DoctorServiceUnitCaps> {
         effective: effective_service_unit_caps(),
         notes: service_hardening_notes(manager),
     })
+}
+
+pub(crate) fn acquire_service_instance_guard(
+    listen: &str,
+) -> Result<ServiceInstanceGuard, ServiceError> {
+    acquire_service_instance_guard_at(&default_service_instance_lock_path(), listen)
 }
 
 fn require_confirmed(action: &str, dry_run: bool, yes: bool) -> Result<(), ServiceError> {
@@ -511,6 +566,7 @@ fn run_status(manager: ServiceManager, name: &str) -> Result<ServiceResult, Serv
     let output = run_capture(&program, &args, false)?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let runtime_instance = discover_service_instance();
     let active = match manager {
         ServiceManager::SystemdUser => stdout == "active",
         ServiceManager::LaunchdUser => output.status.success(),
@@ -525,13 +581,18 @@ fn run_status(manager: ServiceManager, name: &str) -> Result<ServiceResult, Serv
         "active": active,
         "status": stdout,
         "stderr": stderr,
+        "runtime_instance": runtime_instance,
         "exit_code": exit_code,
     });
     let text = if active {
-        format!("oraclemcp service `{name}` is active")
+        format!(
+            "oraclemcp service `{name}` is active; {}",
+            render_instance_discovery(&runtime_instance)
+        )
     } else {
         format!(
-            "oraclemcp service `{name}` is not active; run `oraclemcp service logs` or `oraclemcp service install --dry-run`"
+            "oraclemcp service `{name}` is not active; {}; run `oraclemcp service logs` or `oraclemcp service install --dry-run`",
+            render_instance_discovery(&runtime_instance)
         )
     };
     Ok(ServiceResult {
@@ -652,6 +713,274 @@ fn execute_steps(steps: &[ServiceStep]) -> Result<(), ServiceError> {
         }
     }
     Ok(())
+}
+
+fn acquire_service_instance_guard_at(
+    path: &Path,
+    listen: &str,
+) -> Result<ServiceInstanceGuard, ServiceError> {
+    let token = new_service_instance_token()?;
+    let metadata = ServiceInstanceMetadata {
+        schema_version: SERVICE_INSTANCE_SCHEMA_VERSION,
+        pid: std::process::id(),
+        listen: listen.to_owned(),
+        started_unix_ms: current_unix_millis(),
+        token: token.clone(),
+    };
+    let mut body = serde_json::to_vec_pretty(&metadata).map_err(|e| {
+        ServiceError::new(
+            "ORACLEMCP_SERVICE_LOCK_UNAVAILABLE",
+            format!("failed to serialize service instance lock metadata: {e}"),
+            3,
+        )
+    })?;
+    body.push(b'\n');
+
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        ensure_private_runtime_dir(parent).map_err(|e| {
+            ServiceError::new(
+                "ORACLEMCP_SERVICE_LOCK_UNAVAILABLE",
+                format!(
+                    "failed to prepare service runtime directory {}: {e}",
+                    parent.display()
+                ),
+                3,
+            )
+        })?;
+    }
+
+    let mut file = match create_new_private_file(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(ServiceError::new(
+                "ORACLEMCP_SERVICE_ALREADY_RUNNING",
+                format!(
+                    "another oraclemcp service instance is already registered; refusing to \
+                     start a second instance ({}). This prevents silent takeover of a different \
+                     port or socket; inspect service status/logs before clearing a stale lock.",
+                    render_instance_discovery(&discover_service_instance_at(path))
+                ),
+                3,
+            ));
+        }
+        Err(e) => {
+            return Err(ServiceError::new(
+                "ORACLEMCP_SERVICE_LOCK_UNAVAILABLE",
+                format!(
+                    "failed to create service instance lock {}: {e}",
+                    path.display()
+                ),
+                3,
+            ));
+        }
+    };
+
+    let write_result = file.write_all(&body).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(path);
+        return Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_LOCK_UNAVAILABLE",
+            format!(
+                "failed to write service instance lock {}: {e}",
+                path.display()
+            ),
+            3,
+        ));
+    }
+    if let Err(e) = sync_parent_dir(path) {
+        let _ = fs::remove_file(path);
+        return Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_LOCK_UNAVAILABLE",
+            format!(
+                "failed to sync service instance lock directory for {}: {e}",
+                path.display()
+            ),
+            3,
+        ));
+    }
+
+    Ok(ServiceInstanceGuard {
+        path: path.to_path_buf(),
+        token,
+    })
+}
+
+fn default_service_instance_lock_path() -> PathBuf {
+    default_service_runtime_dir().join(SERVICE_INSTANCE_LOCK_FILE)
+}
+
+fn default_service_runtime_dir() -> PathBuf {
+    if let Some(runtime) = env::var_os("XDG_RUNTIME_DIR") {
+        return PathBuf::from(runtime).join("oraclemcp");
+    }
+    let user = env::var("USER")
+        .or_else(|_| env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown".to_owned());
+    env::temp_dir().join(format!("oraclemcp-service-{user}"))
+}
+
+fn discover_service_instance() -> ServiceInstanceDiscovery {
+    discover_service_instance_at(&default_service_instance_lock_path())
+}
+
+fn discover_service_instance_at(path: &Path) -> ServiceInstanceDiscovery {
+    let lock_path = path.display().to_string();
+    let body = match fs::read_to_string(path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return ServiceInstanceDiscovery::Missing { lock_path };
+        }
+        Err(e) => {
+            return ServiceInstanceDiscovery::Unreadable {
+                lock_path,
+                error: e.to_string(),
+            };
+        }
+    };
+    match serde_json::from_str::<ServiceInstanceMetadata>(&body) {
+        Ok(metadata) if metadata.schema_version == SERVICE_INSTANCE_SCHEMA_VERSION => {
+            ServiceInstanceDiscovery::Present {
+                lock_path,
+                pid: metadata.pid,
+                listen: metadata.listen,
+                started_unix_ms: metadata.started_unix_ms,
+            }
+        }
+        Ok(metadata) => ServiceInstanceDiscovery::Unreadable {
+            lock_path,
+            error: format!("unsupported schema_version {}", metadata.schema_version),
+        },
+        Err(e) => ServiceInstanceDiscovery::Unreadable {
+            lock_path,
+            error: e.to_string(),
+        },
+    }
+}
+
+fn render_instance_discovery(discovery: &ServiceInstanceDiscovery) -> String {
+    match discovery {
+        ServiceInstanceDiscovery::Missing { lock_path } => {
+            format!("no service instance lock at {lock_path}")
+        }
+        ServiceInstanceDiscovery::Present {
+            lock_path,
+            pid,
+            listen,
+            started_unix_ms,
+        } => format!(
+            "service instance lock at {lock_path}: pid={pid} listen={listen:?} started_unix_ms={started_unix_ms}"
+        ),
+        ServiceInstanceDiscovery::Unreadable { lock_path, error } => {
+            format!("service instance lock at {lock_path} is unreadable: {error}")
+        }
+    }
+}
+
+fn ensure_private_runtime_dir(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "service runtime path is not a regular directory",
+                ));
+            }
+            harden_private_runtime_dir(path, &metadata)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt as _;
+                builder.mode(0o700);
+            }
+            builder.create(path)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(unix)]
+fn harden_private_runtime_dir(path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode == 0o700 {
+        return Ok(());
+    }
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn harden_private_runtime_dir(_path: &Path, _metadata: &fs::Metadata) -> io::Result<()> {
+    Ok(())
+}
+
+fn create_new_private_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn new_service_instance_token() -> Result<String, ServiceError> {
+    let mut raw = [0u8; 16];
+    getrandom::getrandom(&mut raw).map_err(|e| {
+        ServiceError::new(
+            "ORACLEMCP_SERVICE_LOCK_UNAVAILABLE",
+            format!("failed to create service instance token: {e}"),
+            3,
+        )
+    })?;
+    Ok(hex_lower(&raw))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn current_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+fn sync_parent_dir(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn sync_dir(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn sync_dir(path: &Path) -> io::Result<()> {
+    File::open(path).and_then(|file| file.sync_all())
 }
 
 fn run_capture(
@@ -1133,6 +1462,16 @@ mod tests {
         PathBuf::from("/opt/oraclemcp/bin/oraclemcp")
     }
 
+    fn test_root(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/service-lifecycle-tests")
+            .join(format!("{name}-{}-{stamp}", std::process::id()))
+    }
+
     #[test]
     fn install_requires_yes_or_dry_run() {
         let err = run_service_command_with(
@@ -1269,6 +1608,53 @@ mod tests {
         )
         .expect_err("path traversal rejected");
         assert_eq!(err.code, "ORACLEMCP_SERVICE_INVALID_NAME");
+    }
+
+    #[test]
+    fn service_instance_guard_refuses_second_instance_and_reports_discovery() {
+        let path = test_root("service-instance").join("service-instance.json");
+        let first =
+            acquire_service_instance_guard_at(&path, "127.0.0.1:7070").expect("first guard");
+
+        let discovery = discover_service_instance_at(&path);
+        let ServiceInstanceDiscovery::Present { pid, listen, .. } = discovery else {
+            panic!("expected present discovery");
+        };
+        assert_eq!(pid, std::process::id());
+        assert_eq!(listen, "127.0.0.1:7070");
+
+        let err = acquire_service_instance_guard_at(&path, "127.0.0.1:7071")
+            .expect_err("second guard is refused");
+        assert_eq!(err.code, "ORACLEMCP_SERVICE_ALREADY_RUNNING");
+        assert_eq!(err.exit_code, 3);
+        assert!(err.message.contains("refusing to start a second instance"));
+        assert!(err.message.contains("pid="));
+        assert!(err.message.contains("127.0.0.1:7070"));
+
+        drop(first);
+        assert!(matches!(
+            discover_service_instance_at(&path),
+            ServiceInstanceDiscovery::Missing { .. }
+        ));
+    }
+
+    #[test]
+    fn service_instance_guard_drop_does_not_clear_replaced_lock() {
+        let path = test_root("service-instance-replaced").join("service-instance.json");
+        let first =
+            acquire_service_instance_guard_at(&path, "127.0.0.1:7070").expect("first guard");
+        fs::remove_file(&path).expect("simulate operator-cleared stale lock");
+        let second =
+            acquire_service_instance_guard_at(&path, "127.0.0.1:7071").expect("second guard");
+
+        drop(first);
+        let discovery = discover_service_instance_at(&path);
+        let ServiceInstanceDiscovery::Present { listen, .. } = discovery else {
+            panic!("replacement lock must remain present");
+        };
+        assert_eq!(listen, "127.0.0.1:7071");
+
+        drop(second);
     }
 
     #[test]

@@ -185,6 +185,9 @@ current process.
 Streamable HTTP auth rules are unchanged for service mode: configure
 service-owned per-client credentials, OAuth, or mTLS with registered client leaf
 fingerprints, or pass `--allow-no-auth` only for intentional local development.
+The HTTP service also owns a private runtime instance lock; a second
+`serve --listen` process refuses to start and reports the existing pid/listen
+metadata instead of silently taking over another port or socket.
 
 The browser dashboard is paired separately even on loopback. `oraclemcp
 dashboard` creates a 0600 one-time ticket under the user runtime directory,

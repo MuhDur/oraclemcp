@@ -326,6 +326,11 @@ surface. Everything below concerns the HTTP transport (`serve --listen`).
   `127.0.0.1`/`::1`) is refused unless `ORACLEMCP_HTTP_ALLOW_REMOTE=1` is set.
   This is a deliberate guard against accidentally exposing the server; set it
   consciously, behind a network boundary.
+- **Single service instance.** After binding but before accepting work, the HTTP
+  service creates a private runtime `service-instance.json` lock containing
+  pid/listen/start metadata. A second `serve --listen` process fails closed with
+  `ORACLEMCP_SERVICE_ALREADY_RUNNING` and reports that metadata instead of
+  silently taking over another port or socket.
 - **Host / Origin allowlists.** `--http-allowed-host` and
   `--http-allowed-origin` (or `[http] allowed_hosts`/`allowed_origins`) gate the
   `Host` authority and browser `Origin`. Loopback authorities are allowed
@@ -405,6 +410,10 @@ Logs go to **stderr** (stdout stays pure JSON-RPC over stdio). Startup keeps the
 tool surface and discovery available even when the live connection cannot open;
 live tool calls then return structured error envelopes instead of crashing the
 server.
+Only one HTTP service instance is allowed per runtime directory. If a second
+`serve --listen` process finds `service-instance.json`, it exits with
+`ORACLEMCP_SERVICE_ALREADY_RUNNING`; `oraclemcp --json service status` includes
+the same runtime instance discovery block for operator inspection.
 
 ### 5.3 Drain and stop (SIGTERM)
 
