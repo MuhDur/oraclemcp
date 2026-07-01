@@ -189,6 +189,16 @@ struct ProfileDispatchPolicy {
     request_timeout: Option<Duration>,
 }
 
+struct PreparedProfileSwitch {
+    profile: String,
+    conn: Box<dyn OracleConnection>,
+    stateless_conn: Option<Box<dyn OracleConnection>>,
+    level: SessionLevelState,
+    request_timeout: Option<Duration>,
+    custom_catalog: CustomToolCatalog,
+    response: Value,
+}
+
 fn default_dispatch_policy() -> ProfileDispatchPolicy {
     ProfileDispatchPolicy {
         level: default_read_only_level(),
@@ -5174,10 +5184,10 @@ impl OracleDispatcher {
                 .with_next_step("restart the server with `oraclemcp serve --profile <name>`"));
             };
 
-            let new_conn = connector(cx, &profile)
+            let conn = connector(cx, &profile)
                 .await
                 .map_err(DbError::into_envelope)?;
-            let new_stateless_conn = match &self.stateless_connector {
+            let stateless_conn = match &self.stateless_connector {
                 Some(connector) => connector(cx, &profile)
                     .await
                     .map_err(DbError::into_envelope)?,
@@ -5185,10 +5195,10 @@ impl OracleDispatcher {
             };
             let mut response = connection_info_json(
                 Some(profile.clone()),
-                describe_conn(cx, new_conn.as_ref()).await,
+                describe_conn(cx, conn.as_ref()).await,
             );
             if let Value::Object(map) = &mut response
-                && let Some(stateless_conn) = new_stateless_conn.as_ref()
+                && let Some(stateless_conn) = stateless_conn.as_ref()
             {
                 map.insert(
                     "stateless_read_connection".to_owned(),
@@ -5202,20 +5212,47 @@ impl OracleDispatcher {
                 Some(loader) => loader(Some(&profile), &new_level)?,
                 None => CustomToolCatalog::default(),
             };
+            let prepared = PreparedProfileSwitch {
+                profile,
+                conn,
+                stateless_conn,
+                level: new_level,
+                request_timeout: new_policy.request_timeout,
+                custom_catalog: new_custom_catalog,
+                response,
+            };
+            // C-5: every capacity-, metadata-, and config-dependent operation
+            // above runs before this commit point. The critical section below
+            // performs only ownership swaps after its fallible mutex updates
+            // succeed, so BUSY/AT_CAPACITY during preparation cannot strand the
+            // lane connection-less or overwrite the old profile.
             let mut state = self.state.lock(cx).await.map_err(|_| {
                 ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
             })?;
-            self.set_request_timeout(new_policy.request_timeout)?;
-            state.conn = new_conn;
-            state.stateless_conn = new_stateless_conn;
+            let old_request_timeout = self.request_timeout()?;
+            self.set_request_timeout(prepared.request_timeout)?;
+            if let Err(err) = self.clear_connection_quarantine() {
+                let _ = self.set_request_timeout(old_request_timeout);
+                return Err(err);
+            }
+            let PreparedProfileSwitch {
+                profile,
+                conn,
+                stateless_conn,
+                level,
+                custom_catalog,
+                mut response,
+                ..
+            } = prepared;
+            state.conn = conn;
+            state.stateless_conn = stateless_conn;
             state.active_profile = Some(profile.clone());
-            state.level = new_level;
-            state.custom_catalog = new_custom_catalog;
+            state.level = level;
+            state.custom_catalog = custom_catalog;
             state.grant_generation = state.grant_generation.saturating_add(1);
             state.execute_grants.clear();
             state.execute_approved_tokens.clear();
             state.patch_previews.clear();
-            self.clear_connection_quarantine()?;
             // A1: the pinned session was replaced; the new session's transaction
             // is fresh, so re-assert the read-only backstop on its first read.
             state.read_only_backstop.reset();

@@ -1343,6 +1343,70 @@ fn failed_profile_switch_does_not_replace_the_current_connection() {
 }
 
 #[test]
+fn switch_profile_at_capacity_keeps_old_conn() {
+    let old_counts = Arc::new(TouchCounts::default());
+    let new_counts = Arc::new(TouchCounts::default());
+    let connector_calls = Arc::new(AtomicUsize::new(0));
+    let new_counts_for_connector = new_counts.clone();
+    let connector_calls_for_connector = connector_calls.clone();
+    let dispatcher = OracleDispatcher::new_switchable_with_custom_tools(
+        Box::new(LabeledMock::new(
+            "old",
+            "single_session",
+            old_counts.clone(),
+        )),
+        Some("dev".to_owned()),
+        default_read_only_level(),
+        Arc::new(move |_cx, profile| {
+            assert_eq!(profile, "other");
+            connector_calls_for_connector.fetch_add(1, Ordering::SeqCst);
+            let counts = new_counts_for_connector.clone();
+            Box::pin(async move {
+                Ok(Box::new(LabeledMock::new("new", "single_session", counts))
+                    as Box<dyn OracleConnection>)
+            })
+        }),
+        CustomToolCatalog::default(),
+        Some(Arc::new(|profile, _level| {
+            assert_eq!(profile, Some("other"));
+            Err(
+                ErrorEnvelope::new(ErrorClass::AtCapacity, "profile capacity exhausted")
+                    .with_retry_after_ms(250),
+            )
+        })),
+    );
+
+    let err = dispatcher
+        .dispatch("oracle_switch_profile", json!({ "profile": "other" }))
+        .expect_err("capacity refusal aborts the switch before commit");
+    assert_eq!(err.error_class, ErrorClass::AtCapacity);
+    assert_eq!(
+        connector_calls.load(Ordering::SeqCst),
+        1,
+        "the replacement connection was acquired before the capacity refusal"
+    );
+    assert_eq!(
+        new_counts.describe.load(Ordering::SeqCst),
+        1,
+        "the prepared replacement was described before the refusal"
+    );
+
+    let query = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({ "sql": "SELECT 1 AS label FROM dual" }),
+        )
+        .expect("old pinned connection remains usable");
+    assert_eq!(query["rows"][0]["LABEL"], json!("old"));
+    assert_eq!(old_counts.query.load(Ordering::SeqCst), 1);
+
+    let out = dispatcher
+        .dispatch("oracle_connection_info", json!({}))
+        .expect("active profile remains the old profile");
+    assert_eq!(out["active_profile"], json!("dev"));
+}
+
+#[test]
 fn missing_profile_switch_target_is_actionable_invalid_arguments() {
     let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
     let err = dispatcher
