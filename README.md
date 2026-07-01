@@ -31,6 +31,14 @@ curl -fsSL https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh \
   | bash -s -- --version <version>
 ```
 
+On Windows, download and run the PowerShell installer:
+
+```powershell
+iwr -UseBasicParsing https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.ps1 -OutFile install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -Version <version>
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version <version>
+```
+
 For air-gapped hosts, download the release archive plus its `.sha256`, `.sig`,
 `.crt`, and `.attestation.sigstore.json` siblings, then run a downloaded copy
 of the installer:
@@ -40,6 +48,11 @@ bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz \
   --version <version>
 ```
 
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 `
+  -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version <version>
+```
+
 Uninstall is preview-first and idempotent. Service removal remains an explicit
 service-manager mutation:
 
@@ -47,6 +60,13 @@ service-manager mutation:
 bash install.sh --uninstall --dry-run
 bash install.sh --uninstall --yes
 bash install.sh --uninstall --service --yes
+```
+
+For Windows service install, the PowerShell installer also requires explicit
+consent:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Service -Yes -Profile db_ro
 ```
 
 Install the local service only with explicit consent. Keep it on loopback unless

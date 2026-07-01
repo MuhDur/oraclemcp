@@ -55,9 +55,15 @@ fn readme_leads_with_hosted_install_one_liner_service_and_dashboard() {
         "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh",
         "bash -s -- --dry-run --version <version>",
         "bash -s -- --version <version>",
+        "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.ps1",
+        "powershell -ExecutionPolicy Bypass -File .\\install.ps1 -DryRun -Version <version>",
+        "powershell -ExecutionPolicy Bypass -File .\\install.ps1 -Version <version>",
         "bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz",
+        "powershell -ExecutionPolicy Bypass -File .\\install.ps1 `",
+        "-Offline .\\oraclemcp-x86_64-pc-windows-msvc.zip -Version <version>",
         "bash install.sh --uninstall --dry-run",
         "bash install.sh --uninstall --service --yes",
+        "powershell -ExecutionPolicy Bypass -File .\\install.ps1 -Service -Yes -Profile db_ro",
         "oraclemcp --json service install --dry-run",
         "oraclemcp service install --yes",
         "om dashboard",
@@ -69,6 +75,42 @@ fn readme_leads_with_hosted_install_one_liner_service_and_dashboard() {
             "README install-first section must contain {needle}"
         );
     }
+}
+
+#[test]
+fn windows_installer_verifies_before_mutating_and_requires_service_consent() {
+    let root = repo_root();
+    let installer = fs::read_to_string(root.join("install.ps1")).expect("read install.ps1");
+
+    for needle in [
+        "certutil.exe -hashfile",
+        "cosign verify-blob",
+        "cosign verify-blob-attestation",
+        "x86_64-pc-windows-msvc",
+        "oraclemcp-$Target.zip",
+        "ORACLEMCP_INSTALL_OFFLINE_BUNDLE_MISSING",
+        "Expand-Archive",
+        "completions powershell",
+        "service install requires -Service -Yes or -DryRun",
+        "service: not requested; no service-manager files or units will be touched",
+        "Windows service '$ServiceName'",
+    ] {
+        assert!(
+            installer.contains(needle),
+            "install.ps1 must contain contract marker {needle}"
+        );
+    }
+
+    let service_gate = installer
+        .find("service install requires -Service -Yes or -DryRun")
+        .expect("service consent gate");
+    let service_exec = installer
+        .find("& $oraclemcp @serviceArguments")
+        .expect("service install command");
+    assert!(
+        service_gate < service_exec,
+        "install.ps1 must check explicit service consent before invoking service install"
+    );
 }
 
 #[test]

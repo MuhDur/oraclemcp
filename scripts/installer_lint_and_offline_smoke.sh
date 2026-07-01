@@ -32,12 +32,86 @@ fi
 bash -n install.sh
 bash -n scripts/installer_lint_and_offline_smoke.sh
 
+ps_text="$(tr -d '\r' < install.ps1)"
+contains "$ps_text" "certutil.exe -hashfile"
+contains "$ps_text" "cosign verify-blob"
+contains "$ps_text" "cosign verify-blob-attestation"
+contains "$ps_text" "completions powershell"
+contains "$ps_text" "service install requires -Service -Yes or -DryRun"
+contains "$ps_text" "service: not requested; no service-manager files or units will be touched"
+contains "$ps_text" "ORACLEMCP_INSTALL_OFFLINE_BUNDLE_MISSING"
+
+if command -v pwsh >/dev/null 2>&1; then
+  # shellcheck disable=SC2016 # PowerShell variables must not be expanded by Bash.
+  pwsh -NoLogo -NoProfile -Command '
+    $errors = $null
+    [System.Management.Automation.PSParser]::Tokenize((Get-Content -LiteralPath "install.ps1" -Raw), [ref]$errors) | Out-Null
+    if ($errors.Count -gt 0) {
+      $errors | Format-List | Out-String | Write-Error
+      exit 1
+    }
+  '
+
+  if pwsh -NoLogo -NoProfile -Command 'if (Get-Module -ListAvailable PSScriptAnalyzer) { exit 0 } exit 1'; then
+    # shellcheck disable=SC2016 # PowerShell variables must not be expanded by Bash.
+    pwsh -NoLogo -NoProfile -Command '
+      Import-Module PSScriptAnalyzer
+      $violations = Invoke-ScriptAnalyzer -Path "install.ps1" -Severity Error,Warning
+      if ($violations) {
+        $violations | Format-Table -AutoSize | Out-String | Write-Error
+        exit 1
+      }
+    '
+  elif [ "${ORACLEMCP_INSTALLER_REQUIRE_PSSA:-0}" = "1" ]; then
+    fail "PSScriptAnalyzer is required but not installed"
+  else
+    printf 'installer-smoke: PSScriptAnalyzer not installed; skipping PSSA\n' >&2
+  fi
+elif [ "${ORACLEMCP_INSTALLER_REQUIRE_PWSH:-0}" = "1" ]; then
+  fail "pwsh is required but not installed"
+else
+  printf 'installer-smoke: pwsh not installed; skipping install.ps1 parse/dry-run\n' >&2
+fi
+
 SMOKE_ROOT="$ROOT/target/installer-smoke"
 PREFIX="$SMOKE_ROOT/prefix"
 HOME_DIR="$SMOKE_ROOT/home"
 CONFIG_HOME="$SMOKE_ROOT/config"
 SMOKE_VERSION="9.9.9-installer-smoke"
 mkdir -p "$SMOKE_ROOT" "$HOME_DIR" "$CONFIG_HOME"
+
+if command -v pwsh >/dev/null 2>&1; then
+  WIN_PREFIX="$SMOKE_ROOT/windows-prefix"
+  WIN_OFFLINE_ARCHIVE="$SMOKE_ROOT/offline/oraclemcp-x86_64-pc-windows-msvc.zip"
+  win_dry_output="$(
+    pwsh -NoLogo -NoProfile -File ./install.ps1 \
+      -DryRun \
+      -Version "$SMOKE_VERSION" \
+      -Prefix "$WIN_PREFIX" \
+      -Offline "$WIN_OFFLINE_ARCHIVE"
+  )"
+  contains "$win_dry_output" "oraclemcp Windows installer plan"
+  contains "$win_dry_output" "mode: offline"
+  contains "$win_dry_output" "offline_archive: $WIN_OFFLINE_ARCHIVE"
+  contains "$win_dry_output" "offline_checksum: $WIN_OFFLINE_ARCHIVE.sha256"
+  contains "$win_dry_output" "oraclemcp.exe"
+  contains "$win_dry_output" "om.exe"
+  contains "$win_dry_output" "service: not requested; no service-manager files or units will be touched"
+  not_contains "$win_dry_output" "service install --yes"
+
+  win_service_output="$(
+    pwsh -NoLogo -NoProfile -File ./install.ps1 \
+      -DryRun \
+      -Version "$SMOKE_VERSION" \
+      -Prefix "$WIN_PREFIX" \
+      -Service \
+      -Yes \
+      -Profile db_ro \
+      -Listen 127.0.0.1:7070
+  )"
+  contains "$win_service_output" "service install --yes --name oraclemcp --listen 127.0.0.1:7070 --profile db_ro"
+  contains "$win_service_output" "readyz_gate: Invoke-WebRequest -UseBasicParsing http://127.0.0.1:7070/readyz"
+fi
 
 dry_output="$(
   env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
