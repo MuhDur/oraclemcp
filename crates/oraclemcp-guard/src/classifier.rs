@@ -15,15 +15,18 @@
 //!    `Destructive`; `EXPLAIN PLAN` is `Guarded`. (P1-1b)
 //! 4. **Purity consult** — a `SELECT` calling a user-defined function is
 //!    `Guarded` **unless** the [`SideEffectOracle`] proves it `ProvenReadOnly`;
-//!    absence of a write edge is `Unknown`, never `Safe` (P1-1e, R15). A
-//!    UDF-free `SELECT` also consults `statement_purity` over its resolved
+//!    for routine calls, absence of a write edge is `Unknown`, never `Safe`
+//!    (P1-1e, R15). A UDF-free `SELECT` also consults `statement_purity` over
+//!    its resolved
 //!    base objects (the engine's trigger/VPD walk): a base object the engine
-//!    proves `ProvenSideEffecting` escalates the `SELECT` to `Guarded`.
+//!    proves `ProvenSideEffecting` escalates the `SELECT` to `Guarded`, and an
+//!    engine-bound classifier can opt into treating statement-level `Unknown`
+//!    as `Guarded`.
 //!
 //! **Fail-closed law:** anything that does not parse, any PL/SQL block, any
-//! desync, and anything the engine cannot prove `ProvenReadOnly` is classified
-//! ≥ `Guarded`. The batch danger is the max over statements; any `Forbidden`
-//! sub-statement rejects the whole batch.
+//! desync, and any user-defined routine the engine cannot prove
+//! `ProvenReadOnly` is classified ≥ `Guarded`. The batch danger is the max over
+//! statements; any `Forbidden` sub-statement rejects the whole batch.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -914,7 +917,11 @@ fn query_base_objects(query: &sqlparser::ast::Query) -> Vec<ObjectRef> {
 }
 
 /// Classify a single pre-split, pure-SQL statement (Stage B + purity consult).
-fn classify_statement(sql: &str, oracle: &dyn SideEffectOracle) -> StatementClass {
+fn classify_statement(
+    sql: &str,
+    oracle: &dyn SideEffectOracle,
+    statement_unknown_guarded: bool,
+) -> StatementClass {
     use sqlparser::ast::Statement;
     let dialect = OracleDialect {};
     let parsed = match Parser::parse_sql(&dialect, sql) {
@@ -992,33 +999,25 @@ fn classify_statement(sql: &str, oracle: &dyn SideEffectOracle) -> StatementClas
                 .iter()
                 .all(|c| oracle.routine_purity(c).permits_safe());
             // The engine's trigger/VPD walk also gets a say: a UDF-free SELECT
-            // can still fire a side-effecting AFTER-SELECT trigger or VPD
-            // (DBMS_RLS) policy function the SQL text never names. Resolve the
-            // statement's base objects (FROM/JOIN tables + CTE/derived bodies)
-            // and consult `statement_purity`. The default UnknownOracle returns
-            // `Unknown` for any object, so we escalate ONLY on an explicit
-            // `ProvenSideEffecting` verdict — treating statement-level `Unknown`
-            // as the current permissive default. This keeps the no-engine
-            // baseline (every plain SELECT stays Safe) intact while giving a
-            // real bound oracle a genuine say. NOTE (P1-1e, oracle-qm3q.8):
-            // tightening this to fail closed on `Unknown` (forcing Guarded
-            // unless `ProvenReadOnly`) is deferred to the engine-binding phase,
-            // when a real non-default oracle is bound and base-object
-            // resolution can be trusted; doing it now would flip every plain
-            // SELECT to Guarded under UnknownOracle and break the corpus.
+            // can still fire side-effecting database logic the SQL text never
+            // names. The default UnknownOracle keeps statement-level `Unknown`
+            // permissive so the engine-free baseline stays stable; a consumer
+            // that binds a real oracle can opt into fail-closed `Unknown`
+            // handling with `Classifier::with_statement_unknown_guarded`.
             let base_objects = query_base_objects(query);
-            let stmt_side_effecting = !base_objects.is_empty()
-                && matches!(
-                    oracle.statement_purity(&base_objects),
-                    Purity::ProvenSideEffecting
-                );
+            let stmt_purity = if base_objects.is_empty() {
+                Purity::ProvenReadOnly
+            } else {
+                oracle.statement_purity(&base_objects)
+            };
+            let stmt_blocks_safe = matches!(stmt_purity, Purity::ProvenSideEffecting)
+                || (statement_unknown_guarded && matches!(stmt_purity, Purity::Unknown));
             // `SELECT … FOR UPDATE` (incl. OF/NOWAIT/SKIP LOCKED) takes row
             // locks and holds a transaction open — levels.rs:93 documents it as
             // Guarded, never Safe. The AST carries `query.locks`; a non-empty
             // lock list forces the guarded branch (oracle-ajm2.6).
             let has_row_lock = !query.locks.is_empty();
-            let stmt_pure =
-                (calls.is_empty() || all_proven) && !stmt_side_effecting && !has_row_lock;
+            let stmt_pure = (calls.is_empty() || all_proven) && !stmt_blocks_safe && !has_row_lock;
             let mut objects: Vec<String> = calls.iter().map(|c| c.name.clone()).collect();
             if stmt_pure {
                 StatementClass {
@@ -1027,7 +1026,7 @@ fn classify_statement(sql: &str, oracle: &dyn SideEffectOracle) -> StatementClas
                     objects,
                 }
             } else {
-                if stmt_side_effecting {
+                if stmt_blocks_safe {
                     objects.extend(base_objects.iter().map(|o| o.name.clone()));
                 }
                 guarded_rw(objects)
@@ -1096,6 +1095,7 @@ fn classify_statement(sql: &str, oracle: &dyn SideEffectOracle) -> StatementClas
 pub struct Classifier {
     config: ClassifierConfig,
     oracle: Arc<dyn SideEffectOracle>,
+    statement_unknown_guarded: bool,
 }
 
 impl Default for Classifier {
@@ -1103,6 +1103,7 @@ impl Default for Classifier {
         Classifier {
             config: ClassifierConfig::new(),
             oracle: Arc::new(UnknownOracle),
+            statement_unknown_guarded: false,
         }
     }
 }
@@ -1114,6 +1115,7 @@ impl Classifier {
         Classifier {
             config,
             oracle: Arc::new(UnknownOracle),
+            statement_unknown_guarded: false,
         }
     }
 
@@ -1121,6 +1123,15 @@ impl Classifier {
     #[must_use]
     pub fn with_oracle(mut self, oracle: Arc<dyn SideEffectOracle>) -> Self {
         self.oracle = oracle;
+        self
+    }
+
+    /// Tighten statement-level `Unknown` purity to `Guarded` for SELECT base
+    /// objects. This is intentionally opt-in so the default no-engine
+    /// `UnknownOracle` continues to keep UDF-free plain SELECTs `Safe`.
+    #[must_use]
+    pub fn with_statement_unknown_guarded(mut self) -> Self {
+        self.statement_unknown_guarded = true;
         self
     }
 
@@ -1221,13 +1232,23 @@ impl Classifier {
         // Classify each statement; the batch danger is the max, and any
         // Forbidden sub-statement rejects the whole batch.
         let classes: Vec<StatementClass> = if shape.statement_count <= 1 {
-            vec![classify_statement(sql, self.oracle.as_ref())]
+            vec![classify_statement(
+                sql,
+                self.oracle.as_ref(),
+                self.statement_unknown_guarded,
+            )]
         } else {
             // Multi-statement pure SQL: let the parser split, classify each.
             match Parser::parse_sql(&OracleDialect {}, sql) {
                 Ok(stmts) => stmts
                     .iter()
-                    .map(|s| classify_statement(&s.to_string(), self.oracle.as_ref()))
+                    .map(|s| {
+                        classify_statement(
+                            &s.to_string(),
+                            self.oracle.as_ref(),
+                            self.statement_unknown_guarded,
+                        )
+                    })
                     .collect(),
                 Err(_) => vec![StatementClass::forbidden()],
             }
@@ -1539,6 +1560,38 @@ mod tests {
                 "default oracle must keep {sql:?} Safe"
             );
         }
+    }
+
+    #[test]
+    fn statement_unknown_guarded_mode_tightens_udf_free_selects() {
+        struct UnknownStatementOracle;
+        impl SideEffectOracle for UnknownStatementOracle {
+            fn statement_purity(&self, _base_objects: &[ObjectRef]) -> Purity {
+                Purity::Unknown
+            }
+        }
+
+        let default_binding = Classifier::default().with_oracle(Arc::new(UnknownStatementOracle));
+        assert_eq!(
+            default_binding.classify("SELECT * FROM orders").danger,
+            DangerLevel::Safe,
+            "`with_oracle` alone must preserve the no-engine SELECT baseline"
+        );
+
+        let tightened = Classifier::default()
+            .with_oracle(Arc::new(UnknownStatementOracle))
+            .with_statement_unknown_guarded();
+        let d = tightened.classify("SELECT * FROM orders");
+        assert_eq!(
+            d.danger,
+            DangerLevel::Guarded,
+            "engine-bound statement Unknown must fail closed to Guarded"
+        );
+        assert_eq!(d.required_level, Some(OperatingLevel::ReadWrite));
+        assert!(
+            d.objects_affected.iter().any(|o| o == "orders"),
+            "the unresolved base object should be surfaced for audit"
+        );
     }
 
     #[test]

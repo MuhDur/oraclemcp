@@ -1,6 +1,8 @@
 #![cfg(feature = "plsql-intelligence")]
 
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use asupersync::Cx;
 use chrono::Utc;
@@ -10,19 +12,20 @@ use oraclemcp_db::{
     OracleConnection, OracleRow as DbOracleRow, extract_catalog_rowsets,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
+use oraclemcp_guard::{Classifier, ClassifierConfig, ObjectRef, Purity, SideEffectOracle};
 use plsql_catalog::{
     CatalogCapabilities, CatalogRowSet, CatalogSnapshot, CatalogSnapshotBuilder, CatalogSource,
     CatalogSourceKind, OracleRow as CatalogOracleRow,
 };
 use plsql_cicd::{ChangeSet, PredictMode, change_impact_envelope, predict};
-use plsql_core::{AnalysisProfile, FileId, Severity};
-use plsql_depgraph::NodeSelector;
+use plsql_core::{AnalysisProfile, CompletenessPosture, ConfidenceLevel, FileId, Severity};
+use plsql_depgraph::{DepGraph, Edge, EdgeKind, Node, NodeId, NodeIdentityKind, NodeSelector};
 use plsql_doc::{DocSet, extract_doc_comments};
 use plsql_engine::{
     AnalysisRequest, analyze_project, engine_doctor_report, engine_full_doctor_report,
 };
 use plsql_ir::{FactStore, FlowEnv, lower_top_level};
-use plsql_lineage::{LineageDirection, dependencies, impact};
+use plsql_lineage::{LineageDirection, column_writers, dependencies, impact};
 use plsql_parser_antlr::lower::lower_source;
 use plsql_sast::{CompletenessSnapshot, Rule, ScanUnit, run_scan};
 use serde::Deserialize;
@@ -230,6 +233,415 @@ fn live_schema(include_changeset: bool) -> Value {
         required.push("changeset");
     }
     object_schema(props, &required)
+}
+
+/// Build the feature-gated, engine-backed classifier. The guard crate owns the
+/// port; this consumer binds the PL/SQL analysis graph to it and opts in to the
+/// Gap-2 statement-Unknown tightening.
+#[must_use]
+pub fn classifier_from_analysis_run(run: &plsql_engine::AnalysisRun) -> Classifier {
+    Classifier::new(ClassifierConfig::new())
+        .with_oracle(Arc::new(PlsqlSideEffectOracle::from_analysis_run(run)))
+        .with_statement_unknown_guarded()
+}
+
+/// The PL/SQL-intelligence implementation of `oraclemcp-guard`'s purity port.
+///
+/// `plsql-depgraph` edges point `dependent -> dependency`. Routine purity walks
+/// outgoing dependencies. Statement purity starts from SELECT base objects,
+/// checks VPD/catalog policy functions, then walks incoming trigger-like
+/// dependents and view dependencies. Anything not strongly proven read-only
+/// stays `Unknown`.
+#[derive(Clone)]
+pub struct PlsqlSideEffectOracle {
+    graph: Arc<DepGraph>,
+    catalog: Option<Arc<CatalogSnapshot>>,
+    catalog_complete: bool,
+    source_trustworthy: bool,
+}
+
+impl PlsqlSideEffectOracle {
+    #[must_use]
+    pub fn from_analysis_run(run: &plsql_engine::AnalysisRun) -> Self {
+        let source_trustworthy = matches!(
+            run.completeness.posture,
+            CompletenessPosture::Clean | CompletenessPosture::Partial
+        );
+        Self {
+            graph: Arc::new(run.dep_graph.clone()),
+            catalog: run.catalog.clone().map(Arc::new),
+            catalog_complete: run.catalog.is_some(),
+            source_trustworthy,
+        }
+    }
+
+    fn routine_purity_by_candidates(&self, candidates: &[String]) -> Purity {
+        let Some(node_id) = self.resolve_candidates(candidates).map(|node| node.id) else {
+            return Purity::Unknown;
+        };
+        self.routine_node_purity(node_id, &mut HashSet::new())
+    }
+
+    fn routine_node_purity(&self, node_id: NodeId, stack: &mut HashSet<WalkKey>) -> Purity {
+        let key = WalkKey::routine(node_id);
+        if !stack.insert(key) {
+            return Purity::Unknown;
+        }
+
+        let verdict = if !self.source_trustworthy {
+            Purity::Unknown
+        } else if self
+            .graph
+            .nodes
+            .get(&node_id)
+            .is_some_and(|node| self.node_writes_columns_via_lineage(node))
+        {
+            Purity::ProvenSideEffecting
+        } else {
+            let mut verdict = Purity::ProvenReadOnly;
+            for edge in self.outgoing_edges(node_id) {
+                verdict = combine_purity(verdict, self.routine_edge_purity(&edge, stack));
+                if matches!(verdict, Purity::ProvenSideEffecting) {
+                    break;
+                }
+            }
+            verdict
+        };
+
+        stack.remove(&key);
+        verdict
+    }
+
+    fn statement_node_purity(&self, node_id: NodeId, stack: &mut HashSet<WalkKey>) -> Purity {
+        let key = WalkKey::statement(node_id);
+        if !stack.insert(key) {
+            return Purity::Unknown;
+        }
+
+        let verdict = if !self.catalog_complete {
+            Purity::Unknown
+        } else {
+            let mut verdict = self.catalog_vpd_purity_for_node(node_id);
+
+            for edge in self.incoming_edges(node_id) {
+                if !matches!(edge.kind, EdgeKind::TriggersOn) {
+                    continue;
+                }
+                let edge_purity = if is_high_confidence(&edge) {
+                    self.routine_node_purity(edge.from, stack)
+                } else {
+                    Purity::Unknown
+                };
+                verdict = combine_purity(verdict, edge_purity);
+                if matches!(verdict, Purity::ProvenSideEffecting) {
+                    break;
+                }
+            }
+
+            if !matches!(verdict, Purity::ProvenSideEffecting) {
+                for edge in self.outgoing_edges(node_id) {
+                    verdict = combine_purity(verdict, self.statement_edge_purity(&edge, stack));
+                    if matches!(verdict, Purity::ProvenSideEffecting) {
+                        break;
+                    }
+                }
+            }
+
+            verdict
+        };
+
+        stack.remove(&key);
+        verdict
+    }
+
+    fn routine_edge_purity(&self, edge: &Edge, stack: &mut HashSet<WalkKey>) -> Purity {
+        if is_write_edge(edge.kind) {
+            return Purity::ProvenSideEffecting;
+        }
+        if !is_high_confidence(edge) {
+            return Purity::Unknown;
+        }
+        match edge.kind {
+            EdgeKind::Calls => self.routine_node_purity(edge.to, stack),
+            EdgeKind::Reads | EdgeKind::ReadsColumn | EdgeKind::ReadsUnknownColumnOfTable => {
+                if self
+                    .graph
+                    .nodes
+                    .get(&edge.to)
+                    .is_some_and(|node| is_statement_object_kind(node.identity_kind))
+                {
+                    self.statement_node_purity(edge.to, stack)
+                } else {
+                    Purity::ProvenReadOnly
+                }
+            }
+            EdgeKind::References | EdgeKind::DependsOnType => Purity::ProvenReadOnly,
+            EdgeKind::Unknown
+            | EdgeKind::TriggersOn
+            | EdgeKind::Constrains
+            | EdgeKind::OpaqueDynamic
+            | EdgeKind::DbLink => Purity::Unknown,
+            EdgeKind::Writes
+            | EdgeKind::WritesColumn
+            | EdgeKind::WritesUnknownColumnOfTable
+            | EdgeKind::DerivesColumn => Purity::ProvenSideEffecting,
+        }
+    }
+
+    fn statement_edge_purity(&self, edge: &Edge, stack: &mut HashSet<WalkKey>) -> Purity {
+        if is_write_edge(edge.kind) {
+            return Purity::ProvenSideEffecting;
+        }
+        if !is_high_confidence(edge) {
+            return Purity::Unknown;
+        }
+        match edge.kind {
+            EdgeKind::Calls => self.routine_node_purity(edge.to, stack),
+            EdgeKind::Reads | EdgeKind::ReadsColumn | EdgeKind::ReadsUnknownColumnOfTable => {
+                self.statement_node_purity(edge.to, stack)
+            }
+            EdgeKind::References | EdgeKind::DependsOnType => Purity::ProvenReadOnly,
+            EdgeKind::Unknown
+            | EdgeKind::TriggersOn
+            | EdgeKind::Constrains
+            | EdgeKind::OpaqueDynamic
+            | EdgeKind::DbLink => Purity::Unknown,
+            EdgeKind::Writes
+            | EdgeKind::WritesColumn
+            | EdgeKind::WritesUnknownColumnOfTable
+            | EdgeKind::DerivesColumn => Purity::ProvenSideEffecting,
+        }
+    }
+
+    fn catalog_vpd_purity_for_node(&self, node_id: NodeId) -> Purity {
+        let Some(catalog) = &self.catalog else {
+            return Purity::ProvenReadOnly;
+        };
+        let Some(node) = self.graph.nodes.get(&node_id) else {
+            return Purity::Unknown;
+        };
+        let mut verdict = Purity::ProvenReadOnly;
+        for schema_catalog in catalog.schemas.values() {
+            for policy in &schema_catalog.vpd_policies {
+                if !policy.enabled || !policy.on_select {
+                    continue;
+                }
+                if !catalog_object_matches(catalog, policy.object_owner, policy.object_name, node) {
+                    continue;
+                }
+                let candidates = vpd_function_candidates(catalog, policy);
+                let policy_purity = if candidates.is_empty() {
+                    Purity::Unknown
+                } else {
+                    self.routine_purity_by_candidates(&candidates)
+                };
+                verdict = combine_purity(verdict, policy_purity);
+                if matches!(verdict, Purity::ProvenSideEffecting) {
+                    break;
+                }
+            }
+            if matches!(verdict, Purity::ProvenSideEffecting) {
+                break;
+            }
+        }
+        verdict
+    }
+
+    fn node_writes_columns_via_lineage(&self, source: &Node) -> bool {
+        self.graph
+            .nodes
+            .values()
+            .filter(|node| matches!(node.identity_kind, NodeIdentityKind::Column))
+            .any(|column| {
+                let writers = column_writers(&self.graph, &NodeSelector::NodeId(column.id));
+                writers.accessors.iter().any(|accessor| {
+                    accessor
+                        .accessor_logical_id
+                        .eq_ignore_ascii_case(source.logical_id.as_str())
+                })
+            })
+    }
+
+    fn resolve_candidates(&self, candidates: &[String]) -> Option<&Node> {
+        for candidate in candidates {
+            if let Ok(node) = self
+                .graph
+                .resolve_node(&NodeSelector::LogicalObjectId(candidate.clone()))
+            {
+                return Some(node);
+            }
+        }
+        self.graph.nodes.values().find(|node| {
+            candidates
+                .iter()
+                .any(|candidate| node.logical_id.as_str().eq_ignore_ascii_case(candidate))
+        })
+    }
+
+    fn outgoing_edges(&self, node_id: NodeId) -> Vec<Edge> {
+        self.graph
+            .edges
+            .iter()
+            .filter(|edge| edge.from == node_id)
+            .cloned()
+            .collect()
+    }
+
+    fn incoming_edges(&self, node_id: NodeId) -> Vec<Edge> {
+        self.graph
+            .edges
+            .iter()
+            .filter(|edge| edge.to == node_id)
+            .cloned()
+            .collect()
+    }
+}
+
+impl SideEffectOracle for PlsqlSideEffectOracle {
+    fn routine_purity(&self, routine: &ObjectRef) -> Purity {
+        self.routine_purity_by_candidates(&object_ref_candidates(routine))
+    }
+
+    fn statement_purity(&self, base_objects: &[ObjectRef]) -> Purity {
+        if base_objects.is_empty() {
+            return Purity::ProvenReadOnly;
+        }
+        let mut verdict = Purity::ProvenReadOnly;
+        for base in base_objects {
+            let Some(node_id) = self
+                .resolve_candidates(&object_ref_candidates(base))
+                .map(|node| node.id)
+            else {
+                return Purity::Unknown;
+            };
+            verdict = combine_purity(
+                verdict,
+                self.statement_node_purity(node_id, &mut HashSet::new()),
+            );
+            if matches!(verdict, Purity::ProvenSideEffecting) {
+                break;
+            }
+        }
+        verdict
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+enum WalkKind {
+    Routine,
+    Statement,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+struct WalkKey {
+    kind: WalkKind,
+    node: NodeId,
+}
+
+impl WalkKey {
+    fn routine(node: NodeId) -> Self {
+        Self {
+            kind: WalkKind::Routine,
+            node,
+        }
+    }
+
+    fn statement(node: NodeId) -> Self {
+        Self {
+            kind: WalkKind::Statement,
+            node,
+        }
+    }
+}
+
+fn combine_purity(left: Purity, right: Purity) -> Purity {
+    match (left, right) {
+        (Purity::ProvenSideEffecting, _) | (_, Purity::ProvenSideEffecting) => {
+            Purity::ProvenSideEffecting
+        }
+        (Purity::Unknown, _) | (_, Purity::Unknown) => Purity::Unknown,
+        (Purity::ProvenReadOnly, Purity::ProvenReadOnly) => Purity::ProvenReadOnly,
+        _ => Purity::Unknown,
+    }
+}
+
+fn is_write_edge(kind: EdgeKind) -> bool {
+    matches!(
+        kind,
+        EdgeKind::Writes
+            | EdgeKind::WritesColumn
+            | EdgeKind::WritesUnknownColumnOfTable
+            | EdgeKind::DerivesColumn
+    )
+}
+
+fn is_high_confidence(edge: &Edge) -> bool {
+    matches!(edge.confidence.level, ConfidenceLevel::High)
+}
+
+fn is_statement_object_kind(kind: NodeIdentityKind) -> bool {
+    matches!(
+        kind,
+        NodeIdentityKind::Table
+            | NodeIdentityKind::View
+            | NodeIdentityKind::MaterializedView
+            | NodeIdentityKind::EditioningView
+    )
+}
+
+fn object_ref_candidates(reference: &ObjectRef) -> Vec<String> {
+    let name = normalize_identifier(&reference.name);
+    let mut out = Vec::new();
+    if let Some(schema) = &reference.schema {
+        out.push(format!("{}.{}", normalize_identifier(schema), name));
+    }
+    out.push(name);
+    out
+}
+
+fn normalize_identifier(value: &str) -> String {
+    value.trim_matches('"').to_ascii_uppercase()
+}
+
+fn catalog_object_matches(
+    catalog: &CatalogSnapshot,
+    owner: plsql_core::SchemaName,
+    object: plsql_core::ObjectName,
+    node: &Node,
+) -> bool {
+    let Some(owner) = catalog.interner.resolve(owner.symbol()) else {
+        return false;
+    };
+    let Some(object) = catalog.interner.resolve(object.symbol()) else {
+        return false;
+    };
+    let bare = normalize_identifier(object);
+    let qualified = format!("{}.{}", normalize_identifier(owner), bare);
+    node.logical_id.as_str().eq_ignore_ascii_case(&bare)
+        || node.logical_id.as_str().eq_ignore_ascii_case(&qualified)
+}
+
+fn vpd_function_candidates(
+    catalog: &CatalogSnapshot,
+    policy: &plsql_catalog::VpdPolicy,
+) -> Vec<String> {
+    let Some(owner) = catalog
+        .interner
+        .resolve(policy.function_owner.symbol())
+        .map(normalize_identifier)
+    else {
+        return Vec::new();
+    };
+    let function = normalize_identifier(&policy.function_name);
+    let mut out = Vec::new();
+    if let Some(package) = &policy.function_package {
+        let package = normalize_identifier(package);
+        out.push(format!("{owner}.{package}.{function}"));
+        out.push(format!("{package}.{function}"));
+    }
+    out.push(format!("{owner}.{function}"));
+    out.push(function);
+    out
 }
 
 fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, args: Value) -> Result<T, ErrorEnvelope> {
@@ -725,6 +1137,7 @@ fn sast_rules() -> Vec<Box<dyn Rule>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oraclemcp_guard::{DangerLevel, OperatingLevel};
 
     #[test]
     fn parse_reports_declarations_without_live_db() {
@@ -760,5 +1173,210 @@ mod tests {
         })
         .expect("doc succeeds");
         assert_eq!(value["matches"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn plsql_side_effect_oracle_proves_clean_routine_and_statement() {
+        let mut graph = DepGraph::new();
+        add_node(&mut graph, 1, "APP.ORDERS", NodeIdentityKind::Table);
+        add_node(
+            &mut graph,
+            2,
+            "APP.LOOKUP",
+            NodeIdentityKind::StandaloneFunction,
+        );
+
+        let run = analysis_run(graph, Some(empty_catalog()));
+        let classifier = classifier_from_analysis_run(&run);
+        let d = classifier.classify("SELECT APP.LOOKUP(id) FROM APP.ORDERS");
+
+        assert_eq!(
+            d.danger,
+            DangerLevel::Safe,
+            "the engine binding may clear a refusal only when routine and base object are proven read-only"
+        );
+        assert_eq!(d.required_level, Some(OperatingLevel::ReadOnly));
+    }
+
+    #[test]
+    fn sideeffect_oracle_binding_never_loosens_without_readonly_proof() {
+        let mut graph = DepGraph::new();
+        add_node(&mut graph, 1, "APP.ORDERS", NodeIdentityKind::Table);
+        add_node(
+            &mut graph,
+            2,
+            "APP.PURGE",
+            NodeIdentityKind::StandaloneFunction,
+        );
+        add_node(&mut graph, 3, "APP.AUDIT_LOG", NodeIdentityKind::Table);
+        add_edge(&mut graph, 1, 2, 3, EdgeKind::Writes);
+
+        let run = analysis_run(graph, Some(empty_catalog()));
+        let classifier = classifier_from_analysis_run(&run);
+
+        assert_eq!(
+            Classifier::default()
+                .classify("SELECT APP.PURGE(id) FROM APP.ORDERS")
+                .danger,
+            DangerLevel::Guarded,
+            "default UnknownOracle refuses the UDF"
+        );
+        assert_eq!(
+            classifier
+                .classify("SELECT APP.PURGE(id) FROM APP.ORDERS")
+                .danger,
+            DangerLevel::Guarded,
+            "a real write edge must not be loosened"
+        );
+        assert_eq!(
+            classifier
+                .classify("SELECT APP.MISSING(id) FROM APP.ORDERS")
+                .danger,
+            DangerLevel::Guarded,
+            "an unresolved routine remains Unknown and guarded"
+        );
+    }
+
+    #[test]
+    fn select_side_effecting_trigger_tightens_plain_select() {
+        let mut graph = DepGraph::new();
+        add_node(&mut graph, 1, "APP.ORDERS", NodeIdentityKind::Table);
+        add_node(
+            &mut graph,
+            2,
+            "APP.ORDERS_READ_TRG",
+            NodeIdentityKind::Trigger,
+        );
+        add_node(&mut graph, 3, "APP.AUDIT_LOG", NodeIdentityKind::Table);
+        add_edge(&mut graph, 1, 2, 1, EdgeKind::TriggersOn);
+        add_edge(&mut graph, 2, 2, 3, EdgeKind::Writes);
+
+        let run = analysis_run(graph, Some(empty_catalog()));
+        let classifier = classifier_from_analysis_run(&run);
+
+        assert_eq!(
+            Classifier::default()
+                .classify("SELECT * FROM APP.ORDERS")
+                .danger,
+            DangerLevel::Safe,
+            "the no-engine baseline stays permissive for UDF-free SELECT"
+        );
+        assert_eq!(
+            classifier.classify("SELECT * FROM APP.ORDERS").danger,
+            DangerLevel::Guarded,
+            "the engine binding must tighten SELECT when graph evidence reaches side effects"
+        );
+    }
+
+    #[test]
+    fn select_vpd_policy_function_is_part_of_statement_purity() {
+        let mut graph = DepGraph::new();
+        add_node(&mut graph, 1, "APP.ORDERS", NodeIdentityKind::Table);
+        add_node(
+            &mut graph,
+            2,
+            "APP.POLICY_FN",
+            NodeIdentityKind::StandaloneFunction,
+        );
+        add_node(&mut graph, 3, "APP.AUDIT_LOG", NodeIdentityKind::Table);
+        add_edge(&mut graph, 1, 2, 3, EdgeKind::Writes);
+
+        let run = analysis_run(graph, Some(catalog_with_select_vpd_policy()));
+        let classifier = classifier_from_analysis_run(&run);
+
+        assert_eq!(
+            classifier.classify("SELECT * FROM APP.ORDERS").danger,
+            DangerLevel::Guarded,
+            "a SELECT VPD policy function is resolved through the catalog and walked for side effects"
+        );
+    }
+
+    fn analysis_run(
+        dep_graph: DepGraph,
+        catalog: Option<CatalogSnapshot>,
+    ) -> plsql_engine::AnalysisRun {
+        let mut completeness = plsql_core::CompletenessReport {
+            posture: CompletenessPosture::Clean,
+            catalog_available: catalog.is_some(),
+            ..plsql_core::CompletenessReport::default()
+        };
+        completeness.finalize_posture();
+        completeness.posture = CompletenessPosture::Clean;
+        plsql_engine::AnalysisRun {
+            dep_graph,
+            catalog,
+            completeness,
+            ..plsql_engine::AnalysisRun::default()
+        }
+    }
+
+    fn add_node(graph: &mut DepGraph, id: u64, logical_id: &str, kind: NodeIdentityKind) {
+        graph.insert_node(Node::new(
+            NodeId::new(id),
+            plsql_depgraph::LogicalObjectId::new(logical_id),
+            plsql_depgraph::ObjectRevisionId::new("test"),
+            plsql_depgraph::QualifiedName::default(),
+            kind,
+        ));
+    }
+
+    fn add_edge(graph: &mut DepGraph, id: u64, from: u64, to: u64, kind: EdgeKind) {
+        graph.insert_edge(
+            Edge::new(
+                plsql_depgraph::EdgeId::new(id),
+                NodeId::new(from),
+                NodeId::new(to),
+                kind,
+                plsql_core::Confidence::new(ConfidenceLevel::High, None::<String>),
+            ),
+            plsql_depgraph::Provenance::new(
+                FileId::new(0),
+                plsql_core::Span::default(),
+                plsql_depgraph::ResolutionStrategy::LocalLexical,
+            ),
+            None,
+        );
+    }
+
+    fn empty_catalog() -> CatalogSnapshot {
+        CatalogSnapshot::new(
+            AnalysisProfile::default(),
+            CatalogCapabilities::default(),
+            CatalogSource::default(),
+            Utc::now(),
+        )
+    }
+
+    fn catalog_with_select_vpd_policy() -> CatalogSnapshot {
+        let mut catalog = empty_catalog();
+        let owner = catalog
+            .interner
+            .intern_schema_name("APP")
+            .expect("schema interned");
+        let object = catalog
+            .interner
+            .intern("ORDERS")
+            .map(plsql_core::ObjectName::from)
+            .expect("object interned");
+        catalog
+            .schemas
+            .entry(owner)
+            .or_default()
+            .vpd_policies
+            .push(plsql_catalog::VpdPolicy {
+                object_owner: owner,
+                object_name: object,
+                policy_group: None,
+                policy_name: "ORDERS_SELECT_POLICY".to_owned(),
+                function_owner: owner,
+                function_package: None,
+                function_name: "POLICY_FN".to_owned(),
+                on_select: true,
+                on_insert: false,
+                on_update: false,
+                on_delete: false,
+                enabled: true,
+            });
+        catalog
     }
 }

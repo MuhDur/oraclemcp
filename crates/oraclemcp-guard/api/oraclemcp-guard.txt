@@ -96,6 +96,7 @@ impl oraclemcp_guard::classifier::Classifier
 pub fn oraclemcp_guard::classifier::Classifier::classify(&self, &str) -> oraclemcp_guard::classifier::GuardDecision
 pub fn oraclemcp_guard::classifier::Classifier::new(oraclemcp_guard::classifier::ClassifierConfig) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::with_oracle(self, alloc::sync::Arc<dyn oraclemcp_guard::purity::SideEffectOracle>) -> Self
+pub fn oraclemcp_guard::classifier::Classifier::with_statement_unknown_guarded(self) -> Self
 impl core::default::Default for oraclemcp_guard::classifier::Classifier
 pub fn oraclemcp_guard::classifier::Classifier::default() -> Self
 impl core::marker::Freeze for oraclemcp_guard::classifier::Classifier
@@ -2360,6 +2361,7 @@ impl oraclemcp_guard::classifier::Classifier
 pub fn oraclemcp_guard::classifier::Classifier::classify(&self, &str) -> oraclemcp_guard::classifier::GuardDecision
 pub fn oraclemcp_guard::classifier::Classifier::new(oraclemcp_guard::classifier::ClassifierConfig) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::with_oracle(self, alloc::sync::Arc<dyn oraclemcp_guard::purity::SideEffectOracle>) -> Self
+pub fn oraclemcp_guard::classifier::Classifier::with_statement_unknown_guarded(self) -> Self
 impl core::default::Default for oraclemcp_guard::classifier::Classifier
 pub fn oraclemcp_guard::classifier::Classifier::default() -> Self
 impl core::marker::Freeze for oraclemcp_guard::classifier::Classifier
