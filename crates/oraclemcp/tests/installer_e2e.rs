@@ -31,6 +31,44 @@ fn installer_lint_and_offline_smoke_passes() {
 }
 
 #[test]
+fn readme_leads_with_hosted_install_one_liner_service_and_dashboard() {
+    let root = repo_root();
+    let readme = fs::read_to_string(root.join("README.md")).expect("read README.md");
+    let install = readme
+        .find("## Install, service, dashboard")
+        .expect("install-first heading");
+    let why = readme.find("## Why oraclemcp").expect("why heading");
+    let source = readme
+        .find("## Source builds and runtime requirements")
+        .expect("source-build heading");
+
+    assert!(
+        install < why,
+        "README must lead with installation before rationale"
+    );
+    assert!(
+        install < source,
+        "release installer must come before source-build instructions"
+    );
+
+    for needle in [
+        "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh",
+        "bash -s -- --dry-run --version <version>",
+        "bash -s -- --version <version>",
+        "oraclemcp --json service install --dry-run",
+        "oraclemcp service install --yes",
+        "om dashboard",
+        "database Subject",
+        "isolated per-principal lanes",
+    ] {
+        assert!(
+            readme.contains(needle),
+            "README install-first section must contain {needle}"
+        );
+    }
+}
+
+#[test]
 fn npx_verifies_binary_no_postinstall_side_effects() {
     let root = repo_root();
     let package_json = root.join("npm/oraclemcp/package.json");
