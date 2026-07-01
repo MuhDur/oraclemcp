@@ -31,6 +31,10 @@ use sha2::{Digest, Sha256};
 
 use crate::admin_auth::OperatorAuthorityPolicy;
 use crate::capabilities::PROTOCOL_VERSION;
+use crate::dashboard_auth::{
+    DASHBOARD_ACTION_TICKET_HEADER, DASHBOARD_CSRF_HEADER, DASHBOARD_PAIR_PATH,
+    DASHBOARD_SESSION_PATH, DashboardAuth, DashboardAuthError,
+};
 use crate::operator_protocol::{
     OPERATOR_PROTOCOL_VERSION, operator_event, operator_response, operator_route_index,
     operator_schema_bundle, operator_subject_id_hash, validate_operator_event,
@@ -138,6 +142,11 @@ pub struct HttpTransportConfig {
     /// D17 operator-authority policy for `/operator/v1`. Ordinary authenticated
     /// subjects are not operators unless this policy authorizes them.
     pub operator_authority: OperatorAuthorityPolicy,
+    /// Browser dashboard local pairing/session guard. When configured, the
+    /// embedded SPA and unauthenticated loopback `/operator/v1` calls require a
+    /// same-origin dashboard session in addition to per-request operator
+    /// authority.
+    pub dashboard_auth: Option<Arc<DashboardAuth>>,
     /// Audit sink for authorized operator API actions. If unset, operator API
     /// actions fail closed rather than running unaudited.
     pub operator_auditor: Option<Arc<Auditor>>,
@@ -174,6 +183,7 @@ impl std::fmt::Debug for HttpTransportConfig {
                 &self.single_principal_guard.is_some(),
             )
             .field("operator_authority", &self.operator_authority)
+            .field("dashboard_auth", &self.dashboard_auth.is_some())
             .field("operator_auditor", &self.operator_auditor.is_some())
             .field(
                 "operator_audit_tail_path",
@@ -204,6 +214,7 @@ impl Default for HttpTransportConfig {
             session_lifecycle: None,
             single_principal_guard: None,
             operator_authority: OperatorAuthorityPolicy::default(),
+            dashboard_auth: None,
             operator_auditor: None,
             operator_audit_tail_path: None,
             operator_idempotency: Arc::new(OperatorIdempotencyLedger::new()),
@@ -1611,6 +1622,237 @@ mod tests {
             _ => panic!("duplicate after completion must replay"),
         };
         assert_eq!(replay, original);
+    }
+
+    fn dashboard_test_dir(name: &str) -> PathBuf {
+        let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        dir.push("../../target/tmp/dashboard-http-tests");
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        dir.push(format!("{}-{nanos}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dashboard test dir");
+        dir
+    }
+
+    fn ticket_from_pairing_url(url: &str) -> &str {
+        url.split_once("ticket=")
+            .map(|(_, token)| token)
+            .expect("pairing URL has ticket query")
+    }
+
+    #[test]
+    fn dashboard_pairing_sets_strict_cookie_and_session_view() {
+        let (auditor, _sink) = operator_auditor();
+        let dir = dashboard_test_dir("pairing");
+        let auth = Arc::new(DashboardAuth::new(dir.clone()));
+        let cfg = HttpTransportConfig {
+            dashboard_auth: Some(Arc::clone(&auth)),
+            operator_auditor: Some(auditor),
+            ..Default::default()
+        };
+        let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
+            .expect("ticket mints");
+        let token = ticket_from_pairing_url(&ticket.url);
+
+        let pair = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                format!("{DASHBOARD_PAIR_PATH}?ticket={token}"),
+                [("host", "127.0.0.1"), ("accept", "text/html")],
+                Vec::new(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(pair.status, 303);
+        assert_eq!(pair.header("location"), Some("/"));
+        assert_eq!(pair.header("referrer-policy"), Some("no-referrer"));
+        assert!(
+            pair.header("content-security-policy")
+                .is_some_and(|csp| csp.contains("frame-ancestors 'none'"))
+        );
+        let cookie = pair.header("set-cookie").expect("dashboard cookie");
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+        let cookie_pair = cookie.split(';').next().expect("cookie pair");
+
+        let replay = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                format!("{DASHBOARD_PAIR_PATH}?ticket={token}"),
+                [("host", "127.0.0.1"), ("accept", "text/html")],
+                Vec::new(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(replay.status, 401, "pairing ticket is single-use");
+
+        let unauth_shell = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                "/",
+                [("host", "127.0.0.1"), ("accept", "text/html")],
+                Vec::new(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(unauth_shell.status, 401);
+
+        let session = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                DASHBOARD_SESSION_PATH,
+                [
+                    ("host", "127.0.0.1"),
+                    ("accept", "application/json"),
+                    ("cookie", cookie_pair),
+                    ("sec-fetch-site", "same-origin"),
+                ],
+                Vec::new(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(session.status, 200);
+        assert_eq!(session.header("cache-control"), Some("no-store"));
+        let session_json = response_json(&session);
+        assert_eq!(
+            session_json["csrf_header"],
+            serde_json::json!(DASHBOARD_CSRF_HEADER)
+        );
+        assert_eq!(
+            session_json["action_ticket_header"],
+            serde_json::json!(DASHBOARD_ACTION_TICKET_HEADER)
+        );
+        assert!(
+            session_json["action_tickets"]
+                .as_array()
+                .expect("action tickets")
+                .iter()
+                .any(|ticket| ticket["path"] == "/operator/v1/actions/preview")
+        );
+    }
+
+    #[test]
+    fn malicious_page_cannot_trigger_dashboard_gated_action() {
+        let (auditor, _sink) = operator_auditor();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = server_with_dispatch(Arc::new(CountingDispatch {
+            calls: Arc::clone(&calls),
+        }));
+        let dir = dashboard_test_dir("csrf");
+        let auth = Arc::new(DashboardAuth::new(dir.clone()));
+        let cfg = HttpTransportConfig {
+            dashboard_auth: Some(Arc::clone(&auth)),
+            operator_auditor: Some(auditor),
+            ..Default::default()
+        };
+        let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
+            .expect("ticket mints");
+        let login = auth
+            .exchange_ticket(ticket_from_pairing_url(&ticket.url))
+            .expect("login works");
+        let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
+        let view = auth
+            .session_view(Some(cookie_pair))
+            .expect("session view works");
+        let preview_ticket = view
+            .action_tickets
+            .iter()
+            .find(|ticket| ticket.path == "/operator/v1/actions/preview")
+            .expect("preview action ticket")
+            .ticket
+            .clone();
+        let action_body = serde_json::json!({
+            "tool": "oracle_preview_sql",
+            "arguments": { "sql": "SELECT 1 FROM dual" }
+        });
+
+        let malicious = handle_http_request(
+            &server,
+            &cfg,
+            HttpRequest::new(
+                "POST",
+                "/operator/v1/actions/preview",
+                [
+                    ("host", "127.0.0.1"),
+                    ("origin", "http://127.0.0.1:3000"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json"),
+                    ("cookie", cookie_pair),
+                    (DASHBOARD_CSRF_HEADER, view.csrf_token.as_str()),
+                    (DASHBOARD_ACTION_TICKET_HEADER, preview_ticket.as_str()),
+                ],
+                action_body.to_string().into_bytes(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(malicious.status, 403);
+        assert_eq!(
+            response_json(&malicious)["error"],
+            serde_json::json!("dashboard_same_origin_required")
+        );
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            0,
+            "cross-origin dashboard POST must not reach dispatch"
+        );
+
+        let missing_csrf = handle_http_request(
+            &server,
+            &cfg,
+            HttpRequest::new(
+                "POST",
+                "/operator/v1/actions/preview",
+                [
+                    ("host", "127.0.0.1"),
+                    ("origin", "http://127.0.0.1"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json"),
+                    ("cookie", cookie_pair),
+                    (DASHBOARD_ACTION_TICKET_HEADER, preview_ticket.as_str()),
+                ],
+                action_body.to_string().into_bytes(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(missing_csrf.status, 403);
+        assert_eq!(
+            response_json(&missing_csrf)["error"],
+            serde_json::json!("dashboard_csrf_required")
+        );
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+
+        let valid = handle_http_request(
+            &server,
+            &cfg,
+            HttpRequest::new(
+                "POST",
+                "/operator/v1/actions/preview",
+                [
+                    ("host", "127.0.0.1"),
+                    ("origin", "http://127.0.0.1"),
+                    ("sec-fetch-site", "same-origin"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json"),
+                    ("cookie", cookie_pair),
+                    (DASHBOARD_CSRF_HEADER, view.csrf_token.as_str()),
+                    (DASHBOARD_ACTION_TICKET_HEADER, preview_ticket.as_str()),
+                ],
+                action_body.to_string().into_bytes(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(valid.status, 200);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
     }
 
     fn sse_json_events(response: &HttpResponse) -> Vec<Value> {
@@ -3656,6 +3898,8 @@ fn single_principal_conflict_response() -> HttpResponse {
 enum HttpRoute {
     ProtectedResourceMetadata,
     Observability,
+    DashboardPairing,
+    DashboardSession,
     Mcp,
     OperatorApi,
     NotFound,
@@ -3665,6 +3909,8 @@ fn route_for(path: &str) -> HttpRoute {
     match path {
         PROTECTED_RESOURCE_METADATA_PATH => HttpRoute::ProtectedResourceMetadata,
         HEALTHZ_PATH | READYZ_PATH | METRICS_PATH => HttpRoute::Observability,
+        DASHBOARD_PAIR_PATH => HttpRoute::DashboardPairing,
+        DASHBOARD_SESSION_PATH => HttpRoute::DashboardSession,
         MCP_PATH => HttpRoute::Mcp,
         OPERATOR_API_PREFIX => HttpRoute::OperatorApi,
         _ if path
@@ -3752,6 +3998,12 @@ fn handle_http_exchange(
                     .unwrap_or_else(|| empty_response(404)),
             );
         }
+        HttpRoute::DashboardPairing => {
+            return HttpExchange::Buffered(handle_dashboard_pairing_route(config, &request));
+        }
+        HttpRoute::DashboardSession => {
+            return HttpExchange::Buffered(handle_dashboard_session_route(config, &request));
+        }
         HttpRoute::OperatorApi => {
             if let Some(response) = guard_http_request(config, &request) {
                 return HttpExchange::Buffered(response);
@@ -3775,6 +4027,11 @@ fn handle_http_exchange(
             let principal_key = validated_oauth
                 .as_ref()
                 .map(|validated| validated.principal_key.as_str());
+            if let Some(response) =
+                enforce_dashboard_operator_auth(config, &request, principal_key.is_some())
+            {
+                return HttpExchange::Buffered(response);
+            }
             let Some(operator_subject) = config
                 .operator_authority
                 .authorize(principal_key, request.peer_is_loopback)
@@ -3786,14 +4043,21 @@ fn handle_http_exchange(
                     Ok(seq) => seq,
                     Err(response) => return HttpExchange::Buffered(response),
                 };
-            return HttpExchange::Buffered(handle_operator_api_route(
+            let response = handle_operator_api_route(
                 server,
                 config,
                 &request,
                 &operator_subject,
                 operator_route,
                 operator_audit_seq,
-            ));
+            );
+            return HttpExchange::Buffered(
+                if config.dashboard_auth.is_some() && principal_key.is_none() {
+                    with_dashboard_security_headers(response)
+                } else {
+                    response
+                },
+            );
         }
         HttpRoute::NotFound => {
             return HttpExchange::Buffered(
@@ -3858,6 +4122,199 @@ fn handle_http_exchange(
             },
         )),
     }
+}
+
+fn handle_dashboard_pairing_route(
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+) -> HttpResponse {
+    if request.method != "GET" {
+        return with_dashboard_security_headers(empty_response(405).with_header("allow", "GET"));
+    }
+    if let Some(response) = guard_http_request(config, request) {
+        return with_dashboard_security_headers(response);
+    }
+    let Some(auth) = &config.dashboard_auth else {
+        return with_dashboard_security_headers(empty_response(404));
+    };
+    if !request.peer_is_loopback {
+        return dashboard_auth_error_response(403, "dashboard_pairing_requires_loopback");
+    }
+    let Some(ticket) = request
+        .query_param("ticket")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return dashboard_auth_error_response(401, "dashboard_pairing_ticket_missing");
+    };
+    match auth.exchange_ticket(ticket) {
+        Ok(login) => with_dashboard_security_headers(
+            empty_response(303)
+                .with_header("location", "/")
+                .with_header("set-cookie", &login.session_cookie)
+                .with_header("cache-control", "no-store"),
+        ),
+        Err(DashboardAuthError::ExpiredTicket) => {
+            dashboard_auth_error_response(401, "dashboard_pairing_ticket_expired")
+        }
+        Err(_) => dashboard_auth_error_response(401, "dashboard_pairing_ticket_invalid"),
+    }
+}
+
+fn handle_dashboard_session_route(
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+) -> HttpResponse {
+    if request.method != "GET" {
+        return with_dashboard_security_headers(empty_response(405).with_header("allow", "GET"));
+    }
+    if let Some(response) = guard_http_request(config, request) {
+        return with_dashboard_security_headers(response);
+    }
+    if let Some(response) = enforce_dashboard_get_headers(request) {
+        return response;
+    }
+    let Some(auth) = &config.dashboard_auth else {
+        return with_dashboard_security_headers(empty_response(404));
+    };
+    if config
+        .operator_authority
+        .authorize(None, request.peer_is_loopback)
+        .is_none()
+    {
+        return dashboard_auth_error_response(403, "dashboard_operator_authority_required");
+    }
+    match auth.session_view(request.header("cookie")) {
+        Ok(view) => with_dashboard_security_headers(json_response(
+            200,
+            &serde_json::to_value(view).unwrap_or(Value::Null),
+        ))
+        .with_header("cache-control", "no-store"),
+        Err(_) => dashboard_auth_error_response(401, "dashboard_session_required"),
+    }
+}
+
+fn enforce_dashboard_operator_auth(
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+    has_authenticated_principal: bool,
+) -> Option<HttpResponse> {
+    let auth = config.dashboard_auth.as_ref()?;
+    if has_authenticated_principal {
+        return None;
+    }
+    if request.method == "POST" {
+        if let Some(response) = enforce_dashboard_post_headers(request) {
+            return Some(response);
+        }
+        return match auth.validate_action(
+            request.header("cookie"),
+            request.header(DASHBOARD_CSRF_HEADER),
+            request.header(DASHBOARD_ACTION_TICKET_HEADER),
+            &request.method,
+            &request.path,
+        ) {
+            Ok(()) => None,
+            Err(DashboardAuthError::MissingSession | DashboardAuthError::InvalidSession) => Some(
+                dashboard_auth_error_response(401, "dashboard_session_required"),
+            ),
+            Err(DashboardAuthError::MissingCsrf | DashboardAuthError::InvalidCsrf) => Some(
+                dashboard_auth_error_response(403, "dashboard_csrf_required"),
+            ),
+            Err(
+                DashboardAuthError::MissingActionTicket | DashboardAuthError::InvalidActionTicket,
+            ) => Some(dashboard_auth_error_response(
+                403,
+                "dashboard_action_ticket_required",
+            )),
+            Err(_) => Some(dashboard_auth_error_response(403, "dashboard_auth_failed")),
+        };
+    }
+    if let Some(response) = enforce_dashboard_get_headers(request) {
+        return Some(response);
+    }
+    match auth.session_view(request.header("cookie")) {
+        Ok(_) => None,
+        Err(_) => Some(dashboard_auth_error_response(
+            401,
+            "dashboard_session_required",
+        )),
+    }
+}
+
+fn enforce_dashboard_post_headers(request: &HttpRequest) -> Option<HttpResponse> {
+    let origin = request.header("origin").map(str::trim).unwrap_or_default();
+    if origin.is_empty() || !origin_matches_host(origin, request.header("host")) {
+        return Some(dashboard_auth_error_response(
+            403,
+            "dashboard_same_origin_required",
+        ));
+    }
+    if let Some(sec_fetch_site) = request.header("sec-fetch-site") {
+        let sec_fetch_site = sec_fetch_site.trim();
+        if !matches!(sec_fetch_site, "same-origin" | "none") {
+            return Some(dashboard_auth_error_response(
+                403,
+                "dashboard_same_origin_required",
+            ));
+        }
+    }
+    None
+}
+
+fn enforce_dashboard_get_headers(request: &HttpRequest) -> Option<HttpResponse> {
+    if let Some(origin) = request.header("origin")
+        && !origin_matches_host(origin, request.header("host"))
+    {
+        return Some(dashboard_auth_error_response(
+            403,
+            "dashboard_same_origin_required",
+        ));
+    }
+    if let Some(sec_fetch_site) = request.header("sec-fetch-site") {
+        let sec_fetch_site = sec_fetch_site.trim();
+        if !matches!(sec_fetch_site, "same-origin" | "none") {
+            return Some(dashboard_auth_error_response(
+                403,
+                "dashboard_same_origin_required",
+            ));
+        }
+    }
+    None
+}
+
+fn origin_matches_host(origin: &str, host: Option<&str>) -> bool {
+    let Some(host) = host.map(str::trim).filter(|host| !host.is_empty()) else {
+        return false;
+    };
+    let origin = origin.trim().trim_end_matches('/');
+    let Some((scheme, authority)) = origin.split_once("://") else {
+        return false;
+    };
+    matches!(scheme, "http" | "https") && authority.eq_ignore_ascii_case(host)
+}
+
+fn dashboard_auth_error_response(status: u16, error: &'static str) -> HttpResponse {
+    with_dashboard_security_headers(json_response(
+        status,
+        &json!({
+            "error": error,
+            "message": "dashboard authentication is required for this browser surface",
+        }),
+    ))
+    .with_header("cache-control", "no-store")
+}
+
+fn with_dashboard_security_headers(response: HttpResponse) -> HttpResponse {
+    response
+        .with_header("content-security-policy", dashboard_csp())
+        .with_header("x-content-type-options", "nosniff")
+        .with_header("referrer-policy", "no-referrer")
+        .with_header("x-frame-options", "DENY")
+}
+
+fn dashboard_csp() -> &'static str {
+    "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
 }
 
 fn operator_authority_required_response() -> HttpResponse {
@@ -4761,21 +5218,43 @@ fn handle_dashboard_route(
     if let Some(response) = guard_http_request(config, request) {
         return Some(response);
     }
+    if config.dashboard_auth.is_some() {
+        if let Some(response) = enforce_dashboard_get_headers(request) {
+            return Some(response);
+        }
+        if config
+            .operator_authority
+            .authorize(None, request.peer_is_loopback)
+            .is_none()
+        {
+            return Some(dashboard_auth_error_response(
+                403,
+                "dashboard_operator_authority_required",
+            ));
+        }
+        if let Some(auth) = &config.dashboard_auth
+            && auth.session_view(request.header("cookie")).is_err()
+        {
+            return Some(dashboard_auth_error_response(
+                401,
+                "dashboard_session_required",
+            ));
+        }
+    }
     let asset = crate::dashboard_bundle::dashboard_asset_for(&request.path)?;
     let body = if request.method == "HEAD" {
         Vec::new()
     } else {
         asset.body
     };
-    Some(HttpResponse {
+    Some(with_dashboard_security_headers(HttpResponse {
         status: 200,
         headers: vec![
             ("content-type".to_owned(), asset.content_type.to_owned()),
             ("cache-control".to_owned(), asset.cache_control.to_owned()),
-            ("x-content-type-options".to_owned(), "nosniff".to_owned()),
         ],
         body,
-    })
+    }))
 }
 
 fn dashboard_html_fallback_path(path: &str) -> bool {
@@ -5823,14 +6302,20 @@ fn reason_phrase(status: u16) -> &'static str {
     match status {
         200 => "OK",
         202 => "Accepted",
+        303 => "See Other",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         406 => "Not Acceptable",
+        409 => "Conflict",
+        410 => "Gone",
         413 => "Payload Too Large",
         415 => "Unsupported Media Type",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "OK",
     }
 }

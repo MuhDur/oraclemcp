@@ -327,6 +327,15 @@ Stateless `DELETE /mcp` is rejected with 405 rather than pretending a session
 was closed. `/mcp` also honors `MCP-Protocol-Version`; an unsupported header is
 rejected before JSON-RPC dispatch with typed JSON `400 unsupported_protocol_version`.
 
+The browser dashboard is never authenticated by loopback alone. `oraclemcp
+dashboard` mints a 0600 one-time ticket in the user runtime directory and opens
+`/dashboard/pair?ticket=...`; the server consumes that ticket once, within 60
+seconds, and returns an HttpOnly, SameSite=Strict dashboard session cookie.
+Dashboard session details are fetched from `/dashboard/session` and are kept out
+of browser storage. Dashboard-originated `/operator/v1` POSTs additionally
+require exact same-origin headers, a CSRF token, and a route-scoped action
+ticket.
+
 `[http]` fields: `allowed_hosts`, `allowed_origins` (both default `[]`,
 loopback-only), `json_response` (default `false`), `stateful` (default `false`),
 `stateful_idle_ttl_seconds` (default `900`, `0` disables idle reaping), the

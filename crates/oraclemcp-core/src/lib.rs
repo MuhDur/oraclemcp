@@ -22,6 +22,7 @@ pub mod capabilities;
 pub mod capability;
 pub mod connect;
 pub mod custom_tools;
+pub mod dashboard_auth;
 mod dashboard_bundle;
 pub mod doctor;
 pub mod export;
@@ -79,6 +80,12 @@ pub use custom_tools::{
     ParamDef, ParamType, RUN_NAMED_TOOL, ToolBody, bind_params, classify_at_load,
     enforce_signature, execute_custom_tool, load_tools, load_tools_for_profile, parse_tools_file,
     register_custom_tools, sign, verify_signature,
+};
+pub use dashboard_auth::{
+    DASHBOARD_ACTION_TICKET_HEADER, DASHBOARD_CSRF_HEADER, DASHBOARD_PAIR_PATH,
+    DASHBOARD_SESSION_COOKIE, DASHBOARD_SESSION_PATH, DashboardAuth, DashboardAuthError,
+    DashboardPairingTicket, DashboardSessionView, default_dashboard_ticket_dir,
+    mint_dashboard_pairing_ticket,
 };
 pub use doctor::{
     AuthModeClass, CheckResult, CheckStatus, DoctorContext, DoctorReport, classify_auth_mode,

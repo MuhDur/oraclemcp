@@ -49,13 +49,14 @@ use oraclemcp_auth::{
 use oraclemcp_config::{AuditConfig, HttpConfig, HttpTlsConfig, OracleMcpConfig};
 use oraclemcp_core::http::SinglePrincipalGuard;
 use oraclemcp_core::{
-    AdmissionController, CapabilitiesReport, CustomToolCatalog, CustomToolDef, DoctorContext,
-    ExportRegistry, FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext,
-    LaneDispatchFactory, LaneRuntime, MCP_PATH, OAuthEnforcement, ObservabilityState,
+    AdmissionController, CapabilitiesReport, CustomToolCatalog, CustomToolDef, DashboardAuth,
+    DoctorContext, ExportRegistry, FeatureTiers, HttpSessionLifecycle, HttpTransportConfig,
+    LaneContext, LaneDispatchFactory, LaneRuntime, MCP_PATH, OAuthEnforcement, ObservabilityState,
     OperatorAuthorityPolicy, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport,
     ShutdownCoordinator, SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy,
-    TlsMaterial, TlsServerConfig, ToolDispatch, WriteIntentLog, build_server_config, load_tools,
-    load_tools_for_profile, parse_tools_file, requires_mtls, run_doctor, sign,
+    TlsMaterial, TlsServerConfig, ToolDispatch, WriteIntentLog, build_server_config,
+    default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
+    mint_dashboard_pairing_ticket, parse_tools_file, requires_mtls, run_doctor, sign,
     start_oraclemcp_service_app_with_transport,
 };
 use oraclemcp_db::{
@@ -144,6 +145,15 @@ enum Command {
     Service {
         #[command(subcommand)]
         command: ServiceCliCommand,
+    },
+    /// Open the local browser dashboard through a one-time pairing ticket.
+    Dashboard {
+        /// Base URL of the running local oraclemcp HTTP service.
+        #[arg(long, default_value = "http://127.0.0.1:7070")]
+        url: String,
+        /// Print the pairing URL without trying to launch a browser.
+        #[arg(long)]
+        no_open: bool,
     },
     /// Print an agent-oriented usage guide from the binary itself.
     #[command(name = "robot-docs", alias = "robot_docs")]
@@ -353,6 +363,7 @@ fn main() -> ExitCode {
         Command::Profiles => run_profiles(robot_json),
         Command::Capabilities => run_capabilities(robot_json),
         Command::Service { command } => run_service_cmd(robot_json, command),
+        Command::Dashboard { url, no_open } => run_dashboard_cmd(robot_json, &url, no_open),
         Command::RobotDocs { command } => match command {
             None | Some(RobotDocsCommand::Guide) => run_robot_docs_guide(robot_json),
         },
@@ -1606,6 +1617,7 @@ fn http_transport_config_from_merged(
                     .map(|subject| subject.trim().to_owned())
                     .collect(),
             },
+            dashboard_auth: Some(Arc::new(DashboardAuth::new(default_dashboard_ticket_dir()))),
             operator_auditor: None,
             operator_audit_tail_path: None,
             operator_idempotency: Arc::new(oraclemcp_core::OperatorIdempotencyLedger::new()),
@@ -2133,6 +2145,91 @@ fn emit_status_error(robot_json: bool, code: &str, message: &str) {
         );
     } else {
         eprintln!("oraclemcp serve: {message}");
+    }
+}
+
+fn run_dashboard_cmd(robot_json: bool, base_url: &str, no_open: bool) -> ExitCode {
+    let ticket_dir = default_dashboard_ticket_dir();
+    let ticket = match mint_dashboard_pairing_ticket(&ticket_dir, base_url) {
+        Ok(ticket) => ticket,
+        Err(e) => {
+            if robot_json {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "kind": "error",
+                        "code": "ORACLEMCP_DASHBOARD_PAIRING_FAILED",
+                        "message": e.to_string(),
+                    })
+                );
+            } else {
+                eprintln!("oraclemcp dashboard: failed to create pairing ticket: {e}");
+            }
+            return ExitCode::from(2);
+        }
+    };
+    let opened = if no_open {
+        false
+    } else {
+        match open_dashboard_url(&ticket.url) {
+            Ok(()) => true,
+            Err(e) => {
+                if robot_json {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "kind": "warning",
+                            "code": "ORACLEMCP_DASHBOARD_OPEN_FAILED",
+                            "message": e.to_string(),
+                        })
+                    );
+                } else {
+                    eprintln!(
+                        "oraclemcp dashboard: browser launch failed; open the printed URL manually"
+                    );
+                }
+                false
+            }
+        }
+    };
+    if robot_json {
+        let output = serde_json::json!({
+            "kind": "dashboard_pairing",
+            "url": ticket.url,
+            "expires_unix": ticket.expires_unix,
+            "opened": opened,
+            "ticket_file": ticket.ticket_file,
+        });
+        stdout_exit(
+            write_stdout_line(&serde_json::to_string(&output).expect("dashboard JSON serializes")),
+            ExitCode::SUCCESS,
+        )
+    } else {
+        stdout_exit(write_stdout_line(&ticket.url), ExitCode::SUCCESS)
+    }
+}
+
+fn open_dashboard_url(url: &str) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open").arg(url).status()?;
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .status()?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = std::process::Command::new("xdg-open").arg(url).status()?;
+    #[cfg(not(any(unix, target_os = "windows")))]
+    let status = {
+        let _ = url;
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "automatic browser launch is not supported on this platform",
+        ));
+    };
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other("browser launcher exited unsuccessfully"))
     }
 }
 
@@ -3677,6 +3774,27 @@ mod tests {
                 ref path,
                 ref tool,
             }) if path == Path::new("tools.toml") && tool.as_deref() == Some("app_lookup")
+        ));
+    }
+
+    #[test]
+    fn dashboard_command_parses() {
+        let dashboard = Cli::try_parse_from([
+            "oraclemcp",
+            "--json",
+            "dashboard",
+            "--url",
+            "http://127.0.0.1:7777",
+            "--no-open",
+        ])
+        .expect("parse dashboard");
+        assert!(dashboard.robot_json);
+        assert!(matches!(
+            dashboard.command,
+            Some(Command::Dashboard {
+                ref url,
+                no_open: true,
+            }) if url == "http://127.0.0.1:7777"
         ));
     }
 

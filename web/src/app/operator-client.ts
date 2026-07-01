@@ -42,6 +42,13 @@ export const overviewProbes: ProbeDefinition[] = [
     group: "Runtime"
   },
   {
+    id: "dashboard-session",
+    label: "Dashboard auth",
+    path: "/dashboard/session",
+    kind: "operator",
+    group: "Operator API"
+  },
+  {
     id: "operator-schema",
     label: "Schema",
     path: "/operator/v1/schema",
@@ -68,6 +75,8 @@ export const sessionsProbes = overviewProbes.filter((probe) =>
   ["operator-lanes", "operator-health"].includes(probe.id)
 );
 
+const operatorSchemaProbe = overviewProbes.find((probe) => probe.id === "operator-schema");
+
 export const auditProbes: ProbeDefinition[] = [
   {
     id: "operator-audit-tail",
@@ -76,7 +85,7 @@ export const auditProbes: ProbeDefinition[] = [
     kind: "operator",
     group: "Operator API"
   },
-  overviewProbes[3]
+  ...(operatorSchemaProbe ? [operatorSchemaProbe] : [])
 ];
 
 export const doctorProbes = overviewProbes.filter((probe) =>
@@ -102,7 +111,8 @@ export async function fetchProbe(definition: ProbeDefinition): Promise<ProbeResu
       headers: {
         accept: definition.path === "/metrics" ? "text/plain" : "application/json"
       },
-      cache: "no-store"
+      cache: "no-store",
+      credentials: "same-origin"
     });
     const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
     const detail = await responseDetail(response);

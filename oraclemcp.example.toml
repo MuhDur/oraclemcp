@@ -46,6 +46,9 @@ json_response = true
 stateful = false
 # Idle TTL for stateful sessions, in seconds. Default: 900. Set 0 to disable.
 stateful_idle_ttl_seconds = 900
+# The embedded browser dashboard still requires local pairing even on loopback:
+# run `oraclemcp dashboard` to mint a 60s one-time ticket that becomes an
+# HttpOnly SameSite=Strict cookie. Dashboard POSTs require CSRF + action tickets.
 
 # [http.oauth] — OAuth 2.1 resource-server protection for /mcp. Optional;
 # omit for an unauthenticated dev listener (which then requires --allow-no-auth).

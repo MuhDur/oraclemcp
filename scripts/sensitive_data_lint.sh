@@ -103,6 +103,12 @@ for pat in "${RENDERED_SURFACE_PATTERNS[@]}"; do
   done < <(scan_rendered_pattern "$pat")
 done
 
+if [ -d web/src ]; then
+  while IFS= read -r line; do
+    [ -n "$line" ] && report "dashboard-browser-storage" "$line"
+  done < <(grep -RInE '\b(localStorage|sessionStorage)\b' web/src 2>/dev/null | grep -v 'sensitive-lint:allow' || true)
+fi
+
 DENYLIST="${ORACLEMCP_SENSITIVE_DENYLIST_FILE:-}"
 if [ -n "$DENYLIST" ]; then
   [ -f "$DENYLIST" ] || { echo "sensitive-data-lint: denylist file not found: $DENYLIST" >&2; exit 2; }

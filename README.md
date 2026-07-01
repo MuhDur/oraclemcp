@@ -135,6 +135,7 @@ oraclemcp --json service install --dry-run --profile db_ro  # preview systemd/la
 oraclemcp service install --yes --profile db_ro              # install the persistent local service
 oraclemcp --json service status       # inspect service-manager state
 oraclemcp --json service logs         # inspect recent service logs
+oraclemcp dashboard                   # open the local dashboard through a one-time pairing URL
 ```
 
 `--json` is a visible alias for `--robot-json` and keeps stdout as a single
@@ -146,6 +147,13 @@ service operations (`install`, `uninstall`, `restart`) require `--yes`;
 `--dry-run` emits the exact file and command plan without changing the host.
 Streamable HTTP auth rules are unchanged for service mode: configure OAuth or
 mTLS, or pass `--allow-no-auth` only for intentional local development.
+
+The browser dashboard is paired separately even on loopback. `oraclemcp
+dashboard` creates a 0600 one-time ticket under the user runtime directory,
+opens `/dashboard/pair?ticket=...`, and the server immediately exchanges it for
+an HttpOnly, SameSite=Strict dashboard cookie. The ticket expires in 60 seconds
+and is single-use; dashboard POSTs also require same-origin headers, a CSRF
+token, and a route-scoped action ticket.
 
 The Streamable HTTP transport (`--listen`) fails closed. It starts only when
 OAuth bearer enforcement is configured or `--allow-no-auth` is supplied, and it
