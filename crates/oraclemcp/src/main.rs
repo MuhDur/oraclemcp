@@ -52,13 +52,13 @@ use oraclemcp_core::http::SinglePrincipalGuard;
 use oraclemcp_core::{
     AdmissionController, CapabilitiesReport, ConfigOpsBackend, ConfigOpsService,
     ConfigReloadApplier, ConfigReloadApplyReport, CustomToolCatalog, CustomToolDef, DashboardAuth,
-    DispatchFuture, DispatchOutcome, DoctorContext, DoctorLevelCaps, DoctorProfileCaps,
-    ExportRegistry, FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext,
-    LaneDispatchFactory, LaneRuntime, MCP_PATH, McpSurfaceDetail, McpSurfaceFuture,
-    MtlsClientRegistry, OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy,
-    OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport, ShutdownCoordinator,
-    SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial,
-    TlsServerConfig, ToolDispatch, WriteIntentLog, build_server_config,
+    DispatchFuture, DispatchOutcome, DoctorAuthCapabilities, DoctorAuthModeKind, DoctorContext,
+    DoctorLevelCaps, DoctorProfileCaps, ExportRegistry, FeatureTiers, HttpSessionLifecycle,
+    HttpTransportConfig, LaneContext, LaneDispatchFactory, LaneRuntime, MCP_PATH, McpSurfaceDetail,
+    McpSurfaceFuture, MtlsClientRegistry, OAuthEnforcement, ObservabilityState,
+    OperatorAuthorityPolicy, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport,
+    ShutdownCoordinator, SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy,
+    TlsMaterial, TlsServerConfig, ToolDispatch, WriteIntentLog, build_server_config,
     default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
     mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file, requires_mtls,
     run_doctor, service_app_doctor_snapshot, sign, start_oraclemcp_service_app_with_transport,
@@ -2957,6 +2957,7 @@ struct DoctorProfileContext {
     call_timeout: Option<std::time::Duration>,
     proxy_user: bool,
     profile_caps: Option<DoctorProfileCaps>,
+    auth_capabilities: Option<DoctorAuthCapabilities>,
     sensitive_values: Vec<String>,
 }
 
@@ -2972,6 +2973,7 @@ impl DoctorProfileContext {
             call_timeout: None,
             proxy_user: false,
             profile_caps: None,
+            auth_capabilities: None,
             sensitive_values: Vec::new(),
         }
     }
@@ -3063,6 +3065,26 @@ fn doctor_profile_caps(
     }
 }
 
+fn doctor_auth_capabilities_for_profile(
+    profile: &oraclemcp_config::ConnectionProfile,
+) -> DoctorAuthCapabilities {
+    let selected = if profile
+        .proxy_auth
+        .as_ref()
+        .and_then(|proxy| proxy.proxy_user())
+        .is_some()
+    {
+        DoctorAuthModeKind::Proxy
+    } else if profile.oci.as_ref().is_some_and(|oci| oci.use_iam_token) {
+        DoctorAuthModeKind::IamToken
+    } else if profile.username.is_none() && profile.credential_ref.is_none() {
+        DoctorAuthModeKind::ExternalWallet
+    } else {
+        DoctorAuthModeKind::Password
+    };
+    DoctorAuthCapabilities::thin(selected)
+}
+
 fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
     let cfg = match OracleMcpConfig::load(None) {
         Ok(cfg) => cfg,
@@ -3106,6 +3128,7 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
             .and_then(|proxy| proxy.proxy_user())
             .is_some(),
         profile_caps: Some(doctor_profile_caps(chosen, &level)),
+        auth_capabilities: Some(doctor_auth_capabilities_for_profile(chosen)),
         sensitive_values: Vec::new(),
     }
 }
@@ -3146,6 +3169,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
             call_timeout: None,
             proxy_user: false,
             profile_caps: None,
+            auth_capabilities: None,
             sensitive_values: Vec::new(),
         },
         Err(e) => DoctorProfileContext {
@@ -3158,6 +3182,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
             call_timeout: None,
             proxy_user: false,
             profile_caps: None,
+            auth_capabilities: None,
             sensitive_values: Vec::new(),
         },
     }
@@ -3183,6 +3208,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
         .to_owned(),
     );
     let profile_caps = Some(resolved.doctor_caps.clone());
+    let auth_capabilities = Some(DoctorAuthCapabilities::from_connect_options(&resolved.opts));
     match block_on_connect(|cx| async move { try_open_runtime_connections(&cx, resolved).await }) {
         Ok(connections) => DoctorProfileContext {
             conn: Some(connections.session),
@@ -3194,6 +3220,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
             call_timeout,
             proxy_user,
             profile_caps,
+            auth_capabilities,
             sensitive_values,
         },
         Err(e) => DoctorProfileContext {
@@ -3206,6 +3233,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
             call_timeout,
             proxy_user,
             profile_caps,
+            auth_capabilities,
             sensitive_values,
         },
     }
@@ -3227,6 +3255,7 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
         proxy_user: profile_ctx.proxy_user,
         online,
         profile_caps: profile_ctx.profile_caps,
+        auth_capabilities: profile_ctx.auth_capabilities,
         service_health: service_app_doctor_snapshot().ok(),
         service_unit_caps: service_lifecycle::doctor_service_unit_caps(),
         sensitive_values: profile_ctx.sensitive_values,
@@ -3684,6 +3713,7 @@ mod tests {
         let ok = oraclemcp_core::DoctorReport {
             checks: Vec::new(),
             profile_caps: None,
+            auth_capabilities: None,
             service_health: None,
             service_unit_caps: None,
             fix: None,
@@ -3702,6 +3732,7 @@ mod tests {
                 ora_code: None,
             }],
             profile_caps: None,
+            auth_capabilities: None,
             service_health: None,
             service_unit_caps: None,
             fix: None,
@@ -3842,6 +3873,79 @@ mod tests {
             "connection profile `missing_ro` not found".to_owned(),
         ));
         assert_eq!(message, "connection profile `missing_ro` not found");
+    }
+
+    #[test]
+    fn doctor_profile_auth_capabilities_are_metadata_only() {
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            schema_version = 1
+
+            [[profiles]]
+            name = "proxy"
+            connect_string = "localhost:1521/FREEPDB1"
+            username = "APP_USER"
+            credential_ref = "env:ORACLE_PASSWORD"
+
+            [profiles.proxy_auth]
+            proxy_user = "APP_USER"
+            target_schema = "APP_OWNER"
+
+            [[profiles]]
+            name = "iam"
+            connect_string = "tcps://private.example/svc"
+            username = "IAM_USER"
+
+            [profiles.oci]
+            wallet_location = "/wallets/private"
+            use_iam_token = true
+
+            [[profiles]]
+            name = "external"
+            connect_string = "tcps://private.example/svc"
+
+            [profiles.oci]
+            wallet_location = "/wallets/private"
+            wallet_password_ref = "env:WALLET_PASSWORD"
+            "#,
+        )
+        .expect("valid config");
+
+        let proxy = doctor_auth_capabilities_for_profile(cfg.profile("proxy").unwrap());
+        assert_eq!(proxy.selected, DoctorAuthModeKind::Proxy);
+        let iam = doctor_auth_capabilities_for_profile(cfg.profile("iam").unwrap());
+        assert_eq!(iam.selected, DoctorAuthModeKind::IamToken);
+        let external = doctor_auth_capabilities_for_profile(cfg.profile("external").unwrap());
+        assert_eq!(external.selected, DoctorAuthModeKind::ExternalWallet);
+
+        let serialized = serde_json::to_string(&serde_json::json!([proxy, iam, external]))
+            .expect("auth capabilities serialize");
+        for forbidden in [
+            "APP_USER",
+            "APP_OWNER",
+            "ORACLE_PASSWORD",
+            "WALLET_PASSWORD",
+            "/wallets/private",
+            "private.example",
+            "FREEPDB1",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "{forbidden} leaked: {serialized}"
+            );
+        }
+        for expected in [
+            "\"driver\":\"thin\"",
+            "\"selected\":\"proxy\"",
+            "\"selected\":\"iam_token\"",
+            "\"selected\":\"external_wallet\"",
+            "\"support\":\"unsupported_in_thin\"",
+        ] {
+            assert!(
+                serialized.contains(expected),
+                "{expected} missing from {serialized}"
+            );
+        }
     }
 
     #[test]

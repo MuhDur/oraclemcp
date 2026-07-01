@@ -17,8 +17,9 @@ use std::time::Duration;
 
 use asupersync::Cx;
 use oraclemcp_db::{
-    DiagnosticsSource, OracleConnection, canonical_nls_statements, detect_oracle_driver,
-    detect_standby, preflight, probe_privileges, probe_write_posture, supported_wallet_modes,
+    AuthAdapter, DiagnosticsSource, OracleConnectOptions, OracleConnection,
+    canonical_nls_statements, detect_oracle_driver, detect_standby, preflight, probe_privileges,
+    probe_write_posture, supported_wallet_modes,
 };
 use oraclemcp_error::{ErrorClass, classify_ora_code, parse_ora_code};
 use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel};
@@ -134,6 +135,144 @@ pub struct DoctorProfileCaps {
     pub protected: bool,
     /// Whether config pins this profile as a read-only standby.
     pub read_only_standby: bool,
+}
+
+/// Authentication modes the thin driver reports to `doctor`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorAuthModeKind {
+    /// Username/password thin authentication.
+    Password,
+    /// Thin proxy authentication (`CONNECT THROUGH`) with a password or token
+    /// owned by the proxy user.
+    Proxy,
+    /// OCI IAM database-token authentication over TCPS.
+    IamToken,
+    /// Passwordless external / wallet authentication.
+    ExternalWallet,
+    /// Kerberos authentication.
+    Kerberos,
+    /// RADIUS / native MFA authentication.
+    Radius,
+}
+
+impl DoctorAuthModeKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            DoctorAuthModeKind::Password => "password",
+            DoctorAuthModeKind::Proxy => "proxy",
+            DoctorAuthModeKind::IamToken => "iam_token",
+            DoctorAuthModeKind::ExternalWallet => "external_wallet",
+            DoctorAuthModeKind::Kerberos => "kerberos",
+            DoctorAuthModeKind::Radius => "radius",
+        }
+    }
+}
+
+/// Whether a driver supports an auth mode in thin mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorAuthModeSupport {
+    /// Supported by the pinned thin driver path.
+    Supported,
+    /// Explicitly not supported by the pinned thin driver path.
+    UnsupportedInThin,
+}
+
+/// One auth capability row in the `doctor` matrix.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DoctorAuthModeCapability {
+    /// Auth mode.
+    pub kind: DoctorAuthModeKind,
+    /// Thin-driver support posture.
+    pub support: DoctorAuthModeSupport,
+    /// Whether this mode is selected by the inspected profile.
+    pub selected: bool,
+    /// Secret-free operator detail.
+    pub detail: &'static str,
+}
+
+/// Secret-free auth capability matrix surfaced by `doctor --profile`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DoctorAuthCapabilities {
+    /// Driver family being reported.
+    pub driver: &'static str,
+    /// Profile-selected auth mode.
+    pub selected: DoctorAuthModeKind,
+    /// Complete thin-mode matrix.
+    pub modes: Vec<DoctorAuthModeCapability>,
+}
+
+impl DoctorAuthCapabilities {
+    /// Build the pinned thin-driver matrix with the supplied selected mode.
+    #[must_use]
+    pub fn thin(selected: DoctorAuthModeKind) -> Self {
+        let row = |kind, support, detail| DoctorAuthModeCapability {
+            kind,
+            support,
+            selected: kind == selected,
+            detail,
+        };
+        DoctorAuthCapabilities {
+            driver: "thin",
+            selected,
+            modes: vec![
+                row(
+                    DoctorAuthModeKind::Password,
+                    DoctorAuthModeSupport::Supported,
+                    "username/password thin authentication",
+                ),
+                row(
+                    DoctorAuthModeKind::Proxy,
+                    DoctorAuthModeSupport::Supported,
+                    "thin proxy authentication via CONNECT THROUGH",
+                ),
+                row(
+                    DoctorAuthModeKind::IamToken,
+                    DoctorAuthModeSupport::Supported,
+                    "OCI IAM database token over TCPS",
+                ),
+                row(
+                    DoctorAuthModeKind::ExternalWallet,
+                    DoctorAuthModeSupport::UnsupportedInThin,
+                    "passwordless external wallet authentication is not supported by this thin driver",
+                ),
+                row(
+                    DoctorAuthModeKind::Kerberos,
+                    DoctorAuthModeSupport::UnsupportedInThin,
+                    "Kerberos authentication is not supported by this thin driver",
+                ),
+                row(
+                    DoctorAuthModeKind::Radius,
+                    DoctorAuthModeSupport::UnsupportedInThin,
+                    "RADIUS/native MFA authentication is not supported by this thin driver",
+                ),
+            ],
+        }
+    }
+
+    /// Derive the selected mode from resolved connect options without exposing
+    /// any connect material.
+    #[must_use]
+    pub fn from_connect_options(opts: &OracleConnectOptions) -> Self {
+        let selected = match &opts.auth_adapter {
+            AuthAdapter::Kerberos { .. } => DoctorAuthModeKind::Kerberos,
+            AuthAdapter::Radius => DoctorAuthModeKind::Radius,
+            AuthAdapter::External => DoctorAuthModeKind::ExternalWallet,
+            AuthAdapter::Proxy { .. } => DoctorAuthModeKind::Proxy,
+            AuthAdapter::Password => {
+                if opts.use_iam_token || opts.iam_token.is_some() {
+                    DoctorAuthModeKind::IamToken
+                } else if opts.external_auth || (opts.username.is_none() && opts.password.is_none())
+                {
+                    DoctorAuthModeKind::ExternalWallet
+                } else {
+                    DoctorAuthModeKind::Password
+                }
+            }
+        };
+        Self::thin(selected)
+    }
 }
 
 /// Service-manager caps as configured by `oraclemcp service install`, and as
@@ -277,6 +416,8 @@ pub struct DoctorContext<'a> {
     pub online: bool,
     /// Non-secret profile authority posture.
     pub profile_caps: Option<DoctorProfileCaps>,
+    /// Secret-free auth support matrix for the inspected profile.
+    pub auth_capabilities: Option<DoctorAuthCapabilities>,
     /// Service/lane health snapshot.
     pub service_health: Option<ServiceAppDoctorSnapshot>,
     /// Service-manager resource caps snapshot.
@@ -293,6 +434,9 @@ pub struct DoctorReport {
     /// Non-secret profile authority posture.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_caps: Option<DoctorProfileCaps>,
+    /// Secret-free auth support matrix for the inspected profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_capabilities: Option<DoctorAuthCapabilities>,
     /// Service/lane health snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_health: Option<ServiceAppDoctorSnapshot>,
@@ -334,6 +478,10 @@ impl DoctorReport {
         if let Some(profile_caps) = &self.profile_caps {
             value["profile_caps"] = serde_json::to_value(profile_caps).unwrap_or(Value::Null);
         }
+        if let Some(auth_capabilities) = &self.auth_capabilities {
+            value["auth_capabilities"] =
+                serde_json::to_value(auth_capabilities).unwrap_or(Value::Null);
+        }
         if let Some(service_health) = &self.service_health {
             value["service_health"] = serde_json::to_value(service_health).unwrap_or(Value::Null);
         }
@@ -366,6 +514,25 @@ impl DoctorReport {
                 profile_caps.effective.default_level,
                 profile_caps.effective.max_level,
                 profile_caps.protected,
+            ));
+        }
+        if let Some(auth_capabilities) = &self.auth_capabilities {
+            let mut supported = Vec::new();
+            let mut unsupported = Vec::new();
+            for mode in &auth_capabilities.modes {
+                match mode.support {
+                    DoctorAuthModeSupport::Supported => supported.push(mode.kind.as_str()),
+                    DoctorAuthModeSupport::UnsupportedInThin => {
+                        unsupported.push(mode.kind.as_str())
+                    }
+                }
+            }
+            out.push_str(&format!(
+                "auth capabilities: driver={} selected={} supported={}; unsupported_in_thin={}\n",
+                auth_capabilities.driver,
+                auth_capabilities.selected.as_str(),
+                supported.join(","),
+                unsupported.join(","),
             ));
         }
         if let Some(service_health) = &self.service_health {
@@ -545,6 +712,7 @@ pub async fn run_doctor(cx: &Cx, ctx: &DoctorContext<'_>) -> DoctorReport {
     DoctorReport {
         checks,
         profile_caps: ctx.profile_caps.clone(),
+        auth_capabilities: ctx.auth_capabilities.clone(),
         service_health: ctx.service_health.clone(),
         service_unit_caps: ctx.service_unit_caps.clone(),
         fix: None,
@@ -1163,7 +1331,10 @@ fn check_call_timeout(ctx: &DoctorContext<'_>) -> CheckResult {
 mod tests {
     use super::*;
     use asupersync::runtime::RuntimeBuilder;
-    use oraclemcp_db::{DbError, OracleBackend, OracleBind, OracleConnectionInfo, OracleRow};
+    use oraclemcp_db::{
+        AuthAdapter, DbError, OracleBackend, OracleBind, OracleConnectOptions,
+        OracleConnectionInfo, OracleRow,
+    };
 
     /// Run `run_doctor` on a fresh current-thread runtime with an installed `Cx`.
     fn doctor(ctx: &DoctorContext<'_>) -> DoctorReport {
@@ -1489,6 +1660,114 @@ mod tests {
     }
 
     #[test]
+    fn auth_capability_matrix_is_thin_and_redaction_safe() {
+        let opts = OracleConnectOptions {
+            connect_string: "dbhost:1521/private_service".to_owned(),
+            username: Some("APP_USER".to_owned()),
+            password: Some("super_secret".to_owned()),
+            auth_adapter: AuthAdapter::Proxy {
+                proxy_user: "MCP_PROXY".to_owned(),
+                target_schema: "APP_OWNER".to_owned(),
+            },
+            wallet_location: Some("/wallets/private".into()),
+            wallet_password: Some("wallet_secret".to_owned()),
+            ssl_server_cert_dn: Some("CN=private-db,O=Example,C=US".to_owned()),
+            use_iam_token: true,
+            iam_token: Some("iam.jwt.token".to_owned()),
+            ..OracleConnectOptions::default()
+        };
+
+        let capabilities = DoctorAuthCapabilities::from_connect_options(&opts);
+        assert_eq!(capabilities.driver, "thin");
+        assert_eq!(capabilities.selected, DoctorAuthModeKind::Proxy);
+        assert_eq!(capabilities.modes.len(), 6);
+        for (kind, support) in [
+            (
+                DoctorAuthModeKind::Password,
+                DoctorAuthModeSupport::Supported,
+            ),
+            (DoctorAuthModeKind::Proxy, DoctorAuthModeSupport::Supported),
+            (
+                DoctorAuthModeKind::IamToken,
+                DoctorAuthModeSupport::Supported,
+            ),
+            (
+                DoctorAuthModeKind::ExternalWallet,
+                DoctorAuthModeSupport::UnsupportedInThin,
+            ),
+            (
+                DoctorAuthModeKind::Kerberos,
+                DoctorAuthModeSupport::UnsupportedInThin,
+            ),
+            (
+                DoctorAuthModeKind::Radius,
+                DoctorAuthModeSupport::UnsupportedInThin,
+            ),
+        ] {
+            let row = capabilities
+                .modes
+                .iter()
+                .find(|row| row.kind == kind)
+                .expect("auth mode row exists");
+            assert_eq!(row.support, support);
+            assert_eq!(row.selected, kind == DoctorAuthModeKind::Proxy);
+        }
+
+        let iam = DoctorAuthCapabilities::from_connect_options(&OracleConnectOptions {
+            use_iam_token: true,
+            iam_token: Some("another.secret.token".to_owned()),
+            ..OracleConnectOptions::default()
+        });
+        assert_eq!(iam.selected, DoctorAuthModeKind::IamToken);
+        let external = DoctorAuthCapabilities::from_connect_options(&OracleConnectOptions {
+            external_auth: true,
+            ..OracleConnectOptions::default()
+        });
+        assert_eq!(external.selected, DoctorAuthModeKind::ExternalWallet);
+
+        let ctx = DoctorContext {
+            auth_capabilities: Some(capabilities),
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let rendered = format!("{}\n{}", report.to_json(), report.to_text());
+        for forbidden in [
+            "dbhost:1521/private_service",
+            "APP_USER",
+            "super_secret",
+            "MCP_PROXY",
+            "APP_OWNER",
+            "/wallets/private",
+            "wallet_secret",
+            "CN=private-db",
+            "iam.jwt.token",
+            "another.secret.token",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "{forbidden} leaked: {rendered}"
+            );
+        }
+        for expected in [
+            "\"driver\":\"thin\"",
+            "\"selected\":\"proxy\"",
+            "\"kind\":\"password\"",
+            "\"kind\":\"iam_token\"",
+            "\"kind\":\"external_wallet\"",
+            "\"kind\":\"kerberos\"",
+            "\"kind\":\"radius\"",
+            "\"support\":\"supported\"",
+            "\"support\":\"unsupported_in_thin\"",
+            "auth capabilities: driver=thin selected=proxy",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "{expected} missing from {rendered}"
+            );
+        }
+    }
+
+    #[test]
     fn service_unit_caps_render_in_json_and_text() {
         let caps = DoctorServiceUnitCaps {
             manager: "systemd_user".to_owned(),
@@ -1794,6 +2073,7 @@ mod tests {
                 .with_fix("tighten grants"),
             ],
             profile_caps: None,
+            auth_capabilities: None,
             service_health: None,
             service_unit_caps: None,
             fix: None,

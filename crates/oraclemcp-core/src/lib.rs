@@ -101,7 +101,8 @@ pub use dashboard_auth::{
     mint_dashboard_pairing_ticket,
 };
 pub use doctor::{
-    AuthModeClass, CheckResult, CheckStatus, DoctorContext, DoctorFixOutcome, DoctorFixPolicy,
+    AuthModeClass, CheckResult, CheckStatus, DoctorAuthCapabilities, DoctorAuthModeCapability,
+    DoctorAuthModeKind, DoctorAuthModeSupport, DoctorContext, DoctorFixOutcome, DoctorFixPolicy,
     DoctorFixRefusal, DoctorFixReport, DoctorLevelCaps, DoctorProfileCaps, DoctorReport,
     DoctorServiceUnitCaps, DoctorServiceUnitLimitCaps, classify_auth_mode, run_doctor,
 };
