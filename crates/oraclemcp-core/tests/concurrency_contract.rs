@@ -295,8 +295,8 @@ fn wp_n_concurrency_contract_matrix_is_complete_and_jsonl_logged() {
         "coverage matrix must account for the WP-N contract row"
     );
     assert!(
-        coverage.contains("Total tracked requirements: 72 MUST, 2 SHOULD, 74 tested."),
-        "coverage totals must include WP-N"
+        coverage.contains("Total tracked requirements: 73 MUST, 2 SHOULD, 75 tested."),
+        "coverage totals must include WP-N and WP-S"
     );
 
     for requirement in REQUIREMENTS {

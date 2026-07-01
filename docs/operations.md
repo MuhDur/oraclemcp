@@ -571,6 +571,36 @@ JSONL-style prunable stores recover by truncating a torn tail and rebuilding an
 offset index from complete lines. Retention is only for prunable data such as
 metrics snapshots; audit data is explicitly non-prunable.
 
+Back up the service-owned files with:
+
+```sh
+oraclemcp --json service backup --dry-run
+oraclemcp --json service backup --yes
+```
+
+The backup creates a new manifest directory outside the service state root by
+default, snapshots `$XDG_STATE_HOME/oraclemcp` (or the `$HOME/.local/state`
+fallback), includes the resolved `profiles.toml`, skips transient
+`.service.lock`, and records SHA-256 metadata for copied config/audit files.
+Use `--output <new-dir>` when you need to choose the destination; the command
+refuses an output directory inside the state root or an existing directory so it
+never recursively backs itself up or overwrites a previous backup.
+
+Restore is a deliberate recovery path:
+
+```sh
+oraclemcp --json service restore /path/to/backup --dry-run
+oraclemcp --json service restore /path/to/backup --yes
+```
+
+`restore --dry-run` reads the manifest and verifies the backed-up audit
+hash-chain with the same key resolution as `oraclemcp audit verify`. `restore
+--yes` then stops the service through the configured service manager, restores
+the manifest files, and starts the service again. A broken or unverifiable audit
+chain fails before any file is restored. Restore does not trust stored SQL
+verdicts or proposal review metadata; after restart, config loading, profile
+ceilings, classifier checks, grants, and audit append paths run normally.
+
 ### 5.4 Verify the audit trail
 
 Privileged actions are written to a hash-chained, HMAC-SHA256-signed audit log

@@ -1,11 +1,12 @@
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use oraclemcp_core::{DoctorServiceUnitCaps, DoctorServiceUnitLimitCaps};
+use oraclemcp_audit::{SigningKey, VerifyOutcome, parse_jsonl, sha256_hex, verify_records};
+use oraclemcp_core::{DoctorServiceUnitCaps, DoctorServiceUnitLimitCaps, FileStore};
 use serde::{Deserialize, Serialize};
 
 const SERVICE_LIMIT_NOFILE: u64 = 65_536;
@@ -15,6 +16,10 @@ const SERVICE_MEMORY_MAX_SYSTEMD: &str = "2G";
 const SERVICE_OOM_SCORE_ADJUST: i16 = 100;
 const SERVICE_INSTANCE_LOCK_FILE: &str = "service-instance.json";
 const SERVICE_INSTANCE_SCHEMA_VERSION: u8 = 1;
+const SERVICE_STATE_LOCK_FILE: &str = ".service.lock";
+const BACKUP_MANIFEST_FILE: &str = "manifest.json";
+const BACKUP_SCHEMA_VERSION: u32 = 1;
+const BACKUP_KIND: &str = "oraclemcp_service_backup";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ServiceError {
@@ -109,12 +114,36 @@ pub(crate) struct ServiceLogsOptions {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct ServiceBackupOptions {
+    pub(crate) name: String,
+    pub(crate) state_dir: PathBuf,
+    pub(crate) config_path: PathBuf,
+    pub(crate) audit_path: PathBuf,
+    pub(crate) output: Option<PathBuf>,
+    pub(crate) yes: bool,
+    pub(crate) dry_run: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ServiceRestoreOptions {
+    pub(crate) name: String,
+    pub(crate) state_dir: PathBuf,
+    pub(crate) config_path: PathBuf,
+    pub(crate) backup: PathBuf,
+    pub(crate) audit_keys: Vec<SigningKey>,
+    pub(crate) yes: bool,
+    pub(crate) dry_run: bool,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum ServiceCommand {
     Install(ServiceInstallOptions),
     Uninstall(ServiceMutationOptions),
     Restart(ServiceMutationOptions),
     Status(ServiceReadOptions),
     Logs(ServiceLogsOptions),
+    Backup(ServiceBackupOptions),
+    Restore(ServiceRestoreOptions),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,6 +151,43 @@ pub(crate) struct ServiceResult {
     pub(crate) exit_code: u8,
     pub(crate) payload: serde_json::Value,
     pub(crate) text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BackupFileManifest {
+    present: bool,
+    source_path: String,
+    backup_path: Option<String>,
+    sha256: Option<String>,
+    bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BackupTreeManifest {
+    source_path: String,
+    backup_path: String,
+    file_count: usize,
+    bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BackupManifest {
+    schema_version: u32,
+    kind: String,
+    service_name: String,
+    created_unix_ms: u64,
+    state: BackupTreeManifest,
+    config: BackupFileManifest,
+    audit: BackupFileManifest,
+    service_lock_held: bool,
+    transient_files_skipped: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum RestoreAuditVerification {
+    Verified { records: usize, file: String },
+    NoAuditLog,
 }
 
 #[derive(Debug)]
@@ -247,6 +313,14 @@ pub(crate) fn run_service_command_with(
         }
         ServiceCommand::Status(options) => run_status(manager, &options.name),
         ServiceCommand::Logs(options) => run_logs(manager, &options.name, options.lines),
+        ServiceCommand::Backup(options) => {
+            require_confirmed("backup", options.dry_run, options.yes)?;
+            run_backup(manager, options)
+        }
+        ServiceCommand::Restore(options) => {
+            require_confirmed("restore", options.dry_run, options.yes)?;
+            run_restore(manager, exe, options)
+        }
     }
 }
 
@@ -634,6 +708,743 @@ fn run_logs(
         exit_code,
         payload,
         text,
+    })
+}
+
+fn run_backup(
+    manager: ServiceManager,
+    options: ServiceBackupOptions,
+) -> Result<ServiceResult, ServiceError> {
+    validate_service_name(&options.name)?;
+    let output = options
+        .output
+        .clone()
+        .unwrap_or_else(|| default_backup_path(&options.state_dir));
+    validate_backup_output_path(&output, &options.state_dir)?;
+
+    let manifest = if options.dry_run {
+        build_backup_manifest(&options, &output, false, false)?
+    } else {
+        let store = FileStore::open(&options.state_dir).map_err(service_store_error)?;
+        let lock = store
+            .acquire_service_lock("service-backup")
+            .map_err(service_store_error)?;
+        create_new_private_dir(&output)?;
+        let state_target = output.join("state");
+        let mut state = copy_dir_snapshot(store.root(), &state_target)?;
+        state.backup_path = "state".to_owned();
+        let mut config = copy_optional_file(
+            &options.config_path,
+            &output.join("config").join("profiles.toml"),
+        )?;
+        relativize_file_manifest(&mut config, &output);
+        let mut audit = copy_audit_for_backup(&options.audit_path, store.root(), &output)?;
+        relativize_file_manifest(&mut audit, &output);
+        let manifest = BackupManifest {
+            schema_version: BACKUP_SCHEMA_VERSION,
+            kind: BACKUP_KIND.to_owned(),
+            service_name: options.name.clone(),
+            created_unix_ms: current_unix_millis(),
+            state,
+            config,
+            audit,
+            service_lock_held: true,
+            transient_files_skipped: vec![SERVICE_STATE_LOCK_FILE.to_owned()],
+        };
+        write_manifest(&output, &manifest)?;
+        drop(lock);
+        manifest
+    };
+
+    let payload = serde_json::json!({
+        "ok": true,
+        "kind": "oraclemcp_service_backup",
+        "manager": manager.as_str(),
+        "service_name": options.name,
+        "dry_run": options.dry_run,
+        "backup_dir": output.display().to_string(),
+        "manifest": manifest,
+        "next_actions": [
+            "restore with `oraclemcp --json service restore <backup-dir> --dry-run` first",
+            "run `oraclemcp audit verify` or service restore with the audit signing key before trusting recovered state"
+        ],
+    });
+    let text = if options.dry_run {
+        format!(
+            "oraclemcp service backup\nmanager: {}\nservice: {}\nmode: dry-run (no changes made)\nbackup dir: {}\nstate: {}\nconfig: {}\naudit: {}\n",
+            manager.as_str(),
+            options.name,
+            output.display(),
+            options.state_dir.display(),
+            options.config_path.display(),
+            options.audit_path.display()
+        )
+    } else {
+        format!(
+            "oraclemcp service backup completed\nbackup dir: {}\nstate files: {}\naudit: {}\n",
+            output.display(),
+            manifest.state.file_count,
+            if manifest.audit.present {
+                "included"
+            } else {
+                "not present"
+            }
+        )
+    };
+    Ok(ServiceResult {
+        exit_code: 0,
+        payload,
+        text,
+    })
+}
+
+fn run_restore(
+    manager: ServiceManager,
+    _exe: &Path,
+    options: ServiceRestoreOptions,
+) -> Result<ServiceResult, ServiceError> {
+    validate_service_name(&options.name)?;
+    let manifest = read_manifest(&options.backup)?;
+    if manifest.kind != BACKUP_KIND || manifest.schema_version != BACKUP_SCHEMA_VERSION {
+        return Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_RESTORE_INVALID_BACKUP",
+            format!(
+                "{} is not an oraclemcp service backup this binary understands",
+                options.backup.display()
+            ),
+            2,
+        ));
+    }
+
+    let audit_verification = verify_backup_audit(&options.backup, &manifest, &options.audit_keys)?;
+    let stop = stop_step(manager, &options.name)?;
+    let start = start_step(manager, &options.name)?;
+
+    if !options.dry_run {
+        execute_steps(std::slice::from_ref(&stop))?;
+        restore_from_manifest(&options.backup, &options, &manifest)?;
+        execute_steps(std::slice::from_ref(&start))?;
+    }
+
+    let payload = serde_json::json!({
+        "ok": true,
+        "kind": "oraclemcp_service_restore",
+        "manager": manager.as_str(),
+        "service_name": options.name,
+        "dry_run": options.dry_run,
+        "backup_dir": options.backup.display().to_string(),
+        "target_state_dir": options.state_dir.display().to_string(),
+        "target_config_path": options.config_path.display().to_string(),
+        "audit_verification": audit_verification,
+        "steps": [stop, start],
+    });
+    let text = if options.dry_run {
+        format!(
+            "oraclemcp service restore\nmanager: {}\nservice: {}\nmode: dry-run (no changes made)\nbackup dir: {}\naudit: verified before restore\n",
+            manager.as_str(),
+            options.name,
+            options.backup.display()
+        )
+    } else {
+        format!(
+            "oraclemcp service restore completed\nbackup dir: {}\nstate: {}\nconfig: {}\n",
+            options.backup.display(),
+            options.state_dir.display(),
+            options.config_path.display()
+        )
+    };
+    Ok(ServiceResult {
+        exit_code: 0,
+        payload,
+        text,
+    })
+}
+
+fn build_backup_manifest(
+    options: &ServiceBackupOptions,
+    output: &Path,
+    service_lock_held: bool,
+    include_existing_stats: bool,
+) -> Result<BackupManifest, ServiceError> {
+    let state = if include_existing_stats {
+        let mut state = tree_manifest_for(&options.state_dir, &output.join("state"))?;
+        state.backup_path = "state".to_owned();
+        state
+    } else {
+        BackupTreeManifest {
+            source_path: options.state_dir.display().to_string(),
+            backup_path: "state".to_owned(),
+            file_count: 0,
+            bytes: 0,
+        }
+    };
+    let mut config = file_manifest_for(&options.config_path, &output.join("config/profiles.toml"))?;
+    relativize_file_manifest(&mut config, output);
+    let mut audit = file_manifest_for(&options.audit_path, &output.join("audit/audit.jsonl"))?;
+    relativize_file_manifest(&mut audit, output);
+    Ok(BackupManifest {
+        schema_version: BACKUP_SCHEMA_VERSION,
+        kind: BACKUP_KIND.to_owned(),
+        service_name: options.name.clone(),
+        created_unix_ms: current_unix_millis(),
+        state,
+        config,
+        audit,
+        service_lock_held,
+        transient_files_skipped: vec![SERVICE_STATE_LOCK_FILE.to_owned()],
+    })
+}
+
+fn relativize_file_manifest(manifest: &mut BackupFileManifest, backup_root: &Path) {
+    if let Some(path) = manifest.backup_path.as_deref() {
+        let path = Path::new(path);
+        if let Ok(relative) = path.strip_prefix(backup_root) {
+            manifest.backup_path = Some(relative.display().to_string());
+        }
+    }
+}
+
+fn default_backup_path(state_dir: &Path) -> PathBuf {
+    let parent = state_dir
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    parent
+        .join("oraclemcp-backups")
+        .join(format!("backup-{}", timestamp_suffix()))
+}
+
+fn validate_backup_output_path(output: &Path, state_dir: &Path) -> Result<(), ServiceError> {
+    if output.as_os_str().is_empty() {
+        return Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_BACKUP_INVALID_TARGET",
+            "backup output path must not be empty",
+            2,
+        ));
+    }
+    if path_is_under(output, state_dir) {
+        return Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_BACKUP_INVALID_TARGET",
+            format!(
+                "backup output {} must not be inside the state directory {}",
+                output.display(),
+                state_dir.display()
+            ),
+            2,
+        ));
+    }
+    if output.exists() {
+        return Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_BACKUP_TARGET_EXISTS",
+            format!(
+                "backup output {} already exists; choose a new directory so no backup is overwritten",
+                output.display()
+            ),
+            2,
+        ));
+    }
+    Ok(())
+}
+
+fn path_is_under(candidate: &Path, root: &Path) -> bool {
+    let candidate_abs = absoluteish(candidate);
+    let root_abs = absoluteish(root);
+    candidate_abs == root_abs || candidate_abs.starts_with(root_abs)
+}
+
+fn absoluteish(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+fn service_store_error(error: oraclemcp_core::FileStoreError) -> ServiceError {
+    ServiceError::new(
+        "ORACLEMCP_SERVICE_STORE_UNAVAILABLE",
+        format!("service file-store operation failed: {error}"),
+        3,
+    )
+}
+
+fn copy_audit_for_backup(
+    audit_path: &Path,
+    state_root: &Path,
+    output: &Path,
+) -> Result<BackupFileManifest, ServiceError> {
+    let audit_compare = audit_path
+        .canonicalize()
+        .unwrap_or_else(|_| audit_path.to_path_buf());
+    let state_compare = state_root
+        .canonicalize()
+        .unwrap_or_else(|_| state_root.to_path_buf());
+    if audit_compare.starts_with(&state_compare) {
+        let relative = audit_compare.strip_prefix(&state_compare).map_err(|e| {
+            ServiceError::new(
+                "ORACLEMCP_SERVICE_BACKUP_AUDIT_PATH_INVALID",
+                format!(
+                    "failed to relativize audit path {}: {e}",
+                    audit_path.display()
+                ),
+                2,
+            )
+        })?;
+        return file_manifest_for(audit_path, &output.join("state").join(relative));
+    }
+    copy_optional_file(audit_path, &output.join("audit").join("audit.jsonl"))
+}
+
+fn copy_dir_snapshot(source: &Path, target: &Path) -> Result<BackupTreeManifest, ServiceError> {
+    let mut manifest = BackupTreeManifest {
+        source_path: source.display().to_string(),
+        backup_path: target.display().to_string(),
+        file_count: 0,
+        bytes: 0,
+    };
+    copy_dir_snapshot_inner(source, target, &mut manifest)?;
+    Ok(manifest)
+}
+
+fn copy_dir_snapshot_inner(
+    source: &Path,
+    target: &Path,
+    manifest: &mut BackupTreeManifest,
+) -> Result<(), ServiceError> {
+    ensure_source_dir_safe(source)?;
+    create_private_dir_all(target)?;
+    let mut entries = fs::read_dir(source)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_READ_FAILED", source, e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_READ_FAILED", source, e))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let file_name = entry.file_name();
+        if file_name == SERVICE_STATE_LOCK_FILE {
+            continue;
+        }
+        let source_path = entry.path();
+        let target_path = target.join(&file_name);
+        let metadata = fs::symlink_metadata(&source_path).map_err(|e| {
+            service_io_error("ORACLEMCP_SERVICE_BACKUP_READ_FAILED", &source_path, e)
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(ServiceError::new(
+                "ORACLEMCP_SERVICE_BACKUP_UNSAFE_PATH",
+                format!("refusing to follow symlink {}", source_path.display()),
+                2,
+            ));
+        }
+        if metadata.is_dir() {
+            copy_dir_snapshot_inner(&source_path, &target_path, manifest)?;
+        } else if metadata.is_file() {
+            copy_regular_file(&source_path, &target_path)?;
+            manifest.file_count += 1;
+            manifest.bytes += metadata.len();
+        }
+    }
+    sync_dir(target)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_SYNC_FAILED", target, e))
+}
+
+fn restore_from_manifest(
+    backup: &Path,
+    options: &ServiceRestoreOptions,
+    manifest: &BackupManifest,
+) -> Result<(), ServiceError> {
+    let state_source = backup.join("state");
+    if !state_source.exists() {
+        return Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_RESTORE_INVALID_BACKUP",
+            format!(
+                "backup state directory is missing: {}",
+                state_source.display()
+            ),
+            2,
+        ));
+    }
+    copy_dir_restore(&state_source, &options.state_dir)?;
+
+    if manifest.config.present {
+        let source = manifest_backup_path(backup, &manifest.config)?;
+        copy_regular_file(&source, &options.config_path)?;
+    }
+    if manifest.audit.present
+        && !Path::new(&manifest.audit.source_path).starts_with(&options.state_dir)
+    {
+        let source = manifest_backup_path(backup, &manifest.audit)?;
+        copy_regular_file(&source, Path::new(&manifest.audit.source_path))?;
+    }
+    Ok(())
+}
+
+fn copy_dir_restore(source: &Path, target: &Path) -> Result<(), ServiceError> {
+    let mut ignored = BackupTreeManifest {
+        source_path: source.display().to_string(),
+        backup_path: target.display().to_string(),
+        file_count: 0,
+        bytes: 0,
+    };
+    copy_dir_snapshot_inner(source, target, &mut ignored)
+}
+
+fn copy_optional_file(source: &Path, target: &Path) -> Result<BackupFileManifest, ServiceError> {
+    if !source.exists() {
+        return Ok(BackupFileManifest {
+            present: false,
+            source_path: source.display().to_string(),
+            backup_path: None,
+            sha256: None,
+            bytes: None,
+        });
+    }
+    copy_regular_file(source, target)?;
+    file_manifest_for(source, target)
+}
+
+fn file_manifest_for(source: &Path, target: &Path) -> Result<BackupFileManifest, ServiceError> {
+    match fs::symlink_metadata(source) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_BACKUP_UNSAFE_PATH",
+            format!("refusing to follow symlink {}", source.display()),
+            2,
+        )),
+        Ok(metadata) if metadata.is_file() => Ok(BackupFileManifest {
+            present: true,
+            source_path: source.display().to_string(),
+            backup_path: Some(target.display().to_string()),
+            sha256: Some(sha256_file(source)?),
+            bytes: Some(metadata.len()),
+        }),
+        Ok(_) => Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_BACKUP_UNSAFE_PATH",
+            format!("{} is not a regular file", source.display()),
+            2,
+        )),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(BackupFileManifest {
+            present: false,
+            source_path: source.display().to_string(),
+            backup_path: None,
+            sha256: None,
+            bytes: None,
+        }),
+        Err(e) => Err(service_io_error(
+            "ORACLEMCP_SERVICE_BACKUP_READ_FAILED",
+            source,
+            e,
+        )),
+    }
+}
+
+fn tree_manifest_for(source: &Path, target: &Path) -> Result<BackupTreeManifest, ServiceError> {
+    let mut manifest = BackupTreeManifest {
+        source_path: source.display().to_string(),
+        backup_path: target.display().to_string(),
+        file_count: 0,
+        bytes: 0,
+    };
+    if !source.exists() {
+        return Ok(manifest);
+    }
+    accumulate_tree_manifest(source, &mut manifest)?;
+    Ok(manifest)
+}
+
+fn accumulate_tree_manifest(
+    source: &Path,
+    manifest: &mut BackupTreeManifest,
+) -> Result<(), ServiceError> {
+    ensure_source_dir_safe(source)?;
+    for entry in fs::read_dir(source)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_READ_FAILED", source, e))?
+    {
+        let entry = entry
+            .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_READ_FAILED", source, e))?;
+        if entry.file_name() == SERVICE_STATE_LOCK_FILE {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_READ_FAILED", &path, e))?;
+        if metadata.file_type().is_symlink() {
+            return Err(ServiceError::new(
+                "ORACLEMCP_SERVICE_BACKUP_UNSAFE_PATH",
+                format!("refusing to follow symlink {}", path.display()),
+                2,
+            ));
+        }
+        if metadata.is_dir() {
+            accumulate_tree_manifest(&path, manifest)?;
+        } else if metadata.is_file() {
+            manifest.file_count += 1;
+            manifest.bytes += metadata.len();
+        }
+    }
+    Ok(())
+}
+
+fn ensure_source_dir_safe(path: &Path) -> Result<(), ServiceError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_READ_FAILED", path, e))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_BACKUP_UNSAFE_PATH",
+            format!("{} is not a safe directory", path.display()),
+            2,
+        ));
+    }
+    Ok(())
+}
+
+fn copy_regular_file(source: &Path, target: &Path) -> Result<(), ServiceError> {
+    let metadata = fs::symlink_metadata(source)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_READ_FAILED", source, e))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_BACKUP_UNSAFE_PATH",
+            format!("{} is not a regular file", source.display()),
+            2,
+        ));
+    }
+    if let Some(parent) = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        create_private_dir_all(parent)?;
+    }
+    let mut bytes = Vec::new();
+    File::open(source)
+        .and_then(|mut file| file.read_to_end(&mut bytes))
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_READ_FAILED", source, e))?;
+    write_private_file_atomic(target, &bytes)
+}
+
+fn create_new_private_dir(path: &Path) -> Result<(), ServiceError> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(path).map_err(|e| {
+        ServiceError::new(
+            "ORACLEMCP_SERVICE_BACKUP_WRITE_FAILED",
+            format!("failed to create backup directory {}: {e}", path.display()),
+            3,
+        )
+    })
+}
+
+fn create_private_dir_all(path: &Path) -> Result<(), ServiceError> {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ServiceError::new(
+                "ORACLEMCP_SERVICE_BACKUP_UNSAFE_PATH",
+                format!("{} is not a safe directory", path.display()),
+                2,
+            ));
+        }
+        harden_private_runtime_dir(path, &metadata)
+            .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_WRITE_FAILED", path, e))?;
+        return Ok(());
+    }
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder
+        .create(path)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_WRITE_FAILED", path, e))
+}
+
+fn write_private_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), ServiceError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        create_private_dir_all(parent)?;
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            ServiceError::new(
+                "ORACLEMCP_SERVICE_BACKUP_WRITE_FAILED",
+                format!("invalid file target {}", path.display()),
+                2,
+            )
+        })?;
+    let tmp = parent.join(format!(
+        ".{file_name}.tmp.{}.{}",
+        std::process::id(),
+        timestamp_suffix()
+    ));
+    let mut file = create_new_private_file(&tmp)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_WRITE_FAILED", &tmp, e))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_WRITE_FAILED", &tmp, e))?;
+    drop(file);
+    fs::rename(&tmp, path)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_WRITE_FAILED", path, e))?;
+    sync_dir(parent)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_SYNC_FAILED", parent, e))
+}
+
+fn write_manifest(output: &Path, manifest: &BackupManifest) -> Result<(), ServiceError> {
+    let mut bytes = serde_json::to_vec_pretty(manifest).map_err(|e| {
+        ServiceError::new(
+            "ORACLEMCP_SERVICE_BACKUP_MANIFEST_FAILED",
+            format!("failed to serialize backup manifest: {e}"),
+            3,
+        )
+    })?;
+    bytes.push(b'\n');
+    write_private_file_atomic(&output.join(BACKUP_MANIFEST_FILE), &bytes)
+}
+
+fn read_manifest(backup: &Path) -> Result<BackupManifest, ServiceError> {
+    let path = backup.join(BACKUP_MANIFEST_FILE);
+    let body = fs::read_to_string(&path)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_RESTORE_INVALID_BACKUP", &path, e))?;
+    serde_json::from_str(&body).map_err(|e| {
+        ServiceError::new(
+            "ORACLEMCP_SERVICE_RESTORE_INVALID_BACKUP",
+            format!("backup manifest {} is invalid: {e}", path.display()),
+            2,
+        )
+    })
+}
+
+fn verify_backup_audit(
+    backup: &Path,
+    manifest: &BackupManifest,
+    keys: &[SigningKey],
+) -> Result<RestoreAuditVerification, ServiceError> {
+    if !manifest.audit.present {
+        return Ok(RestoreAuditVerification::NoAuditLog);
+    }
+    let path = manifest_backup_path(backup, &manifest.audit)?;
+    let body = fs::read_to_string(&path)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_RESTORE_AUDIT_READ_FAILED", &path, e))?;
+    let records = parse_jsonl(&body).map_err(|e| {
+        ServiceError::new(
+            "ORACLEMCP_SERVICE_RESTORE_AUDIT_MALFORMED",
+            format!("backup audit log {} is malformed: {e}", path.display()),
+            2,
+        )
+    })?;
+    match verify_records(&records, keys) {
+        VerifyOutcome::Ok { records } => Ok(RestoreAuditVerification::Verified {
+            records,
+            file: path.display().to_string(),
+        }),
+        VerifyOutcome::Broken { seq, index, reason } => Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_RESTORE_AUDIT_BROKEN",
+            format!(
+                "backup audit chain {} failed at seq {seq} record #{index}: {reason}",
+                path.display()
+            ),
+            2,
+        )),
+        _ => Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_RESTORE_AUDIT_UNVERIFIABLE",
+            "unrecognized audit verification outcome",
+            2,
+        )),
+    }
+}
+
+fn manifest_backup_path(backup: &Path, file: &BackupFileManifest) -> Result<PathBuf, ServiceError> {
+    let Some(path) = file.backup_path.as_deref() else {
+        return Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_RESTORE_INVALID_BACKUP",
+            "backup manifest file entry is present but has no backup path",
+            2,
+        ));
+    };
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(backup.join(path))
+    }
+}
+
+fn sha256_file(path: &Path) -> Result<String, ServiceError> {
+    let bytes = fs::read(path)
+        .map_err(|e| service_io_error("ORACLEMCP_SERVICE_BACKUP_READ_FAILED", path, e))?;
+    Ok(sha256_hex(&bytes))
+}
+
+fn service_io_error(code: &'static str, path: &Path, error: io::Error) -> ServiceError {
+    ServiceError::new(code, format!("{}: {error}", path.display()), 3)
+}
+
+fn timestamp_suffix() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}-{:09}", now.as_secs(), now.subsec_nanos())
+}
+
+fn stop_step(manager: ServiceManager, name: &str) -> Result<ServiceStep, ServiceError> {
+    Ok(match manager {
+        ServiceManager::SystemdUser => ServiceStep::Run {
+            program: "systemctl".to_owned(),
+            args: vec!["--user".into(), "stop".into(), systemd_unit_name(name)],
+            optional: true,
+        },
+        ServiceManager::LaunchdUser => {
+            let label = launchd_label(name);
+            ServiceStep::Run {
+                program: "launchctl".to_owned(),
+                args: vec![
+                    "kill".into(),
+                    "TERM".into(),
+                    launchd_service_target(&label)?,
+                ],
+                optional: true,
+            }
+        }
+        ServiceManager::WindowsService => ServiceStep::Run {
+            program: "sc.exe".to_owned(),
+            args: vec!["stop".into(), name.to_owned()],
+            optional: true,
+        },
+    })
+}
+
+fn start_step(manager: ServiceManager, name: &str) -> Result<ServiceStep, ServiceError> {
+    Ok(match manager {
+        ServiceManager::SystemdUser => ServiceStep::Run {
+            program: "systemctl".to_owned(),
+            args: vec!["--user".into(), "start".into(), systemd_unit_name(name)],
+            optional: false,
+        },
+        ServiceManager::LaunchdUser => {
+            let label = launchd_label(name);
+            ServiceStep::Run {
+                program: "launchctl".to_owned(),
+                args: vec![
+                    "kickstart".into(),
+                    "-k".into(),
+                    launchd_service_target(&label)?,
+                ],
+                optional: false,
+            }
+        }
+        ServiceManager::WindowsService => ServiceStep::Run {
+            program: "sc.exe".to_owned(),
+            args: vec!["start".into(), name.to_owned()],
+            optional: false,
+        },
     })
 }
 
@@ -1457,6 +2268,9 @@ fn finite_min(values: impl IntoIterator<Item = Option<u64>>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oraclemcp_audit::{
+        AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord, AuditSubject, GENESIS_HASH,
+    };
 
     fn exe() -> PathBuf {
         PathBuf::from("/opt/oraclemcp/bin/oraclemcp")
@@ -1470,6 +2284,28 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/service-lifecycle-tests")
             .join(format!("{name}-{}-{stamp}", std::process::id()))
+    }
+
+    fn signed_audit_jsonl(key: &SigningKey) -> String {
+        let draft = AuditEntryDraft {
+            subject: AuditSubject::new("operator", "restore-test").with_authn_method("loopback"),
+            db_evidence: None,
+            cancel: None,
+            tool: "oracle_execute".to_owned(),
+            sql: "update app.t set c = 1 where id = :id".to_owned(),
+            danger_level: "READ_WRITE".to_owned(),
+            decision: AuditDecision::Allowed,
+            rows_affected: Some(1),
+            outcome: AuditOutcome::Succeeded,
+        };
+        let record = AuditRecord::chained_signed(
+            &draft,
+            1,
+            GENESIS_HASH,
+            "2026-07-01T00:00:00Z".to_owned(),
+            key,
+        );
+        format!("{}\n", serde_json::to_string(&record).expect("audit json"))
     }
 
     #[test]
@@ -1593,6 +2429,141 @@ mod tests {
         let payload = result.payload.to_string();
         assert!(payload.contains("restart"));
         assert!(payload.contains("oraclemcp.service"));
+    }
+
+    #[test]
+    fn backup_restore_verifies_audit_chain() {
+        let root = test_root("backup-restore");
+        let state_dir = root.join("state").join("oraclemcp");
+        let config_path = root.join("config").join("profiles.toml");
+        let audit_path = state_dir.join("audit").join("audit.jsonl");
+        let backup_dir = root.join("backup");
+        let key = SigningKey::new("default", b"backup-restore-test-key".to_vec());
+
+        fs::create_dir_all(audit_path.parent().expect("audit parent")).expect("audit dir");
+        fs::create_dir_all(config_path.parent().expect("config parent")).expect("config dir");
+        fs::create_dir_all(state_dir.join("metrics")).expect("metrics dir");
+        fs::write(&audit_path, signed_audit_jsonl(&key)).expect("seed audit chain");
+        fs::write(
+            state_dir.join("metrics").join("snapshot.json"),
+            b"{\"ok\":true}\n",
+        )
+        .expect("seed state file");
+        fs::write(
+            &config_path,
+            b"schema_version = 2\n\n[[profiles]]\nname = \"prod\"\nconnect_string = \"db\"\n",
+        )
+        .expect("seed config");
+
+        let backup = run_service_command_with(
+            ServiceCommand::Backup(ServiceBackupOptions {
+                name: "oraclemcp".to_owned(),
+                state_dir: state_dir.clone(),
+                config_path: config_path.clone(),
+                audit_path: audit_path.clone(),
+                output: Some(backup_dir.clone()),
+                yes: true,
+                dry_run: false,
+            }),
+            ServiceManager::SystemdUser,
+            &exe(),
+        )
+        .expect("backup succeeds");
+        assert_eq!(
+            backup.payload["kind"],
+            serde_json::json!("oraclemcp_service_backup")
+        );
+        assert_eq!(
+            backup.payload["manifest"]["service_lock_held"],
+            serde_json::json!(true)
+        );
+
+        let restore_plan = run_service_command_with(
+            ServiceCommand::Restore(ServiceRestoreOptions {
+                name: "oraclemcp".to_owned(),
+                state_dir: state_dir.clone(),
+                config_path: config_path.clone(),
+                backup: backup_dir.clone(),
+                audit_keys: vec![key.clone()],
+                yes: false,
+                dry_run: true,
+            }),
+            ServiceManager::SystemdUser,
+            &exe(),
+        )
+        .expect("dry-run restore verifies audit");
+        assert_eq!(
+            restore_plan.payload["audit_verification"]["status"],
+            serde_json::json!("verified")
+        );
+        assert_eq!(
+            restore_plan.payload["audit_verification"]["records"],
+            serde_json::json!(1)
+        );
+
+        fs::write(
+            state_dir.join("metrics").join("snapshot.json"),
+            b"{\"ok\":false}\n",
+        )
+        .expect("mutate state file");
+        fs::write(&config_path, b"schema_version = 2\n").expect("mutate config");
+
+        let manifest = read_manifest(&backup_dir).expect("manifest");
+        restore_from_manifest(
+            &backup_dir,
+            &ServiceRestoreOptions {
+                name: "oraclemcp".to_owned(),
+                state_dir: state_dir.clone(),
+                config_path: config_path.clone(),
+                backup: backup_dir.clone(),
+                audit_keys: vec![key.clone()],
+                yes: true,
+                dry_run: false,
+            },
+            &manifest,
+        )
+        .expect("restore copies manifest files");
+        assert_eq!(
+            fs::read(state_dir.join("metrics").join("snapshot.json")).expect("restored state"),
+            b"{\"ok\":true}\n"
+        );
+        assert!(
+            fs::read_to_string(&config_path)
+                .expect("restored config")
+                .contains("name = \"prod\"")
+        );
+
+        let backup_audit = backup_dir.join("state").join("audit").join("audit.jsonl");
+        let mut tampered: serde_json::Value = serde_json::from_str(
+            fs::read_to_string(&backup_audit)
+                .expect("read backup audit")
+                .trim(),
+        )
+        .expect("backup audit json");
+        tampered["signature"] = serde_json::json!("hmac-sha256:00");
+        fs::write(
+            &backup_audit,
+            format!(
+                "{}\n",
+                serde_json::to_string(&tampered).expect("tampered json")
+            ),
+        )
+        .expect("tamper backup audit");
+        let err = run_service_command_with(
+            ServiceCommand::Restore(ServiceRestoreOptions {
+                name: "oraclemcp".to_owned(),
+                state_dir,
+                config_path,
+                backup: backup_dir,
+                audit_keys: vec![key],
+                yes: false,
+                dry_run: true,
+            }),
+            ServiceManager::SystemdUser,
+            &exe(),
+        )
+        .expect_err("tampered audit refuses restore");
+        assert_eq!(err.code, "ORACLEMCP_SERVICE_RESTORE_AUDIT_BROKEN");
     }
 
     #[test]

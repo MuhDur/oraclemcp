@@ -78,8 +78,9 @@ use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel, SessionLevelState};
 use oraclemcp_telemetry::{HealthState, Metrics, OtlpConfig};
 use service_lifecycle::{
-    ServiceCommand as ServiceLifecycleCommand, ServiceInstallOptions, ServiceLogsOptions,
-    ServiceMutationOptions, ServiceReadOptions, acquire_service_instance_guard,
+    ServiceBackupOptions, ServiceCommand as ServiceLifecycleCommand, ServiceInstallOptions,
+    ServiceLogsOptions, ServiceMutationOptions, ServiceReadOptions, ServiceRestoreOptions,
+    acquire_service_instance_guard,
 };
 
 /// Whether this build includes live Oracle connectivity.
@@ -263,6 +264,10 @@ enum ServiceCliCommand {
     Logs(ServiceLogsCliArgs),
     /// Restart the persistent local service.
     Restart(ServiceMutationCliArgs),
+    /// Snapshot the service state directory plus the active config file.
+    Backup(ServiceBackupCliArgs),
+    /// Restore a service backup after verifying its audit hash-chain.
+    Restore(ServiceRestoreCliArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -349,6 +354,40 @@ struct ServiceLogsCliArgs {
     /// Number of recent log lines/events to request.
     #[arg(long, default_value_t = 100)]
     lines: u16,
+}
+
+#[derive(Args, Debug, Clone)]
+struct ServiceBackupCliArgs {
+    /// Service name / label.
+    #[arg(long, default_value = "oraclemcp")]
+    name: String,
+    /// New directory to create for the backup. Defaults outside the XDG state root.
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Execute the local backup write. Omit and use --dry-run to inspect safely.
+    #[arg(long)]
+    yes: bool,
+    /// Print the backup plan without writing files.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+struct ServiceRestoreCliArgs {
+    /// Backup directory produced by `oraclemcp service backup`.
+    backup: PathBuf,
+    /// Service name / label.
+    #[arg(long, default_value = "oraclemcp")]
+    name: String,
+    /// Override the audit signing key id to verify against.
+    #[arg(long, visible_alias = "key_id")]
+    key_id: Option<String>,
+    /// Execute the stop, restore, and start sequence. Omit and use --dry-run first.
+    #[arg(long)]
+    yes: bool,
+    /// Verify the backup and print the restore plan without writing files.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Args, Debug, Default)]
@@ -2136,6 +2175,23 @@ fn operator_config_target_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("profiles.toml"))
 }
 
+fn service_state_dir_for_cli(robot_json: bool) -> Result<PathBuf, ExitCode> {
+    oraclemcp_core::FileStore::default_state_dir().map_err(|e| {
+        emit_status_error(
+            robot_json,
+            "ORACLEMCP_SERVICE_STATE_UNAVAILABLE",
+            &format!("failed to resolve XDG service state directory: {e}"),
+        );
+        ExitCode::from(2)
+    })
+}
+
+fn service_audit_path_for_backup(config_path: &Path) -> Result<PathBuf, String> {
+    OracleMcpConfig::load(Some(config_path))
+        .map(|config| config.audit.path.unwrap_or_else(default_audit_path))
+        .map_err(|e| format!("failed to load config for backup audit path: {e}"))
+}
+
 fn resolve_http_transport_config(
     cli: &HttpServeArgs,
     level: &SessionLevelState,
@@ -3552,6 +3608,51 @@ fn run_service_cmd(robot_json: bool, command: ServiceCliCommand) -> ExitCode {
         ServiceCliCommand::Restart(args) => {
             ServiceLifecycleCommand::Restart(ServiceMutationOptions {
                 name: args.name,
+                yes: args.yes,
+                dry_run: args.dry_run,
+            })
+        }
+        ServiceCliCommand::Backup(args) => {
+            let state_dir = match service_state_dir_for_cli(robot_json) {
+                Ok(path) => path,
+                Err(code) => return code,
+            };
+            let config_path = operator_config_target_path();
+            let audit_path = match service_audit_path_for_backup(&config_path) {
+                Ok(path) => path,
+                Err(message) => {
+                    emit_status_error(robot_json, "ORACLEMCP_CONFIG_INVALID", &message);
+                    return ExitCode::from(2);
+                }
+            };
+            ServiceLifecycleCommand::Backup(ServiceBackupOptions {
+                name: args.name,
+                state_dir,
+                config_path,
+                audit_path,
+                output: args.output,
+                yes: args.yes,
+                dry_run: args.dry_run,
+            })
+        }
+        ServiceCliCommand::Restore(args) => {
+            let state_dir = match service_state_dir_for_cli(robot_json) {
+                Ok(path) => path,
+                Err(code) => return code,
+            };
+            let audit_keys = match audit_verification_keys(args.key_id.as_deref()) {
+                Ok(keys) => keys,
+                Err(message) => {
+                    emit_status_error(robot_json, "ORACLEMCP_AUDIT_KEY_REQUIRED", &message);
+                    return ExitCode::from(2);
+                }
+            };
+            ServiceLifecycleCommand::Restore(ServiceRestoreOptions {
+                name: args.name,
+                state_dir,
+                config_path: operator_config_target_path(),
+                backup: args.backup,
+                audit_keys,
                 yes: args.yes,
                 dry_run: args.dry_run,
             })
@@ -5623,6 +5724,49 @@ mod tests {
             Some(Command::Service {
                 command: ServiceCliCommand::Restart(ServiceMutationCliArgs { dry_run: true, .. })
             })
+        ));
+
+        let backup = Cli::try_parse_from([
+            "oraclemcp",
+            "service",
+            "backup",
+            "--output",
+            "/tmp/oraclemcp-backup",
+            "--dry-run",
+        ])
+        .expect("parse service backup");
+        assert!(matches!(
+            backup.command,
+            Some(Command::Service {
+                command: ServiceCliCommand::Backup(ServiceBackupCliArgs {
+                    ref output,
+                    dry_run: true,
+                    ..
+                })
+            }) if output.as_deref() == Some(Path::new("/tmp/oraclemcp-backup"))
+        ));
+
+        let restore = Cli::try_parse_from([
+            "oraclemcp",
+            "service",
+            "restore",
+            "/tmp/oraclemcp-backup",
+            "--key_id",
+            "2026-q2",
+            "--dry-run",
+        ])
+        .expect("parse service restore");
+        assert!(matches!(
+            restore.command,
+            Some(Command::Service {
+                command: ServiceCliCommand::Restore(ServiceRestoreCliArgs {
+                    ref backup,
+                    ref key_id,
+                    dry_run: true,
+                    ..
+                })
+            }) if backup == Path::new("/tmp/oraclemcp-backup")
+                && key_id.as_deref() == Some("2026-q2")
         ));
     }
 

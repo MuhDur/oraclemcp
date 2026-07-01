@@ -247,6 +247,8 @@ oraclemcp --json service install --dry-run --profile db_ro  # preview systemd/la
 oraclemcp service install --yes --client-credentials --profile db_ro
 oraclemcp --json service status       # inspect service-manager state
 oraclemcp --json service logs         # inspect recent service logs
+oraclemcp --json service backup --dry-run  # preview state+config backup
+oraclemcp --json service restore /path/to/backup --dry-run  # verify audit chain before restore
 oraclemcp dashboard                   # open the local dashboard through a one-time pairing URL
 ```
 
@@ -260,7 +262,7 @@ alias.
 
 `oraclemcp service install` targets the platform user service manager: systemd
 `--user` on Linux, launchd on macOS, and Windows services on Windows. Mutating
-service operations (`install`, `uninstall`, `restart`) require `--yes`;
+service operations (`install`, `uninstall`, `restart`, `backup`, `restore`) require `--yes`;
 `--dry-run` emits the exact file and command plan without changing the host.
 Generated service definitions include bounded host caps for the 64-lane default:
 systemd uses `Type=notify`, `NotifyAccess=main`, `Restart=on-failure`,
@@ -269,7 +271,10 @@ systemd uses `Type=notify`, `NotifyAccess=main`, `Restart=on-failure`,
 `SoftResourceLimits`; Windows configures automatic start and restart-on-failure
 through `sc.exe`. `oraclemcp --json doctor` reports those configured caps plus
 the effective open-file, task, memory-cgroup, and OOM caps visible to the
-current process.
+current process. `service backup` snapshots the XDG service state directory plus
+the resolved profiles config into a new manifest directory; `service restore`
+verifies the backed-up audit hash-chain before stopping the service, restoring
+files, and starting it again.
 Streamable HTTP auth rules are unchanged for service mode: configure
 service-owned per-client credentials, OAuth, or mTLS with registered client leaf
 fingerprints, or pass `--allow-no-auth` only for intentional local development.

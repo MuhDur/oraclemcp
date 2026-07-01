@@ -96,9 +96,10 @@ Harnesses:
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
 | Oracle structured cells | 6 | 0 | 6 | 6 | 0 | 100% |
 | Durable SQL idempotency | 1 | 0 | 1 | 1 | 0 | 100% |
+| WP-S persistent service | 1 | 0 | 1 | 1 | 0 | 100% |
 | WP-N concurrency/session | 11 | 0 | 11 | 11 | 0 | 100% |
 
-Total tracked requirements: 72 MUST, 2 SHOULD, 74 tested.
+Total tracked requirements: 73 MUST, 2 SHOULD, 75 tested.
 
 ## Requirement IDs
 
@@ -168,6 +169,7 @@ Total tracked requirements: 72 MUST, 2 SHOULD, 74 tested.
 | DB-SER-005 | MUST | Oracle structured cells | `OracleCell::structured` carries the structured contract version, the published schema declares it, and metadata cache keys include it. |
 | DB-SER-006 | MUST | Oracle structured cells | Structured ARRAY/JSON/VECTOR decode is capped by row, cell, byte, and depth budgets; larger query budgets require `deep_decode=true`. |
 | WRITE-INTENT-001 | MUST | Durable SQL idempotency | Committing tools write a durable pre-execute intent, unresolved in-doubt intents fail writable startup closed, and recovered terminal history rejects exact confirmation-grant plus SQL replay after restart. |
+| WPS-BACKUP-001 | MUST | WP-S persistent service | Service backup snapshots the XDG state directory plus config under the service lock, restore verifies the backed-up audit hash-chain before recovering files, and audit data remains non-prunable. |
 | WPN-A-001 | MUST | WP-N concurrency/session | Per-session and per-subject lanes keep operating level, profile, connection, and session state isolated. |
 | WPN-A-002 | MUST | WP-N concurrency/session | Confirmation and execution grants are single-use and bound to lane, subject, session, profile, and generation. |
 | WPN-B-001 | MUST | WP-N concurrency/session | Different configured databases stay isolated under concurrent live lanes. |
@@ -217,6 +219,12 @@ Total tracked requirements: 72 MUST, 2 SHOULD, 74 tested.
 | HTTPS-001 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_accepts_tls_handshake` |
 | HTTPS-002 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_requires_client_certificate_when_mtls_is_configured` |
 | WRITE-INTENT-001 | `crates/oraclemcp-core/src/write_intent.rs::tests::resolved_intent_survives_reopen_and_rejects_same_grant_sql_replay`; `crates/oraclemcp/src/main.rs::tests::build_write_intent_log_fails_closed_on_unresolved_restart_intent`; `crates/oraclemcp/src/dispatch/tests.rs::execute_commit_in_doubt_leaves_durable_intent_unresolved` |
+
+## WP-S Proof Map
+
+| Requirement | Primary proof |
+| --- | --- |
+| WPS-BACKUP-001 | `crates/oraclemcp/src/service_lifecycle.rs::tests::backup_restore_verifies_audit_chain`; `crates/oraclemcp-core/src/file_store.rs::tests::retention_prunes_metrics_but_never_audit` |
 
 ## WP-N Proof Map
 

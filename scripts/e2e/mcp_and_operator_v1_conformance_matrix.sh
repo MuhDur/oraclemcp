@@ -71,7 +71,10 @@ fi
 if ! grep -F "| WP-N concurrency/session | 11 | 0 | 11 | 11 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "WP-N concurrency/session coverage must include the N9 contract"
 fi
-if ! grep -F "Total tracked requirements: 72 MUST, 2 SHOULD, 74 tested." tests/conformance/COVERAGE.md >/dev/null; then
+if ! grep -F "| WP-S persistent service | 1 | 0 | 1 | 1 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "WP-S persistent service coverage must include backup/restore audit verification"
+fi
+if ! grep -F "Total tracked requirements: 73 MUST, 2 SHOULD, 75 tested." tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "B.6 coverage totals are stale"
 fi
 if grep -RInE '(^|[^A-Z])SKIP([^A-Z]|$)' tests/conformance/COVERAGE.md >/dev/null; then
@@ -94,5 +97,5 @@ e2e_run_command "assert" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/targe
 e2e_run_command "assert" env CARGO_TARGET_DIR="$ROOT/target" TMPDIR="$ROOT/target/tmp" \
   cargo test -p oraclemcp execute_commit_in_doubt_leaves_durable_intent_unresolved
 
-e2e_log_event "coverage_summary" "assert" "pass" 0 "B.6 + dashboard + WP-N MUST coverage 72/72 score=1.00"
+e2e_log_event "coverage_summary" "assert" "pass" 0 "B.6 + dashboard + WP-N/WP-S MUST coverage 73/73 score=1.00"
 e2e_finish_pass
