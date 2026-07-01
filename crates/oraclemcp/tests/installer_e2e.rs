@@ -114,6 +114,36 @@ fn windows_installer_verifies_before_mutating_and_requires_service_consent() {
 }
 
 #[test]
+fn unix_installer_reinstall_is_idempotent_for_identical_files() {
+    let root = repo_root();
+    let installer = fs::read_to_string(root.join("install.sh")).expect("read install.sh");
+    let smoke = fs::read_to_string(root.join("scripts/installer_lint_and_offline_smoke.sh"))
+        .expect("read installer smoke");
+
+    for needle in [
+        "should_replace_file()",
+        "cmp -s \"$src\" \"$dest\"",
+        "already exists with different content; rerun with --force",
+    ] {
+        assert!(
+            installer.contains(needle),
+            "install.sh must contain idempotency marker {needle}"
+        );
+    }
+
+    for needle in [
+        "built artifact idempotent reinstall failed",
+        "--offline \"$archive\"",
+        "--no-service",
+    ] {
+        assert!(
+            smoke.contains(needle),
+            "installer smoke must contain idempotent reinstall marker {needle}"
+        );
+    }
+}
+
+#[test]
 fn installer_ci_runs_built_artifact_and_windows_pssa_gates() {
     let root = repo_root();
     let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");

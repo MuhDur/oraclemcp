@@ -566,11 +566,27 @@ assert_replaceable() {
   fi
 }
 
+should_replace_file() {
+  local src="$1" dest="$2"
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    if [ "$FORCE" -eq 0 ]; then
+      if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
+        return 1
+      fi
+      fail "$dest already exists with different content; rerun with --force to replace it"
+    fi
+  fi
+  return 0
+}
+
 install_binary() {
   local src="$1" dest="$BIN_DIR/oraclemcp"
   ensure_parent_dir "$dest"
-  assert_replaceable "$dest"
-  install -m 0755 "$src" "$dest"
+  if should_replace_file "$src" "$dest"; then
+    install -m 0755 "$src" "$dest"
+  else
+    chmod 0755 "$dest"
+  fi
 }
 
 install_om_alias() {
@@ -584,10 +600,21 @@ install_om_alias() {
 }
 
 install_completion() {
-  local command_path="$1" shell="$2" dest="$3"
+  local command_path="$1" shell="$2" dest="$3" content existing
   ensure_parent_dir "$dest"
-  assert_replaceable "$dest"
-  "$command_path" completions "$shell" >"$dest"
+  content="$("$command_path" completions "$shell")"
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    if [ "$FORCE" -eq 0 ]; then
+      if [ -f "$dest" ]; then
+        existing="$(cat "$dest")"
+        if [ "$existing" = "$content" ]; then
+          return
+        fi
+      fi
+      fail "$dest already exists with different content; rerun with --force to replace it"
+    fi
+  fi
+  printf '%s\n' "$content" >"$dest"
 }
 
 install_completions() {

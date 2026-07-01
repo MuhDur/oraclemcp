@@ -22,6 +22,8 @@ Use the verified release installer first. It downloads the platform archive,
 checks the SHA-256 digest, verifies the cosign blob signature and provenance
 attestation, installs `oraclemcp` plus the short `om` alias, and prints the
 service/client mutation plan before it changes the host.
+Re-running the same verified archive is a no-op for identical installed files;
+use `--force` only when intentionally replacing different local content.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh \

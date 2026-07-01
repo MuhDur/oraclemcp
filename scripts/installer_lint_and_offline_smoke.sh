@@ -37,7 +37,7 @@ checksum_file() {
 run_built_artifact_smoke() {
   local built_binary="$1"
   local smoke_target="${ORACLEMCP_INSTALLER_SMOKE_TARGET:-x86_64-unknown-linux-musl}"
-  local bundle_root dist archive fake_bin fake_log fake_cosign built_prefix install_output install_status cosign_output
+  local bundle_root dist archive fake_bin fake_log fake_cosign built_prefix install_output install_status reinstall_output reinstall_status cosign_output
 
   [ -x "$built_binary" ] || fail "ORACLEMCP_INSTALLER_BUILT_BINARY is not executable: $built_binary"
   case "$smoke_target" in
@@ -107,6 +107,25 @@ COSIGN
   cosign_output="$(cat "$fake_log")"
   contains "$cosign_output" "verify-blob"
   contains "$cosign_output" "verify-blob-attestation"
+
+  set +e
+  reinstall_output="$(
+    env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+      PATH="$fake_bin:$PATH" \
+      ORACLEMCP_INSTALLER_FAKE_COSIGN_LOG="$fake_log" \
+      bash install.sh \
+        --offline "$archive" \
+        --version "$SMOKE_VERSION" \
+        --target "$smoke_target" \
+        --prefix "$built_prefix" \
+        --no-service 2>&1
+  )"
+  reinstall_status=$?
+  set -e
+  [ "$reinstall_status" -eq 0 ] || fail "built artifact idempotent reinstall failed: $reinstall_output"
+  contains "$reinstall_output" "oraclemcp installer: service install skipped"
+  not_contains "$reinstall_output" "service install --yes"
+  not_contains "$reinstall_output" "clients issue"
 }
 
 if command -v shellcheck >/dev/null 2>&1; then
