@@ -2626,6 +2626,19 @@ fn generated_read_uses_primary_session(tool: &str) -> bool {
     )
 }
 
+/// Whether a tool can run on a stateless read-worker lane instead of the
+/// control/session lane.
+///
+/// This is deliberately narrower than "read-only": caller SQL, LOB reads,
+/// samples, health/top-query diagnostics, and anything needing the pinned
+/// session stay on the control lane. The worker set is for generated metadata
+/// reads that can safely use a separate per-subject/profile connection.
+#[must_use]
+pub fn stateless_read_worker_tool(name: &str) -> bool {
+    let tool = canonical_tool_name(name);
+    generated_read_tool(tool) && !generated_read_uses_primary_session(tool)
+}
+
 #[derive(Clone, Copy)]
 struct GeneratedReadAuditCtx<'a> {
     entry: AuditEntryCtx<'a>,

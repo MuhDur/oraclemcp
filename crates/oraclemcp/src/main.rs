@@ -23,13 +23,14 @@ mod readiness;
 mod robot_docs;
 mod service_lifecycle;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use asupersync::Cx;
@@ -37,6 +38,7 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use oraclemcp::dispatch::{
     McpExposurePolicy, OracleDispatcher, ProfileConnector, ProfileDrainState,
     ProfileStatelessConnector, StatelessReadStrategy, profile_draining_error,
+    stateless_read_worker_tool,
 };
 use oraclemcp::registry;
 use oraclemcp_audit::{
@@ -48,21 +50,23 @@ use oraclemcp_auth::{
     resolve_secret_with,
 };
 use oraclemcp_config::{AuditConfig, CONFIG_PATH_ENV, HttpConfig, HttpTlsConfig, OracleMcpConfig};
+use oraclemcp_core::admission::DEFAULT_READ_PER_PROFILE_CAP;
 use oraclemcp_core::http::SinglePrincipalGuard;
 use oraclemcp_core::{
     AdmissionController, CapabilitiesReport, ClientCredentialError, ClientCredentialIssueRequest,
     ClientCredentialLifecycle, ClientCredentialStore, ConfigOpsBackend, ConfigOpsService,
     ConfigReloadApplier, ConfigReloadApplyReport, CustomToolCatalog, CustomToolDef, DashboardAuth,
-    DispatchFuture, DispatchOutcome, DoctorAuthCapabilities, DoctorAuthModeKind, DoctorContext,
-    DoctorLevelCaps, DoctorProfileCaps, ExportRegistry, FeatureTiers, HttpSessionLifecycle,
-    HttpTransportConfig, LaneContext, LaneDispatchFactory, LaneRuntime, MCP_PATH, McpSurfaceDetail,
-    McpSurfaceFuture, MtlsClientRegistry, OAuthEnforcement, ObservabilityState,
-    OperatorAuthorityPolicy, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport,
-    ShutdownCoordinator, SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy,
-    TlsMaterial, TlsServerConfig, ToolDispatch, WriteIntentLog, build_server_config,
-    default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
-    mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file, requires_mtls,
-    run_doctor, service_app_doctor_snapshot, sign, start_oraclemcp_service_app_with_transport,
+    DispatchCloseReason, DispatchContext, DispatchFuture, DispatchOutcome, DoctorAuthCapabilities,
+    DoctorAuthModeKind, DoctorContext, DoctorLevelCaps, DoctorProfileCaps, ExportRegistry,
+    FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext, LaneDispatchFactory,
+    LaneRuntime, MCP_PATH, McpSurfaceDetail, McpSurfaceFuture, MtlsClientRegistry,
+    OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy, OracleMcpServer,
+    PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport, ShutdownCoordinator, SiemFormat,
+    SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial, TlsServerConfig,
+    ToolDispatch, WriteIntentLog, build_server_config, default_dashboard_ticket_dir, load_tools,
+    load_tools_for_profile, mint_dashboard_pairing_ticket, operator_subject_id_hash,
+    parse_tools_file, requires_mtls, run_doctor, service_app_doctor_snapshot, sign,
+    start_oraclemcp_service_app_with_transport,
 };
 use oraclemcp_db::{
     DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
@@ -719,6 +723,12 @@ struct RuntimeConnections {
     stateless: Option<Box<dyn OracleConnection>>,
 }
 
+enum RuntimeConnectionPlan {
+    Profile(Box<ResolvedProfile>),
+    Default,
+    Stub(DbError),
+}
+
 async fn try_open_runtime_connections(
     cx: &Cx,
     resolved: ResolvedProfile,
@@ -776,6 +786,32 @@ fn open_runtime_connections(resolved: ResolvedProfile) -> RuntimeConnections {
                 stateless: None,
             }
         }
+    }
+}
+
+fn open_runtime_connection_plan(
+    plan: RuntimeConnectionPlan,
+    include_stateless: bool,
+) -> RuntimeConnections {
+    match plan {
+        RuntimeConnectionPlan::Profile(resolved) if include_stateless => {
+            open_runtime_connections(*resolved)
+        }
+        RuntimeConnectionPlan::Profile(resolved) => {
+            let resolved = *resolved;
+            RuntimeConnections {
+                session: open_connection(resolved.opts),
+                stateless: None,
+            }
+        }
+        RuntimeConnectionPlan::Default => RuntimeConnections {
+            session: open_connection(OracleConnectOptions::default()),
+            stateless: None,
+        },
+        RuntimeConnectionPlan::Stub(e) => RuntimeConnections {
+            session: Box::new(stub::StubConnection::new(e)) as Box<dyn OracleConnection>,
+            stateless: None,
+        },
     }
 }
 
@@ -1526,6 +1562,220 @@ fn stateful_lane_factory(
     })
 }
 
+type ReadWorkerFactoryBuilder =
+    dyn Fn(Option<String>) -> Arc<LaneDispatchFactory> + Send + Sync + 'static;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ReadWorkerKey {
+    principal_key: String,
+    active_profile: Option<String>,
+}
+
+struct ReadWorkerBucket {
+    next: usize,
+    lanes: Vec<LaneRuntime>,
+}
+
+struct HttpStatelessReadDispatch {
+    control_lane: LaneRuntime,
+    active_profile: Mutex<Option<String>>,
+    read_factory: Arc<ReadWorkerFactoryBuilder>,
+    read_lanes: Mutex<HashMap<ReadWorkerKey, ReadWorkerBucket>>,
+    next_lane_id: AtomicU64,
+    width_per_key: usize,
+}
+
+impl HttpStatelessReadDispatch {
+    fn new(
+        control_lane: LaneRuntime,
+        active_profile: Option<String>,
+        width_per_key: usize,
+        read_factory: Arc<ReadWorkerFactoryBuilder>,
+    ) -> Self {
+        Self {
+            control_lane,
+            active_profile: Mutex::new(active_profile),
+            read_factory,
+            read_lanes: Mutex::new(HashMap::new()),
+            next_lane_id: AtomicU64::new(1),
+            width_per_key: width_per_key.max(1),
+        }
+    }
+
+    fn active_profile(&self) -> Option<String> {
+        self.active_profile
+            .lock()
+            .expect("stateless read active_profile mutex not poisoned")
+            .clone()
+    }
+
+    fn set_active_profile(&self, active_profile: Option<String>) {
+        *self
+            .active_profile
+            .lock()
+            .expect("stateless read active_profile mutex not poisoned") = active_profile;
+    }
+
+    fn read_lane_for(&self, context: DispatchContext<'_>) -> LaneRuntime {
+        let key = ReadWorkerKey {
+            principal_key: context
+                .principal_key()
+                .unwrap_or("anonymous-http")
+                .to_owned(),
+            active_profile: self.active_profile(),
+        };
+        let mut lanes = self
+            .read_lanes
+            .lock()
+            .expect("stateless read lane registry mutex not poisoned");
+        let bucket = lanes
+            .entry(key.clone())
+            .or_insert_with(|| ReadWorkerBucket {
+                next: 0,
+                lanes: Vec::new(),
+            });
+        if bucket.lanes.len() < self.width_per_key {
+            let lane_number = self.next_lane_id.fetch_add(1, Ordering::SeqCst);
+            let lane_id = format!("stateless-read-{lane_number}");
+            let lane_context = LaneContext::new(
+                lane_id.clone(),
+                "stateless-read",
+                key.principal_key.clone(),
+                1,
+            );
+            let factory = (self.read_factory)(key.active_profile.clone());
+            let lane = LaneRuntime::spawn_with_dispatch_factory(
+                lane_id,
+                lane_context,
+                factory,
+                oraclemcp_core::DEFAULT_LANE_MAILBOX_CAPACITY,
+                None,
+            );
+            bucket.lanes.push(lane);
+        }
+        let index = bucket.next % bucket.lanes.len();
+        bucket.next = bucket.next.wrapping_add(1);
+        bucket.lanes[index].clone()
+    }
+
+    fn close_read_lanes(&self, reason: DispatchCloseReason) {
+        let buckets = self
+            .read_lanes
+            .lock()
+            .expect("stateless read lane registry mutex not poisoned")
+            .drain()
+            .map(|(_, bucket)| bucket)
+            .collect::<Vec<_>>();
+        for bucket in buckets {
+            for lane in bucket.lanes {
+                lane.close_with_reason(reason);
+            }
+        }
+    }
+}
+
+impl ToolDispatch for HttpStatelessReadDispatch {
+    fn dispatch<'a>(
+        &'a self,
+        cx: &'a Cx,
+        context: DispatchContext<'a>,
+        name: &'a str,
+        args: serde_json::Value,
+    ) -> DispatchFuture<'a> {
+        Box::pin(async move {
+            if stateless_read_worker_tool(name) {
+                let lane = self.read_lane_for(context);
+                return lane.dispatch(cx, context, name, args).await;
+            }
+
+            let switches_profile = matches!(name, "oracle_switch_profile" | "switch_database");
+            let outcome = self.control_lane.dispatch(cx, context, name, args).await;
+            if switches_profile && let DispatchOutcome::Ok(value) = &outcome {
+                let active_profile = value
+                    .get("active_profile")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                self.set_active_profile(active_profile);
+                self.close_read_lanes(DispatchCloseReason::RuntimeDrop);
+            }
+            outcome
+        })
+    }
+
+    fn close<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        reason: DispatchCloseReason,
+    ) -> oraclemcp_core::DispatchCloseFuture<'a> {
+        self.close_read_lanes(reason);
+        self.control_lane.close_with_reason(reason);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn mcp_surface_state<'a>(
+        &'a self,
+        cx: &'a Cx,
+        context: DispatchContext<'a>,
+        detail: McpSurfaceDetail,
+    ) -> McpSurfaceFuture<'a> {
+        self.control_lane.mcp_surface_state(cx, context, detail)
+    }
+}
+
+fn stateless_read_worker_factory_builder(
+    wiring: DispatcherWiring,
+    metrics: Option<Arc<Metrics>>,
+) -> Arc<ReadWorkerFactoryBuilder> {
+    Arc::new(move |active_profile| {
+        stateless_read_worker_factory(wiring.clone(), metrics.clone(), active_profile)
+    })
+}
+
+fn stateless_read_worker_factory(
+    wiring: DispatcherWiring,
+    metrics: Option<Arc<Metrics>>,
+    active_profile: Option<String>,
+) -> Arc<LaneDispatchFactory> {
+    Arc::new(move |cx: &Cx, lane_context: &LaneContext| {
+        let mut wiring = wiring.clone();
+        let metrics = metrics.clone();
+        let active_profile = active_profile.clone();
+        let principal_key = lane_context.principal_key().to_owned();
+        Box::pin(async move {
+            if let Some(profile) = active_profile.as_deref()
+                && wiring.profile_drain.is_draining(profile)
+            {
+                return Err(profile_draining_error(profile));
+            }
+            let Some(resolved) = resolve_profile_options_with(
+                active_profile.as_deref(),
+                wiring.secret_resolver.as_ref(),
+            )
+            .map_err(DbError::into_envelope)?
+            else {
+                return Err(ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    "stateless read-worker lanes require an active connection profile",
+                )
+                .with_next_step("start the server with `oraclemcp serve --profile <name>`"));
+            };
+            let profile = resolved.name.clone();
+            let level = resolved.level.clone();
+            let request_timeout = resolved.opts.call_timeout;
+            let conn = try_open_connection(cx, resolved.opts)
+                .await
+                .map_err(DbError::into_envelope)?;
+            wiring.active_profile = Some(profile);
+            wiring.level = level;
+            wiring.request_timeout = request_timeout;
+            let dispatcher = build_oracle_dispatcher(conn, None, &wiring)
+                .with_default_audit_subject(audit_subject_from_principal_key(&principal_key));
+            let dispatcher: Arc<dyn ToolDispatch> = Arc::new(dispatcher);
+            Ok(maybe_wrap_metrics_dispatch(dispatcher, metrics.as_ref()))
+        })
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ServerTransportMode {
     Stdio,
@@ -1632,16 +1882,22 @@ fn build_server_with_lifecycle(
             session_lifecycle = Some(stateful.clone());
             stateful
         } else {
-            let dispatcher = build_oracle_dispatcher(conn, stateless_conn, &wiring);
+            let dispatcher = build_oracle_dispatcher(conn, None, &wiring);
             let dispatcher =
                 maybe_wrap_metrics_dispatch(Arc::new(dispatcher), options.metrics.as_ref());
-            let lane: Arc<dyn ToolDispatch> =
-                Arc::new(LaneRuntime::spawn_default_with_panic_auditor(
-                    "served-http-stateless",
-                    dispatcher,
-                    wiring.auditor.clone(),
-                ));
-            lane
+            let control_lane = LaneRuntime::spawn_default_with_panic_auditor(
+                "served-http-stateless-control",
+                dispatcher,
+                wiring.auditor.clone(),
+            );
+            let read_dispatch = HttpStatelessReadDispatch::new(
+                control_lane,
+                wiring.active_profile.clone(),
+                DEFAULT_READ_PER_PROFILE_CAP,
+                stateless_read_worker_factory_builder(wiring.clone(), options.metrics.clone()),
+            );
+            drop(stateless_conn);
+            Arc::new(read_dispatch)
         }
     } else {
         let dispatcher = build_oracle_dispatcher(conn, stateless_conn, &wiring);
@@ -1960,7 +2216,7 @@ fn run_serve(
     // `probe_opts` carries the resolved connect options so the /readyz pinger can
     // open its own dedicated probe connection (D1-health). `None` means no live
     // DB is configured — the pinger then probes a stub and /readyz reports 503.
-    let (connections, active_profile, level, request_timeout, probe_opts) =
+    let (connection_plan, active_profile, level, request_timeout, probe_opts) =
         match resolve_profile_options_with(profile.as_deref(), secret_resolver.as_ref()) {
             Ok(Some(resolved)) => {
                 let active_profile = Some(resolved.name.clone());
@@ -1968,7 +2224,7 @@ fn run_serve(
                 let request_timeout = resolved.opts.call_timeout;
                 let probe_opts = Some(resolved.opts.clone());
                 (
-                    open_runtime_connections(resolved),
+                    RuntimeConnectionPlan::Profile(Box::new(resolved)),
                     active_profile,
                     level,
                     request_timeout,
@@ -1976,10 +2232,7 @@ fn run_serve(
                 )
             }
             Ok(None) => (
-                RuntimeConnections {
-                    session: open_connection(OracleConnectOptions::default()),
-                    stateless: None,
-                },
+                RuntimeConnectionPlan::Default,
                 None,
                 default_read_only_level(),
                 OracleConnectOptions::default().call_timeout,
@@ -1996,11 +2249,7 @@ fn run_serve(
             Err(e) => {
                 tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
                 (
-                    RuntimeConnections {
-                        session: Box::new(stub::StubConnection::new(e))
-                            as Box<dyn OracleConnection>,
-                        stateless: None,
-                    },
+                    RuntimeConnectionPlan::Stub(e),
                     None,
                     default_read_only_level(),
                     OracleConnectOptions::default().call_timeout,
@@ -2077,6 +2326,7 @@ fn run_serve(
                     return ExitCode::from(2);
                 }
             };
+            let connections = open_runtime_connection_plan(connection_plan, true);
             let server = build_server(
                 connections.session,
                 connections.stateless,
@@ -2186,6 +2436,7 @@ fn run_serve(
             if http_stateful {
                 resolved_http.transport.single_principal_guard = None;
             }
+            let connections = open_runtime_connection_plan(connection_plan, false);
             let metrics = Arc::new(Metrics::new());
             let profile_drain = ProfileDrainState::default();
             let built = build_server_with_lifecycle(
@@ -2260,8 +2511,9 @@ fn run_serve(
                 metrics: Some(Arc::clone(&metrics)),
                 readiness_probe: Some(pinger.probe()),
             };
-            // Pool is established (or a stub stands in); the server is ready to
-            // accept work. /readyz still gates on the live DB-reachability probe.
+            // The control connection is established (or a stub stands in); the
+            // server is ready to accept work. /readyz still gates on the live
+            // DB-reachability probe.
             health.set_ready(true);
 
             // Feed the OTLP metrics exporter (when enabled) the live snapshot.
@@ -4017,6 +4269,256 @@ mod tests {
         assert_eq!(err.0, "ORACLEMCP_HTTP_OAUTH_SECRET_INVALID");
         assert!(err.1.contains("plaintext literal credential is forbidden"));
         assert!(!err.1.contains("test-secret"));
+    }
+
+    #[test]
+    fn stateless_http_read_workers_do_not_head_of_line_block() {
+        struct ControlDispatch;
+
+        impl ToolDispatch for ControlDispatch {
+            fn dispatch<'a>(
+                &'a self,
+                _cx: &'a Cx,
+                _context: oraclemcp_core::DispatchContext<'a>,
+                _name: &'a str,
+                _args: serde_json::Value,
+            ) -> DispatchFuture<'a> {
+                Box::pin(async {
+                    DispatchOutcome::Ok(serde_json::json!({
+                        "control": true
+                    }))
+                })
+            }
+        }
+
+        struct BlockingReadDispatch {
+            started: std::sync::mpsc::Sender<()>,
+            release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+        }
+
+        impl ToolDispatch for BlockingReadDispatch {
+            fn dispatch<'a>(
+                &'a self,
+                _cx: &'a Cx,
+                _context: oraclemcp_core::DispatchContext<'a>,
+                _name: &'a str,
+                _args: serde_json::Value,
+            ) -> DispatchFuture<'a> {
+                Box::pin(async move {
+                    self.started.send(()).expect("test observer is alive");
+                    let (lock, cvar) = &*self.release;
+                    let mut released = lock.lock().expect("release mutex not poisoned");
+                    while !*released {
+                        released = cvar.wait(released).expect("release mutex not poisoned");
+                    }
+                    DispatchOutcome::Ok(serde_json::json!({
+                        "schemas": []
+                    }))
+                })
+            }
+        }
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let read_factory: Arc<ReadWorkerFactoryBuilder> = Arc::new({
+            let release = Arc::clone(&release);
+            move |_profile| {
+                let started = started_tx.clone();
+                let release = Arc::clone(&release);
+                Arc::new(move |_cx: &Cx, _lane_context: &LaneContext| {
+                    let dispatch: Arc<dyn ToolDispatch> = Arc::new(BlockingReadDispatch {
+                        started: started.clone(),
+                        release: Arc::clone(&release),
+                    });
+                    Box::pin(async move { Ok(dispatch) })
+                })
+            }
+        });
+        let control_lane =
+            LaneRuntime::spawn("test-stateless-control", Arc::new(ControlDispatch), 4);
+        let dispatch = Arc::new(HttpStatelessReadDispatch::new(
+            control_lane,
+            Some("dev".to_owned()),
+            2,
+            read_factory,
+        ));
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let dispatch = Arc::clone(&dispatch);
+            handles.push(std::thread::spawn(move || {
+                let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+                    .build()
+                    .expect("test runtime builds");
+                runtime.block_on(async move {
+                    let cx = Cx::current().expect("test runtime installs Cx");
+                    let outcome = dispatch
+                        .dispatch(
+                            &cx,
+                            oraclemcp_core::DispatchContext::default()
+                                .with_principal_key("oauth:reader"),
+                            "oracle_list_schemas",
+                            serde_json::json!({ "max_rows": 1 }),
+                        )
+                        .await;
+                    assert!(matches!(outcome, DispatchOutcome::Ok(_)));
+                });
+            }));
+        }
+
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("first read worker starts");
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("second read worker starts without waiting for first to finish");
+
+        let (lock, cvar) = &*release;
+        *lock.lock().expect("release mutex not poisoned") = true;
+        cvar.notify_all();
+        for handle in handles {
+            handle.join().expect("read worker caller joins");
+        }
+    }
+
+    #[test]
+    fn stateless_http_profile_switch_closes_read_workers() {
+        struct SwitchControlDispatch;
+
+        impl ToolDispatch for SwitchControlDispatch {
+            fn dispatch<'a>(
+                &'a self,
+                _cx: &'a Cx,
+                _context: oraclemcp_core::DispatchContext<'a>,
+                name: &'a str,
+                _args: serde_json::Value,
+            ) -> DispatchFuture<'a> {
+                Box::pin(async move {
+                    if name == "oracle_switch_profile" {
+                        DispatchOutcome::Ok(serde_json::json!({
+                            "active_profile": "prod"
+                        }))
+                    } else {
+                        DispatchOutcome::Ok(serde_json::json!({
+                            "control": name
+                        }))
+                    }
+                })
+            }
+        }
+
+        struct ProfileReadDispatch {
+            profile: Option<String>,
+            seen: std::sync::mpsc::Sender<Option<String>>,
+            closed: std::sync::mpsc::Sender<DispatchCloseReason>,
+        }
+
+        impl ToolDispatch for ProfileReadDispatch {
+            fn dispatch<'a>(
+                &'a self,
+                _cx: &'a Cx,
+                _context: oraclemcp_core::DispatchContext<'a>,
+                _name: &'a str,
+                _args: serde_json::Value,
+            ) -> DispatchFuture<'a> {
+                Box::pin(async move {
+                    self.seen
+                        .send(self.profile.clone())
+                        .expect("test profile observer is alive");
+                    DispatchOutcome::Ok(serde_json::json!({
+                        "schemas": []
+                    }))
+                })
+            }
+
+            fn close<'a>(
+                &'a self,
+                _cx: &'a Cx,
+                reason: DispatchCloseReason,
+            ) -> oraclemcp_core::DispatchCloseFuture<'a> {
+                self.closed
+                    .send(reason)
+                    .expect("test close observer is alive");
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let (profile_tx, profile_rx) = std::sync::mpsc::channel();
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        let read_factory: Arc<ReadWorkerFactoryBuilder> = Arc::new(move |profile| {
+            let seen = profile_tx.clone();
+            let closed = closed_tx.clone();
+            Arc::new(move |_cx: &Cx, _lane_context: &LaneContext| {
+                let dispatch: Arc<dyn ToolDispatch> = Arc::new(ProfileReadDispatch {
+                    profile: profile.clone(),
+                    seen: seen.clone(),
+                    closed: closed.clone(),
+                });
+                Box::pin(async move { Ok(dispatch) })
+            })
+        });
+        let control_lane = LaneRuntime::spawn(
+            "test-stateless-switch-control",
+            Arc::new(SwitchControlDispatch),
+            4,
+        );
+        let dispatch =
+            HttpStatelessReadDispatch::new(control_lane, Some("dev".to_owned()), 1, read_factory);
+
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("test runtime builds");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("test runtime installs Cx");
+            let first = dispatch
+                .dispatch(
+                    &cx,
+                    oraclemcp_core::DispatchContext::default().with_principal_key("oauth:reader"),
+                    "oracle_list_schemas",
+                    serde_json::json!({ "max_rows": 1 }),
+                )
+                .await;
+            assert!(matches!(first, DispatchOutcome::Ok(_)));
+
+            let switched = dispatch
+                .dispatch(
+                    &cx,
+                    oraclemcp_core::DispatchContext::default().with_principal_key("oauth:reader"),
+                    "oracle_switch_profile",
+                    serde_json::json!({ "profile": "prod" }),
+                )
+                .await;
+            assert!(matches!(switched, DispatchOutcome::Ok(_)));
+
+            let second = dispatch
+                .dispatch(
+                    &cx,
+                    oraclemcp_core::DispatchContext::default().with_principal_key("oauth:reader"),
+                    "oracle_list_schemas",
+                    serde_json::json!({ "max_rows": 1 }),
+                )
+                .await;
+            assert!(matches!(second, DispatchOutcome::Ok(_)));
+        });
+
+        assert_eq!(
+            profile_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("first read records startup profile"),
+            Some("dev".to_owned())
+        );
+        assert_eq!(
+            closed_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("profile switch closes old read lane"),
+            DispatchCloseReason::RuntimeDrop
+        );
+        assert_eq!(
+            profile_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("next read records switched profile"),
+            Some("prod".to_owned())
+        );
     }
 
     #[test]

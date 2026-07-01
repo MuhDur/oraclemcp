@@ -461,8 +461,12 @@ session is deleted or expires by the stateful idle TTL.
 
 ### 5.3.2 Connection pool and failover posture
 
-The stateless-read pool (`oraclemcp-db`, `[profiles.pool]`) is a bounded,
-pure-Rust async pool — no Tokio/r2d2 boundary. Its operating posture:
+The local stateless-read pool (`oraclemcp-db`, `[profiles.pool]`) is a bounded,
+pure-Rust async pool — no Tokio/r2d2 boundary — for stdio/direct dispatch and
+lane-local metadata reads where pool-backed reads are used. Served stateless
+HTTP does not share that pool across lane runtimes; generated catalog/metadata
+reads route through bounded per-subject/profile read-worker lanes, each with its
+own reactor and Oracle connection. The local pool's operating posture:
 
 - **Sizing.** `max_size` from the profile is a *ceiling*; the effective ceiling
   applied at construction is `min(max_size, cpu*2+1)` (plan §10), so a large

@@ -336,9 +336,11 @@ pooled = true
 connection_class = "ORACLE_MCP_AGENTS"
 purity = "reuse"
 
-# Optional local client-side pool for stateless metadata/catalog reads.
+# Optional local client-side pool for stateless metadata/catalog reads where
+# pool-backed reads are used.
 # User SQL, LOB/sample reads, DBMS_OUTPUT, transactions, and session state stay
-# on the pinned main session.
+# on the pinned main session. Served stateless HTTP uses bounded read-worker
+# lanes instead of sharing one pool across lane runtimes.
 # [profiles.pool]
 # max_size = 4
 # min_idle = 1
@@ -409,13 +411,17 @@ A few further profile keys are optional:
   honors the effective `max_level` ceiling.
 - `[profiles.pool]`: local client-side connection reuse settings
   (`max_size`, `min_idle`, `acquire_timeout_secs`, `statement_cache_size`).
-  This enables the hybrid runtime strategy: catalog and metadata tools such as
-  schema/object/source inspection use a bounded stateless read pool, while
-  agent queries, sampled rows, LOB reads, DDL/write previews, transactions,
-  savepoints, temp tables, package globals, login setup, session identity, and
-  `DBMS_OUTPUT` stay on the pinned main session. `statement_cache_size` is
-  passed to the thin driver's bounded per-connection statement cache; omit it to
-  keep the driver default. This is separate from DRCP server routing.
+  This enables the hybrid runtime strategy for stdio/direct dispatch and
+  lane-local metadata reads: catalog and metadata tools such as
+  schema/object/source inspection can use bounded stateless read connections,
+  while agent queries, sampled rows, LOB reads, DDL/write previews,
+  transactions, savepoints, temp tables, package globals, login setup, session
+  identity, and `DBMS_OUTPUT` stay on the pinned main session. Served stateless
+  HTTP routes generated metadata reads through bounded read-worker lanes instead
+  of sharing one pool across lane runtimes. `statement_cache_size` is passed to
+  the thin driver's bounded per-connection statement cache where pool-backed
+  reads are used; omit it to keep the driver default. This is separate from DRCP
+  server routing.
 - `[profiles.oci]`: OCI-specific connection settings for the underlying driver.
   For TCPS/wallet connections, named fields are available for `wallet_location`,
   `wallet_password_ref`, `ssl_server_dn_match`, `ssl_server_cert_dn`, and

@@ -41,16 +41,19 @@ use_sni = true
 # target_schema = "APP_OWNER"
 
 # Optional DRCP server routing. This is separate from the local [profiles.pool]
-# client-side reuse settings. [profiles.pool] enables a hybrid strategy: metadata
-# and catalog reads may use a bounded stateless pool, while user SQL, LOB/sample
-# reads, transactions, DBMS_OUTPUT, login setup, and session identity stay pinned
-# to the main session.
+# client-side reuse settings. [profiles.pool] enables a hybrid strategy for
+# stdio/direct dispatch and lane-local metadata reads: metadata and catalog reads
+# may use bounded stateless read connections, while user SQL, LOB/sample reads,
+# transactions, DBMS_OUTPUT, login setup, and session identity stay pinned to the
+# main session. Served stateless HTTP uses bounded read-worker lanes instead of
+# sharing one pool across lane runtimes.
 [profiles.drcp]
 pooled = true
 connection_class = "ORACLE_MCP_AGENTS"
 purity = "reuse"
 
-# Optional local client-side pool for stateless metadata/catalog reads.
+# Optional local client-side pool for stateless metadata/catalog reads where
+# pool-backed reads are used.
 # User SQL, LOB/sample reads, DBMS_OUTPUT, transactions, and session state stay
 # on the pinned main session.
 # [profiles.pool]
@@ -319,7 +322,7 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
             "http_transport": "use --client-credentials for service-owned per-client bearers, or top-level http config / serve --oauth-* / --http-* / --tls-* flags for Streamable HTTP; native rustls TLS and optional mTLS are served directly, mTLS identities require registered leaf fingerprints, and server-only TLS still needs per-client credentials, OAuth, or explicit --allow-no-auth",
             "proxy_auth": "use profiles.proxy_auth for thin proxy auth; credential_ref belongs to proxy_user and target_schema is the CONNECT THROUGH client",
             "network_routing": "use top-level sdu and profiles.drcp for validated thin SDU and DRCP server routing instead of raw connect_string query parameters",
-            "local_pool": "profiles.pool enables hybrid_pool: stateless catalog/metadata reads can use the bounded local pool, while user SQL, LOB/sample reads, transactions, DBMS_OUTPUT, login setup, and session identity remain on the pinned main session; statement_cache_size reaches the thin driver",
+            "local_pool": "profiles.pool enables hybrid_pool where pool-backed reads are used: stateless catalog/metadata reads can use bounded local read connections, while user SQL, LOB/sample reads, transactions, DBMS_OUTPUT, login setup, and session identity remain on the pinned main session; served stateless HTTP uses bounded per-subject/profile read-worker lanes instead of sharing one pool across lane runtimes; statement_cache_size reaches the thin driver for pool-backed reads",
             "app_context": "use repeated profiles.app_context entries for typed thin logon application-context triples; values are sensitive and redacted from profile output",
             "environment_specifics": "database aliases, session identity, client module/program labels, and custom workflow tools belong in profiles or tools.d config, not in the general core"
         },
@@ -468,7 +471,7 @@ Configuration
 - Prefer credential_ref and wallet_password_ref over literal passwords.
 - Use profiles.proxy_auth for thin proxy authentication: credential_ref belongs to proxy_user and target_schema is the CONNECT THROUGH client.
 - Use top-level sdu and profiles.drcp for validated thin SDU and DRCP server routing instead of raw connect_string query parameters.
-- Use profiles.pool for hybrid_pool: stateless catalog/metadata reads can use the bounded local pool, while user SQL, LOB/sample reads, transactions, DBMS_OUTPUT, login setup, and session identity remain on the pinned main session.
+- Use profiles.pool for hybrid_pool where pool-backed reads are used: stateless catalog/metadata reads can use bounded local read connections, while user SQL, LOB/sample reads, transactions, DBMS_OUTPUT, login setup, and session identity remain on the pinned main session. Served stateless HTTP uses bounded per-subject/profile read-worker lanes instead of sharing one pool across lane runtimes.
 - Use repeated profiles.app_context entries for thin logon application-context triples; values are redacted from profile output.
 - Database aliases, session identity, client module/program labels, and custom workflow tools belong in profiles or tools.d config, not in the general core.
 

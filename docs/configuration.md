@@ -116,7 +116,7 @@ field is unset after inheritance.
 |---|---|
 | `[profiles.oci]` | OCI / Autonomous DB connection fields (wallet/TLS/SNI and the IAM-token fields). See [Auth modes](#auth-modes). |
 | `[profiles.drcp]` | Database Resident Connection Pooling server routing. |
-| `[profiles.pool]` | Local client-side pool for stateless catalog/metadata reads. |
+| `[profiles.pool]` | Local client-side pool for stateless catalog/metadata reads where pool-backed reads are used. |
 | `[profiles.proxy_auth]` | Thin proxy authentication. |
 | `[[profiles.app_context]]` | Driver-level application-context triples applied at logon (repeatable). |
 | `[profiles.session_identity]` | End-to-end Oracle session identity (profile-local; redacted from `list_profiles`). |
@@ -143,10 +143,13 @@ field is unset after inheritance.
 
 #### `[profiles.pool]`
 
-Local client-side connection reuse for stateless catalog/metadata reads. User
-SQL, sampled rows, LOB reads, transactions, savepoints, package globals, login
-setup, session identity, and `DBMS_OUTPUT` stay on the pinned main session. This
-is **separate** from DRCP server routing.
+Local client-side connection reuse for stateless catalog/metadata reads where
+pool-backed reads are used. User SQL, sampled rows, LOB reads, transactions,
+savepoints, package globals, login setup, session identity, and `DBMS_OUTPUT`
+stay on the pinned main session. Served stateless HTTP uses bounded
+per-subject/profile read-worker lanes for generated metadata reads instead of
+sharing one pool across lane runtimes. This is **separate** from DRCP server
+routing.
 
 | Field | Type | Default | Effect |
 |---|---|---|---|
