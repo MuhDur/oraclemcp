@@ -80,7 +80,7 @@ fi
 if ! grep -F "| WP-N concurrency/session | 11 | 0 | 11 | 11 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "tests/conformance/COVERAGE.md must record 1.00 MUST coverage for WP-N"
 fi
-if ! grep -F "Total tracked requirements: 62 MUST, 2 SHOULD, 64 tested." tests/conformance/COVERAGE.md >/dev/null; then
+if ! grep -F "Total tracked requirements: 69 MUST, 2 SHOULD, 71 tested." tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "tests/conformance/COVERAGE.md totals are stale"
 fi
 if ! grep -F "| JSON-RPC errors | 3 | 2 | 5 | 5 | 1 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then

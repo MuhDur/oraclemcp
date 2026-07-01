@@ -118,6 +118,7 @@ import {
   fetchExplorerObjects,
   fetchExplorerSchemas,
   fetchExplorerSource,
+  fetchExplorerSourceSearch,
   fetchLaneCapabilities,
   explorerMetadataCacheSummary,
   ORACLE_METADATA_SERIALIZATION_CONTRACT_VERSION,
@@ -2980,6 +2981,17 @@ const explorerObjectTypes = [
   "SYNONYM"
 ] as const;
 
+const explorerSourceSearchTypes = [
+  "",
+  "PACKAGE",
+  "PACKAGE BODY",
+  "PROCEDURE",
+  "FUNCTION",
+  "TRIGGER",
+  "TYPE",
+  "TYPE BODY"
+] as const;
+
 type ExplorerSchemaRow = {
   schemaName: string;
   objectCount: string;
@@ -2995,6 +3007,23 @@ type ExplorerObjectRow = {
   lastAnalyzed: string;
   comment: string;
   raw: Record<string, unknown>;
+};
+
+type ExplorerSourceHitRow = {
+  owner: string;
+  name: string;
+  objectType: string;
+  line: string;
+  text: string;
+  raw: Record<string, unknown>;
+};
+
+type ExplorerGlobalSearchRequest = {
+  needle: string;
+  includeObjects: boolean;
+  includeSource: boolean;
+  allSchemas: boolean;
+  sourceType: string;
 };
 
 type ExplorerDetailResult =
@@ -3024,6 +3053,13 @@ function ExplorerPage(): React.ReactElement {
   const [maxChars, setMaxChars] = React.useState(40_000);
   const [selectedRef, setSelectedRef] = React.useState<ExplorerObjectRef | null>(null);
   const [detailResult, setDetailResult] = React.useState<ExplorerDetailResult | null>(null);
+  const [globalSearchText, setGlobalSearchText] = React.useState("");
+  const [globalIncludeObjects, setGlobalIncludeObjects] = React.useState(true);
+  const [globalIncludeSource, setGlobalIncludeSource] = React.useState(true);
+  const [globalAllSchemas, setGlobalAllSchemas] = React.useState(true);
+  const [globalSourceType, setGlobalSourceType] = React.useState("");
+  const [globalSearchRequest, setGlobalSearchRequest] =
+    React.useState<ExplorerGlobalSearchRequest | null>(null);
   const [cacheVersion, setCacheVersion] = React.useState(0);
 
   const session = useQuery({
@@ -3051,6 +3087,7 @@ function ExplorerPage(): React.ReactElement {
     setCacheVersion((version) => version + 1);
     setSelectedRef(null);
     setDetailResult(null);
+    setGlobalSearchRequest(null);
   }, [laneId]);
 
   React.useEffect(() => {
@@ -3075,6 +3112,13 @@ function ExplorerPage(): React.ReactElement {
   const objectScope = baseCacheKey
     ? explorerScopeForVisibleSchema(baseCacheKey, owner.trim() || baseCacheKey.visible_schema)
     : null;
+  const globalScope =
+    baseCacheKey && globalSearchRequest
+      ? explorerScopeForVisibleSchema(
+          baseCacheKey,
+          globalSearchRequest.allSchemas ? "*" : owner.trim() || baseCacheKey.visible_schema
+        )
+      : null;
 
   const schemasQuery = useQuery({
     queryKey: [
@@ -3151,6 +3195,86 @@ function ExplorerPage(): React.ReactElement {
     retry: 1
   });
 
+  const globalObjectsQuery = useQuery({
+    queryKey: [
+      "explorer",
+      "global-objects",
+      laneId,
+      globalSearchRequest,
+      cacheScopeToken(globalScope),
+      cacheVersion
+    ],
+    queryFn: async () => {
+      if (!session.data || !globalScope || !globalSearchRequest) {
+        throw new Error("global object search is not ready");
+      }
+      const ownerFilter = globalSearchRequest.allSchemas ? "*" : owner.trim();
+      const nameLike = `%${globalSearchRequest.needle}%`;
+      return cachedExplorerMetadata(
+        globalScope,
+        JSON.stringify({
+          tool: "oracle_search_objects",
+          owner: ownerFilter,
+          object_type: "",
+          name_like: nameLike,
+          detail_level: "summary",
+          max_rows: maxRows
+        }),
+        () =>
+          fetchExplorerObjects(session.data, {
+            laneId,
+            owner: ownerFilter,
+            objectType: "",
+            nameLike,
+            detailLevel: "summary",
+            maxRows
+          })
+      );
+    },
+    enabled:
+      session.status === "success" &&
+      Boolean(globalScope && globalSearchRequest?.includeObjects),
+    retry: 1
+  });
+
+  const globalSourceQuery = useQuery({
+    queryKey: [
+      "explorer",
+      "global-source",
+      laneId,
+      globalSearchRequest,
+      cacheScopeToken(globalScope),
+      cacheVersion
+    ],
+    queryFn: async () => {
+      if (!session.data || !globalScope || !globalSearchRequest) {
+        throw new Error("global source search is not ready");
+      }
+      const ownerFilter = globalSearchRequest.allSchemas ? "*" : owner.trim();
+      return cachedExplorerMetadata(
+        globalScope,
+        JSON.stringify({
+          tool: "oracle_search_source",
+          owner: ownerFilter,
+          object_type: globalSearchRequest.sourceType,
+          needle: globalSearchRequest.needle,
+          max_rows: maxRows
+        }),
+        () =>
+          fetchExplorerSourceSearch(session.data, {
+            laneId,
+            owner: ownerFilter,
+            objectType: globalSearchRequest.sourceType,
+            needle: globalSearchRequest.needle,
+            maxRows
+          })
+      );
+    },
+    enabled:
+      session.status === "success" && Boolean(globalScope && globalSearchRequest?.includeSource),
+    retry: 1
+  });
+
   const detailMutation = useMutation({
     mutationFn: async ({ kind, ref }: { kind: "ddl" | "source"; ref: ExplorerObjectRef }) => {
       if (!session.data || !baseCacheKey) {
@@ -3193,6 +3317,12 @@ function ExplorerPage(): React.ReactElement {
 
   const schemaRows = schemaRowsFromResponse(schemasQuery.data?.value);
   const objectRows = objectRowsFromResponse(objectsQuery.data?.value);
+  const globalObjectRows = globalSearchRequest?.includeObjects
+    ? objectRowsFromResponse(globalObjectsQuery.data?.value)
+    : [];
+  const globalSourceRows = globalSearchRequest?.includeSource
+    ? sourceRowsFromResponse(globalSourceQuery.data?.value)
+    : [];
   const selectedRow = selectedRef
     ? objectRows.find((row) => objectRefKey(rowRef(row)) === objectRefKey(selectedRef)) ?? null
     : null;
@@ -3211,6 +3341,27 @@ function ExplorerPage(): React.ReactElement {
     const ref = rowRef(row);
     setSelectedRef(ref);
     setDetailResult(null);
+  };
+  const selectSourceHit = (row: ExplorerSourceHitRow): void => {
+    setSelectedRef({
+      owner: row.owner,
+      name: row.name,
+      objectType: row.objectType
+    });
+    setDetailResult(null);
+  };
+  const runGlobalSearch = (): void => {
+    const needle = globalSearchText.trim();
+    if (!needle || (!globalIncludeObjects && !globalIncludeSource)) {
+      return;
+    }
+    setGlobalSearchRequest({
+      needle,
+      includeObjects: globalIncludeObjects,
+      includeSource: globalIncludeSource,
+      allSchemas: globalAllSchemas,
+      sourceType: globalSourceType
+    });
   };
 
   return (
@@ -3332,6 +3483,40 @@ function ExplorerPage(): React.ReactElement {
           ) : null}
         </Surface>
 
+        <ExplorerGlobalSearchPanel
+          searchText={globalSearchText}
+          includeObjects={globalIncludeObjects}
+          includeSource={globalIncludeSource}
+          allSchemas={globalAllSchemas}
+          sourceType={globalSourceType}
+          request={globalSearchRequest}
+          objectRows={globalObjectRows}
+          sourceRows={globalSourceRows}
+          objectPending={globalObjectsQuery.isFetching}
+          sourcePending={globalSourceQuery.isFetching}
+          objectError={
+            globalObjectsQuery.error instanceof Error ? globalObjectsQuery.error.message : null
+          }
+          sourceError={
+            globalSourceQuery.error instanceof Error ? globalSourceQuery.error.message : null
+          }
+          objectCacheStatus={globalObjectsQuery.data?.status}
+          sourceCacheStatus={globalSourceQuery.data?.status}
+          canSearch={
+            session.status === "success" &&
+            globalSearchText.trim().length > 0 &&
+            (globalIncludeObjects || globalIncludeSource)
+          }
+          onSearchTextChange={setGlobalSearchText}
+          onIncludeObjectsChange={setGlobalIncludeObjects}
+          onIncludeSourceChange={setGlobalIncludeSource}
+          onAllSchemasChange={setGlobalAllSchemas}
+          onSourceTypeChange={setGlobalSourceType}
+          onSearch={runGlobalSearch}
+          onSelectObject={selectRow}
+          onSelectSource={selectSourceHit}
+        />
+
         <div className="grid gap-4 xl:grid-cols-[minmax(260px,0.55fr)_minmax(0,1.45fr)]">
           <ExplorerSchemasPanel
             rows={schemaRows}
@@ -3361,6 +3546,204 @@ function ExplorerPage(): React.ReactElement {
         />
       </div>
     </PageFrame>
+  );
+}
+
+function ExplorerGlobalSearchPanel({
+  searchText,
+  includeObjects,
+  includeSource,
+  allSchemas,
+  sourceType,
+  request,
+  objectRows,
+  sourceRows,
+  objectPending,
+  sourcePending,
+  objectError,
+  sourceError,
+  objectCacheStatus,
+  sourceCacheStatus,
+  canSearch,
+  onSearchTextChange,
+  onIncludeObjectsChange,
+  onIncludeSourceChange,
+  onAllSchemasChange,
+  onSourceTypeChange,
+  onSearch,
+  onSelectObject,
+  onSelectSource
+}: {
+  searchText: string;
+  includeObjects: boolean;
+  includeSource: boolean;
+  allSchemas: boolean;
+  sourceType: string;
+  request: ExplorerGlobalSearchRequest | null;
+  objectRows: ExplorerObjectRow[];
+  sourceRows: ExplorerSourceHitRow[];
+  objectPending: boolean;
+  sourcePending: boolean;
+  objectError: string | null;
+  sourceError: string | null;
+  objectCacheStatus: ExplorerCacheStatus | undefined;
+  sourceCacheStatus: ExplorerCacheStatus | undefined;
+  canSearch: boolean;
+  onSearchTextChange: (value: string) => void;
+  onIncludeObjectsChange: (value: boolean) => void;
+  onIncludeSourceChange: (value: boolean) => void;
+  onAllSchemasChange: (value: boolean) => void;
+  onSourceTypeChange: (value: string) => void;
+  onSearch: () => void;
+  onSelectObject: (row: ExplorerObjectRow) => void;
+  onSelectSource: (row: ExplorerSourceHitRow) => void;
+}): React.ReactElement {
+  const pending = objectPending || sourcePending;
+  const totalHits = objectRows.length + sourceRows.length;
+  const tone = pending ? "info" : request ? (totalHits > 0 ? "ok" : "off") : "neutral";
+  const objectCache = objectCacheStatus ?? "cold";
+  const sourceCache = sourceCacheStatus ?? "cold";
+
+  return (
+    <Surface className="overflow-hidden">
+      <PanelHeader
+        icon={Search}
+        title="Global Search"
+        meta={pending ? "sync" : request ? `${totalHits} hits` : "idle"}
+        tone={tone}
+      />
+      <div className="space-y-4 p-4">
+        <div className="grid gap-3 xl:grid-cols-[minmax(260px,1fr)_180px_auto] xl:items-end">
+          <label className="block">
+            <span className="mb-2 block text-sm font-bold text-zinc-700">Needle</span>
+            <input
+              className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+              value={searchText}
+              onChange={(event) => onSearchTextChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && canSearch) {
+                  onSearch();
+                }
+              }}
+              placeholder="customer, commit, package"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-sm font-bold text-zinc-700">Source Type</span>
+            <select
+              className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200 disabled:bg-zinc-100 disabled:text-zinc-500"
+              value={sourceType}
+              disabled={!includeSource}
+              onChange={(event) => onSourceTypeChange(event.target.value)}
+            >
+              {explorerSourceSearchTypes.map((type) => (
+                <option key={type || "all-source"} value={type}>
+                  {type || "All source"}
+                </option>
+              ))}
+            </select>
+          </label>
+          <Button type="button" variant="primary" disabled={!canSearch} onClick={onSearch}>
+            <Search className="size-4" aria-hidden="true" />
+            Search
+          </Button>
+        </div>
+        <div className="flex flex-wrap items-center gap-4">
+          <label className="flex min-h-9 items-center gap-2 text-sm font-semibold text-zinc-700">
+            <input
+              className="size-4 rounded border-zinc-300 text-emerald-700 focus:ring-emerald-600"
+              type="checkbox"
+              checked={includeObjects}
+              onChange={(event) => onIncludeObjectsChange(event.target.checked)}
+            />
+            Objects
+          </label>
+          <label className="flex min-h-9 items-center gap-2 text-sm font-semibold text-zinc-700">
+            <input
+              className="size-4 rounded border-zinc-300 text-emerald-700 focus:ring-emerald-600"
+              type="checkbox"
+              checked={includeSource}
+              onChange={(event) => onIncludeSourceChange(event.target.checked)}
+            />
+            Source
+          </label>
+          <label className="flex min-h-9 items-center gap-2 text-sm font-semibold text-zinc-700">
+            <input
+              className="size-4 rounded border-zinc-300 text-emerald-700 focus:ring-emerald-600"
+              type="checkbox"
+              checked={allSchemas}
+              onChange={(event) => onAllSchemasChange(event.target.checked)}
+            />
+            All visible schemas
+          </label>
+          <Badge tone={cacheStatusTone(objectCache)}>{`objects ${objectCache}`}</Badge>
+          <Badge tone={cacheStatusTone(sourceCache)}>{`source ${sourceCache}`}</Badge>
+        </div>
+        {objectError ? <ErrorNotice message={objectError} /> : null}
+        {sourceError ? <ErrorNotice message={sourceError} /> : null}
+        <div className="grid gap-4 xl:grid-cols-2">
+          <div className="overflow-hidden rounded-md border border-zinc-200">
+            <div className="flex items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-50 px-3 py-2">
+              <span className="text-xs font-bold uppercase text-zinc-500">Object Matches</span>
+              <Badge tone={includeObjects ? "ok" : "off"}>{objectRows.length}</Badge>
+            </div>
+            <div className="max-h-[360px] overflow-auto">
+              {objectRows.length === 0 ? (
+                <p className="px-3 py-6 text-sm font-semibold text-zinc-500">No objects</p>
+              ) : (
+                objectRows.map((row) => (
+                  <button
+                    key={objectRefKey(rowRef(row))}
+                    type="button"
+                    className="block w-full border-b border-zinc-100 px-3 py-3 text-left hover:bg-zinc-50"
+                    onClick={() => onSelectObject(row)}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="min-w-0 truncate font-mono text-sm font-semibold text-zinc-950">
+                        {row.objectName}
+                      </span>
+                      <Badge tone="neutral">{row.objectType}</Badge>
+                    </div>
+                    <p className="mt-1 font-mono text-xs text-zinc-500">{row.owner}</p>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+          <div className="overflow-hidden rounded-md border border-zinc-200">
+            <div className="flex items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-50 px-3 py-2">
+              <span className="text-xs font-bold uppercase text-zinc-500">Source Matches</span>
+              <Badge tone={includeSource ? "ok" : "off"}>{sourceRows.length}</Badge>
+            </div>
+            <div className="max-h-[360px] overflow-auto">
+              {sourceRows.length === 0 ? (
+                <p className="px-3 py-6 text-sm font-semibold text-zinc-500">No source hits</p>
+              ) : (
+                sourceRows.map((row) => (
+                  <button
+                    key={`${row.owner}.${row.name}:${row.objectType}:${row.line}`}
+                    type="button"
+                    className="block w-full border-b border-zinc-100 px-3 py-3 text-left hover:bg-zinc-50"
+                    onClick={() => onSelectSource(row)}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="min-w-0 truncate font-mono text-sm font-semibold text-zinc-950">
+                        {row.name}
+                      </span>
+                      <span className="font-mono text-xs font-semibold text-zinc-500">
+                        {row.objectType}:{row.line}
+                      </span>
+                    </div>
+                    <p className="mt-1 font-mono text-xs text-zinc-500">{row.owner}</p>
+                    <p className="mt-2 line-clamp-2 text-sm text-zinc-700">{row.text}</p>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </Surface>
   );
 }
 
@@ -3690,6 +4073,21 @@ function objectRowsFromResponse(
     columnCount: cellText(row, "column_count") ?? "...",
     lastAnalyzed: cellText(row, "last_analyzed") ?? "...",
     comment: cellText(row, "comment") ?? "",
+    raw: row
+  }));
+}
+
+function sourceRowsFromResponse(
+  response: OperatorResponse<WorkbenchActionData> | undefined
+): ExplorerSourceHitRow[] {
+  const result = mcpResult(response?.data.mcp_response);
+  const matches = isRecord(result) && Array.isArray(result["matches"]) ? result["matches"] : [];
+  return matches.filter(isRecord).map((row) => ({
+    owner: cellText(row, "owner") ?? "",
+    name: cellText(row, "name") ?? "",
+    objectType: cellText(row, "type") ?? "",
+    line: cellText(row, "line") ?? "...",
+    text: cellText(row, "text") ?? "",
     raw: row
   }));
 }

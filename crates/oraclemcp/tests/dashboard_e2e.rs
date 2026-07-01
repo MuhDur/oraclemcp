@@ -217,6 +217,60 @@ fn read_only_dashboard_surface_contracts_are_registered() {
 }
 
 #[test]
+fn wd_search_global_explorer_uses_guarded_dictionary_tools() {
+    let app = read_repo_file("web/src/app/App.tsx");
+    let client = read_repo_file("web/src/app/operator-client.ts");
+    let behavior = read_repo_file("docs/behavior-inventory.md");
+    let readme = read_repo_file("README.md");
+
+    assert_contains_all(
+        "Explorer global search UI",
+        &app,
+        &[
+            "function ExplorerGlobalSearchPanel",
+            "Global Search",
+            "All visible schemas",
+            "Object Matches",
+            "Source Matches",
+            "explorerSourceSearchTypes",
+            "fetchExplorerObjects(session.data",
+            "fetchExplorerSourceSearch(session.data",
+            "tool: \"oracle_search_objects\"",
+            "tool: \"oracle_search_source\"",
+            "owner: ownerFilter",
+            "object_type: globalSearchRequest.sourceType",
+            "sourceRowsFromResponse",
+        ],
+    );
+    assert_contains_all(
+        "Explorer source-search client",
+        &client,
+        &[
+            "export type ExplorerSourceSearchRequest",
+            "export async function fetchExplorerSourceSearch",
+            "operatorPost(\"/operator/v1/actions/execute\"",
+            "idempotency_key: requestId(\"explorer-source-search\")",
+            "tool: \"oracle_search_source\"",
+            "needle: request.needle.trim()",
+        ],
+    );
+    assert_contains_all(
+        "Explorer global search docs",
+        &readme,
+        &[
+            "global search across visible schemas",
+            "`oracle_search_objects` with all object types",
+            "`oracle_search_source`",
+        ],
+    );
+    assert_contains_all(
+        "behavior inventory",
+        &behavior,
+        &["oracle_search_source", "global object/source search"],
+    );
+}
+
+#[test]
 fn skin_conformance_2d_fallback_a11y() {
     let app = read_repo_file("web/src/app/App.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");

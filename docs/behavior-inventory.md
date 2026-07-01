@@ -50,7 +50,7 @@ query text.
 | Profile inventory and switching | `oraclemcp --json profiles`, `oraclemcp --json doctor --profile <profile>` | `oracle_list_profiles`, `oracle_switch_profile`, `oracle_connection_info` | Config profiles view, lane profile controls, connection health | Aligned |
 | Offline and live diagnostics | `oraclemcp --json doctor`, `oraclemcp --json doctor --online --profile <profile>` | `oracle_connection_info`, `oracle_capabilities` | Doctor probes, health and capacity pages | Aligned |
 | Guarded SQL workflow | Documented by `oraclemcp robot-docs guide` | `oracle_preview_sql`, `oracle_query`, `oracle_execute`, DDL/source-patch tools, `oracle_set_session_level` | SQL workbench read/execute/DDL modes | Aligned |
-| Schema/object metadata | `oraclemcp --json capabilities` advertises dictionary/source tools | `oracle_list_schemas`, `oracle_schema_inspect`, `oracle_search_objects`, `oracle_get_ddl`, `oracle_get_source` | Explorer schemas, objects, source/DDL detail | Aligned |
+| Schema/object metadata | `oraclemcp --json capabilities` advertises dictionary/source tools | `oracle_list_schemas`, `oracle_schema_inspect`, `oracle_search_objects`, `oracle_search_source`, `oracle_get_ddl`, `oracle_get_source` | Explorer schemas, objects, global object/source search, source/DDL detail | Aligned |
 | Service lifecycle and auth | `oraclemcp --json service ...`, `oraclemcp --json clients ...` | Stdio init token, HTTP OAuth, mTLS, client credentials | Pairing ticket, service health, active lanes | Aligned |
 | Audit-chain visibility | `oraclemcp audit verify <file>` | Privileged MCP actions append audit-chain records | Audit timeline, filters, proof export | Aligned |
 

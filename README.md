@@ -294,6 +294,10 @@ The Reviews board stores profile-scoped Change Proposals as service-owned SQL
 templates plus captured binds, then applies them by re-classifying each
 template and forwarding through the same guarded action route; stored proposal
 verdicts are never authorization inputs.
+The Explorer page includes global search across visible schemas: object-name
+matches use `oracle_search_objects` with all object types, and source-text
+matches use `oracle_search_source`; both are sent through the same guarded
+operator action route as the rest of the dashboard.
 
 The Streamable HTTP transport (`--listen`) fails closed. It starts only when
 service-owned per-client credentials, OAuth bearer enforcement, mTLS

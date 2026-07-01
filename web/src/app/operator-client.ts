@@ -446,6 +446,15 @@ export type ExplorerSourceRequest = ExplorerObjectRef & {
   maxChars: number;
 };
 
+export type ExplorerSourceSearchRequest = {
+  laneId?: string;
+  owner?: string;
+  objectType?: string;
+  nameLike?: string;
+  needle: string;
+  maxRows: number;
+};
+
 export type WorkbenchSqlRequest = {
   sql: string;
   mode: WorkbenchMode;
@@ -872,6 +881,24 @@ export async function fetchExplorerSource(
       name: request.name,
       object_type: sourceObjectType(request.objectType),
       max_chars: request.maxChars
+    }
+  });
+}
+
+export async function fetchExplorerSourceSearch(
+  session: DashboardSession,
+  request: ExplorerSourceSearchRequest
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId("explorer-source-search"),
+    lane_id: laneIdValue(request.laneId),
+    tool: "oracle_search_source",
+    arguments: {
+      owner: optionalString(request.owner),
+      object_type: optionalString(request.objectType),
+      name_like: optionalString(request.nameLike),
+      needle: request.needle.trim(),
+      max_rows: request.maxRows
     }
   });
 }

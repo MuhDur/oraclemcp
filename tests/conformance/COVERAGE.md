@@ -96,7 +96,7 @@ Harnesses:
 | Durable SQL idempotency | 1 | 0 | 1 | 1 | 0 | 100% |
 | WP-N concurrency/session | 11 | 0 | 11 | 11 | 0 | 100% |
 
-Total tracked requirements: 68 MUST, 2 SHOULD, 70 tested.
+Total tracked requirements: 69 MUST, 2 SHOULD, 71 tested.
 
 ## Requirement IDs
 
@@ -152,6 +152,7 @@ Total tracked requirements: 68 MUST, 2 SHOULD, 70 tested.
 | DASHBOARD-B8-004 | MUST | Dashboard B.8 | Workbench execution has no alternate SQL path: preview/read/write route through the same classifier, ceilings, preview/confirm, idempotency, audit, and dispatcher path used by MCP agents. |
 | DASHBOARD-B8-005 | MUST | Dashboard B.8 | Change proposal apply re-classifies every current SQL template, re-checks level/grants/subject at apply time, forwards through gated actions, and treats stored verdicts as review metadata only. |
 | DASHBOARD-B8-006 | MUST | Dashboard B.8 | Dashboard skin grammar is a contract: 2D and table no-WebGL fallbacks stay available, Orrery remains lazy/quarantined, a11y anchors stay present, and credential secrets are never rendered. |
+| DASHBOARD-B8-007 | MUST | Dashboard B.8 | Explorer global search spans all visible schemas and object types for object-name matches and source text matches through the existing guarded `oracle_search_objects` and `oracle_search_source` action routes. |
 | HTTP-SURFACE-001 | MUST | HTTP auth/no-leak | The surface inventory asserts per-surface authn/gating for `/mcp`, stateful SSE GET, `/operator/v1`, dashboard pairing/POSTs, config apply, `/readyz`, and `/metrics`; unauthenticated infra probes expose no DB identity, SQL text, bind values, wallet, credential, or password markers. |
 | HTTPS-001 | MUST | HTTPS / mTLS | Server-only native TLS accepts a valid HTTPS handshake. |
 | HTTPS-002 | MUST | HTTPS / mTLS | Native mTLS rejects clients without a certificate and accepts a client certificate signed by the configured CA. |
@@ -203,6 +204,7 @@ Total tracked requirements: 68 MUST, 2 SHOULD, 70 tested.
 | DASHBOARD-B8-004 | `crates/oraclemcp-core/src/http.rs::tests::workbench_no_bypass_guard_is_the_feature`; `crates/oraclemcp-core/src/http.rs::tests::dashboard_workbench_ddl_apply_is_release_gated`; `crates/oraclemcp/tests/trust_safety.rs` |
 | DASHBOARD-B8-005 | `crates/oraclemcp-core/src/http.rs::tests::cp_apply_reclassifies_never_trusts_stored_verdict`; `crates/oraclemcp-core/src/change_proposal.rs::tests::proposal_view_omits_bind_values_and_stored_verdict_payloads` |
 | DASHBOARD-B8-006 | `crates/oraclemcp/tests/dashboard_e2e.rs::skin_conformance_2d_fallback_a11y`; `scripts/dashboard_skin_lint.sh`; `scripts/sensitive_data_lint.sh` |
+| DASHBOARD-B8-007 | `crates/oraclemcp/tests/dashboard_e2e.rs::wd_search_global_explorer_uses_guarded_dictionary_tools`; `web/src/app/App.tsx::ExplorerGlobalSearchPanel`; `web/src/app/operator-client.ts::fetchExplorerSourceSearch` |
 | HTTP-SURFACE-001 | `crates/oraclemcp-core/src/http.rs::tests::surface_inventory_authn_no_leak`; `docs/behavior-inventory.md` |
 | HTTPS-001 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_accepts_tls_handshake` |
 | HTTPS-002 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_requires_client_certificate_when_mtls_is_configured` |
