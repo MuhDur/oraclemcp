@@ -1,0 +1,16 @@
+{
+  "data": {
+    "lane_id": "http-lane-1",
+    "mcp_response": {
+      "id": "operator-v1",
+      "jsonrpc": "2.0",
+      "result": {}
+    },
+    "mcp_tool": "oracle_preview_sql",
+    "status": "forwarded"
+  },
+  "protocol_version": "operator.v1",
+  "redaction_level": "operator_redacted",
+  "route": "/operator/v1/actions/preview",
+  "schema_version": 1
+}

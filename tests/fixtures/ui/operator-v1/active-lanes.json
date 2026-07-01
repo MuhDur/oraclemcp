@@ -1,0 +1,17 @@
+{
+  "data": {
+    "lanes": [
+      {
+        "generation": 1,
+        "lane_id": "http-lane-1",
+        "status": "running",
+        "subject_id_hash": "subject-sha256:fbb4a1e284731d21e1a8b010638855af3f13be2a422fb4d4f34bd325e7ca900f"
+      }
+    ],
+    "source": "self_lane"
+  },
+  "protocol_version": "operator.v1",
+  "redaction_level": "operator_redacted",
+  "route": "/operator/v1/active-lanes",
+  "schema_version": 1
+}

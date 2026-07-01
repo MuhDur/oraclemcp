@@ -7,10 +7,11 @@
 //! validation. It deliberately does not depend on a web framework or ambient
 //! async runtime.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as FmtWrite;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -28,13 +29,18 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::admin_auth::OperatorAuthorityPolicy;
+use crate::capabilities::PROTOCOL_VERSION;
+use crate::operator_protocol::{
+    OPERATOR_PROTOCOL_VERSION, operator_event, operator_response, operator_route_index,
+    operator_schema_bundle, operator_subject_id_hash, validate_operator_event,
+    validate_operator_response,
+};
 use crate::server::{DispatchCloseReason, DispatchContext, OracleMcpServer};
 use crate::tls::TlsServerConfig;
 
 /// The MCP endpoint path the Streamable HTTP transport is mounted at.
 pub const MCP_PATH: &str = "/mcp";
-/// The versioned operator API prefix. FN0 only installs routing and query
-/// parsing; later WP-P beads fill in the schema-first API under this prefix.
+/// The versioned, schema-first operator API prefix.
 pub const OPERATOR_API_PREFIX: &str = "/operator/v1";
 /// The RFC 9728 protected-resource-metadata well-known path.
 pub const PROTECTED_RESOURCE_METADATA_PATH: &str = "/.well-known/oauth-protected-resource";
@@ -134,6 +140,9 @@ pub struct HttpTransportConfig {
     /// Audit sink for authorized operator API actions. If unset, operator API
     /// actions fail closed rather than running unaudited.
     pub operator_auditor: Option<Arc<Auditor>>,
+    /// Optional audit JSONL path used by `/operator/v1/audit-tail`. The route
+    /// summarizes records and never exposes bind values or raw identities.
+    pub operator_audit_tail_path: Option<PathBuf>,
     /// Health/metrics observability endpoints (D1; off by default — `None`
     /// fields make the corresponding route return 404 / not be advertised).
     pub observability: ObservabilityState,
@@ -158,6 +167,13 @@ impl std::fmt::Debug for HttpTransportConfig {
             )
             .field("operator_authority", &self.operator_authority)
             .field("operator_auditor", &self.operator_auditor.is_some())
+            .field(
+                "operator_audit_tail_path",
+                &self
+                    .operator_audit_tail_path
+                    .as_ref()
+                    .map(|_| "<configured>"),
+            )
             .field("observability", &self.observability)
             .finish()
     }
@@ -179,9 +195,27 @@ impl Default for HttpTransportConfig {
             single_principal_guard: None,
             operator_authority: OperatorAuthorityPolicy::default(),
             operator_auditor: None,
+            operator_audit_tail_path: None,
             observability: ObservabilityState::default(),
         }
     }
+}
+
+/// Redacted stateful lane summary exposed to the operator API.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpLaneSnapshot {
+    pub lane_id: String,
+    pub generation: u64,
+    pub status: &'static str,
+    pub subject_id_hash: String,
+}
+
+/// Internal binding for routing operator actions back onto an existing lane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpLaneBinding {
+    pub lane_id: String,
+    pub mcp_session_id: String,
+    pub principal_key: String,
 }
 
 /// Lifecycle hook for stateful Streamable HTTP sessions.
@@ -205,6 +239,18 @@ pub trait HttpSessionLifecycle: std::fmt::Debug + Send + Sync {
 
     /// Close every live stateful session during listener shutdown.
     fn close_all_sessions(&self) {}
+
+    /// Redacted lane summaries for `/operator/v1/active-lanes`.
+    fn active_lanes(&self) -> Vec<HttpLaneSnapshot> {
+        Vec::new()
+    }
+
+    /// Resolve a lane id for an operator-triggered action. Implementations
+    /// return internal session/principal keys only to the HTTP router; these
+    /// values are never serialized.
+    fn lane_binding(&self, _lane_id: &str) -> Option<HttpLaneBinding> {
+        None
+    }
 }
 
 /// OAuth 2.1 resource-server enforcement wiring for the HTTP transport (P1-9b).
@@ -736,14 +782,19 @@ mod tests {
         assert_eq!(response.status, 404);
         assert_eq!(response.header("content-type"), Some("application/json"));
         let body = response_json(&response);
-        assert_eq!(body["error"], serde_json::json!("operator_route_not_found"));
-        assert_eq!(body["query"]["cursor"], serde_json::json!("4/0"));
+        assert_eq!(body["protocol_version"], serde_json::json!("operator.v1"));
+        assert_eq!(body["schema_version"], serde_json::json!(1));
         assert_eq!(
-            body["query"]["filters"]["status"],
+            body["data"]["error"],
+            serde_json::json!("operator_route_not_found")
+        );
+        assert_eq!(body["data"]["query"]["cursor"], serde_json::json!("4/0"));
+        assert_eq!(
+            body["data"]["query"]["filters"]["status"],
             serde_json::json!("active")
         );
         assert_eq!(
-            body["query"]["filters"]["profile"],
+            body["data"]["query"]["filters"]["profile"],
             serde_json::json!("prod")
         );
         let records = sink.records();
@@ -767,6 +818,171 @@ mod tests {
             .with_peer_loopback(true),
         );
         assert_eq!(bad_host.status, 403);
+    }
+
+    #[test]
+    fn mcp_protocol_version_header_is_enforced_before_dispatch() {
+        let mut request = post(&init_body());
+        request
+            .headers
+            .push(("mcp-protocol-version".to_owned(), "1900-01-01".to_owned()));
+
+        let response =
+            handle_http_request(&test_server(), &HttpTransportConfig::default(), request);
+
+        assert_eq!(response.status, 400);
+        assert_eq!(response.header("mcp-protocol-version"), Some("2025-11-25"));
+        let body = response_json(&response);
+        assert_eq!(
+            body["error"],
+            serde_json::json!("unsupported_protocol_version")
+        );
+        assert_eq!(body["supported"], serde_json::json!(["2025-11-25"]));
+    }
+
+    struct StaticReadinessProbe(bool);
+
+    impl ReadinessProbe for StaticReadinessProbe {
+        fn is_db_reachable(&self) -> bool {
+            self.0
+        }
+    }
+
+    #[test]
+    fn operator_v1_serves_schema_health_events_and_action_mapping() {
+        let (auditor, sink) = operator_auditor();
+        let health = oraclemcp_telemetry::HealthState::new("0.4.1");
+        health.set_ready(true);
+        let metrics = Arc::new(oraclemcp_telemetry::Metrics::new());
+        metrics.record_request("oracle_query", "ok");
+        let cfg = HttpTransportConfig {
+            operator_auditor: Some(auditor),
+            observability: ObservabilityState {
+                health: Some(health),
+                metrics: Some(metrics),
+                readiness_probe: Some(Arc::new(StaticReadinessProbe(true))),
+            },
+            ..Default::default()
+        };
+
+        let schema = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                "/operator/v1/schema",
+                [("host", "127.0.0.1"), ("accept", "application/json")],
+                Vec::new(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(schema.status, 200);
+        let schema_body = response_json(&schema);
+        assert_eq!(
+            schema_body["x-oraclemcp-protocol-version"],
+            serde_json::json!("operator.v1")
+        );
+        assert!(
+            schema_body["routes"]
+                .as_array()
+                .expect("routes")
+                .iter()
+                .any(|route| route["path"] == "/operator/v1/actions/preview")
+        );
+
+        let health_response = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                "/operator/v1/health",
+                [("host", "127.0.0.1"), ("accept", "application/json")],
+                Vec::new(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(health_response.status, 200);
+        let health_body = response_json(&health_response);
+        assert_eq!(
+            health_body["data"]["readiness"]["status"],
+            serde_json::json!("ok")
+        );
+        assert_eq!(
+            health_body["data"]["readiness"]["db_reachable"],
+            serde_json::json!(true)
+        );
+
+        let events = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "GET",
+                "/operator/v1/events",
+                [("host", "127.0.0.1"), ("accept", "text/event-stream")],
+                Vec::new(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(events.status, 200);
+        assert_eq!(events.header("content-type"), Some("text/event-stream"));
+        let event = sse_json_events(&events)[0].clone();
+        assert_eq!(event["schema_version"], serde_json::json!(1));
+        assert_eq!(event["lane_id"], serde_json::json!("operator"));
+        assert!(
+            event["subject_id_hash"]
+                .as_str()
+                .expect("subject hash")
+                .starts_with("subject-sha256:")
+        );
+
+        let action_body = serde_json::json!({
+            "tool": "oracle_preview_sql",
+            "arguments": { "sql": "SELECT 1 FROM dual" }
+        });
+        let action = handle_http_request(
+            &test_server(),
+            &cfg,
+            HttpRequest::new(
+                "POST",
+                "/operator/v1/actions/preview",
+                [
+                    ("host", "127.0.0.1"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json"),
+                ],
+                action_body.to_string().into_bytes(),
+            )
+            .with_peer_loopback(true),
+        );
+        assert_eq!(action.status, 200);
+        let action_body = response_json(&action);
+        assert_eq!(
+            action_body["data"]["mcp_tool"],
+            serde_json::json!("oracle_preview_sql")
+        );
+        assert_eq!(
+            action_body["data"]["status"],
+            serde_json::json!("forwarded")
+        );
+
+        let records = sink.records();
+        assert!(
+            records.len() >= 4,
+            "schema, health, events, and action routes are audited"
+        );
+        assert_eq!(records[0].sql_preview, "GET /operator/v1/schema");
+        assert_eq!(records[1].sql_preview, "GET /operator/v1/health");
+        assert_eq!(records[2].sql_preview, "GET /operator/v1/events");
+        assert_eq!(records[3].sql_preview, "POST /operator/v1/actions/preview");
+    }
+
+    fn sse_json_events(response: &HttpResponse) -> Vec<Value> {
+        String::from_utf8(response.body.clone())
+            .expect("SSE body is UTF-8")
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|json| serde_json::from_str(json).expect("SSE data is JSON"))
+            .collect()
     }
 
     #[cfg(not(feature = "dashboard-bundle"))]
@@ -2855,7 +3071,13 @@ fn handle_http_exchange(
             if let Some(response) = guard_http_request(config, &request) {
                 return HttpExchange::Buffered(response);
             }
-            if !accepts_media(request.header("accept"), "application/json") {
+            let operator_route = operator_route_kind(&request.path);
+            let required_media = if operator_route == OperatorRouteKind::Events {
+                "text/event-stream"
+            } else {
+                "application/json"
+            };
+            if !accepts_media(request.header("accept"), required_media) {
                 return HttpExchange::Buffered(empty_response(406));
             }
             let validated_oauth = match &config.oauth {
@@ -2877,7 +3099,13 @@ fn handle_http_exchange(
             if let Err(response) = append_operator_audit(config, &operator_subject, &request) {
                 return HttpExchange::Buffered(response);
             }
-            return HttpExchange::Buffered(handle_operator_api_route(&request));
+            return HttpExchange::Buffered(handle_operator_api_route(
+                server,
+                config,
+                &request,
+                &operator_subject,
+                operator_route,
+            ));
         }
         HttpRoute::NotFound => {
             return HttpExchange::Buffered(
@@ -2887,6 +3115,9 @@ fn handle_http_exchange(
         HttpRoute::Mcp => {}
     }
     if let Some(response) = guard_http_request(config, &request) {
+        return HttpExchange::Buffered(response);
+    }
+    if let Some(response) = enforce_mcp_protocol_version(&request) {
         return HttpExchange::Buffered(response);
     }
     if request.body.len() > MAX_BODY_BYTES {
@@ -2973,6 +3204,25 @@ fn operator_audit_failed_response() -> HttpResponse {
     )
 }
 
+fn enforce_mcp_protocol_version(request: &HttpRequest) -> Option<HttpResponse> {
+    let presented = request.header("mcp-protocol-version")?;
+    if presented.trim() == PROTOCOL_VERSION {
+        return None;
+    }
+    Some(
+        json_response(
+            400,
+            &json!({
+                "error": "unsupported_protocol_version",
+                "message": "unsupported MCP-Protocol-Version header",
+                "presented": presented,
+                "supported": [PROTOCOL_VERSION],
+            }),
+        )
+        .with_header("mcp-protocol-version", PROTOCOL_VERSION),
+    )
+}
+
 fn audit_timestamp() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3006,21 +3256,128 @@ fn append_operator_audit(
         .map_err(|_| operator_audit_failed_response())
 }
 
-fn handle_operator_api_route(request: &HttpRequest) -> HttpResponse {
-    if request.method != "GET" {
-        return empty_response(405).with_header("allow", "GET");
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OperatorRouteKind {
+    Index,
+    Schema,
+    Health,
+    Metrics,
+    AuditTail,
+    ActiveLanes,
+    Vsession,
+    Events,
+    ActionPreview,
+    ActionConfirm,
+    ActionExecute,
+    SetLevel,
+    SwitchProfile,
+    NotFound,
+}
+
+fn operator_route_kind(path: &str) -> OperatorRouteKind {
+    match path {
+        OPERATOR_API_PREFIX => OperatorRouteKind::Index,
+        "/operator/v1/schema" => OperatorRouteKind::Schema,
+        "/operator/v1/health" => OperatorRouteKind::Health,
+        "/operator/v1/metrics" => OperatorRouteKind::Metrics,
+        "/operator/v1/audit-tail" => OperatorRouteKind::AuditTail,
+        "/operator/v1/active-lanes" => OperatorRouteKind::ActiveLanes,
+        "/operator/v1/vsession" => OperatorRouteKind::Vsession,
+        "/operator/v1/events" => OperatorRouteKind::Events,
+        "/operator/v1/actions/preview" => OperatorRouteKind::ActionPreview,
+        "/operator/v1/actions/confirm" => OperatorRouteKind::ActionConfirm,
+        "/operator/v1/actions/execute" => OperatorRouteKind::ActionExecute,
+        "/operator/v1/session/set-level" => OperatorRouteKind::SetLevel,
+        "/operator/v1/session/switch-profile" => OperatorRouteKind::SwitchProfile,
+        _ => OperatorRouteKind::NotFound,
     }
+}
+
+impl OperatorRouteKind {
+    fn allowed_method(self) -> &'static str {
+        match self {
+            Self::ActionPreview
+            | Self::ActionConfirm
+            | Self::ActionExecute
+            | Self::SetLevel
+            | Self::SwitchProfile => "POST",
+            _ => "GET",
+        }
+    }
+}
+
+fn handle_operator_api_route(
+    server: &OracleMcpServer,
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+    operator_subject: &AuditSubject,
+    route: OperatorRouteKind,
+) -> HttpResponse {
+    if route == OperatorRouteKind::NotFound {
+        return operator_not_found_response(request);
+    }
+    let allowed = route.allowed_method();
+    if request.method != allowed {
+        return empty_response(405).with_header("allow", allowed);
+    }
+    match route {
+        OperatorRouteKind::Index => json_response(200, &operator_route_index()),
+        OperatorRouteKind::Schema => json_response(200, &operator_schema_bundle()),
+        OperatorRouteKind::Health => operator_json_response(
+            200,
+            &request.path,
+            operator_health_data(&config.observability),
+        ),
+        OperatorRouteKind::Metrics => operator_json_response(
+            200,
+            &request.path,
+            operator_metrics_data(&config.observability),
+        ),
+        OperatorRouteKind::AuditTail => operator_json_response(
+            200,
+            &request.path,
+            operator_audit_tail_data(config, request),
+        ),
+        OperatorRouteKind::ActiveLanes => {
+            operator_json_response(200, &request.path, operator_active_lanes_data(config))
+        }
+        OperatorRouteKind::Vsession => {
+            operator_json_response(200, &request.path, operator_vsession_data())
+        }
+        OperatorRouteKind::Events => operator_events_response(config, operator_subject),
+        OperatorRouteKind::ActionPreview
+        | OperatorRouteKind::ActionConfirm
+        | OperatorRouteKind::ActionExecute
+        | OperatorRouteKind::SetLevel
+        | OperatorRouteKind::SwitchProfile => {
+            handle_operator_action_route(server, config, request, operator_subject, route)
+        }
+        OperatorRouteKind::NotFound => unreachable!("handled above"),
+    }
+}
+
+fn operator_json_response(status: u16, route: &str, data: Value) -> HttpResponse {
+    let body = operator_response(route, data);
+    debug_assert!(
+        validate_operator_response(&body).is_ok(),
+        "operator REST response must match the Rust contract"
+    );
+    json_response(status, &body)
+}
+
+fn operator_not_found_response(request: &HttpRequest) -> HttpResponse {
     let filters: serde_json::Map<String, Value> = request
         .query
         .iter()
         .filter(|(name, _)| name != "cursor")
         .map(|(name, value)| (name.clone(), Value::String(value.clone())))
         .collect();
-    json_response(
+    operator_json_response(
         404,
-        &json!({
+        &request.path,
+        json!({
             "error": "operator_route_not_found",
-            "message": "operator API route is not served yet",
+            "message": "operator API route is not served",
             "path": request.path,
             "query": {
                 "cursor": request.query_param("cursor"),
@@ -3028,6 +3385,404 @@ fn handle_operator_api_route(request: &HttpRequest) -> HttpResponse {
             },
         }),
     )
+}
+
+fn operator_health_data(obs: &ObservabilityState) -> Value {
+    let liveness = obs
+        .health
+        .as_ref()
+        .map(|health| serde_json::to_value(health.liveness().1).unwrap_or(Value::Null))
+        .unwrap_or_else(|| {
+            json!({
+                "status": "unavailable",
+                "live": false,
+                "ready": false,
+                "version": null,
+            })
+        });
+    let (ready, health_ready) = obs
+        .health
+        .as_ref()
+        .map(|health| (health.is_ready(), health.is_ready()))
+        .unwrap_or((false, false));
+    let db_reachable = obs
+        .readiness_probe
+        .as_ref()
+        .is_some_and(|probe| probe.is_db_reachable());
+    json!({
+        "source": if obs.health.is_some() { "self_lane" } else { "unavailable" },
+        "liveness": liveness,
+        "readiness": {
+            "status": if ready && db_reachable { "ok" } else { "unavailable" },
+            "ready": ready && db_reachable,
+            "db_reachable": db_reachable,
+            "draining": !health_ready,
+        }
+    })
+}
+
+fn operator_metrics_data(obs: &ObservabilityState) -> Value {
+    match &obs.metrics {
+        Some(metrics) => json!({
+            "source": "self_lane",
+            "snapshot": metrics.snapshot(),
+        }),
+        None => json!({
+            "source": "unavailable",
+            "reason": "metrics provider is not configured",
+            "snapshot": null,
+        }),
+    }
+}
+
+fn operator_active_lanes_data(config: &HttpTransportConfig) -> Value {
+    let lanes = config
+        .session_lifecycle
+        .as_ref()
+        .map(|lifecycle| lifecycle.active_lanes())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|lane| {
+            json!({
+                "lane_id": lane.lane_id,
+                "generation": lane.generation,
+                "status": lane.status,
+                "subject_id_hash": lane.subject_id_hash,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "source": if config.session_lifecycle.is_some() { "self_lane" } else { "unavailable" },
+        "lanes": lanes,
+    })
+}
+
+fn operator_vsession_data() -> Value {
+    json!({
+        "source": "unavailable",
+        "reason": "v$session summary requires a configured monitor profile; this provider is not configured",
+        "sessions": [],
+    })
+}
+
+fn operator_audit_tail_data(config: &HttpTransportConfig, request: &HttpRequest) -> Value {
+    let limit = request
+        .query_param("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(50)
+        .clamp(1, 200);
+    let Some(path) = config.operator_audit_tail_path.as_ref() else {
+        return json!({
+            "source": "unavailable",
+            "reason": "audit tail provider is not configured",
+            "records": [],
+        });
+    };
+    match read_redacted_audit_tail(path, limit) {
+        Ok(records) => json!({
+            "source": "self_lane",
+            "limit": limit,
+            "records": records,
+        }),
+        Err(reason) => json!({
+            "source": "unavailable",
+            "reason": reason,
+            "records": [],
+        }),
+    }
+}
+
+fn read_redacted_audit_tail(path: &PathBuf, limit: usize) -> Result<Vec<Value>, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("audit tail unavailable: {e}"))?;
+    let reader = BufReader::new(file);
+    let mut tail = VecDeque::with_capacity(limit);
+    for line in reader.lines() {
+        let line = line.map_err(|e| format!("audit tail read failed: {e}"))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if tail.len() == limit {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+    let mut records = Vec::with_capacity(tail.len());
+    for line in tail {
+        let value: Value =
+            serde_json::from_str(&line).map_err(|e| format!("audit tail parse failed: {e}"))?;
+        records.push(redacted_audit_record(&value));
+    }
+    Ok(records)
+}
+
+fn redacted_audit_record(value: &Value) -> Value {
+    let subject_key = value
+        .get("subject")
+        .and_then(Value::as_object)
+        .and_then(|subject| {
+            let kind = subject.get("kind").and_then(Value::as_str)?;
+            let stable_id = subject.get("stable_id").and_then(Value::as_str)?;
+            Some(format!("{kind}:{stable_id}"))
+        })
+        .or_else(|| {
+            value
+                .get("agent_identity")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "unknown:unknown".to_owned());
+    json!({
+        "schema_version": value.get("schema_version").cloned().unwrap_or(Value::Null),
+        "seq": value.get("seq").cloned().unwrap_or(Value::Null),
+        "timestamp": value.get("timestamp").cloned().unwrap_or(Value::Null),
+        "subject_id_hash": operator_subject_id_hash(&subject_key),
+        "tool": value.get("tool").cloned().unwrap_or(Value::Null),
+        "danger_level": value.get("danger_level").cloned().unwrap_or(Value::Null),
+        "decision": value.get("decision").cloned().unwrap_or(Value::Null),
+        "outcome": value.get("outcome").cloned().unwrap_or(Value::Null),
+        "sql_sha256": value.get("sql_sha256").cloned().unwrap_or(Value::Null),
+        "db_evidence": value.get("db_evidence").map(|db| {
+            json!({
+                "availability": db.get("availability").cloned().unwrap_or(Value::Null),
+                "db_unique_name": db.get("db_unique_name").cloned().unwrap_or(Value::Null),
+                "service_name": db.get("service_name").cloned().unwrap_or(Value::Null),
+                "instance_name": db.get("instance_name").cloned().unwrap_or(Value::Null),
+            })
+        }),
+    })
+}
+
+fn operator_events_response(
+    config: &HttpTransportConfig,
+    operator_subject: &AuditSubject,
+) -> HttpResponse {
+    let active_lanes = operator_active_lanes_data(config);
+    let lane_count = active_lanes["lanes"].as_array().map_or(0, Vec::len);
+    let event = operator_event(
+        1,
+        "operator",
+        operator_subject.legacy_agent_identity(),
+        "operator.snapshot",
+        json!({
+            "protocol_version": OPERATOR_PROTOCOL_VERSION,
+            "active_lanes": lane_count,
+            "health": operator_health_data(&config.observability),
+            "metrics": operator_metrics_data(&config.observability),
+        }),
+    );
+    debug_assert!(
+        validate_operator_event(&event).is_ok(),
+        "operator SSE event must match the Rust contract"
+    );
+    let mut body = Vec::new();
+    write_sse_event(
+        &mut body,
+        Some("operator.snapshot"),
+        event.get("event_id").and_then(Value::as_str),
+        Some(3000),
+        Some(&event),
+    );
+    HttpResponse {
+        status: 200,
+        headers: vec![
+            ("content-type".to_owned(), "text/event-stream".to_owned()),
+            ("cache-control".to_owned(), "no-cache".to_owned()),
+        ],
+        body,
+    }
+}
+
+fn handle_operator_action_route(
+    server: &OracleMcpServer,
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+    operator_subject: &AuditSubject,
+    route: OperatorRouteKind,
+) -> HttpResponse {
+    if !content_type_is_json(request) {
+        return empty_response(415);
+    }
+    let payload = match serde_json::from_slice::<Value>(&request.body) {
+        Ok(Value::Object(payload)) => payload,
+        Ok(_) | Err(_) => {
+            return operator_json_response(
+                400,
+                &request.path,
+                json!({
+                    "error": "invalid_operator_action",
+                    "message": "operator action body must be a JSON object",
+                }),
+            );
+        }
+    };
+    let lane_id = payload
+        .get("lane_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let (tool, mut arguments) = match operator_action_target(route, &payload) {
+        Ok(target) => target,
+        Err(response) => return operator_json_response(400, &request.path, response),
+    };
+    if route == OperatorRouteKind::ActionPreview {
+        force_preview_mode(tool, &mut arguments);
+    }
+
+    let binding = match operator_action_lane_binding(config, lane_id.as_deref()) {
+        Ok(binding) => binding,
+        Err(response) => return operator_json_response(response.0, &request.path, response.1),
+    };
+    let operator_key;
+    let mut context = DispatchContext::default();
+    if let Some(binding) = binding.as_ref() {
+        context = context
+            .with_http_session_id(&binding.mcp_session_id)
+            .with_principal_key(&binding.principal_key);
+    } else {
+        operator_key = operator_subject.legacy_agent_identity();
+        context = context.with_principal_key(&operator_key);
+    }
+
+    let rpc = json!({
+        "jsonrpc": "2.0",
+        "id": "operator-v1",
+        "method": "tools/call",
+        "params": {
+            "name": tool,
+            "arguments": arguments,
+        }
+    });
+    let response = server.handle_jsonrpc_request_with_context(rpc, None, context);
+    let data = json!({
+        "status": if response.is_some() { "forwarded" } else { "accepted" },
+        "lane_id": binding
+            .as_ref()
+            .map(|binding| binding.lane_id.as_str())
+            .or(lane_id.as_deref()),
+        "mcp_tool": tool,
+        "mcp_response": response,
+    });
+    operator_json_response(
+        if data["status"] == "accepted" {
+            202
+        } else {
+            200
+        },
+        &request.path,
+        data,
+    )
+}
+
+fn operator_action_target(
+    route: OperatorRouteKind,
+    payload: &serde_json::Map<String, Value>,
+) -> Result<(&'static str, Value), Value> {
+    match route {
+        OperatorRouteKind::SetLevel => Ok((
+            "oracle_set_session_level",
+            operator_arguments_from_payload(payload),
+        )),
+        OperatorRouteKind::SwitchProfile => Ok((
+            "oracle_switch_profile",
+            operator_arguments_from_payload(payload),
+        )),
+        OperatorRouteKind::ActionPreview
+        | OperatorRouteKind::ActionConfirm
+        | OperatorRouteKind::ActionExecute => {
+            let Some(tool) = payload.get("tool").and_then(Value::as_str) else {
+                return Err(json!({
+                    "error": "invalid_operator_action",
+                    "message": "action body must include tool",
+                }));
+            };
+            let Some(tool) = allowed_operator_action_tool(route, tool) else {
+                return Err(json!({
+                    "error": "operator_action_tool_not_allowed",
+                    "message": "tool is not allowed for this operator action route",
+                    "tool": tool,
+                }));
+            };
+            Ok((tool, operator_arguments_from_payload(payload)))
+        }
+        _ => unreachable!("non-action route"),
+    }
+}
+
+fn operator_arguments_from_payload(payload: &serde_json::Map<String, Value>) -> Value {
+    payload.get("arguments").cloned().unwrap_or_else(|| {
+        let mut args = payload.clone();
+        args.remove("lane_id");
+        args.remove("tool");
+        Value::Object(args)
+    })
+}
+
+fn allowed_operator_action_tool(route: OperatorRouteKind, tool: &str) -> Option<&'static str> {
+    const PREVIEW: &[&str] = &[
+        "oracle_preview_sql",
+        "oracle_set_session_level",
+        "oracle_compile_object",
+        "oracle_create_or_replace",
+        "oracle_patch_source",
+    ];
+    const EXECUTE: &[&str] = &[
+        "oracle_execute",
+        "oracle_set_session_level",
+        "oracle_compile_object",
+        "oracle_create_or_replace",
+        "oracle_patch_source",
+    ];
+    let allowed = match route {
+        OperatorRouteKind::ActionPreview => PREVIEW,
+        OperatorRouteKind::ActionConfirm | OperatorRouteKind::ActionExecute => EXECUTE,
+        _ => &[],
+    };
+    allowed.iter().copied().find(|candidate| *candidate == tool)
+}
+
+fn force_preview_mode(tool: &str, arguments: &mut Value) {
+    if tool == "oracle_preview_sql" {
+        return;
+    }
+    if let Value::Object(args) = arguments {
+        args.insert("execute".to_owned(), Value::Bool(false));
+    }
+}
+
+fn operator_action_lane_binding(
+    config: &HttpTransportConfig,
+    lane_id: Option<&str>,
+) -> Result<Option<HttpLaneBinding>, (u16, Value)> {
+    if !config.stateful {
+        return Ok(None);
+    }
+    let Some(lane_id) = lane_id else {
+        return Err((
+            400,
+            json!({
+                "error": "operator_lane_required",
+                "message": "stateful operator actions require lane_id",
+            }),
+        ));
+    };
+    let Some(lifecycle) = config.session_lifecycle.as_ref() else {
+        return Err((
+            409,
+            json!({
+                "error": "operator_lane_registry_unavailable",
+                "message": "stateful operator action route has no lane registry provider",
+            }),
+        ));
+    };
+    lifecycle.lane_binding(lane_id).map(Some).ok_or_else(|| {
+        (
+            404,
+            json!({
+                "error": "operator_lane_not_found",
+                "message": "requested lane_id is not active",
+                "lane_id": lane_id,
+            }),
+        )
+    })
 }
 
 fn handle_dashboard_route(

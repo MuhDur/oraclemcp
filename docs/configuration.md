@@ -324,7 +324,8 @@ retained in a bounded in-process result buffer; clients can reconnect with
 fallen out of the retained ring, the server returns typed
 `410 stream_cursor_expired` and the client must restart the MCP session.
 Stateless `DELETE /mcp` is rejected with 405 rather than pretending a session
-was closed.
+was closed. `/mcp` also honors `MCP-Protocol-Version`; an unsupported header is
+rejected before JSON-RPC dispatch with typed JSON `400 unsupported_protocol_version`.
 
 `[http]` fields: `allowed_hosts`, `allowed_origins` (both default `[]`,
 loopback-only), `json_response` (default `false`), `stateful` (default `false`),
@@ -347,6 +348,18 @@ is listed in `allowed_subjects`, for example `oauth:<stable-hash>` or
 operator merely by asking for it in a tool argument or query parameter. Operator
 API actions require the signed audit chain; without an audit sink, `/operator/v1`
 fails closed.
+
+`/operator/v1` is schema-first. `GET /operator/v1/schema` serves the generated
+bundle in `schemas/operator.schema.json`, and `ui/generated/operator-v1.ts`
+contains the matching generated TypeScript types for the dashboard SPA. The
+read-only operator routes are `GET /operator/v1/health`, `/metrics`,
+`/audit-tail`, `/active-lanes`, `/vsession`, and `/events` (SSE). Every SSE event
+carries `event_seq`, `event_id`, `lane_id`, `subject_id_hash`,
+`redaction_level`, and `schema_version`. Gated-action routes under
+`/operator/v1/actions/*` plus `/operator/v1/session/set-level` and
+`/operator/v1/session/switch-profile` forward to the existing MCP guarded
+`tools/call` path; they do not bypass SQL classification, profile ceilings, or
+confirmation-token checks.
 
 ---
 

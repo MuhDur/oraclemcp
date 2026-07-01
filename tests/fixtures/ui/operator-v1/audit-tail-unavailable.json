@@ -1,0 +1,11 @@
+{
+  "data": {
+    "reason": "audit tail provider is not configured",
+    "records": [],
+    "source": "unavailable"
+  },
+  "protocol_version": "operator.v1",
+  "redaction_level": "operator_redacted",
+  "route": "/operator/v1/audit-tail",
+  "schema_version": 1
+}

@@ -29,7 +29,8 @@ use parking_lot::Mutex;
 use serde_json::Value;
 
 use crate::admission::{AdmissionController, AdmissionPermit, DEFAULT_RETRY_AFTER_MS};
-use crate::http::HttpSessionLifecycle;
+use crate::http::{HttpLaneBinding, HttpLaneSnapshot, HttpSessionLifecycle};
+use crate::operator_protocol::operator_subject_id_hash;
 use crate::server::{
     DispatchCloseReason, DispatchContext, DispatchFuture, OwnedDispatchContext, ToolDispatch,
 };
@@ -142,6 +143,17 @@ impl LaneRuntimeStatus {
             STATUS_STOPPED => Self::Stopped,
             STATUS_QUARANTINED => Self::Quarantined,
             _ => Self::Starting,
+        }
+    }
+
+    /// Stable lower-case label for operator diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::Quarantined => "quarantined",
         }
     }
 }
@@ -579,6 +591,29 @@ impl HttpSessionLifecycle for StatefulLaneDispatch {
 
     fn close_all_sessions(&self) {
         let _ = StatefulLaneDispatch::close_all_sessions(self);
+    }
+
+    fn active_lanes(&self) -> Vec<HttpLaneSnapshot> {
+        self.lanes
+            .lock()
+            .iter()
+            .map(|(key, lane)| HttpLaneSnapshot {
+                lane_id: lane.name().to_owned(),
+                generation: lane.generation(),
+                status: lane.status().as_str(),
+                subject_id_hash: operator_subject_id_hash(&key.principal_key),
+            })
+            .collect()
+    }
+
+    fn lane_binding(&self, lane_id: &str) -> Option<HttpLaneBinding> {
+        self.lanes.lock().iter().find_map(|(key, lane)| {
+            (lane.name() == lane_id).then(|| HttpLaneBinding {
+                lane_id: lane.name().to_owned(),
+                mcp_session_id: key.mcp_session_id.clone(),
+                principal_key: key.principal_key.clone(),
+            })
+        })
     }
 }
 

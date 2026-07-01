@@ -1,0 +1,101 @@
+{
+  "data": {
+    "routes": [
+      {
+        "mcp_tool": null,
+        "method": "GET",
+        "path": "/operator/v1",
+        "schema": "routeIndexResponse",
+        "sse": false
+      },
+      {
+        "mcp_tool": null,
+        "method": "GET",
+        "path": "/operator/v1/schema",
+        "schema": "operatorSchemaBundle",
+        "sse": false
+      },
+      {
+        "mcp_tool": null,
+        "method": "GET",
+        "path": "/operator/v1/health",
+        "schema": "healthResponse",
+        "sse": false
+      },
+      {
+        "mcp_tool": null,
+        "method": "GET",
+        "path": "/operator/v1/metrics",
+        "schema": "metricsResponse",
+        "sse": false
+      },
+      {
+        "mcp_tool": null,
+        "method": "GET",
+        "path": "/operator/v1/audit-tail",
+        "schema": "auditTailResponse",
+        "sse": false
+      },
+      {
+        "mcp_tool": null,
+        "method": "GET",
+        "path": "/operator/v1/active-lanes",
+        "schema": "activeLanesResponse",
+        "sse": false
+      },
+      {
+        "mcp_tool": null,
+        "method": "GET",
+        "path": "/operator/v1/vsession",
+        "schema": "vsessionResponse",
+        "sse": false
+      },
+      {
+        "mcp_tool": null,
+        "method": "GET",
+        "path": "/operator/v1/events",
+        "schema": "operatorEvent",
+        "sse": true
+      },
+      {
+        "mcp_tool": "operator-selected preview tool",
+        "method": "POST",
+        "path": "/operator/v1/actions/preview",
+        "schema": "gatedActionResponse",
+        "sse": false
+      },
+      {
+        "mcp_tool": "operator-selected confirmation tool",
+        "method": "POST",
+        "path": "/operator/v1/actions/confirm",
+        "schema": "gatedActionResponse",
+        "sse": false
+      },
+      {
+        "mcp_tool": "operator-selected execute tool",
+        "method": "POST",
+        "path": "/operator/v1/actions/execute",
+        "schema": "gatedActionResponse",
+        "sse": false
+      },
+      {
+        "mcp_tool": "oracle_set_session_level",
+        "method": "POST",
+        "path": "/operator/v1/session/set-level",
+        "schema": "gatedActionResponse",
+        "sse": false
+      },
+      {
+        "mcp_tool": "oracle_switch_profile",
+        "method": "POST",
+        "path": "/operator/v1/session/switch-profile",
+        "schema": "gatedActionResponse",
+        "sse": false
+      }
+    ]
+  },
+  "protocol_version": "operator.v1",
+  "redaction_level": "operator_redacted",
+  "route": "/operator/v1",
+  "schema_version": 1
+}

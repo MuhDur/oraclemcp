@@ -1,0 +1,21 @@
+{
+  "data": {
+    "liveness": {
+      "live": true,
+      "ready": true,
+      "status": "ok",
+      "version": "0.4.1"
+    },
+    "readiness": {
+      "db_reachable": true,
+      "draining": false,
+      "ready": true,
+      "status": "ok"
+    },
+    "source": "self_lane"
+  },
+  "protocol_version": "operator.v1",
+  "redaction_level": "operator_redacted",
+  "route": "/operator/v1/health",
+  "schema_version": 1
+}

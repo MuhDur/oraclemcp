@@ -22,6 +22,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The reserved `/operator/v1` API now requires server-derived operator authority
   from `[http.operator]` or the loopback local-owner default, and authorized
   operator actions require the signed audit chain before routing.
+- `/mcp` now rejects unsupported `MCP-Protocol-Version` headers with typed JSON
+  `400 unsupported_protocol_version`. `/operator/v1` now serves a generated
+  schema bundle, REST/SSE read-only operator routes, and guarded action routes
+  that forward through the existing MCP dispatcher.
 
 ## [0.4.1] — 2026-06-29
 

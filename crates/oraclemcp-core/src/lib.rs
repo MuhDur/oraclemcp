@@ -31,6 +31,7 @@ pub mod http;
 pub mod init_token;
 pub mod lane;
 pub mod notifications;
+pub mod operator_protocol;
 pub mod pagination;
 pub mod plugin;
 pub mod query_execute;
@@ -102,6 +103,10 @@ pub use lane::{
     LaneRuntimeStatus, StatefulLaneDispatch, block_on_lane_bridge,
 };
 pub use notifications::{NotificationHub, progress_token_from_params};
+pub use operator_protocol::{
+    OPERATOR_PROTOCOL_VERSION, OPERATOR_REDACTION_LEVEL, OPERATOR_ROUTE_SPECS,
+    OPERATOR_SCHEMA_VERSION, operator_schema_bundle, operator_subject_id_hash,
+};
 pub use plugin::{
     PluginCapability, PluginError, PluginManifest, PluginRequest, PluginResponse, SubprocessPlugin,
     check_capability,

@@ -38,12 +38,18 @@ Harnesses:
   `schemas/oracle-cell-structured.schema.json`,
   `crates/oraclemcp-db/tests/structured_schema_golden.rs`, and
   `tests/golden/oracle-cell-structured/*.json`
+- Operator v1 generated schema and UI fixtures:
+  `schemas/operator.schema.json`,
+  `crates/oraclemcp-core/src/operator_protocol.rs`,
+  `scripts/ui_fixtures_validate_against_rust_schema.sh`, and
+  `tests/fixtures/ui/operator-v1/*.json`
 - Native listener TLS tests: `crates/oraclemcp-core/src/http.rs`
 - Transports under test:
   - stdio: `OracleMcpServer::serve_stdio_with_io`
   - HTTP: `TcpListener -> serve_http_until -> native parser -> MCP dispatcher`
   - HTTPS: `TcpListener -> serve_https_until -> rustls -> native parser`
-- Fixture style: spec-derived structural assertions, no external/generated fixtures
+- Fixture style: spec-derived structural assertions plus Rust-generated
+  operator UI fixtures; no external fixture corpora
 
 ## Matrix
 
@@ -61,11 +67,14 @@ Harnesses:
 | Security | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTP OAuth | 4 | 0 | 4 | 4 | 0 | 100% |
 | HTTP guards | 1 | 0 | 1 | 1 | 0 | 100% |
-| HTTP sessions | 1 | 0 | 1 | 1 | 0 | 100% |
+| HTTP sessions | 2 | 0 | 2 | 2 | 0 | 100% |
+| HTTP routing | 1 | 0 | 1 | 1 | 0 | 100% |
+| HTTP negotiation | 2 | 0 | 2 | 2 | 0 | 100% |
+| Operator v1 | 6 | 0 | 6 | 6 | 0 | 100% |
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
 | Oracle structured cells | 6 | 0 | 6 | 6 | 0 | 100% |
 
-Total tracked requirements: 40 MUST, 2 SHOULD, 42 tested.
+Total tracked requirements: 47 MUST, 2 SHOULD, 49 tested.
 
 ## Requirement IDs
 
@@ -105,6 +114,13 @@ Total tracked requirements: 40 MUST, 2 SHOULD, 42 tested.
 | HTTP-SESSION-002 | MUST | HTTP sessions | Stateful GET replays buffered SSE responses after `cursor` / `Last-Event-ID`; stateless DELETE returns 405 instead of a false session-close acceptance. |
 | HTTP-ROUTE-001 | MUST | HTTP routing | `/operator/v1` API routes return typed JSON 404 responses and preserve parsed query filters; they never fall through to a SPA/history HTML response. |
 | HTTP-NEG-001 | MUST | HTTP negotiation | `/mcp` POST rejects unacceptable `Accept` and unsupported `Content-Type` values before JSON-RPC dispatch. |
+| HTTP-MCP-VER-001 | MUST | HTTP negotiation | `/mcp` honors `MCP-Protocol-Version`; unsupported versions return typed JSON `400 unsupported_protocol_version` before dispatch. |
+| OPERATOR-V1-001 | MUST | Operator v1 | `/operator/v1/schema` serves the generated machine-readable schema bundle with route and event schemas. |
+| OPERATOR-V1-002 | MUST | Operator v1 | `/operator/v1/health`, `/metrics`, `/audit-tail`, `/active-lanes`, and `/vsession` return versioned, redacted REST envelopes with unavailable-source degradation where providers are absent. |
+| OPERATOR-V1-003 | MUST | Operator v1 | `/operator/v1/events` emits SSE `operatorEvent` envelopes carrying `event_seq`, `event_id`, `lane_id`, `subject_id_hash`, `redaction_level`, and `schema_version`. |
+| OPERATOR-V1-004 | MUST | Operator v1 | Gated-action operator routes forward to existing MCP `tools/call` dispatch mappings rather than bypassing the guarded dispatcher. |
+| OPERATOR-V1-005 | MUST | Operator v1 | Generated operator TypeScript types and UI fixtures are checked against the Rust schema source of truth. |
+| OPERATOR-V1-006 | MUST | Operator v1 | B.6 `mcp_and_operator_v1_conformance_matrix` records 1.00 MUST coverage and runs the UI fixture schema validator. |
 | HTTPS-001 | MUST | HTTPS / mTLS | Server-only native TLS accepts a valid HTTPS handshake. |
 | HTTPS-002 | MUST | HTTPS / mTLS | Native mTLS rejects clients without a certificate and accepts a client certificate signed by the configured CA. |
 | DB-SER-001 | MUST | Oracle structured cells | A published JSON Schema exists for `OracleCell::structured` and declares ARRAY, JSON/OSON, VECTOR, TSTZ, object marker, and generic unsupported variants. |
@@ -127,6 +143,13 @@ Total tracked requirements: 40 MUST, 2 SHOULD, 42 tested.
 | HTTP-SESSION-002 | `crates/oraclemcp-core/src/http.rs::tests::stateful_get_replays_buffered_lane_results_by_cursor`; `crates/oraclemcp-core/src/http.rs::tests::stateless_delete_is_method_not_allowed_not_false_accepted` |
 | HTTP-ROUTE-001 | `crates/oraclemcp-core/src/http.rs::tests::operator_api_routes_are_typed_json_404_and_parse_query` |
 | HTTP-NEG-001 | `crates/oraclemcp-core/src/http.rs::tests::mcp_post_enforces_accept_and_content_type_negotiation` |
+| HTTP-MCP-VER-001 | `crates/oraclemcp-core/src/http.rs::tests::mcp_protocol_version_header_is_enforced_before_dispatch` |
+| OPERATOR-V1-001 | `crates/oraclemcp-core/src/operator_protocol.rs::tests::operator_schema_declares_every_route_and_event_contract`; `crates/oraclemcp-core/src/http.rs::tests::operator_v1_serves_schema_health_events_and_action_mapping` |
+| OPERATOR-V1-002 | `crates/oraclemcp-core/src/http.rs::tests::operator_v1_serves_schema_health_events_and_action_mapping`; `tests/fixtures/ui/operator-v1/*.json` |
+| OPERATOR-V1-003 | `crates/oraclemcp-core/src/http.rs::tests::operator_v1_serves_schema_health_events_and_action_mapping`; `tests/fixtures/ui/operator-v1/event-snapshot.json` |
+| OPERATOR-V1-004 | `crates/oraclemcp-core/src/http.rs::tests::operator_v1_serves_schema_health_events_and_action_mapping` |
+| OPERATOR-V1-005 | `scripts/ui_fixtures_validate_against_rust_schema.sh`; `crates/oraclemcp-core/src/operator_protocol.rs::tests::generated_operator_schema_artifacts_match_rust_contract` |
+| OPERATOR-V1-006 | `scripts/e2e/mcp_and_operator_v1_conformance_matrix.sh` |
 | HTTPS-001 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_accepts_tls_handshake` |
 | HTTPS-002 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_requires_client_certificate_when_mtls_is_configured` |
 
@@ -135,6 +158,7 @@ Total tracked requirements: 40 MUST, 2 SHOULD, 42 tested.
 This harness was created from the native stdio implementation and the MCP
 `2025-11-25` wire shape already frozen by `tests/golden/stdio/*.json` and
 `tests/golden/http/*.json`. The HTTP/OAuth rows are derived from the native
-listener, parser, OAuth challenge builder, scope dispatcher path, and rustls
-TLS listener in this repository. No third-party reference implementation or
-generated fixture corpus is used.
+listener, parser, OAuth challenge builder, scope dispatcher path, operator v1
+Rust schema source, generated UI fixtures, and rustls TLS listener in this
+repository. No third-party reference implementation or externally generated
+fixture corpus is used.

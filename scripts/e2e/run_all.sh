@@ -32,6 +32,7 @@ done
 cd "$ROOT"
 scenarios=(
   scripts/e2e/conformance_coverage.sh
+  scripts/e2e/mcp_and_operator_v1_conformance_matrix.sh
   scripts/e2e/offline_stdio.sh
   scripts/e2e/http_oauth_lanes.sh
   scripts/e2e/audit_append.sh
@@ -66,7 +67,7 @@ for script in "${scenarios[@]}"; do
   if [ "$status" -ne 0 ]; then
     failed=$((failed + 1))
     e2e_log_event "scenario_result" "assert" "fail" 0 "$name status=$status"
-  elif grep -F '"outcome":"skipped"' "$err" >/dev/null 2>&1; then
+  elif grep -F '"event":"scenario_complete"' "$err" | grep -F '"outcome":"skipped"' >/dev/null 2>&1; then
     skipped=$((skipped + 1))
     e2e_log_event "scenario_result" "assert" "skipped" 0 "$name skipped"
   else

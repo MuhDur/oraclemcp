@@ -1527,6 +1527,7 @@ fn http_transport_config_from_merged(
                     .collect(),
             },
             operator_auditor: None,
+            operator_audit_tail_path: None,
             // Observability is wired in run_serve (HealthState/Metrics/probe).
             observability: ObservabilityState::default(),
         },
@@ -1813,6 +1814,13 @@ fn run_serve(
                 mut transport, tls, ..
             } = resolved_http;
             transport.session_lifecycle = built.session_lifecycle;
+            transport.operator_audit_tail_path = auditor.as_ref().map(|_| {
+                full_config
+                    .audit
+                    .path
+                    .clone()
+                    .unwrap_or_else(default_audit_path)
+            });
             transport.operator_auditor = auditor;
 
             // ── D1 observability wiring (health + metrics + graceful drain) ──

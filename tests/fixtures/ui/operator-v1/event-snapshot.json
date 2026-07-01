@@ -1,0 +1,13 @@
+{
+  "data": {
+    "active_lanes": 1
+  },
+  "event_id": "operator/1",
+  "event_seq": 1,
+  "event_type": "operator.snapshot",
+  "lane_id": "operator",
+  "protocol_version": "operator.v1",
+  "redaction_level": "operator_redacted",
+  "schema_version": 1,
+  "subject_id_hash": "subject-sha256:e6f85903d833166ce993240e5808c4ed143be60ddc574ceca93754f1b5979b57"
+}

@@ -36,6 +36,7 @@ required=(
   scripts/e2e/lib.sh
   scripts/e2e/run_all.sh
   scripts/e2e/offline_stdio.sh
+  scripts/e2e/mcp_and_operator_v1_conformance_matrix.sh
   scripts/e2e/http_oauth_lanes.sh
   scripts/e2e/audit_append.sh
   scripts/e2e/live_oracle.sh
@@ -43,6 +44,8 @@ required=(
   scripts/e2e/COVERAGE.md
   scripts/e2e/PROVENANCE.md
   scripts/e2e/DISCREPANCIES.md
+  tests/conformance/COVERAGE.md
+  scripts/ui_fixtures_validate_against_rust_schema.sh
 )
 missing=0
 for path in "${required[@]}"; do
@@ -57,6 +60,9 @@ fi
 
 if ! grep -F "| MUST coverage | 6 | 6 | 6 | 0 | 1.00 |" scripts/e2e/COVERAGE.md >/dev/null; then
   e2e_finish_fail "COVERAGE.md must record 1.00 MUST coverage for the harness standard"
+fi
+if ! grep -F "| Operator v1 | 6 | 0 | 6 | 6 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "tests/conformance/COVERAGE.md must record 1.00 MUST coverage for operator v1"
 fi
 if grep -RInE '(^|[^A-Z])SKIP([^A-Z]|$)' scripts/e2e/COVERAGE.md scripts/e2e/DISCREPANCIES.md >/dev/null; then
   e2e_finish_fail "coverage/discrepancy docs must use XFAIL terminology, not SKIP"

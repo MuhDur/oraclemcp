@@ -529,6 +529,17 @@ local-owner path is accepted by default. Authorized operator API actions append
 to the same signed audit chain before routing, and fail closed if no audit sink
 is configured.
 
+Operator v1 is versioned and schema-first. `GET /operator/v1/schema` serves the
+generated schema bundle (`schemas/operator.schema.json`), while the captured UI
+fixtures in `tests/fixtures/ui/operator-v1/` are validated by
+`scripts/ui_fixtures_validate_against_rust_schema.sh`. REST routes expose
+health, metrics, audit-tail summaries, active lane summaries, and unavailable
+`v$session` status until a monitor profile is configured. `GET
+/operator/v1/events` streams redacted SSE event envelopes with `event_seq`,
+`event_id`, `lane_id`, `subject_id_hash`, `redaction_level`, and
+`schema_version`. Gated-action routes forward to the existing MCP `tools/call`
+dispatcher so all SQL guards and confirmation-token checks remain in one place.
+
 ### 5.5 Rotate credentials and keys
 
 - **DB credential:** update the secret behind `credential_ref` and restart (or
