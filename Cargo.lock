@@ -1726,6 +1726,7 @@ name = "oraclemcp-audit"
 version = "0.4.1"
 dependencies = [
  "oraclemcp-error",
+ "parking_lot 0.12.5",
  "serde",
  "serde_json",
  "sha2 0.11.0",

@@ -50,8 +50,9 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use parking_lot::Mutex;
 
 use crate::record::AuditRecord;
 use crate::sink::{AuditError, AuditSink};
@@ -137,7 +138,7 @@ impl ShippingForwarder for WormFileForwarder {
     fn forward(&self, record: &AuditRecord) -> Result<(), ShippingError> {
         let line =
             serde_json::to_string(record).map_err(|e| ShippingError::Transport(e.to_string()))?;
-        let mut f = self.file.lock().expect("worm mirror mutex poisoned");
+        let mut f = self.file.lock();
         f.write_all(line.as_bytes())
             .map_err(|e| ShippingError::Transport(e.to_string()))?;
         f.write_all(b"\n")
@@ -146,7 +147,7 @@ impl ShippingForwarder for WormFileForwarder {
     }
 
     fn flush(&self) -> Result<(), ShippingError> {
-        let f = self.file.lock().expect("worm mirror mutex poisoned");
+        let f = self.file.lock();
         f.sync_all()
             .map_err(|e| ShippingError::Transport(e.to_string()))
     }
@@ -197,10 +198,7 @@ impl ShippingAuditSink {
     fn forward_pending(&self) {
         // Take the pending batch under the lock, then forward outside it.
         let batch = {
-            let mut pending = self
-                .pending
-                .lock()
-                .expect("shipping pending mutex poisoned");
+            let mut pending = self.pending.lock();
             std::mem::take(&mut *pending)
         };
         for record in &batch {
@@ -225,10 +223,7 @@ impl AuditSink for ShippingAuditSink {
         // Local durable store FIRST — this must succeed (or error) before we
         // ever consider the record shippable.
         self.local.append(record)?;
-        self.pending
-            .lock()
-            .expect("shipping pending mutex poisoned")
-            .push(record.clone());
+        self.pending.lock().push(record.clone());
         Ok(())
     }
 
@@ -456,16 +451,16 @@ mod tests {
     }
     impl CapturingForwarder {
         fn records(&self) -> Vec<AuditRecord> {
-            self.records.lock().expect("poisoned").clone()
+            self.records.lock().clone()
         }
     }
     impl ShippingForwarder for CapturingForwarder {
         fn forward(&self, record: &AuditRecord) -> Result<(), ShippingError> {
-            self.records.lock().expect("poisoned").push(record.clone());
+            self.records.lock().push(record.clone());
             Ok(())
         }
         fn flush(&self) -> Result<(), ShippingError> {
-            *self.flushes.lock().expect("poisoned") += 1;
+            *self.flushes.lock() += 1;
             Ok(())
         }
     }
@@ -614,7 +609,7 @@ mod tests {
         }
         impl AuditSink for LocalFlushFails {
             fn append(&self, _r: &AuditRecord) -> Result<(), AuditError> {
-                *self.appended.lock().expect("poisoned") += 1;
+                *self.appended.lock() += 1;
                 Ok(())
             }
             fn flush(&self) -> Result<(), AuditError> {

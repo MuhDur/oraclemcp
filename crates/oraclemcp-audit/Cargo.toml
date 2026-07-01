@@ -13,6 +13,7 @@ categories.workspace = true
 oraclemcp-error = { path = "../oraclemcp-error", version = "0.4.1" }
 serde.workspace = true
 serde_json.workspace = true
+parking_lot.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 # D2 audit shipping: a forward failure is logged + dropped (fail-safe) rather

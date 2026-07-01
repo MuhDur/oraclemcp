@@ -11,9 +11,10 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
-use std::sync::Mutex;
 
+use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::record::{AuditEntryDraft, AuditRecord, GENESIS_HASH, SigningKey};
@@ -28,11 +29,11 @@ pub enum AuditError {
     /// Chain verification failed at the given sequence number.
     #[error("audit chain broken at seq {0}")]
     ChainBroken(u64),
-    /// A previous durable flush failed, leaving a non-durably-synced record at
-    /// the head of the on-disk byte stream. The auditor is poisoned: it refuses
-    /// further appends rather than re-issue that sequence number and fork the
-    /// hash chain. Operator action (inspect/repair the audit log) is required.
-    #[error("audit sink poisoned after durable flush failure")]
+    /// A previous append/flush failed or panicked after the next record may have
+    /// reached the byte stream. The auditor is poisoned: it refuses further
+    /// appends rather than re-issue that sequence number and fork the hash chain.
+    /// Operator action (inspect/repair the audit log) is required.
+    #[error("audit sink poisoned after uncertain append")]
     Poisoned,
 }
 
@@ -69,14 +70,14 @@ impl AuditSink for FileAuditSink {
     fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
         let mut line = serde_json::to_vec(record).map_err(|e| AuditError::Io(e.to_string()))?;
         line.push(b'\n');
-        let mut f = self.file.lock().map_err(|_| AuditError::Poisoned)?;
+        let mut f = self.file.lock();
         f.write_all(&line)
             .map_err(|e| AuditError::Io(e.to_string()))?;
         Ok(())
     }
 
     fn flush(&self) -> Result<(), AuditError> {
-        let f = self.file.lock().map_err(|_| AuditError::Poisoned)?;
+        let f = self.file.lock();
         // fsync: the bytes are durably on disk before we return.
         f.sync_all().map_err(|e| AuditError::Io(e.to_string()))
     }
@@ -100,30 +101,24 @@ impl MemoryAuditSink {
     /// A snapshot of appended records.
     #[must_use]
     pub fn records(&self) -> Vec<AuditRecord> {
-        self.records
-            .lock()
-            .expect("memory audit sink poisoned")
-            .clone()
+        self.records.lock().clone()
     }
 
     /// How many times `flush` was called.
     #[must_use]
     pub fn flush_count(&self) -> usize {
-        *self.flushes.lock().expect("memory audit sink poisoned")
+        *self.flushes.lock()
     }
 }
 
 impl AuditSink for MemoryAuditSink {
     fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
-        self.records
-            .lock()
-            .map_err(|_| AuditError::Poisoned)?
-            .push(record.clone());
+        self.records.lock().push(record.clone());
         Ok(())
     }
 
     fn flush(&self) -> Result<(), AuditError> {
-        *self.flushes.lock().map_err(|_| AuditError::Poisoned)? += 1;
+        *self.flushes.lock() += 1;
         Ok(())
     }
 }
@@ -131,12 +126,10 @@ impl AuditSink for MemoryAuditSink {
 struct ChainState {
     seq: u64,
     last_hash: String,
-    /// Set once a durable flush has failed. The seq=N line was already written
-    /// (visible in the page cache / on-disk byte stream) but not durably
-    /// `fsync`ed, so the in-memory state was NOT advanced. Re-issuing seq=N
-    /// from the un-advanced state would fork the tamper-evident hash chain
-    /// (two records with the same seq off the same prev_hash). Once poisoned,
-    /// every subsequent `append` fails closed rather than forking the chain.
+    /// Set once an append or flush failed/panicked after the seq=N line may have
+    /// reached the byte stream. The in-memory state was NOT advanced, so
+    /// re-issuing seq=N from the un-advanced state would fork the tamper-evident
+    /// hash chain. Once poisoned, every subsequent `append` fails closed.
     poisoned: bool,
 }
 
@@ -178,27 +171,41 @@ impl Auditor {
         timestamp: String,
         durable: bool,
     ) -> Result<AuditRecord, AuditError> {
-        let mut state = self.state.lock().map_err(|_| AuditError::Poisoned)?;
-        // Fail closed: once a durable flush has failed, the head of the on-disk
-        // byte stream holds a record that was written but not fsynced. Issuing
-        // any further record would either reuse that seq (forking the chain) or
-        // chain past an un-synced record, so refuse outright.
+        let mut state = self.state.lock();
+        // Fail closed: once an append/flush failure or panic may have left a
+        // record in the byte stream without advancing state, issuing any further
+        // record would either reuse that seq or chain past an uncertain record.
         if state.poisoned {
             return Err(AuditError::Poisoned);
         }
         let seq = state.seq + 1;
         let record =
             AuditRecord::chained_signed(draft, seq, &state.last_hash, timestamp, &self.key);
-        self.sink.append(&record)?;
+        match catch_unwind(AssertUnwindSafe(|| self.sink.append(&record))) {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                state.poisoned = true;
+                return Err(err);
+            }
+            Err(_) => {
+                state.poisoned = true;
+                return Err(AuditError::Poisoned);
+            }
+        }
         if durable {
             // The seq=N line is now in the byte stream but not yet durable. If
-            // the fsync fails we must NOT advance state (that would claim a
-            // non-durable record as committed) and must NOT later re-issue
-            // seq=N off the same prev_hash (that would fork the chain). Poison
-            // the auditor so every subsequent append fails closed instead.
-            if let Err(e) = self.sink.flush() {
-                state.poisoned = true;
-                return Err(e);
+            // the fsync fails or panics we must NOT advance state and must NOT
+            // later re-issue seq=N off the same prev_hash.
+            match catch_unwind(AssertUnwindSafe(|| self.sink.flush())) {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    state.poisoned = true;
+                    return Err(err);
+                }
+                Err(_) => {
+                    state.poisoned = true;
+                    return Err(AuditError::Poisoned);
+                }
             }
         }
         state.seq = seq;
@@ -323,11 +330,10 @@ mod tests {
     #[test]
     fn durable_flush_failure_poisons_auditor_and_never_forks_chain() {
         // Regression for oracle-ajm2.9: on a transient fsync failure the seq=N
-        // line is already in the byte stream but state was not advanced. A naive
-        // implementation re-issues seq=N off the same prev_hash on the next
-        // durable append, forking the tamper-evident chain. The auditor must
-        // poison instead: the failing call Errs, and every subsequent append
-        // fails closed (no record with a duplicate seq is ever appended).
+        // line may already be in the byte stream but state was not advanced. A
+        // naive implementation re-issues seq=N off the same prev_hash on the
+        // next durable append, forking the tamper-evident chain. The auditor
+        // must poison instead.
         let sink = Arc::new(FlushFailsOnceSink::default());
         let auditor = Auditor::new(Box::new(SharedFlakySink(sink.clone())), test_key());
 
@@ -413,6 +419,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn append_panic_poisons_auditor_without_forking_chain() {
+        let sink = Arc::new(PanicAfterAppendSink::default());
+        let auditor = Auditor::new(Box::new(SharedPanicSink(sink.clone())), test_key());
+
+        let first = auditor.append(
+            &draft("DELETE FROM t WHERE id=1", "GUARDED"),
+            "t0".to_owned(),
+            true,
+        );
+        assert!(
+            matches!(first, Err(AuditError::Poisoned)),
+            "append panic is contained as poisoned, got {first:?}"
+        );
+
+        let second = auditor.append(
+            &draft("DELETE FROM t WHERE id=2", "GUARDED"),
+            "t1".to_owned(),
+            true,
+        );
+        assert!(
+            matches!(second, Err(AuditError::Poisoned)),
+            "auditor stays poisoned after append panic, got {second:?}"
+        );
+
+        let records = sink.records();
+        assert_eq!(records.len(), 1, "no duplicate seq after append panic");
+        assert_eq!(
+            crate::verify_records(&records, &[test_key()]),
+            crate::VerifyOutcome::Ok { records: 1 }
+        );
+    }
+
     // A sink that forwards to a shared Arc<MemoryAuditSink> (so the test keeps a
     // handle while the Auditor owns its Box<dyn AuditSink>).
     struct SharedSink(Arc<MemoryAuditSink>);
@@ -434,16 +473,16 @@ mod tests {
     }
     impl FlushFailsOnceSink {
         fn records(&self) -> Vec<AuditRecord> {
-            self.records.lock().expect("poisoned").clone()
+            self.records.lock().clone()
         }
     }
     impl AuditSink for FlushFailsOnceSink {
         fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
-            self.records.lock().expect("poisoned").push(record.clone());
+            self.records.lock().push(record.clone());
             Ok(())
         }
         fn flush(&self) -> Result<(), AuditError> {
-            let mut calls = self.flush_calls.lock().expect("poisoned");
+            let mut calls = self.flush_calls.lock();
             *calls += 1;
             if *calls == 1 {
                 Err(AuditError::Io("EIO: fsync failed".to_owned()))
@@ -455,6 +494,35 @@ mod tests {
 
     struct SharedFlakySink(Arc<FlushFailsOnceSink>);
     impl AuditSink for SharedFlakySink {
+        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            self.0.append(record)
+        }
+        fn flush(&self) -> Result<(), AuditError> {
+            self.0.flush()
+        }
+    }
+
+    #[derive(Default)]
+    struct PanicAfterAppendSink {
+        records: Mutex<Vec<AuditRecord>>,
+    }
+    impl PanicAfterAppendSink {
+        fn records(&self) -> Vec<AuditRecord> {
+            self.records.lock().clone()
+        }
+    }
+    impl AuditSink for PanicAfterAppendSink {
+        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            self.records.lock().push(record.clone());
+            panic!("panic after writing audit record");
+        }
+        fn flush(&self) -> Result<(), AuditError> {
+            Ok(())
+        }
+    }
+
+    struct SharedPanicSink(Arc<PanicAfterAppendSink>);
+    impl AuditSink for SharedPanicSink {
         fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
             self.0.append(record)
         }

@@ -3,8 +3,8 @@
 #
 # This gate keeps the thin-native service on the intended concurrency contract:
 # explicit block_on boundaries only, no Tokio spawn drift, no production
-# std::sync::Mutex in oraclemcp-core, bounded queues only, and no lane command
-# sender leakage across module boundaries.
+# std::sync::Mutex in oraclemcp-core or the audit-chain writer, bounded queues
+# only, and no lane command sender leakage across module boundaries.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -124,7 +124,7 @@ def report_violation(kind: str, path: Path, line_no: int, line: str) -> None:
     )
 
 
-rust_files = git_files("crates/oraclemcp-core/src", "crates/oraclemcp/src")
+rust_files = git_files("crates/oraclemcp-audit/src", "crates/oraclemcp-core/src", "crates/oraclemcp/src")
 prod: dict[Path, list[tuple[int, str]]] = {path: production_lines(path) for path in rust_files}
 violations: list[str] = []
 warnings: list[str] = []
@@ -148,8 +148,11 @@ for path, lines in prod.items():
             report_violation("FORBIDDEN[tokio-spawn]", path, line_no, line)
         if unbounded_queue.search(line):
             report_violation("FORBIDDEN[unbounded-queue]", path, line_no, line)
-        if path_rel.startswith("crates/oraclemcp-core/src/") and std_mutex.search(line):
-            report_violation("FORBIDDEN[core-std-mutex]", path, line_no, line)
+        if (
+            path_rel.startswith("crates/oraclemcp-core/src/")
+            or path_rel.startswith("crates/oraclemcp-audit/src/")
+        ) and std_mutex.search(line):
+            report_violation("FORBIDDEN[poisoning-mutex]", path, line_no, line)
         if path_rel != "crates/oraclemcp-core/src/lane.rs" and lane_sender_leak.search(line):
             report_violation("FORBIDDEN[lane-sender-leak]", path, line_no, line)
         if block_on.search(line):
