@@ -2,11 +2,12 @@
 # oraclemcp honesty-grep gate (bead F1a / plan §8 item 8).
 #
 # Fails if over-claiming / stale framing appears in RELEASE-VISIBLE text: the
-# README, docs, package metadata (Cargo.toml descriptions), and shipped source
-# doc-comments. oraclemcp is GOVERNED and least-privilege — a fail-closed SQL
-# guard with an explicit, confirmation-gated operating-level ladder (read-only by
-# default, escalation up to ADMIN within per-profile ceilings). It is NOT
-# "safe-by-default", NOT a "read-only binary", and NOT "fully audited".
+# README, docs, server.json, package metadata (Cargo.toml descriptions), and
+# shipped source doc-comments. oraclemcp is GOVERNED and least-privilege — a
+# fail-closed SQL guard with an explicit, confirmation-gated operating-level
+# ladder (read-only by default, escalation up to ADMIN within per-profile
+# ceilings). It is NOT "safe-by-default", NOT a "read-only binary", and NOT
+# "fully audited".
 #
 # Escape hatch: append a `honesty-allow: <reason>` marker to a line that
 # legitimately needs a forbidden phrase (a historical note, a negative example).
@@ -20,8 +21,8 @@ PATTERN='safe[- ]by[- ]default|read-only binary|fully audited'
 # Release-visible surfaces. Test/fuzz sources and the planning doc are excluded
 # (not shipped / discuss the framing on purpose).
 mapfile -t FILES < <(
-  git ls-files README.md docs crates Dockerfile '*Dockerfile' \
-    | grep -E '\.(md|rs|toml)$|(^|/)Dockerfile$' \
+  git ls-files README.md docs crates server.json Dockerfile '*Dockerfile' \
+    | grep -E '(^server\.json$)|\.(md|rs|toml)$|(^|/)Dockerfile$' \
     | grep -vE '/tests?/|tests\.rs$|/fuzz/'
 )
 

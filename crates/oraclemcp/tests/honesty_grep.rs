@@ -1,6 +1,7 @@
 //! Honesty-grep gate (bead F1a / plan §8 item 8) — a `cargo test` mirror of
 //! `scripts/oraclemcp_honesty_grep.sh`, so over-claiming framing in
-//! release-visible text fails the test suite, not only CI.
+//! release-visible text, including `server.json`, fails the test suite, not
+//! only CI.
 //!
 //! oraclemcp is GOVERNED and least-privilege (a fail-closed SQL guard with a
 //! confirmation-gated operating-level ladder, read-only by default, escalation
@@ -67,7 +68,11 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
 #[test]
 fn no_overclaiming_framing_in_release_visible_text() {
     let root = workspace_root();
-    let mut files = vec![root.join("README.md"), root.join("Dockerfile")];
+    let mut files = vec![
+        root.join("README.md"),
+        root.join("server.json"),
+        root.join("Dockerfile"),
+    ];
     for sub in ["docs", "crates"] {
         collect(&root.join(sub), &mut files);
     }

@@ -198,7 +198,7 @@ ssl_server_cert_dn = "CN=dbhost.example.com"
 # Override TCPS SNI behavior (use_sni). Default: none (driver default).
 use_sni = true
 # Authenticate with an OCI IAM database token instead of a password. Default: false.
-# NOTE: this PARSES but the 0.5.0 thin adapter FAILS CLOSED on an IAM-token connect
+# NOTE: this PARSES but the 0.5.1 thin adapter FAILS CLOSED on an IAM-token connect
 # today (structured unsupported-auth diagnostic; refused over non-TCPS). See
 # docs/configuration.md and the README OCI section. Deferred bead k6q.9.
 # use_iam_token = false

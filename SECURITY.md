@@ -99,3 +99,12 @@ authorization server, or substitute for database-side controls. A misconfigured
 profile ceiling (`max_level = "ADMIN"`) makes confirmation-gated escalation to
 `ADMIN` possible *by design* — set the ceiling to match the work. See
 [`docs/hardening.md`](docs/hardening.md) for the controls you own.
+
+## Installer and artifact trust
+
+The release installer verifies the downloaded archive before extracting it:
+SHA-256 checks transport integrity, while the cosign blob signature and
+attestation are the authenticity and provenance checks. Do not treat a checksum
+by itself as proof of origin. Service installation, service-manager mutation,
+and scoped client-credential issuance are opt-in actions. Source builds should
+use the pinned nightly documented in [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md).

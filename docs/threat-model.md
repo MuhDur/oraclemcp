@@ -270,6 +270,88 @@ confirm at a glance which profiles — and ceilings — the agent can reach.
   example (an exposed read-only profile beside a hidden privileged one) parses,
   validates, and the served list omits the hidden profile.
 
+### T11 — Subject / lane confusion (S, E; assets A1, A3)
+
+*Threat.* A caller supplies or forges an identity, replays another principal's
+stateful session id, or crosses lanes so a confirmation grant, operating level,
+profile switch, or audit subject from one actor affects another actor.
+
+*Mitigation.* **Subject-not-supplied** is the rule: the client never gets to
+declare its security subject in a tool argument, query parameter, or header.
+The server derives a principal key from the authenticated transport credential
+(per-client bearer, OAuth token, registered mTLS leaf fingerprint, or the local
+loopback owner path). Stateful MCP session ids are bound to that server-derived
+principal, and invalid / cross-principal session ids collapse to the same
+failure surface. Served stateful lanes are keyed by MCP session and principal;
+stateless generated-read workers are keyed by principal and active profile.
+Each lane owns its own runtime and Oracle connection, and profile switches tear
+down the old read-worker set. Confirmation grants are bound to session, lane,
+principal, lane generation, and statement/action digest, so replaying one from
+another lane or subject fails closed.
+
+*Evidence (green; CI):*
+- `crates/oraclemcp/tests/e2e_http_oauth.rs` —
+  `stateful_http_lanes_keep_operating_level_isolated_per_session_and_subject`
+  and `binary_http_rejects_bad_origin_and_forged_stateful_sessions`.
+- `crates/oraclemcp-core/src/http.rs` tests —
+  `stateful_requests_require_a_known_session_id_after_initialize`,
+  `uniform_auth_errors_no_enumeration_oracle`, and
+  `operator_session_set_level_is_lane_bound_preview_apply_drop`.
+- `crates/oraclemcp-core/src/lane.rs` tests —
+  stateful lane dispatch keys lanes by session and principal, close releases
+  capacity, and sibling lanes survive quarantine.
+
+### T12 — Browser dashboard and loopback confusion (S, T, E; assets A1, A2)
+
+*Threat.* A malicious web page or local process abuses loopback reachability,
+CSRF, browser storage, or a hidden terminal path to turn the dashboard into a
+write-capable SQL shell.
+
+*Mitigation.* Loopback alone is not dashboard authentication. `oraclemcp
+dashboard` mints a 0600 one-time pairing ticket in the user's runtime
+directory; `/dashboard/pair` requires loopback, consumes the ticket once, and
+sets an HttpOnly, SameSite=Strict session cookie. Dashboard GETs and POSTs
+enforce same-origin checks; POST actions also require a CSRF token and
+route-scoped action ticket. The Workbench exposes no PTY, SQLcl shell, or
+alternate SQL path: preview routes through `oracle_preview_sql`, reads through
+`oracle_query`, and guarded DML through `oracle_execute` with the same
+classifier, profile ceiling, rollback, confirmation, idempotency, and audit path
+used by MCP. Browser-originated DDL/Admin apply remains behind both the global
+dashboard workbench flag and a per-profile opt-in.
+
+*Evidence (green; CI):*
+- `crates/oraclemcp-core/src/http.rs` tests —
+  `dashboard_pairing_sets_strict_cookie_and_session_view`,
+  `malicious_page_cannot_trigger_dashboard_gated_action`,
+  `dashboard_workbench_ddl_apply_is_release_gated`, and
+  `workbench_no_bypass_guard_is_the_feature`.
+- `crates/oraclemcp/tests/dashboard_e2e.rs` — read-only dashboard acceptance
+  contracts and structured dry-run coverage.
+- `scripts/sensitive_data_lint.sh` — dashboard browser-storage and generic
+  sensitive-data lint.
+
+### T13 — Installer / package provenance confusion (T, E; assets A1, A2)
+
+*Threat.* A downloaded archive, container reference, or future package wrapper
+is replaced, or an operator mistakes a SHA-256 checksum for proof that the
+artifact came from this project.
+
+*Mitigation.* The shell installer verifies the downloaded release archive before
+extracting: SHA-256 checks transport integrity, while the cosign blob signature
+and attestation are the authenticity and provenance checks. Service-manager
+mutation and scoped HTTP client registration are explicit opt-in actions, not
+postinstall side effects. Containers should be pinned to immutable tags/digests.
+The planned npm/npx wrapper is a separate packaging bead and must keep the same
+rule: verify before run, no service/client mutation in postinstall.
+
+*Evidence (green; CI):*
+- `install.sh` and `scripts/installer_lint_and_offline_smoke.sh` — dry-run,
+  checksum/cosign wording, no implicit service mutation, and offline smoke.
+- `scripts/release_preflight.sh` — installer gate plus `server.json` version /
+  image checks.
+- `docs/hardening.md` — supply-chain checklist for pinned images, digest
+  verification, pinned toolchain, and cargo-deny policy.
+
 ## Evidence summary — run it yourself
 
 ```sh
