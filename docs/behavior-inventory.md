@@ -32,6 +32,28 @@ query text.
 | `oraclemcp sign-tool` | Signs operator-defined TOML custom tools with `ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY`. | `crates/oraclemcp/src/main.rs`, `README.md` |
 | Global `--robot-json` / `--json` | Machine-readable output mode for CLI commands that support it. | `crates/oraclemcp/src/main.rs` |
 
+## Agent Ergonomics Contract
+
+| Contract item | Current behavior | Evidence |
+| --- | --- | --- |
+| Binary names | `oraclemcp` is canonical; `om` is accepted as an argv0-aware short alias in help and hints. | `crates/oraclemcp/src/main.rs` |
+| Structured output | `--robot-json` and visible alias `--json` emit compact machine-readable stdout for robot-safe CLI commands; diagnostics remain on stderr. | `crates/oraclemcp/src/main.rs`, `crates/oraclemcp/src/robot_docs.rs` |
+| Exit-code dictionary | 0 success; 1 process/transport failure after startup; 2 invalid invocation, config/auth error, failed doctor check, or startup safety block; 3 service-manager state/failure; 4 `doctor --fix` refused out-of-scope repair. | `crates/oraclemcp/src/main.rs`, `crates/oraclemcp/src/service_lifecycle.rs`, `crates/oraclemcp-core/src/doctor.rs` |
+| Dangerous-operation gating | Local service install/restart/uninstall require `--dry-run` or `--yes`; guarded SQL writes require preview-derived confirmation plus operating-level gates. | `crates/oraclemcp/src/service_lifecycle.rs`, `crates/oraclemcp/src/dispatch/mod.rs` |
+| In-tool docs | `oraclemcp robot-docs guide` and `oraclemcp --json capabilities` expose the CLI contract and the MCP/CLI/dashboard parity matrix. | `crates/oraclemcp/src/robot_docs.rs`, `crates/oraclemcp/src/main.rs` |
+
+## MCP / CLI / Dashboard Parity Matrix
+
+| Capability | CLI | MCP | Dashboard | Status |
+| --- | --- | --- | --- | --- |
+| Tool and server capability discovery | `oraclemcp --json capabilities`, `oraclemcp --json robot-docs guide` | `tools/list`, `tools/call oracle_capabilities`, `resources/read oracle://capabilities` | Operator overview capability posture | Aligned |
+| Profile inventory and switching | `oraclemcp --json profiles`, `oraclemcp --json doctor --profile <profile>` | `oracle_list_profiles`, `oracle_switch_profile`, `oracle_connection_info` | Config profiles view, lane profile controls, connection health | Aligned |
+| Offline and live diagnostics | `oraclemcp --json doctor`, `oraclemcp --json doctor --online --profile <profile>` | `oracle_connection_info`, `oracle_capabilities` | Doctor probes, health and capacity pages | Aligned |
+| Guarded SQL workflow | Documented by `oraclemcp robot-docs guide` | `oracle_preview_sql`, `oracle_query`, `oracle_execute`, DDL/source-patch tools, `oracle_set_session_level` | SQL workbench read/execute/DDL modes | Aligned |
+| Schema/object metadata | `oraclemcp --json capabilities` advertises dictionary/source tools | `oracle_list_schemas`, `oracle_schema_inspect`, `oracle_search_objects`, `oracle_get_ddl`, `oracle_get_source` | Explorer schemas, objects, source/DDL detail | Aligned |
+| Service lifecycle and auth | `oraclemcp --json service ...`, `oraclemcp --json clients ...` | Stdio init token, HTTP OAuth, mTLS, client credentials | Pairing ticket, service health, active lanes | Aligned |
+| Audit-chain visibility | `oraclemcp audit verify <file>` | Privileged MCP actions append audit-chain records | Audit timeline, filters, proof export | Aligned |
+
 ## MCP Surface
 
 | Surface | Current contract | Evidence |

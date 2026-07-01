@@ -3204,11 +3204,23 @@ fn run_audit_verify(robot_json: bool, file: &Path, key_id_override: Option<&str>
     }
 }
 
-fn run_capabilities(robot_json: bool) -> ExitCode {
+fn capabilities_payload() -> serde_json::Value {
     // HTTP is advertised as available (the binary can serve it); live_db tracks
     // the compiled driver feature.
     let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), LIVE_DB, true);
-    let value = serde_json::to_value(&caps).unwrap_or(serde_json::Value::Null);
+    let mut value = serde_json::to_value(&caps).unwrap_or(serde_json::Value::Null);
+    if let serde_json::Value::Object(obj) = &mut value {
+        obj.insert("cli_contract".to_owned(), robot_docs::cli_contract_json());
+        obj.insert(
+            "mcp_cli_dashboard_parity".to_owned(),
+            robot_docs::mcp_cli_dashboard_parity_json(),
+        );
+    }
+    value
+}
+
+fn run_capabilities(robot_json: bool) -> ExitCode {
+    let value = capabilities_payload();
     let output = if robot_json {
         serde_json::to_string(&value).unwrap()
     } else {
@@ -5358,6 +5370,68 @@ mod tests {
     }
 
     #[test]
+    fn capabilities_payload_pins_cli_contract_and_parity_matrix() {
+        let out = capabilities_payload();
+        assert_eq!(
+            out["cli_contract"]["contract_version"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            out["cli_contract"]["structured_output"]["alias"],
+            serde_json::json!("--json")
+        );
+        assert_eq!(
+            out["cli_contract"]["binary_names"],
+            serde_json::json!(["oraclemcp", "om"])
+        );
+
+        let exit_codes = out["cli_contract"]["exit_codes"]
+            .as_array()
+            .expect("exit code dictionary");
+        for code in [0, 1, 2, 3, 4] {
+            assert!(
+                exit_codes
+                    .iter()
+                    .any(|entry| entry["code"] == serde_json::json!(code)),
+                "missing exit code {code}: {exit_codes:?}"
+            );
+        }
+        assert!(
+            serde_json::to_string(&out["cli_contract"])
+                .expect("json")
+                .contains("--dry-run")
+        );
+
+        let parity = out["mcp_cli_dashboard_parity"]["matrix"]
+            .as_array()
+            .expect("parity matrix");
+        assert_eq!(parity.len(), 7);
+        for id in [
+            "discovery",
+            "profile_inventory",
+            "diagnostics",
+            "guarded_sql",
+            "schema_explorer",
+            "service_and_auth",
+            "audit",
+        ] {
+            let row = parity
+                .iter()
+                .find(|row| row["id"] == serde_json::json!(id))
+                .unwrap_or_else(|| panic!("missing parity row {id}: {parity:?}"));
+            assert_eq!(row["status"], serde_json::json!("aligned"));
+            for face in ["cli", "mcp", "dashboard"] {
+                assert!(
+                    row[face]
+                        .as_array()
+                        .is_some_and(|values| !values.is_empty()),
+                    "{id} has no {face} surface"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn robot_docs_guide_outputs_agent_workflows() {
         let text = robot_docs::robot_docs_guide_text();
         assert!(text.contains("oraclemcp robot-docs guide"));
@@ -5371,6 +5445,16 @@ mod tests {
             out["structured_output"]["alias"],
             serde_json::json!("--json")
         );
+        assert_eq!(
+            out["cli_contract"]["exit_codes"][4]["code"],
+            serde_json::json!(4)
+        );
+        assert_eq!(
+            out["mcp_cli_dashboard_parity"]["status"],
+            serde_json::json!("aligned")
+        );
+        assert!(text.contains("MCP / CLI / dashboard parity"));
+        assert!(text.contains("Exit codes: 0 success"));
         assert!(text.contains("Client smoke tests"));
         assert!(text.contains("oraclemcp --json setup --profile <profile>"));
         assert!(text.contains("Always-on service"));

@@ -126,7 +126,161 @@ description = "Customer id"
 "#
 }
 
+pub(crate) fn cli_exit_codes_json() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "code": 0,
+            "name": "success",
+            "meaning": "command completed successfully"
+        },
+        {
+            "code": 1,
+            "name": "process_or_transport_failure",
+            "meaning": "stdout write failure or serve transport/runtime failure after startup"
+        },
+        {
+            "code": 2,
+            "name": "usage_config_or_safety_block",
+            "meaning": "invalid invocation, config/auth/custom-tool/audit/client-credential error, failed doctor check, or startup safety block"
+        },
+        {
+            "code": 3,
+            "name": "service_manager_failure",
+            "meaning": "local service is inactive, service logs/status are unavailable, or the service manager rejected a requested operation"
+        },
+        {
+            "code": 4,
+            "name": "doctor_fix_refused",
+            "meaning": "doctor --fix refused an out-of-scope repair target such as Oracle state, audit chain, classifier, or profile ceiling"
+        }
+    ])
+}
+
+pub(crate) fn cli_contract_json() -> serde_json::Value {
+    serde_json::json!({
+        "contract_version": 1,
+        "binary_names": ["oraclemcp", "om"],
+        "structured_output": {
+            "flag": "--robot-json",
+            "alias": "--json",
+            "stdout": "data only: compact JSON for robot-readable commands, human reports otherwise",
+            "stderr": "diagnostics only: startup notices, refusals, and operator hints"
+        },
+        "read_side_json_commands": [
+            ["oraclemcp", "--json", "info"],
+            ["oraclemcp", "--json", "setup", "--profile", "<profile>"],
+            ["oraclemcp", "--json", "profiles"],
+            ["oraclemcp", "--json", "doctor"],
+            ["oraclemcp", "--json", "doctor", "--online", "--profile", "<profile>"],
+            ["oraclemcp", "--json", "capabilities"],
+            ["oraclemcp", "--json", "robot-docs", "guide"],
+            ["oraclemcp", "--json", "service", "status"],
+            ["oraclemcp", "--json", "service", "logs"]
+        ],
+        "dangerous_operations": [
+            {
+                "command": "oraclemcp service install",
+                "safe_preview": ["oraclemcp", "--json", "service", "install", "--dry-run", "--profile", "<profile>"],
+                "execute_gate": "--yes"
+            },
+            {
+                "command": "oraclemcp service restart",
+                "safe_preview": ["oraclemcp", "--json", "service", "restart", "--dry-run"],
+                "execute_gate": "--yes"
+            },
+            {
+                "command": "oraclemcp service uninstall",
+                "safe_preview": ["oraclemcp", "--json", "service", "uninstall", "--dry-run"],
+                "execute_gate": "--yes"
+            },
+            {
+                "command": "MCP guarded writes: oracle_execute, oracle_create_or_replace, oracle_patch_source",
+                "safe_preview": ["oracle_preview_sql", "oracle_execute with commit=false", "oracle_create_or_replace without execute=true", "oracle_patch_source without execute=true"],
+                "execute_gate": "preview-derived confirmation token plus profile/session operating-level gate"
+            }
+        ],
+        "error_pedagogy": {
+            "bare_invocation_hint": "no subcommand exits 2 and names serve, doctor, and capabilities",
+            "service_mutation_hint": "missing --yes names --dry-run as the safe alternative",
+            "profiles_config_hint": "config load failures name ORACLEMCP_CONFIG and the default profiles path"
+        },
+        "determinism": {
+            "ordering": "tool names, custom tool files, and profile metadata are emitted in stable order",
+            "non_tty": "no interactive prompts are used; destructive host changes require flags instead",
+            "secrets": "profile and doctor outputs redact credential refs, resolved secrets, wallet paths, and connect strings"
+        },
+        "exit_codes": cli_exit_codes_json()
+    })
+}
+
+pub(crate) fn mcp_cli_dashboard_parity_json() -> serde_json::Value {
+    serde_json::json!({
+        "contract_version": 1,
+        "status": "aligned",
+        "matrix": [
+            {
+                "id": "discovery",
+                "capability": "tool and server capability discovery",
+                "cli": ["oraclemcp --json capabilities", "oraclemcp --json robot-docs guide"],
+                "mcp": ["tools/list", "tools/call oracle_capabilities", "resources/read oracle://capabilities"],
+                "dashboard": ["/operator/v1/actions/execute oracle_capabilities", "overview capability posture"],
+                "status": "aligned"
+            },
+            {
+                "id": "profile_inventory",
+                "capability": "profile inventory and profile switching",
+                "cli": ["oraclemcp --json profiles", "oraclemcp --json doctor --profile <profile>"],
+                "mcp": ["oracle_list_profiles", "oracle_switch_profile", "oracle_connection_info"],
+                "dashboard": ["config profiles view", "session lane profile controls", "connection health"],
+                "status": "aligned"
+            },
+            {
+                "id": "diagnostics",
+                "capability": "offline and live diagnostics",
+                "cli": ["oraclemcp --json doctor", "oraclemcp --json doctor --online --profile <profile>"],
+                "mcp": ["oracle_connection_info", "oracle_capabilities"],
+                "dashboard": ["doctor probes", "health and capacity pages"],
+                "status": "aligned"
+            },
+            {
+                "id": "guarded_sql",
+                "capability": "read, preview, DML, DDL, and source patch workflow",
+                "cli": ["oraclemcp robot-docs guide documents the guarded SQL flow"],
+                "mcp": ["oracle_preview_sql", "oracle_query", "oracle_execute", "oracle_create_or_replace", "oracle_patch_source", "oracle_set_session_level"],
+                "dashboard": ["SQL workbench read mode", "SQL workbench execute mode", "SQL workbench DDL mode"],
+                "status": "aligned"
+            },
+            {
+                "id": "schema_explorer",
+                "capability": "schema/object metadata and source inspection",
+                "cli": ["oraclemcp --json capabilities lists dictionary/source tools"],
+                "mcp": ["oracle_list_schemas", "oracle_schema_inspect", "oracle_search_objects", "oracle_get_ddl", "oracle_get_source"],
+                "dashboard": ["explorer schemas", "explorer objects", "source/DDL detail"],
+                "status": "aligned"
+            },
+            {
+                "id": "service_and_auth",
+                "capability": "local service lifecycle and HTTP client credentials",
+                "cli": ["oraclemcp --json service install --dry-run", "oraclemcp --json service status", "oraclemcp --json clients issue"],
+                "mcp": ["serve stdio init token", "serve HTTP OAuth", "serve HTTP mTLS", "serve HTTP client credentials"],
+                "dashboard": ["pairing ticket", "operator service health", "active lanes"],
+                "status": "aligned"
+            },
+            {
+                "id": "audit",
+                "capability": "audit-chain visibility and verification",
+                "cli": ["oraclemcp audit verify <file>"],
+                "mcp": ["audit hash-chain records every privileged action out of band"],
+                "dashboard": ["audit timeline", "audit filters", "proof export"],
+                "status": "aligned"
+            }
+        ]
+    })
+}
+
 pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
+    let cli_contract = cli_contract_json();
+    let parity = mcp_cli_dashboard_parity_json();
     serde_json::json!({
         "ok": true,
         "guide_version": 1,
@@ -136,6 +290,8 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
             "alias": "--json",
             "contract": "stdout is compact JSON; diagnostics go to stderr"
         },
+        "cli_contract": cli_contract,
+        "mcp_cli_dashboard_parity": parity,
         "tool_schema_contract": {
             "top_level": "every advertised MCP tool input schema is a JSON object",
             "strict_client_safe": "tool parameter schemas avoid top-level oneOf, anyOf, allOf, enum, and not"
@@ -380,10 +536,7 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
             "Preview service lifecycle changes with oraclemcp --json service install --dry-run before using --yes.",
             "Keep environment-specific tools, names, identities, and connection details in config."
         ],
-        "exit_codes": [
-            { "code": 0, "meaning": "success" },
-            { "code": 2, "meaning": "invalid arguments, config error, failed diagnostics, or startup safety block" }
-        ]
+        "exit_codes": cli_exit_codes_json()
     })
 }
 
@@ -395,6 +548,12 @@ Output contract
 - Diagnostics and serve startup status are written to stderr.
 - Read-only commands do not open a database unless their command explicitly says so.
 - MCP tool parameter schemas are top-level JSON objects and avoid top-level oneOf, anyOf, allOf, enum, and not for strict client adapters.
+
+CLI contract
+- Binary names: oraclemcp and the short argv0-aware alias om.
+- Exit codes: 0 success; 1 process/transport failure after startup; 2 invalid invocation, config/auth error, failed doctor check, or startup safety block; 3 service-manager state/failure; 4 doctor --fix refused an out-of-scope repair.
+- Dangerous host operations are flag-gated: service install/restart/uninstall require --dry-run for preview or --yes to execute.
+- No command prompts interactively; missing consent exits non-zero and names the safe preview command.
 
 Client setup
 - Install or build one oraclemcp binary, then configure every MCP client to call the same command, args, config file, and environment.
@@ -463,6 +622,15 @@ Safety model
 - DML rolls back by default.
 - DDL and ADMIN require commit=true plus confirmation because Oracle cannot rollback-preview them.
 - Confirmation tokens are process-local preview tokens; regenerate them after restarting the server.
+
+MCP / CLI / dashboard parity
+- Discovery: CLI capabilities and robot-docs, MCP tools/list and oracle_capabilities, dashboard overview capability posture.
+- Profiles: CLI profiles/doctor, MCP oracle_list_profiles/oracle_switch_profile/oracle_connection_info, dashboard config and lane controls.
+- Diagnostics: CLI doctor, MCP connection_info/capabilities, dashboard doctor probes and health pages.
+- Guarded SQL: MCP preview/query/execute/DDL/source patch tools and dashboard SQL workbench share the classifier, operating-level, confirmation, and audit path documented by robot-docs.
+- Schema explorer: MCP dictionary/source tools back the dashboard explorer; CLI capabilities advertises the same tool names.
+- Service/auth: CLI service and clients commands configure the service that serves MCP HTTP and the dashboard pairing flow.
+- Audit: CLI audit verify checks the same hash-chain the dashboard audit timeline renders.
 
 Configuration
 - Profiles: ~/.config/oraclemcp/profiles.toml or ORACLEMCP_CONFIG.
