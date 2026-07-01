@@ -40,6 +40,7 @@ scenarios=(
   scripts/e2e/audit_append.sh
   scripts/e2e/live_oracle.sh
   scripts/e2e/load_soak.sh
+  scripts/e2e/live_xe_headline.sh
 )
 
 run_dir="$ORACLEMCP_E2E_ARTIFACT_DIR/run_all"

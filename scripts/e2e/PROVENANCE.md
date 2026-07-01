@@ -19,3 +19,5 @@ Current generated evidence:
 | Audit append/hash-chain coverage | `crates/oraclemcp-audit` tests | current git checkout | `cargo test -p oraclemcp-audit concurrent_appends_keep_one_valid_chain -- --nocapture` |
 | Live Oracle coverage | `crates/oraclemcp-db/tests/live_oracle.rs` | `ORACLEMCP_TEST_*` test database | `cargo test -p oraclemcp-db --features live-xe --test live_oracle -- --nocapture` |
 | Live load/soak coverage | `crates/oraclemcp-db/tests/load_soak.rs` | `ORACLEMCP_TEST_*` test database with `ORACLEMCP_LIVE_XE=1` | `cargo test -p oraclemcp-db --test load_soak live_xe_load_soak_pool_accounting_and_latency -- --ignored --nocapture` |
+| Live multi-lane DB coverage | `crates/oraclemcp-db/tests/multi_lane_live_xe.rs` | `ORACLEMCP_TEST_*_A/B` test databases with `ORACLEMCP_MULTI_DB_LIVE_XE=1` | `cargo test -p oraclemcp-db --features live-xe --test multi_lane_live_xe -- --ignored --nocapture` |
+| G6 live-XE headline service attach | `scripts/e2e/live_xe_headline.sh`, `crates/oraclemcp/tests/live_xe_service_attach.rs` | `ORACLEMCP_TEST_*` plus multi-DB and contention gates | `bash scripts/e2e/live_xe_headline.sh --log` |

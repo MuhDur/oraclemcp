@@ -43,6 +43,7 @@ required=(
   scripts/e2e/audit_append.sh
   scripts/e2e/live_oracle.sh
   scripts/e2e/load_soak.sh
+  scripts/e2e/live_xe_headline.sh
   scripts/e2e/COVERAGE.md
   scripts/e2e/PROVENANCE.md
   scripts/e2e/DISCREPANCIES.md
@@ -57,6 +58,7 @@ required=(
   crates/oraclemcp-core/tests/concurrency_contract.rs
   crates/oraclemcp-core/tests/lane_state_machine.rs
   crates/oraclemcp-db/tests/multi_lane_live_xe.rs
+  crates/oraclemcp/tests/live_xe_service_attach.rs
 )
 missing=0
 for path in "${required[@]}"; do
@@ -113,6 +115,12 @@ if ! grep -F "Release acceptance CI suite" scripts/e2e/COVERAGE.md >/dev/null; t
 fi
 if ! grep -F "scripts/release_acceptance_ci_suite.sh" scripts/e2e/PROVENANCE.md >/dev/null; then
   e2e_finish_fail "PROVENANCE.md must document the HCI release acceptance suite command"
+fi
+if ! grep -F "G6 live-XE headline" scripts/e2e/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "COVERAGE.md must account for the G6 live-XE headline suite"
+fi
+if ! grep -F "scripts/e2e/live_xe_headline.sh" scripts/e2e/PROVENANCE.md >/dev/null; then
+  e2e_finish_fail "PROVENANCE.md must document the G6 live-XE headline command"
 fi
 
 e2e_log_event "coverage_summary" "assert" "pass" 0 "MUST coverage 6/6 score=1.00 xfail=0"
