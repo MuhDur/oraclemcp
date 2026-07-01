@@ -16,7 +16,7 @@ use std::ops::{Deref, DerefMut};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -219,25 +219,71 @@ enum LaneCommand {
         detail: McpSurfaceDetail,
         reply: oneshot::Sender<McpSurfaceOutcome>,
     },
-    Close {
-        reason: DispatchCloseReason,
-    },
+}
+
+struct LaneCloseState {
+    requested: AtomicBool,
+    reason: Mutex<Option<DispatchCloseReason>>,
+}
+
+impl LaneCloseState {
+    fn new() -> Self {
+        Self {
+            requested: AtomicBool::new(false),
+            reason: Mutex::new(None),
+        }
+    }
+
+    fn request(&self, reason: DispatchCloseReason) {
+        if self.requested.load(Ordering::Acquire) {
+            return;
+        }
+        let mut guard = self.reason.lock();
+        if guard.is_none() {
+            *guard = Some(reason);
+            self.requested.store(true, Ordering::Release);
+        }
+    }
+
+    fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    fn requested_reason(&self) -> Option<DispatchCloseReason> {
+        if self.requested.load(Ordering::Acquire) {
+            Some(
+                self.reason
+                    .lock()
+                    .unwrap_or(DispatchCloseReason::RuntimeDrop),
+            )
+        } else {
+            None
+        }
+    }
 }
 
 struct LaneRuntimeInner {
     name: String,
     generation: AtomicU64,
     status: Arc<AtomicU8>,
+    close_state: Arc<LaneCloseState>,
     sender: Mutex<Option<mpsc::Sender<LaneCommand>>>,
     join: Mutex<Option<JoinHandle<()>>>,
     _capacity_permit: Option<AdmissionPermit>,
 }
 
+impl LaneRuntimeInner {
+    fn request_close(&self, reason: DispatchCloseReason) -> Option<mpsc::Sender<LaneCommand>> {
+        self.close_state.request(reason);
+        self.sender.lock().take()
+    }
+}
+
 impl Drop for LaneRuntimeInner {
     fn drop(&mut self) {
         assert_no_lane_registry_lock("dropping a dispatch lane handle");
-        if let Some(sender) = self.sender.lock().take() {
-            let _ = enqueue_close(&sender, DispatchCloseReason::RuntimeDrop);
+        if let Some(sender) = self.request_close(DispatchCloseReason::RuntimeDrop) {
+            sender.wake_receiver();
         }
         if let Some(handle) = self.join.lock().take()
             && handle.thread().id() != thread::current().id()
@@ -328,6 +374,8 @@ impl LaneRuntime {
         let (sender, receiver) = mpsc::channel::<LaneCommand>(capacity);
         let status = Arc::new(AtomicU8::new(STATUS_STARTING));
         let thread_status = Arc::clone(&status);
+        let close_state = Arc::new(LaneCloseState::new());
+        let thread_close_state = Arc::clone(&close_state);
         let thread_name = format!("oraclemcp-lane-{name}");
         let lane_name = name.clone();
         let join = thread::Builder::new()
@@ -339,6 +387,7 @@ impl LaneRuntime {
                     receiver,
                     factory,
                     thread_status,
+                    thread_close_state,
                     panic_auditor,
                 );
             })
@@ -349,6 +398,7 @@ impl LaneRuntime {
                 name,
                 generation: AtomicU64::new(1),
                 status,
+                close_state,
                 sender: Mutex::new(Some(sender)),
                 join: Mutex::new(Some(join)),
                 _capacity_permit: capacity_permit,
@@ -410,6 +460,9 @@ impl LaneRuntime {
                 format!("dispatch lane {} is quarantined after panic", self.name()),
             ));
         }
+        if self.inner.close_state.is_requested() {
+            return Err(lane_stopped_before_reply(self.name()));
+        }
         let guard = self.inner.sender.lock();
         guard.as_ref().cloned().ok_or_else(|| {
             ErrorEnvelope::new(
@@ -419,10 +472,11 @@ impl LaneRuntime {
         })
     }
 
-    /// Stop accepting new commands for this lane and join its thread once the
-    /// current bounded mailbox drains. This is the N5 Streamable HTTP DELETE
-    /// hook; full dirty-session rollback is owned by the lane dispatcher/lease
-    /// layer, while this handle tears down the transport-facing lane resource.
+    /// Stop accepting new commands for this lane and join its thread once any
+    /// active dispatcher call returns. Queued commands are not run after close is
+    /// requested. This is the N5 Streamable HTTP DELETE hook; full dirty-session
+    /// rollback is owned by the lane dispatcher/lease layer, while this handle
+    /// tears down the transport-facing lane resource.
     pub fn close(&self) {
         self.close_with_reason(DispatchCloseReason::SessionDelete);
     }
@@ -431,9 +485,8 @@ impl LaneRuntime {
     /// up with the supplied lifecycle reason before the lane exits.
     pub fn close_with_reason(&self, reason: DispatchCloseReason) {
         assert_no_lane_registry_lock("closing a dispatch lane");
-        let sender = self.inner.sender.lock().take();
-        if let Some(sender) = sender {
-            let _ = enqueue_close(&sender, reason);
+        if let Some(sender) = self.inner.request_close(reason) {
+            sender.wake_receiver();
         }
         if let Some(handle) = self.inner.join.lock().take()
             && handle.thread().id() != thread::current().id()
@@ -489,7 +542,11 @@ impl ToolDispatch for LaneRuntime {
                     "dispatch lane receive cancelled before reply",
                 )),
                 Err(oneshot::RecvError::Closed) => {
-                    Outcome::Panicked(lane_panic_payload(self.name()))
+                    if self.inner.close_state.is_requested() {
+                        Outcome::Err(lane_stopped_before_reply(self.name()))
+                    } else {
+                        Outcome::Panicked(lane_panic_payload(self.name()))
+                    }
                 }
                 Err(_) => Outcome::Err(ErrorEnvelope::new(
                     ErrorClass::RuntimeStateRequired,
@@ -542,7 +599,11 @@ impl ToolDispatch for LaneRuntime {
                     "dispatch lane surface-state receive cancelled before reply",
                 )),
                 Err(oneshot::RecvError::Closed) => {
-                    Outcome::Panicked(lane_panic_payload(self.name()))
+                    if self.inner.close_state.is_requested() {
+                        Outcome::Err(lane_stopped_before_reply(self.name()))
+                    } else {
+                        Outcome::Panicked(lane_panic_payload(self.name()))
+                    }
                 }
                 Err(_) => Outcome::Err(ErrorEnvelope::new(
                     ErrorClass::RuntimeStateRequired,
@@ -886,21 +947,11 @@ fn lane_panic_payload(name: &str) -> PanicPayload {
     PanicPayload::new(format!("dispatch lane {name} panicked before replying"))
 }
 
-fn enqueue_close(
-    sender: &mpsc::Sender<LaneCommand>,
-    reason: DispatchCloseReason,
-) -> Result<(), SendError<LaneCommand>> {
-    let command = LaneCommand::Close { reason };
-    match sender.try_send(command) {
-        Ok(()) => Ok(()),
-        Err(SendError::Full(command)) => block_on_lane_bridge(async {
-            let Some(cx) = Cx::current() else {
-                return Err(SendError::Cancelled(command));
-            };
-            sender.send(&cx, command).await
-        }),
-        Err(err) => Err(err),
-    }
+fn lane_stopped_before_reply(name: &str) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::RuntimeStateRequired,
+        format!("dispatch lane {name} stopped before replying"),
+    )
 }
 
 fn run_lane_thread_with_factory(
@@ -909,6 +960,7 @@ fn run_lane_thread_with_factory(
     receiver: mpsc::Receiver<LaneCommand>,
     factory: Arc<LaneDispatchFactory>,
     status: Arc<AtomicU8>,
+    close_state: Arc<LaneCloseState>,
     panic_auditor: Option<Arc<Auditor>>,
 ) {
     let outcome = catch_unwind(AssertUnwindSafe(|| {
@@ -920,7 +972,12 @@ fn run_lane_thread_with_factory(
             .expect("Asupersync current-thread runtime builds for lane dispatch");
         status.store(STATUS_RUNNING, Ordering::Release);
         // block-on-boundary: sanctioned lane runtime on a dedicated OS thread.
-        runtime.block_on(run_lane_loop_with_factory(receiver, lane_context, factory));
+        runtime.block_on(run_lane_loop_with_factory(
+            receiver,
+            lane_context,
+            factory,
+            close_state,
+        ));
     }));
     match outcome {
         Ok(()) => status.store(STATUS_STOPPED, Ordering::Release),
@@ -978,13 +1035,37 @@ async fn run_lane_loop_with_factory(
     mut receiver: mpsc::Receiver<LaneCommand>,
     lane_context: LaneContext,
     factory: Arc<LaneDispatchFactory>,
+    close_state: Arc<LaneCloseState>,
 ) {
     let Some(cx) = Cx::current() else {
         return;
     };
     let mut dispatcher: Option<Arc<dyn ToolDispatch>> = None;
 
-    while let Ok(command) = receiver.recv(&cx).await {
+    loop {
+        if let Some(reason) = close_state.requested_reason() {
+            close_lane_dispatcher(dispatcher.as_deref(), &cx, &lane_context, reason).await;
+            break;
+        }
+        if cx.checkpoint().is_err() {
+            break;
+        }
+
+        let command = match receiver.recv(&cx).await {
+            Ok(command) => command,
+            Err(_) => {
+                if let Some(reason) = close_state.requested_reason() {
+                    close_lane_dispatcher(dispatcher.as_deref(), &cx, &lane_context, reason).await;
+                }
+                break;
+            }
+        };
+
+        if let Some(reason) = close_state.requested_reason() {
+            close_lane_dispatcher(dispatcher.as_deref(), &cx, &lane_context, reason).await;
+            break;
+        }
+
         match command {
             LaneCommand::Dispatch {
                 context,
@@ -1031,21 +1112,26 @@ async fn run_lane_loop_with_factory(
                     .await;
                 let _ = reply.send_blocking(result);
             }
-            LaneCommand::Close { reason } => {
-                if let Some(dispatcher) = dispatcher.as_ref()
-                    && let Err(err) = dispatcher.close(&cx, reason).await
-                {
-                    tracing::warn!(
-                        lane = %lane_context.lane_id(),
-                        close_reason = reason.as_str(),
-                        error_class = ?err.error_class,
-                        error = %err.message,
-                        "stateful lane dispatcher cleanup returned an error"
-                    );
-                }
-                break;
-            }
         }
+    }
+}
+
+async fn close_lane_dispatcher(
+    dispatcher: Option<&dyn ToolDispatch>,
+    cx: &Cx,
+    lane_context: &LaneContext,
+    reason: DispatchCloseReason,
+) {
+    if let Some(dispatcher) = dispatcher
+        && let Err(err) = dispatcher.close(cx, reason).await
+    {
+        tracing::warn!(
+            lane = %lane_context.lane_id(),
+            close_reason = reason.as_str(),
+            error_class = ?err.error_class,
+            error = %err.message,
+            "stateful lane dispatcher cleanup returned an error"
+        );
     }
 }
 
@@ -1111,6 +1197,45 @@ mod tests {
                     .recv()
                     .expect("test coordinator releases blocked lane");
                 Outcome::Ok(json!({ "lane_thread": format!("{lane_thread:?}") }))
+            })
+        }
+    }
+
+    struct BlockingCloseRecordingDispatch {
+        entered: std_mpsc::Sender<thread::ThreadId>,
+        release: Mutex<std_mpsc::Receiver<()>>,
+        close_reasons: Arc<Mutex<Vec<DispatchCloseReason>>>,
+    }
+
+    impl ToolDispatch for BlockingCloseRecordingDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            Box::pin(async move {
+                let lane_thread = thread::current().id();
+                self.entered
+                    .send(lane_thread)
+                    .expect("test coordinator waits for lane entry");
+                self.release
+                    .lock()
+                    .recv()
+                    .expect("test coordinator releases blocked lane");
+                Outcome::Ok(json!({ "lane_thread": format!("{lane_thread:?}") }))
+            })
+        }
+
+        fn close<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            reason: DispatchCloseReason,
+        ) -> crate::server::DispatchCloseFuture<'a> {
+            Box::pin(async move {
+                self.close_reasons.lock().push(reason);
+                Ok(())
             })
         }
     }
@@ -1245,6 +1370,16 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("lane mailbox did not fill");
+    }
+
+    fn wait_for_close_requested(lane: &LaneRuntime) {
+        for _ in 0..50 {
+            if lane.inner.close_state.is_requested() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("lane close request was not published");
     }
 
     #[test]
@@ -1411,6 +1546,83 @@ mod tests {
             close_reasons.lock().as_slice(),
             &[DispatchCloseReason::ServerShutdown]
         );
+    }
+
+    #[test]
+    fn close_requested_with_full_mailbox_preempts_queued_work() {
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let close_reasons = Arc::new(Mutex::new(Vec::new()));
+        let lane = LaneRuntime::spawn(
+            "full-mailbox-close",
+            Arc::new(BlockingCloseRecordingDispatch {
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+                close_reasons: Arc::clone(&close_reasons),
+            }),
+            1,
+        );
+
+        let first_call = {
+            let lane = lane.clone();
+            thread::spawn(move || {
+                block_on_lane_bridge(async move {
+                    let cx = Cx::current().expect("bridge installs Cx");
+                    lane.dispatch(&cx, DispatchContext::default(), "first", Value::Null)
+                        .await
+                        .expect("first blocked call eventually replies")
+                })
+            })
+        };
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first call reached the lane");
+
+        let second_call = {
+            let lane = lane.clone();
+            thread::spawn(move || {
+                block_on_lane_bridge(async move {
+                    let cx = Cx::current().expect("bridge installs Cx");
+                    lane.dispatch(&cx, DispatchContext::default(), "second", Value::Null)
+                        .await
+                })
+            })
+        };
+        wait_for_queued_lane_command(&lane);
+
+        let lane_for_close = lane.clone();
+        let (closed_tx, closed_rx) = std_mpsc::channel();
+        thread::spawn(move || {
+            lane_for_close.close_with_reason(DispatchCloseReason::ServerShutdown);
+            closed_tx.send(()).expect("test waits for close completion");
+        });
+        wait_for_close_requested(&lane);
+
+        release_tx.send(()).expect("release first call");
+        first_call.join().expect("first caller joined");
+
+        let second_entry = entered_rx.recv_timeout(Duration::from_millis(100));
+        if second_entry.is_ok() {
+            let _ = release_tx.send(());
+        }
+        assert!(
+            second_entry.is_err(),
+            "queued work must not enter the dispatcher after close is requested"
+        );
+
+        closed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("close completes after active dispatch returns");
+        assert_eq!(lane.status(), LaneRuntimeStatus::Stopped);
+        assert_eq!(
+            close_reasons.lock().as_slice(),
+            &[DispatchCloseReason::ServerShutdown]
+        );
+
+        match second_call.join().expect("second caller joined") {
+            Outcome::Err(err) => assert_eq!(err.error_class, ErrorClass::RuntimeStateRequired),
+            other => panic!("queued call should fail as stopped, got {other:?}"),
+        }
     }
 
     #[test]
