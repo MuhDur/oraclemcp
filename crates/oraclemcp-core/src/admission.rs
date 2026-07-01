@@ -19,11 +19,17 @@ use serde_json::json;
 
 /// Default `retry_after_ms` returned with a `BUSY`.
 pub const DEFAULT_RETRY_AFTER_MS: u64 = 250;
-/// N4 upper-bound default for stateless read connections per profile.
+/// CX-I6 capacity measurement that finalized the shipped N4 upper-bound caps.
+///
+/// Evidence: `tests/artifacts/perf/20260630-cx-i6-phase0-capacity/RESULTS.md`.
+#[cfg(test)]
+const N4B_CAPACITY_MEASUREMENT_ID: &str = "20260630-cx-i6-phase0-capacity";
+
+/// N4b finalized upper-bound default for stateless read connections per profile.
 pub const DEFAULT_READ_PER_PROFILE_CAP: usize = 16;
-/// N4 upper-bound default for stateful/write lanes per profile.
+/// N4b finalized upper-bound default for stateful/write lanes per profile.
 pub const DEFAULT_STATEFUL_PER_PROFILE_CAP: usize = 8;
-/// N4 upper-bound default for all regular lanes on one host.
+/// N4b finalized upper-bound default for all lane slots on one host.
 pub const DEFAULT_GLOBAL_HOST_CAP: usize = 64;
 /// N4 operator reserve: kept out of regular agent admission.
 pub const DEFAULT_OPERATOR_RESERVED_LANES: usize = 1;
@@ -143,9 +149,14 @@ impl AdmissionController {
         }
     }
 
-    /// N4 defaults for stateful/write lanes: 8 per subject/profile, 64 global
-    /// upper bound, with one operator and one doctor slot reserved outside
-    /// regular agent admission.
+    /// N4b finalized defaults for stateful/write lanes: 8 per subject/profile,
+    /// 64 global upper bound, with one operator and one doctor slot reserved
+    /// outside regular agent admission.
+    ///
+    /// These upper bounds are pinned to the CX-I6 measurement recorded as
+    /// `20260630-cx-i6-phase0-capacity`: 16 real lane-owned Oracle sessions,
+    /// 2.00 observed OS threads per lane, 4.00 observed fds per lane, and host
+    /// limits supporting the 64-lane candidate on the measured dev host.
     #[must_use]
     pub fn n4_stateful_defaults() -> Self {
         Self::with_reserved(
@@ -379,7 +390,21 @@ mod tests {
     fn n4_defaults_keep_operator_and_doctor_reserve_out_of_regular_capacity() {
         let cx = test_cx();
         let ctrl = AdmissionController::n4_stateful_defaults();
-        assert_eq!(ctrl.regular_global_cap(), DEFAULT_GLOBAL_HOST_CAP - 2);
+        assert_eq!(
+            N4B_CAPACITY_MEASUREMENT_ID,
+            "20260630-cx-i6-phase0-capacity"
+        );
+        assert_eq!(DEFAULT_READ_PER_PROFILE_CAP, 16);
+        assert_eq!(DEFAULT_STATEFUL_PER_PROFILE_CAP, 8);
+        assert_eq!(DEFAULT_GLOBAL_HOST_CAP, 64);
+        assert_eq!(DEFAULT_OPERATOR_RESERVED_LANES, 1);
+        assert_eq!(DEFAULT_DOCTOR_RESERVED_LANES, 1);
+        assert_eq!(
+            ctrl.regular_global_cap(),
+            DEFAULT_GLOBAL_HOST_CAP
+                - DEFAULT_OPERATOR_RESERVED_LANES
+                - DEFAULT_DOCTOR_RESERVED_LANES
+        );
         let mut permits = Vec::new();
         for i in 0..ctrl.regular_global_cap() {
             permits.push(

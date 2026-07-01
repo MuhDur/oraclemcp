@@ -493,12 +493,18 @@ Served stateful HTTP lanes have a separate N4 admission gate before the lane
 thread or lane-owned Oracle connection can be opened. The current served
 defaults are upper bounds: 8 stateful lanes per principal bucket, 64 total
 host slots, with 1 operator slot and 1 doctor/readiness slot held out of
-regular agent admission. When regular capacity is exhausted, the request returns
-the typed `AT_CAPACITY` error with `retry_after_ms`, HTTP 429, `Retry-After`,
-and a redacted capacity snapshot. The snapshot reports capacities and redacted
-subject length only; it does not echo bearer tokens, raw principals, profiles,
-connect strings, or credentials. The broader N4b work computes effective
-DB/host ceilings from live DB limits, fd limits, task limits, and memory budget.
+regular agent admission. N4b finalized those shipped upper bounds from the
+CX-I6 Phase-0 measurement recorded in
+`tests/artifacts/perf/20260630-cx-i6-phase0-capacity/RESULTS.md`, which observed
+2.00 OS threads and 4.00 file descriptors per warmed stateful lane and enough
+finite fd/task headroom for the 64-slot host candidate on the measured dev host.
+When regular capacity is exhausted, the request returns the typed `AT_CAPACITY`
+error with `retry_after_ms`, HTTP 429, `Retry-After`, and a redacted capacity
+snapshot. The snapshot reports capacities and redacted subject length only; it
+does not echo bearer tokens, raw principals, profiles, connect strings, or
+credentials. Runtime effective-cap surfaces still clamp the configured caps by
+the service context's visible DB/session, fd, task, and memory budgets when
+those values are available.
 
 `oraclemcp --json service install --dry-run` includes the generated service-unit
 hardening. On Linux systemd user units are `Type=notify`/`NotifyAccess=main`,

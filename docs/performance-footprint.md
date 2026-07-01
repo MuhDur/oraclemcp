@@ -231,7 +231,7 @@ passed.
 
 ## Phase-0 Lane Capacity Spike (CX-I6)
 
-CX-I6 measures the WP-N stateful lane shape before N4b finalizes shipped
+CX-I6 measured the WP-N stateful lane shape that N4b uses to finalize shipped
 capacity defaults. The live harness is:
 
 ```text
@@ -266,13 +266,13 @@ measurement data.
 Interpretation: this validates the Appendix A.11 budgeting assumption for the
 current lane bridge on this host: each stateful lane costs one dedicated lane
 thread plus one current-thread runtime worker. The finite process/fd limits
-leave substantial headroom for the N4 upper-bound defaults now wired into the
-served path: 16 stateless read connections per profile, 8 stateful lanes per
-principal bucket, and 64 total host slots with operator/doctor reserve kept out
-of regular agent admission. cgroup pids and memory limits were unavailable and
-therefore recorded as unknown rather than guessed. This section is evidence for
-N4/N4b; N4b still owns live effective-cap computation from DB/session, fd, task,
-and memory limits.
+leave substantial headroom for the N4b-finalized upper-bound defaults now wired
+into the served path: 16 stateless read connections per profile, 8 stateful
+lanes per principal bucket, and 64 total host slots with operator/doctor reserve
+kept out of regular agent admission. cgroup pids and memory limits were
+unavailable and therefore recorded as unknown rather than guessed. Runtime
+effective-cap surfaces still clamp configured caps by DB/session, fd, task, and
+memory limits when those values are available.
 
 ## Scope Limits
 
