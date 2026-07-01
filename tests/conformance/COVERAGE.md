@@ -128,6 +128,7 @@ Total tracked requirements: 50 MUST, 2 SHOULD, 52 tested.
 | OPERATOR-V1-006 | MUST | Operator v1 | B.6 `mcp_and_operator_v1_conformance_matrix` records 1.00 MUST coverage and runs the UI fixture schema validator. |
 | OPERATOR-V1-007 | MUST | Operator v1 | Gated-action operator routes accept or derive idempotency keys, return typed in-progress/conflict responses, and replay the original redacted response for same-key retries without re-entering guarded dispatch. |
 | OPERATOR-V1-008 | MUST | Operator v1 | `/operator/v1/events` resumes by `cursor` / `Last-Event-ID` from a bounded subject+lane ring, emits gap markers or typed expiry for stale cursors, and rejects cross-lane cursors before replay. |
+| HTTP-SURFACE-001 | MUST | HTTP auth/no-leak | The surface inventory asserts per-surface authn/gating for `/mcp`, stateful SSE GET, `/operator/v1`, dashboard pairing/POSTs, config apply, `/readyz`, and `/metrics`; unauthenticated infra probes expose no DB identity, SQL text, bind values, wallet, credential, or password markers. |
 | HTTPS-001 | MUST | HTTPS / mTLS | Server-only native TLS accepts a valid HTTPS handshake. |
 | HTTPS-002 | MUST | HTTPS / mTLS | Native mTLS rejects clients without a certificate and accepts a client certificate signed by the configured CA. |
 | DB-SER-001 | MUST | Oracle structured cells | A published JSON Schema exists for `OracleCell::structured` and declares ARRAY, JSON/OSON, VECTOR, TSTZ, object marker, and generic unsupported variants. |
@@ -160,6 +161,7 @@ Total tracked requirements: 50 MUST, 2 SHOULD, 52 tested.
 | OPERATOR-V1-006 | `scripts/e2e/mcp_and_operator_v1_conformance_matrix.sh` |
 | OPERATOR-V1-007 | `crates/oraclemcp-core/src/http.rs::tests::operator_action_idempotency_replays_same_response_and_conflicts_on_drift`; `crates/oraclemcp-core/src/http.rs::tests::operator_idempotency_ledger_reports_in_progress_before_completion` |
 | OPERATOR-V1-008 | `crates/oraclemcp-core/src/http.rs::tests::operator_events_resume_is_lane_scoped`; `crates/oraclemcp-core/src/http.rs::tests::operator_events_last_event_id_reports_gap_for_slow_consumer` |
+| HTTP-SURFACE-001 | `crates/oraclemcp-core/src/http.rs::tests::surface_inventory_authn_no_leak`; `docs/behavior-inventory.md` |
 | HTTPS-001 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_accepts_tls_handshake` |
 | HTTPS-002 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_requires_client_certificate_when_mtls_is_configured` |
 | WRITE-INTENT-001 | `crates/oraclemcp-core/src/write_intent.rs::tests::resolved_intent_survives_reopen_and_rejects_same_grant_sql_replay`; `crates/oraclemcp/src/main.rs::tests::build_write_intent_log_fails_closed_on_unresolved_restart_intent`; `crates/oraclemcp/src/dispatch/tests.rs::execute_commit_in_doubt_leaves_durable_intent_unresolved` |

@@ -348,6 +348,13 @@ surface. Everything below concerns the HTTP transport (`serve --listen`).
   mode with `serve --client-credentials` or `service install
   --client-credentials`. Rotate or revoke one `client_id` without changing the
   others; issue/rotate print the new bearer once.
+- **Infra probes are intentionally small.** `/readyz`, `/healthz`, and
+  `/metrics` are unauthenticated infrastructure surfaces and bypass OAuth/Host
+  guards so supervisors can probe them. They must stay allow-list-first:
+  readiness exposes process/readiness booleans only, metrics expose counters and
+  redacted capacity labels, and OTLP export redacts span/log attributes before
+  egress. These surfaces must not include `v$session`, database identity, SQL
+  text, bind values, wallet paths, credential refs, or passwords.
 - **TLS / mTLS.** Native rustls TLS is enabled with `[http.tls]` or
   `--tls-cert`/`--tls-key`. Adding `[http.tls.client_ca_path]` or
   `--mtls-client-ca` requires client certificates (mTLS) verified against that

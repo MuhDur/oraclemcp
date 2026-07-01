@@ -3787,6 +3787,255 @@ mod tests {
         assert_eq!(resp.status, 200, "healthz bypasses OAuth + guards");
     }
 
+    #[test]
+    fn surface_inventory_authn_no_leak() {
+        let server = test_server();
+
+        let oauth_cfg = HttpTransportConfig {
+            json_response: true,
+            stateful: true,
+            resource_metadata: Some(
+                serde_json::json!({"resource": "https://oraclemcp.example/mcp"}),
+            ),
+            oauth: Some(oauth_enforcement()),
+            ..Default::default()
+        };
+        let mcp_post = handle_http_request(&server, &oauth_cfg, post(&init_body()));
+        let mcp_sse_get = handle_http_request(
+            &server,
+            &oauth_cfg,
+            HttpRequest::new(
+                "GET",
+                MCP_PATH,
+                [("host", "127.0.0.1"), ("accept", "text/event-stream")],
+                Vec::new(),
+            )
+            .with_peer_loopback(true),
+        );
+        let metadata = handle_http_request(
+            &server,
+            &oauth_cfg,
+            HttpRequest::new(
+                "GET",
+                PROTECTED_RESOURCE_METADATA_PATH,
+                [("host", "127.0.0.1"), ("accept", "application/json")],
+                Vec::new(),
+            ),
+        );
+
+        let (auditor, _sink) = operator_auditor();
+        let operator_cfg = HttpTransportConfig {
+            operator_auditor: Some(auditor),
+            ..Default::default()
+        };
+        let operator_remote = handle_http_request(
+            &server,
+            &operator_cfg,
+            HttpRequest::new(
+                "GET",
+                "/operator/v1/health",
+                [("host", "127.0.0.1"), ("accept", "application/json")],
+                Vec::new(),
+            )
+            .with_peer_loopback(false),
+        );
+        let operator_no_audit = handle_http_request(
+            &server,
+            &HttpTransportConfig::default(),
+            operator_json_get("/operator/v1/health"),
+        );
+
+        let dir = dashboard_test_dir("surface-inventory");
+        let dashboard_cfg = HttpTransportConfig {
+            dashboard_auth: Some(Arc::new(DashboardAuth::new(dir))),
+            operator_auditor: operator_cfg.operator_auditor.clone(),
+            ..Default::default()
+        };
+        let dashboard_post = handle_http_request(
+            &server,
+            &dashboard_cfg,
+            HttpRequest::new(
+                "POST",
+                "/operator/v1/actions/preview",
+                [
+                    ("host", "127.0.0.1"),
+                    ("origin", "http://127.0.0.1"),
+                    ("sec-fetch-site", "same-origin"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json"),
+                ],
+                serde_json::json!({
+                    "tool": "oracle_preview_sql",
+                    "arguments": { "sql": "SELECT 1 FROM dual" }
+                })
+                .to_string()
+                .into_bytes(),
+            )
+            .with_peer_loopback(true),
+        );
+        let dashboard_pairing_remote = handle_http_request(
+            &server,
+            &dashboard_cfg,
+            HttpRequest::new(
+                "GET",
+                format!("{DASHBOARD_PAIR_PATH}?ticket=opaque"),
+                [("host", "127.0.0.1"), ("accept", "text/html")],
+                Vec::new(),
+            )
+            .with_peer_loopback(false),
+        );
+        let config_apply_remote = handle_http_request(
+            &server,
+            &operator_cfg,
+            HttpRequest::new(
+                "POST",
+                "/operator/v1/config/apply",
+                [
+                    ("host", "127.0.0.1"),
+                    ("content-type", "application/json"),
+                    ("accept", "application/json"),
+                ],
+                serde_json::json!({"draft_toml": ""})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .with_peer_loopback(false),
+        );
+
+        let health = HealthState::new("0.1.0");
+        health.set_ready(true);
+        let metrics = Arc::new(Metrics::new());
+        metrics.record_request("oracle_query", "ok");
+        let mut observability_cfg = obs_config(
+            health,
+            Some(metrics),
+            Some(Arc::new(StaticProbe(std::sync::atomic::AtomicBool::new(
+                true,
+            )))),
+        );
+        observability_cfg.oauth = Some(oauth_enforcement());
+        observability_cfg.allowed_hosts = vec!["only-this.example".to_owned()];
+        observability_cfg.allowed_origins = vec!["https://only-this.example".to_owned()];
+        let readyz = handle_http_request(
+            &server,
+            &observability_cfg,
+            HttpRequest::new(
+                "GET",
+                READYZ_PATH,
+                [
+                    ("host", "attacker.example"),
+                    ("origin", "https://evil.example"),
+                    ("accept", "application/json"),
+                ],
+                Vec::new(),
+            ),
+        );
+        let metrics_response = handle_http_request(
+            &server,
+            &observability_cfg,
+            HttpRequest::new(
+                "GET",
+                METRICS_PATH,
+                [
+                    ("host", "attacker.example"),
+                    ("origin", "https://evil.example"),
+                    ("accept", "text/plain"),
+                ],
+                Vec::new(),
+            ),
+        );
+
+        let inventory = [
+            ("mcp POST", mcp_post.status, 401, "oauth bearer required"),
+            (
+                "mcp SSE GET",
+                mcp_sse_get.status,
+                401,
+                "oauth bearer required",
+            ),
+            (
+                "oauth metadata",
+                metadata.status,
+                200,
+                "public discovery only",
+            ),
+            (
+                "operator remote",
+                operator_remote.status,
+                403,
+                "operator authority required",
+            ),
+            (
+                "operator no audit",
+                operator_no_audit.status,
+                503,
+                "audit required before operator action",
+            ),
+            (
+                "dashboard POST",
+                dashboard_post.status,
+                401,
+                "dashboard session required",
+            ),
+            (
+                "dashboard pairing remote",
+                dashboard_pairing_remote.status,
+                403,
+                "loopback pairing required",
+            ),
+            (
+                "config apply remote",
+                config_apply_remote.status,
+                403,
+                "operator authority required",
+            ),
+            ("readyz", readyz.status, 200, "unauth infra no-leak"),
+            (
+                "metrics",
+                metrics_response.status,
+                200,
+                "unauth infra no-leak",
+            ),
+        ];
+        for (surface, actual, expected, gate) in inventory {
+            assert_eq!(
+                actual, expected,
+                "{surface} should enforce {gate}, got HTTP {actual}"
+            );
+        }
+
+        assert_observability_no_db_or_secret_leak("readyz", &readyz);
+        assert_observability_no_db_or_secret_leak("metrics", &metrics_response);
+        assert_eq!(
+            metrics_response.header("content-type"),
+            Some("text/plain; version=0.0.4; charset=utf-8")
+        );
+    }
+
+    fn assert_observability_no_db_or_secret_leak(surface: &str, response: &HttpResponse) {
+        let body = String::from_utf8_lossy(&response.body).to_ascii_lowercase();
+        for forbidden in [
+            "v$session",
+            "app_user",
+            "orcl",
+            "freepdb",
+            "connect_string",
+            "credential_ref",
+            "wallet",
+            "password",
+            "sql_text",
+            "bind_values",
+            "session_user",
+            "serial_number",
+            "client_identifier",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "{surface} leaked forbidden marker {forbidden}: {body}"
+            );
+        }
+    }
+
     fn oauth_enforcement() -> Arc<OAuthEnforcement> {
         Arc::new(OAuthEnforcement {
             config: ResourceServerConfig {
