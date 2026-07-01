@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WEB="$ROOT/web"
 DIST="$WEB/dist"
 HASH_FILE="$DIST/oraclemcp-dashboard.sha256"
+SBOM_FILE="$DIST/oraclemcp-dashboard.cyclonedx.json"
 MAX_CRATE_BYTES="${ORACLEMCP_MAX_CRATE_BYTES:-1000000}"
 
 write_hash=false
@@ -45,6 +46,8 @@ need sha256sum
 
 [ -f "$WEB/package.json" ] || fail "missing web/package.json"
 [ -f "$WEB/package-lock.json" ] || fail "missing web/package-lock.json; run npm install --package-lock-only in web/"
+package_name="$(jq -r '.name' "$WEB/package.json")"
+package_version="$(jq -r '.version' "$WEB/package.json")"
 
 if jq -e '
   [
@@ -62,6 +65,14 @@ fi
 
 [ -d "$DIST" ] || fail "missing web/dist; run npm run build in web/"
 [ -f "$DIST/index.html" ] || fail "missing web/dist/index.html"
+[ -f "$SBOM_FILE" ] || fail "missing $SBOM_FILE; run npm run build in web/"
+
+jq -e '
+  .bomFormat == "CycloneDX" and
+  (.components | type == "array") and
+  (.metadata.component["bom-ref"] == ($name + "@" + $version))
+' --arg name "$package_name" --arg version "$package_version" "$SBOM_FILE" >/dev/null ||
+  fail "dashboard SBOM is not a CycloneDX document for $package_name@$package_version"
 
 tmp_hash="$(mktemp)"
 trap 'rm -f "$tmp_hash"' EXIT

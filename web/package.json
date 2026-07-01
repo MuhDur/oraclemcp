@@ -9,11 +9,30 @@
     "npm": "10.9.4"
   },
   "scripts": {
-    "build": "vite build && bash ../scripts/dashboard_bundle_check.sh --write-hash",
+    "dev": "vite",
+    "build": "vite build && npm run sbom && bash ../scripts/dashboard_bundle_check.sh --write-hash",
+    "preview": "vite preview",
+    "sbom": "npm sbom --sbom-format cyclonedx --json > dist/oraclemcp-dashboard.cyclonedx.json",
     "check": "tsc --noEmit && npm run build"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "4.3.2",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.3",
+    "tailwindcss": "4.3.2",
     "typescript": "6.0.3",
     "vite": "8.1.2"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.101.2",
+    "@tanstack/react-router": "1.170.16",
+    "@tanstack/react-table": "8.21.3",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "1.22.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "tailwind-merge": "3.6.0"
   }
 }
