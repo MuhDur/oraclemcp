@@ -96,7 +96,7 @@ Harnesses:
 | Durable SQL idempotency | 1 | 0 | 1 | 1 | 0 | 100% |
 | WP-N concurrency/session | 11 | 0 | 11 | 11 | 0 | 100% |
 
-Total tracked requirements: 62 MUST, 2 SHOULD, 64 tested.
+Total tracked requirements: 68 MUST, 2 SHOULD, 70 tested.
 
 ## Requirement IDs
 
@@ -146,6 +146,12 @@ Total tracked requirements: 62 MUST, 2 SHOULD, 64 tested.
 | OPERATOR-V1-007 | MUST | Operator v1 | Gated-action operator routes accept or derive idempotency keys, return typed in-progress/conflict responses, and replay the original redacted response for same-key retries without re-entering guarded dispatch. |
 | OPERATOR-V1-008 | MUST | Operator v1 | `/operator/v1/events` resumes by `cursor` / `Last-Event-ID` from a bounded subject+lane ring, emits gap markers or typed expiry for stale cursors, and rejects cross-lane cursors before replay. |
 | OPERATOR-V1-009 | MUST | Operator v1 | B.8 change proposal apply re-classifies stored SQL templates and re-checks level/grants/subject at apply time instead of trusting stored proposal verdicts. |
+| DASHBOARD-B8-001 | MUST | Dashboard B.8 | The embedded dashboard bundle serves the SPA when enabled, never falls back from API routes to HTML, and the bundle gate checks npm audit, lockfile provenance, SBOM shape, and content hashes. |
+| DASHBOARD-B8-002 | MUST | Dashboard B.8 | A malicious page cannot trigger dashboard gated actions: browser POSTs require same-origin, HttpOnly/SameSite cookie, CSRF, route action ticket, CSP frame controls, and no browser-storage token persistence. |
+| DASHBOARD-B8-003 | MUST | Dashboard B.8 | Config draft/apply is staged, strictly validated, redacted, atomic, audited, reload-aware, and rollback restores the prior config without serializing secret references. |
+| DASHBOARD-B8-004 | MUST | Dashboard B.8 | Workbench execution has no alternate SQL path: preview/read/write route through the same classifier, ceilings, preview/confirm, idempotency, audit, and dispatcher path used by MCP agents. |
+| DASHBOARD-B8-005 | MUST | Dashboard B.8 | Change proposal apply re-classifies every current SQL template, re-checks level/grants/subject at apply time, forwards through gated actions, and treats stored verdicts as review metadata only. |
+| DASHBOARD-B8-006 | MUST | Dashboard B.8 | Dashboard skin grammar is a contract: 2D and table no-WebGL fallbacks stay available, Orrery remains lazy/quarantined, a11y anchors stay present, and credential secrets are never rendered. |
 | HTTP-SURFACE-001 | MUST | HTTP auth/no-leak | The surface inventory asserts per-surface authn/gating for `/mcp`, stateful SSE GET, `/operator/v1`, dashboard pairing/POSTs, config apply, `/readyz`, and `/metrics`; unauthenticated infra probes expose no DB identity, SQL text, bind values, wallet, credential, or password markers. |
 | HTTPS-001 | MUST | HTTPS / mTLS | Server-only native TLS accepts a valid HTTPS handshake. |
 | HTTPS-002 | MUST | HTTPS / mTLS | Native mTLS rejects clients without a certificate and accepts a client certificate signed by the configured CA. |
@@ -191,6 +197,12 @@ Total tracked requirements: 62 MUST, 2 SHOULD, 64 tested.
 | OPERATOR-V1-007 | `crates/oraclemcp-core/src/http.rs::tests::operator_action_idempotency_replays_same_response_and_conflicts_on_drift`; `crates/oraclemcp-core/src/http.rs::tests::operator_idempotency_ledger_reports_in_progress_before_completion` |
 | OPERATOR-V1-008 | `crates/oraclemcp-core/src/http.rs::tests::operator_events_resume_is_lane_scoped`; `crates/oraclemcp-core/src/http.rs::tests::operator_events_last_event_id_reports_gap_for_slow_consumer` |
 | OPERATOR-V1-009 | `crates/oraclemcp-core/src/http.rs::tests::cp_apply_reclassifies_never_trusts_stored_verdict` |
+| DASHBOARD-B8-001 | `crates/oraclemcp-core/src/http.rs::tests::dashboard_bundle_serves_html_without_api_fallback`; `scripts/dashboard_bundle_check.sh`; `crates/oraclemcp/tests/dashboard_e2e.rs::b8_dashboard_acceptance_suite_is_accounted` |
+| DASHBOARD-B8-002 | `crates/oraclemcp-core/src/http.rs::tests::dashboard_pairing_sets_strict_cookie_and_session_view`; `crates/oraclemcp-core/src/http.rs::tests::malicious_page_cannot_trigger_dashboard_gated_action`; `scripts/sensitive_data_lint.sh`; `crates/oraclemcp/tests/dashboard_e2e.rs::skin_conformance_2d_fallback_a11y` |
+| DASHBOARD-B8-003 | `crates/oraclemcp-core/src/http.rs::tests::operator_config_draft_apply_and_rollback_are_redacted_and_audited`; `crates/oraclemcp-core/src/config_ops.rs`; `crates/oraclemcp-core/src/file_store.rs` |
+| DASHBOARD-B8-004 | `crates/oraclemcp-core/src/http.rs::tests::workbench_no_bypass_guard_is_the_feature`; `crates/oraclemcp-core/src/http.rs::tests::dashboard_workbench_ddl_apply_is_release_gated`; `crates/oraclemcp/tests/trust_safety.rs` |
+| DASHBOARD-B8-005 | `crates/oraclemcp-core/src/http.rs::tests::cp_apply_reclassifies_never_trusts_stored_verdict`; `crates/oraclemcp-core/src/change_proposal.rs::tests::proposal_view_omits_bind_values_and_stored_verdict_payloads` |
+| DASHBOARD-B8-006 | `crates/oraclemcp/tests/dashboard_e2e.rs::skin_conformance_2d_fallback_a11y`; `scripts/dashboard_skin_lint.sh`; `scripts/sensitive_data_lint.sh` |
 | HTTP-SURFACE-001 | `crates/oraclemcp-core/src/http.rs::tests::surface_inventory_authn_no_leak`; `docs/behavior-inventory.md` |
 | HTTPS-001 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_accepts_tls_handshake` |
 | HTTPS-002 | `crates/oraclemcp-core/src/http.rs::tests::serve_https_requires_client_certificate_when_mtls_is_configured` |

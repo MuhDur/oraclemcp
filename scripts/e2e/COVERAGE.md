@@ -27,4 +27,5 @@ their own rows or generated reports instead of replacing this base contract.
 | Agent ergonomics drift guard | `oraclemcp-epic-060-f4xo.12.9` | `scripts/oraclemcp_ergonomics_lint.sh`, `.github/workflows/ci.yml`, `crates/oraclemcp/src/main.rs::tests::agent_ergonomics_drift_guard_*` | PASS |
 | Release acceptance CI suite | `oraclemcp-epic-060-f4xo.12.13` | `scripts/release_acceptance_ci_suite.sh`, `.github/workflows/ci.yml`, `.github/workflows/release.yml` | PASS |
 | 0.6.0 read-only dashboard | `oraclemcp-epic-060-f4xo.8.26` | `scripts/e2e/dashboard_readonly.sh`, `crates/oraclemcp/tests/dashboard_e2e.rs` | PASS |
+| WP-W B.8 dashboard acceptance suite | `oraclemcp-epic-060-f4xo.8.20` | `crates/oraclemcp/tests/dashboard_e2e.rs`, `crates/oraclemcp-core/src/http.rs`, `scripts/e2e/dashboard_readonly.sh`, `scripts/dashboard_bundle_check.sh`, `scripts/dashboard_skin_lint.sh`, `scripts/sensitive_data_lint.sh` | PASS |
 | G6 live-XE headline | `oraclemcp-epic-060-f4xo.11.6` | `scripts/e2e/live_xe_headline.sh`, `crates/oraclemcp-db/tests/multi_lane_live_xe.rs`, `crates/oraclemcp/tests/live_xe_service_attach.rs` | PASS |
