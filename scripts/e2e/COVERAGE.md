@@ -11,7 +11,7 @@ their own rows or generated reports instead of replacing this base contract.
 | Failure handling emits a CRASHPACK path and replay SEED. | MUST | `scripts/e2e/lib.sh`, `crates/oraclemcp/tests/e2e_harness.rs` | PASS |
 | Live Oracle scenarios are env-gated and refuse production-looking targets. | MUST | `scripts/e2e/live_oracle.sh`, `scripts/e2e/load_soak.sh`, `crates/oraclemcp/tests/e2e_harness.rs` | PASS |
 | The harness adds no script-level mocks; Score-at-least-8 acceptance beads must use live-Oracle or real-file scenarios. | MUST | `scripts/e2e/audit_append.sh`, `scripts/e2e/live_oracle.sh`, `scripts/e2e/load_soak.sh`, this coverage rule | PASS |
-| Conformance accounting documents XFAIL policy and fixture provenance. | MUST | `scripts/e2e/COVERAGE.md`, `scripts/e2e/DISCREPANCIES.md`, `scripts/e2e/PROVENANCE.md` | PASS |
+| Conformance accounting documents XFAIL policy and fixture provenance. | MUST | `scripts/e2e/COVERAGE.md`, `scripts/e2e/DISCREPANCIES.md`, `scripts/e2e/PROVENANCE.md`, `tests/conformance/COVERAGE.md`, `tests/conformance/DISCREPANCIES.md`, `tests/golden/PROVENANCE.md` | PASS |
 
 | Summary | MUST total | Tested | Passing | XFAIL | Score |
 |---------|------------|--------|---------|-------|-------|

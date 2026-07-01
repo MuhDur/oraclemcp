@@ -57,7 +57,7 @@ Harnesses:
 
 ## Matrix
 
-| Section | MUST Clauses | SHOULD Clauses | Tested | Passing | Divergent | Score |
+| Section | MUST Clauses | SHOULD Clauses | Tested | Passing | XFAIL | Score |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Initialize | 2 | 0 | 2 | 2 | 0 | 100% |
 | Notifications | 3 | 0 | 3 | 3 | 0 | 100% |

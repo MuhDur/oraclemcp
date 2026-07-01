@@ -46,6 +46,8 @@ required=(
   scripts/e2e/PROVENANCE.md
   scripts/e2e/DISCREPANCIES.md
   tests/conformance/COVERAGE.md
+  tests/conformance/DISCREPANCIES.md
+  tests/golden/PROVENANCE.md
   scripts/ui_fixtures_validate_against_rust_schema.sh
 )
 missing=0
@@ -65,11 +67,29 @@ fi
 if ! grep -F "| Operator v1 | 8 | 0 | 8 | 8 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "tests/conformance/COVERAGE.md must record 1.00 MUST coverage for operator v1"
 fi
-if grep -RInE '(^|[^A-Z])SKIP([^A-Z]|$)' scripts/e2e/COVERAGE.md scripts/e2e/DISCREPANCIES.md >/dev/null; then
+if ! grep -F "Total tracked requirements: 50 MUST, 2 SHOULD, 52 tested." tests/conformance/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "tests/conformance/COVERAGE.md totals are stale"
+fi
+if ! grep -F "| JSON-RPC errors | 3 | 2 | 5 | 5 | 1 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "accepted JSON-RPC divergences must be XFAIL-accounted while preserving 100% coverage"
+fi
+if grep -RInE '(^|[^A-Z])SKIP([^A-Z]|$)' scripts/e2e/COVERAGE.md scripts/e2e/DISCREPANCIES.md tests/conformance/COVERAGE.md tests/conformance/DISCREPANCIES.md >/dev/null; then
   e2e_finish_fail "coverage/discrepancy docs must use XFAIL terminology, not SKIP"
 fi
 if ! grep -F "No accepted divergences." scripts/e2e/DISCREPANCIES.md >/dev/null; then
   e2e_finish_fail "DISCREPANCIES.md must explicitly state current divergence posture"
+fi
+if ! grep -F "XFAIL-ACCEPTED" tests/conformance/DISCREPANCIES.md >/dev/null; then
+  e2e_finish_fail "tests/conformance/DISCREPANCIES.md must label intentional divergences as XFAIL-ACCEPTED"
+fi
+if ! grep -F "UPDATE_GOLDENS=1 cargo test -p oraclemcp-core --test golden_behavior" tests/golden/PROVENANCE.md >/dev/null; then
+  e2e_finish_fail "golden provenance must document the core HTTP golden rebless command"
+fi
+if ! grep -F "UPDATE_GOLDENS=1 cargo test -p oraclemcp --test golden_behavior" tests/golden/PROVENANCE.md >/dev/null; then
+  e2e_finish_fail "golden provenance must document the binary stdio golden rebless command"
+fi
+if ! grep -F "UPDATE_GOLDENS=1 cargo test -p oraclemcp-db --test structured_schema_golden" tests/golden/PROVENANCE.md >/dev/null; then
+  e2e_finish_fail "golden provenance must document the structured schema golden rebless command"
 fi
 
 e2e_log_event "coverage_summary" "assert" "pass" 0 "MUST coverage 6/6 score=1.00 xfail=0"
