@@ -7,9 +7,12 @@
 //! plan: non-`Send` dispatch futures are never spawned across OS threads, and
 //! all stateful DB work is marshaled to the owning lane.
 
+#[cfg(debug_assertions)]
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
+use std::ops::{Deref, DerefMut};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -45,6 +48,49 @@ const STATUS_STARTING: u8 = 0;
 const STATUS_RUNNING: u8 = 1;
 const STATUS_STOPPED: u8 = 2;
 const STATUS_QUARANTINED: u8 = 3;
+
+// DL-4 canonical lock rank for the served lane path:
+// Config watch snapshot/read -> lane registry -> lane handle/status ->
+// lease state -> grants -> audit-chain writer -> metadata cache.
+//
+// The high-risk AB-BA edge is Registry -> Lane mailbox. The registry may copy
+// or insert `LaneRuntime` handles, but it must not dispatch, surface-state, or
+// close a lane while the registry guard is held. The debug rank below makes
+// that edge executable in tests.
+#[cfg(debug_assertions)]
+thread_local! {
+    static LANE_REGISTRY_LOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(debug_assertions)]
+fn enter_lane_registry_lock() {
+    LANE_REGISTRY_LOCK_DEPTH.with(|depth| depth.set(depth.get() + 1));
+}
+
+#[cfg(debug_assertions)]
+fn exit_lane_registry_lock() {
+    LANE_REGISTRY_LOCK_DEPTH.with(|depth| {
+        let current = depth.get();
+        debug_assert!(current > 0, "lane registry lock depth underflow");
+        depth.set(current.saturating_sub(1));
+    });
+}
+
+#[cfg(debug_assertions)]
+fn lane_registry_lock_held() -> bool {
+    LANE_REGISTRY_LOCK_DEPTH.with(|depth| depth.get() > 0)
+}
+
+#[cfg(debug_assertions)]
+fn assert_no_lane_registry_lock(operation: &str) {
+    debug_assert!(
+        !lane_registry_lock_held(),
+        "{operation} while holding the lane registry lock violates DL-4"
+    );
+}
+
+#[cfg(not(debug_assertions))]
+fn assert_no_lane_registry_lock(_operation: &str) {}
 
 /// Async factory that builds the concrete dispatcher on the lane's own runtime.
 ///
@@ -189,6 +235,7 @@ struct LaneRuntimeInner {
 
 impl Drop for LaneRuntimeInner {
     fn drop(&mut self) {
+        assert_no_lane_registry_lock("dropping a dispatch lane handle");
         if let Some(sender) = self.sender.lock().take() {
             let _ = enqueue_close(&sender, DispatchCloseReason::RuntimeDrop);
         }
@@ -383,6 +430,7 @@ impl LaneRuntime {
     /// Stop accepting new commands and ask the lane-owned dispatcher to clean
     /// up with the supplied lifecycle reason before the lane exits.
     pub fn close_with_reason(&self, reason: DispatchCloseReason) {
+        assert_no_lane_registry_lock("closing a dispatch lane");
         let sender = self.inner.sender.lock().take();
         if let Some(sender) = sender {
             let _ = enqueue_close(&sender, reason);
@@ -404,6 +452,7 @@ impl ToolDispatch for LaneRuntime {
         args: Value,
     ) -> DispatchFuture<'a> {
         Box::pin(async move {
+            assert_no_lane_registry_lock("sending a dispatch command to a lane");
             if cx.checkpoint().is_err() {
                 return Outcome::Cancelled(cancel_reason_from_cx(
                     cx,
@@ -457,6 +506,7 @@ impl ToolDispatch for LaneRuntime {
         detail: McpSurfaceDetail,
     ) -> McpSurfaceFuture<'a> {
         Box::pin(async move {
+            assert_no_lane_registry_lock("sending an MCP surface-state command to a lane");
             if cx.checkpoint().is_err() {
                 return Outcome::Cancelled(cancel_reason_from_cx(
                     cx,
@@ -518,12 +568,38 @@ pub struct StatefulLaneDispatch {
     lanes: Mutex<HashMap<LaneKey, LaneRuntime>>,
 }
 
+struct LaneRegistryGuard<'a> {
+    inner: parking_lot::MutexGuard<'a, HashMap<LaneKey, LaneRuntime>>,
+}
+
+impl Drop for LaneRegistryGuard<'_> {
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        exit_lane_registry_lock();
+    }
+}
+
+impl Deref for LaneRegistryGuard<'_> {
+    type Target = HashMap<LaneKey, LaneRuntime>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl DerefMut for LaneRegistryGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
 impl fmt::Debug for StatefulLaneDispatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let lane_count = self.lock_lanes().len();
         f.debug_struct("StatefulLaneDispatch")
             .field("mailbox_capacity", &self.mailbox_capacity)
             .field("admission", &self.admission.is_some())
-            .field("lane_count", &self.lanes.lock().len())
+            .field("lane_count", &lane_count)
             .finish_non_exhaustive()
     }
 }
@@ -563,6 +639,13 @@ impl StatefulLaneDispatch {
         self
     }
 
+    fn lock_lanes(&self) -> LaneRegistryGuard<'_> {
+        let inner = self.lanes.lock();
+        #[cfg(debug_assertions)]
+        enter_lane_registry_lock();
+        LaneRegistryGuard { inner }
+    }
+
     fn resolve_lane(
         &self,
         cx: &Cx,
@@ -571,11 +654,11 @@ impl StatefulLaneDispatch {
         let session_id = context.http_session_id().ok_or_else(lease_required)?;
         let principal_key = context.principal_key().unwrap_or("anonymous-http");
         let key = LaneKey::new(session_id, principal_key);
-        if let Some(lane) = self.lanes.lock().get(&key).cloned() {
+        if let Some(lane) = self.lock_lanes().get(&key).cloned() {
             return Ok(lane);
         }
 
-        let mut lanes = self.lanes.lock();
+        let mut lanes = self.lock_lanes();
         if let Some(lane) = lanes.get(&key).cloned() {
             return Ok(lane);
         }
@@ -600,6 +683,10 @@ impl StatefulLaneDispatch {
             self.panic_auditor.clone(),
             capacity_permit,
         );
+        // SAFETY: DL-4 allows the registry to hold only lane handles and
+        // metadata. This insertion stores a Send handle; the actual mailbox
+        // send happens after `resolve_lane` returns and the registry guard has
+        // been dropped. Debug assertions in `LaneRuntime` enforce that rule.
         lanes.insert(key, lane.clone());
         Ok(lane)
     }
@@ -611,8 +698,7 @@ impl StatefulLaneDispatch {
     /// by the caller before this is invoked.
     pub fn close_session(&self, session_id: &str, principal_key: &str) -> bool {
         let lane = self
-            .lanes
-            .lock()
+            .lock_lanes()
             .remove(&LaneKey::new(session_id, principal_key));
         if let Some(lane) = lane {
             lane.close();
@@ -624,7 +710,7 @@ impl StatefulLaneDispatch {
 
     /// Close every registered lane and return how many were present.
     pub fn close_all_sessions(&self) -> usize {
-        let lanes: Vec<LaneRuntime> = self.lanes.lock().drain().map(|(_, lane)| lane).collect();
+        let lanes: Vec<LaneRuntime> = self.lock_lanes().drain().map(|(_, lane)| lane).collect();
         let count = lanes.len();
         for lane in lanes {
             lane.close_with_reason(DispatchCloseReason::ServerShutdown);
@@ -634,7 +720,7 @@ impl StatefulLaneDispatch {
 
     #[cfg(test)]
     fn lane_count(&self) -> usize {
-        self.lanes.lock().len()
+        self.lock_lanes().len()
     }
 }
 
@@ -650,8 +736,7 @@ impl HttpSessionLifecycle for StatefulLaneDispatch {
         reason: DispatchCloseReason,
     ) -> bool {
         let lane = self
-            .lanes
-            .lock()
+            .lock_lanes()
             .remove(&LaneKey::new(session_id, principal_key));
         if let Some(lane) = lane {
             lane.close_with_reason(reason);
@@ -667,7 +752,7 @@ impl HttpSessionLifecycle for StatefulLaneDispatch {
 
     fn close_principal_sessions(&self, principal_key: &str, reason: DispatchCloseReason) -> usize {
         let lanes = {
-            let mut registered = self.lanes.lock();
+            let mut registered = self.lock_lanes();
             let keys = registered
                 .keys()
                 .filter(|key| key.principal_key == principal_key)
@@ -685,8 +770,7 @@ impl HttpSessionLifecycle for StatefulLaneDispatch {
     }
 
     fn active_lanes(&self) -> Vec<HttpLaneSnapshot> {
-        self.lanes
-            .lock()
+        self.lock_lanes()
             .iter()
             .map(|(key, lane)| HttpLaneSnapshot {
                 lane_id: lane.name().to_owned(),
@@ -704,7 +788,7 @@ impl HttpSessionLifecycle for StatefulLaneDispatch {
     }
 
     fn lane_binding(&self, lane_id: &str) -> Option<HttpLaneBinding> {
-        self.lanes.lock().iter().find_map(|(key, lane)| {
+        self.lock_lanes().iter().find_map(|(key, lane)| {
             (lane.name() == lane_id).then(|| HttpLaneBinding {
                 lane_id: lane.name().to_owned(),
                 mcp_session_id: key.mcp_session_id.clone(),
@@ -1355,6 +1439,19 @@ mod tests {
             entered_rx.recv_timeout(Duration::from_millis(50)).is_err(),
             "cancelled caller must not enqueue work onto the lane"
         );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(
+        expected = "closing a dispatch lane while holding the lane registry lock violates DL-4"
+    )]
+    fn registry_lane_lock_order_ab_ba_unconstructible() {
+        let registry = StatefulLaneDispatch::new(Arc::new(EchoThreadDispatch));
+        let lane = LaneRuntime::spawn("lock-order-test", Arc::new(EchoThreadDispatch), 4);
+        let _registry_guard = registry.lock_lanes();
+
+        lane.close_with_reason(DispatchCloseReason::ServerShutdown);
     }
 
     #[test]

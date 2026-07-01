@@ -1655,6 +1655,9 @@ impl HttpStatelessReadDispatch {
         }
         let index = bucket.next % bucket.lanes.len();
         bucket.next = bucket.next.wrapping_add(1);
+        // SAFETY: the read-worker registry stores only `LaneRuntime` handles.
+        // The caller sends to the returned lane after this mutex guard is gone,
+        // mirroring the core stateful registry's copy-handle-before-send rule.
         bucket.lanes[index].clone()
     }
 
