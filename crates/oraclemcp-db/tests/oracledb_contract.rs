@@ -530,7 +530,7 @@ fn contract_type_structured_carrier_serializes_verbatim() {
 }
 
 #[test]
-fn contract_type_structured_carrier_round_trips_array_json_vector_tstz() {
+fn contract_type_tstz_round_trips_with_offset_in_structured_carrier() {
     // The C1 carrier is intentionally typed rather than raw JSON: it preserves
     // Oracle scalar identity for arrays, OSON, vectors, and nested TSTZ values.
     let structured = json!({

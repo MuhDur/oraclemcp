@@ -105,7 +105,7 @@ fn binary_double_edge_values_are_explicit() {
 }
 
 #[test]
-fn structured_carrier_round_trips_array_json_vector_tstz_shape() {
+fn tstz_round_trips_with_offset_in_structured_carrier() {
     let structured = json!({
         "kind": "array",
         "items": [

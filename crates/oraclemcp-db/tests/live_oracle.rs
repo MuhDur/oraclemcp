@@ -713,11 +713,11 @@ fn live_type_fidelity_number_string_and_iso_date() {
 }
 
 #[test]
-fn live_tstz_bind_fetch_preserves_numeric_offset() {
+fn tstz_live_bind_fetch_preserves_numeric_offset() {
     run_with_cx(|cx| async move {
         let Some(conn) = connect_or_skip(
             &cx,
-            "live_tstz_bind_fetch_preserves_numeric_offset",
+            "tstz_live_bind_fetch_preserves_numeric_offset",
             test_opts(),
         )
         .await
@@ -747,7 +747,7 @@ fn live_tstz_bind_fetch_preserves_numeric_offset() {
             "{}",
             json!({
                 "suite": "live_oracle",
-                "test": "live_tstz_bind_fetch_preserves_numeric_offset",
+                "test": "tstz_live_bind_fetch_preserves_numeric_offset",
                 "phase": "assert",
                 "event": "tstz_bind_fetch",
                 "expected": expected,

@@ -4298,7 +4298,7 @@ mod tests {
     }
 
     #[test]
-    fn om_dashboard_alias_is_argv0_aware() {
+    fn om_alias_argv0_aware_parses_dashboard_help() {
         assert_eq!(
             display_binary_name_from_argv0(Some(std::ffi::OsStr::new("/usr/local/bin/om"))),
             "om"

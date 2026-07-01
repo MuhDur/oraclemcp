@@ -98,7 +98,7 @@ fn serve_with_missing_explicit_profile_fails_fast() {
 }
 
 #[test]
-fn om_alias_is_argv0_aware_and_runs_dashboard_pairing() {
+fn om_alias_argv0_aware_runs_dashboard_pairing() {
     let dir = temp_dir("om-alias");
     let alias = make_om_alias(&dir);
 
