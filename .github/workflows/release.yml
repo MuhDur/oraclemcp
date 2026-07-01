@@ -446,6 +446,11 @@ jobs:
               "$f"
           done
 
+      - name: Generate Homebrew and winget manifests
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: bash scripts/render_distribution_manifests.sh artifacts
+
       - name: Publish release with checksums, SBOM, and signatures
         uses: softprops/action-gh-release@v3
         with:
@@ -465,6 +470,8 @@ jobs:
             artifacts/*.cdx.json.sig
             artifacts/*.cdx.json.crt
             artifacts/*.cdx.json.attestation.sigstore.json
+            artifacts/distribution-manifests/homebrew/Formula/oraclemcp.rb
+            artifacts/distribution-manifests/winget/**/*.yaml
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
 

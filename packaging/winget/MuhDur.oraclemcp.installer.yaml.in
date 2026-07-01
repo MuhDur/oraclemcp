@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+PackageIdentifier: MuhDur.oraclemcp
+PackageVersion: __VERSION__
+InstallerType: zip
+NestedInstallerType: portable
+ArchiveBinariesDependOnPath: true
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/MuhDur/oraclemcp/releases/download/v__VERSION__/oraclemcp-x86_64-pc-windows-msvc.zip
+    InstallerSha256: __SHA256_WINDOWS_X64__
+    NestedInstallerFiles:
+      - RelativeFilePath: oraclemcp-x86_64-pc-windows-msvc\oraclemcp.exe
+        PortableCommandAlias: oraclemcp
+      - RelativeFilePath: oraclemcp-x86_64-pc-windows-msvc\om.exe
+        PortableCommandAlias: om
+ManifestType: installer
+ManifestVersion: 1.12.0
