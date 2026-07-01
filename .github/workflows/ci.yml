@@ -193,6 +193,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - run: bash scripts/oraclemcp_boundary_lint.sh
+      - run: bash scripts/oraclemcp_arch_fitness_lint.sh
       - run: bash scripts/oraclemcp_agent_surface_lint.sh
       - run: bash scripts/oraclemcp_driver_seam_lint.sh
       - run: bash scripts/oraclemcp_concurrency_lint.sh

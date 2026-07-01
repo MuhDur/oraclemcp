@@ -21,5 +21,6 @@ their own rows or generated reports instead of replacing this base contract.
 
 | Scenario | Release bead | Covered by | Status |
 |----------|--------------|------------|--------|
+| Architecture fitness dependency lint | `oraclemcp-epic-060-f4xo.12.11` | `scripts/oraclemcp_arch_fitness_lint.sh`, `.github/workflows/ci.yml` | PASS |
 | Doctor fixture/accounting gate | `oraclemcp-epic-060-f4xo.12.12` | `scripts/e2e/doctor_fixtures.sh`, `crates/oraclemcp-core/src/doctor.rs::tests::doctor_fix_fixture_gate_current_repairs_are_fixture_accounted` | PASS |
 | 0.6.0 read-only dashboard | `oraclemcp-epic-060-f4xo.8.26` | `scripts/e2e/dashboard_readonly.sh`, `crates/oraclemcp/tests/dashboard_e2e.rs` | PASS |

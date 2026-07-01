@@ -50,6 +50,7 @@ required=(
   tests/conformance/DISCREPANCIES.md
   tests/golden/PROVENANCE.md
   scripts/ui_fixtures_validate_against_rust_schema.sh
+  scripts/oraclemcp_arch_fitness_lint.sh
 )
 missing=0
 for path in "${required[@]}"; do
