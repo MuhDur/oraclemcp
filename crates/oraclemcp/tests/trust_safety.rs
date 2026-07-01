@@ -82,25 +82,20 @@ fn a1_classifier_proves_select_read_only_but_refuses_a_misclassification_surroga
 }
 
 // ---------------------------------------------------------------------------
-// A2 — read-only proxy/role posture: doctor write-posture + wallet modes.
+// A2/A4 — read-only proxy/role posture: doctor write-posture + wallet modes.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a2_supported_wallet_modes_are_never_fail_closed() {
-    // All three wallet modes the thin driver supports must be reported supported
-    // (unencrypted PEM, auto-login SSO, password-protected p12). The doctor's
-    // write-posture check embeds this note so an operator sees wallets are not
-    // refused.
+fn a2_a4_wallet_modes_report_default_build_truth() {
+    // The default build reports both supported and recognized-but-unsupported
+    // wallet artifacts so operators get a typed diagnostic rather than a false
+    // support claim or a silent fallback.
     let modes = supported_wallet_modes();
     assert!(!modes.is_empty(), "wallet modes must be reported");
-    assert!(
-        modes.iter().all(|m| m.supported),
-        "every published wallet mode must be supported, never fail-closed: {modes:?}"
-    );
     let names: Vec<&str> = modes.iter().map(|m| m.mode).collect();
     assert!(
         names.iter().any(|m| m.contains("sso")),
-        "auto-login SSO wallet: {names:?}"
+        "auto-login SSO wallet diagnostic: {names:?}"
     );
     assert!(
         names.iter().any(|m| m.contains("pem")),
@@ -108,7 +103,18 @@ fn a2_supported_wallet_modes_are_never_fail_closed() {
     );
     assert!(
         names.iter().any(|m| m.contains("p12")),
-        "password p12 wallet: {names:?}"
+        "password p12 wallet diagnostic: {names:?}"
+    );
+    assert!(modes.iter().any(|m| m.mode == "ewallet.pem" && m.supported));
+    assert!(
+        modes
+            .iter()
+            .any(|m| m.mode == "cwallet.sso" && !m.supported)
+    );
+    assert!(
+        modes
+            .iter()
+            .any(|m| m.mode == "ewallet.p12" && !m.supported)
     );
 }
 

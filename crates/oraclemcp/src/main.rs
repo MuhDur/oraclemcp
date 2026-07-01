@@ -3741,6 +3741,7 @@ mod tests {
                 fix: None,
                 failure_class: None,
                 auth_mode: None,
+                wallet_error: None,
                 ora_code: None,
             }],
             profile_caps: None,

@@ -83,7 +83,8 @@ impl PoolConfig {
 #[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OciConfig {
-    /// Cloud wallet directory (`cwallet.sso` + `tnsnames.ora`) passed to the thin driver.
+    /// TCPS wallet directory passed to the thin driver. The default build loads
+    /// `ewallet.pem`; recognized unsupported formats are reported by doctor.
     pub wallet_location: Option<PathBuf>,
     /// Secret reference for encrypted-wallet passwords. `literal:` is dev-only
     /// and rejected when the profile is protected.

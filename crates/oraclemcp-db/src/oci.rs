@@ -301,39 +301,38 @@ pub fn ensure_fresh_token(
     }
 }
 
-/// A wallet auth mode this thin driver supports, with a one-line note. Reporting
-/// these as SUPPORTED (bead A2, Round 3) corrects an earlier fail-closed posture:
-/// unencrypted `ewallet.pem`, auto-login `cwallet.sso`, and password-protected
-/// `ewallet.p12` (with `wallet_password`) all work in the pinned driver.
+/// A wallet auth mode this default thin-driver build reports to doctor, with a
+/// one-line note. The pinned driver recognizes multiple wallet artifacts, but
+/// this workspace does not enable the driver's `experimental` feature and the
+/// driver explicitly rejects standalone `ewallet.p12`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WalletMode {
     /// The wallet artifact / mode (e.g. `cwallet.sso`).
     pub mode: &'static str,
-    /// Whether the pinned thin driver supports it.
+    /// Whether this default build can load it directly.
     pub supported: bool,
     /// A short operator note.
     pub note: &'static str,
 }
 
-/// The wallet auth modes the pinned thin driver supports. All three TCPS wallet
-/// forms are SUPPORTED — none is fail-closed.
+/// The wallet auth modes this default build can consume directly.
 #[must_use]
 pub fn supported_wallet_modes() -> &'static [WalletMode] {
     &[
-        WalletMode {
-            mode: "cwallet.sso",
-            supported: true,
-            note: "auto-login SSO wallet (mTLS without a wallet password)",
-        },
         WalletMode {
             mode: "ewallet.pem",
             supported: true,
             note: "unencrypted PEM wallet (no wallet password required)",
         },
         WalletMode {
-            mode: "ewallet.p12 + wallet_password",
-            supported: true,
-            note: "password-protected PKCS#12 wallet via wallet_password/_ref",
+            mode: "cwallet.sso",
+            supported: false,
+            note: "recognized, but the driver's experimental SSO parser is not enabled in this build",
+        },
+        WalletMode {
+            mode: "ewallet.p12",
+            supported: false,
+            note: "standalone PKCS#12 wallet is recognized but deferred; convert to ewallet.pem",
         },
     ]
 }
@@ -477,25 +476,17 @@ mod tests {
     }
 
     #[test]
-    fn unencrypted_and_sso_and_password_wallets_are_reported_supported() {
-        // A2 (Round 3): these wallet modes must be reported SUPPORTED, not
-        // fail-closed — they work in the pinned thin driver.
+    fn supported_wallet_modes_report_default_build_truth() {
+        // A4: the default build consumes ewallet.pem directly and gives typed
+        // diagnostics for recognized wallet artifacts the driver cannot load.
         let modes = supported_wallet_modes();
-        for needle in [
-            "cwallet.sso",
-            "ewallet.pem",
-            "ewallet.p12 + wallet_password",
-        ] {
+        for needle in ["ewallet.pem", "cwallet.sso", "ewallet.p12"] {
             let mode = modes
                 .iter()
                 .find(|m| m.mode == needle)
                 .unwrap_or_else(|| panic!("{needle} mode reported"));
-            assert!(
-                mode.supported,
-                "{needle} must be SUPPORTED, not fail-closed"
-            );
+            assert_eq!(mode.supported, needle == "ewallet.pem", "{needle}");
         }
-        assert!(modes.iter().all(|m| m.supported));
     }
 
     #[test]

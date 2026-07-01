@@ -74,6 +74,9 @@ pub struct CheckResult {
     /// driver-unsupported auth vs bad-creds vs TLS vs listener.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_mode: Option<AuthModeClass>,
+    /// Precise wallet-file diagnostic for driver wallet setup failures (A4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wallet_error: Option<DoctorWalletDiagnostic>,
     /// Parsed Oracle error code, when a check failed because Oracle returned ORA-NNNNN.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ora_code: Option<i32>,
@@ -89,6 +92,7 @@ impl CheckResult {
             fix: None,
             failure_class: None,
             auth_mode: None,
+            wallet_error: None,
             ora_code: None,
         }
     }
@@ -102,6 +106,10 @@ impl CheckResult {
     }
     fn with_auth_mode(mut self, class: AuthModeClass) -> Self {
         self.auth_mode = Some(class);
+        self
+    }
+    fn with_wallet_error(mut self, wallet_error: Option<DoctorWalletDiagnostic>) -> Self {
+        self.wallet_error = wallet_error;
         self
     }
     fn with_oracle_error(mut self, message: &str) -> Self {
@@ -817,6 +825,36 @@ pub enum AuthModeClass {
     Other,
 }
 
+/// Which pinned-driver wallet setup error occurred.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorWalletErrorKind {
+    /// Neither `ewallet.pem` nor `cwallet.sso` was present in the resolved wallet directory.
+    FileMissing,
+    /// The wallet file could not be read.
+    Io,
+    /// `ewallet.pem` was present but malformed or held an unsupported key shape.
+    Pem,
+    /// The wallet had no usable trust-anchor certificate.
+    NoCertificates,
+    /// `cwallet.sso` parsing failed on a recognized but unsupported branch.
+    Sso,
+    /// `cwallet.sso` parsing is not enabled in this build.
+    SsoNotEnabled,
+    /// A recognized wallet file exists, but this build does not support that file format.
+    UnsupportedFormat,
+}
+
+/// Secret-free wallet diagnostic attached to the connectivity check.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+pub struct DoctorWalletDiagnostic {
+    /// Stable wallet error kind.
+    pub kind: DoctorWalletErrorKind,
+    /// Unsupported wallet format, when the driver reported one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
 /// Classify the authentication / transport posture of a connection failure into
 /// a precise [`AuthModeClass`] (A5). Driver-unsupported enterprise auth modes
 /// are detected by the typed adapter messages the DB layer emits; the
@@ -868,9 +906,82 @@ pub fn classify_auth_mode(error: &str) -> AuthModeClass {
     AuthModeClass::Other
 }
 
+fn unsupported_wallet_format(error: &str) -> Option<String> {
+    let lower = error.to_ascii_lowercase();
+    let start = lower.find("wallet format ")? + "wallet format ".len();
+    let rest = &error[start..];
+    let end = rest
+        .to_ascii_lowercase()
+        .find(" is not supported")
+        .unwrap_or(rest.len());
+    let format = rest[..end].trim();
+    (!format.is_empty()).then(|| format.to_owned())
+}
+
+fn classify_wallet_error(error: &str) -> Option<DoctorWalletDiagnostic> {
+    let lower = error.to_ascii_lowercase();
+    if !(lower.contains("wallet error:")
+        || lower.contains("wallet file")
+        || lower.contains("wallet pem")
+        || lower.contains("cwallet.sso")
+        || lower.contains("wallet contained no certificates")
+        || lower.contains("wallet format "))
+    {
+        return None;
+    }
+
+    let (kind, format) = if let Some(format) = unsupported_wallet_format(error) {
+        (DoctorWalletErrorKind::UnsupportedFormat, Some(format))
+    } else if lower.contains("cwallet.sso support is experimental and not enabled") {
+        (DoctorWalletErrorKind::SsoNotEnabled, None)
+    } else if lower.contains("cwallet.sso parse error") {
+        (DoctorWalletErrorKind::Sso, None)
+    } else if lower.contains("wallet file is missing") {
+        (DoctorWalletErrorKind::FileMissing, None)
+    } else if lower.contains("failed to read wallet file") {
+        (DoctorWalletErrorKind::Io, None)
+    } else if lower.contains("failed to parse wallet pem") {
+        (DoctorWalletErrorKind::Pem, None)
+    } else if lower.contains("wallet contained no certificates") {
+        (DoctorWalletErrorKind::NoCertificates, None)
+    } else {
+        return None;
+    };
+
+    Some(DoctorWalletDiagnostic { kind, format })
+}
+
+fn wallet_connectivity_fix(wallet: &DoctorWalletDiagnostic) -> &'static str {
+    match wallet.kind {
+        DoctorWalletErrorKind::UnsupportedFormat => {
+            "convert the wallet to ewallet.pem; standalone ewallet.p12 is not supported by this thin build"
+        }
+        DoctorWalletErrorKind::SsoNotEnabled => {
+            "convert the wallet to ewallet.pem; cwallet.sso parsing is experimental and not enabled in this build"
+        }
+        DoctorWalletErrorKind::Sso => {
+            "convert the wallet to ewallet.pem or regenerate the cwallet.sso using a supported auto-login format"
+        }
+        DoctorWalletErrorKind::FileMissing => {
+            "place ewallet.pem in the configured wallet directory, or correct wallet_location/TNS_ADMIN"
+        }
+        DoctorWalletErrorKind::Io => {
+            "verify wallet file permissions and readability for the oraclemcp service user"
+        }
+        DoctorWalletErrorKind::Pem => {
+            "regenerate ewallet.pem with valid PEM certificate material and an unencrypted private key if mTLS is required"
+        }
+        DoctorWalletErrorKind::NoCertificates => {
+            "regenerate ewallet.pem with at least one trust-anchor certificate"
+        }
+    }
+}
+
 fn connectivity_fix(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
-    if lower.contains("proxy_auth") {
+    if let Some(wallet) = classify_wallet_error(error) {
+        wallet_connectivity_fix(&wallet)
+    } else if lower.contains("proxy_auth") {
         "set both profiles.proxy_auth.proxy_user and target_schema; if username is present it must match proxy_user"
     } else if lower.contains("connection profile") || lower.contains("default_profile") {
         "run `oraclemcp --json profiles` to list configured profiles, then rerun doctor with a valid `--profile` name"
@@ -911,6 +1022,17 @@ fn connectivity_failure_class(error: &str) -> ErrorClass {
     let lower = error.to_ascii_lowercase();
     if let Some(code) = parse_ora_code(error) {
         classify_ora_code(code)
+    } else if let Some(wallet) = classify_wallet_error(error) {
+        match wallet.kind {
+            DoctorWalletErrorKind::UnsupportedFormat | DoctorWalletErrorKind::SsoNotEnabled => {
+                ErrorClass::InvalidArguments
+            }
+            DoctorWalletErrorKind::FileMissing
+            | DoctorWalletErrorKind::Io
+            | DoctorWalletErrorKind::Pem
+            | DoctorWalletErrorKind::NoCertificates
+            | DoctorWalletErrorKind::Sso => ErrorClass::ConnectionFailed,
+        }
     } else if lower.contains("config load failed")
         || lower.contains("connection profile")
         || lower.contains("default_profile")
@@ -935,6 +1057,7 @@ async fn check_connectivity(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
             .with_fix(fix)
             .with_failure_class(connectivity_failure_class(error))
             .with_auth_mode(classify_auth_mode(error))
+            .with_wallet_error(classify_wallet_error(error))
             .with_oracle_error(error);
     }
     match ctx.conn {
@@ -965,6 +1088,7 @@ async fn check_connectivity(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
             .with_fix(connectivity_fix(&e.to_string()))
             .with_failure_class(connectivity_failure_class(&e.to_string()))
             .with_auth_mode(classify_auth_mode(&e.to_string()))
+            .with_wallet_error(classify_wallet_error(&e.to_string()))
             .with_oracle_error(&e.to_string()),
         },
     }
@@ -1209,16 +1333,27 @@ async fn check_dba_suite_preflight(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckRes
     }
 }
 
-/// A one-line, honest summary of the wallet auth modes the pinned thin driver
-/// supports (A2, Round 3): unencrypted `ewallet.pem`, auto-login `cwallet.sso`,
-/// and password-protected `ewallet.p12` are all SUPPORTED — never fail-closed.
+/// A one-line, honest summary of wallet auth modes for this default build.
 fn supported_wallet_modes_note() -> String {
-    let modes: Vec<&str> = supported_wallet_modes()
+    let supported: Vec<&str> = supported_wallet_modes()
         .iter()
         .filter(|m| m.supported)
         .map(|m| m.mode)
         .collect();
-    format!("supported wallet modes: {}", modes.join(", "))
+    let unsupported: Vec<&str> = supported_wallet_modes()
+        .iter()
+        .filter(|m| !m.supported)
+        .map(|m| m.mode)
+        .collect();
+    if unsupported.is_empty() {
+        format!("supported wallet modes: {}", supported.join(", "))
+    } else {
+        format!(
+            "supported wallet modes: {}; unsupported in this build: {}",
+            supported.join(", "),
+            unsupported.join(", ")
+        )
+    }
 }
 
 /// Check 11 — read-only proxy-user / role posture (bead A2, **report-only**).
@@ -1227,9 +1362,9 @@ fn supported_wallet_modes_note() -> String {
 /// least-privilege proxy user / read-only role holds NO write-implying system
 /// privileges; if it does, the operator is WARNED (the classifier + per-DB
 /// ceiling are still the enforced control, but a write-capable principal is not
-/// defense in depth). The detail always reports the SUPPORTED wallet modes so an
-/// operator can see unencrypted/SSO/password wallets are not fail-closed. Never
-/// `Fail`s the suite.
+/// defense in depth). The detail always reports the wallet mode truth table so
+/// an operator sees which recognized wallet artifacts this build can load
+/// directly. Never `Fail`s the suite.
 async fn check_write_posture(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     const ID: u8 = 11;
     const NAME: &str = "Write posture";
@@ -1692,6 +1827,87 @@ mod tests {
                 .unwrap()
                 .contains("wallet_password_ref")
         );
+    }
+
+    #[test]
+    fn wallet_error_classifier_covers_driver_wallet_variants() {
+        let cases = [
+            (
+                "wallet error: wallet file is missing",
+                DoctorWalletErrorKind::FileMissing,
+                None,
+            ),
+            (
+                "wallet error: failed to read wallet file: permission denied",
+                DoctorWalletErrorKind::Io,
+                None,
+            ),
+            (
+                "wallet error: failed to parse wallet PEM: malformed pem",
+                DoctorWalletErrorKind::Pem,
+                None,
+            ),
+            (
+                "wallet error: wallet contained no certificates",
+                DoctorWalletErrorKind::NoCertificates,
+                None,
+            ),
+            (
+                "wallet error: cwallet.sso parse error: invalid SSO wallet magic",
+                DoctorWalletErrorKind::Sso,
+                None,
+            ),
+            (
+                "wallet error: cwallet.sso support is experimental and not enabled; rebuild with --features experimental, or convert the wallet to ewallet.pem",
+                DoctorWalletErrorKind::SsoNotEnabled,
+                None,
+            ),
+            (
+                "wallet error: wallet format ewallet.p12 is not supported by this thin build",
+                DoctorWalletErrorKind::UnsupportedFormat,
+                Some("ewallet.p12"),
+            ),
+        ];
+        for (error, kind, format) in cases {
+            let diagnostic = classify_wallet_error(error).unwrap_or_else(|| panic!("{error}"));
+            assert_eq!(diagnostic.kind, kind, "{error}");
+            assert_eq!(diagnostic.format.as_deref(), format, "{error}");
+        }
+    }
+
+    #[test]
+    fn wallet_unsupported_format_is_structured_no_path_leak() {
+        let ctx = DoctorContext {
+            connection_error: Some(
+                "wallet error: wallet format ewallet.p12 is not supported by this thin build"
+                    .to_owned(),
+            ),
+            wallet_location: Some("/wallets/private".to_owned()),
+            sensitive_values: vec!["/wallets/private".to_owned()],
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
+        assert_eq!(connectivity.status, CheckStatus::Fail);
+        assert_eq!(
+            connectivity.failure_class,
+            Some(oraclemcp_error::ErrorClass::InvalidArguments)
+        );
+        assert_eq!(connectivity.auth_mode, Some(AuthModeClass::Tls));
+        assert_eq!(
+            connectivity.wallet_error,
+            Some(DoctorWalletDiagnostic {
+                kind: DoctorWalletErrorKind::UnsupportedFormat,
+                format: Some("ewallet.p12".to_owned()),
+            })
+        );
+        assert!(connectivity.fix.as_deref().unwrap().contains("ewallet.pem"));
+
+        let serialized = serde_json::to_string(&report.to_json()).expect("json");
+        assert!(serialized.contains("\"wallet_error\""));
+        assert!(serialized.contains("\"kind\":\"unsupported_format\""));
+        assert!(serialized.contains("\"format\":\"ewallet.p12\""));
+        assert!(!serialized.contains("/wallets/private"), "{serialized}");
     }
 
     #[test]
@@ -2198,9 +2414,9 @@ mod tests {
         assert_eq!(report.exit_code(), 0, "a warning is not a failure");
     }
 
-    /// A2 (Round 3) — the write-posture check always reports the SUPPORTED wallet
-    /// modes: unencrypted ewallet.pem, auto-login cwallet.sso, and password
-    /// ewallet.p12 are SUPPORTED (not fail-closed).
+    /// A4 — the write-posture check reports the wallet truth table for this
+    /// default build: ewallet.pem is supported; cwallet.sso and standalone
+    /// ewallet.p12 get explicit typed diagnostics instead of false support.
     #[test]
     fn doctor_reports_supported_wallet_modes() {
         let conn = LiveMock;
@@ -2213,11 +2429,25 @@ mod tests {
         for needle in ["cwallet.sso", "ewallet.pem", "ewallet.p12"] {
             assert!(
                 posture.detail.contains(needle),
-                "wallet mode {needle} should be reported SUPPORTED: {}",
+                "wallet mode {needle} should be reported: {}",
                 posture.detail
             );
         }
-        // And the underlying source-of-truth marks every mode SUPPORTED.
-        assert!(supported_wallet_modes().iter().all(|m| m.supported));
+        assert!(posture.detail.contains("unsupported in this build"));
+        assert!(
+            supported_wallet_modes()
+                .iter()
+                .any(|m| m.mode == "ewallet.pem" && m.supported)
+        );
+        assert!(
+            supported_wallet_modes()
+                .iter()
+                .any(|m| m.mode == "cwallet.sso" && !m.supported)
+        );
+        assert!(
+            supported_wallet_modes()
+                .iter()
+                .any(|m| m.mode == "ewallet.p12" && !m.supported)
+        );
     }
 }

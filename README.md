@@ -644,7 +644,7 @@ documented in [`docs/configuration.md`](docs/configuration.md).
 |---|---|
 | **Database version** | Tested against **Oracle Database 23ai**, including the free **Oracle FREE 23ai** image (`gvenzl/oracle-free:23-slim`, `FREEPDB1`). The pure-Rust thin `oracledb` driver speaks the Oracle Net protocol directly — no Instant Client or ODPI-C. |
 | **EZConnect** | Supported (`host:port/service`, plus EZConnect-Plus `tcps://…?wallet_location=…`) and `tnsnames.ora` aliases. |
-| **TCPS / wallet (TLS, mTLS)** | Supported — auto-login `cwallet.sso`, unencrypted `ewallet.pem`, and password-protected `ewallet.p12` (via `wallet_password_ref`), with `ssl_server_dn_match` / `ssl_server_cert_dn` / `use_sni` controls. |
+| **TCPS / wallet (TLS, mTLS)** | Supported with unencrypted `ewallet.pem`, plus `ssl_server_dn_match` / `ssl_server_cert_dn` / `use_sni` controls. `cwallet.sso` and standalone `ewallet.p12` are recognized and reported with structured wallet diagnostics in the default build rather than silently falling back. |
 | **OCI IAM database token** | Fields parse but **fail closed today** (structured unsupported-auth diagnostic; refused over non-TCPS). End-to-end support is deferred — see the [OCI section](#oci-iam-database-token-auth) and [`docs/configuration.md`](docs/configuration.md). |
 | **Proxy auth** | Supported (`proxy_user` + `target_schema` with `CONNECT THROUGH`). |
 | **DRCP** | Supported (server routing: `pooled` / `connection_class` / `purity`). |
@@ -869,9 +869,9 @@ keep the profile `max_level` no higher than that work requires.
 (11): with a live connection it reads the session's own `SESSION_PRIVS` and
 reports a read-only posture when the principal holds no write-implying system
 privilege, or **warns** (naming the offending privileges) when it can write. The
-same check reports the supported TCPS wallet modes — auto-login `cwallet.sso`,
-unencrypted `ewallet.pem`, and password-protected `ewallet.p12` (via
-`wallet_password` / `wallet_password_ref`) are all supported. `doctor --fix`
+same check reports the wallet mode truth table: `ewallet.pem` is supported in
+the default build, while `cwallet.sso` and standalone `ewallet.p12` produce
+structured wallet diagnostics. `doctor --fix`
 never changes Oracle, the audit hash-chain, the SQL classifier, or a profile
 `max_level`; those findings are detect-only and refused with exit 4.
 

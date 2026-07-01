@@ -707,9 +707,9 @@ pub struct OracleConnectOptions {
     pub auth_adapter: AuthAdapter,
     /// Use external / wallet auth (`/@alias`) rather than a password.
     pub external_auth: bool,
-    /// Cloud wallet directory; folded into an EZConnect-Plus descriptor so the
-    /// library never has to mutate `TNS_ADMIN` (which would require `unsafe`
-    /// `std::env::set_var` under edition 2024 — forbidden workspace-wide).
+    /// TCPS wallet directory passed to the thin driver. The library never
+    /// mutates `TNS_ADMIN` (which would require `unsafe` `std::env::set_var`
+    /// under edition 2024 — forbidden workspace-wide).
     pub wallet_location: Option<PathBuf>,
     /// Password for encrypted TCPS wallets. Plaintext only transiently after
     /// resolving `wallet_password_ref`; never sourced directly from profile TOML.

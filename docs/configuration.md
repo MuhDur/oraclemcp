@@ -125,7 +125,7 @@ field is unset after inheritance.
 
 | Field | Type | Default | Effect |
 |---|---|---|---|
-| `wallet_location` | path | none | Cloud wallet directory (`cwallet.sso` + `tnsnames.ora`). |
+| `wallet_location` | path | none | TCPS wallet directory. The default build loads `ewallet.pem`; other recognized wallet artifacts are diagnostic-only unless driver support is enabled later. |
 | `wallet_password_ref` | string | none | Secret reference for an encrypted-wallet password. Use `env:`, `file:`, `keyring:`, or future `vault:` for production; `literal:` is dev-only and rejected when `protected = true`. |
 | `ssl_server_dn_match` | bool | none (driver default) | Override server-certificate DN matching. |
 | `ssl_server_cert_dn` | string | none | Exact expected server-certificate DN. |
@@ -282,7 +282,7 @@ hatch only and is rejected when `protected = true`. Supported forms:
 | Mode | How to configure | Status |
 |---|---|---|
 | **Password** | `username` + `credential_ref` (for example `env:`, `file:`, `keyring:`; `literal:` dev-only). | Supported. |
-| **Wallet / TCPS (TLS/mTLS)** | `[profiles.oci]` `wallet_location` (+ `wallet_password_ref` for an encrypted wallet), `ssl_server_dn_match`, `ssl_server_cert_dn`, `use_sni`; or a `tcps://…` / TLS-descriptor `connect_string`. Auto-login `cwallet.sso`, unencrypted `ewallet.pem`, and password-protected `ewallet.p12` are all supported. | Supported. |
+| **Wallet / TCPS (TLS/mTLS)** | `[profiles.oci]` `wallet_location`, `ssl_server_dn_match`, `ssl_server_cert_dn`, `use_sni`; or a `tcps://…` / TLS-descriptor `connect_string`. The default build loads `ewallet.pem`; `cwallet.sso` and standalone `ewallet.p12` are recognized and reported with structured wallet diagnostics instead of a silent fallback. | `ewallet.pem` supported; other recognized wallet formats are diagnostic-only in the default build. |
 | **OCI IAM database token** | `[profiles.oci]` `use_iam_token = true` (+ optional `iam_config_profile`). | **Parses, fails closed today** — see below. |
 | **Proxy** | `[profiles.proxy_auth]` `proxy_user` + `target_schema`; `credential_ref` belongs to `proxy_user`. Needs `ALTER USER <target_schema> GRANT CONNECT THROUGH <proxy_user>`. | Supported. |
 | **DRCP routing** | `[profiles.drcp]` `pooled` / `connection_class` / `purity`. | Supported (server routing; orthogonal to auth). |

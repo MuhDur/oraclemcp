@@ -168,7 +168,9 @@ trusted_session_statements = [
 
 # [profiles.oci] — OCI / Oracle Cloud (Autonomous DB) connection fields. Optional.
 [profiles.oci]
-# Cloud wallet directory (cwallet.sso + tnsnames.ora). Default: none.
+# TCPS wallet directory. The default build loads ewallet.pem and reports
+# cwallet.sso / standalone ewallet.p12 as structured wallet diagnostics.
+# Default: none.
 wallet_location = "/etc/oracle/wallet"
 # Secret reference for an encrypted-wallet password. NEVER a literal. Default: none.
 wallet_password_ref = "env:WALLET_PASSWORD"
