@@ -8,6 +8,7 @@ Current generated evidence:
 | Artifact | Generator | Version source | Command |
 |----------|-----------|----------------|---------|
 | JSON-line script contract | `scripts/e2e/lib.sh` | current git checkout | `bash scripts/e2e/run_all.sh --log --dry-run` |
+| Doctor fixture/accounting gate | `crates/oraclemcp-core/src/doctor.rs` | current git checkout | `bash scripts/e2e/doctor_fixtures.sh --log` |
 | Offline stdio protocol coverage | `crates/oraclemcp/tests/e2e_stdio.rs` | current git checkout | `cargo test -p oraclemcp --test e2e_stdio -- --nocapture` |
 | Offline HTTP OAuth/lane coverage | `crates/oraclemcp/tests/e2e_http_oauth.rs` | current git checkout | `cargo test -p oraclemcp --test e2e_http_oauth -- --nocapture` |
 | Read-only dashboard acceptance gate | `scripts/e2e/dashboard_readonly.sh` | current git checkout | `bash scripts/e2e/dashboard_readonly.sh --log` |

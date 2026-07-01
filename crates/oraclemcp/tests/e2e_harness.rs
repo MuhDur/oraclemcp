@@ -98,7 +98,7 @@ fn e2e_orchestrator_aggregates_dry_run_scenarios() {
                 && event["outcome"] == "pass"
                 && event["message"]
                     .as_str()
-                    .is_some_and(|message| message.contains("pass=6 fail=0 skipped=2 total=8"))),
+                    .is_some_and(|message| message.contains("pass=7 fail=0 skipped=2 total=9"))),
         "missing passing orchestrator summary: {events:?}"
     );
 }

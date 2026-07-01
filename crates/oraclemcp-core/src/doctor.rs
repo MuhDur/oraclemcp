@@ -2374,6 +2374,130 @@ mod tests {
         );
     }
 
+    #[test]
+    fn doctor_fix_fixture_gate_current_repairs_are_fixture_accounted() {
+        let missing_tns = DoctorContext {
+            tns_admin: Some("/nonexistent/tns/dir/doctor-fixture".to_owned()),
+            ..DoctorContext::default()
+        };
+        let protected_profile = DoctorContext {
+            protected_profile_writable: true,
+            ..DoctorContext::default()
+        };
+        let classifier_regression = DoctorReport {
+            checks: vec![
+                CheckResult::new(
+                    8,
+                    "Classifier self-test",
+                    CheckStatus::Fail,
+                    "classifier regression",
+                )
+                .with_fix("review classifier"),
+            ],
+            profile_caps: None,
+            auth_capabilities: None,
+            service_health: None,
+            service_unit_caps: None,
+            fix: None,
+        };
+        let write_posture = DoctorReport {
+            checks: vec![
+                CheckResult::new(
+                    11,
+                    "Write posture",
+                    CheckStatus::Warn,
+                    "principal can write",
+                )
+                .with_fix("tighten grants"),
+            ],
+            profile_caps: None,
+            auth_capabilities: None,
+            service_health: None,
+            service_unit_caps: None,
+            fix: None,
+        };
+        let unresolved_without_fix = DoctorReport {
+            checks: vec![CheckResult::new(
+                99,
+                "Synthetic unresolved failure",
+                CheckStatus::Fail,
+                "no scoped repair exists",
+            )],
+            profile_caps: None,
+            auth_capabilities: None,
+            service_health: None,
+            service_unit_caps: None,
+            fix: None,
+        };
+        let cases = [
+            (
+                "healthy_offline",
+                doctor(&DoctorContext::default()).with_fix_report(),
+                DoctorFixOutcome::Noop,
+                0,
+                &[][..],
+            ),
+            (
+                "missing_tns_admin_directory",
+                doctor(&missing_tns).with_fix_report(),
+                DoctorFixOutcome::RefusedOutOfScope,
+                4,
+                &["operator_config"][..],
+            ),
+            (
+                "protected_profile_writable",
+                doctor(&protected_profile).with_fix_report(),
+                DoctorFixOutcome::RefusedOutOfScope,
+                4,
+                &["profile_max_level"][..],
+            ),
+            (
+                "classifier_regression",
+                classifier_regression.with_fix_report(),
+                DoctorFixOutcome::RefusedOutOfScope,
+                4,
+                &["classifier"][..],
+            ),
+            (
+                "oracle_write_posture",
+                write_posture.with_fix_report(),
+                DoctorFixOutcome::RefusedOutOfScope,
+                4,
+                &["oracle_database"][..],
+            ),
+            (
+                "unresolved_without_scoped_fix",
+                unresolved_without_fix.with_fix_report(),
+                DoctorFixOutcome::UnresolvedFindings,
+                2,
+                &[][..],
+            ),
+        ];
+
+        for (name, report, expected_outcome, expected_exit, expected_targets) in cases {
+            let fix = report.fix.as_ref().expect("fixture attaches fix report");
+            assert_eq!(fix.outcome, expected_outcome, "{name}");
+            assert_eq!(fix.exit_code, expected_exit, "{name}");
+            assert!(
+                fix.policy.backups_required && fix.policy.undo_required,
+                "{name}: every future mutation must be backup-backed and undoable"
+            );
+            assert!(
+                fix.mutations.is_empty(),
+                "{name}: current doctor --fix must not mutate. Add a corrupt -> \
+                 doctor --fix -> healthy -> undo byte-identical fixture before \
+                 enabling a DoctorFixMutation."
+            );
+            for target in expected_targets {
+                assert!(
+                    fix.refusals.iter().any(|refusal| refusal.target == *target),
+                    "{name}: expected refusal target {target}, got {:?}",
+                    fix.refusals
+                );
+            }
+        }
+    }
+
     /// A2 — a read-only (least-privilege) principal: the write-posture check (11)
     /// passes and reports read-only posture; the suite never fails.
     #[test]
