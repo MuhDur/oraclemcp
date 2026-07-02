@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/MuhDur/oraclemcp/schemas/oracle-cell-structured.schema.json",
   "title": "oraclemcp OracleCell.structured payload",
-  "description": "Version 1 schema for structured OracleCell JSON payloads emitted by oraclemcp-db. Scalar NUMBER remains lossless text where Oracle precision requires it; unsupported Oracle object/UDT values are explicit markers.",
+  "description": "Version 1 schema for structured OracleCell JSON payloads emitted by oraclemcp-db and consumed by plsql-mcp catalog snapshots. Scalar NUMBER remains lossless text where Oracle precision requires it; unsupported Oracle object/UDT values are explicit markers.",
   "x-oraclemcp-contract-version": 1,
   "oneOf": [
     { "$ref": "#/$defs/structuredCell" }

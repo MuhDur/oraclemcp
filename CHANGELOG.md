@@ -11,8 +11,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Query serialization now exposes structured Oracle values through the
   versioned `OracleCell.structured` contract instead of relying on
   ordinary-looking placeholder strings for non-text shapes. Consumers that
-  inspect raw query JSON should handle the structured contract-version tag,
-  typed ARRAY/JSON/VECTOR/TSTZ/object/unsupported variants, and explicit
+  inspect raw query JSON, including `plsql-mcp` catalog snapshot importers,
+  should handle the structured contract-version tag, typed
+  ARRAY/JSON/VECTOR/TSTZ/object/unsupported variants, and explicit
   truncation/cap markers. The default agent-facing caps remain conservative;
   larger catalog extraction must opt into `deep_decode` and explicit structured
   row/cell/byte/depth caps.

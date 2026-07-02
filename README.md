@@ -634,7 +634,11 @@ caps, and valid REF CURSOR values or implicit result sets are returned as nested
 objects containing child `columns`, `rows`, `row_count`, `fetched_count`, and
 `truncated` metadata. Nested cursor materialization has separate row, cell, byte,
 and depth caps, and unsupported shapes remain explicit instead of silently
-flattening or guessing.
+flattening or guessing. The same versioned `OracleCell.structured` payload is
+the shared catalog-snapshot contract consumed by the `plsql-mcp` superset: a
+catalog value is either preserved in a documented structured representation or
+reported as a typed unsupported marker with provenance, never as an
+ordinary-looking placeholder string.
 
 To live-verify driver-level application context against Oracle 23ai/FREE, create
 an application context namespace in the test database, configure matching
