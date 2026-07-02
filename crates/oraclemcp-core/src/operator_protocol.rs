@@ -146,6 +146,20 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
     },
     OperatorRouteSpec {
         method: "GET",
+        path: "/operator/v1/source-history",
+        schema: "sourceHistoryListResponse",
+        sse: false,
+        mcp_tool: None,
+    },
+    OperatorRouteSpec {
+        method: "POST",
+        path: "/operator/v1/source-history/revert",
+        schema: "sourceHistoryRevertResponse",
+        sse: false,
+        mcp_tool: None,
+    },
+    OperatorRouteSpec {
+        method: "GET",
         path: "/operator/v1/client-credentials",
         schema: "clientCredentialsResponse",
         sse: false,
@@ -348,6 +362,8 @@ pub fn operator_schema_bundle() -> Value {
             "changeProposalListResponse": { "$ref": "#/$defs/versionedResponse" },
             "changeProposalDraftResponse": { "$ref": "#/$defs/versionedResponse" },
             "changeProposalApplyResponse": { "$ref": "#/$defs/versionedResponse" },
+            "sourceHistoryListResponse": { "$ref": "#/$defs/versionedResponse" },
+            "sourceHistoryRevertResponse": { "$ref": "#/$defs/versionedResponse" },
             "clientCredentialsResponse": { "$ref": "#/$defs/versionedResponse" },
             "clientCredentialRotateResponse": { "$ref": "#/$defs/versionedResponse" },
             "clientCredentialRevokeResponse": { "$ref": "#/$defs/versionedResponse" },
@@ -578,6 +594,33 @@ pub fn operator_fixture_values() -> Vec<(&'static str, Value)> {
                                 "reason": "fixture"
                             }
                         }]
+                    }]
+                }),
+            ),
+        ),
+        (
+            "source-history",
+            operator_response(
+                "/operator/v1/source-history",
+                json!({
+                    "source": "source_history",
+                    "snapshots": [{
+                        "schema_version": 1,
+                        "id": "srcsnap-fixture",
+                        "created_at": "unix:00000000000000000001.000000000",
+                        "profile": "prod",
+                        "owner": "APP",
+                        "name": "EMP_API",
+                        "object_type": "PACKAGE BODY",
+                        "source_kind": "all_source",
+                        "source_sha256": "sha256:e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5",
+                        "source_lines": 42,
+                        "source_chars": 4096,
+                        "proposal_id": "cp-fixture",
+                        "statement_id": "stmt-fixture",
+                        "statement_sql_sha256": "sha256:1f8b10508c06b6d97931f83be25776c3bb82cd6cdf1374ee05bed0dde144f86c",
+                        "lane_id": "operator",
+                        "subject_id_hash": operator_subject_id_hash("oauth:fixture")
                     }]
                 }),
             ),

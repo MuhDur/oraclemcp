@@ -304,7 +304,12 @@ browser allowlist.
 The Reviews board stores profile-scoped Change Proposals as service-owned SQL
 templates plus captured binds, then applies them by re-classifying each
 template and forwarding through the same guarded action route; stored proposal
-verdicts are never authorization inputs.
+verdicts are never authorization inputs. For source-replaceable
+`CREATE OR REPLACE` DDL, proposal apply captures the prior source into
+content-addressed service files before dispatch when the current source is
+visible. `/operator/v1/source-history` lists source-free snapshot metadata, and
+dashboard revert creates a normal DDL Change Proposal from the stored snapshot
+instead of bypassing review, confirmation, or profile ceilings.
 The Explorer page includes global search across visible schemas: object-name
 matches use `oracle_search_objects` with all object types, and source-text
 matches use `oracle_search_source`; both are sent through the same guarded

@@ -69,11 +69,12 @@ use oraclemcp_core::{
     HttpTransportConfig, LaneContext, LaneDispatchFactory, LaneRuntime, MCP_PATH, McpSurfaceDetail,
     McpSurfaceFuture, MtlsClientRegistry, OAuthEnforcement, ObservabilityState,
     OperatorAuthorityPolicy, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport,
-    ShutdownCoordinator, SiemFormat, SiemHttpForwarder, StatefulLaneDispatch, StdioAuthPolicy,
-    TlsMaterial, TlsServerConfig, ToolDispatch, WriteIntentLog, apply_legacy_state_migration,
-    build_server_config, default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
-    mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file, requires_mtls,
-    run_doctor, service_app_doctor_snapshot, sign, start_oraclemcp_service_app_with_transport,
+    ShutdownCoordinator, SiemFormat, SiemHttpForwarder, SourceHistoryStore, StatefulLaneDispatch,
+    StdioAuthPolicy, TlsMaterial, TlsServerConfig, ToolDispatch, WriteIntentLog,
+    apply_legacy_state_migration, build_server_config, default_dashboard_ticket_dir, load_tools,
+    load_tools_for_profile, mint_dashboard_pairing_ticket, operator_subject_id_hash,
+    parse_tools_file, requires_mtls, run_doctor, service_app_doctor_snapshot, sign,
+    start_oraclemcp_service_app_with_transport,
 };
 use oraclemcp_db::{
     DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
@@ -2665,6 +2666,18 @@ fn run_serve(
                 }
             };
             transport.change_proposals = Some(Arc::new(change_proposals));
+            let source_history = match SourceHistoryStore::open_default() {
+                Ok(store) => store,
+                Err(e) => {
+                    emit_status_error(
+                        robot_json,
+                        "ORACLEMCP_SOURCE_HISTORY_UNAVAILABLE",
+                        &format!("failed to initialize source history store: {e}"),
+                    );
+                    return ExitCode::from(2);
+                }
+            };
+            transport.source_history = Some(Arc::new(source_history));
 
             // ── D1 observability wiring (health + metrics + graceful drain) ──
             let version = env!("CARGO_PKG_VERSION");

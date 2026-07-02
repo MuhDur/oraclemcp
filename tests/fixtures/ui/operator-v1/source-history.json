@@ -1,0 +1,29 @@
+{
+  "data": {
+    "snapshots": [
+      {
+        "created_at": "unix:00000000000000000001.000000000",
+        "id": "srcsnap-fixture",
+        "lane_id": "operator",
+        "name": "EMP_API",
+        "object_type": "PACKAGE BODY",
+        "owner": "APP",
+        "profile": "prod",
+        "proposal_id": "cp-fixture",
+        "schema_version": 1,
+        "source_chars": 4096,
+        "source_kind": "all_source",
+        "source_lines": 42,
+        "source_sha256": "sha256:e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5",
+        "statement_id": "stmt-fixture",
+        "statement_sql_sha256": "sha256:1f8b10508c06b6d97931f83be25776c3bb82cd6cdf1374ee05bed0dde144f86c",
+        "subject_id_hash": "subject-sha256:fbb4a1e284731d21e1a8b010638855af3f13be2a422fb4d4f34bd325e7ca900f"
+      }
+    ],
+    "source": "source_history"
+  },
+  "protocol_version": "operator.v1",
+  "redaction_level": "operator_redacted",
+  "route": "/operator/v1/source-history",
+  "schema_version": 1
+}

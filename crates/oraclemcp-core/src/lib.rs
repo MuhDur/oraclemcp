@@ -46,6 +46,7 @@ pub mod server;
 pub mod service_app;
 pub mod session_tool;
 pub mod shutdown;
+pub mod source_history;
 pub mod subscriptions;
 pub mod tamper_token;
 pub mod tls;
@@ -65,6 +66,11 @@ pub use server::{
     OracleMcpServer, ToolDispatch,
 };
 pub use shutdown::{CancelOutcome, ShutdownCoordinator, install_panic_hook};
+pub use source_history::{
+    SourceHistoryError, SourceHistoryFilter, SourceHistoryRevertRequest, SourceHistoryStore,
+    SourceObjectTarget, SourceSnapshot, SourceSnapshotDraft, SourceSnapshotView,
+    normalize_source_object_type, source_object_from_create_or_replace_sql,
+};
 
 pub use admin_auth::{
     AdminAssertionVerifier, AdminAuthError, AdminAuthPolicy, OperatorAuthorityPolicy,

@@ -160,6 +160,12 @@
       ],
       "type": "object"
     },
+    "sourceHistoryListResponse": {
+      "$ref": "#/$defs/versionedResponse"
+    },
+    "sourceHistoryRevertResponse": {
+      "$ref": "#/$defs/versionedResponse"
+    },
     "versionedResponse": {
       "additionalProperties": false,
       "properties": {
@@ -299,6 +305,20 @@
       "method": "POST",
       "path": "/operator/v1/change-proposals/apply",
       "schema": "changeProposalApplyResponse",
+      "sse": false
+    },
+    {
+      "mcp_tool": null,
+      "method": "GET",
+      "path": "/operator/v1/source-history",
+      "schema": "sourceHistoryListResponse",
+      "sse": false
+    },
+    {
+      "mcp_tool": null,
+      "method": "POST",
+      "path": "/operator/v1/source-history/revert",
+      "schema": "sourceHistoryRevertResponse",
       "sse": false
     },
     {

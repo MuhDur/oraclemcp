@@ -742,6 +742,15 @@ statement through the same gated action route. Stored verdicts are treated as
 review metadata only and are never trusted for authorization. Multi-statement
 apply is reported honestly as sequential stop-on-failure, with per-statement
 DML / per-object DDL semantics rather than a false all-or-nothing DDL claim.
+For source-replaceable `CREATE OR REPLACE` DDL (`PACKAGE`, `PACKAGE BODY`,
+`PROCEDURE`, `FUNCTION`, `TRIGGER`, `TYPE`, `TYPE BODY`, and `VIEW`), proposal
+apply attempts to fetch the current source before dispatch and stores it as a
+content-addressed service-owned snapshot. `/operator/v1/source-history` returns
+source-free snapshot metadata; `/operator/v1/source-history/revert` drafts a
+new DDL Change Proposal from a selected snapshot, so revert still requires the
+normal preview, confirmation, classifier, profile-ceiling, and audit path.
+New objects or prior source that is not visible are reported as skipped snapshot
+coverage, not as a universal DDL undo guarantee.
 Gated action and proposal apply calls carry an in-memory idempotency ledger:
 send `Idempotency-Key`, `idempotency_key`, or `request_id` for explicit retry
 identity, or let the server derive a key from the

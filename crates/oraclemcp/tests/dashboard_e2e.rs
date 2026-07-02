@@ -520,6 +520,98 @@ fn w10_client_credentials_screen_is_redacted_and_isolated() {
 }
 
 #[test]
+fn wd_history_source_snapshots_and_revert_are_review_gated() {
+    let app = read_repo_file("web/src/app/App.tsx");
+    let client = read_repo_file("web/src/app/operator-client.ts");
+    let http = read_repo_file("crates/oraclemcp-core/src/http.rs");
+    let source_history = read_repo_file("crates/oraclemcp-core/src/source_history.rs");
+    let dashboard_auth = read_repo_file("crates/oraclemcp-core/src/dashboard_auth.rs");
+    let readme = read_repo_file("README.md");
+    let operations = read_repo_file("docs/operations.md");
+    let conformance = read_repo_file("tests/conformance/COVERAGE.md");
+    let e2e_coverage = read_repo_file("scripts/e2e/COVERAGE.md");
+
+    assert_contains_all(
+        "source-history operator routes",
+        &http,
+        &[
+            "/operator/v1/source-history",
+            "/operator/v1/source-history/revert",
+            "source_history_snapshots_prior_source_and_revert_drafts_review_proposal",
+            "source_snapshot",
+            "capture_source_snapshot_for_statement",
+        ],
+    );
+    assert_contains_all(
+        "source-history store",
+        &source_history,
+        &[
+            "SourceHistoryStore",
+            "source_object_from_create_or_replace_sql",
+            "SOURCE_SNAPSHOT_COLLECTION",
+            "SOURCE_HISTORY_COLLECTION",
+            "view(&self) -> SourceSnapshotView",
+            "source text",
+        ],
+    );
+    assert_contains_all(
+        "dashboard source-history UI",
+        &app,
+        &[
+            "SourceHistoryPanel",
+            "fetchSourceHistory",
+            "draftSourceHistoryRevert",
+            "Source History",
+            "Draft revert proposal",
+        ],
+    );
+    assert_contains_all(
+        "dashboard source-history client",
+        &client,
+        &[
+            "SourceSnapshotView",
+            "/operator/v1/source-history?max_rows=100",
+            "/operator/v1/source-history/revert",
+            "SourceHistoryRevertData",
+        ],
+    );
+    assert_contains_all(
+        "dashboard source-history tickets",
+        &dashboard_auth,
+        &["(\"POST\", \"/operator/v1/source-history/revert\")"],
+    );
+    assert_contains_all(
+        "source-history docs",
+        &(readme + &operations),
+        &[
+            "content-addressed service",
+            "/operator/v1/source-history",
+            "/operator/v1/source-history/revert",
+            "normal preview, confirmation, classifier, profile-ceiling, and audit path",
+            "not as a universal DDL undo guarantee",
+        ],
+    );
+    assert_contains_all(
+        "source-history conformance",
+        &conformance,
+        &[
+            "DASHBOARD-B8-010",
+            "source_history_snapshots_prior_source_and_revert_drafts_review_proposal",
+            "wd_history_source_snapshots_and_revert_are_review_gated",
+        ],
+    );
+    assert_contains_all(
+        "source-history e2e coverage",
+        &e2e_coverage,
+        &[
+            "WD-History source snapshots and revert",
+            "oraclemcp-epic-060-f4xo.8.18",
+            "wd_history_source_snapshots_and_revert_are_review_gated",
+        ],
+    );
+}
+
+#[test]
 fn skin_conformance_2d_fallback_a11y() {
     let app = read_repo_file("web/src/app/App.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");

@@ -69,6 +69,7 @@ import {
   auditProbes,
   applyChangeProposal,
   doctorProbes,
+  draftSourceHistoryRevert,
   draftChangeProposal,
   executeWorkbenchSql,
   applyConfigDraft,
@@ -76,6 +77,7 @@ import {
   fetchClientCredentials,
   fetchDashboardSession,
   fetchChangeProposals,
+  fetchSourceHistory,
   fetchOperatorConfig,
   fetchOperatorHealth,
   fetchOperatorMetrics,
@@ -101,6 +103,7 @@ import {
   type ChangeProposalApplyUnit,
   type ChangeProposalAuthorKind,
   type ChangeProposalView,
+  type SourceSnapshotView,
   type ClientCredentialRotateData,
   type ClientCredentialStatus,
   type ClientCredentialView,
@@ -4513,7 +4516,13 @@ function ReviewsPage(): React.ReactElement {
     queryFn: fetchChangeProposals,
     refetchInterval: 10_000
   });
+  const sourceHistoryQuery = useQuery({
+    queryKey: ["source-history"],
+    queryFn: fetchSourceHistory,
+    refetchInterval: 15_000
+  });
   const proposals = proposalsQuery.data?.data.proposals ?? [];
+  const snapshots = sourceHistoryQuery.data?.data.snapshots ?? [];
   const filtered = React.useMemo(() => {
     const needle = filter.trim().toLowerCase();
     if (!needle) {
@@ -4597,6 +4606,27 @@ function ReviewsPage(): React.ReactElement {
     }
   });
 
+  const revertMutation = useMutation({
+    mutationFn: async (snapshot: SourceSnapshotView) => {
+      if (!session.data) {
+        throw new Error("dashboard session is not ready");
+      }
+      return draftSourceHistoryRevert(session.data, snapshot.id, snapshot.profile);
+    },
+    onSuccess: (response) => {
+      setLastResult({ state: "ok", label: "Revert draft", response });
+      setSelectedId(response.data.proposal.id);
+      queryClient.invalidateQueries({ queryKey: ["change-proposals"] });
+    },
+    onError: (error) => {
+      setLastResult({
+        state: "error",
+        label: "Revert draft",
+        message: error instanceof Error ? error.message : "revert draft failed"
+      });
+    }
+  });
+
   const canDraft =
     session.status === "success" &&
     profile.trim().length > 0 &&
@@ -4615,62 +4645,70 @@ function ReviewsPage(): React.ReactElement {
       description="Profile-scoped SQL proposals with apply-time guard checks."
     >
       <div className="grid gap-4 xl:grid-cols-[minmax(320px,0.8fr)_minmax(0,1.2fr)]">
-        <Surface className="overflow-hidden">
-          <div className="border-b border-zinc-200 p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
-                  <GitPullRequest className="size-4" aria-hidden="true" />
-                  Proposals
-                </h3>
-                <p className="mt-1 truncate text-sm text-zinc-500">
-                  {proposalsQuery.isFetching ? "sync" : `${formatNumber(filtered.length)} visible`}
-                </p>
+        <div className="space-y-4">
+          <Surface className="overflow-hidden">
+            <div className="border-b border-zinc-200 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
+                    <GitPullRequest className="size-4" aria-hidden="true" />
+                    Proposals
+                  </h3>
+                  <p className="mt-1 truncate text-sm text-zinc-500">
+                    {proposalsQuery.isFetching ? "sync" : `${formatNumber(filtered.length)} visible`}
+                  </p>
+                </div>
+                <Badge tone={proposalsQuery.isError ? "warn" : proposalsQuery.data ? "ok" : "info"}>
+                  {proposalsQuery.isError ? "blocked" : proposalsQuery.data ? "ready" : "sync"}
+                </Badge>
               </div>
-              <Badge tone={proposalsQuery.isError ? "warn" : proposalsQuery.data ? "ok" : "info"}>
-                {proposalsQuery.isError ? "blocked" : proposalsQuery.data ? "ready" : "sync"}
-              </Badge>
+              <label className="mt-4 block">
+                <span className="mb-2 block text-sm font-bold text-zinc-700">Filter</span>
+                <input
+                  className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                  value={filter}
+                  onChange={(event) => setFilter(event.target.value)}
+                  placeholder="profile, title, SQL"
+                />
+              </label>
             </div>
-            <label className="mt-4 block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Filter</span>
-              <input
-                className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
-                value={filter}
-                onChange={(event) => setFilter(event.target.value)}
-                placeholder="profile, title, SQL"
-              />
-            </label>
-          </div>
-          <div className="max-h-[720px] overflow-auto">
-            {filtered.length === 0 ? (
-              <div className="px-4 py-8 text-sm font-semibold text-zinc-500">No proposals</div>
-            ) : (
-              filtered.map((proposal) => (
-                <button
-                  key={proposal.id}
-                  type="button"
-                  className={cn(
-                    "block w-full border-b border-zinc-200 px-4 py-3 text-left transition-colors hover:bg-zinc-50",
-                    selected?.id === proposal.id ? "bg-emerald-50" : "bg-white"
-                  )}
-                  onClick={() => setSelectedId(proposal.id)}
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="min-w-0 truncate text-sm font-bold text-zinc-950">
-                      {proposal.title}
-                    </span>
-                    <Badge tone={proposalLevelTone(proposal)}>{proposal.profile}</Badge>
-                  </div>
-                  <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold text-zinc-500">
-                    <span>{proposal.author}</span>
-                    <span>{formatNumber(proposal.statement_count)} stmt</span>
-                    <span>{proposal.updated_at}</span>
-                  </div>
-                </button>
-              ))
-            )}
-          </div>
-        </Surface>
+            <div className="max-h-[560px] overflow-auto">
+              {filtered.length === 0 ? (
+                <div className="px-4 py-8 text-sm font-semibold text-zinc-500">No proposals</div>
+              ) : (
+                filtered.map((proposal) => (
+                  <button
+                    key={proposal.id}
+                    type="button"
+                    className={cn(
+                      "block w-full border-b border-zinc-200 px-4 py-3 text-left transition-colors hover:bg-zinc-50",
+                      selected?.id === proposal.id ? "bg-emerald-50" : "bg-white"
+                    )}
+                    onClick={() => setSelectedId(proposal.id)}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="min-w-0 truncate text-sm font-bold text-zinc-950">
+                        {proposal.title}
+                      </span>
+                      <Badge tone={proposalLevelTone(proposal)}>{proposal.profile}</Badge>
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold text-zinc-500">
+                      <span>{proposal.author}</span>
+                      <span>{formatNumber(proposal.statement_count)} stmt</span>
+                      <span>{proposal.updated_at}</span>
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          </Surface>
+          <SourceHistoryPanel
+            snapshots={snapshots}
+            pending={sourceHistoryQuery.isFetching || revertMutation.isPending}
+            blocked={sourceHistoryQuery.isError}
+            onDraftRevert={(snapshot) => revertMutation.mutate(snapshot)}
+          />
+        </div>
 
         <div className="space-y-4">
           <Surface className="p-4">
@@ -4853,6 +4891,73 @@ function ProposalStatementTable({ proposal }: { proposal: ChangeProposalView }):
         </tbody>
       </table>
     </div>
+  );
+}
+
+function SourceHistoryPanel({
+  snapshots,
+  pending,
+  blocked,
+  onDraftRevert
+}: {
+  snapshots: SourceSnapshotView[];
+  pending: boolean;
+  blocked: boolean;
+  onDraftRevert: (snapshot: SourceSnapshotView) => void;
+}): React.ReactElement {
+  return (
+    <Surface className="overflow-hidden">
+      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+        <div className="min-w-0">
+          <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
+            <FileClock className="size-4" aria-hidden="true" />
+            Source History
+          </h3>
+          <p className="mt-1 truncate text-sm text-zinc-500">
+            {pending ? "sync" : `${formatNumber(snapshots.length)} snapshots`}
+          </p>
+        </div>
+        <Badge tone={blocked ? "warn" : snapshots.length ? "ok" : "off"}>
+          {blocked ? "blocked" : snapshots.length ? "ready" : "empty"}
+        </Badge>
+      </div>
+      <div className="max-h-[320px] overflow-auto">
+        {snapshots.length === 0 ? (
+          <div className="px-4 py-6 text-sm font-semibold text-zinc-500">No source snapshots</div>
+        ) : (
+          snapshots.map((snapshot) => (
+            <div
+              key={`${snapshot.id}-${snapshot.statement_id}`}
+              className="grid gap-3 border-b border-zinc-200 px-4 py-3"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-bold text-zinc-950">
+                    {snapshot.owner}.{snapshot.name}
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold text-zinc-500">
+                    <span>{snapshot.object_type}</span>
+                    <span>{snapshot.profile}</span>
+                    <span>{formatNumber(snapshot.source_lines)} lines</span>
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={pending}
+                  onClick={() => onDraftRevert(snapshot)}
+                  title="Draft revert proposal"
+                >
+                  <RotateCcw className="size-4" aria-hidden="true" />
+                  Revert
+                </Button>
+              </div>
+              <p className="truncate font-mono text-xs text-zinc-500">{snapshot.source_sha256}</p>
+            </div>
+          ))
+        )}
+      </div>
+    </Surface>
   );
 }
 

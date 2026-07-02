@@ -66,6 +66,11 @@ use crate::operator_protocol::{
     validate_operator_response,
 };
 use crate::server::{DispatchCloseReason, DispatchContext, OracleMcpServer};
+use crate::source_history::{
+    SourceHistoryError, SourceHistoryFilter, SourceHistoryRevertRequest, SourceHistoryStore,
+    SourceObjectTarget, SourceSnapshotDraft, normalize_source_object_type,
+    source_object_from_create_or_replace_sql,
+};
 use crate::tls::TlsServerConfig;
 
 /// The MCP endpoint path the Streamable HTTP transport is mounted at.
@@ -414,6 +419,10 @@ pub struct HttpTransportConfig {
     /// Draft/list are lane-free; apply acquires a lane only by forwarding to the
     /// existing gated action route.
     pub change_proposals: Option<Arc<ChangeProposalStore>>,
+    /// Durable source snapshots captured before governed source-replaceable DDL
+    /// applies. Revert uses the change-proposal path; this store never writes
+    /// directly to Oracle.
+    pub source_history: Option<Arc<SourceHistoryStore>>,
     /// In-memory idempotency ledger for `/operator/v1` gated-action routes.
     /// It caches only redacted operator envelopes and never bypasses the
     /// dispatcher's grant or write-intent checks.
@@ -466,6 +475,7 @@ impl std::fmt::Debug for HttpTransportConfig {
             )
             .field("config_ops", &self.config_ops.is_some())
             .field("change_proposals", &self.change_proposals.is_some())
+            .field("source_history", &self.source_history.is_some())
             .field("operator_idempotency", &true)
             .field("operator_events", &true)
             .field("observability", &self.observability)
@@ -498,6 +508,7 @@ impl Default for HttpTransportConfig {
             operator_audit_tail_path: None,
             config_ops: None,
             change_proposals: None,
+            source_history: None,
             operator_idempotency: Arc::new(OperatorIdempotencyLedger::new()),
             operator_events: Arc::new(OperatorEventStore::new()),
             observability: ObservabilityState::default(),
@@ -1288,6 +1299,51 @@ mod tests {
                 Outcome::Ok(serde_json::json!({
                     "tool": tool,
                     "call": call,
+                    "args": args,
+                    "classification": classification,
+                }))
+            })
+        }
+    }
+
+    struct SourceHistoryDispatch {
+        calls: Arc<Mutex<Vec<(String, Value)>>>,
+    }
+
+    impl ToolDispatch for SourceHistoryDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            name: &'a str,
+            args: Value,
+        ) -> DispatchFuture<'a> {
+            self.calls.lock().push((name.to_owned(), args.clone()));
+            let tool = name.to_owned();
+            Box::pin(async move {
+                if tool == "oracle_get_source" {
+                    return Outcome::Ok(serde_json::json!({
+                        "source": {
+                            "owner": "APP",
+                            "name": "EMP_API",
+                            "object_type": "PACKAGE BODY",
+                            "source": "PACKAGE BODY emp_api AS BEGIN NULL; END;",
+                            "line_count": 1,
+                            "char_count": 39,
+                            "truncated": false
+                        }
+                    }));
+                }
+                let classification = args.get("sql").and_then(Value::as_str).map(|sql| {
+                    let decision = Classifier::default().classify(sql);
+                    serde_json::json!({
+                        "required_level": decision.required_level,
+                        "danger": decision.danger,
+                        "reason": decision.reason,
+                    })
+                });
+                Outcome::Ok(serde_json::json!({
+                    "tool": tool,
                     "args": args,
                     "classification": classification,
                 }))
@@ -3071,6 +3127,130 @@ mod tests {
             calls.load(AtomicOrdering::SeqCst),
             2,
             "proposal apply should enter dispatch once per statement after reclassification"
+        );
+    }
+
+    #[test]
+    fn source_history_snapshots_prior_source_and_revert_drafts_review_proposal() {
+        let (auditor, _sink) = operator_auditor();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let server = server_with_dispatch(Arc::new(SourceHistoryDispatch {
+            calls: Arc::clone(&calls),
+        }));
+        let dir = dashboard_test_dir("source-history");
+        let state = dir.join("state");
+        let change_proposals = Arc::new(crate::change_proposal::ChangeProposalStore::new(
+            crate::file_store::FileStore::open(&state).expect("proposal store"),
+        ));
+        let source_history = Arc::new(crate::source_history::SourceHistoryStore::new(
+            crate::file_store::FileStore::open(&state).expect("source-history store"),
+        ));
+        let cfg = HttpTransportConfig {
+            operator_auditor: Some(auditor),
+            change_proposals: Some(change_proposals),
+            source_history: Some(source_history),
+            ..Default::default()
+        };
+        let ddl = "CREATE OR REPLACE PACKAGE BODY app.emp_api AS BEGIN NULL; END;";
+
+        let draft = handle_http_request(
+            &server,
+            &cfg,
+            operator_json_post(
+                "/operator/v1/change-proposals/draft",
+                &serde_json::json!({
+                    "profile": "prod",
+                    "author": "agent",
+                    "title": "Patch package body",
+                    "statements": [{
+                        "sql_template": ddl,
+                        "unit": "ddl",
+                        "commit": true
+                    }]
+                }),
+            ),
+        );
+        assert_eq!(draft.status, 200);
+        let proposal_id = response_json(&draft)["data"]["proposal"]["id"]
+            .as_str()
+            .expect("proposal id")
+            .to_owned();
+
+        let apply = handle_http_request(
+            &server,
+            &cfg,
+            operator_json_post(
+                "/operator/v1/change-proposals/apply",
+                &serde_json::json!({
+                    "proposal_id": proposal_id,
+                    "confirm": "opaque-preview-grant",
+                    "commit": true,
+                    "idempotency_key": "source-history-apply"
+                }),
+            ),
+        );
+        assert_eq!(apply.status, 200);
+        let apply_json = response_json(&apply);
+        let snapshot = &apply_json["data"]["results"][0]["source_snapshot"]["snapshot"];
+        assert_eq!(
+            apply_json["data"]["results"][0]["source_snapshot"]["status"],
+            serde_json::json!("captured")
+        );
+        assert_eq!(snapshot["owner"], serde_json::json!("APP"));
+        assert_eq!(snapshot["name"], serde_json::json!("EMP_API"));
+        assert_eq!(snapshot["object_type"], serde_json::json!("PACKAGE BODY"));
+        let snapshot_id = snapshot["id"].as_str().expect("snapshot id").to_owned();
+
+        let history = handle_http_request(
+            &server,
+            &cfg,
+            operator_json_get("/operator/v1/source-history"),
+        );
+        assert_eq!(history.status, 200);
+        let history_body = String::from_utf8(history.body.clone()).expect("history utf8");
+        assert!(
+            !history_body.contains("BEGIN NULL"),
+            "source-history list must not serialize source text"
+        );
+        let history_json = response_json(&history);
+        assert_eq!(
+            history_json["data"]["snapshots"][0]["id"],
+            serde_json::json!(snapshot_id)
+        );
+
+        let revert = handle_http_request(
+            &server,
+            &cfg,
+            operator_json_post(
+                "/operator/v1/source-history/revert",
+                &serde_json::json!({ "snapshot_id": snapshot_id }),
+            ),
+        );
+        assert_eq!(revert.status, 200);
+        let revert_json = response_json(&revert);
+        assert_eq!(
+            revert_json["data"]["status"],
+            serde_json::json!("revert_drafted")
+        );
+        assert_eq!(
+            revert_json["data"]["proposal"]["statements"][0]["unit"],
+            serde_json::json!("ddl")
+        );
+        assert!(
+            revert_json["data"]["proposal"]["statements"][0]["sql_template"]
+                .as_str()
+                .expect("revert SQL")
+                .starts_with("CREATE OR REPLACE PACKAGE BODY")
+        );
+
+        let call_names = calls
+            .lock()
+            .iter()
+            .map(|(tool, _)| tool.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            call_names,
+            vec!["oracle_get_source".to_owned(), "oracle_execute".to_owned()]
         );
     }
 
@@ -7346,6 +7526,8 @@ enum OperatorRouteKind {
     ChangeProposalsList,
     ChangeProposalsDraft,
     ChangeProposalsApply,
+    SourceHistoryList,
+    SourceHistoryRevert,
     ClientCredentials,
     ClientCredentialRotate,
     ClientCredentialRevoke,
@@ -7374,6 +7556,8 @@ fn operator_route_kind(path: &str) -> OperatorRouteKind {
         "/operator/v1/change-proposals" => OperatorRouteKind::ChangeProposalsList,
         "/operator/v1/change-proposals/draft" => OperatorRouteKind::ChangeProposalsDraft,
         "/operator/v1/change-proposals/apply" => OperatorRouteKind::ChangeProposalsApply,
+        "/operator/v1/source-history" => OperatorRouteKind::SourceHistoryList,
+        "/operator/v1/source-history/revert" => OperatorRouteKind::SourceHistoryRevert,
         "/operator/v1/client-credentials" => OperatorRouteKind::ClientCredentials,
         "/operator/v1/client-credentials/rotate" => OperatorRouteKind::ClientCredentialRotate,
         "/operator/v1/client-credentials/revoke" => OperatorRouteKind::ClientCredentialRevoke,
@@ -7397,6 +7581,7 @@ impl OperatorRouteKind {
             | Self::ConfigRollback
             | Self::ChangeProposalsDraft
             | Self::ChangeProposalsApply
+            | Self::SourceHistoryRevert
             | Self::ClientCredentialRotate
             | Self::ClientCredentialRevoke
             | Self::SetLevel
@@ -7460,6 +7645,9 @@ fn handle_operator_api_route(
             operator_audit_seq,
             dashboard_browser,
         ),
+        OperatorRouteKind::SourceHistoryList | OperatorRouteKind::SourceHistoryRevert => {
+            handle_operator_source_history_route(config, request, operator_subject, route)
+        }
         OperatorRouteKind::ClientCredentials
         | OperatorRouteKind::ClientCredentialRotate
         | OperatorRouteKind::ClientCredentialRevoke => {
@@ -8019,7 +8207,13 @@ fn apply_change_proposal(
     let mut results = Vec::new();
     let mut failed = false;
     for (index, statement) in proposal.statements.iter().enumerate() {
-        let response = apply_change_proposal_statement(context, proposal, apply, statement);
+        let source_snapshot =
+            capture_source_snapshot_for_statement(context, proposal, apply, statement);
+        let response = if source_snapshot_blocks_apply(&source_snapshot) {
+            source_snapshot_blocked_response(context, &source_snapshot)
+        } else {
+            apply_change_proposal_statement(context, proposal, apply, statement)
+        };
         let response_body: Value = serde_json::from_slice(&response.body).unwrap_or_else(|_| {
             json!({
                 "error": "invalid_operator_action_response",
@@ -8036,6 +8230,7 @@ fn apply_change_proposal(
             "bind_count": statement.binds.len(),
             "reclassified": statement.reclassified_view(),
             "stored_verdict_ignored": statement.stored_verdict.is_some() || proposal.stored_verdict.is_some(),
+            "source_snapshot": source_snapshot,
             "action_status": response.status,
             "action_response": response_body,
         }));
@@ -8064,6 +8259,29 @@ fn apply_change_proposal(
     })
 }
 
+fn source_snapshot_blocks_apply(snapshot: &Value) -> bool {
+    snapshot
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| status == "failed")
+}
+
+fn source_snapshot_blocked_response(
+    context: &ChangeProposalApplyContext<'_>,
+    snapshot: &Value,
+) -> HttpResponse {
+    operator_json_response(
+        500,
+        &context.original_request.path,
+        json!({
+            "source": "change_proposals",
+            "error": "source_snapshot_failed",
+            "message": "source snapshot persistence failed before DDL apply; statement was not dispatched",
+            "source_snapshot": snapshot,
+        }),
+    )
+}
+
 fn apply_change_proposal_statement(
     context: &ChangeProposalApplyContext<'_>,
     proposal: &crate::change_proposal::ChangeProposal,
@@ -8077,11 +8295,33 @@ fn apply_change_proposal_statement(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("change-proposal-apply");
+    forward_operator_action(
+        context,
+        OperatorActionForward {
+            idempotency_key: format!("{key_prefix}:{}:{}", proposal.id, statement.id),
+            lane_id: apply.lane_id.as_deref(),
+            tool,
+            arguments,
+        },
+    )
+}
+
+struct OperatorActionForward<'a> {
+    idempotency_key: String,
+    lane_id: Option<&'a str>,
+    tool: &'a str,
+    arguments: Value,
+}
+
+fn forward_operator_action(
+    context: &ChangeProposalApplyContext<'_>,
+    action: OperatorActionForward<'_>,
+) -> HttpResponse {
     let body = json!({
-        "idempotency_key": format!("{key_prefix}:{}:{}", proposal.id, statement.id),
-        "lane_id": apply.lane_id.as_deref().map(str::trim).filter(|value| !value.is_empty()),
-        "tool": tool,
-        "arguments": arguments,
+        "idempotency_key": action.idempotency_key,
+        "lane_id": action.lane_id.map(str::trim).filter(|value| !value.is_empty()),
+        "tool": action.tool,
+        "arguments": action.arguments,
     });
     let host = context
         .original_request
@@ -8114,6 +8354,285 @@ fn apply_change_proposal_statement(
         context.operator_audit_seq,
         context.dashboard_browser,
     )
+}
+
+struct CurrentSourceDocument {
+    owner: String,
+    name: String,
+    object_type: String,
+    source_kind: String,
+    source: String,
+}
+
+enum SourceSnapshotFetchOutcome {
+    Document(CurrentSourceDocument),
+    Skipped(Value),
+}
+
+fn capture_source_snapshot_for_statement(
+    context: &ChangeProposalApplyContext<'_>,
+    proposal: &crate::change_proposal::ChangeProposal,
+    apply: &ChangeProposalApplyRequest,
+    statement: &ChangeProposalStatement,
+) -> Value {
+    if statement.unit != ChangeProposalApplyUnit::Ddl {
+        return json!({
+            "status": "not_applicable",
+            "reason": "statement unit is not DDL",
+        });
+    }
+    let Some(store) = context.config.source_history.as_ref() else {
+        return json!({
+            "status": "unavailable",
+            "reason": "source history store is not configured",
+        });
+    };
+    let Some(target) = source_object_from_create_or_replace_sql(&statement.sql_template) else {
+        return json!({
+            "status": "skipped",
+            "reason": "statement is not a supported source-replaceable CREATE OR REPLACE shape",
+        });
+    };
+    let document = match fetch_current_source_document(context, proposal, apply, statement, &target)
+    {
+        Ok(SourceSnapshotFetchOutcome::Document(document)) => document,
+        Ok(SourceSnapshotFetchOutcome::Skipped(data)) | Err(data) => return data,
+    };
+    match store.record_snapshot(SourceSnapshotDraft {
+        profile: proposal.profile.clone(),
+        owner: document.owner,
+        name: document.name,
+        object_type: document.object_type,
+        source_kind: document.source_kind,
+        source: document.source,
+        proposal_id: proposal.id.clone(),
+        statement_id: statement.id.clone(),
+        statement_sql_sha256: prefixed_sha256_hex(statement.sql_template.as_bytes()),
+        lane_id: apply
+            .lane_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        subject_id_hash: operator_subject_id_hash(
+            &context.operator_subject.legacy_agent_identity(),
+        ),
+    }) {
+        Ok(view) => json!({
+            "status": "captured",
+            "snapshot": view,
+        }),
+        Err(error) => json!({
+            "status": "failed",
+            "reason": "source snapshot could not be persisted",
+            "error": error.to_string(),
+        }),
+    }
+}
+
+fn fetch_current_source_document(
+    context: &ChangeProposalApplyContext<'_>,
+    proposal: &crate::change_proposal::ChangeProposal,
+    apply: &ChangeProposalApplyRequest,
+    statement: &ChangeProposalStatement,
+    target: &SourceObjectTarget,
+) -> Result<SourceSnapshotFetchOutcome, Value> {
+    let object_type = normalize_source_object_type(&target.object_type).ok_or_else(|| {
+        json!({
+            "status": "skipped",
+            "reason": "unsupported source object type",
+            "object_type": target.object_type,
+        })
+    })?;
+    let (tool, arguments) = source_snapshot_fetch_action(target, &object_type);
+    let response = forward_operator_action(
+        context,
+        OperatorActionForward {
+            idempotency_key: format!(
+                "source-history-snapshot:{}:{}:{}",
+                context.operator_audit_seq, proposal.id, statement.id
+            ),
+            lane_id: apply.lane_id.as_deref(),
+            tool,
+            arguments,
+        },
+    );
+    let body: Value = serde_json::from_slice(&response.body).unwrap_or_else(|_| {
+        json!({
+            "error": "invalid_operator_action_response",
+            "message": "source snapshot fetch response was not valid JSON",
+        })
+    });
+    if operator_action_response_failed(response.status, &body) {
+        return Ok(SourceSnapshotFetchOutcome::Skipped(json!({
+            "status": "skipped",
+            "reason": "prior source was not visible before apply",
+            "object": source_target_json(target, &object_type),
+            "fetch_status": response.status,
+            "fetch_error": body.pointer("/data/mcp_response/error/message")
+                .or_else(|| body.pointer("/data/mcp_response/error"))
+                .or_else(|| body.pointer("/data/error"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        })));
+    }
+    let structured = body
+        .pointer("/data/mcp_response/result/structuredContent")
+        .ok_or_else(|| {
+            json!({
+                "status": "skipped",
+                "reason": "source fetch response did not include structured content",
+                "object": source_target_json(target, &object_type),
+            })
+        })?;
+    if object_type == "VIEW" {
+        return Ok(source_snapshot_document_from_ddl(structured, target));
+    }
+    Ok(source_snapshot_document_from_all_source(
+        structured,
+        target,
+        &object_type,
+    ))
+}
+
+fn source_snapshot_fetch_action(
+    target: &SourceObjectTarget,
+    object_type: &str,
+) -> (&'static str, Value) {
+    let mut arguments = serde_json::Map::new();
+    if let Some(owner) = target.owner.as_ref() {
+        arguments.insert("owner".to_owned(), json!(owner));
+    }
+    arguments.insert("name".to_owned(), json!(target.name.as_str()));
+    arguments.insert("object_type".to_owned(), json!(object_type));
+    if object_type == "VIEW" {
+        ("oracle_get_ddl", Value::Object(arguments))
+    } else {
+        arguments.insert("max_chars".to_owned(), json!(1_000_000));
+        ("oracle_get_source", Value::Object(arguments))
+    }
+}
+
+fn source_snapshot_document_from_ddl(
+    structured: &Value,
+    target: &SourceObjectTarget,
+) -> SourceSnapshotFetchOutcome {
+    let Some(source) = structured.get("ddl").and_then(Value::as_str) else {
+        return SourceSnapshotFetchOutcome::Skipped(json!({
+            "status": "skipped",
+            "reason": "no prior view DDL was visible before apply",
+            "object": source_target_json(target, "VIEW"),
+        }));
+    };
+    let source = source.trim();
+    if source.is_empty() {
+        return SourceSnapshotFetchOutcome::Skipped(json!({
+            "status": "skipped",
+            "reason": "no prior view DDL was visible before apply",
+            "object": source_target_json(target, "VIEW"),
+        }));
+    }
+    SourceSnapshotFetchOutcome::Document(CurrentSourceDocument {
+        owner: structured
+            .get("owner")
+            .and_then(Value::as_str)
+            .or(target.owner.as_deref())
+            .unwrap_or_default()
+            .to_ascii_uppercase(),
+        name: structured
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(&target.name)
+            .to_ascii_uppercase(),
+        object_type: "VIEW".to_owned(),
+        source_kind: "dbms_metadata".to_owned(),
+        source: source.to_owned(),
+    })
+}
+
+fn source_snapshot_document_from_all_source(
+    structured: &Value,
+    target: &SourceObjectTarget,
+    object_type: &str,
+) -> SourceSnapshotFetchOutcome {
+    let source = structured.get("source").unwrap_or(&Value::Null);
+    if source
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return SourceSnapshotFetchOutcome::Skipped(json!({
+            "status": "skipped",
+            "reason": "prior source was truncated before apply",
+            "object": source_target_json(target, object_type),
+        }));
+    }
+    if source
+        .get("line_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        == 0
+    {
+        return SourceSnapshotFetchOutcome::Skipped(json!({
+            "status": "skipped",
+            "reason": "no prior source was visible before apply",
+            "object": source_target_json(target, object_type),
+        }));
+    }
+    let Some(text) = source.get("source").and_then(Value::as_str) else {
+        return SourceSnapshotFetchOutcome::Skipped(json!({
+            "status": "skipped",
+            "reason": "source fetch response did not include source text",
+            "object": source_target_json(target, object_type),
+        }));
+    };
+    if text.trim().is_empty() {
+        return SourceSnapshotFetchOutcome::Skipped(json!({
+            "status": "skipped",
+            "reason": "no prior source was visible before apply",
+            "object": source_target_json(target, object_type),
+        }));
+    }
+    SourceSnapshotFetchOutcome::Document(CurrentSourceDocument {
+        owner: source
+            .get("owner")
+            .and_then(Value::as_str)
+            .or(target.owner.as_deref())
+            .unwrap_or_default()
+            .to_ascii_uppercase(),
+        name: source
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(&target.name)
+            .to_ascii_uppercase(),
+        object_type: source
+            .get("object_type")
+            .and_then(Value::as_str)
+            .and_then(normalize_source_object_type)
+            .unwrap_or_else(|| object_type.to_owned()),
+        source_kind: "all_source".to_owned(),
+        source: create_or_replace_ddl_for_source(text),
+    })
+}
+
+fn create_or_replace_ddl_for_source(source: &str) -> String {
+    let trimmed = source.trim_start();
+    if trimmed
+        .to_ascii_uppercase()
+        .starts_with("CREATE OR REPLACE ")
+    {
+        source.to_owned()
+    } else {
+        format!("CREATE OR REPLACE {trimmed}")
+    }
+}
+
+fn source_target_json(target: &SourceObjectTarget, object_type: &str) -> Value {
+    json!({
+        "owner": target.owner.as_deref(),
+        "name": target.name.as_str(),
+        "object_type": object_type,
+    })
 }
 
 fn change_proposal_action_arguments(
@@ -8185,6 +8704,166 @@ fn operator_change_proposal_error_response(
         route,
         json!({
             "source": "change_proposals",
+            "error": code,
+            "message": error.to_string(),
+        }),
+    )
+}
+
+fn handle_operator_source_history_route(
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+    operator_subject: &AuditSubject,
+    route: OperatorRouteKind,
+) -> HttpResponse {
+    let Some(history) = config.source_history.as_ref() else {
+        return operator_json_response(
+            503,
+            &request.path,
+            json!({
+                "source": "source_history",
+                "error": "source_history_unavailable",
+                "message": "source history store is not configured for this transport",
+            }),
+        );
+    };
+
+    match route {
+        OperatorRouteKind::SourceHistoryList => {
+            match history.list(source_history_filter_from_request(request)) {
+                Ok(snapshots) => operator_json_response(
+                    200,
+                    &request.path,
+                    json!({
+                        "source": "source_history",
+                        "snapshots": snapshots,
+                        "redaction": "source text is omitted from history list responses",
+                    }),
+                ),
+                Err(error) => operator_source_history_error_response(&request.path, error),
+            }
+        }
+        OperatorRouteKind::SourceHistoryRevert => {
+            if !content_type_is_json(request) {
+                return empty_response(415);
+            }
+            let Some(change_proposals) = config.change_proposals.as_ref() else {
+                return operator_json_response(
+                    503,
+                    &request.path,
+                    json!({
+                        "source": "source_history",
+                        "error": "change_proposals_unavailable",
+                        "message": "source-history revert requires the change proposal store",
+                    }),
+                );
+            };
+            let revert = match serde_json::from_slice::<SourceHistoryRevertRequest>(&request.body) {
+                Ok(revert) => revert,
+                Err(_) => {
+                    return operator_json_response(
+                        400,
+                        &request.path,
+                        json!({
+                            "source": "source_history",
+                            "error": "invalid_source_history_revert",
+                            "message": "source-history revert body must include a valid snapshot_id",
+                        }),
+                    );
+                }
+            };
+            let snapshot = match history.load_snapshot(&revert.snapshot_id) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    return operator_source_history_error_response(&request.path, error);
+                }
+            };
+            let profile = revert
+                .profile
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| snapshot.profile.clone());
+            let title = revert
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    format!(
+                        "Revert {}.{} {} to {}",
+                        snapshot.owner, snapshot.name, snapshot.object_type, snapshot.source_sha256
+                    )
+                });
+            let author_id_hash =
+                operator_subject_id_hash(&operator_subject.legacy_agent_identity());
+            let draft_request = crate::change_proposal::ChangeProposalDraftRequest {
+                profile,
+                author: crate::change_proposal::ChangeProposalAuthorKind::Agent,
+                title: Some(title),
+                statements: vec![crate::change_proposal::ChangeProposalStatementDraft {
+                    sql_template: snapshot.source.clone(),
+                    binds: Vec::new(),
+                    unit: Some(ChangeProposalApplyUnit::Ddl),
+                    commit: Some(true),
+                    capture_dbms_output: Some(false),
+                    stored_verdict: None,
+                }],
+                stored_verdict: None,
+            };
+            match change_proposals.draft(draft_request, author_id_hash) {
+                Ok(outcome) => operator_json_response(
+                    200,
+                    &request.path,
+                    json!({
+                        "source": "source_history",
+                        "status": "revert_drafted",
+                        "snapshot": snapshot.view(),
+                        "proposal": outcome.proposal,
+                    }),
+                ),
+                Err(error) => operator_change_proposal_error_response(&request.path, error),
+            }
+        }
+        _ => unreachable!("non-source-history route"),
+    }
+}
+
+fn source_history_filter_from_request(request: &HttpRequest) -> SourceHistoryFilter {
+    let max_rows = request
+        .query_param("max_rows")
+        .or_else(|| request.query_param("limit"))
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(1, 500))
+        .or(Some(100));
+    SourceHistoryFilter {
+        profile: request.query_param("profile").map(str::to_owned),
+        owner: request.query_param("owner").map(str::to_owned),
+        name: request.query_param("name").map(str::to_owned),
+        object_type: request.query_param("object_type").map(str::to_owned),
+        max_rows,
+    }
+}
+
+fn operator_source_history_error_response(route: &str, error: SourceHistoryError) -> HttpResponse {
+    let (status, code) = match &error {
+        SourceHistoryError::Invalid(_) => (400, "invalid_source_history_request"),
+        SourceHistoryError::UnknownSnapshot => (404, "unknown_source_history_snapshot"),
+        SourceHistoryError::FileStore(FileStoreError::InvalidSegment { .. }) => {
+            (400, "invalid_source_history_request")
+        }
+        SourceHistoryError::FileStore(FileStoreError::Locked) => (409, "source_history_locked"),
+        SourceHistoryError::FileStore(_)
+        | SourceHistoryError::Io(_)
+        | SourceHistoryError::Json(_) => (500, "source_history_store_failed"),
+    };
+    operator_json_response(
+        status,
+        route,
+        json!({
+            "source": "source_history",
             "error": code,
             "message": error.to_string(),
         }),

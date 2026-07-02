@@ -387,6 +387,38 @@ export type ChangeProposalApplyData = {
   results: Array<Record<string, unknown>>;
 };
 
+export type SourceSnapshotView = {
+  schema_version: number;
+  id: string;
+  created_at: string;
+  profile: string;
+  owner: string;
+  name: string;
+  object_type: string;
+  source_kind: string;
+  source_sha256: string;
+  source_lines: number;
+  source_chars: number;
+  proposal_id: string;
+  statement_id: string;
+  statement_sql_sha256: string;
+  lane_id?: string | null;
+  subject_id_hash: string;
+};
+
+export type SourceHistoryListData = {
+  source: string;
+  snapshots: SourceSnapshotView[];
+  redaction?: string;
+};
+
+export type SourceHistoryRevertData = {
+  source: string;
+  status: string;
+  snapshot: SourceSnapshotView;
+  proposal: ChangeProposalView;
+};
+
 export type WorkbenchActionData = {
   status?: string;
   lane_id?: string | null;
@@ -729,6 +761,10 @@ export async function fetchChangeProposals(): Promise<OperatorResponse<ChangePro
   return operatorGet("/operator/v1/change-proposals");
 }
 
+export async function fetchSourceHistory(): Promise<OperatorResponse<SourceHistoryListData>> {
+  return operatorGet("/operator/v1/source-history?max_rows=100");
+}
+
 export async function fetchClientCredentials(): Promise<OperatorResponse<ClientCredentialsData>> {
   return operatorGet("/operator/v1/client-credentials");
 }
@@ -803,6 +839,17 @@ export async function applyChangeProposal(
     confirm: request.confirm?.trim() || undefined,
     commit: request.commit,
     idempotency_key: requestId("change-proposal-apply")
+  });
+}
+
+export async function draftSourceHistoryRevert(
+  session: DashboardSession,
+  snapshotId: string,
+  profile?: string
+): Promise<OperatorResponse<SourceHistoryRevertData>> {
+  return operatorPost("/operator/v1/source-history/revert", session, {
+    snapshot_id: snapshotId,
+    profile: optionalString(profile)
   });
 }
 
