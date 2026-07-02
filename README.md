@@ -22,12 +22,12 @@ One line installs or updates `oraclemcp` on macOS and Linux. It works as pasted
 for a human terminal and for a non-interactive agent run:
 
 ```sh
-curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --version 0.6.4
+curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --version 0.6.5
 ```
 
 The hosted script fetch includes a cache buster so stale CDN/proxy copies do not
 hide installer updates. This command is literal and copy-pasteable for release
-`0.6.4`; change only the version number when installing another release. Later
+`0.6.5`; change only the version number when installing another release. Later
 examples that contain `...`, `<pw>`, `<profile>`, or placeholder env values are
 templates: replace those placeholders before running them.
 
@@ -61,22 +61,22 @@ the normal command above is the install/update command.
 Preview the Linux/macOS host plan without changing the machine:
 
 ```sh
-curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --dry-run --version 0.6.4
+curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --dry-run --version 0.6.5
 ```
 
 From an installed binary, preview or run the same update path:
 
 ```sh
-oraclemcp --json self-update --dry-run --version 0.6.4
-oraclemcp self-update --version 0.6.4 --no-service
+oraclemcp --json self-update --dry-run --version 0.6.5
+oraclemcp self-update --version 0.6.5 --no-service
 ```
 
 On Windows, download and run the PowerShell installer:
 
 ```powershell
 iwr -UseBasicParsing https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.ps1 -OutFile install.ps1
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -Version 0.6.4
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.6.4
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -Version 0.6.5
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.6.5
 ```
 
 The Windows installer accepts the same release operations: `-Update` for the
@@ -86,7 +86,7 @@ verification posture. `prefer` installs after a hard SHA-256 check when cosign
 is missing; `require` fails without cosign.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Update -Version 0.6.4 -NoService
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Update -Version 0.6.5 -NoService
 ```
 
 For air-gapped hosts, download the release archive plus its `.sha256`, `.sig`,
@@ -94,12 +94,12 @@ For air-gapped hosts, download the release archive plus its `.sha256`, `.sig`,
 of the installer:
 
 ```sh
-bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz --version 0.6.4
+bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz --version 0.6.5
 ```
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 `
-  -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.6.4
+  -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.6.5
 ```
 
 The release installer does not silently fall back from a missing release archive
@@ -156,7 +156,7 @@ after it resolves the target version.
 
 ```sh
 cargo binstall oraclemcp
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.4
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.5
 ```
 
 Pending registry-backed channels:
@@ -164,7 +164,7 @@ Pending registry-backed channels:
 ```sh
 brew info MuhDur/oraclemcp/oraclemcp
 winget search --id MuhDur.oraclemcp --exact
-npm view oraclemcp@0.6.4 version
+npm view oraclemcp@0.6.5 version
 ```
 
 After the relevant check resolves the target version, these commands are
@@ -251,9 +251,9 @@ oraclemcp --json setup --write --profile db_ro
 docker run -i --rm \
   -v "$HOME/.config/oraclemcp:/root/.config/oraclemcp:ro" \
   -e ORACLE_APP_PASSWORD \
-  ghcr.io/muhdur/oraclemcp:0.6.4          # MCP over stdio, against the configured profile
+  ghcr.io/muhdur/oraclemcp:0.6.5          # MCP over stdio, against the configured profile
 
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.4   # tool surface only (no DB)
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.5   # tool surface only (no DB)
 ```
 
 An optional PL/SQL intelligence image is available from the manual Docker
@@ -262,8 +262,8 @@ it can start without a database connection and advertises the offline
 `oracle_plsql_*` tools immediately. Live PL/SQL tools still require a profile.
 
 ```sh
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.4-plsql-intelligence --json info
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.4-plsql-intelligence capabilities
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.5-plsql-intelligence --json info
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.5-plsql-intelligence capabilities
 ```
 
 Local feature-image builds resolve the PL/SQL engine crates from crates.io:

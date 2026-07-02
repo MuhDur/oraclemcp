@@ -1704,7 +1704,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "asupersync",
  "async-trait",
@@ -1742,7 +1742,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-audit"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "oraclemcp-error",
  "parking_lot 0.12.5",
@@ -1756,7 +1756,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-auth"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "oraclemcp-audit",
  "oraclemcp-error",
@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-config"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "figment",
  "oraclemcp-error",
@@ -1782,7 +1782,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-core"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "asupersync",
  "async-trait",
@@ -1810,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-db"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "asupersync",
  "async-trait",
@@ -1827,7 +1827,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-error"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -1836,7 +1836,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-guard"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "oraclemcp-audit",
  "oraclemcp-error",
@@ -1851,7 +1851,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-telemetry"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "asupersync",
  "oraclemcp-error",
