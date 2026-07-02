@@ -4414,10 +4414,36 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
 
 fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileContext {
     if !online {
-        return profile.map_or_else(
-            DoctorProfileContext::offline,
-            doctor_profile_metadata_context,
-        );
+        return match profile {
+            Some(profile) => doctor_profile_metadata_context(profile),
+            None => match OracleMcpConfig::load(None) {
+                Ok(cfg) => match selected_config_profile(&cfg, None) {
+                    Ok(Some(chosen)) => doctor_profile_metadata_context(&chosen.name),
+                    Ok(None) if cfg.profiles.is_empty() => DoctorProfileContext {
+                        connection_error: Some(
+                            "no connection profiles are configured; run `oraclemcp --json setup --write --profile db_ro`, then export ORACLE_APP_PASSWORD for the generated credential_ref and rerun `oraclemcp --json doctor --profile db_ro`"
+                                .to_owned(),
+                        ),
+                        ..DoctorProfileContext::offline()
+                    },
+                    Ok(None) => DoctorProfileContext {
+                        connection_error: Some(
+                            "multiple connection profiles exist but no default_profile is configured; run `oraclemcp --json profiles`, then rerun `oraclemcp --json doctor --profile <profile>`"
+                                .to_owned(),
+                        ),
+                        ..DoctorProfileContext::offline()
+                    },
+                    Err(e) => DoctorProfileContext {
+                        connection_error: Some(doctor_connection_error(e)),
+                        ..DoctorProfileContext::offline()
+                    },
+                },
+                Err(e) => DoctorProfileContext {
+                    connection_error: Some(format!("config load failed: {e}")),
+                    ..DoctorProfileContext::offline()
+                },
+            },
+        };
     }
 
     let Some(profile) = profile else {

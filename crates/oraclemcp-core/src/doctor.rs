@@ -1234,6 +1234,8 @@ fn connectivity_fix(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
     if let Some(wallet) = classify_wallet_error(error) {
         wallet_connectivity_fix(&wallet)
+    } else if lower.contains("no connection profiles are configured") {
+        "run `oraclemcp --json setup --write --profile db_ro`, then export ORACLE_APP_PASSWORD for the generated credential_ref and rerun `oraclemcp --json doctor --profile db_ro`"
     } else if lower.contains("proxy_auth") {
         "set both profiles.proxy_auth.proxy_user and target_schema; if username is present it must match proxy_user"
     } else if lower.contains("connection profile") || lower.contains("default_profile") {

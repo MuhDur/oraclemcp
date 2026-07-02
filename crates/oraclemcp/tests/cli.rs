@@ -192,6 +192,43 @@ fn om_alias_argv0_aware_runs_dashboard_pairing() {
 }
 
 #[test]
+fn doctor_zero_profile_is_non_ok_and_names_first_run_fix() {
+    let dir = temp_dir("doctor-zero-profile");
+    let config = dir.join("profiles.toml");
+    fs::write(&config, "schema_version = 2\n").expect("write empty config");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args(["--json", "doctor"])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("HOME", &dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        output.stderr.is_empty(),
+        "doctor stderr should be empty: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let doctor_json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("doctor JSON");
+    assert_eq!(doctor_json["ok"], serde_json::json!(false));
+    assert_eq!(doctor_json["exit_code"], serde_json::json!(2));
+    let connectivity = doctor_json["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .find(|check| check["id"] == serde_json::json!(3))
+        .expect("connectivity check");
+    assert_eq!(connectivity["status"], serde_json::json!("fail"));
+    let rendered = connectivity.to_string();
+    assert!(rendered.contains("oraclemcp --json setup --write --profile db_ro"));
+    assert!(rendered.contains("ORACLE_APP_PASSWORD"));
+    assert!(rendered.contains("oraclemcp --json doctor --profile db_ro"));
+}
+
+#[test]
 fn setup_write_round_trips_profiles_through_config_ops() {
     let dir = temp_dir("setup-write");
     let config = dir.join("profiles.toml");
