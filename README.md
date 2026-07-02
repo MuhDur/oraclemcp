@@ -314,6 +314,10 @@ The Explorer page includes global search across visible schemas: object-name
 matches use `oracle_search_objects` with all object types, and source-text
 matches use `oracle_search_source`; both are sent through the same guarded
 operator action route as the rest of the dashboard.
+The Reviews page can also compare two supplied schema snapshots and export a
+reviewable migration script. The diff view omits raw DDL and shows hashes/counts;
+any executable export step must be drafted into the normal Change Proposal board
+before apply, where the server re-classifies and re-checks the statement.
 
 The Streamable HTTP transport (`--listen`) fails closed. It starts only when
 service-owned per-client credentials, OAuth bearer enforcement, mTLS

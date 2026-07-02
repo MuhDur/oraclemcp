@@ -65,6 +65,9 @@ use crate::operator_protocol::{
     operator_schema_bundle, operator_subject_id_hash, validate_operator_event,
     validate_operator_response,
 };
+use crate::schema_diff_export::{
+    SchemaDiffExportRequest, schema_diff_error_data, schema_diff_export_data,
+};
 use crate::server::{DispatchCloseReason, DispatchContext, OracleMcpServer};
 use crate::source_history::{
     SourceHistoryError, SourceHistoryFilter, SourceHistoryRevertRequest, SourceHistoryStore,
@@ -3127,6 +3130,88 @@ mod tests {
             calls.load(AtomicOrdering::SeqCst),
             2,
             "proposal apply should enter dispatch once per statement after reclassification"
+        );
+    }
+
+    #[test]
+    fn schema_diff_export_is_redacted_and_review_gated() {
+        let (auditor, _sink) = operator_auditor();
+        let cfg = HttpTransportConfig {
+            operator_auditor: Some(auditor),
+            ..Default::default()
+        };
+
+        let response = handle_http_request(
+            &test_server(),
+            &cfg,
+            operator_json_post(
+                "/operator/v1/schema-diff",
+                &serde_json::json!({
+                    "title": "App migration",
+                    "before": {
+                        "objects": [
+                            {
+                                "object_type": "TABLE",
+                                "name": "T_OLD",
+                                "ddl": "create table t_old (id number)"
+                            },
+                            {
+                                "object_type": "TABLE",
+                                "name": "T_CHANGED",
+                                "ddl": "create table t_changed (id number)"
+                            }
+                        ]
+                    },
+                    "after": {
+                        "objects": [
+                            {
+                                "object_type": "TABLE",
+                                "name": "T_CHANGED",
+                                "ddl": "create table t_changed (id number, name varchar2(30))"
+                            },
+                            {
+                                "object_type": "VIEW",
+                                "name": "V_NEW",
+                                "ddl": "create or replace view v_new as select id from t_changed"
+                            }
+                        ]
+                    }
+                }),
+            ),
+        );
+
+        assert_eq!(response.status, 200);
+        let body = response_json(&response);
+        assert_eq!(body["data"]["source"], serde_json::json!("schema_diff"));
+        assert_eq!(body["data"]["summary"]["added"], serde_json::json!(1));
+        assert_eq!(body["data"]["summary"]["dropped"], serde_json::json!(1));
+        assert_eq!(body["data"]["summary"]["changed"], serde_json::json!(1));
+        assert_eq!(
+            body["data"]["diff"]["changed"][0].get("ddl"),
+            None,
+            "redacted diff view must not expose object DDL"
+        );
+        assert!(
+            body["data"]["diff"]["changed"][0]["ddl_sha256"]
+                .as_str()
+                .expect("ddl hash")
+                .starts_with("sha256:")
+        );
+        let script = body["data"]["migration_script"]
+            .as_str()
+            .expect("migration script");
+        assert!(script.contains("review artifact only"));
+        assert!(script.contains("Oracle DDL commits independently"));
+        assert!(script.contains("create or replace view v_new"));
+        assert!(script.contains("DROP TABLE T_OLD"));
+        assert_eq!(
+            body["data"]["proposal_statements"][0]["unit"],
+            serde_json::json!("ddl"),
+            "apply is via a normal Change Proposal statement"
+        );
+        assert_eq!(
+            body["data"]["proposal_statements"][0]["binds"],
+            serde_json::json!([])
         );
     }
 
@@ -7526,6 +7611,7 @@ enum OperatorRouteKind {
     ChangeProposalsList,
     ChangeProposalsDraft,
     ChangeProposalsApply,
+    SchemaDiff,
     SourceHistoryList,
     SourceHistoryRevert,
     ClientCredentials,
@@ -7556,6 +7642,7 @@ fn operator_route_kind(path: &str) -> OperatorRouteKind {
         "/operator/v1/change-proposals" => OperatorRouteKind::ChangeProposalsList,
         "/operator/v1/change-proposals/draft" => OperatorRouteKind::ChangeProposalsDraft,
         "/operator/v1/change-proposals/apply" => OperatorRouteKind::ChangeProposalsApply,
+        "/operator/v1/schema-diff" => OperatorRouteKind::SchemaDiff,
         "/operator/v1/source-history" => OperatorRouteKind::SourceHistoryList,
         "/operator/v1/source-history/revert" => OperatorRouteKind::SourceHistoryRevert,
         "/operator/v1/client-credentials" => OperatorRouteKind::ClientCredentials,
@@ -7581,6 +7668,7 @@ impl OperatorRouteKind {
             | Self::ConfigRollback
             | Self::ChangeProposalsDraft
             | Self::ChangeProposalsApply
+            | Self::SchemaDiff
             | Self::SourceHistoryRevert
             | Self::ClientCredentialRotate
             | Self::ClientCredentialRevoke
@@ -7645,6 +7733,7 @@ fn handle_operator_api_route(
             operator_audit_seq,
             dashboard_browser,
         ),
+        OperatorRouteKind::SchemaDiff => handle_operator_schema_diff_route(request),
         OperatorRouteKind::SourceHistoryList | OperatorRouteKind::SourceHistoryRevert => {
             handle_operator_source_history_route(config, request, operator_subject, route)
         }
@@ -8187,6 +8276,30 @@ fn handle_operator_change_proposal_route(
             )
         }
         _ => unreachable!("non-change-proposal route"),
+    }
+}
+
+fn handle_operator_schema_diff_route(request: &HttpRequest) -> HttpResponse {
+    if !content_type_is_json(request) {
+        return empty_response(415);
+    }
+    let payload = match serde_json::from_slice::<SchemaDiffExportRequest>(&request.body) {
+        Ok(payload) => payload,
+        Err(_) => {
+            return operator_json_response(
+                400,
+                &request.path,
+                json!({
+                    "source": "schema_diff",
+                    "error": "invalid_schema_diff_request",
+                    "message": "schema diff body must include before and after schema snapshots",
+                }),
+            );
+        }
+    };
+    match schema_diff_export_data(payload) {
+        Ok(data) => operator_json_response(200, &request.path, data),
+        Err(error) => operator_json_response(400, &request.path, schema_diff_error_data(error)),
     }
 }
 

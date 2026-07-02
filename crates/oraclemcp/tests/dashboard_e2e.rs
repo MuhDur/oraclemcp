@@ -683,6 +683,72 @@ fn wd_history_source_snapshots_and_revert_are_review_gated() {
 }
 
 #[test]
+fn wd_diff_schema_diff_exports_migration_through_reviews() {
+    let app = read_repo_file("web/src/app/App.tsx");
+    let client = read_repo_file("web/src/app/operator-client.ts");
+    let http = read_repo_file("crates/oraclemcp-core/src/http.rs");
+    let dashboard_auth = read_repo_file("crates/oraclemcp-core/src/dashboard_auth.rs");
+    let schema_diff = read_repo_file("crates/oraclemcp-core/src/schema_diff_export.rs");
+    let e2e_coverage = read_repo_file("scripts/e2e/COVERAGE.md");
+
+    assert_contains_all(
+        "schema diff dashboard UI",
+        &app,
+        &[
+            "function SchemaDiffPanel",
+            "aria-label=\"schema diff before snapshot\"",
+            "aria-label=\"schema diff after snapshot\"",
+            "previewSchemaDiff(session, before, after, title)",
+            "downloadTextFile(`${safeFilename(preview.title)}.sql`, preview.migration_script)",
+            "proposal_statements",
+            "draftChangeProposal(session",
+        ],
+    );
+    assert_contains_all(
+        "schema diff dashboard client",
+        &client,
+        &[
+            "export type SchemaDiffExportData",
+            "operatorPost(\"/operator/v1/schema-diff\"",
+            "proposal_statements: ChangeProposalDraftStatement[]",
+        ],
+    );
+    assert_contains_all(
+        "schema diff operator route",
+        &http,
+        &[
+            "\"/operator/v1/schema-diff\" => OperatorRouteKind::SchemaDiff",
+            "handle_operator_schema_diff_route",
+            "schema_diff_export_is_redacted_and_review_gated",
+        ],
+    );
+    assert_contains_all(
+        "schema diff dashboard action ticket",
+        &dashboard_auth,
+        &["(\"POST\", \"/operator/v1/schema-diff\")"],
+    );
+    assert_contains_all(
+        "schema diff export builder",
+        &schema_diff,
+        &[
+            "diff and step views omit object DDL",
+            "review artifact only: this endpoint never applies DDL",
+            "Oracle DDL commits independently",
+            "proposal_statements_from_steps",
+        ],
+    );
+    assert_contains_all(
+        "schema diff e2e coverage",
+        &e2e_coverage,
+        &[
+            "WD-Diff schema diff + migration export",
+            "oraclemcp-epic-060-f4xo.8.21",
+            "wd_diff_schema_diff_exports_migration_through_reviews",
+        ],
+    );
+}
+
+#[test]
 fn skin_conformance_2d_fallback_a11y() {
     let app = read_repo_file("web/src/app/App.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");

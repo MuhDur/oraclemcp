@@ -1,0 +1,77 @@
+{
+  "data": {
+    "diff": {
+      "added": [
+        {
+          "ddl_chars": 45,
+          "ddl_sha256": "sha256:e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5",
+          "kind": "added",
+          "name": "APP_V",
+          "object_type": "VIEW",
+          "source_replaceable": true
+        }
+      ],
+      "changed": [
+        {
+          "ddl_chars": 64,
+          "ddl_sha256": "sha256:1f8b10508c06b6d97931f83be25776c3bb82cd6cdf1374ee05bed0dde144f86c",
+          "kind": "changed",
+          "name": "APP_T",
+          "object_type": "TABLE",
+          "source_replaceable": false
+        }
+      ],
+      "dropped": []
+    },
+    "migration_script": "-- oraclemcp schema-diff migration export\n-- review artifact only\n",
+    "migration_script_sha256": "sha256:55da6dc2ff734041469afe5c7be784c2733368389fa97dbb9e1e2f287257b156",
+    "migration_steps": [
+      {
+        "ddl_chars": 128,
+        "ddl_sha256": "sha256:1f8b10508c06b6d97931f83be25776c3bb82cd6cdf1374ee05bed0dde144f86c",
+        "executable": false,
+        "kind": "manual_review",
+        "name": "APP_T",
+        "object_type": "TABLE",
+        "order": 0,
+        "source_replaceable": false
+      },
+      {
+        "ddl_chars": 45,
+        "ddl_sha256": "sha256:e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5",
+        "executable": true,
+        "kind": "create",
+        "name": "APP_V",
+        "object_type": "VIEW",
+        "order": 1,
+        "source_replaceable": true
+      }
+    ],
+    "proposal_statements": [
+      {
+        "binds": [],
+        "capture_dbms_output": false,
+        "commit": true,
+        "sql_template": "create or replace view app_v as select * from app_t",
+        "stored_verdict": null,
+        "unit": "ddl"
+      }
+    ],
+    "redaction": "diff and step views omit object DDL; migration_script is the explicit review artifact",
+    "source": "schema_diff",
+    "status": "previewed",
+    "summary": {
+      "added": 1,
+      "changed": 1,
+      "dropped": 0,
+      "executable_steps": 1,
+      "manual_review_steps": 1,
+      "migration_steps": 2
+    },
+    "title": "Fixture migration"
+  },
+  "protocol_version": "operator.v1",
+  "redaction_level": "operator_redacted",
+  "route": "/operator/v1/schema-diff",
+  "schema_version": 1
+}

@@ -419,6 +419,60 @@ export type SourceHistoryRevertData = {
   proposal: ChangeProposalView;
 };
 
+export type SchemaSnapshotObject = {
+  object_type: string;
+  name: string;
+  ddl: string;
+};
+
+export type SchemaSnapshotInput = {
+  objects: SchemaSnapshotObject[];
+};
+
+export type SchemaDiffObjectView = {
+  kind: "added" | "dropped" | "changed";
+  object_type: string;
+  name: string;
+  ddl_sha256: string;
+  ddl_chars: number;
+  source_replaceable: boolean;
+};
+
+export type SchemaDiffStepView = {
+  order: number;
+  kind: "create" | "replace" | "drop" | "manual_review";
+  object_type: string;
+  name: string;
+  ddl_sha256: string;
+  ddl_chars: number;
+  executable: boolean;
+  source_replaceable: boolean;
+};
+
+export type SchemaDiffExportData = {
+  source: string;
+  status: string;
+  title: string;
+  redaction: string;
+  summary: {
+    added: number;
+    dropped: number;
+    changed: number;
+    migration_steps: number;
+    executable_steps: number;
+    manual_review_steps: number;
+  };
+  diff: {
+    added: SchemaDiffObjectView[];
+    dropped: SchemaDiffObjectView[];
+    changed: SchemaDiffObjectView[];
+  };
+  migration_steps: SchemaDiffStepView[];
+  migration_script_sha256: string;
+  migration_script: string;
+  proposal_statements: ChangeProposalDraftStatement[];
+};
+
 export type WorkbenchActionData = {
   status?: string;
   lane_id?: string | null;
@@ -850,6 +904,19 @@ export async function draftSourceHistoryRevert(
   return operatorPost("/operator/v1/source-history/revert", session, {
     snapshot_id: snapshotId,
     profile: optionalString(profile)
+  });
+}
+
+export async function previewSchemaDiff(
+  session: DashboardSession,
+  before: SchemaSnapshotInput,
+  after: SchemaSnapshotInput,
+  title?: string
+): Promise<OperatorResponse<SchemaDiffExportData>> {
+  return operatorPost("/operator/v1/schema-diff", session, {
+    before,
+    after,
+    title: title?.trim() || undefined
   });
 }
 

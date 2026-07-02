@@ -751,6 +751,13 @@ new DDL Change Proposal from a selected snapshot, so revert still requires the
 normal preview, confirmation, classifier, profile-ceiling, and audit path.
 New objects or prior source that is not visible are reported as skipped snapshot
 coverage, not as a universal DDL undo guarantee.
+The Reviews page also exposes schema diff + migration export for two supplied
+schema snapshots. The diff view is redacted to object metadata, hashes, and
+counts; the generated migration script is an explicit reviewable file artifact.
+Drafting executable steps creates a normal DDL Change Proposal, so apply still
+uses apply-time reclassification, confirmation, profile ceilings, idempotency,
+and audit. The export is honest about Oracle DDL atomicity: successful DDL steps
+may commit before a later step fails.
 Gated action and proposal apply calls carry an in-memory idempotency ledger:
 send `Idempotency-Key`, `idempotency_key`, or `request_id` for explicit retry
 identity, or let the server derive a key from the

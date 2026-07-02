@@ -85,6 +85,7 @@ import {
   overviewProbes,
   pendingProbe,
   previewConfigDraft,
+  previewSchemaDiff,
   previewWorkbenchSql,
   readWorkbenchSql,
   revokeClientCredential,
@@ -103,6 +104,11 @@ import {
   type ChangeProposalApplyUnit,
   type ChangeProposalAuthorKind,
   type ChangeProposalView,
+  type DashboardSession,
+  type SchemaDiffExportData,
+  type SchemaDiffObjectView,
+  type SchemaDiffStepView,
+  type SchemaSnapshotInput,
   type SourceSnapshotView,
   type ClientCredentialRotateData,
   type ClientCredentialStatus,
@@ -4474,6 +4480,49 @@ const reviewUnits: Array<{ id: ChangeProposalApplyUnit; label: string }> = [
   { id: "read", label: "Read" }
 ];
 
+const schemaDiffBeforeFixture = JSON.stringify(
+  {
+    objects: [
+      {
+        object_type: "TABLE",
+        name: "APP_SETTINGS",
+        ddl: "create table app_settings (id number primary key, value varchar2(100))"
+      },
+      {
+        object_type: "VIEW",
+        name: "APP_SETTINGS_V",
+        ddl: "create or replace view app_settings_v as select id, value from app_settings"
+      }
+    ]
+  },
+  null,
+  2
+);
+
+const schemaDiffAfterFixture = JSON.stringify(
+  {
+    objects: [
+      {
+        object_type: "TABLE",
+        name: "APP_SETTINGS",
+        ddl: "create table app_settings (id number primary key, value varchar2(200), updated_at timestamp)"
+      },
+      {
+        object_type: "VIEW",
+        name: "APP_SETTINGS_V",
+        ddl: "create or replace view app_settings_v as select id, value, updated_at from app_settings"
+      },
+      {
+        object_type: "PACKAGE",
+        name: "APP_SETTINGS_API",
+        ddl: "create or replace package app_settings_api as procedure refresh_cache; end app_settings_api;"
+      }
+    ]
+  },
+  null,
+  2
+);
+
 type ReviewResult =
   | {
       state: "ok";
@@ -4707,6 +4756,15 @@ function ReviewsPage(): React.ReactElement {
             pending={sourceHistoryQuery.isFetching || revertMutation.isPending}
             blocked={sourceHistoryQuery.isError}
             onDraftRevert={(snapshot) => revertMutation.mutate(snapshot)}
+          />
+          <SchemaDiffPanel
+            session={session.data ?? null}
+            profile={profile}
+            onDrafted={(proposal, response) => {
+              setLastResult({ state: "ok", label: "Migration draft", response });
+              setSelectedId(proposal.id);
+              queryClient.invalidateQueries({ queryKey: ["change-proposals"] });
+            }}
           />
         </div>
 
@@ -4961,6 +5019,253 @@ function SourceHistoryPanel({
   );
 }
 
+function SchemaDiffPanel({
+  session,
+  profile,
+  onDrafted
+}: {
+  session: DashboardSession | null;
+  profile: string;
+  onDrafted: (proposal: ChangeProposalView, response: unknown) => void;
+}): React.ReactElement {
+  const [title, setTitle] = React.useState("Schema diff migration");
+  const [beforeJson, setBeforeJson] = React.useState(schemaDiffBeforeFixture);
+  const [afterJson, setAfterJson] = React.useState(schemaDiffAfterFixture);
+  const [preview, setPreview] = React.useState<SchemaDiffExportData | null>(null);
+  const [lastError, setLastError] = React.useState<string | null>(null);
+
+  const previewMutation = useMutation({
+    mutationFn: async () => {
+      if (!session) {
+        throw new Error("dashboard session is not ready");
+      }
+      const before = parseSchemaSnapshotInput(beforeJson);
+      const after = parseSchemaSnapshotInput(afterJson);
+      return previewSchemaDiff(session, before, after, title);
+    },
+    onSuccess: (response) => {
+      setPreview(response.data);
+      setLastError(null);
+    },
+    onError: (error) => {
+      setLastError(error instanceof Error ? error.message : "schema diff preview failed");
+    }
+  });
+
+  const draftMutation = useMutation({
+    mutationFn: async () => {
+      if (!session) {
+        throw new Error("dashboard session is not ready");
+      }
+      if (!preview) {
+        throw new Error("preview a schema diff first");
+      }
+      if (preview.proposal_statements.length === 0) {
+        throw new Error("no executable migration steps to draft");
+      }
+      return draftChangeProposal(session, {
+        profile: profile.trim() || "prod",
+        author: "human",
+        title: preview.title,
+        statements: preview.proposal_statements
+      });
+    },
+    onSuccess: (response) => {
+      setLastError(null);
+      onDrafted(response.data.proposal, response);
+    },
+    onError: (error) => {
+      setLastError(error instanceof Error ? error.message : "migration draft failed");
+    }
+  });
+
+  const busy = previewMutation.isPending || draftMutation.isPending;
+  const canPreview = Boolean(session) && !busy;
+  const canDraft = Boolean(session && preview && preview.proposal_statements.length > 0) && !busy;
+
+  return (
+    <Surface className="overflow-hidden">
+      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+        <div className="min-w-0">
+          <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
+            <SquarePen className="size-4" aria-hidden="true" />
+            Schema Diff
+          </h3>
+          <p className="mt-1 truncate text-sm text-zinc-500">
+            {preview ? `${formatNumber(preview.summary.migration_steps)} steps` : "snapshot compare"}
+          </p>
+        </div>
+        <Badge tone={preview ? "ok" : lastError ? "warn" : "off"}>
+          {preview ? "previewed" : lastError ? "blocked" : "idle"}
+        </Badge>
+      </div>
+      <div className="grid gap-3 p-4">
+        <label className="block">
+          <span className="mb-2 block text-sm font-bold text-zinc-700">Title</span>
+          <input
+            className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+          />
+        </label>
+        <div className="grid gap-3 lg:grid-cols-2">
+          <label className="block">
+            <span className="mb-2 block text-sm font-bold text-zinc-700">Before</span>
+            <textarea
+              className="min-h-[180px] w-full resize-y rounded-md border border-zinc-300 bg-zinc-950 p-3 font-mono text-xs leading-5 text-zinc-50 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+              aria-label="schema diff before snapshot"
+              spellCheck={false}
+              value={beforeJson}
+              onChange={(event) => setBeforeJson(event.target.value)}
+            />
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-sm font-bold text-zinc-700">After</span>
+            <textarea
+              className="min-h-[180px] w-full resize-y rounded-md border border-zinc-300 bg-zinc-950 p-3 font-mono text-xs leading-5 text-zinc-50 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+              aria-label="schema diff after snapshot"
+              spellCheck={false}
+              value={afterJson}
+              onChange={(event) => setAfterJson(event.target.value)}
+            />
+          </label>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="button" variant="secondary" disabled={!canPreview} onClick={() => previewMutation.mutate()}>
+            <RefreshCcw className="size-4" aria-hidden="true" />
+            Preview
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={!preview || busy}
+            onClick={() =>
+              preview
+                ? downloadTextFile(`${safeFilename(preview.title)}.sql`, preview.migration_script)
+                : undefined
+            }
+          >
+            <Download className="size-4" aria-hidden="true" />
+            Export
+          </Button>
+          <Button type="button" variant="primary" disabled={!canDraft} onClick={() => draftMutation.mutate()}>
+            <GitPullRequest className="size-4" aria-hidden="true" />
+            Draft
+          </Button>
+          {lastError ? (
+            <Badge tone="warn" className="max-w-full whitespace-normal break-all">
+              {lastError}
+            </Badge>
+          ) : null}
+        </div>
+        {preview ? <SchemaDiffSummaryPanel preview={preview} /> : null}
+      </div>
+    </Surface>
+  );
+}
+
+function SchemaDiffSummaryPanel({ preview }: { preview: SchemaDiffExportData }): React.ReactElement {
+  return (
+    <div className="grid gap-3">
+      <div className="grid gap-2 sm:grid-cols-3">
+        <CapacityFact label="Added" value={preview.summary.added} />
+        <CapacityFact label="Changed" value={preview.summary.changed} />
+        <CapacityFact label="Dropped" value={preview.summary.dropped} />
+      </div>
+      <div className="grid gap-3 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
+        <SchemaDiffObjectList title="Objects" objects={schemaDiffObjects(preview)} />
+        <SchemaDiffStepTable steps={preview.migration_steps} />
+      </div>
+      <div className="grid gap-2 rounded-md border border-zinc-200 bg-zinc-50 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-sm font-bold text-zinc-700">Migration Script</span>
+          <Badge tone="info">{shortHash(preview.migration_script_sha256)}</Badge>
+        </div>
+        <pre className="max-h-[240px] overflow-auto rounded-md bg-zinc-950 p-3 text-xs leading-5 text-zinc-50">
+          {preview.migration_script}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+function SchemaDiffObjectList({
+  title,
+  objects
+}: {
+  title: string;
+  objects: SchemaDiffObjectView[];
+}): React.ReactElement {
+  return (
+    <div className="overflow-hidden rounded-md border border-zinc-200">
+      <div className="border-b border-zinc-200 bg-zinc-50 px-3 py-2 text-sm font-bold text-zinc-700">
+        {title}
+      </div>
+      <div className="max-h-[260px] overflow-auto divide-y divide-zinc-100">
+        {objects.length === 0 ? (
+          <div className="px-3 py-4 text-sm font-semibold text-zinc-500">No object changes</div>
+        ) : (
+          objects.map((object) => (
+            <div key={`${object.kind}:${object.object_type}:${object.name}`} className="grid gap-1 px-3 py-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone={object.kind === "dropped" ? "warn" : object.kind === "added" ? "ok" : "info"}>
+                  {object.kind}
+                </Badge>
+                <span className="min-w-0 truncate font-mono text-sm font-semibold text-zinc-950">
+                  {object.object_type} {object.name}
+                </span>
+              </div>
+              <p className="truncate font-mono text-xs text-zinc-500">
+                {shortHash(object.ddl_sha256)} · {formatNumber(object.ddl_chars)} chars
+              </p>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SchemaDiffStepTable({ steps }: { steps: SchemaDiffStepView[] }): React.ReactElement {
+  return (
+    <div className="overflow-hidden rounded-md border border-zinc-200">
+      <div className="border-b border-zinc-200 bg-zinc-50 px-3 py-2 text-sm font-bold text-zinc-700">
+        Migration Steps
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[560px] border-collapse text-left text-sm">
+          <thead className="bg-white text-xs uppercase text-zinc-500">
+            <tr>
+              <th className="px-3 py-2 font-bold">#</th>
+              <th className="px-3 py-2 font-bold">Kind</th>
+              <th className="px-3 py-2 font-bold">Object</th>
+              <th className="px-3 py-2 font-bold">Gate</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-100">
+            {steps.map((step) => (
+              <tr key={`${step.order}:${step.object_type}:${step.name}`}>
+                <td className="px-3 py-2 font-mono text-xs text-zinc-600">{step.order + 1}</td>
+                <td className="px-3 py-2">
+                  <Badge tone={step.kind === "manual_review" ? "warn" : "info"}>{step.kind}</Badge>
+                </td>
+                <td className="px-3 py-2 font-mono text-xs font-semibold text-zinc-900">
+                  {step.object_type} {step.name}
+                </td>
+                <td className="px-3 py-2">
+                  <Badge tone={step.executable ? "ok" : "warn"}>
+                    {step.executable ? "proposal" : "review"}
+                  </Badge>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function ReviewResultPanel({
   result,
   pending
@@ -5009,6 +5314,58 @@ function parseBindsJson(text: string): unknown[] {
     throw new Error("binds must be a JSON array");
   }
   return parsed;
+}
+
+function parseSchemaSnapshotInput(text: string): SchemaSnapshotInput {
+  const parsed = JSON.parse(text.trim()) as unknown;
+  const candidate = Array.isArray(parsed) ? { objects: parsed } : parsed;
+  if (!candidate || typeof candidate !== "object" || !Array.isArray((candidate as { objects?: unknown }).objects)) {
+    throw new Error("schema snapshot must be an object with an objects array");
+  }
+  const objects = (candidate as { objects: unknown[] }).objects.map((item, index) => {
+    if (!item || typeof item !== "object") {
+      throw new Error(`schema snapshot object ${index + 1} must be an object`);
+    }
+    const object = item as Record<string, unknown>;
+    return {
+      object_type: requiredString(object.object_type, `objects[${index}].object_type`),
+      name: requiredString(object.name, `objects[${index}].name`),
+      ddl: requiredString(object.ddl, `objects[${index}].ddl`)
+    };
+  });
+  return { objects };
+}
+
+function requiredString(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${field} must be a non-empty string`);
+  }
+  return value;
+}
+
+function schemaDiffObjects(preview: SchemaDiffExportData): SchemaDiffObjectView[] {
+  return [...preview.diff.added, ...preview.diff.changed, ...preview.diff.dropped];
+}
+
+function downloadTextFile(filename: string, text: string): void {
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function safeFilename(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || "schema-diff-migration";
 }
 
 function proposalSearchText(proposal: ChangeProposalView): string {

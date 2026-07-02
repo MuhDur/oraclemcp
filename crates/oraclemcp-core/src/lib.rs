@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 #![forbid(unsafe_code)]
 // ErrorEnvelope is the deliberate agent-facing error payload (§8.2); it is the
 // `Err` of the dispatch contract throughout this crate. Boxing every
@@ -42,6 +43,7 @@ pub mod query_execute;
 pub mod request_budget;
 pub mod resilience;
 pub mod resources;
+mod schema_diff_export;
 pub mod server;
 pub mod service_app;
 pub mod session_tool;

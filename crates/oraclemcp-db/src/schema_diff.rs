@@ -131,7 +131,7 @@ fn create_rank(object_type: &str) -> u8 {
         "INDEX" | "CONSTRAINT" => 2,
         "VIEW" | "MATERIALIZED VIEW" => 3,
         "SYNONYM" => 4,
-        "FUNCTION" | "PROCEDURE" | "PACKAGE" | "PACKAGE BODY" | "TRIGGER" => 5,
+        "FUNCTION" | "PROCEDURE" | "PACKAGE" | "PACKAGE BODY" | "TYPE BODY" | "TRIGGER" => 5,
         _ => 6,
     }
 }
@@ -148,6 +148,7 @@ fn is_replaceable(object_type: &str) -> bool {
             | "PACKAGE BODY"
             | "TRIGGER"
             | "TYPE"
+            | "TYPE BODY"
             | "SYNONYM"
     )
 }
@@ -289,5 +290,21 @@ mod tests {
         let drop_step = plan.iter().find(|s| s.kind == StepKind::Drop).unwrap();
         assert_eq!(drop_step.ddl, "DROP TABLE T_OLD");
         assert!(drop_step.order > t_pos && drop_step.order > p_pos);
+    }
+
+    #[test]
+    fn type_body_changes_are_replaceable_source_objects() {
+        let diff = SchemaDiff {
+            added: Vec::new(),
+            changed: vec![obj(
+                "TYPE BODY",
+                "T_BODY",
+                "create or replace type body t_body as end;",
+            )],
+            dropped: Vec::new(),
+        };
+        let plan = migration_plan(&diff);
+        assert_eq!(plan[0].kind, StepKind::Replace);
+        assert_eq!(plan[0].object_type, "TYPE BODY");
     }
 }

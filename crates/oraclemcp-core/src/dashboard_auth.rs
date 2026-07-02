@@ -44,6 +44,7 @@ pub const DASHBOARD_ACTION_ROUTES: &[(&str, &str)] = &[
     ("POST", "/operator/v1/config/rollback"),
     ("POST", "/operator/v1/change-proposals/draft"),
     ("POST", "/operator/v1/change-proposals/apply"),
+    ("POST", "/operator/v1/schema-diff"),
     ("POST", "/operator/v1/source-history/revert"),
     ("POST", "/operator/v1/client-credentials/rotate"),
     ("POST", "/operator/v1/client-credentials/revoke"),

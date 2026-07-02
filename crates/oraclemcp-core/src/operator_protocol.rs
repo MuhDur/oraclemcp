@@ -145,6 +145,13 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         mcp_tool: Some("proposal-selected apply tool"),
     },
     OperatorRouteSpec {
+        method: "POST",
+        path: "/operator/v1/schema-diff",
+        schema: "schemaDiffResponse",
+        sse: false,
+        mcp_tool: None,
+    },
+    OperatorRouteSpec {
         method: "GET",
         path: "/operator/v1/source-history",
         schema: "sourceHistoryListResponse",
@@ -362,6 +369,7 @@ pub fn operator_schema_bundle() -> Value {
             "changeProposalListResponse": { "$ref": "#/$defs/versionedResponse" },
             "changeProposalDraftResponse": { "$ref": "#/$defs/versionedResponse" },
             "changeProposalApplyResponse": { "$ref": "#/$defs/versionedResponse" },
+            "schemaDiffResponse": { "$ref": "#/$defs/versionedResponse" },
             "sourceHistoryListResponse": { "$ref": "#/$defs/versionedResponse" },
             "sourceHistoryRevertResponse": { "$ref": "#/$defs/versionedResponse" },
             "clientCredentialsResponse": { "$ref": "#/$defs/versionedResponse" },
@@ -621,6 +629,74 @@ pub fn operator_fixture_values() -> Vec<(&'static str, Value)> {
                         "statement_sql_sha256": "sha256:1f8b10508c06b6d97931f83be25776c3bb82cd6cdf1374ee05bed0dde144f86c",
                         "lane_id": "operator",
                         "subject_id_hash": operator_subject_id_hash("oauth:fixture")
+                    }]
+                }),
+            ),
+        ),
+        (
+            "schema-diff",
+            operator_response(
+                "/operator/v1/schema-diff",
+                json!({
+                    "source": "schema_diff",
+                    "status": "previewed",
+                    "title": "Fixture migration",
+                    "redaction": "diff and step views omit object DDL; migration_script is the explicit review artifact",
+                    "summary": {
+                        "added": 1,
+                        "dropped": 0,
+                        "changed": 1,
+                        "migration_steps": 2,
+                        "executable_steps": 1,
+                        "manual_review_steps": 1
+                    },
+                    "diff": {
+                        "added": [{
+                            "kind": "added",
+                            "object_type": "VIEW",
+                            "name": "APP_V",
+                            "ddl_sha256": "sha256:e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5",
+                            "ddl_chars": 45,
+                            "source_replaceable": true
+                        }],
+                        "dropped": [],
+                        "changed": [{
+                            "kind": "changed",
+                            "object_type": "TABLE",
+                            "name": "APP_T",
+                            "ddl_sha256": "sha256:1f8b10508c06b6d97931f83be25776c3bb82cd6cdf1374ee05bed0dde144f86c",
+                            "ddl_chars": 64,
+                            "source_replaceable": false
+                        }]
+                    },
+                    "migration_steps": [{
+                        "order": 0,
+                        "kind": "manual_review",
+                        "object_type": "TABLE",
+                        "name": "APP_T",
+                        "ddl_sha256": "sha256:1f8b10508c06b6d97931f83be25776c3bb82cd6cdf1374ee05bed0dde144f86c",
+                        "ddl_chars": 128,
+                        "executable": false,
+                        "source_replaceable": false
+                    }, {
+                        "order": 1,
+                        "kind": "create",
+                        "object_type": "VIEW",
+                        "name": "APP_V",
+                        "ddl_sha256": "sha256:e004ebd5b5532a4b85984a62f8ad48a81aa3460c1ca07701f386135d72cdecf5",
+                        "ddl_chars": 45,
+                        "executable": true,
+                        "source_replaceable": true
+                    }],
+                    "migration_script_sha256": "sha256:55da6dc2ff734041469afe5c7be784c2733368389fa97dbb9e1e2f287257b156",
+                    "migration_script": "-- oraclemcp schema-diff migration export\n-- review artifact only\n",
+                    "proposal_statements": [{
+                        "sql_template": "create or replace view app_v as select * from app_t",
+                        "binds": [],
+                        "unit": "ddl",
+                        "commit": true,
+                        "capture_dbms_output": false,
+                        "stored_verdict": null
                     }]
                 }),
             ),

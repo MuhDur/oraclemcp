@@ -160,6 +160,9 @@
       ],
       "type": "object"
     },
+    "schemaDiffResponse": {
+      "$ref": "#/$defs/versionedResponse"
+    },
     "sourceHistoryListResponse": {
       "$ref": "#/$defs/versionedResponse"
     },
@@ -305,6 +308,13 @@
       "method": "POST",
       "path": "/operator/v1/change-proposals/apply",
       "schema": "changeProposalApplyResponse",
+      "sse": false
+    },
+    {
+      "mcp_tool": null,
+      "method": "POST",
+      "path": "/operator/v1/schema-diff",
+      "schema": "schemaDiffResponse",
       "sse": false
     },
     {
