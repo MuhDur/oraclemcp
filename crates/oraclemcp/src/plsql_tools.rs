@@ -18,13 +18,15 @@ use plsql_catalog::{
     CatalogSourceKind, OracleRow as CatalogOracleRow,
 };
 use plsql_cicd::{ChangeSet, PredictMode, change_impact_envelope, predict};
-use plsql_core::{AnalysisProfile, CompletenessPosture, ConfidenceLevel, FileId, Severity};
+use plsql_core::{
+    AnalysisProfile, CompletenessPosture, ConfidenceLevel, Diagnostic, FileId, Severity, Span,
+};
 use plsql_depgraph::{DepGraph, Edge, EdgeKind, Node, NodeId, NodeIdentityKind, NodeSelector};
 use plsql_doc::{DocSet, extract_doc_comments};
 use plsql_engine::{
     AnalysisRequest, analyze_project, engine_doctor_report, engine_full_doctor_report,
 };
-use plsql_ir::{FactStore, FlowEnv, lower_top_level};
+use plsql_ir::{FactPayload, FactStore, FlowEnv, lower_top_level};
 use plsql_lineage::{LineageDirection, column_writers, dependencies, impact};
 use plsql_parser_antlr::lower::lower_source;
 use plsql_sast::{CompletenessSnapshot, Rule, ScanUnit, run_scan};
@@ -50,6 +52,8 @@ const STATIC_TOOL_NAMES: [&str; 6] = [
     "oracle_plsql_sast",
     "oracle_plsql_doc",
 ];
+
+const IDE_LIST_LIMIT: usize = 200;
 
 #[must_use]
 pub fn is_static_tool(name: &str) -> bool {
@@ -719,27 +723,22 @@ fn run_parse(args: ParseArgs) -> Result<Value, ErrorEnvelope> {
     let ast = lower_source(&args.source, FileId::new(1));
     let mut interner = plsql_core::SymbolInterner::new();
     let lowered = lower_top_level(&ast, &mut interner);
-    let diagnostics: Vec<Value> = lowered
-        .diagnostics
-        .iter()
-        .map(|diagnostic| {
-            json!({
-                "code": diagnostic.code,
-                "severity": format!("{:?}", diagnostic.severity),
-                "message": diagnostic.message,
-                "unknown_reasons": diagnostic.unknown_reasons,
-            })
-        })
-        .collect();
+    let diagnostics: Vec<Value> = lowered.diagnostics.iter().map(diagnostic_summary).collect();
     let declaration_kinds: Vec<String> = lowered
         .declarations
         .iter()
         .map(|decl| format!("{:?}", decl.kind()))
         .collect();
+    let declarations: Vec<Value> = lowered
+        .declarations
+        .iter()
+        .map(|decl| declaration_summary(decl, &interner))
+        .collect();
 
     Ok(json!({
         "declaration_count": declaration_kinds.len(),
         "declaration_kinds": declaration_kinds,
+        "declarations": declarations,
         "recovered": false,
         "error_count": lowered
             .diagnostics
@@ -767,8 +766,167 @@ fn run_analyze(args: AnalyzeArgs) -> Result<Value, ErrorEnvelope> {
             "node_count": run.dep_graph.node_count(),
             "edge_count": run.dep_graph.edge_count(),
         },
+        "ide": ide_project_summary(&run),
         "diagnostic_count": run.diagnostics.len(),
     }))
+}
+
+fn declaration_summary(
+    decl: &plsql_ir::Declaration,
+    interner: &plsql_core::SymbolInterner,
+) -> Value {
+    json!({
+        "name": interner.resolve(decl.common().name).unwrap_or(""),
+        "kind": format!("{:?}", decl.kind()),
+        "span": span_summary(decl.span()),
+        "schema": decl.common().schema.map(|schema| interner.resolve(schema.symbol()).unwrap_or("")),
+        "parent": decl.common().parent.map(|parent| parent.get()),
+        "callable": decl.is_callable(),
+        "schema_object": decl.is_schema_object(),
+    })
+}
+
+fn diagnostic_summary(diagnostic: &Diagnostic) -> Value {
+    json!({
+        "code": diagnostic.code.as_str(),
+        "severity": format!("{:?}", diagnostic.severity),
+        "message": diagnostic.message.as_str(),
+        "primary_span": diagnostic.primary_span.map(span_summary),
+        "related_spans": diagnostic
+            .related_spans
+            .iter()
+            .map(|span| json!({ "label": span.label.as_str(), "span": span_summary(span.span) }))
+            .collect::<Vec<_>>(),
+        "help": diagnostic.help.as_deref(),
+        "unknown_reasons": &diagnostic.unknown_reasons,
+    })
+}
+
+fn span_summary(span: Span) -> Value {
+    json!({
+        "file_id": span.file_id,
+        "start": {
+            "line": span.start.line,
+            "column": span.start.column,
+            "offset": span.start.offset,
+        },
+        "end": {
+            "line": span.end.line,
+            "column": span.end.column,
+            "offset": span.end.offset,
+        },
+    })
+}
+
+fn ide_project_summary(run: &plsql_engine::AnalysisRun) -> Value {
+    let mut nodes: Vec<_> = run.dep_graph.nodes.values().collect();
+    nodes.sort_by(|a, b| a.logical_id.as_str().cmp(b.logical_id.as_str()));
+    let definitions: Vec<Value> = nodes
+        .iter()
+        .take(IDE_LIST_LIMIT)
+        .map(|node| {
+            json!({
+                "node_id": node.id.get(),
+                "logical_id": node.logical_id.as_str(),
+                "kind": node.identity_kind.as_str(),
+                "revision_id": node.revision_id.as_str(),
+            })
+        })
+        .collect();
+
+    let mut edges: Vec<_> = run.dep_graph.edges.iter().collect();
+    edges.sort_by_key(|edge| edge.id.get());
+    let dependencies: Vec<Value> = edges
+        .iter()
+        .take(IDE_LIST_LIMIT)
+        .map(|edge| {
+            let provenance = run.dep_graph.provenance.get(&edge.id);
+            json!({
+                "edge_id": edge.id.get(),
+                "from": graph_node_name(run, edge.from),
+                "to": graph_node_name(run, edge.to),
+                "kind": edge.kind.as_str(),
+                "confidence": &edge.confidence,
+                "resolution_strategy": provenance.map(|p| p.resolution_strategy.as_str()),
+                "span": provenance.map(|p| span_summary(p.span)),
+                "notes": provenance.map(|p| p.notes.clone()).unwrap_or_default(),
+                "has_evidence": run.dep_graph.evidence.contains_key(&edge.id),
+            })
+        })
+        .collect();
+
+    let mut declaration_facts = Vec::new();
+    let mut reference_facts = Vec::new();
+    let mut dependency_facts = Vec::new();
+    for fact in &run.fact_store.facts {
+        match &fact.payload {
+            FactPayload::Declaration { decl, logical_id } => {
+                if declaration_facts.len() < IDE_LIST_LIMIT {
+                    declaration_facts.push(json!({
+                        "fact_id": fact.id.0.as_str(),
+                        "decl_id": decl.get(),
+                        "logical_id": logical_id,
+                        "source_file": fact.provenance.source_file.as_deref(),
+                        "source_logical_id": fact.provenance.source_logical_id.as_deref(),
+                    }));
+                }
+            }
+            FactPayload::Reference {
+                from_decl,
+                to_logical_id,
+            } => {
+                if reference_facts.len() < IDE_LIST_LIMIT {
+                    reference_facts.push(json!({
+                        "fact_id": fact.id.0.as_str(),
+                        "from_decl": from_decl.get(),
+                        "to_logical_id": to_logical_id,
+                        "source_file": fact.provenance.source_file.as_deref(),
+                        "source_logical_id": fact.provenance.source_logical_id.as_deref(),
+                    }));
+                }
+            }
+            FactPayload::DependencyEdge {
+                from_logical_id,
+                to_logical_id,
+                edge_kind,
+            } => {
+                if dependency_facts.len() < IDE_LIST_LIMIT {
+                    dependency_facts.push(json!({
+                        "fact_id": fact.id.0.as_str(),
+                        "from": from_logical_id,
+                        "to": to_logical_id,
+                        "kind": edge_kind,
+                        "source_file": fact.provenance.source_file.as_deref(),
+                        "source_logical_id": fact.provenance.source_logical_id.as_deref(),
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    json!({
+        "definition_count": run.dep_graph.node_count(),
+        "dependency_count": run.dep_graph.edge_count(),
+        "definition_sample": definitions,
+        "dependency_sample": dependencies,
+        "fact_sample": {
+            "declarations": declaration_facts,
+            "references": reference_facts,
+            "dependency_edges": dependency_facts,
+        },
+        "truncated": run.dep_graph.node_count() > IDE_LIST_LIMIT
+            || run.dep_graph.edge_count() > IDE_LIST_LIMIT
+            || run.fact_store.facts.len() > IDE_LIST_LIMIT,
+    })
+}
+
+fn graph_node_name(run: &plsql_engine::AnalysisRun, node_id: NodeId) -> String {
+    run.dep_graph
+        .nodes
+        .get(&node_id)
+        .map(|node| node.logical_id.to_string())
+        .unwrap_or_else(|| format!("node:{}", node_id.get()))
 }
 
 fn run_what_breaks(args: WhatBreaksArgs) -> Result<Value, ErrorEnvelope> {
@@ -1147,6 +1305,12 @@ mod tests {
         .expect("parse succeeds");
         assert_eq!(value["declaration_count"].as_u64(), Some(1));
         assert_eq!(value["recovered"].as_bool(), Some(false));
+        assert_eq!(value["declarations"][0]["name"].as_str(), Some("p"));
+        assert_eq!(value["declarations"][0]["kind"].as_str(), Some("Package"));
+        assert_eq!(
+            value["declarations"][0]["span"]["start"]["offset"].as_u64(),
+            Some(0)
+        );
     }
 
     #[test]

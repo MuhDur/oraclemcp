@@ -87,6 +87,7 @@ import {
   readWorkbenchSql,
   revokeClientCredential,
   rotateClientCredential,
+  runWorkbenchPlsqlTool,
   rollbackConfigDraft,
   setSessionLevel,
   type OperatorResponse,
@@ -131,7 +132,8 @@ import {
   explorerMetadataCacheSummary,
   ORACLE_METADATA_SERIALIZATION_CONTRACT_VERSION,
   type WorkbenchActionData,
-  type WorkbenchMode
+  type WorkbenchMode,
+  type WorkbenchPlsqlTool
 } from "./operator-client";
 
 const queryClient = new QueryClient({
@@ -4935,6 +4937,8 @@ const workbenchModes: Array<{ id: WorkbenchMode; label: string }> = [
 
 type WorkbenchAction = "preview" | "read" | "rollback_preview" | "commit";
 
+type WorkbenchIdeAction = "parse" | "analyze" | "lineage" | "lint" | "docs" | "impact";
+
 type WorkbenchResult =
   | {
       state: "ok";
@@ -4947,6 +4951,36 @@ type WorkbenchResult =
       message: string;
     };
 
+type PlsqlPosition = {
+  line: number;
+  column: number;
+  offset: number;
+};
+
+type PlsqlSpan = {
+  start: PlsqlPosition;
+  end: PlsqlPosition;
+};
+
+type PlsqlDefinition = {
+  name: string;
+  kind: string;
+  span: PlsqlSpan | null;
+};
+
+type IdentifierOccurrence = {
+  offset: number;
+  endOffset: number;
+  line: number;
+  column: number;
+  preview: string;
+};
+
+type RefactorPreview = {
+  occurrences: IdentifierOccurrence[];
+  preview: string;
+};
+
 function WorkbenchPage(): React.ReactElement {
   const [mode, setMode] = React.useState<WorkbenchMode>("classify_only");
   const [sql, setSql] = React.useState("SELECT * FROM dual");
@@ -4955,6 +4989,19 @@ function WorkbenchPage(): React.ReactElement {
   const [maxRows, setMaxRows] = React.useState(100);
   const [captureDbmsOutput, setCaptureDbmsOutput] = React.useState(false);
   const [lastResult, setLastResult] = React.useState<WorkbenchResult | null>(null);
+  const [lastIdeResult, setLastIdeResult] = React.useState<WorkbenchResult | null>(null);
+  const [projectRoot, setProjectRoot] = React.useState("");
+  const [plsqlTarget, setPlsqlTarget] = React.useState("");
+  const [lineageDirection, setLineageDirection] = React.useState<
+    "upstream" | "downstream" | "bidirectional"
+  >("bidirectional");
+  const [lineageDepth, setLineageDepth] = React.useState(2);
+  const [identifier, setIdentifier] = React.useState("");
+  const [replacement, setReplacement] = React.useState("");
+  const [changesetJson, setChangesetJson] = React.useState(
+    '{\n  "objects": [],\n  "unclassified_files": []\n}'
+  );
+  const sqlEditorRef = React.useRef<HTMLTextAreaElement | null>(null);
 
   const session = useQuery({
     queryKey: ["dashboard-session"],
@@ -5003,9 +5050,70 @@ function WorkbenchPage(): React.ReactElement {
     }
   });
 
+  const ideAction = useMutation({
+    mutationFn: async (kind: WorkbenchIdeAction) => {
+      if (!session.data) {
+        throw new Error("dashboard session is not ready");
+      }
+      const request = workbenchIdeRequest(kind, {
+        source: sql,
+        laneId,
+        projectRoot,
+        target: plsqlTarget,
+        direction: lineageDirection,
+        maxDepth: lineageDepth,
+        changesetJson
+      });
+      return runWorkbenchPlsqlTool(session.data, request);
+    },
+    onSuccess: (response, kind) => {
+      setLastIdeResult({ state: "ok", label: ideActionLabel(kind), response });
+    },
+    onError: (error, kind) => {
+      setLastIdeResult({
+        state: "error",
+        label: ideActionLabel(kind),
+        message: error instanceof Error ? error.message : "PL/SQL analysis failed"
+      });
+    }
+  });
+
   const canSubmit = sql.trim().length > 0 && session.status === "success" && !action.isPending;
+  const canRunIde =
+    sql.trim().length > 0 && session.status === "success" && !ideAction.isPending;
   const confirmReady = confirm.trim().length > 0;
   const sessionTone = session.status === "success" ? "ok" : session.status === "error" ? "warn" : "info";
+  const definitions =
+    lastIdeResult?.state === "ok" && lastIdeResult.response.data.mcp_tool === "oracle_plsql_parse"
+      ? plsqlDefinitionsFromResponse(lastIdeResult.response)
+      : [];
+  const usageRows = React.useMemo(
+    () => identifierOccurrences(sql, identifier),
+    [identifier, sql]
+  );
+  const refactorPreview = React.useMemo(
+    () => buildRefactorPreview(sql, identifier, replacement),
+    [identifier, replacement, sql]
+  );
+  const jumpToRange = React.useCallback((start: number, end: number) => {
+    const editor = sqlEditorRef.current;
+    if (!editor) {
+      return;
+    }
+    editor.focus();
+    editor.setSelectionRange(start, Math.max(start, end));
+  }, []);
+  const useSelectionAsIdentifier = React.useCallback(() => {
+    const editor = sqlEditorRef.current;
+    if (!editor) {
+      return;
+    }
+    const selected = sql.slice(editor.selectionStart, editor.selectionEnd).trim();
+    if (selected) {
+      setIdentifier(selected);
+      setPlsqlTarget(selected.toUpperCase());
+    }
+  }, [sql]);
 
   return (
     <PageFrame
@@ -5013,7 +5121,7 @@ function WorkbenchPage(): React.ReactElement {
       eyebrow="Guarded SQL"
       description="Human-in-the-loop SQL through the same classifier, lane gate, confirmation, and audit path as MCP tools."
     >
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
+      <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.6fr)_minmax(360px,0.75fr)]">
         <Surface className="p-4">
           <div className="flex flex-col gap-4">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -5037,6 +5145,7 @@ function WorkbenchPage(): React.ReactElement {
             <label className="block">
               <span className="mb-2 block text-sm font-bold text-zinc-700">SQL</span>
               <textarea
+                ref={sqlEditorRef}
                 className="min-h-[320px] w-full resize-y rounded-md border border-zinc-300 bg-zinc-950 p-3 font-mono text-sm leading-6 text-zinc-50 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
                 spellCheck={false}
                 value={sql}
@@ -5127,9 +5236,313 @@ function WorkbenchPage(): React.ReactElement {
           </div>
         </Surface>
 
+        <WorkbenchIdePanel
+          canRun={canRunIde}
+          changesetJson={changesetJson}
+          definitions={definitions}
+          identifier={identifier}
+          lineageDepth={lineageDepth}
+          lineageDirection={lineageDirection}
+          onJump={jumpToRange}
+          onRun={(kind) => ideAction.mutate(kind)}
+          onUseSelection={useSelectionAsIdentifier}
+          pending={ideAction.isPending}
+          projectRoot={projectRoot}
+          refactorPreview={refactorPreview}
+          replacement={replacement}
+          result={lastIdeResult}
+          target={plsqlTarget}
+          usageRows={usageRows}
+          setChangesetJson={setChangesetJson}
+          setIdentifier={setIdentifier}
+          setLineageDepth={setLineageDepth}
+          setLineageDirection={setLineageDirection}
+          setProjectRoot={setProjectRoot}
+          setReplacement={setReplacement}
+          setTarget={setPlsqlTarget}
+        />
+
         <WorkbenchResultPanel result={lastResult} pending={action.isPending} />
       </div>
     </PageFrame>
+  );
+}
+
+function WorkbenchIdePanel({
+  canRun,
+  changesetJson,
+  definitions,
+  identifier,
+  lineageDepth,
+  lineageDirection,
+  onJump,
+  onRun,
+  onUseSelection,
+  pending,
+  projectRoot,
+  refactorPreview,
+  replacement,
+  result,
+  target,
+  usageRows,
+  setChangesetJson,
+  setIdentifier,
+  setLineageDepth,
+  setLineageDirection,
+  setProjectRoot,
+  setReplacement,
+  setTarget
+}: {
+  canRun: boolean;
+  changesetJson: string;
+  definitions: PlsqlDefinition[];
+  identifier: string;
+  lineageDepth: number;
+  lineageDirection: "upstream" | "downstream" | "bidirectional";
+  onJump: (start: number, end: number) => void;
+  onRun: (kind: WorkbenchIdeAction) => void;
+  onUseSelection: () => void;
+  pending: boolean;
+  projectRoot: string;
+  refactorPreview: RefactorPreview;
+  replacement: string;
+  result: WorkbenchResult | null;
+  target: string;
+  usageRows: IdentifierOccurrence[];
+  setChangesetJson: React.Dispatch<React.SetStateAction<string>>;
+  setIdentifier: React.Dispatch<React.SetStateAction<string>>;
+  setLineageDepth: React.Dispatch<React.SetStateAction<number>>;
+  setLineageDirection: React.Dispatch<
+    React.SetStateAction<"upstream" | "downstream" | "bidirectional">
+  >;
+  setProjectRoot: React.Dispatch<React.SetStateAction<string>>;
+  setReplacement: React.Dispatch<React.SetStateAction<string>>;
+  setTarget: React.Dispatch<React.SetStateAction<string>>;
+}): React.ReactElement {
+  const projectReady = canRun && projectRoot.trim().length > 0;
+  const lineageReady = projectReady && target.trim().length > 0;
+  return (
+    <Surface className="min-h-[520px] overflow-hidden">
+      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+        <div className="min-w-0">
+          <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
+            <Code2 className="size-4" aria-hidden="true" />
+            PL/SQL IDE
+          </h3>
+          <p className="mt-1 truncate text-sm text-zinc-500">
+            {pending ? "analysis in flight" : result ? result.label : "idle"}
+          </p>
+        </div>
+        <Badge tone={pending ? "info" : result?.state === "error" ? "warn" : result ? "ok" : "off"}>
+          {pending ? "running" : result?.state ?? "empty"}
+        </Badge>
+      </div>
+
+      <div className="space-y-4 p-4">
+        <div className="grid gap-3">
+          <label className="block">
+            <span className="mb-2 block text-sm font-bold text-zinc-700">Project Root</span>
+            <input
+              className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+              value={projectRoot}
+              onChange={(event) => setProjectRoot(event.target.value)}
+              placeholder="/path/to/plsql/project"
+            />
+          </label>
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_150px_110px]">
+            <label className="block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Target</span>
+              <input
+                className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                value={target}
+                onChange={(event) => setTarget(event.target.value)}
+                placeholder="APP.PACKAGE"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Direction</span>
+              <select
+                className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                value={lineageDirection}
+                onChange={(event) =>
+                  setLineageDirection(
+                    event.target.value as "upstream" | "downstream" | "bidirectional"
+                  )
+                }
+              >
+                <option value="bidirectional">Both</option>
+                <option value="downstream">Downstream</option>
+                <option value="upstream">Upstream</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Depth</span>
+              <input
+                className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                min={0}
+                max={20}
+                type="number"
+                value={lineageDepth}
+                onChange={(event) => setLineageDepth(clampDepth(event.target.valueAsNumber))}
+              />
+            </label>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="secondary" disabled={!canRun} onClick={() => onRun("parse")}>
+            <Code2 className="size-4" aria-hidden="true" />
+            Parse
+          </Button>
+          <Button type="button" variant="secondary" disabled={!canRun} onClick={() => onRun("docs")}>
+            <FileClock className="size-4" aria-hidden="true" />
+            Docs
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={!projectReady}
+            onClick={() => onRun("analyze")}
+          >
+            <RefreshCcw className="size-4" aria-hidden="true" />
+            Analyze
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={!lineageReady}
+            onClick={() => onRun("lineage")}
+          >
+            <GitPullRequest className="size-4" aria-hidden="true" />
+            Dependencies
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={!projectReady}
+            onClick={() => onRun("lint")}
+          >
+            <ShieldCheck className="size-4" aria-hidden="true" />
+            Lint
+          </Button>
+          <Button type="button" variant="secondary" disabled={!canRun} onClick={() => onRun("impact")}>
+            <AlertTriangle className="size-4" aria-hidden="true" />
+            Impact
+          </Button>
+        </div>
+
+        <label className="block">
+          <span className="mb-2 block text-sm font-bold text-zinc-700">ChangeSet</span>
+          <textarea
+            className="min-h-24 w-full resize-y rounded-md border border-zinc-300 bg-zinc-50 p-3 font-mono text-xs leading-5 text-zinc-900 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+            spellCheck={false}
+            value={changesetJson}
+            onChange={(event) => setChangesetJson(event.target.value)}
+          />
+        </label>
+
+        <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <h4 className="text-sm font-bold text-zinc-950">Definitions</h4>
+            <Badge tone={definitions.length > 0 ? "ok" : "off"}>{definitions.length}</Badge>
+          </div>
+          <div className="mt-3 max-h-44 space-y-2 overflow-auto">
+            {definitions.length === 0 ? (
+              <p className="text-sm font-semibold text-zinc-500">No parsed definitions</p>
+            ) : (
+              definitions.map((definition, index) => (
+                <button
+                  key={`${definition.name}-${definition.kind}-${index}`}
+                  className="flex w-full items-center justify-between gap-3 rounded-md border border-zinc-200 bg-white px-3 py-2 text-left text-sm hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  type="button"
+                  disabled={!definition.span}
+                  onClick={() =>
+                    definition.span
+                      ? onJump(definition.span.start.offset, definition.span.end.offset)
+                      : undefined
+                  }
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate font-mono font-semibold text-zinc-950">
+                      {definition.name || "anonymous"}
+                    </span>
+                    <span className="block text-xs font-semibold text-zinc-500">
+                      {definition.span
+                        ? `${definition.span.start.line}:${definition.span.start.column}`
+                        : "span unavailable"}
+                    </span>
+                  </span>
+                  <Badge tone="info">{definition.kind}</Badge>
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <label className="block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Identifier</span>
+              <input
+                className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                value={identifier}
+                onChange={(event) => setIdentifier(event.target.value)}
+                placeholder="PKG_NAME"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-bold text-zinc-700">Rename To</span>
+              <input
+                className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                value={replacement}
+                onChange={(event) => setReplacement(event.target.value)}
+                placeholder="PKG_NAME_V2"
+              />
+            </label>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Button type="button" variant="ghost" onClick={onUseSelection}>
+              <Search className="size-4" aria-hidden="true" />
+              Selection
+            </Button>
+            <Badge tone={usageRows.length > 0 ? "ok" : "off"}>{usageRows.length} usages</Badge>
+            <Badge tone={replacement.trim() ? "info" : "off"}>
+              {replacement.trim() ? "preview" : "rename idle"}
+            </Badge>
+          </div>
+          <div className="mt-3 max-h-36 space-y-2 overflow-auto">
+            {usageRows.slice(0, 20).map((occurrence) => (
+              <button
+                key={`${occurrence.offset}-${occurrence.endOffset}`}
+                className="block w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-left hover:bg-zinc-100"
+                type="button"
+                onClick={() => onJump(occurrence.offset, occurrence.endOffset)}
+              >
+                <span className="font-mono text-xs font-semibold text-zinc-500">
+                  {occurrence.line}:{occurrence.column}
+                </span>
+                <span className="mt-1 block truncate font-mono text-xs text-zinc-900">
+                  {occurrence.preview}
+                </span>
+              </button>
+            ))}
+          </div>
+          <pre className="mt-3 max-h-40 overflow-auto rounded-md bg-zinc-950 p-3 text-xs leading-5 text-zinc-50">
+            {refactorPreview.preview}
+          </pre>
+        </div>
+
+        {result?.state === "error" ? (
+          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+            {result.message}
+          </div>
+        ) : (
+          <pre className="max-h-[360px] overflow-auto rounded-md bg-zinc-950 p-3 text-xs leading-5 text-zinc-50">
+            {result?.state === "ok" ? prettyJson(result.response) : "{}"}
+          </pre>
+        )}
+      </div>
+    </Surface>
   );
 }
 
@@ -5718,6 +6131,250 @@ function actionLabel(action: WorkbenchAction): string {
   }
 }
 
+type WorkbenchIdeRequestInput = {
+  source: string;
+  laneId?: string;
+  projectRoot: string;
+  target: string;
+  direction: "upstream" | "downstream" | "bidirectional";
+  maxDepth: number;
+  changesetJson: string;
+};
+
+function workbenchIdeRequest(
+  action: WorkbenchIdeAction,
+  input: WorkbenchIdeRequestInput
+): {
+  laneId?: string;
+  tool: WorkbenchPlsqlTool;
+  arguments: Record<string, unknown>;
+  idempotencyPrefix: string;
+} {
+  const projectRoot = input.projectRoot.trim();
+  const target = input.target.trim();
+  switch (action) {
+    case "parse":
+      return {
+        laneId: input.laneId,
+        tool: "oracle_plsql_parse",
+        arguments: { source: input.source },
+        idempotencyPrefix: "workbench-plsql-parse"
+      };
+    case "docs":
+      return {
+        laneId: input.laneId,
+        tool: "oracle_plsql_doc",
+        arguments: { source: input.source, format: "json" },
+        idempotencyPrefix: "workbench-plsql-doc"
+      };
+    case "analyze":
+      if (!projectRoot) {
+        throw new Error("project root is required");
+      }
+      return {
+        laneId: input.laneId,
+        tool: "oracle_plsql_analyze",
+        arguments: { project_root: projectRoot },
+        idempotencyPrefix: "workbench-plsql-analyze"
+      };
+    case "lineage":
+      if (!projectRoot || !target) {
+        throw new Error("project root and target are required");
+      }
+      return {
+        laneId: input.laneId,
+        tool: "oracle_plsql_lineage",
+        arguments: {
+          project_root: projectRoot,
+          target,
+          direction: input.direction,
+          max_depth: input.maxDepth
+        },
+        idempotencyPrefix: "workbench-plsql-lineage"
+      };
+    case "lint":
+      if (!projectRoot) {
+        throw new Error("project root is required");
+      }
+      return {
+        laneId: input.laneId,
+        tool: "oracle_plsql_sast",
+        arguments: { project_root: projectRoot, format: "json" },
+        idempotencyPrefix: "workbench-plsql-sast"
+      };
+    case "impact":
+      return {
+        laneId: input.laneId,
+        tool: "oracle_plsql_what_breaks",
+        arguments: {
+          changeset: parseChangeset(input.changesetJson),
+          mode: "source_only"
+        },
+        idempotencyPrefix: "workbench-plsql-impact"
+      };
+  }
+}
+
+function parseChangeset(raw: string): Record<string, unknown> {
+  const parsed = JSON.parse(raw) as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error("changeset must be a JSON object");
+  }
+  return parsed;
+}
+
+function ideActionLabel(action: WorkbenchIdeAction): string {
+  switch (action) {
+    case "parse":
+      return "Parse";
+    case "analyze":
+      return "Analyze";
+    case "lineage":
+      return "Dependencies";
+    case "lint":
+      return "Lint";
+    case "docs":
+      return "Docs";
+    case "impact":
+      return "Impact";
+  }
+}
+
+function plsqlDefinitionsFromResponse(
+  response: OperatorResponse<WorkbenchActionData>
+): PlsqlDefinition[] {
+  const result = mcpResult(response.data.mcp_response);
+  if (!isRecord(result) || !Array.isArray(result["declarations"])) {
+    return [];
+  }
+  return result["declarations"].flatMap((item): PlsqlDefinition[] => {
+    if (!isRecord(item)) {
+      return [];
+    }
+    return [
+      {
+        name: stringValue(item["name"], ""),
+        kind: stringValue(item["kind"], "Unknown"),
+        span: plsqlSpanFromValue(item["span"])
+      }
+    ];
+  });
+}
+
+function plsqlSpanFromValue(value: unknown): PlsqlSpan | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const start = plsqlPositionFromValue(value["start"]);
+  const end = plsqlPositionFromValue(value["end"]);
+  return start && end ? { start, end } : null;
+}
+
+function plsqlPositionFromValue(value: unknown): PlsqlPosition | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const line = numberField(value, "line");
+  const column = numberField(value, "column");
+  const offset = numberField(value, "offset");
+  if (line === null || column === null || offset === null) {
+    return null;
+  }
+  return { line, column, offset };
+}
+
+function identifierOccurrences(source: string, identifier: string): IdentifierOccurrence[] {
+  const needle = identifier.trim();
+  if (!needle) {
+    return [];
+  }
+  const lowerSource = source.toLocaleLowerCase();
+  const lowerNeedle = needle.toLocaleLowerCase();
+  const occurrences: IdentifierOccurrence[] = [];
+  let cursor = 0;
+  while (cursor < source.length) {
+    const offset = lowerSource.indexOf(lowerNeedle, cursor);
+    if (offset < 0) {
+      break;
+    }
+    const endOffset = offset + needle.length;
+    const before = offset > 0 ? source[offset - 1] : "";
+    const after = endOffset < source.length ? source[endOffset] : "";
+    if (!isPlsqlIdentifierChar(before) && !isPlsqlIdentifierChar(after)) {
+      const location = sourceLocationAtOffset(source, offset);
+      occurrences.push({
+        offset,
+        endOffset,
+        line: location.line,
+        column: location.column,
+        preview: linePreviewAtOffset(source, offset)
+      });
+    }
+    cursor = endOffset;
+  }
+  return occurrences;
+}
+
+function buildRefactorPreview(
+  source: string,
+  identifier: string,
+  replacement: string
+): RefactorPreview {
+  const occurrences = identifierOccurrences(source, identifier);
+  if (!identifier.trim() || !replacement.trim() || occurrences.length === 0) {
+    return { occurrences, preview: "{}" };
+  }
+  let cursor = 0;
+  const chunks: string[] = [];
+  for (const occurrence of occurrences) {
+    chunks.push(source.slice(cursor, occurrence.offset), replacement);
+    cursor = occurrence.endOffset;
+  }
+  chunks.push(source.slice(cursor));
+  const preview = chunks.join("");
+  return {
+    occurrences,
+    preview: preview.length > 2400 ? `${preview.slice(0, 2400)}\n...` : preview
+  };
+}
+
+function sourceLocationAtOffset(source: string, offset: number): { line: number; column: number } {
+  let line = 1;
+  let column = 1;
+  const end = Math.min(Math.max(0, offset), source.length);
+  for (let index = 0; index < end; index += 1) {
+    if (source[index] === "\n") {
+      line += 1;
+      column = 1;
+    } else {
+      column += 1;
+    }
+  }
+  return { line, column };
+}
+
+function linePreviewAtOffset(source: string, offset: number): string {
+  const start = Math.max(0, source.lastIndexOf("\n", offset - 1) + 1);
+  const endIndex = source.indexOf("\n", offset);
+  const end = endIndex >= 0 ? endIndex : source.length;
+  return source.slice(start, end).trim();
+}
+
+function isPlsqlIdentifierChar(value: string): boolean {
+  if (!value) {
+    return false;
+  }
+  const code = value.charCodeAt(0);
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    value === "_" ||
+    value === "$" ||
+    value === "#"
+  );
+}
+
 function confirmationFromResponse(response: OperatorResponse<WorkbenchActionData>): string | null {
   const result = mcpResult(response.data.mcp_response);
   if (!isRecord(result)) {
@@ -5756,6 +6413,13 @@ function clampRows(value: number): number {
     return 100;
   }
   return Math.min(5000, Math.max(1, Math.trunc(value)));
+}
+
+function clampDepth(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 2;
+  }
+  return Math.min(20, Math.max(0, Math.trunc(value)));
 }
 
 function clampTtl(value: number): number {

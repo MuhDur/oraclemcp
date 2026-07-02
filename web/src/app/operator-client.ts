@@ -471,6 +471,21 @@ export type WorkbenchExecuteRequest = WorkbenchSqlRequest & {
   captureDbmsOutput: boolean;
 };
 
+export type WorkbenchPlsqlTool =
+  | "oracle_plsql_parse"
+  | "oracle_plsql_analyze"
+  | "oracle_plsql_what_breaks"
+  | "oracle_plsql_lineage"
+  | "oracle_plsql_sast"
+  | "oracle_plsql_doc";
+
+export type WorkbenchPlsqlRequest = {
+  laneId?: string;
+  tool: WorkbenchPlsqlTool;
+  arguments: Record<string, unknown>;
+  idempotencyPrefix: string;
+};
+
 export type SessionLevelRequest = {
   laneId?: string;
   level?: OperatingLevel;
@@ -835,6 +850,18 @@ export async function executeWorkbenchSql(
       confirm: request.confirm?.trim() || undefined,
       capture_dbms_output: request.captureDbmsOutput
     }
+  });
+}
+
+export async function runWorkbenchPlsqlTool(
+  session: DashboardSession,
+  request: WorkbenchPlsqlRequest
+): Promise<OperatorResponse<WorkbenchActionData>> {
+  return operatorPost("/operator/v1/actions/execute", session, {
+    idempotency_key: requestId(request.idempotencyPrefix),
+    lane_id: laneIdValue(request.laneId),
+    tool: request.tool,
+    arguments: request.arguments
   });
 }
 

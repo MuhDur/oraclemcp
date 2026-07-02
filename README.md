@@ -295,6 +295,12 @@ actions forward to `oracle_preview_sql`, read execution forwards to
 single-use confirmation grant and audit path agents use. Browser-originated
 DDL/Admin apply is release-gated; DDL can be previewed, but applying it requires
 a non-browser operator path until a profile-level dashboard DDL opt-in exists.
+When compiled with `plsql-intelligence`, the Workbench IDE panel also exposes
+the static `oracle_plsql_parse`, `oracle_plsql_analyze`,
+`oracle_plsql_lineage`, `oracle_plsql_sast`, `oracle_plsql_doc`, and
+`oracle_plsql_what_breaks` tools for source navigation, dependency, lint, doc,
+and impact previews; live snapshot/blast-radius tools remain outside the
+browser allowlist.
 The Reviews board stores profile-scoped Change Proposals as service-owned SQL
 templates plus captured binds, then applies them by re-classifying each
 template and forwarding through the same guarded action route; stored proposal

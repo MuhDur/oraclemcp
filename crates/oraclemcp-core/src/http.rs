@@ -2798,6 +2798,41 @@ mod tests {
                     "max_chars": 4000
                 }),
             ),
+            (
+                "oracle_plsql_parse",
+                serde_json::json!({ "source": "CREATE OR REPLACE PROCEDURE p IS BEGIN NULL; END;" }),
+            ),
+            (
+                "oracle_plsql_analyze",
+                serde_json::json!({ "project_root": "." }),
+            ),
+            (
+                "oracle_plsql_lineage",
+                serde_json::json!({
+                    "project_root": ".",
+                    "target": "APP.PKG_CUSTOMERS",
+                    "direction": "bidirectional",
+                    "max_depth": 2
+                }),
+            ),
+            (
+                "oracle_plsql_sast",
+                serde_json::json!({ "project_root": ".", "format": "json" }),
+            ),
+            (
+                "oracle_plsql_doc",
+                serde_json::json!({
+                    "source": "/** customer package */\nCREATE PACKAGE pkg_customers AS END;",
+                    "query": "customer"
+                }),
+            ),
+            (
+                "oracle_plsql_what_breaks",
+                serde_json::json!({
+                    "changeset": { "objects": [], "unclassified_files": [] },
+                    "mode": "source_only"
+                }),
+            ),
         ];
         let expected_count = metadata_tools.len();
 
@@ -9278,6 +9313,12 @@ fn allowed_operator_action_tool(route: OperatorRouteKind, tool: &str) -> Option<
         "oracle_compile_object",
         "oracle_create_or_replace",
         "oracle_patch_source",
+        "oracle_plsql_parse",
+        "oracle_plsql_analyze",
+        "oracle_plsql_what_breaks",
+        "oracle_plsql_lineage",
+        "oracle_plsql_sast",
+        "oracle_plsql_doc",
     ];
     let allowed = match route {
         OperatorRouteKind::ActionPreview => PREVIEW,

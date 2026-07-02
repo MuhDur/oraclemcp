@@ -273,6 +273,87 @@ fn wd_search_global_explorer_uses_guarded_dictionary_tools() {
 }
 
 #[test]
+fn wd_ide_workbench_uses_static_plsql_tools() {
+    let app = read_repo_file("web/src/app/App.tsx");
+    let client = read_repo_file("web/src/app/operator-client.ts");
+    let http = read_repo_file("crates/oraclemcp-core/src/http.rs");
+    let operations = read_repo_file("docs/operations.md");
+    let readme = read_repo_file("README.md");
+
+    assert_contains_all(
+        "Workbench PL/SQL IDE UI",
+        &app,
+        &[
+            "function WorkbenchIdePanel",
+            "PL/SQL IDE",
+            "workbenchIdeRequest",
+            "plsqlDefinitionsFromResponse",
+            "identifierOccurrences",
+            "buildRefactorPreview",
+            "oracle_plsql_parse",
+            "oracle_plsql_analyze",
+            "oracle_plsql_lineage",
+            "oracle_plsql_sast",
+            "oracle_plsql_doc",
+            "oracle_plsql_what_breaks",
+        ],
+    );
+    assert_contains_all(
+        "Workbench PL/SQL IDE client",
+        &client,
+        &[
+            "type WorkbenchPlsqlTool",
+            "runWorkbenchPlsqlTool",
+            "/operator/v1/actions/execute",
+            "tool: request.tool",
+            "arguments: request.arguments",
+        ],
+    );
+    assert_contains_all(
+        "operator static PL/SQL allowlist",
+        &http,
+        &[
+            "oracle_plsql_parse",
+            "oracle_plsql_analyze",
+            "oracle_plsql_what_breaks",
+            "oracle_plsql_lineage",
+            "oracle_plsql_sast",
+            "oracle_plsql_doc",
+            "operator_execute_allows_read_only_metadata_tools_for_explorer",
+        ],
+    );
+    assert_contains_all(
+        "operator docs for Workbench PL/SQL IDE",
+        &operations,
+        &[
+            "Workbench IDE panel",
+            "oracle_plsql_parse",
+            "oracle_plsql_analyze",
+            "oracle_plsql_lineage",
+            "oracle_plsql_sast",
+            "oracle_plsql_doc",
+            "oracle_plsql_what_breaks",
+            "live PL/SQL snapshot/blast-radius tools",
+            "remain MCP-only",
+        ],
+    );
+    assert_contains_all(
+        "README Workbench PL/SQL IDE",
+        &readme,
+        &[
+            "Workbench IDE panel",
+            "oracle_plsql_parse",
+            "oracle_plsql_analyze",
+            "oracle_plsql_lineage",
+            "oracle_plsql_sast",
+            "oracle_plsql_doc",
+            "oracle_plsql_what_breaks",
+            "browser allowlist",
+        ],
+    );
+}
+
+#[test]
 fn w8b_proof_bundle_is_redacted_and_exportable() {
     let app = read_repo_file("web/src/app/App.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");

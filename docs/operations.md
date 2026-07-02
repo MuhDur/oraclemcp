@@ -87,8 +87,11 @@ The optional PL/SQL intelligence image uses the same runtime contract, but the
 binary is compiled with `--features plsql-intelligence`. It does not need a
 database connection to start, list capabilities, or expose the offline
 `oracle_plsql_parse`, `oracle_plsql_analyze`, `oracle_plsql_lineage`,
-`oracle_plsql_sast`, and `oracle_plsql_doc` tools. Live snapshot and blast
-radius tools still need a configured profile.
+`oracle_plsql_sast`, and `oracle_plsql_doc` tools. The dashboard Workbench IDE
+panel uses the same static action route for parse, project analysis, lineage,
+SAST, docs, and source-only impact checks. Live snapshot and blast radius tools
+still need a configured profile and are not exposed through the browser
+Workbench action allowlist.
 
 ```sh
 # Published by the manual Docker workflow with variant=plsql-intelligence.
@@ -722,9 +725,14 @@ another lane is rejected before replay. Gated-action routes forward to the
 existing MCP `tools/call` dispatcher so all SQL guards and confirmation-token
 checks remain in one place. The browser Workbench uses this surface directly:
 `oracle_preview_sql` for classify/preview, `oracle_query` for read execution,
-and `oracle_execute` for guarded DML. Browser-originated DDL/Admin apply is
-release-gated and rejected before MCP dispatch; DDL preview remains available,
-and non-browser operator API callers keep the normal profile-ceiling path.
+and `oracle_execute` for guarded DML. When the binary is built with
+`plsql-intelligence`, the Workbench IDE panel also forwards the static
+`oracle_plsql_parse`, `oracle_plsql_analyze`, `oracle_plsql_lineage`,
+`oracle_plsql_sast`, `oracle_plsql_doc`, and `oracle_plsql_what_breaks` tools
+through `/operator/v1/actions/execute`; live PL/SQL snapshot/blast-radius tools
+remain MCP-only. Browser-originated DDL/Admin apply is release-gated and
+rejected before MCP dispatch; DDL preview remains available, and non-browser
+operator API callers keep the normal profile-ceiling path.
 `/operator/v1/change-proposals` backs the dashboard Reviews board. Drafted
 proposals are profile-scoped service-state files keyed by `(profile, author)`;
 they store SQL as `sql_template` plus captured `binds`, expose redacted board
