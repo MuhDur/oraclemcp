@@ -625,6 +625,8 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: https://registry.npmjs.org
+      - name: Use npm with OIDC publishing support
+        run: npm install -g npm@11.5.1
       - name: Validate npm wrapper
         run: npm --prefix npm/oraclemcp test
       - name: Publish npm package with provenance
@@ -646,6 +648,9 @@ jobs:
           dist_tag="latest"
           if [[ "$version" == *-* ]]; then
             dist_tag="next"
+          fi
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            unset NODE_AUTH_TOKEN NPM_CONFIG_USERCONFIG
           fi
           npm publish ./npm/oraclemcp --provenance --access public --tag "$dist_tag"
 

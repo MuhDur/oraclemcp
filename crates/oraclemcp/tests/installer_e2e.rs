@@ -428,6 +428,16 @@ fn npx_verifies_binary_no_postinstall_side_effects() {
         !npm_workflow.contains("npm publish npm/oraclemcp "),
         "bare npm/oraclemcp is parsed as a package spec, not a local publish path"
     );
+    for workflow in [&release_workflow, &npm_workflow] {
+        assert!(
+            workflow.contains("npm install -g npm@11.5.1"),
+            "npm publish workflows must use an npm CLI new enough for OIDC publishing"
+        );
+        assert!(
+            workflow.contains("unset NODE_AUTH_TOKEN NPM_CONFIG_USERCONFIG"),
+            "npm publish workflows must fall back to OIDC when NPM_TOKEN is absent"
+        );
+    }
 
     let scripts = package["scripts"].as_object().expect("scripts object");
     for lifecycle in ["preinstall", "install", "postinstall", "prepare"] {
