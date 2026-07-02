@@ -413,8 +413,20 @@ fn npx_verifies_binary_no_postinstall_side_effects() {
     assert_eq!(package["bin"]["oraclemcp"], "bin/oraclemcp.js");
     assert_eq!(package["bin"]["om"], "bin/oraclemcp.js");
     assert!(
-        release_workflow.contains("npm publish ./npm/oraclemcp --provenance"),
-        "release workflow must publish the local npm wrapper directory explicitly"
+        release_workflow.contains("name: validate npm wrapper package"),
+        "release workflow must validate the npm wrapper without requiring npm registry auth"
+    );
+    assert!(
+        release_workflow.contains("npm --prefix npm/oraclemcp test"),
+        "release workflow must smoke-test the npm wrapper"
+    );
+    assert!(
+        release_workflow.contains("npm pack ./npm/oraclemcp --dry-run"),
+        "release workflow must validate the npm package contents"
+    );
+    assert!(
+        !release_workflow.contains("npm publish"),
+        "release workflow must not fail the signed release on externally gated npm publishing"
     );
     assert!(
         npm_workflow.contains("npm publish ./npm/oraclemcp --provenance"),
@@ -428,16 +440,14 @@ fn npx_verifies_binary_no_postinstall_side_effects() {
         !npm_workflow.contains("npm publish npm/oraclemcp "),
         "bare npm/oraclemcp is parsed as a package spec, not a local publish path"
     );
-    for workflow in [&release_workflow, &npm_workflow] {
-        assert!(
-            workflow.contains("npm install -g npm@11.5.1"),
-            "npm publish workflows must use an npm CLI new enough for OIDC publishing"
-        );
-        assert!(
-            workflow.contains("unset NODE_AUTH_TOKEN NPM_CONFIG_USERCONFIG"),
-            "npm publish workflows must fall back to OIDC when NPM_TOKEN is absent"
-        );
-    }
+    assert!(
+        npm_workflow.contains("npm install -g npm@11.5.1"),
+        "npm publish workflow must use an npm CLI new enough for OIDC publishing"
+    );
+    assert!(
+        npm_workflow.contains("unset NODE_AUTH_TOKEN NPM_CONFIG_USERCONFIG"),
+        "npm publish workflow must fall back to OIDC when NPM_TOKEN is absent"
+    );
 
     let scripts = package["scripts"].as_object().expect("scripts object");
     for lifecycle in ["preinstall", "install", "postinstall", "prepare"] {

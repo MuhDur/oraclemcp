@@ -607,15 +607,16 @@ jobs:
             oraclemcp capabilities | head -c 1200 >/dev/null
           '
 
-  publish-npm:
-    name: publish npm wrapper
+  # npm publication requires npm-side package ownership plus either NPM_TOKEN or
+  # trusted-publisher setup. Keep that externally gated in publish-npm.yml so a
+  # missing npm credential cannot turn an otherwise complete signed release red.
+  validate-npm-wrapper:
+    name: validate npm wrapper package
     needs: release
     if: ${{ startsWith(github.ref, 'refs/tags/') && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
-    environment: npm
     permissions:
       contents: read
-      id-token: write
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -625,13 +626,9 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: https://registry.npmjs.org
-      - name: Use npm with OIDC publishing support
-        run: npm install -g npm@11.5.1
       - name: Validate npm wrapper
         run: npm --prefix npm/oraclemcp test
-      - name: Publish npm package with provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Check npm package metadata and pack list
         shell: bash
         run: |
           set -euo pipefail
@@ -641,18 +638,7 @@ jobs:
             echo "npm package version $package_version does not match release tag $version" >&2
             exit 1
           fi
-          if npm view "oraclemcp@$version" version >/dev/null 2>&1; then
-            echo "oraclemcp@$version is already published on npm; skipping"
-            exit 0
-          fi
-          dist_tag="latest"
-          if [[ "$version" == *-* ]]; then
-            dist_tag="next"
-          fi
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            unset NODE_AUTH_TOKEN NPM_CONFIG_USERCONFIG
-          fi
-          npm publish ./npm/oraclemcp --provenance --access public --tag "$dist_tag"
+          npm pack ./npm/oraclemcp --dry-run
 
   publish-mcp-registry:
     name: publish MCP registry entry
