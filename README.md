@@ -164,7 +164,6 @@ Pending registry-backed channels:
 ```sh
 brew info MuhDur/oraclemcp/oraclemcp
 winget search --id MuhDur.oraclemcp --exact
-npm view oraclemcp@0.6.6 version
 ```
 
 After the relevant check resolves the target version, these commands are
@@ -173,13 +172,11 @@ copy-pasteable:
 ```sh
 brew install MuhDur/oraclemcp/oraclemcp
 winget install --id MuhDur.oraclemcp --exact
-npx oraclemcp serve --profile db_ro --allow-no-auth
 ```
 
-The npm wrapper is a verify-before-run package with no `postinstall` mutation.
-It checks SHA-256 before running the binary and soft-skips cosign in the default
-`prefer` posture when cosign is not installed; set `ORACLEMCP_NPM_VERIFY=require`
-to require cosign.
+An npm/npx channel is not offered. Install with the one-line installer above, or
+`cargo binstall oraclemcp`, the GHCR Docker image, or the Homebrew/winget
+channels once they resolve.
 
 ## Why oraclemcp
 

@@ -607,9 +607,10 @@ jobs:
             oraclemcp capabilities | head -c 1200 >/dev/null
           '
 
-  # npm publication requires npm-side package ownership plus either NPM_TOKEN or
-  # trusted-publisher setup. Keep that externally gated in publish-npm.yml so a
-  # missing npm credential cannot turn an otherwise complete signed release red.
+  # npm PUBLICATION is excluded from the 0.6.x line (operator decision
+  # 2026-07-02): publish-npm.yml stays dormant (manual-dispatch only) and is
+  # never dispatched. The wrapper package is still lint-validated below so it
+  # stays well-formed while dormant; nothing here publishes to npm.
   validate-npm-wrapper:
     name: validate npm wrapper package
     needs: release

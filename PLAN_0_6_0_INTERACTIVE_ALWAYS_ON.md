@@ -2024,8 +2024,8 @@ all beaded together. **Phase-0 spikes (CX-I6 capacity, CX-I7 panic) gate 0.6.0.*
   (systemd+linger); agents connect over HTTP, **each in its own lane**; the human opens
   the **web dashboard** (`om dashboard`; `om` = short CLI alias). 50 agents on 50 DBs +
   a human = 51 isolated lanes.
-- **Install:** `curl … | bash` / `irm … | iex` / `npx oraclemcp` / `cargo binstall` /
-  `brew` / `winget` / Docker.
+- **Install:** `curl … | bash` / `irm … | iex` / `cargo binstall` /
+  `brew` / `winget` / Docker. (npm/npx channel excluded from 0.6.x.)
 
 ## 7. Definition of Done (gates — cumulative across the D1 release train)
 > **Train scoping (D1):** the list below is the **cumulative** Definition of Done for the whole

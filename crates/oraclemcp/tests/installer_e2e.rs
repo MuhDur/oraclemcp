@@ -157,9 +157,7 @@ fn readme_leads_with_hosted_install_one_liner_service_and_dashboard() {
         "Pending registry-backed channels",
         "brew info MuhDur/oraclemcp/oraclemcp",
         "winget search --id MuhDur.oraclemcp --exact",
-        "npm view oraclemcp@0.6.6 version",
-        "ORACLEMCP_NPM_VERIFY=require",
-        "npx oraclemcp serve --profile db_ro --allow-no-auth",
+        "An npm/npx channel is not offered",
     ] {
         assert!(
             readme.contains(needle),
