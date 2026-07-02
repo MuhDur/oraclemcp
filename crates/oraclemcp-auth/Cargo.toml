@@ -1,6 +1,6 @@
 [package]
 name = "oraclemcp-auth"
-version = "0.6.1"
+version = "0.6.2"
 description = "Transport auth (OAuth 2.1 RS, mTLS, init token), step-up confirmation delivery and secrets for oraclemcp (Apache-2.0 OR MIT)"
 edition.workspace = true
 license.workspace = true
@@ -10,9 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-oraclemcp-error = { path = "../oraclemcp-error", version = "0.6.1" }
-oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.6.1" }
-oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.6.1" }
+oraclemcp-error = { path = "../oraclemcp-error", version = "0.6.2" }
+oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.6.2" }
+oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.6.2" }
 serde.workspace = true
 zeroize = { version = "1", features = ["alloc"] }
 serde_json.workspace = true

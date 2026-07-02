@@ -339,7 +339,7 @@ struct ServiceInstallCliArgs {
 
 #[derive(Args, Debug)]
 struct SelfUpdateCliArgs {
-    /// Release version to install, e.g. 0.6.1 or v0.6.1.
+    /// Release version to install, e.g. 0.6.2 or v0.6.2.
     #[arg(long, default_value = "latest")]
     version: String,
     /// Verification posture forwarded to the platform installer.

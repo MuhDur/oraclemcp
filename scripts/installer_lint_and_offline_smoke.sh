@@ -30,10 +30,10 @@ USAGE
   esac
 done
 
-E2E_SCENARIO="${E2E_SCENARIO:-installer_lint_and_offline_smoke}"
-E2E_LANE="${E2E_LANE:-installer}"
-E2E_PROFILE="${E2E_PROFILE:-offline}"
-E2E_LEVEL="${E2E_LEVEL:-READ_ONLY}"
+E2E_SCENARIO="installer_lint_and_offline_smoke"
+E2E_LANE="installer"
+E2E_PROFILE="offline"
+E2E_LEVEL="READ_ONLY"
 export E2E_LOG E2E_SCENARIO E2E_LANE E2E_PROFILE E2E_LEVEL
 # shellcheck disable=SC1091 # ROOT is computed from this script's location.
 source "$ROOT/scripts/e2e/lib.sh"

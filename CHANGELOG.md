@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-07-02
+
+### Added
+
+- Shipped the advanced dashboard release line: Change-Review board, schema-diff
+  and migration export workflows, the selected 2D BigBoard signature skin, and
+  release-gated per-view acceptance for those surfaces.
+- Added the one-line install/update experience: guided TTY flow,
+  non-interactive agent path, self-update, Windows installer parity, and
+  structured JSON-line installer acceptance evidence.
+
+### Fixed
+
+- First-run setup now writes a bootable starter profile, doctor reports exact
+  remediation, and generated MCP snippets include paste-ready profile/path
+  wiring.
+- Fresh-host installers no longer hard-fail when cosign is absent at the
+  default verification posture; SHA-256 remains mandatory and stricter
+  `require` mode is available.
+
 ## [0.6.1] — 2026-07-02
 
 ### Changed
@@ -301,6 +321,7 @@ pure Rust. (Not affiliated with Oracle Corporation.)
   closed on desynchronized multi-statement input. It carries a differential
   adversarial corpus (run in CI) and a `cargo-fuzz` target.
 
+[0.6.2]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.6.2
 [0.6.1]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.6.1
 [0.6.0]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.6.0
 [0.4.1]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.4.1
