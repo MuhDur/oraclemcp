@@ -1419,20 +1419,7 @@ impl OracleMcpServer {
             "oracle_list_schemas",
             json!({ "name_like": like_prefix(prefix), "max_rows": COMPLETION_QUERY_ROWS }),
         )?;
-        let names = value
-            .get("schemas")
-            .and_then(Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|row| {
-                        row.get("SCHEMA_NAME")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(filter_and_sort(names, prefix))
+        Ok(completion_names_from(&value, "schemas", "SCHEMA_NAME", prefix))
     }
 
     /// Complete object names via `oracle_search_objects` (names detail), scoped
@@ -1464,20 +1451,7 @@ impl OracleMcpServer {
             }
         }
         let value = self.dispatch_resource_tool(context, "oracle_search_objects", args)?;
-        let names = value
-            .get("results")
-            .and_then(Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|row| {
-                        row.get("object_name")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(filter_and_sort(names, prefix))
+        Ok(completion_names_from(&value, "results", "object_name", prefix))
     }
 
     /// Complete profile names via `oracle_list_profiles` (E7). The dispatcher
@@ -1489,16 +1463,7 @@ impl OracleMcpServer {
         prefix: &str,
     ) -> Result<Vec<String>, ErrorEnvelope> {
         let value = self.dispatch_resource_tool(context, "oracle_list_profiles", json!({}))?;
-        let names = value
-            .get("profiles")
-            .and_then(Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|row| row.get("name").and_then(Value::as_str).map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(filter_and_sort(names, prefix))
+        Ok(completion_names_from(&value, "profiles", "name", prefix))
     }
 }
 
@@ -1566,6 +1531,22 @@ fn complete_object_types(prefix: &str) -> Vec<String> {
         .map(|t| (*t).to_owned())
         .collect();
     filter_and_sort(types, prefix)
+}
+
+/// Project the string field `field` from each object in `value[array]`, then
+/// prefix-filter and sort (E7). Shared by the dictionary completion methods,
+/// which differ only in the response's array wrapper and per-row field name.
+fn completion_names_from(value: &Value, array: &str, field: &str, prefix: &str) -> Vec<String> {
+    let names = value
+        .get(array)
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.get(field).and_then(Value::as_str).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    filter_and_sort(names, prefix)
 }
 
 /// Turn a typed completion prefix into a SQL `LIKE` pattern (`PREFIX%`), or `%`
