@@ -1,0 +1,62 @@
+name: Publish npm wrapper
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version to publish, without the leading v"
+        required: true
+        type: string
+      checkout_ref:
+        description: "Git ref to package; defaults to v<version>"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  NODE_VERSION: 22.17.0
+
+jobs:
+  publish:
+    name: publish npm wrapper
+    runs-on: ubuntu-latest
+    environment: npm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.checkout_ref || format('v{0}', inputs.version) }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://registry.npmjs.org
+      - name: Validate npm wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(node -p "require('./npm/oraclemcp/package.json').version")"
+          if [ "$package_version" != "${{ inputs.version }}" ]; then
+            echo "npm package version $package_version does not match requested ${{ inputs.version }}" >&2
+            exit 1
+          fi
+          npm --prefix npm/oraclemcp test
+      - name: Publish npm package with provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ inputs.version }}"
+          if npm view "oraclemcp@$version" version >/dev/null 2>&1; then
+            echo "oraclemcp@$version is already published on npm; skipping"
+            exit 0
+          fi
+          dist_tag="latest"
+          if [[ "$version" == *-* ]]; then
+            dist_tag="next"
+          fi
+          npm publish ./npm/oraclemcp --provenance --access public --tag "$dist_tag"

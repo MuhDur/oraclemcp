@@ -391,6 +391,10 @@ fn npx_verifies_binary_no_postinstall_side_effects() {
     let root = repo_root();
     let package_json = root.join("npm/oraclemcp/package.json");
     let wrapper = root.join("npm/oraclemcp/bin/oraclemcp.js");
+    let release_workflow =
+        fs::read_to_string(root.join(".github/workflows/release.yml")).expect("read release.yml");
+    let npm_workflow = fs::read_to_string(root.join(".github/workflows/publish-npm.yml"))
+        .expect("read publish-npm.yml");
     let package: Value =
         serde_json::from_str(&fs::read_to_string(&package_json).expect("read npm package.json"))
             .expect("npm package.json parses");
@@ -408,6 +412,22 @@ fn npx_verifies_binary_no_postinstall_side_effects() {
     assert_eq!(package["publishConfig"]["provenance"], true);
     assert_eq!(package["bin"]["oraclemcp"], "bin/oraclemcp.js");
     assert_eq!(package["bin"]["om"], "bin/oraclemcp.js");
+    assert!(
+        release_workflow.contains("npm publish ./npm/oraclemcp --provenance"),
+        "release workflow must publish the local npm wrapper directory explicitly"
+    );
+    assert!(
+        npm_workflow.contains("npm publish ./npm/oraclemcp --provenance"),
+        "manual npm workflow must publish the local npm wrapper directory explicitly"
+    );
+    assert!(
+        !release_workflow.contains("npm publish npm/oraclemcp "),
+        "bare npm/oraclemcp is parsed as a package spec, not a local publish path"
+    );
+    assert!(
+        !npm_workflow.contains("npm publish npm/oraclemcp "),
+        "bare npm/oraclemcp is parsed as a package spec, not a local publish path"
+    );
 
     let scripts = package["scripts"].as_object().expect("scripts object");
     for lifecycle in ["preinstall", "install", "postinstall", "prepare"] {

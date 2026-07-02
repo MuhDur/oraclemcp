@@ -647,7 +647,7 @@ jobs:
           if [[ "$version" == *-* ]]; then
             dist_tag="next"
           fi
-          npm publish npm/oraclemcp --provenance --access public --tag "$dist_tag"
+          npm publish ./npm/oraclemcp --provenance --access public --tag "$dist_tag"
 
   publish-mcp-registry:
     name: publish MCP registry entry
