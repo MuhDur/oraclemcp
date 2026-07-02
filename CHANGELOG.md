@@ -10,6 +10,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Upgrade Notes
 
+- See [`docs/upgrading-to-0.6.0.md`](docs/upgrading-to-0.6.0.md) for the
+  operator checklist covering result JSON consumers, config schema 2 fields,
+  HTTP lane/profile-switch behavior, lane-bound confirmation grants, audit
+  migration, and dashboard Workbench gates.
 - Query serialization now exposes structured Oracle values through the
   versioned `OracleCell.structured` contract instead of relying on
   ordinary-looking placeholder strings for non-text shapes. Consumers that
@@ -22,6 +26,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Audit records now write `schema_version = 3` when they include expanded
   server-derived subject and DB evidence fields. Existing signed v1/v2 audit
   logs continue to verify; no log rewrite is required.
+- Config files remain on `schema_version = 2`. Schema 1 configs still load, but
+  use schema 2 for the new default-safe `monitor_profile`,
+  `[http].dashboard_workbench`, and per-profile `dashboard_ddl_workbench`
+  fields. These fields never raise profile ceilings or bypass protected
+  profiles, confirmation, rollback, idempotency, or audit controls.
+- `oracle_switch_profile` is now lane-aware in served stateful HTTP. The switch
+  applies to the active principal/session lane, revalidates exposure and
+  draining state before credential resolution, reloads profile-scoped custom
+  tools, bumps the lane generation, and clears old grants. Failed switches leave
+  the previous connection/profile in place.
+- The N8 shared-principal safety path fails closed before Oracle I/O when a
+  served HTTP request would otherwise share mutable dispatcher state across
+  unsupported principals or sessions. Multi-agent HTTP deployments should use
+  stateful sessions with per-client credentials, OAuth, or mTLS.
+- Confirmation grants are opaque, single-use, lane-bound references. The legacy
+  deterministic confirmation-MAC shape is retired; grants are bound to the
+  statement/action digest, active profile, MCP session, dispatch lane,
+  server-derived principal, and lane generation. Preview again after profile
+  switches, level changes, expiry, lane close, or restart.
 - The reserved `/operator/v1` API now requires server-derived operator authority
   from `[http.operator]` or the loopback local-owner default, and authorized
   operator actions require the signed audit chain before routing.
