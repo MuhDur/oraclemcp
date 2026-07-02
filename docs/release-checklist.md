@@ -84,6 +84,46 @@ investigate, not a blocker:
 
 ---
 
+## Rollback runbook for a broken `v0.6.0`
+
+Run the dry-run first and paste its JSON-line output into the incident notes:
+
+```sh
+bash scripts/e2e/release_rollback_dry_run.sh --log --dry-run
+```
+
+The dry-run is intentionally non-mutating and fails closed without `--dry-run`.
+After explicit operator approval, execute the reviewed commands in this order:
+
+1. **Stop promotion.** Cancel still-running release, Docker, and MCP-registry
+   workflows for the broken tag before changing public state.
+2. **Yank crates.io packages.** Yank every published `0.6.0` crate:
+   `oraclemcp-error`, `oraclemcp-telemetry`, `oraclemcp-audit`,
+   `oraclemcp-guard`, `oraclemcp-config`, `oraclemcp-db`, `oraclemcp-auth`,
+   `oraclemcp-core`, and `oraclemcp`.
+3. **Mark or remove the GitHub release.** First mark `v0.6.0` as prerelease.
+   Delete the GitHub release and cleanup tag only if the artifacts must be
+   hidden; otherwise leave the prerelease visible with the incident note.
+4. **Revert GHCR `:latest`.** Dispatch `docker.yml` for the previous good
+   version with `variant=core`; if the PL/SQL intelligence image shipped,
+   dispatch the same version with `variant=plsql-intelligence`.
+5. **Revert MCP registry metadata.** Restore `server.json` from the previous
+   good tag, commit that rollback on `main`, push, then dispatch
+   `publish-mcp.yml` so the registry no longer points at the broken image.
+6. **Handle npm correctly.** npm packages cannot be unpublished after the
+   short unpublish window and must not be treated as reversible. Deprecate
+   `oraclemcp@0.6.0` with a clear message and move the `latest` dist-tag back
+   to the previous good version.
+7. **Document Homebrew and winget lag.** Both are pull/manifest-update
+   channels. Submit rollback PRs or manifest updates promptly, but assume users
+   may still see the broken version until those ecosystems process the change.
+
+Do not call this rollback complete until crates.io, GitHub release state, GHCR
+`:latest`, MCP registry `server.json`, npm deprecation/dist-tag, and the
+Homebrew/winget lag note are all recorded in the incident notes.
+
+---
+
 ## RC sign-off block (copy into the release notes)
 
 ```
@@ -102,6 +142,7 @@ Required gates green on the RC commit:
 - [ ] sensitive-data   (sensitive_data_lint.sh)
 - [ ] release-acceptance (B.12: DL-9 + ERG-10 + DOC-10 + E0 + feature-powerset + arch-fitness)
 - [ ] release-metadata (release_preflight.sh)
+- [ ] rollback dry-run (scripts/e2e/release_rollback_dry_run.sh --log --dry-run)
 ```
 
 > **This checklist proves the gates are _green_; it does not by itself qualify

@@ -128,6 +128,7 @@ fn release_acceptance_suite_schedules_hci_component_gates() {
         "scripts/dashboard_bundle_check.sh",
         "scripts/release_sbom_check.sh --source",
         "scripts/installer_lint_and_offline_smoke.sh",
+        "scripts/e2e/release_rollback_dry_run.sh --log --dry-run",
         "scripts/oraclemcp_feature_powerset.sh",
         "scripts/oraclemcp_arch_fitness_lint.sh",
     ] {
@@ -145,6 +146,60 @@ fn release_acceptance_suite_schedules_hci_component_gates() {
                 && event["outcome"] == "pass"
                 && event["scenario"] == "release_acceptance_ci_suite"),
         "missing passing release-acceptance completion: {events:?}"
+    );
+}
+
+#[test]
+fn rollback_runbook_dry_run_covers_release_surfaces() {
+    let output = run_script(
+        "scripts/e2e/release_rollback_dry_run.sh",
+        &["--log", "--dry-run"],
+    );
+    assert!(
+        output.status.success(),
+        "rollback runbook dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = json_lines(&output.stderr);
+    let messages = events
+        .iter()
+        .filter_map(|event| event["message"].as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "cargo yank -p oraclemcp-error --vers 0.6.0",
+        "cargo yank -p oraclemcp-telemetry --vers 0.6.0",
+        "cargo yank -p oraclemcp-audit --vers 0.6.0",
+        "cargo yank -p oraclemcp-guard --vers 0.6.0",
+        "cargo yank -p oraclemcp-config --vers 0.6.0",
+        "cargo yank -p oraclemcp-db --vers 0.6.0",
+        "cargo yank -p oraclemcp-auth --vers 0.6.0",
+        "cargo yank -p oraclemcp-core --vers 0.6.0",
+        "cargo yank -p oraclemcp --vers 0.6.0",
+        "gh release edit v0.6.0 --prerelease",
+        "gh release delete v0.6.0 --yes --cleanup-tag",
+        "gh workflow run docker.yml -f version=0.4.1 -f variant=core",
+        "gh workflow run docker.yml -f version=0.4.1 -f variant=plsql-intelligence",
+        "git restore --source=v0.4.1 -- server.json",
+        "git commit -m chore: revert MCP registry listing to v0.4.1 server.json",
+        "gh workflow run publish-mcp.yml --ref main",
+        "npm deprecate oraclemcp@0.6.0",
+        "npm dist-tag add oraclemcp@0.4.1 latest",
+        "Homebrew and winget are pull-based",
+        "rollback plan covers crates.io, GitHub release, GHCR latest, server.json, npm, Homebrew, and winget",
+    ] {
+        assert!(
+            messages.iter().any(|message| message.contains(expected)),
+            "rollback runbook dry-run did not cover {expected}: {messages:?}"
+        );
+    }
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "pass"
+                && event["scenario"] == "rollback_runbook_dry_run"),
+        "missing passing rollback-runbook completion: {events:?}"
     );
 }
 
