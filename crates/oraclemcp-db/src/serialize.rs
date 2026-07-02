@@ -370,8 +370,33 @@ pub fn base64_encode(bytes: &[u8]) -> String {
 /// sign (`... +00:00` → `...+00:00`). Already-ISO text passes through unchanged.
 #[must_use]
 pub fn canonicalize_datetime(text: &str) -> String {
-    let with_t = text.replacen(' ', "T", 1);
-    with_t.replace(" +", "+").replace(" -", "-")
+    // Byte-identical single-pass form of:
+    //   text.replacen(' ', "T", 1).replace(" +", "+").replace(" -", "-")
+    // The output never grows (each transform is a 1:1 'T' substitution or a
+    // space deletion), so one `text.len()`-capacity allocation always suffices —
+    // down from the three allocations the chained `replacen`/`replace` made.
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut run_start = 0usize;
+    let mut first_space_replaced = false;
+    for i in 0..bytes.len() {
+        if bytes[i] != b' ' {
+            continue;
+        }
+        if !first_space_replaced {
+            // Replace only the first space with the ISO date/time separator 'T'.
+            out.push_str(&text[run_start..i]);
+            out.push('T');
+            run_start = i + 1;
+            first_space_replaced = true;
+        } else if matches!(bytes.get(i + 1).copied(), Some(b'+') | Some(b'-')) {
+            // Close the gap before a timezone sign (" +" → "+", " -" → "-").
+            out.push_str(&text[run_start..i]);
+            run_start = i + 1;
+        }
+    }
+    out.push_str(&text[run_start..]);
+    out
 }
 
 /// Serialize one cell to its canonical JSON value per the type table.
@@ -626,6 +651,57 @@ mod tests {
             ),
             json!("2026-06-01T12:00:00")
         );
+    }
+
+    #[test]
+    fn canonicalize_datetime_matches_reference_three_pass() {
+        // Isomorphism proof (machine-checked): the single-pass canonicalizer must
+        // be byte-identical to the original chained `replacen`/`replace` form for
+        // every input, including adversarial space/sign layouts and multibyte text.
+        fn reference(text: &str) -> String {
+            let with_t = text.replacen(' ', "T", 1);
+            with_t.replace(" +", "+").replace(" -", "-")
+        }
+        let corpus = [
+            "",
+            " ",
+            "  ",
+            "   ",
+            "T",
+            "+",
+            "-",
+            " +",
+            " -",
+            "  +",
+            "  -",
+            " -+",
+            " +-",
+            "a +b",
+            "a -b",
+            "a  +b",
+            "a - b",
+            "x  +  -  y",
+            "2026-06-01 12:00:00",
+            "2026-06-01 12:00:00.000000 +00:00",
+            "2026-06-01 12:00:00.000000 -05:30",
+            "2026-06-01T12:00:00",
+            "2026-06-01T12:00:00.000000+00:00",
+            "1999-12-31 23:59:59 +14:00",
+            "  2026-01-01  00:00:00  +00:00  ",
+            "no-spaces-2026-06-01",
+            "héllo 2026 +€",
+            "héllo -€ world",
+            "a\tb c +d",
+            "trailing space ",
+            " leading",
+        ];
+        for input in corpus {
+            assert_eq!(
+                canonicalize_datetime(input),
+                reference(input),
+                "single-pass diverged from reference for {input:?}"
+            );
+        }
     }
 
     #[test]
