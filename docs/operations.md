@@ -575,6 +575,18 @@ connect strings, or credentials. Runtime effective-cap surfaces still clamp the
 configured caps by the service context's visible DB/session, fd, task, and
 memory budgets when those values are available.
 
+Authenticated MCP POST/GET/DELETE and authorized `/operator/v1` calls also pass
+through a per-principal request-rate limiter backed by asupersync
+`RateLimiter`. This is separate from the N4 concurrency caps above. Limiter
+buckets are derived from a fixed traffic surface plus a server-derived principal
+hash, the resident bucket set is bounded, and operator traffic has a separate
+bucket from MCP traffic so a hot MCP caller does not consume the operator
+request-rate slot. Health/readiness observability routes are not charged to MCP
+request-rate buckets. Rejections use the same HTTP shape as capacity pressure:
+typed `AT_CAPACITY`, `retry_after_ms`, HTTP 429, `Retry-After`, and a redacted
+rate-limit snapshot. The limiter does not implement optimizer or query-cost
+budgets; those remain deferred policy work.
+
 `oraclemcp --json service install --dry-run` includes the generated service-unit
 hardening. On Linux systemd user units are `Type=notify`/`NotifyAccess=main`,
 restart on failure, and set `LimitNOFILE=65536`, `TasksMax=512`,

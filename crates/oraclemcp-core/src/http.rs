@@ -7,7 +7,7 @@
 //! validation. It deliberately does not depend on a web framework or ambient
 //! async runtime.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -17,7 +17,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use asupersync::combinator::{
+    RateLimitAlgorithm, RateLimitPolicy, RateLimiter, RateLimiterRegistry, WaitStrategy,
+};
 use asupersync::cx::NoCaps;
+use asupersync::time::wall_now;
+use asupersync::types::Time;
 use asupersync::{Cx, Outcome};
 use oraclemcp_audit::{
     AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord, AuditSubject, Auditor, DbEvidence,
@@ -28,6 +33,7 @@ use oraclemcp_auth::{
     extract_bearer,
 };
 use oraclemcp_db::PoolSettings;
+use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_telemetry::{HealthState, Metrics, MetricsSnapshot};
 use parking_lot::{Condvar, Mutex};
 use rustls::{ServerConnection, StreamOwned};
@@ -84,6 +90,22 @@ const CONFIG_DRAFT_MAX_BYTES: usize = 256 * 1024;
 const HTTP_TRANSPORT_CAPACITY_SCOPE: &str = "http_transport_connection";
 const HTTP_TRANSPORT_CAPACITY_SUBJECT: &str = "accepted-connections";
 const HTTP_SSE_CAPACITY_SCOPE: &str = "http_sse_subscriber";
+const HTTP_RATE_LIMIT_SCOPE_MCP: &str = "http_mcp_request_rate";
+const HTTP_RATE_LIMIT_SCOPE_OPERATOR: &str = "http_operator_request_rate";
+const HTTP_REQUEST_RATE_POLICY_NAME: &str = "http_principal_request_rate";
+const HTTP_REQUEST_RATE_COST: u32 = 1;
+
+/// Default per-principal HTTP request-rate limit.
+///
+/// This is intentionally independent from N4/N4+ concurrency admission. It
+/// protects authenticated request surfaces from hot-loop callers without
+/// constraining normal tool latency, SSE subscriber counts, or listener-worker
+/// capacity.
+pub const DEFAULT_HTTP_REQUEST_RATE_PER_SECOND: u32 = 600;
+/// Default per-principal burst for the HTTP request-rate limiter.
+pub const DEFAULT_HTTP_REQUEST_RATE_BURST: u32 = 1200;
+/// Maximum resident rate-limit buckets retained by the HTTP transport.
+pub const DEFAULT_HTTP_REQUEST_RATE_BUCKETS: usize = 1024;
 
 /// A cheap, synchronous DB-reachability check for the `/readyz` probe.
 ///
@@ -168,6 +190,151 @@ impl MtlsClientRegistry {
     }
 }
 
+/// Per-principal HTTP request-rate limiter policy.
+///
+/// The limiter key is always derived by the server from an authenticated
+/// principal/session subject plus a fixed traffic scope. Raw bearer tokens,
+/// OAuth subject strings, request ids, and caller-supplied identity values are
+/// never used as registry names or rendered in responses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpRequestRateLimitConfig {
+    pub rate_per_second: u32,
+    pub burst: u32,
+    pub max_buckets: usize,
+}
+
+impl Default for HttpRequestRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            rate_per_second: DEFAULT_HTTP_REQUEST_RATE_PER_SECOND,
+            burst: DEFAULT_HTTP_REQUEST_RATE_BURST,
+            max_buckets: DEFAULT_HTTP_REQUEST_RATE_BUCKETS,
+        }
+    }
+}
+
+impl HttpRequestRateLimitConfig {
+    #[must_use]
+    fn normalized(self) -> Self {
+        Self {
+            rate_per_second: self.rate_per_second.max(1),
+            burst: self.burst.max(1),
+            max_buckets: self.max_buckets.max(1),
+        }
+    }
+}
+
+#[derive(Default)]
+struct HttpRequestRateBuckets {
+    known: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+/// Bounded registry of asupersync request-rate limiters for HTTP principals.
+pub struct HttpRequestRateLimiters {
+    registry: RateLimiterRegistry,
+    buckets: Mutex<HttpRequestRateBuckets>,
+    config: HttpRequestRateLimitConfig,
+}
+
+impl std::fmt::Debug for HttpRequestRateLimiters {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpRequestRateLimiters")
+            .field("rate_per_second", &self.config.rate_per_second)
+            .field("burst", &self.config.burst)
+            .field("max_buckets", &self.config.max_buckets)
+            .field("bucket_count", &self.bucket_count())
+            .finish()
+    }
+}
+
+impl Default for HttpRequestRateLimiters {
+    fn default() -> Self {
+        Self::new(HttpRequestRateLimitConfig::default())
+    }
+}
+
+impl HttpRequestRateLimiters {
+    #[must_use]
+    pub fn new(config: HttpRequestRateLimitConfig) -> Self {
+        let config = config.normalized();
+        let policy = RateLimitPolicy {
+            name: HTTP_REQUEST_RATE_POLICY_NAME.to_owned(),
+            rate: config.rate_per_second,
+            period: Duration::from_secs(1),
+            burst: config.burst,
+            wait_strategy: WaitStrategy::Reject,
+            default_cost: HTTP_REQUEST_RATE_COST,
+            algorithm: RateLimitAlgorithm::TokenBucket,
+        };
+        Self {
+            registry: RateLimiterRegistry::new(policy),
+            buckets: Mutex::new(HttpRequestRateBuckets::default()),
+            config,
+        }
+    }
+
+    fn try_admit_at(
+        &self,
+        scope: &str,
+        principal_key: &str,
+        now: Time,
+    ) -> Result<(), HttpRequestRateLimitRejection> {
+        let bucket_key = http_request_rate_bucket_key(scope, principal_key);
+        let limiter = self.limiter_for_bucket(&bucket_key);
+        if limiter.try_acquire(HTTP_REQUEST_RATE_COST, now) {
+            return Ok(());
+        }
+        let retry_after = limiter.retry_after(HTTP_REQUEST_RATE_COST, now);
+        let retry_after_ms = duration_to_millis_saturating(retry_after).max(1);
+        Err(HttpRequestRateLimitRejection {
+            scope: scope.to_owned(),
+            subject_id_hash: operator_subject_id_hash(principal_key),
+            retry_after_ms,
+            rate_per_second: self.config.rate_per_second,
+            burst: self.config.burst,
+            max_buckets: self.config.max_buckets,
+            bucket_count: self.bucket_count(),
+        })
+    }
+
+    fn limiter_for_bucket(&self, bucket_key: &str) -> Arc<RateLimiter> {
+        let mut buckets = self.buckets.lock();
+        if buckets.known.insert(bucket_key.to_owned()) {
+            buckets.order.push_back(bucket_key.to_owned());
+            while buckets.known.len() > self.config.max_buckets {
+                let Some(evicted) = buckets.order.pop_front() else {
+                    break;
+                };
+                if buckets.known.remove(&evicted) {
+                    let _ = self.registry.remove(&evicted);
+                }
+            }
+        }
+        drop(buckets);
+        self.registry.get_or_create(bucket_key)
+    }
+
+    fn bucket_count(&self) -> usize {
+        self.buckets.lock().known.len()
+    }
+
+    #[cfg(test)]
+    fn metric_bucket_names(&self) -> Vec<String> {
+        self.registry.all_metrics().keys().cloned().collect()
+    }
+}
+
+struct HttpRequestRateLimitRejection {
+    scope: String,
+    subject_id_hash: String,
+    retry_after_ms: u64,
+    rate_per_second: u32,
+    burst: u32,
+    max_buckets: usize,
+    bucket_count: usize,
+}
+
 /// Operator configuration for the HTTP transport.
 #[derive(Clone)]
 pub struct HttpTransportConfig {
@@ -193,6 +360,10 @@ pub struct HttpTransportConfig {
     /// transport consumers, not Oracle lanes, so they are capped separately from
     /// lane/session admission.
     pub sse_admission: Arc<AdmissionController>,
+    /// Per-principal request-rate limiter for authenticated MCP and operator
+    /// HTTP calls. Buckets are hashed server-derived principal/scope keys and
+    /// are bounded independently from concurrency admission.
+    pub request_rate_limits: Arc<HttpRequestRateLimiters>,
     /// The RFC 9728 protected-resource metadata document to serve, if OAuth is
     /// enabled (from [`oraclemcp_auth::oauth_rs::ResourceServerConfig`]).
     pub resource_metadata: Option<Value>,
@@ -271,6 +442,7 @@ impl std::fmt::Debug for HttpTransportConfig {
                 "sse_regular_global_cap",
                 &self.sse_admission.regular_global_cap(),
             )
+            .field("request_rate_limits", &self.request_rate_limits)
             .field("resource_metadata", &self.resource_metadata.is_some())
             .field("oauth", &self.oauth.is_some())
             .field("mtls_client_count", &self.mtls_clients.fingerprints.len())
@@ -311,6 +483,7 @@ impl Default for HttpTransportConfig {
             stateful_idle_ttl: Duration::from_secs(DEFAULT_STATEFUL_IDLE_TTL_SECONDS),
             transport_admission: default_transport_admission(),
             sse_admission: default_sse_admission(),
+            request_rate_limits: Arc::new(HttpRequestRateLimiters::default()),
             resource_metadata: None,
             oauth: None,
             mtls_clients: MtlsClientRegistry::default(),
@@ -1224,6 +1397,134 @@ mod tests {
             ],
             body.to_string().into_bytes(),
         )
+    }
+
+    #[test]
+    fn request_rate_limiter_uses_bounded_redacted_principal_buckets() {
+        let limiters = HttpRequestRateLimiters::new(HttpRequestRateLimitConfig {
+            rate_per_second: 1,
+            burst: 1,
+            max_buckets: 2,
+        });
+        let now = Time::from_millis(1_000);
+        let subject_a = "oauth:alice@example.invalid";
+        let subject_b = "oauth:bob@example.invalid";
+        let subject_c = "oauth:carol@example.invalid";
+
+        assert!(
+            limiters
+                .try_admit_at(HTTP_RATE_LIMIT_SCOPE_MCP, subject_a, now)
+                .is_ok()
+        );
+        let rejected = limiters
+            .try_admit_at(HTTP_RATE_LIMIT_SCOPE_MCP, subject_a, now)
+            .expect_err("second same-scope request is throttled");
+        assert_eq!(rejected.scope, HTTP_RATE_LIMIT_SCOPE_MCP);
+        assert_eq!(
+            rejected.subject_id_hash,
+            operator_subject_id_hash(subject_a)
+        );
+        assert!(rejected.retry_after_ms > 0);
+
+        assert!(
+            limiters
+                .try_admit_at(HTTP_RATE_LIMIT_SCOPE_OPERATOR, subject_a, now)
+                .is_ok(),
+            "operator traffic has a separate bucket from MCP traffic for the same subject"
+        );
+        assert!(
+            limiters
+                .try_admit_at(HTTP_RATE_LIMIT_SCOPE_MCP, subject_b, now)
+                .is_ok()
+        );
+        assert!(
+            limiters
+                .try_admit_at(HTTP_RATE_LIMIT_SCOPE_MCP, subject_c, now)
+                .is_ok()
+        );
+        assert_eq!(
+            limiters.bucket_count(),
+            2,
+            "resident limiter buckets stay bounded"
+        );
+
+        let metric_bucket_names = limiters.metric_bucket_names();
+        assert_eq!(metric_bucket_names.len(), 2);
+        for name in metric_bucket_names {
+            assert!(name.starts_with("http-rate:"));
+            assert!(!name.contains("alice"));
+            assert!(!name.contains("bob"));
+            assert!(!name.contains("carol"));
+            assert!(!name.contains("example.invalid"));
+            assert!(!name.contains("oauth:"));
+        }
+    }
+
+    #[test]
+    fn mcp_post_rate_limit_returns_429_retry_after_and_redacts_principal() {
+        let limiters = Arc::new(HttpRequestRateLimiters::new(HttpRequestRateLimitConfig {
+            rate_per_second: 1,
+            burst: 1,
+            max_buckets: 8,
+        }));
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            request_rate_limits: Arc::clone(&limiters),
+            ..Default::default()
+        };
+        let request = post(&init_body());
+        let principal_key = "oauth:alice@example.invalid";
+
+        let first = handle_mcp_post(&test_server(), &cfg, &request, None, Some(principal_key));
+        assert_eq!(first.status, 200);
+        let second = handle_mcp_post(&test_server(), &cfg, &request, None, Some(principal_key));
+
+        assert_eq!(second.status, 429);
+        assert!(
+            second
+                .headers
+                .iter()
+                .any(|(name, value)| name == "retry-after" && value == "1")
+        );
+        let body = String::from_utf8(second.body).expect("rate limit body is UTF-8 JSON");
+        assert!(body.contains("\"error_class\":\"AT_CAPACITY\""));
+        assert!(body.contains("rate_limit_snapshot"));
+        assert!(body.contains("subject-sha256:"));
+        assert!(!body.contains(principal_key));
+        assert!(!body.contains("alice@example.invalid"));
+    }
+
+    #[test]
+    fn request_rate_limiter_does_not_throttle_observability_routes() {
+        let limiters = Arc::new(HttpRequestRateLimiters::new(HttpRequestRateLimitConfig {
+            rate_per_second: 1,
+            burst: 1,
+            max_buckets: 8,
+        }));
+        let health = HealthState::new("0.1.0");
+        let cfg = HttpTransportConfig {
+            json_response: true,
+            request_rate_limits: Arc::clone(&limiters),
+            observability: ObservabilityState {
+                health: Some(health),
+                metrics: None,
+                readiness_probe: None,
+            },
+            ..Default::default()
+        };
+        let request = post(&init_body());
+        let principal_key = "oauth:alice@example.invalid";
+
+        let first = handle_mcp_post(&test_server(), &cfg, &request, None, Some(principal_key));
+        assert_eq!(first.status, 200);
+        let second = handle_mcp_post(&test_server(), &cfg, &request, None, Some(principal_key));
+        assert_eq!(second.status, 429);
+
+        let healthz = handle_http_request(&test_server(), &cfg, get(HEALTHZ_PATH));
+        assert_eq!(
+            healthz.status, 200,
+            "health/doctor-style observability probes are not charged to MCP request-rate buckets"
+        );
     }
 
     fn response_json(response: &HttpResponse) -> Value {
@@ -6412,6 +6713,18 @@ fn sha256_hex(input: &[u8]) -> String {
     out
 }
 
+fn http_request_rate_bucket_key(scope: &str, principal_key: &str) -> String {
+    let mut material = Vec::with_capacity(scope.len() + principal_key.len() + 1);
+    material.extend_from_slice(scope.as_bytes());
+    material.push(0);
+    material.extend_from_slice(principal_key.as_bytes());
+    format!("http-rate:{}", sha256_hex(&material))
+}
+
+fn duration_to_millis_saturating(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
 fn stateful_principal_key(principal_key: Option<&str>) -> &str {
     principal_key.unwrap_or("anonymous-http")
 }
@@ -6623,6 +6936,14 @@ fn handle_http_exchange(
             else {
                 return HttpExchange::Buffered(operator_authority_required_response());
             };
+            if let Err(response) = try_admit_http_request_rate(
+                &config.request_rate_limits,
+                HTTP_RATE_LIMIT_SCOPE_OPERATOR,
+                &operator_subject.legacy_agent_identity(),
+                "retry after retry_after_ms, or reduce operator API request rate for this subject",
+            ) {
+                return HttpExchange::Buffered(response);
+            }
             let operator_audit_seq =
                 match append_operator_audit(config, &operator_subject, &request) {
                     Ok(seq) => seq,
@@ -9160,6 +9481,14 @@ fn handle_mcp_get(
     };
     let session_id = session.session_id;
     let session_principal_key = session.principal_key;
+    if let Err(response) = try_admit_http_request_rate(
+        &config.request_rate_limits,
+        HTTP_RATE_LIMIT_SCOPE_MCP,
+        &session_principal_key,
+        "retry after retry_after_ms, or reduce MCP GET/SSE request rate for this principal",
+    ) {
+        return HttpExchange::Buffered(response);
+    }
     let cursor = request
         .query_param("cursor")
         .or_else(|| request.header("last-event-id"));
@@ -9203,6 +9532,14 @@ fn handle_mcp_delete(
         return match validate_stateful_session(config, request, Some(principal_key), false) {
             Ok(session) => {
                 let session_id = session.session_id;
+                if let Err(response) = try_admit_http_request_rate(
+                    &config.request_rate_limits,
+                    HTTP_RATE_LIMIT_SCOPE_MCP,
+                    &session.principal_key,
+                    "retry after retry_after_ms, or reduce MCP DELETE request rate for this principal",
+                ) {
+                    return response;
+                }
                 if let Some(store) = &config.session_store {
                     store.remove(session_id);
                 }
@@ -9263,6 +9600,19 @@ fn handle_mcp_post(
     } else {
         None
     };
+    let rate_limit_principal_key = if config.stateful {
+        session_principal_key
+    } else {
+        stateful_principal_key(principal_key)
+    };
+    if let Err(response) = try_admit_http_request_rate(
+        &config.request_rate_limits,
+        HTTP_RATE_LIMIT_SCOPE_MCP,
+        rate_limit_principal_key,
+        "retry after retry_after_ms, or reduce MCP request rate for this principal",
+    ) {
+        return response;
+    }
     let mut context = scope_grant
         .map(DispatchContext::with_scope_grant)
         .unwrap_or_default();
@@ -9389,6 +9739,51 @@ fn try_admit_http_capacity(
             retry_after_header_seconds(envelope.retry_after_ms.unwrap_or(DEFAULT_RETRY_AFTER_MS));
         json_response(429, &envelope.to_json()).with_header("retry-after", &retry_after)
     })
+}
+
+fn try_admit_http_request_rate(
+    limiters: &HttpRequestRateLimiters,
+    scope: &str,
+    principal_key: &str,
+    next_step: &str,
+) -> Result<(), HttpResponse> {
+    limiters
+        .try_admit_at(scope, principal_key, wall_now())
+        .map_err(|rejection| http_request_rate_limit_response(rejection, next_step))
+}
+
+fn http_request_rate_limit_response(
+    rejection: HttpRequestRateLimitRejection,
+    next_step: &str,
+) -> HttpResponse {
+    let snapshot = json!({
+        "scope": rejection.scope,
+        "subject_id_hash": rejection.subject_id_hash,
+        "retry_after_ms": rejection.retry_after_ms,
+        "rate_per_second": rejection.rate_per_second,
+        "burst": rejection.burst,
+        "bucket_count": rejection.bucket_count,
+        "max_buckets": rejection.max_buckets,
+    });
+    let envelope = ErrorEnvelope::new(
+        ErrorClass::AtCapacity,
+        format!(
+            "request rate limit exceeded for {}; rate_limit_snapshot={}",
+            snapshot["scope"].as_str().unwrap_or("http_request_rate"),
+            serde_json::to_string(&snapshot).unwrap_or_else(|_| {
+                json!({
+                    "scope": "http_request_rate",
+                    "subject": "redacted",
+                    "retry_after_ms": rejection.retry_after_ms
+                })
+                .to_string()
+            })
+        ),
+    )
+    .with_retry_after_ms(rejection.retry_after_ms)
+    .with_next_step(next_step);
+    let retry_after = retry_after_header_seconds(rejection.retry_after_ms);
+    json_response(429, &envelope.to_json()).with_header("retry-after", &retry_after)
 }
 
 fn content_type_is_json(request: &HttpRequest) -> bool {
