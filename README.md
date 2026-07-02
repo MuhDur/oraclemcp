@@ -20,25 +20,33 @@
 
 Use the verified release installer first. It downloads the platform archive,
 checks the SHA-256 digest, verifies the cosign blob signature and provenance
-attestation, installs `oraclemcp` plus the short `om` alias, and prints the
-service/client mutation plan before it changes the host.
+attestation, and installs `oraclemcp` plus the short `om` alias. The same
+script can print the service/client mutation plan with `--dry-run` before it
+changes the host.
 Re-running the same verified archive is a no-op for identical installed files;
 use `--force` only when intentionally replacing different local content.
+The examples below are copy-pasteable for `0.6.0` once the release artifacts are
+published; change only the version number when installing another release.
+
+Use the dry-run command first when you want a preview: it prints the archive,
+verification inputs, files, service plan, and client-registration plan without
+writing files or touching the service manager. The normal command performs the
+install into `$HOME/.local` unless you pass `--prefix`.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh \
-  | bash -s -- --dry-run --version <version>
+  | bash -s -- --dry-run --version 0.6.0
 
 curl -fsSL https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh \
-  | bash -s -- --version <version>
+  | bash -s -- --version 0.6.0
 ```
 
 On Windows, download and run the PowerShell installer:
 
 ```powershell
 iwr -UseBasicParsing https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.ps1 -OutFile install.ps1
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -Version <version>
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version <version>
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -Version 0.6.0
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.6.0
 ```
 
 For air-gapped hosts, download the release archive plus its `.sha256`, `.sig`,
@@ -47,12 +55,12 @@ of the installer:
 
 ```sh
 bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz \
-  --version <version>
+  --version 0.6.0
 ```
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 `
-  -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version <version>
+  -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.6.0
 ```
 
 Uninstall is preview-first and idempotent. Service removal remains an explicit
@@ -106,7 +114,7 @@ npx oraclemcp serve --allow-no-auth     # verifies the release archive before ru
 cargo binstall oraclemcp                # uses the GitHub release archive metadata
 brew install MuhDur/oraclemcp/oraclemcp # tap formula is generated at release time
 winget install MuhDur.oraclemcp         # community submission may lag the tag
-docker run -i --rm ghcr.io/muhdur/oraclemcp:<version>
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.0
 ```
 
 ## Why oraclemcp
@@ -190,8 +198,8 @@ it can start without a database connection and advertises the offline
 `oracle_plsql_*` tools immediately. Live PL/SQL tools still require a profile.
 
 ```sh
-docker run -i --rm ghcr.io/muhdur/oraclemcp:<version>-plsql-intelligence --json info
-docker run -i --rm ghcr.io/muhdur/oraclemcp:<version>-plsql-intelligence capabilities
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.0-plsql-intelligence --json info
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.0-plsql-intelligence capabilities
 ```
 
 Local feature-image builds resolve the PL/SQL engine crates from crates.io:

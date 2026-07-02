@@ -65,14 +65,22 @@ investigate, not a blocker:
    linger, the boundary lint holds, and the honesty gate passes. With
    `RELEASE_TAG` set it also checks the tag is `vX.Y.Z` and matches the
    workspace version.
-3. **Confirm CI is green on the RC commit.** Open the CI run for that exact SHA
+3. **Run the installer sandbox smoke against the built binary.** This exercises
+   the real offline Unix installer path in a disposable prefix under
+   `target/installer-smoke`; it does not request a service install:
+   ```sh
+   cargo build -p oraclemcp
+   TMPDIR=/dev/shm ORACLEMCP_INSTALLER_BUILT_BINARY="$PWD/target/debug/oraclemcp" \
+     bash scripts/installer_lint_and_offline_smoke.sh
+   ```
+4. **Confirm CI is green on the RC commit.** Open the CI run for that exact SHA
    and confirm every **required** gate in the table above is green. The advisory
    jobs (`fuzz-build`, `multi-nightly`) may be red without blocking.
-4. **Link the run as evidence.** Record the CI run URL for the RC commit in the
+5. **Link the run as evidence.** Record the CI run URL for the RC commit in the
    release notes / `CHANGELOG.md` entry for `vX.Y.Z`. That linked, green run on
    the frozen SHA *is* the release-gate evidence — there is nothing to attest
    beyond it.
-5. **Tag and publish.** Only after steps 3–4 hold, push the `vX.Y.Z` tag. The
+6. **Tag and publish.** Only after steps 4–5 hold, push the `vX.Y.Z` tag. The
    `release.yml` / `docker.yml` / `publish-mcp.yml` workflows build the
    artifacts on the pinned toolchain from that tag.
 
