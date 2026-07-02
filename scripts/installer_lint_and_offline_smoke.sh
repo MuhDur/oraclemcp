@@ -277,6 +277,7 @@ write_fake_release_archive "$NO_COSIGN_ARCHIVE" x86_64-unknown-linux-musl
 no_cosign_output="$(
   env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
     ORACLEMCP_COSIGN="$SMOKE_ROOT/missing-cosign" \
+    PATH="/usr/bin:/bin" \
     bash install.sh \
       --offline "$NO_COSIGN_ARCHIVE" \
       --version "$SMOKE_VERSION" \
@@ -287,7 +288,52 @@ no_cosign_output="$(
       --no-service 2>&1
 )"
 contains "$no_cosign_output" "authenticity unverified: cosign not installed; SHA-256 checksum verified"
+contains "$no_cosign_output" "oraclemcp installer: $NO_COSIGN_PREFIX/bin is not on PATH"
+contains "$no_cosign_output" "export PATH='$NO_COSIGN_PREFIX/bin':\"\$PATH\""
+contains "$no_cosign_output" "$NO_COSIGN_PREFIX/bin/oraclemcp --json doctor"
+contains "$no_cosign_output" "$NO_COSIGN_PREFIX/bin/oraclemcp --json setup --write --profile db_ro"
+contains "$no_cosign_output" "$NO_COSIGN_PREFIX/bin/oraclemcp --json setup --profile db_ro"
+not_contains "$no_cosign_output" "Add $NO_COSIGN_PREFIX/bin to PATH in"
 [ -x "$NO_COSIGN_PREFIX/bin/oraclemcp" ] || fail "no-cosign prefer install did not install oraclemcp"
+
+ON_PATH_PREFIX="$SMOKE_ROOT/on-path-prefix"
+on_path_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    PATH="$ON_PATH_PREFIX/bin:/usr/bin:/bin" \
+    bash install.sh \
+      --offline "$NO_COSIGN_ARCHIVE" \
+      --version "$SMOKE_VERSION" \
+      --target x86_64-unknown-linux-musl \
+      --prefix "$ON_PATH_PREFIX" \
+      --verify checksum-only \
+      --no-completions \
+      --no-service 2>&1
+)"
+not_contains "$on_path_output" "is not on PATH"
+not_contains "$on_path_output" "export PATH="
+contains "$on_path_output" "oraclemcp --json doctor"
+contains "$on_path_output" "oraclemcp --json setup --write --profile db_ro"
+
+if command -v script >/dev/null 2>&1; then
+  PTY_PREFIX="$SMOKE_ROOT/pty-prefix-$$"
+  pty_command=""
+  printf -v pty_command 'bash install.sh --offline %q --version %q --target %q --prefix %q --verify checksum-only --no-completions --no-service' \
+    "$NO_COSIGN_ARCHIVE" \
+    "$SMOKE_VERSION" \
+    "x86_64-unknown-linux-musl" \
+    "$PTY_PREFIX"
+  pty_output="$(
+    printf 'y\n' | env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+      SHELL="/bin/bash" PATH="/usr/bin:/bin" \
+      script -qefc "$pty_command" /dev/null 2>&1
+  )"
+  contains "$pty_output" "Add $PTY_PREFIX/bin to PATH in $HOME_DIR/.bashrc? [y/N]"
+  contains "$pty_output" "oraclemcp installer: appended PATH line to $HOME_DIR/.bashrc"
+  rc_text="$(cat "$HOME_DIR/.bashrc")"
+  contains "$rc_text" "export PATH='$PTY_PREFIX/bin':\"\$PATH\""
+else
+  printf 'installer-smoke: script not installed; skipping TTY PATH prompt smoke\n' >&2
+fi
 
 set +e
 require_no_cosign_output="$(

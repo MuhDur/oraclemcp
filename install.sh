@@ -439,6 +439,132 @@ readyz_url() {
   esac
 }
 
+shell_name() {
+  local shell_path="${SHELL:-}"
+  if [ -z "$shell_path" ] && have ps; then
+    shell_path="$(ps -p "$PPID" -o comm= 2>/dev/null || true)"
+  fi
+  shell_path="${shell_path##*/}"
+  [ -n "$shell_path" ] || shell_path="sh"
+  printf '%s\n' "$shell_path"
+}
+
+single_quote_shell() {
+  printf "%s" "$1" | sed "s/'/'\\\\''/g"
+}
+
+path_export_line() {
+  case "$(shell_name)" in
+    fish)
+      printf 'fish_add_path "%s"\n' "$BIN_DIR"
+      ;;
+    csh | tcsh)
+      printf '%s\n' "setenv PATH \"$BIN_DIR:\$PATH\""
+      ;;
+    *)
+      printf "export PATH='%s':\"\$PATH\"\n" "$(single_quote_shell "$BIN_DIR")"
+      ;;
+  esac
+}
+
+path_rc_file() {
+  case "$(shell_name)" in
+    zsh)
+      printf '%s\n' "${ZDOTDIR:-${HOME:-}}/.zshrc"
+      ;;
+    bash)
+      printf '%s\n' "${HOME:-}/.bashrc"
+      ;;
+    fish)
+      printf '%s\n' "${XDG_CONFIG_HOME:-${HOME:-}/.config}/fish/config.fish"
+      ;;
+    *)
+      printf '%s\n' "${HOME:-}/.profile"
+      ;;
+  esac
+}
+
+bin_dir_on_path() {
+  local part bin_phys part_phys
+  [ -n "${PATH:-}" ] || return 1
+  bin_phys="$(cd "$BIN_DIR" 2>/dev/null && pwd -P)" || bin_phys="$BIN_DIR"
+  local IFS=:
+  for part in $PATH; do
+    [ -n "$part" ] || part="."
+    if [ "$part" = "$BIN_DIR" ]; then
+      return 0
+    fi
+    part_phys="$(cd "$part" 2>/dev/null && pwd -P)" || part_phys="$part"
+    if [ "$part_phys" = "$bin_phys" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+append_path_to_rc() {
+  local rc_file="$1" line="$2"
+  [ -n "$rc_file" ] || return 1
+  ensure_parent_dir "$rc_file"
+  if [ -f "$rc_file" ] && grep -Fqx "$line" "$rc_file"; then
+    printf 'oraclemcp installer: PATH line already present in %s\n' "$rc_file" >&2
+    return 0
+  fi
+  {
+    printf '\n# Added by oraclemcp installer.\n'
+    printf '%s\n' "$line"
+  } >>"$rc_file"
+  printf 'oraclemcp installer: appended PATH line to %s\n' "$rc_file" >&2
+}
+
+maybe_prompt_path_append() {
+  local rc_file="$1" line="$2" answer
+  [ -n "${HOME:-}" ] || return 0
+  [ -t 0 ] && [ -t 1 ] || return 0
+  printf 'Add %s to PATH in %s? [y/N] ' "$BIN_DIR" "$rc_file" >&2
+  if ! read -r answer; then
+    printf 'oraclemcp installer: PATH update skipped\n' >&2
+    return 0
+  fi
+  case "$answer" in
+    y | Y | yes | YES)
+      append_path_to_rc "$rc_file" "$line"
+      ;;
+    *)
+      printf 'oraclemcp installer: PATH update skipped\n' >&2
+      ;;
+  esac
+}
+
+print_path_guidance() {
+  local line rc_file
+  if bin_dir_on_path; then
+    return 0
+  fi
+  line="$(path_export_line)"
+  rc_file="$(path_rc_file)"
+  printf 'oraclemcp installer: %s is not on PATH\n' "$BIN_DIR" >&2
+  printf 'oraclemcp installer: add it for this shell with:\n  %s\n' "$line" >&2
+  maybe_prompt_path_append "$rc_file" "$line"
+}
+
+installed_command() {
+  if bin_dir_on_path; then
+    printf '%s\n' "oraclemcp"
+  else
+    printf '%s/oraclemcp\n' "$BIN_DIR"
+  fi
+}
+
+print_next_steps() {
+  local cmd
+  cmd="$(installed_command)"
+  printf 'oraclemcp installer: next steps\n' >&2
+  printf '  1. Run diagnostics: %s --json doctor\n' "$cmd" >&2
+  printf '  2. Write a starter profile: %s --json setup --write --profile db_ro\n' "$cmd" >&2
+  printf '  3. Generate MCP client snippets: %s --json setup --profile db_ro\n' "$cmd" >&2
+}
+
 service_install_args() {
   local args=("service" "install" "--yes" "--name" "$SERVICE_NAME" "--listen" "$SERVICE_LISTEN")
   if [ -n "$SERVICE_PROFILE" ]; then
@@ -1041,7 +1167,9 @@ main() {
     printf 'oraclemcp installer: service install skipped\n' >&2
   fi
 
-  printf 'oraclemcp installer: installed %s/oraclemcp and %s/om\n' "$BIN_DIR" "$BIN_DIR"
+  print_path_guidance
+  print_next_steps
+  printf 'oraclemcp installer: installed %s/oraclemcp and %s/om\n' "$BIN_DIR" "$BIN_DIR" >&2
 }
 
 main "$@"

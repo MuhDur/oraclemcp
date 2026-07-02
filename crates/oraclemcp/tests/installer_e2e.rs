@@ -66,6 +66,8 @@ fn readme_leads_with_hosted_install_one_liner_service_and_dashboard() {
         "exits before downloading, verifying, writing files, or",
         "The normal command downloads, verifies, and",
         "installs into `$HOME/.local`",
+        "prints the exact export line for the detected shell",
+        "Every install finishes with next steps on stderr",
         "literal",
         "copy-paste commands for release `0.6.1`",
         "Later examples that contain `...`, `<pw>`, `<profile>`",
@@ -144,6 +146,11 @@ fn unix_installer_reinstall_is_idempotent_for_identical_files() {
         "should_replace_file()",
         "cmp -s \"$src\" \"$dest\"",
         "already exists with different content; rerun with --force",
+        "path_export_line()",
+        "bin_dir_on_path()",
+        "print_next_steps()",
+        "Add %s to PATH in %s? [y/N]",
+        "oraclemcp installer: next steps",
     ] {
         assert!(
             installer.contains(needle),
@@ -155,6 +162,9 @@ fn unix_installer_reinstall_is_idempotent_for_identical_files() {
         "built artifact idempotent reinstall failed",
         "--offline \"$archive\"",
         "--no-service",
+        "export PATH='$NO_COSIGN_PREFIX/bin'",
+        "oraclemcp --json setup --write --profile db_ro",
+        "script -qefc",
     ] {
         assert!(
             smoke.contains(needle),

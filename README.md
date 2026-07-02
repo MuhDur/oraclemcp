@@ -35,7 +35,12 @@ Use the dry-run command first when you want a preview: it prints the archive,
 verification inputs, files, service plan, client-registration plan, and
 installer lock path, then exits before downloading, verifying, writing files, or
 touching the service manager. The normal command downloads, verifies, and
-installs into `$HOME/.local` unless you pass `--prefix`.
+installs into `$HOME/.local` unless you pass `--prefix`. After a normal install,
+the installer checks whether the binary directory is already on `PATH`. If it is
+missing, it prints the exact export line for the detected shell; in an
+interactive terminal it also offers to append that line to the shell rc file.
+Every install finishes with next steps on stderr: run `doctor`, write the
+starter profile, and generate MCP client snippets.
 
 The install, uninstall, and service commands in this section are literal
 copy-paste commands for release `0.6.1` after the `v0.6.1` artifacts exist.
