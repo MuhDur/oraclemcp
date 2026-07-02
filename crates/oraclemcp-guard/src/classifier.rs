@@ -401,7 +401,11 @@ fn has_buried_dangerous_verb(upper_source: &str) -> bool {
 /// Run Stage A: allow-list → block-list → PL/SQL-block detection.
 #[must_use]
 pub fn stage_a(sql: &str, config: &ClassifierConfig) -> StageA {
-    if config.allow_list.contains(&normalized_sha256(sql)) {
+    // Skip the normalize + SHA-256 + hex hash entirely when there is nothing to
+    // match against (the default: no operator-configured allow-list). An empty
+    // set can never contain the digest, so this short-circuit is behavior-
+    // identical yet removes the per-statement hashing cost on the hot path.
+    if !config.allow_list.is_empty() && config.allow_list.contains(&normalized_sha256(sql)) {
         return StageA::AllowListed;
     }
     for re in &config.block_patterns {

@@ -34,17 +34,25 @@ const CORPUS: &[&str] = &[
 fn classifier_throughput_baseline() {
     let classifier = Classifier::new(ClassifierConfig::new());
 
+    // Iteration counts are env-configurable (measurement-only) so the same
+    // harness can be driven under callgrind with a small workload; defaults
+    // are unchanged when the env vars are unset.
+    let env_u32 = |k: &str, d: u32| {
+        std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d)
+    };
+    let warmup = env_u32("PERF_WARMUP", 1_000);
+    let iters = env_u32("PERF_ITERS", 20_000);
+
     // Warm up (prime caches / lazies).
-    for _ in 0..1_000 {
+    for _ in 0..warmup {
         for sql in CORPUS {
             std::hint::black_box(classifier.classify(std::hint::black_box(sql)));
         }
     }
 
-    const ITERS: u32 = 20_000;
     let start = Instant::now();
     let mut sink = 0u64;
-    for _ in 0..ITERS {
+    for _ in 0..iters {
         for sql in CORPUS {
             let d = classifier.classify(std::hint::black_box(sql));
             sink = sink.wrapping_add(d.required_level.is_some() as u64);
@@ -53,7 +61,7 @@ fn classifier_throughput_baseline() {
     let elapsed = start.elapsed();
     std::hint::black_box(sink);
 
-    let total_classifications = ITERS as u128 * CORPUS.len() as u128;
+    let total_classifications = iters as u128 * CORPUS.len() as u128;
     let ns_per = elapsed.as_nanos() / total_classifications;
     let per_sec = 1_000_000_000u128 / ns_per.max(1);
     println!(

@@ -87,3 +87,11 @@ todo = "deny"
 # quarantine a failed lane without aborting sibling lanes.
 [profile.release]
 panic = "unwind"
+
+# Profiling-only build (callgrind/samply attribution). Inherits release so the
+# hotspot picture matches the shipped binary; adds debug line tables + keeps
+# symbols. NOT used for releases. `cargo build/test/bench --profile release-perf`.
+[profile.release-perf]
+inherits = "release"
+debug = "line-tables-only"
+strip = false
