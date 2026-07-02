@@ -150,6 +150,60 @@ fn release_acceptance_suite_schedules_hci_component_gates() {
 }
 
 #[test]
+fn hardening_acceptance_suite_schedules_b11_component_gates() {
+    let output = run_script(
+        "scripts/e2e/hardening_acceptance.sh",
+        &["--log", "--dry-run"],
+    );
+    assert!(
+        output.status.success(),
+        "hardening acceptance dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = json_lines(&output.stderr);
+    let command_messages = events
+        .iter()
+        .filter(|event| event["event"] == "command_start")
+        .filter_map(|event| event["message"].as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "scripts/oraclemcp_honesty_grep.sh",
+        "scripts/sensitive_data_lint.sh",
+        "scripts/e2e/conformance_coverage.sh --log",
+        "scripts/e2e/mcp_and_operator_v1_conformance_matrix.sh --log",
+        "scripts/installer_lint_and_offline_smoke.sh",
+        "cargo test -p oraclemcp-core surface_inventory_authn_no_leak",
+        "cargo test -p oraclemcp-core uniform_auth_errors_no_enumeration_oracle",
+        "cargo test -p oraclemcp-core self_heal_down_never_up_refuses_protected_profile_repair",
+        "cargo test -p oraclemcp-core cp_apply_reclassifies_never_trusts_stored_verdict",
+        "cargo test -p oraclemcp backup_restore_verifies_audit_chain",
+        "cargo test -p oraclemcp audit_verify_with_db_evidence_command_parses",
+        "cargo test -p oraclemcp --test e2e_http_oauth",
+        "cargo test -p oraclemcp --test e2e_stdio",
+        "cargo test -p oraclemcp --test golden_behavior",
+        "cargo test -p oraclemcp-core --test mcp_conformance",
+        "cargo test -p oraclemcp-db --test structured_schema_golden",
+        "cargo test -p oraclemcp --test installer_e2e",
+    ] {
+        assert!(
+            command_messages
+                .iter()
+                .any(|message| message.contains(expected)),
+            "hardening acceptance suite did not schedule {expected}: {command_messages:?}"
+        );
+    }
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "pass"
+                && event["scenario"] == "hardening_acceptance"),
+        "missing passing hardening-acceptance completion: {events:?}"
+    );
+}
+
+#[test]
 fn rollback_runbook_dry_run_covers_release_surfaces() {
     let output = run_script(
         "scripts/e2e/release_rollback_dry_run.sh",

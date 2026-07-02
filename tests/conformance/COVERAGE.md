@@ -56,7 +56,10 @@ Harnesses:
   `crates/oraclemcp-db/tests/{cancel_correctness,load_soak,multi_lane_live_xe}.rs`,
   and `crates/oraclemcp/src/dispatch/tests.rs`
 - WP-G hardening and docs:
-  `crates/oraclemcp/src/main.rs` and `docs/operations.md`
+  `crates/oraclemcp/src/main.rs`, `crates/oraclemcp-core/src/{http,doctor}.rs`,
+  `crates/oraclemcp/src/{dispatch,service_lifecycle}.rs`,
+  `scripts/e2e/hardening_acceptance.sh`, `scripts/installer_lint_and_offline_smoke.sh`,
+  `docs/operations.md`, and `docs/behavior-inventory.md`
 - B.13 cross-cutting edge/negative catalog:
   `crates/oraclemcp-core/tests/concurrency_contract.rs`,
   `crates/oraclemcp-guard/tests/{adversarial_corpus,proptest_invariants}.rs`,
@@ -192,7 +195,7 @@ Total tracked requirements: 76 MUST, 2 SHOULD, 78 tested.
 
 | Requirement | Primary proof |
 | --- | --- |
-| HTTP-AUTH-001 | `crates/oraclemcp-core/tests/golden_behavior.rs::golden_http_served_auth_scope_and_session_matrix`; `crates/oraclemcp/tests/e2e_http_oauth.rs::binary_http_oauth_rejects_missing_invalid_and_insufficient_tokens` |
+| HTTP-AUTH-001 | `crates/oraclemcp-core/tests/golden_behavior.rs::golden_http_served_auth_scope_and_session_matrix`; `crates/oraclemcp/tests/e2e_http_oauth.rs::binary_http_oauth_rejects_missing_invalid_and_insufficient_tokens`; `crates/oraclemcp-core/src/http.rs::tests::uniform_auth_errors_no_enumeration_oracle` |
 | HTTP-AUTH-002 | `crates/oraclemcp-core/tests/golden_behavior.rs::golden_http_served_auth_scope_and_session_matrix` |
 | HTTP-AUTH-003 | `crates/oraclemcp/tests/e2e_http_oauth.rs::binary_http_oauth_rejects_missing_invalid_and_insufficient_tokens` |
 | HTTP-AUTH-004 | `crates/oraclemcp/tests/e2e_http_oauth.rs::binary_http_oauth_serves_metadata_and_applies_scope_ceilings` |
@@ -259,10 +262,9 @@ Total tracked requirements: 76 MUST, 2 SHOULD, 78 tested.
 ## B.13 Cross-Cutting Negative Catalog
 
 B.13 is a coverage index over other acceptance beads, not a separate runtime
-surface. Rows marked `covered` are backed by closed dependencies
-N9-edge/TB3/TB6. Rows marked `owned by follow-up` are intentionally tracked by
-the dependent hardening bead `oraclemcp-epic-060-f4xo.11.13`, so they stay
-visible without over-claiming coverage in this index bead.
+surface. Rows marked `covered` are backed by closed dependencies plus the
+hardening acceptance suite in `oraclemcp-epic-060-f4xo.11.13`, so the catalog
+stays visible without turning into a second runtime harness.
 
 | ID | Concern | Status | Primary proof |
 | --- | --- | --- | --- |
@@ -286,9 +288,9 @@ visible without over-claiming coverage in this index bead.
 | B13-PROTOCOL-001 | Malformed, unknown, invalid-param, oversized, and batch JSON-RPC frames fail closed. | covered | `crates/oraclemcp-core/tests/mcp_conformance.rs::malformed_json_unknown_method_invalid_params_and_oversized_frames_fail_closed`; `batch_requests_are_explicitly_rejected_for_stdio`; `crates/oraclemcp-core/src/server.rs::tests::native_stdio_rejects_malformed_unknown_invalid_and_oversized_frames` |
 | B13-PROTOCOL-002 | HTTP negotiation, stateless DELETE, operator route precedence, and query filters are typed. | covered | `crates/oraclemcp-core/src/http.rs::tests::mcp_post_enforces_accept_and_content_type_negotiation`; `stateless_delete_is_method_not_allowed_not_false_accepted`; `operator_api_routes_are_typed_json_404_and_parse_query`; `dashboard_bundle_serves_html_without_api_fallback` |
 | B13-PROTOCOL-003 | MCP and operator SSE slow consumers receive bounded gap markers. | covered | `crates/oraclemcp-core/src/http.rs::tests::stateful_get_last_event_id_reports_gap_marker_for_slow_consumer`; `operator_events_last_event_id_reports_gap_for_slow_consumer` |
-| B13-RECOVERY-001 | SEC-1 recovery paths re-run classifier, level, grant, audit, and idempotency. | owned by follow-up | `oraclemcp-epic-060-f4xo.11.13` |
-| B13-INSTALLER-001 | Installer/doctor idempotency, audit tamper detect-never-repair, and exit-4 edges. | owned by follow-up | `oraclemcp-epic-060-f4xo.11.13` |
-| B13-STDIO-001 | stdio byte-identical non-regression and no lane/registry reachability. | owned by follow-up | `oraclemcp-epic-060-f4xo.11.13` |
+| B13-RECOVERY-001 | SEC-1 recovery paths re-run classifier, level, grant, audit, and idempotency. | covered | `crates/oraclemcp-core/src/http.rs::tests::cp_apply_reclassifies_never_trusts_stored_verdict`; `operator_config_draft_apply_and_rollback_are_redacted_and_audited`; `crates/oraclemcp-core/src/doctor.rs::tests::legacy_state_layout_detects_and_migrates_audit_jsonl_once`; `crates/oraclemcp/src/service_lifecycle.rs::tests::backup_restore_verifies_audit_chain`; `crates/oraclemcp/src/dispatch/tests.rs::s5_active_drained_profile_refuses_non_diagnostic_work`; `s5_draining_profiles_are_not_listed_or_switchable`; `scripts/e2e/hardening_acceptance.sh` |
+| B13-INSTALLER-001 | Installer/doctor idempotency, audit tamper detect-never-repair, and exit-4 edges. | covered | `scripts/installer_lint_and_offline_smoke.sh`; `crates/oraclemcp/tests/installer_e2e.rs::installer_lint_and_offline_smoke_passes`; `unix_installer_reinstall_is_idempotent_for_identical_files`; `windows_installer_verifies_before_mutating_and_requires_service_consent`; `crates/oraclemcp-core/src/doctor.rs::tests::self_heal_down_never_up_refuses_protected_profile_repair`; `fix_policy_refuses_oracle_and_classifier_targets`; `doctor_fix_fixture_gate_current_repairs_are_fixture_accounted` |
+| B13-STDIO-001 | stdio byte-identical non-regression and no lane/registry reachability. | covered | `crates/oraclemcp/tests/e2e_stdio.rs`; `crates/oraclemcp/tests/golden_behavior.rs::golden_stdio_main_tool_transcript`; `crates/oraclemcp-core/tests/golden_behavior.rs::golden_http_stateful_streamable_session`; `crates/oraclemcp-core/tests/concurrency_contract.rs::wp_n_concurrency_contract_matrix_is_complete_and_jsonl_logged`; `scripts/e2e/hardening_acceptance.sh` |
 
 ## Provenance
 

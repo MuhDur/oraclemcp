@@ -36,6 +36,7 @@ required=(
   scripts/e2e/lib.sh
   scripts/e2e/run_all.sh
   scripts/e2e/offline_stdio.sh
+  scripts/e2e/hardening_acceptance.sh
   scripts/e2e/mcp_and_operator_v1_conformance_matrix.sh
   scripts/e2e/doctor_fixtures.sh
   scripts/e2e/http_oauth_lanes.sh
@@ -134,6 +135,20 @@ fi
 if ! grep -F "scripts/e2e/live_xe_headline.sh" scripts/e2e/PROVENANCE.md >/dev/null; then
   e2e_finish_fail "PROVENANCE.md must document the G6 live-XE headline command"
 fi
+if ! grep -F "WP-G hardening acceptance suite" scripts/e2e/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "COVERAGE.md must account for the WP-G hardening acceptance suite"
+fi
+if ! grep -F "scripts/e2e/hardening_acceptance.sh" scripts/e2e/PROVENANCE.md >/dev/null; then
+  e2e_finish_fail "PROVENANCE.md must document the WP-G hardening acceptance command"
+fi
+for id in B13-RECOVERY-001 B13-INSTALLER-001 B13-STDIO-001; do
+  if ! grep -F "| $id |" tests/conformance/COVERAGE.md | grep -F "| covered |" >/dev/null; then
+    e2e_finish_fail "$id must be covered now that oraclemcp-epic-060-f4xo.11.13 is the closing bead"
+  fi
+done
+if grep -F "| B13-" tests/conformance/COVERAGE.md | grep -F "owned by follow-up" >/dev/null; then
+  e2e_finish_fail "B.13 catalog must not retain owned-by-follow-up rows after hardening closeout"
+fi
 
-e2e_log_event "coverage_summary" "assert" "pass" 0 "MUST coverage 75/75 score=1.00 xfail=0"
+e2e_log_event "coverage_summary" "assert" "pass" 0 "MUST coverage 76/76 score=1.00 xfail=0"
 e2e_finish_pass

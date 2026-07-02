@@ -388,7 +388,7 @@ fn b13_cross_cutting_catalog_is_indexed_in_conformance_coverage() {
         );
     }
     assert!(
-        coverage.contains("oraclemcp-epic-060-f4xo.11.13"),
-        "open B.13 hardening/stdio tails must stay assigned to their follow-up bead"
+        !coverage.contains("owned by follow-up"),
+        "B.13 hardening/installer/stdio tails must be covered by named artifacts"
     );
 }
