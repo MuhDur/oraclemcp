@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
+#
+# oraclemcp installer
+#
+# Dry-run preview with a cache-busted script fetch:
+#   curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --dry-run --version 0.6.0
+#
+# Normal verified install with a cache-busted script fetch:
+#   curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --version 0.6.0
+#
 # Install oraclemcp from a verified release archive, or from source when
 # explicitly requested. Service-manager mutation is opt-in only.
 set -euo pipefail
+shopt -s lastpipe 2>/dev/null || true
+umask 022
 
 REPO="MuhDur/oraclemcp"
 VERSION="latest"
@@ -30,6 +41,20 @@ SERVICE_SKIP_LINGER=0
 CLIENT_REGISTER=0
 CLIENT_LABEL=""
 CLIENT_SCOPES=()
+PROXY_ARGS=()
+WORK_DIR=""
+LOCK_DIR=""
+
+cleanup() {
+  if [ -n "${WORK_DIR:-}" ] && [ -d "$WORK_DIR" ]; then
+    rm -rf -- "$WORK_DIR"
+  fi
+  if [ -n "${LOCK_DIR:-}" ] && [ -d "$LOCK_DIR" ]; then
+    rm -f -- "$LOCK_DIR/pid"
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
 
 usage() {
   cat <<'USAGE'
@@ -84,6 +109,15 @@ have() {
 
 need() {
   have "$1" || fail "missing required command: $1"
+}
+
+setup_proxy() {
+  PROXY_ARGS=()
+  if [ -n "${HTTPS_PROXY:-}" ]; then
+    PROXY_ARGS=(--proxy "$HTTPS_PROXY")
+  elif [ -n "${HTTP_PROXY:-}" ]; then
+    PROXY_ARGS=(--proxy "$HTTP_PROXY")
+  fi
 }
 
 normalize_version() {
@@ -282,6 +316,30 @@ archive_name() {
   printf 'oraclemcp-%s.tar.gz\n' "$TARGET"
 }
 
+lock_path() {
+  local sanitized
+  sanitized="$(printf '%s' "$BIN_DIR" | sed 's#[^A-Za-z0-9._-]#_#g')"
+  printf '%s/oraclemcp-install-%s.lock\n' "${TMPDIR:-/tmp}" "$sanitized"
+}
+
+acquire_lock() {
+  local lock pid
+  lock="$(lock_path)"
+  if mkdir "$lock" 2>/dev/null; then
+    LOCK_DIR="$lock"
+    printf '%s\n' "$$" >"$LOCK_DIR/pid"
+    return 0
+  fi
+
+  if [ -f "$lock/pid" ]; then
+    pid="$(cat "$lock/pid" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      fail "another oraclemcp installer is already running for $BIN_DIR (pid $pid)"
+    fi
+  fi
+  fail "installer lock exists at $lock; remove it after confirming no installer is running"
+}
+
 cosign_identity_args() {
   if [ "$VERSION" = "latest" ]; then
     printf '%s\0%s\0' \
@@ -412,6 +470,7 @@ print_plan() {
   fi
   printf '  prefix: %s\n' "$PREFIX"
   printf '  bin_dir: %s\n' "$BIN_DIR"
+  printf '  lock: %s\n' "$(lock_path)"
 
   if [ "$SOURCE" -eq 1 ]; then
     if [ "$VERSION" = "latest" ]; then
@@ -452,7 +511,7 @@ print_plan() {
     done < <(service_install_args)
     printf '%q ' "${service_args[@]}"
     printf '\n'
-    printf '    readyz_gate: curl --fail --silent --show-error %s\n' "$(readyz_url)"
+    printf '    readyz_gate: curl --fail --silent --show-error --noproxy '\''*'\'' %s\n' "$(readyz_url)"
   else
     printf '  service: not requested; no service-manager files or units will be touched\n'
   fi
@@ -493,7 +552,7 @@ print_uninstall_plan() {
 download_file() {
   local url="$1" dest="$2"
   if have curl; then
-    curl --fail --location --show-error --silent --proto '=https' --tlsv1.2 \
+    curl --fail --location --show-error --silent --proto '=https' --tlsv1.2 "${PROXY_ARGS[@]}" \
       --output "$dest" "$url"
   elif have wget; then
     wget --https-only --quiet --output-document "$dest" "$url"
@@ -652,8 +711,8 @@ install_prebuilt() {
   fi
   asset="$(archive_name)"
   base="$(release_base_url)"
-  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/oraclemcp-install.XXXXXX")"
-  trap 'if [ -n "${work_dir:-}" ] && [ -d "$work_dir" ]; then rm -rf -- "$work_dir"; fi' EXIT
+  WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/oraclemcp-install.XXXXXX")"
+  work_dir="$WORK_DIR"
 
   if [ -n "$OFFLINE_ARCHIVE" ]; then
     archive="$OFFLINE_ARCHIVE"
@@ -832,7 +891,7 @@ wait_readyz() {
   url="$(readyz_url)"
   attempt=1
   while [ "$attempt" -le 30 ]; do
-    if curl --fail --silent --show-error "$url" >/dev/null; then
+    if curl --fail --silent --show-error --noproxy '*' "$url" >/dev/null; then
       printf 'oraclemcp installer: service ready at %s\n' "$url"
       return
     fi
@@ -870,11 +929,14 @@ main() {
     TARGET="$(detect_target)"
   fi
   validate_target "$TARGET"
+  setup_proxy
 
   if [ "$DRY_RUN" -eq 1 ]; then
     print_plan
     exit 0
   fi
+
+  acquire_lock
 
   if [ "$UNINSTALL" -eq 1 ]; then
     uninstall_oraclemcp

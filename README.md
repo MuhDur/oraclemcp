@@ -25,13 +25,20 @@ script can print the service/client mutation plan with `--dry-run` before it
 changes the host.
 Re-running the same verified archive is a no-op for identical installed files;
 use `--force` only when intentionally replacing different local content.
-The examples below are copy-pasteable for `0.6.0` once the release artifacts are
-published; change only the version number when installing another release.
+The hosted installer URLs below target release `0.6.0` once the release
+artifacts are published; change only the version number when installing another
+release.
 
 Use the dry-run command first when you want a preview: it prints the archive,
-verification inputs, files, service plan, and client-registration plan without
-writing files or touching the service manager. The normal command performs the
-install into `$HOME/.local` unless you pass `--prefix`.
+verification inputs, files, service plan, client-registration plan, and
+installer lock path, then exits before downloading, verifying, writing files, or
+touching the service manager. The normal command downloads, verifies, and
+installs into `$HOME/.local` unless you pass `--prefix`.
+
+The install, uninstall, and service commands in this section are literal
+copy-paste commands for release `0.6.0` after the `v0.6.0` artifacts exist.
+Later examples that contain `...`, `<pw>`, `<profile>`, or placeholder env
+values are templates: replace those placeholders before running them.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh \
@@ -62,6 +69,10 @@ bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz \
 powershell -ExecutionPolicy Bypass -File .\install.ps1 `
   -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.6.0
 ```
+
+The release installer does not silently fall back from a missing release archive
+to a source build. Use `--source` explicitly when you want `cargo install`
+instead of the verified archive path.
 
 Uninstall is preview-first and idempotent. Service removal remains an explicit
 service-manager mutation:

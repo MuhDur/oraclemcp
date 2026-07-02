@@ -37,12 +37,12 @@
 //!
 //! ## Lazy / reset / fail-closed behavior
 //!
-//! - **Lazy.** [`ReadOnlyBackstop::ensure_armed`] issues
-//!   `SET TRANSACTION READ ONLY` only when the backstop is not already `armed`.
-//!   Once armed, repeated reads in the SAME read-only transaction pay no extra
-//!   round trip — the property persists until a transaction boundary. The
-//!   deterministic test asserts the statement is issued exactly once across many
-//!   reads.
+//! - **Lazy.** [`ReadOnlyBackstop::ensure_armed`] resets any open startup or
+//!   metadata transaction with `ROLLBACK`, then issues `SET TRANSACTION READ
+//!   ONLY`, only when the backstop is not already `armed`. Once armed, repeated
+//!   reads in the SAME read-only transaction pay no extra round trip — the
+//!   property persists until a transaction boundary. The deterministic test
+//!   asserts the statement is issued exactly once across many reads.
 //! - **Reset on a transaction boundary.** Anything that ends the transaction
 //!   disarms the backstop so the next read re-asserts it: a committed/rolled-back
 //!   write ([`ReadOnlyBackstop::disarm`], called by the write path before it runs
@@ -131,12 +131,17 @@ impl ReadOnlyBackstop {
         self.assert_read_only(cx, conn).await
     }
 
-    /// Issue `SET TRANSACTION READ ONLY` and, only on success, mark armed.
+    /// Reset the current transaction, issue `SET TRANSACTION READ ONLY`, and
+    /// only on success mark armed.
     async fn assert_read_only(
         &mut self,
         cx: &Cx,
         conn: &dyn OracleConnection,
     ) -> Result<(), ErrorEnvelope> {
+        // Oracle requires SET TRANSACTION to be the first statement in a
+        // transaction. Startup/profile attach may already have described or
+        // pinged the session, so reset before arming the database backstop.
+        conn.rollback(cx).await.map_err(DbError::into_envelope)?;
         conn.execute(cx, SET_TRANSACTION_READ_ONLY, &[] as &[OracleBind])
             .await
             .map_err(DbError::into_envelope)?;
@@ -174,6 +179,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingConn {
         executed: Mutex<Vec<String>>,
+        rollbacks: Mutex<usize>,
     }
 
     #[async_trait::async_trait(?Send)]
@@ -206,6 +212,7 @@ mod tests {
             Ok(())
         }
         async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            *self.rollbacks.lock().expect("rollback mutex") += 1;
             Ok(())
         }
     }
@@ -287,6 +294,11 @@ mod tests {
                 vec![SET_TRANSACTION_READ_ONLY.to_owned()],
                 "SET TRANSACTION READ ONLY issued exactly once (lazy), not per read"
             );
+            assert_eq!(
+                *conn.rollbacks.lock().expect("rollback mutex"),
+                1,
+                "the arming path resets the transaction once before the lazy backstop"
+            );
             assert!(backstop.is_armed());
         });
     }
@@ -311,6 +323,11 @@ mod tests {
                     SET_TRANSACTION_READ_ONLY.to_owned(),
                 ],
                 "the backstop is re-asserted on the new read transaction after a commit/rollback"
+            );
+            assert_eq!(
+                *conn.rollbacks.lock().expect("rollback mutex"),
+                2,
+                "each arming pass resets the transaction before SET TRANSACTION"
             );
         });
     }

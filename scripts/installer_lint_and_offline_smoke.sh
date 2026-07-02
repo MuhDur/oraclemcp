@@ -82,7 +82,7 @@ COSIGN
 
   set +e
   install_output="$(
-    env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+    env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
       PATH="$fake_bin:$PATH" \
       ORACLEMCP_INSTALLER_FAKE_COSIGN_LOG="$fake_log" \
       bash install.sh \
@@ -110,7 +110,7 @@ COSIGN
 
   set +e
   reinstall_output="$(
-    env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+    env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
       PATH="$fake_bin:$PATH" \
       ORACLEMCP_INSTALLER_FAKE_COSIGN_LOG="$fake_log" \
       bash install.sh \
@@ -184,8 +184,9 @@ SMOKE_ROOT="$ROOT/target/installer-smoke"
 PREFIX="$SMOKE_ROOT/prefix"
 HOME_DIR="$SMOKE_ROOT/home"
 CONFIG_HOME="$SMOKE_ROOT/config"
+TMP_DIR="$SMOKE_ROOT/tmp"
 SMOKE_VERSION="9.9.9-installer-smoke"
-mkdir -p "$SMOKE_ROOT" "$HOME_DIR" "$CONFIG_HOME"
+mkdir -p "$SMOKE_ROOT" "$HOME_DIR" "$CONFIG_HOME" "$TMP_DIR"
 
 if [ -n "${ORACLEMCP_INSTALLER_BUILT_BINARY:-}" ]; then
   run_built_artifact_smoke "$ORACLEMCP_INSTALLER_BUILT_BINARY"
@@ -225,7 +226,7 @@ if command -v pwsh >/dev/null 2>&1; then
 fi
 
 dry_output="$(
-  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
     bash install.sh \
       --dry-run \
       --version "$SMOKE_VERSION" \
@@ -234,6 +235,7 @@ dry_output="$(
 )"
 
 contains "$dry_output" "mode: prebuilt"
+contains "$dry_output" "lock: $TMP_DIR/oraclemcp-install-"
 contains "$dry_output" "archive: https://github.com/MuhDur/oraclemcp/releases/download/v$SMOKE_VERSION/oraclemcp-x86_64-unknown-linux-musl.tar.gz"
 contains "$dry_output" "checksum verifies transport integrity only; cosign verifies authenticity and provenance"
 contains "$dry_output" "$PREFIX/bin/oraclemcp"
@@ -252,7 +254,7 @@ if [ -e "$PREFIX/bin/oraclemcp" ] || [ -e "$PREFIX/bin/om" ]; then
 fi
 
 service_output="$(
-  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
     bash install.sh \
       --dry-run \
       --version "$SMOKE_VERSION" \
@@ -266,10 +268,10 @@ service_output="$(
 
 contains "$service_output" "unit: $CONFIG_HOME/systemd/user/oraclemcp.service"
 contains "$service_output" "$PREFIX/bin/oraclemcp service install --yes --name oraclemcp --listen 127.0.0.1:7070 --profile db_ro"
-contains "$service_output" "readyz_gate: curl --fail --silent --show-error http://127.0.0.1:7070/readyz"
+contains "$service_output" "readyz_gate: curl --fail --silent --show-error --noproxy '*' http://127.0.0.1:7070/readyz"
 
 client_service_output="$(
-  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
     bash install.sh \
       --dry-run \
       --version "$SMOKE_VERSION" \
@@ -289,7 +291,7 @@ contains "$client_service_output" "$PREFIX/bin/oraclemcp clients issue --label c
 contains "$client_service_output" "secret_rule: bearer is printed once by the command"
 
 source_output="$(
-  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
     bash install.sh \
       --dry-run \
       --source \
@@ -307,7 +309,7 @@ OFFLINE_ARCHIVE="$OFFLINE_DIR/oraclemcp-x86_64-unknown-linux-musl.tar.gz"
 mkdir -p "$OFFLINE_DIR"
 
 offline_output="$(
-  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
     bash install.sh \
       --dry-run \
       --offline "$OFFLINE_ARCHIVE" \
@@ -326,7 +328,7 @@ not_contains "$offline_output" "archive: https://github.com"
 : >"$OFFLINE_ARCHIVE"
 set +e
 offline_missing_output="$(
-  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
     bash install.sh \
       --offline "$OFFLINE_ARCHIVE" \
       --version "$SMOKE_VERSION" \
@@ -358,7 +360,7 @@ printf 'complete\n' >"$UNINSTALL_PREFIX/share/powershell/Completions/oraclemcp.p
 printf 'complete\n' >"$UNINSTALL_PREFIX/share/powershell/Completions/om.ps1"
 
 uninstall_dry_output="$(
-  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
     bash install.sh \
       --uninstall \
       --dry-run \
@@ -371,9 +373,9 @@ contains "$uninstall_dry_output" "remove if present: $UNINSTALL_BIN/oraclemcp"
 contains "$uninstall_dry_output" "service: not requested; no service-manager files or units will be touched"
 [ -e "$UNINSTALL_BIN/oraclemcp" ] || fail "uninstall dry-run removed oraclemcp"
 
-env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
   bash install.sh --uninstall --yes --no-service --prefix "$UNINSTALL_PREFIX" >/dev/null
-env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" \
+env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
   bash install.sh --uninstall --yes --no-service --prefix "$UNINSTALL_PREFIX" >/dev/null
 
 for removed in \

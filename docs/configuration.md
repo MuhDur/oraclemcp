@@ -41,7 +41,10 @@ The environment layer reads `ORACLEMCP_*` variables (nested keys split on `__`).
 A set of launcher/control variables are explicitly **ignored** as config keys so
 they never become "unknown key" errors: `ORACLEMCP_CONFIG`, `ORACLEMCP_LOG`,
 `ORACLEMCP_STDIO_TOKEN`, `ORACLEMCP_TOOLS_DIR`, `ORACLEMCP_AUDIT_KEY`,
-`ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY`, and the `ORACLEMCP_TEST_*` live-test vars.
+`ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY`, the `ORACLEMCP_TEST_*` live-test vars, and
+the live-gate control vars `ORACLEMCP_LIVE_XE`,
+`ORACLEMCP_MULTI_DB_LIVE_XE`, `ORACLEMCP_LIVE_XE_CONTENTION`, and
+`ORACLEMCP_PHASE0_*`.
 
 ### Strictness
 

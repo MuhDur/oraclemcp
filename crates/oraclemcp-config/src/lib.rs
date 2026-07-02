@@ -43,11 +43,33 @@ const IGNORED_ENV_KEYS: &[&str] = &[
     "audit_key",
     "config",
     "custom_tools_hmac_key",
+    "live_xe",
+    "live_xe_contention",
     "log",
+    "multi_db_live_xe",
+    "phase0_lanes",
+    "phase0_probes_per_lane",
     "stdio_token",
+    "test_app_context",
+    "test_drcp",
+    "test_drcp_class",
     "test_dsn",
+    "test_dsn_a",
+    "test_dsn_b",
+    "test_edition",
     "test_password",
+    "test_password_a",
+    "test_password_b",
+    "test_proxy_target_schema",
+    "test_proxy_user",
+    "test_ssl_server_cert_dn",
+    "test_ssl_server_dn_match",
     "test_user",
+    "test_user_a",
+    "test_user_b",
+    "test_use_sni",
+    "test_wallet_location",
+    "test_wallet_password",
     "tools_dir",
 ];
 
@@ -1351,7 +1373,31 @@ mod tests {
             jail.set_env("ORACLEMCP_STDIO_TOKEN", "token-for-stdio");
             jail.set_env("ORACLEMCP_TOOLS_DIR", "/tmp/oraclemcp-tools");
             jail.set_env("ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY", "test-hmac-key");
+            jail.set_env("ORACLEMCP_LIVE_XE", "1");
+            jail.set_env("ORACLEMCP_LIVE_XE_CONTENTION", "1");
+            jail.set_env("ORACLEMCP_MULTI_DB_LIVE_XE", "1");
+            jail.set_env("ORACLEMCP_PHASE0_LANES", "4");
+            jail.set_env("ORACLEMCP_PHASE0_PROBES_PER_LANE", "2");
             jail.set_env("ORACLEMCP_TEST_DSN", "localhost:1521/FREEPDB1");
+            jail.set_env("ORACLEMCP_TEST_USER", "ORACLEMCP_TEST");
+            jail.set_env("ORACLEMCP_TEST_PASSWORD", "test-password");
+            jail.set_env("ORACLEMCP_TEST_DSN_A", "localhost:1521/FREEPDB1");
+            jail.set_env("ORACLEMCP_TEST_USER_A", "ORACLEMCP_TEST_A");
+            jail.set_env("ORACLEMCP_TEST_PASSWORD_A", "test-password-a");
+            jail.set_env("ORACLEMCP_TEST_DSN_B", "localhost:1523/FREEPDB1");
+            jail.set_env("ORACLEMCP_TEST_USER_B", "ORACLEMCP_TEST_B");
+            jail.set_env("ORACLEMCP_TEST_PASSWORD_B", "test-password-b");
+            jail.set_env("ORACLEMCP_TEST_EDITION", "ORA$BASE");
+            jail.set_env("ORACLEMCP_TEST_APP_CONTEXT", "NS:key:value");
+            jail.set_env("ORACLEMCP_TEST_DRCP", "1");
+            jail.set_env("ORACLEMCP_TEST_DRCP_CLASS", "ORACLEMCP");
+            jail.set_env("ORACLEMCP_TEST_WALLET_LOCATION", "/tmp/wallet");
+            jail.set_env("ORACLEMCP_TEST_WALLET_PASSWORD", "wallet-password");
+            jail.set_env("ORACLEMCP_TEST_SSL_SERVER_DN_MATCH", "true");
+            jail.set_env("ORACLEMCP_TEST_SSL_SERVER_CERT_DN", "CN=test");
+            jail.set_env("ORACLEMCP_TEST_USE_SNI", "true");
+            jail.set_env("ORACLEMCP_TEST_PROXY_USER", "PROXY_USER");
+            jail.set_env("ORACLEMCP_TEST_PROXY_TARGET_SCHEMA", "TARGET_SCHEMA");
 
             let cfg = OracleMcpConfig::load(None).expect("control env vars are ignored");
 

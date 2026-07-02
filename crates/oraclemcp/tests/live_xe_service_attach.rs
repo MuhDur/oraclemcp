@@ -207,7 +207,17 @@ fn wait_for_service(child: &mut ChildGuard, addr: SocketAddr) {
     let mut last_status = None;
     loop {
         if let Some(status) = child.child.try_wait().expect("poll service child") {
-            panic!("live-XE service exited before attach: {status}");
+            let mut stdout = String::new();
+            if let Some(pipe) = child.child.stdout.as_mut() {
+                let _ = pipe.read_to_string(&mut stdout);
+            }
+            let mut stderr = String::new();
+            if let Some(pipe) = child.child.stderr.as_mut() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            panic!(
+                "live-XE service exited before attach: {status}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
         }
         if let Ok(reply) = http_request(addr, "GET", "/readyz", &[], None) {
             last_status = Some(reply.status);
