@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use oraclemcp_config::{CONFIG_PATH_ENV, OracleMcpConfig};
+use oraclemcp_config::{CONFIG_PATH_ENV, OperatingLevel, OracleMcpConfig};
 
 fn temp_config(contents: &str) -> PathBuf {
     let dir = temp_dir("config");
@@ -196,6 +196,8 @@ fn setup_write_round_trips_profiles_through_config_ops() {
     let dir = temp_dir("setup-write");
     let config = dir.join("profiles.toml");
     let state = dir.join("state");
+    let tools_dir = dir.join("tools.d");
+    fs::create_dir_all(&tools_dir).expect("create empty tools dir");
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
     cmd.args([
@@ -209,6 +211,8 @@ fn setup_write_round_trips_profiles_through_config_ops() {
     ])
     .env(CONFIG_PATH_ENV, &config)
     .env("XDG_STATE_HOME", &state)
+    .env("HOME", &dir)
+    .env("ORACLEMCP_TOOLS_DIR", &tools_dir)
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
 
@@ -257,8 +261,74 @@ fn setup_write_round_trips_profiles_through_config_ops() {
     let written = fs::read_to_string(&config).expect("profiles config written");
     assert!(written.contains("credential_ref = \"env:APP_PASSWORD\""));
     assert!(written.contains("connect_string = \"dbhost.example.com:1521/service_name\""));
-    assert!(written.contains("[profiles.drcp]"));
-    OracleMcpConfig::from_toml_str(&written).expect("written setup config parses");
+    assert!(!written.contains("[profiles.oci]"));
+    assert!(!written.contains("[profiles.drcp]"));
+    assert!(!written.contains("[profiles.pool]"));
+    assert!(!written.contains("[profiles.proxy_auth]"));
+    assert!(!written.contains("[profiles.session_identity]"));
+    assert!(!written.contains("[[profiles.app_context]]"));
+    assert!(!written.contains("db_ddl"));
+
+    let cfg = OracleMcpConfig::from_toml_str(&written).expect("written setup config parses");
+    assert_eq!(cfg.default_profile.as_deref(), Some("tenant_ro"));
+    let profile = cfg.profile("tenant_ro").expect("starter profile exists");
+    assert_eq!(profile.max_level(), OperatingLevel::ReadOnly);
+    assert_eq!(profile.default_level(), OperatingLevel::ReadOnly);
+    assert!(!profile.protected());
+
+    let mut serve = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    serve
+        .args([
+            "--json",
+            "serve",
+            "--allow-no-auth",
+            "--profile",
+            "tenant_ro",
+        ])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", &state)
+        .env("HOME", &dir)
+        .env("ORACLEMCP_TOOLS_DIR", &tools_dir)
+        .env_remove("APP_PASSWORD")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let serve_output = wait_with_timeout(serve, Duration::from_secs(5));
+    assert_eq!(serve_output.status.code(), Some(0));
+    let serve_stderr = String::from_utf8(serve_output.stderr).expect("serve stderr is utf8");
+    assert!(
+        serve_stderr.contains("\"kind\":\"status\""),
+        "serve must boot to status output: {serve_stderr}"
+    );
+    assert!(
+        !serve_stderr.contains("ORACLEMCP_AUDIT_KEY_REQUIRED"),
+        "minimal starter must not create a writable-profile audit gate: {serve_stderr}"
+    );
+
+    let mut doctor = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    doctor
+        .args(["--json", "doctor", "--profile", "tenant_ro"])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", &state)
+        .env("HOME", &dir)
+        .env("ORACLEMCP_TOOLS_DIR", &tools_dir)
+        .env_remove("APP_PASSWORD")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let doctor_output = wait_with_timeout(doctor, Duration::from_secs(5));
+    assert_eq!(doctor_output.status.code(), Some(0));
+    assert!(
+        doctor_output.stderr.is_empty(),
+        "doctor stderr should be empty: {}",
+        String::from_utf8_lossy(&doctor_output.stderr)
+    );
+    let doctor_json: serde_json::Value =
+        serde_json::from_slice(&doctor_output.stdout).expect("doctor JSON");
+    assert_eq!(doctor_json["ok"], serde_json::json!(true));
+    assert_eq!(doctor_json["exit_code"], serde_json::json!(0));
+    assert_eq!(
+        doctor_json["profile_caps"]["configured"]["max_level"],
+        serde_json::json!("READ_ONLY")
+    );
 
     let backup_path = value["write"]["outcome"]["apply"]["backup_path"]
         .as_str()

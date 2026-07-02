@@ -201,10 +201,10 @@ snippets:
 oraclemcp --json setup --profile db_ro
 ```
 
-To create the starter profiles file directly, use the same template through the
-SCFG config-ops backend. This validates the draft, writes a backup, atomically
-replaces the target, and reports the reload/rollback metadata without echoing
-the raw profile TOML:
+To create a minimal starter profiles file directly, use the same config-ops
+backend the dashboard uses. This validates the draft, writes a backup,
+atomically replaces the target, and reports the reload/rollback metadata
+without echoing the raw profile TOML:
 
 ```sh
 oraclemcp --json setup --write --profile db_ro
@@ -412,7 +412,10 @@ Connection profiles are resolved from layered configuration (`oraclemcp-config`)
 > annotated, copy-pasteable config showing every field with its default;
 > [`docs/configuration.md`](docs/configuration.md) is the canonical field
 > reference (types, defaults, precedence, the operating-level ladder, the
-> `mcp_exposed` opt-out, auth modes, and `base` inheritance).
+> `mcp_exposed` opt-out, auth modes, and `base` inheritance). The
+> `oraclemcp setup --write` starter is intentionally smaller so it can boot
+> before you add wallet, proxy, DRCP, pool, app-context, or writable-profile
+> settings.
 
 For live database access, create `~/.config/oraclemcp/profiles.toml`:
 

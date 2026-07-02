@@ -9,93 +9,12 @@ pub(crate) fn setup_profiles_template(profile: &str, credential_env: &str) -> St
         r#"schema_version = 2
 default_profile = "{profile}"
 
-[http]
-dashboard_workbench = false
-
 [[profiles]]
 name = "{profile}"
 description = "Read-only database profile"
 connect_string = "dbhost.example.com:1521/service_name"
 username = "APP_READONLY"
 credential_ref = "env:{credential_env}"
-max_level = "READ_ONLY"
-default_level = "READ_ONLY"
-protected = true
-require_signed_tools = true
-dashboard_ddl_workbench = false
-call_timeout_seconds = 30
-sdu = 32768
-login_statements = [
-  "ALTER SESSION SET NLS_LANGUAGE = english",
-]
-
-[profiles.oci]
-# Optional TCPS/wallet fields. Prefer these named fields over raw
-# connect_string query parameters when the value should be validated or redacted.
-wallet_location = "/etc/oracle/wallet"
-wallet_password_ref = "env:WALLET_PASSWORD"
-ssl_server_dn_match = true
-ssl_server_cert_dn = "CN=dbhost.example.com"
-use_sni = true
-
-# Optional proxy authentication. If enabled, `credential_ref` belongs to
-# `proxy_user`; omit top-level `username` or set it to the same value.
-# [profiles.proxy_auth]
-# proxy_user = "MCP_PROXY"
-# target_schema = "APP_OWNER"
-
-# Optional DRCP server routing. This is separate from the local [profiles.pool]
-# client-side reuse settings. [profiles.pool] enables a hybrid strategy for
-# stdio/direct dispatch and lane-local metadata reads: metadata and catalog reads
-# may use bounded stateless read connections, while user SQL, LOB/sample reads,
-# transactions, DBMS_OUTPUT, login setup, and session identity stay pinned to the
-# main session. Served stateless HTTP uses bounded read-worker lanes instead of
-# sharing one pool across lane runtimes.
-[profiles.drcp]
-pooled = true
-connection_class = "ORACLE_MCP_AGENTS"
-purity = "reuse"
-
-# Optional local client-side pool for stateless metadata/catalog reads where
-# pool-backed reads are used.
-# User SQL, LOB/sample reads, DBMS_OUTPUT, transactions, and session state stay
-# on the pinned main session.
-# [profiles.pool]
-# max_size = 4
-# min_idle = 1
-# acquire_timeout_secs = 5
-
-[[profiles.app_context]]
-namespace = "ORACLEMCP_CTX"
-key = "tenant_id"
-value = "tenant-123"
-
-[[profiles.app_context]]
-namespace = "ORACLEMCP_CTX"
-key = "request_id"
-value = "req-456"
-
-[profiles.session_identity]
-# Optional edition for Edition-Based Redefinition; applied during thin auth.
-# edition = "ORA$BASE"
-program = "oraclemcp"
-machine = "local-workstation"
-os_user = "local-agent"
-terminal = "agent"
-driver_name = "oraclemcp"
-module = "oraclemcp"
-action = "inspect"
-client_identifier = "agent"
-client_info = "local-agent"
-
-[[profiles]]
-name = "db_ddl"
-description = "DDL-capable sandbox; never point this at production"
-base = "{profile}"
-protected = false
-max_level = "DDL"
-default_level = "READ_ONLY"
-require_signed_tools = true
 "#
     )
 }

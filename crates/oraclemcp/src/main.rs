@@ -3079,7 +3079,8 @@ fn setup_payload(
         "paths": {
             "profiles": config_path,
             "custom_tools": tools_dir,
-            "wrapper": wrapper_path
+            "wrapper": wrapper_path,
+            "full_profile_example": "oraclemcp.example.toml"
         },
         "profiles_toml": robot_docs::setup_profiles_template(profile, credential_env),
         "wrapper_script": robot_docs::setup_wrapper_template(),
@@ -3118,7 +3119,8 @@ fn setup_payload(
             ["oraclemcp", "--json", "capabilities"]
         ],
         "next_actions": [
-            format!("write the profiles template to {config_path} after replacing placeholders"),
+            format!("write the minimal profiles template to {config_path} after replacing placeholders"),
+            "use oraclemcp.example.toml when you need the fully annotated profile reference",
             format!("write the wrapper template to {wrapper_path} and make it executable if Oracle client environment setup is needed"),
             "for HTTP clients, issue one per-client bearer and configure --client-credentials on the service",
             "configure every stdio MCP client to call the same wrapper and args",
@@ -3196,7 +3198,8 @@ fn setup_write_payload(
             "next_actions".to_owned(),
             serde_json::json!([
                 format!("edit {} locally to replace placeholder database metadata before live use", target_path.display()),
-                "set the environment variables referenced by credential_ref and wallet_password_ref outside profiles.toml",
+                "set the environment variable referenced by credential_ref outside profiles.toml",
+                "use oraclemcp.example.toml when you need wallet, proxy, DRCP, pool, app-context, or writable-profile examples",
                 "write the wrapper template only if local Oracle network environment setup is needed",
                 "for HTTP clients, issue one per-client bearer and configure --client-credentials on the service",
                 "run the validation commands before allowing agents to use live database tools"
@@ -5813,25 +5816,22 @@ mod tests {
                 .contains("credential_ref = \"env:APP_PASSWORD\"")
         );
         let profiles_toml = out["profiles_toml"].as_str().expect("profiles_toml");
-        OracleMcpConfig::from_toml_str(profiles_toml).expect("setup profiles TOML parses");
-        assert!(profiles_toml.contains("wallet_password_ref = \"env:WALLET_PASSWORD\""));
-        assert!(profiles_toml.contains("ssl_server_dn_match = true"));
-        assert!(profiles_toml.contains("ssl_server_cert_dn = \"CN=dbhost.example.com\""));
-        assert!(profiles_toml.contains("use_sni = true"));
-        assert!(profiles_toml.contains("sdu = 32768"));
-        assert!(profiles_toml.contains("[profiles.drcp]"));
-        assert!(profiles_toml.contains("connection_class = \"ORACLE_MCP_AGENTS\""));
-        assert!(profiles_toml.contains("purity = \"reuse\""));
-        assert!(profiles_toml.contains("# [profiles.pool]"));
-        assert!(profiles_toml.contains("# max_size = 4"));
-        assert!(profiles_toml.contains("[profiles.proxy_auth]"));
-        assert!(profiles_toml.contains("proxy_user = \"MCP_PROXY\""));
-        assert!(profiles_toml.contains("target_schema = \"APP_OWNER\""));
-        assert!(profiles_toml.contains("# edition = \"ORA$BASE\""));
-        assert!(profiles_toml.contains("program = \"oraclemcp\""));
-        assert!(profiles_toml.contains("machine = \"local-workstation\""));
-        assert!(profiles_toml.contains("os_user = \"local-agent\""));
-        assert!(profiles_toml.contains("terminal = \"agent\""));
+        let cfg =
+            OracleMcpConfig::from_toml_str(profiles_toml).expect("setup profiles TOML parses");
+        assert_eq!(cfg.default_profile.as_deref(), Some("tenant_ro"));
+        let profile = cfg.profile("tenant_ro").expect("starter profile exists");
+        assert_eq!(profile.max_level(), OperatingLevel::ReadOnly);
+        assert_eq!(profile.default_level(), OperatingLevel::ReadOnly);
+        assert!(!profiles_toml.contains("wallet_password_ref"));
+        assert!(!profiles_toml.contains("[profiles.oci]"));
+        assert!(!profiles_toml.contains("[profiles.drcp]"));
+        assert!(!profiles_toml.contains("[profiles.proxy_auth]"));
+        assert!(!profiles_toml.contains("[[profiles.app_context]]"));
+        assert!(!profiles_toml.contains("[profiles.session_identity]"));
+        assert_eq!(
+            out["paths"]["full_profile_example"],
+            serde_json::json!("oraclemcp.example.toml")
+        );
         assert_eq!(
             out["claude_mcp_json"]["mcpServers"]["oracle"]["command"],
             serde_json::json!("/opt/oraclemcp-wrapper")
