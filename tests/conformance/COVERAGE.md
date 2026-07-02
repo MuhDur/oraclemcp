@@ -94,7 +94,7 @@ Harnesses:
 | HTTP routing | 1 | 0 | 1 | 1 | 0 | 100% |
 | HTTP negotiation | 2 | 0 | 2 | 2 | 0 | 100% |
 | Operator v1 | 9 | 0 | 9 | 9 | 0 | 100% |
-| Dashboard B.8 | 9 | 0 | 9 | 9 | 0 | 100% |
+| Dashboard B.8 | 10 | 0 | 10 | 10 | 0 | 100% |
 | HTTPS / mTLS | 2 | 0 | 2 | 2 | 0 | 100% |
 | Oracle structured cells | 6 | 0 | 6 | 6 | 0 | 100% |
 | Durable SQL idempotency | 1 | 0 | 1 | 1 | 0 | 100% |
@@ -102,7 +102,7 @@ Harnesses:
 | WP-N concurrency/session | 11 | 0 | 11 | 11 | 0 | 100% |
 | WP-G hardening/docs | 1 | 0 | 1 | 1 | 0 | 100% |
 
-Total tracked requirements: 75 MUST, 2 SHOULD, 77 tested.
+Total tracked requirements: 76 MUST, 2 SHOULD, 78 tested.
 
 ## Requirement IDs
 

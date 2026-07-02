@@ -59,7 +59,7 @@ fi
 if ! grep -F "| HTTP client credentials | 1 | 0 | 1 | 1 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "HTTP client credential coverage must include isolated rotate/revoke"
 fi
-if ! grep -F "| Dashboard B.8 | 9 | 0 | 9 | 9 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
+if ! grep -F "| Dashboard B.8 | 10 | 0 | 10 | 10 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "Dashboard B.8 coverage must include W10 client credentials"
 fi
 if ! grep -F "| HTTP negotiation | 2 | 0 | 2 | 2 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
@@ -77,7 +77,7 @@ fi
 if ! grep -F "| WP-G hardening/docs | 1 | 0 | 1 | 1 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "WP-G hardening/docs coverage must include audit verify DB evidence"
 fi
-if ! grep -F "Total tracked requirements: 75 MUST, 2 SHOULD, 77 tested." tests/conformance/COVERAGE.md >/dev/null; then
+if ! grep -F "Total tracked requirements: 76 MUST, 2 SHOULD, 78 tested." tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "B.6 coverage totals are stale"
 fi
 if grep -RInE '(^|[^A-Z])SKIP([^A-Z]|$)' tests/conformance/COVERAGE.md >/dev/null; then

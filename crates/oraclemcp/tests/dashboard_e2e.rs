@@ -749,6 +749,95 @@ fn wd_diff_schema_diff_exports_migration_through_reviews() {
 }
 
 #[test]
+fn dashboard_per_view_acceptance_suite_is_accounted() {
+    let app = read_repo_file("web/src/app/App.tsx");
+    let client = read_repo_file("web/src/app/operator-client.ts");
+    let http = read_repo_file("crates/oraclemcp-core/src/http.rs");
+    let conformance = read_repo_file("tests/conformance/COVERAGE.md");
+    let e2e_coverage = read_repo_file("scripts/e2e/COVERAGE.md");
+
+    assert_contains_all(
+        "per-view dashboard pages",
+        &app,
+        &[
+            "function OverviewPage",
+            "function SessionsPage",
+            "function HealthPage",
+            "function CapacityPage",
+            "function AuditPage",
+            "function DoctorPage",
+            "function ExplorerPage",
+            "function ReviewsPage",
+            "function WorkbenchPage",
+            "SessionLevelControlPanel",
+            "ExplorerGlobalSearchPanel",
+            "WorkbenchIdePanel",
+            "AuditProofBundlePanel",
+            "ClientCredentialTable",
+            "SourceHistoryPanel",
+            "SchemaDiffPanel",
+            "BigBoardSurface capabilities={capabilities}",
+        ],
+    );
+    assert_contains_all(
+        "per-view dashboard client routes",
+        &client,
+        &[
+            "fetchDashboardSession",
+            "fetchOperatorHealth",
+            "fetchOperatorMetrics",
+            "fetchActiveLanes",
+            "setSessionLevel",
+            "fetchAuditTail",
+            "fetchExplorerObjects",
+            "fetchExplorerSourceSearch",
+            "runWorkbenchPlsqlTool",
+            "fetchClientCredentials",
+            "fetchSourceHistory",
+            "previewSchemaDiff",
+        ],
+    );
+    assert_contains_all(
+        "per-view operator backing tests",
+        &http,
+        &[
+            "operator_v1_serves_schema_health_events_and_action_mapping",
+            "operator_session_set_level_is_lane_bound_preview_apply_drop",
+            "operator_execute_allows_read_only_metadata_tools_for_explorer",
+            "audit_tail_filters_exports_redacted_proof_bundle",
+            "operator_client_credentials_screen_lists_rotates_revokes_without_token_leak",
+            "source_history_snapshots_prior_source_and_revert_drafts_review_proposal",
+            "schema_diff_export_is_redacted_and_review_gated",
+        ],
+    );
+    assert_contains_all(
+        "per-view dashboard e2e coverage",
+        &e2e_coverage,
+        &[
+            "Dashboard per-view acceptance",
+            "oraclemcp-epic-060-f4xo.8.25",
+            "read_only_dashboard_surface_contracts_are_registered",
+            "w9_read_only_health_stats_mirror_is_flag_gated",
+            "wd_search_global_explorer_uses_guarded_dictionary_tools",
+            "wd_ide_workbench_uses_static_plsql_tools",
+            "w8b_proof_bundle_is_redacted_and_exportable",
+            "w10_client_credentials_screen_is_redacted_and_isolated",
+            "wd_history_source_snapshots_and_revert_are_review_gated",
+            "wd_diff_schema_diff_exports_migration_through_reviews",
+            "skin_conformance_2d_fallback_a11y",
+        ],
+    );
+    assert_contains_all(
+        "dashboard conformance accounting",
+        &conformance,
+        &[
+            "| Dashboard B.8 | 10 | 0 | 10 | 10 | 0 | 100% |",
+            "Total tracked requirements: 76 MUST, 2 SHOULD, 78 tested.",
+        ],
+    );
+}
+
+#[test]
 fn skin_conformance_2d_fallback_a11y() {
     let app = read_repo_file("web/src/app/App.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");
@@ -887,6 +976,7 @@ fn b8_dashboard_acceptance_suite_is_accounted() {
             "DASHBOARD-B8-007",
             "DASHBOARD-B8-008",
             "DASHBOARD-B8-009",
+            "DASHBOARD-B8-010",
         ],
     );
     assert_contains_all(
@@ -897,10 +987,18 @@ fn b8_dashboard_acceptance_suite_is_accounted() {
             "oraclemcp-epic-060-f4xo.8.20",
             "W9 read-only health/stats mirror",
             "oraclemcp-epic-060-f4xo.8.11",
+            "WD-Search global database search",
+            "oraclemcp-epic-060-f4xo.8.17",
+            "WD-History source snapshots and revert",
+            "oraclemcp-epic-060-f4xo.8.18",
+            "WD-Diff schema diff + migration export",
+            "oraclemcp-epic-060-f4xo.8.21",
             "W8b proof bundle for gated actions",
             "oraclemcp-epic-060-f4xo.8.10",
             "W10 client-credentials dashboard",
             "oraclemcp-epic-060-f4xo.8.12",
+            "Dashboard per-view acceptance",
+            "oraclemcp-epic-060-f4xo.8.25",
         ],
     );
 }
