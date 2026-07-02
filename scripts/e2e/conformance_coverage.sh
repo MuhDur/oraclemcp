@@ -45,6 +45,7 @@ required=(
   scripts/e2e/live_oracle.sh
   scripts/e2e/load_soak.sh
   scripts/e2e/live_xe_headline.sh
+  scripts/e2e/clean_machine_e2e.sh
   scripts/e2e/COVERAGE.md
   scripts/e2e/PROVENANCE.md
   scripts/e2e/DISCREPANCIES.md
@@ -60,6 +61,7 @@ required=(
   crates/oraclemcp-core/tests/lane_state_machine.rs
   crates/oraclemcp-db/tests/multi_lane_live_xe.rs
   crates/oraclemcp/tests/live_xe_service_attach.rs
+  crates/oraclemcp/tests/clean_machine_e2e.rs
 )
 missing=0
 for path in "${required[@]}"; do
@@ -134,6 +136,12 @@ if ! grep -F "G6 live-XE headline" scripts/e2e/COVERAGE.md >/dev/null; then
 fi
 if ! grep -F "scripts/e2e/live_xe_headline.sh" scripts/e2e/PROVENANCE.md >/dev/null; then
   e2e_finish_fail "PROVENANCE.md must document the G6 live-XE headline command"
+fi
+if ! grep -F "H5 clean-machine e2e" scripts/e2e/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "COVERAGE.md must account for the H5 clean-machine e2e harness"
+fi
+if ! grep -F "scripts/e2e/clean_machine_e2e.sh" scripts/e2e/PROVENANCE.md >/dev/null; then
+  e2e_finish_fail "PROVENANCE.md must document the H5 clean-machine command"
 fi
 if ! grep -F "WP-G hardening acceptance suite" scripts/e2e/COVERAGE.md >/dev/null; then
   e2e_finish_fail "COVERAGE.md must account for the WP-G hardening acceptance suite"

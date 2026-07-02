@@ -98,8 +98,92 @@ fn e2e_orchestrator_aggregates_dry_run_scenarios() {
                 && event["outcome"] == "pass"
                 && event["message"]
                     .as_str()
-                    .is_some_and(|message| message.contains("pass=7 fail=0 skipped=3 total=10"))),
+                    .is_some_and(|message| message.contains("pass=7 fail=0 skipped=4 total=11"))),
         "missing passing orchestrator summary: {events:?}"
+    );
+}
+
+#[test]
+fn clean_machine_e2e_dry_run_schedules_h5_contract() {
+    let root = repo_root();
+    let output = Command::new("bash")
+        .arg(root.join("scripts/e2e/clean_machine_e2e.sh"))
+        .args(["--log", "--dry-run"])
+        .current_dir(&root)
+        .env("ORACLEMCP_E2E_SEED", "4242")
+        .env(
+            "ORACLEMCP_E2E_ARTIFACT_DIR",
+            root.join("target/e2e-contract"),
+        )
+        .env("ORACLEMCP_CLEAN_MACHINE_E2E", "1")
+        .env("ORACLEMCP_CLEAN_MACHINE_BOOT_ID_BEFORE", "before-reboot")
+        .env("ORACLEMCP_CLEAN_MACHINE_BOOT_ID_AFTER", "after-reboot")
+        .env("ORACLEMCP_CLEAN_MACHINE_URL", "http://127.0.0.1:7070")
+        .env("ORACLEMCP_CLEAN_MACHINE_PROFILE_A", "xe_test_a")
+        .env("ORACLEMCP_CLEAN_MACHINE_PROFILE_B", "xe_test_b")
+        .env("ORACLEMCP_CLEAN_MACHINE_ALLOW_NO_AUTH", "1")
+        .output()
+        .expect("run clean_machine_e2e dry-run");
+    assert!(
+        output.status.success(),
+        "clean_machine_e2e dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = json_lines(&output.stderr);
+    let command_messages = events
+        .iter()
+        .filter(|event| event["event"] == "command_start")
+        .filter_map(|event| event["message"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        command_messages.iter().any(|message| message.contains(
+            "cargo test -p oraclemcp --features live-xe --test clean_machine_e2e -- --ignored --nocapture"
+        )),
+        "clean-machine dry-run did not schedule the ignored H5 Rust proof: {command_messages:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "pass"
+                && event["scenario"] == "clean_machine_e2e"),
+        "missing passing clean-machine completion: {events:?}"
+    );
+}
+
+#[test]
+fn clean_machine_e2e_refuses_production_markers() {
+    let root = repo_root();
+    let output = Command::new("bash")
+        .arg(root.join("scripts/e2e/clean_machine_e2e.sh"))
+        .args(["--log", "--dry-run"])
+        .current_dir(&root)
+        .env("ORACLEMCP_E2E_SEED", "4242")
+        .env(
+            "ORACLEMCP_E2E_ARTIFACT_DIR",
+            root.join("target/e2e-contract"),
+        )
+        .env("ORACLEMCP_CLEAN_MACHINE_E2E", "1")
+        .env("ORACLEMCP_CLEAN_MACHINE_BOOT_ID_BEFORE", "before-reboot")
+        .env("ORACLEMCP_CLEAN_MACHINE_BOOT_ID_AFTER", "after-reboot")
+        .env("ORACLEMCP_CLEAN_MACHINE_URL", "http://127.0.0.1:7070")
+        .env("ORACLEMCP_CLEAN_MACHINE_PROFILE_A", "prod_ro")
+        .env("ORACLEMCP_CLEAN_MACHINE_PROFILE_B", "xe_test_b")
+        .env("ORACLEMCP_CLEAN_MACHINE_ALLOW_NO_AUTH", "1")
+        .output()
+        .expect("run clean_machine_e2e production-marker check");
+    assert!(
+        !output.status.success(),
+        "production-looking clean-machine profile must be refused"
+    );
+    let events = json_lines(&output.stderr);
+    assert!(
+        events.iter().any(|event| event["outcome"] == "fail"
+            && event["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("production-looking"))),
+        "missing production-marker refusal event: {events:?}"
     );
 }
 
@@ -129,6 +213,7 @@ fn release_acceptance_suite_schedules_hci_component_gates() {
         "scripts/release_sbom_check.sh --source",
         "scripts/installer_lint_and_offline_smoke.sh --log",
         "scripts/e2e/release_rollback_dry_run.sh --log --dry-run",
+        "scripts/e2e/clean_machine_e2e.sh --log --dry-run",
         "scripts/oraclemcp_feature_powerset.sh",
         "scripts/oraclemcp_arch_fitness_lint.sh",
     ] {
@@ -151,7 +236,8 @@ fn release_acceptance_suite_schedules_hci_component_gates() {
         events.iter().any(|event| event["event"] == "suite_summary"
             && event["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("installer-jsonl"))),
+                .is_some_and(|message| message.contains("installer-jsonl")
+                    && message.contains("clean-machine"))),
         "release acceptance summary must account for installer JSON-line logs: {events:?}"
     );
 }
