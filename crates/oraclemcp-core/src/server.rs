@@ -1419,7 +1419,12 @@ impl OracleMcpServer {
             "oracle_list_schemas",
             json!({ "name_like": like_prefix(prefix), "max_rows": COMPLETION_QUERY_ROWS }),
         )?;
-        Ok(completion_names_from(&value, "schemas", "SCHEMA_NAME", prefix))
+        Ok(completion_names_from(
+            &value,
+            "schemas",
+            "SCHEMA_NAME",
+            prefix,
+        ))
     }
 
     /// Complete object names via `oracle_search_objects` (names detail), scoped
@@ -1451,7 +1456,12 @@ impl OracleMcpServer {
             }
         }
         let value = self.dispatch_resource_tool(context, "oracle_search_objects", args)?;
-        Ok(completion_names_from(&value, "results", "object_name", prefix))
+        Ok(completion_names_from(
+            &value,
+            "results",
+            "object_name",
+            prefix,
+        ))
     }
 
     /// Complete profile names via `oracle_list_profiles` (E7). The dispatcher

@@ -20,7 +20,6 @@ use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::{Budget, CancelReason, Cx, Outcome};
 use oraclemcp_audit::{
     AuditCancel, AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor, DbEvidence,
-    sha256_hex,
 };
 use oraclemcp_auth::apply_oauth_scopes;
 use oraclemcp_config::{ConfigReloadPlan, OracleMcpConfig};
@@ -33,14 +32,13 @@ use oraclemcp_core::{
 };
 use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
-    DbError, DbmsOutput, ORACLE_CELL_STRUCTURED_CONTRACT_VERSION, OracleBackend, OracleBind,
-    OracleConnection, OracleConnectionInfo, OracleMetadataCacheKey, OracleRow, QuarantineOutcome,
-    QueryCaps, SerializeOptions, StructuredDecodeCaps, compile_errors, compile_object_statements,
-    describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
-    execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl, get_source,
-    get_sources_by_name, list_objects, list_schemas, plscope_identifiers, plscope_statements,
-    read_lob, read_query, read_query_named, sample_rows, search_objects, search_source,
-    serialize_row,
+    DbError, DbmsOutput, OracleBackend, OracleBind, OracleConnection, OracleConnectionInfo,
+    OracleRow, QuarantineOutcome, QueryCaps, SerializeOptions, StructuredDecodeCaps,
+    compile_errors, compile_object_statements, describe_columns, describe_constraints,
+    describe_index, describe_trigger, describe_view, execute_immediate_audit, explain_plan,
+    find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects, list_schemas,
+    plscope_identifiers, plscope_statements, read_lob, read_query, read_query_named, sample_rows,
+    search_objects, search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{
@@ -1145,6 +1143,9 @@ use audit_marker::with_audit_marker;
 
 mod read_only_backstop;
 use read_only_backstop::ReadOnlyBackstop;
+
+mod metadata_cache_key;
+use metadata_cache_key::metadata_cache_key_json;
 
 /// Map a JSON value to an [`OracleBind`]. Agent argument values are always
 /// bound, never interpolated. Unsupported JSON (arrays/objects) is an
@@ -4844,47 +4845,6 @@ fn connection_info_json(
             })
         }
     }
-}
-
-fn metadata_cache_key_json(active_profile: Option<&str>, info: &OracleConnectionInfo) -> Value {
-    let visible_schema = info.current_schema.as_deref().unwrap_or("*");
-    let key = OracleMetadataCacheKey::with_serialization_contract_version(
-        metadata_db_fingerprint(info),
-        active_profile.unwrap_or("<unprofiled>"),
-        metadata_user_fingerprint(info),
-        metadata_schema_fingerprint(visible_schema),
-        ORACLE_CELL_STRUCTURED_CONTRACT_VERSION,
-    );
-    serde_json::to_value(key).unwrap_or(Value::Null)
-}
-
-fn metadata_db_fingerprint(info: &OracleConnectionInfo) -> String {
-    let material = json!({
-        "backend": &info.backend,
-        "db_unique_name": &info.db_unique_name,
-        "service_name": &info.service_name,
-        "instance_name": &info.instance_name,
-        "server_version": &info.server_version,
-    });
-    format!("db-sha256:{}", sha256_hex(&stable_json_bytes(&material)))
-}
-
-fn metadata_user_fingerprint(info: &OracleConnectionInfo) -> String {
-    let material = json!({
-        "current_schema": &info.current_schema,
-        "session_user": &info.session_user,
-        "current_user": &info.current_user,
-        "proxy_user": &info.proxy_user,
-    });
-    format!("user-sha256:{}", sha256_hex(&stable_json_bytes(&material)))
-}
-
-fn metadata_schema_fingerprint(schema: &str) -> String {
-    format!("schema-sha256:{}", sha256_hex(schema.as_bytes()))
-}
-
-fn stable_json_bytes(value: &Value) -> Vec<u8> {
-    serde_json::to_vec(value).unwrap_or_else(|_| b"<json-serialization-failed>".to_vec())
 }
 
 async fn connection_strategy_json(cx: &Cx, conn: &dyn OracleConnection) -> Value {
