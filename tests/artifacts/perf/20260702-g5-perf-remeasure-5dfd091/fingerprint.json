@@ -1,0 +1,58 @@
+{
+  "run_id": "20260702-g5-perf-remeasure-5dfd091",
+  "captured_at_utc": "2026-07-02T00:19:09Z",
+  "git_sha": "5dfd09192e2dce3cc90dbcbb72e2d9eb7862eee1",
+  "git_dirty": false,
+  "hardware": {
+    "cpu_model": "AMD EPYC 7713 64-Core Processor",
+    "cpu_cores_per_socket": 64,
+    "cpu_sockets": 1,
+    "cpu_threads_total": 128,
+    "ram_total": "247 GiB",
+    "swap_total": "8.0 GiB"
+  },
+  "storage": {
+    "device": "/dev/mapper/ubuntu--vg-ubuntu--lv",
+    "mount_point": "/home/durakovic/projects/oraclemcp",
+    "filesystem": "ext4",
+    "mount_options": "rw,relatime"
+  },
+  "os": {
+    "distribution": "Ubuntu 26.04 LTS",
+    "kernel": "7.0.0-27-generic"
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0-nightly (a343accce 2026-05-08)",
+    "rustc": "rustc 1.97.0-nightly (4b0c9d76a 2026-05-10)"
+  },
+  "database": {
+    "image": "gvenzl/oracle-free:23-slim",
+    "container": "plsql-intelligence-xe",
+    "connect_string": "localhost:1521/FREEPDB1",
+    "image_id": "sha256:0dd844cb53093d8bbfb9799e6ae61f904bd8e516033115d7c72f50958cd6c0e7"
+  },
+  "build_profile": {
+    "name": "test",
+    "opt_level": "debug",
+    "target_dir": "/home/durakovic/.cache/oraclemcp-gap2-target"
+  },
+  "tuning_applied": {
+    "governor": "schedutil",
+    "boost": "1",
+    "smt_active": "1",
+    "perf_event_paranoid": "4",
+    "kptr_restrict": "1",
+    "nmi_watchdog": "1",
+    "transparent_hugepage": "madvise"
+  },
+  "workload_isolation": {
+    "taskset": null,
+    "cgroup": null,
+    "other_running_oracle_containers": [
+      "rust-oracledb-051-live-1528",
+      "rust-oracledb-lane-1523"
+    ],
+    "notes": "No kernel or CPU tuning applied; shared developer host."
+  },
+  "secret_handling": "ORACLE_PASSWORD was read from Docker metadata into a shell variable for the test process only; it was not echoed or committed."
+}

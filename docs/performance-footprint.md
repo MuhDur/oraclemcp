@@ -2,8 +2,9 @@
 
 This file summarizes local measurement evidence for the thin-native
 `oraclemcp` line. It is not a marketing benchmark: numbers are scoped to the
-host and commands recorded in
-`tests/artifacts/perf/20260615T182242Z-7dd4a60/`.
+host and commands recorded under `tests/artifacts/perf/`. The latest
+post-lane-work re-measurement is
+`tests/artifacts/perf/20260702-g5-perf-remeasure-5dfd091/`.
 
 The [Net load + shutdown soak](#net-load--shutdown-soak-b3) section below is the
 B3 release-gate evidence: an OFFLINE deterministic harness asserts the
@@ -216,15 +217,16 @@ passed.
 
 | Metric | Value | Captured by |
 |---|---|---|
-| Run id | `20260623-v0.4.0-oracledb0.5.0-473f9a8` (dev-host validation) | `live-xe` |
-| Host | AMD EPYC 7713, Ubuntu 25.10, Linux 6.17.0, governor `schedutil` (no tuning) | `live-xe` |
+| Run id | `20260702-g5-perf-remeasure-5dfd091` (dev-host validation) | `live-xe` |
+| Host | AMD EPYC 7713, Ubuntu 26.04 LTS, Linux 7.0.0, governor `schedutil` (no tuning) | `live-xe` |
 | Database | Oracle 23ai FREE (`gvenzl/oracle-free:23-slim`, FREEPDB1), local container | `live-xe` |
 | Clients (N) | 8 | `live-xe` |
 | Soak duration | 200 iterations/client | `live-xe` |
 | Total operations | 1,600 | `live-xe` |
-| load/soak op p50 | 0.905 ms (well under the ≤ 25 ms `oracle_query` threshold) | `live-xe` |
-| load/soak op p95 | 2.984 ms (well under ≤ 75 ms) | `live-xe` |
-| load/soak op p99 | 3.410 ms (well under ≤ 150 ms) | `live-xe` |
+| Throughput | ~2,254 ops/sec (test-harness wall), ~1,720 ops/sec including Cargo wrapper | `live-xe` |
+| load/soak op p50 | 0.898 ms (well under the ≤ 25 ms `oracle_query` threshold) | `live-xe` |
+| load/soak op p95 | 3.525 ms (well under ≤ 75 ms) | `live-xe` |
+| load/soak op p99 | 5.248 ms (well under ≤ 150 ms) | `live-xe` |
 | Leaked sessions | 0 | `live-xe` |
 | Pool accounting balanced | yes (every per-client `PoolMetrics::is_balanced`) | `live-xe` |
 | Clean drain | yes (offline soak asserts force-rollback + zero held leases) | `live-xe` |
@@ -243,16 +245,16 @@ ORACLEMCP_PHASE0_PROBES_PER_LANE=4 \
 cargo test -p oraclemcp-core --test phase0_capacity -- --ignored --nocapture
 ```
 
-The 2026-06-30 dev-host run is recorded in
-`tests/artifacts/perf/20260630-cx-i6-phase0-capacity/RESULTS.md`. It ran against
-a local Oracle FREE 23ai container and printed only redaction-safe JSON
+The latest 2026-07-02 G5 dev-host re-measurement is recorded in
+`tests/artifacts/perf/20260702-g5-perf-remeasure-5dfd091/RESULTS.md`. It ran
+against a local Oracle FREE 23ai container and printed only redaction-safe JSON
 measurement data.
 
 | Metric | Value |
 |---|---:|
 | Lane-owned Oracle sessions opened | 16 |
 | Probe samples | 64 |
-| p50 / p95 / p99 / max | 1203 us / 1427 us / 1464 us / 2090 us |
+| p50 / p95 / p99 / max | 1173 us / 1613 us / 1723 us / 1729 us |
 | Process threads before -> warmed | 2 -> 34 |
 | Observed process-thread delta | 32 = 2.00 per lane |
 | File descriptors before -> warmed | 4 -> 68 |
