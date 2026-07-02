@@ -119,15 +119,29 @@ connection, operating level, grants, cancellation, and audit context. Intentiona
 `--allow-no-auth` HTTP development uses one anonymous lane; stdio remains the
 single local client path.
 
-Other release channels are available or generated from the same signed archive
-matrix:
+Other release channels come from the same signed archive matrix. The commands
+below are safe to copy-paste when the channel is available; registry-backed
+channels such as Homebrew, winget, and npm can lag the GitHub release tag.
 
 ```sh
-npx oraclemcp serve --allow-no-auth     # verifies the release archive before run
 cargo binstall oraclemcp                # uses the GitHub release archive metadata
 brew install MuhDur/oraclemcp/oraclemcp # tap formula is generated at release time
 winget install MuhDur.oraclemcp         # community submission may lag the tag
 docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.0
+```
+
+The npm wrapper is a verify-before-run package with no `postinstall` mutation,
+but `npx` only works after the npm registry entry exists. Check the channel
+first:
+
+```sh
+npm view oraclemcp@0.6.0 version
+```
+
+When that prints `0.6.0`, this command is copy-pasteable:
+
+```sh
+npx oraclemcp serve --allow-no-auth
 ```
 
 ## Why oraclemcp
