@@ -38,7 +38,10 @@ fn classifier_throughput_baseline() {
     // harness can be driven under callgrind with a small workload; defaults
     // are unchanged when the env vars are unset.
     let env_u32 = |k: &str, d: u32| {
-        std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d)
+        std::env::var(k)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(d)
     };
     let warmup = env_u32("PERF_WARMUP", 1_000);
     let iters = env_u32("PERF_ITERS", 20_000);
