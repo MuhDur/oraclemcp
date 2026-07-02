@@ -11,6 +11,15 @@ on:
         description: "Git ref to package; defaults to v<version>"
         required: false
         type: string
+      auth_mode:
+        description: "npm auth mode: auto uses NPM_TOKEN when present; oidc ignores NPM_TOKEN for trusted publishing"
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - token
+          - oidc
 
 permissions:
   contents: read
@@ -61,7 +70,43 @@ jobs:
           if [[ "$version" == *-* ]]; then
             dist_tag="next"
           fi
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            unset NODE_AUTH_TOKEN NPM_CONFIG_USERCONFIG
+          auth_mode="${{ inputs.auth_mode || 'auto' }}"
+          case "$auth_mode" in
+            auto)
+              if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+                echo "npm publish auth: token from npm environment NPM_TOKEN"
+                npm whoami --registry=https://registry.npmjs.org/ >/dev/null
+              else
+                echo "npm publish auth: trusted publishing/OIDC because NPM_TOKEN is empty"
+                unset NODE_AUTH_TOKEN NPM_CONFIG_USERCONFIG
+              fi
+              ;;
+            token)
+              if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+                echo "::error::auth_mode=token requires the npm environment NPM_TOKEN secret" >&2
+                exit 1
+              fi
+              echo "npm publish auth: token from npm environment NPM_TOKEN"
+              npm whoami --registry=https://registry.npmjs.org/ >/dev/null
+              ;;
+            oidc)
+              echo "npm publish auth: trusted publishing/OIDC; npm must trust MuhDur/oraclemcp, workflow publish-npm.yml, environment npm"
+              unset NODE_AUTH_TOKEN NPM_CONFIG_USERCONFIG
+              ;;
+            *)
+              echo "::error::unsupported auth_mode '$auth_mode'" >&2
+              exit 1
+              ;;
+          esac
+
+          set +e
+          publish_output="$(npm publish ./npm/oraclemcp --provenance --access public --tag "$dist_tag" 2>&1)"
+          publish_status=$?
+          set -e
+          printf '%s\n' "$publish_output"
+          if [ "$publish_status" -ne 0 ]; then
+            if printf '%s\n' "$publish_output" | grep -q 'E403'; then
+              echo "::error::npm publish returned E403. For auth_mode=token, use an npm granular token with read/write access to the package or scope and 2FA bypass where required. For auth_mode=oidc, configure npm trusted publishing for owner MuhDur, repository oraclemcp, workflow publish-npm.yml, environment npm, allowed action npm publish." >&2
+            fi
+            exit "$publish_status"
           fi
-          npm publish ./npm/oraclemcp --provenance --access public --tag "$dist_tag"

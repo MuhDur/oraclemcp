@@ -564,6 +564,44 @@ fn npx_verifies_binary_no_postinstall_side_effects() {
         "npm publish workflow must use an npm CLI new enough for OIDC publishing"
     );
     assert!(
+        npm_workflow.contains("NODE_VERSION: 22.17.0"),
+        "npm publish workflow must use a Node version new enough for trusted publishing"
+    );
+    assert!(
+        npm_workflow.contains("id-token: write"),
+        "npm publish workflow must request OIDC id-token permission"
+    );
+    assert!(
+        npm_workflow.contains("auth_mode:"),
+        "manual npm publish workflow must expose explicit auth mode selection"
+    );
+    for mode in ["auto", "token", "oidc"] {
+        assert!(
+            npm_workflow.contains(&format!("- {mode}")),
+            "manual npm publish workflow must support auth_mode={mode}"
+        );
+    }
+    assert!(
+        npm_workflow.contains("auth_mode=token requires the npm environment NPM_TOKEN secret"),
+        "token mode must fail before publish when the npm token is absent"
+    );
+    assert!(
+        npm_workflow.contains("trusted publishing/OIDC; npm must trust MuhDur/oraclemcp, workflow publish-npm.yml, environment npm"),
+        "OIDC mode must name the exact trusted-publisher tuple operators need to configure"
+    );
+    assert!(
+        npm_workflow.contains("unset NODE_AUTH_TOKEN NPM_CONFIG_USERCONFIG"),
+        "OIDC mode must ignore a present NPM_TOKEN and setup-node npmrc"
+    );
+    assert!(
+        npm_workflow.contains("npm whoami --registry=https://registry.npmjs.org/"),
+        "token mode must preflight token authentication without treating whoami as an OIDC proof"
+    );
+    assert!(
+        npm_workflow.contains("npm publish returned E403"),
+        "npm publish workflow must explain npm permission failures"
+    );
+    assert!(
         npm_workflow.contains("unset NODE_AUTH_TOKEN NPM_CONFIG_USERCONFIG"),
         "npm publish workflow must fall back to OIDC when NPM_TOKEN is absent"
     );
