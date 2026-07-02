@@ -455,7 +455,7 @@ if command -v script >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
     "$PTY_PREFIX"
   pty_output="$(
     printf 'y\nn\nn\n' | env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
-      SHELL="/bin/bash" PATH="/usr/bin:/bin" \
+      CI= SHELL="/bin/bash" PATH="/usr/bin:/bin" \
       timeout 20s script -qefc "$pty_command" /dev/null 2>&1
   )"
   contains_unwrapped_fragments "$pty_output" "PATH prompt" \
@@ -474,7 +474,7 @@ if command -v script >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
     "$PTY_DEFAULT_PREFIX"
   pty_default_output="$(
     printf '\n\n\n\n' | env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
-      SHELL="/bin/bash" PATH="/usr/bin:/bin" \
+      CI= SHELL="/bin/bash" PATH="/usr/bin:/bin" \
       timeout 20s script -qefc "$pty_command" /dev/null 2>&1
   )"
   contains_unwrapped_fragments "$pty_default_output" "PATH prompt" \
