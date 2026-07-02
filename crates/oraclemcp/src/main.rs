@@ -339,7 +339,7 @@ struct ServiceInstallCliArgs {
 
 #[derive(Args, Debug)]
 struct SelfUpdateCliArgs {
-    /// Release version to install, e.g. 0.6.2 or v0.6.2.
+    /// Release version to install, e.g. 0.6.3 or v0.6.3.
     #[arg(long, default_value = "latest")]
     version: String,
     /// Verification posture forwarded to the platform installer.
@@ -6127,7 +6127,7 @@ mod tests {
             "self-update",
             "--dry-run",
             "--version",
-            "0.6.2",
+            "0.6.3",
             "--verify",
             "require",
             "--no-service",
@@ -6142,7 +6142,7 @@ mod tests {
                 dry_run: true,
                 no_service: true,
                 ..
-            })) if version == "0.6.2" && verify.as_deref() == Some("require")
+            })) if version == "0.6.3" && verify.as_deref() == Some("require")
         ));
 
         let sign = Cli::try_parse_from([

@@ -193,6 +193,7 @@ function Test-BinDirOnPath {
                 return $true
             }
         } catch {
+            Write-Verbose ("oraclemcp installer: ignoring invalid PATH segment '{0}': {1}" -f $segment, $_.Exception.Message)
         }
     }
     return $false
@@ -740,7 +741,7 @@ function Invoke-OptionalClientSnippet {
     }
 }
 
-function Write-NextSteps {
+function Write-NextStep {
     $oraclemcp = Join-Path -Path $BinDir -ChildPath "oraclemcp.exe"
     Write-Output "oraclemcp installer: next steps"
     Write-Output "  1. Run doctor: $oraclemcp --json doctor"
@@ -785,7 +786,7 @@ function Invoke-Main {
     Invoke-OptionalDoctor
     Invoke-OptionalClientSnippet
     Invoke-ServiceInstall
-    Write-NextSteps
+    Write-NextStep
     Write-Output "oraclemcp installer: installed $(Join-Path -Path $BinDir -ChildPath "oraclemcp.exe") and $(Join-Path -Path $BinDir -ChildPath "om.exe")"
 }
 
