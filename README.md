@@ -25,7 +25,7 @@ script can print the service/client mutation plan with `--dry-run` before it
 changes the host.
 Re-running the same verified archive is a no-op for identical installed files;
 use `--force` only when intentionally replacing different local content.
-The hosted installer URLs below target release `0.6.0` once the release
+The hosted installer URLs below target release `0.6.1` once the release
 artifacts are published; change only the version number when installing another
 release.
 
@@ -36,7 +36,7 @@ touching the service manager. The normal command downloads, verifies, and
 installs into `$HOME/.local` unless you pass `--prefix`.
 
 The install, uninstall, and service commands in this section are literal
-copy-paste commands for release `0.6.0` after the `v0.6.0` artifacts exist.
+copy-paste commands for release `0.6.1` after the `v0.6.1` artifacts exist.
 The hosted script fetches below include a cache buster so stale CDN/proxy copies
 do not hide installer updates.
 Later examples that contain `...`, `<pw>`, `<profile>`, or placeholder env
@@ -44,18 +44,18 @@ values are templates: replace those placeholders before running them.
 
 ```sh
 curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" \
-  | bash -s -- --dry-run --version 0.6.0
+  | bash -s -- --dry-run --version 0.6.1
 
 curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" \
-  | bash -s -- --version 0.6.0
+  | bash -s -- --version 0.6.1
 ```
 
 On Windows, download and run the PowerShell installer:
 
 ```powershell
 iwr -UseBasicParsing https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.ps1 -OutFile install.ps1
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -Version 0.6.0
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.6.0
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -Version 0.6.1
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.6.1
 ```
 
 For air-gapped hosts, download the release archive plus its `.sha256`, `.sig`,
@@ -64,12 +64,12 @@ of the installer:
 
 ```sh
 bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz \
-  --version 0.6.0
+  --version 0.6.1
 ```
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 `
-  -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.6.0
+  -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.6.1
 ```
 
 The release installer does not silently fall back from a missing release archive
@@ -127,7 +127,7 @@ channels such as Homebrew, winget, and npm can lag the GitHub release tag.
 cargo binstall oraclemcp                # uses the GitHub release archive metadata
 brew install MuhDur/oraclemcp/oraclemcp # tap formula is generated at release time
 winget install MuhDur.oraclemcp         # community submission may lag the tag
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.0
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.1
 ```
 
 The npm wrapper is a verify-before-run package with no `postinstall` mutation,
@@ -135,10 +135,10 @@ but `npx` only works after the npm registry entry exists. Check the channel
 first:
 
 ```sh
-npm view oraclemcp@0.6.0 version
+npm view oraclemcp@0.6.1 version
 ```
 
-When that prints `0.6.0`, this command is copy-pasteable:
+When that prints `0.6.1`, this command is copy-pasteable:
 
 ```sh
 npx oraclemcp serve --allow-no-auth
@@ -214,9 +214,9 @@ oraclemcp --json setup --write --profile db_ro
 docker run -i --rm \
   -v "$HOME/.config/oraclemcp:/root/.config/oraclemcp:ro" \
   -e ORACLE_APP_PASSWORD \
-  ghcr.io/muhdur/oraclemcp:0.6.0          # MCP over stdio, against the configured profile
+  ghcr.io/muhdur/oraclemcp:0.6.1          # MCP over stdio, against the configured profile
 
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.0   # tool surface only (no DB)
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.1   # tool surface only (no DB)
 ```
 
 An optional PL/SQL intelligence image is available from the manual Docker
@@ -225,8 +225,8 @@ it can start without a database connection and advertises the offline
 `oracle_plsql_*` tools immediately. Live PL/SQL tools still require a profile.
 
 ```sh
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.0-plsql-intelligence --json info
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.0-plsql-intelligence capabilities
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.1-plsql-intelligence --json info
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.1-plsql-intelligence capabilities
 ```
 
 Local feature-image builds resolve the PL/SQL engine crates from crates.io:

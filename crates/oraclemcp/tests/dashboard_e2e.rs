@@ -200,7 +200,7 @@ fn read_only_dashboard_surface_contracts_are_registered() {
 
     assert!(
         skin.contains("defaultBigBoard: \"board2d\""),
-        "0.6.0 dashboard must default to the 2D board renderer"
+        "dashboard must default to the 2D board renderer"
     );
     assert!(
         skin.contains("board2d:") && skin.contains("requiresWebGl: false"),

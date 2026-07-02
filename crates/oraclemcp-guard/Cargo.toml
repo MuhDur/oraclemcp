@@ -1,6 +1,6 @@
 [package]
 name = "oraclemcp-guard"
-version = "0.6.0"
+version = "0.6.1"
 description = "Fail-closed statement classifier, operating levels, policy and approval tokens for oraclemcp (Apache-2.0 OR MIT)"
 edition.workspace = true
 license.workspace = true
@@ -10,8 +10,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-oraclemcp-error = { path = "../oraclemcp-error", version = "0.6.0" }
-oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.6.0" }
+oraclemcp-error = { path = "../oraclemcp-error", version = "0.6.1" }
+oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.6.1" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

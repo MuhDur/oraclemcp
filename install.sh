@@ -3,10 +3,10 @@
 # oraclemcp installer
 #
 # Dry-run preview with a cache-busted script fetch:
-#   curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --dry-run --version 0.6.0
+#   curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --dry-run --version 0.6.1
 #
 # Normal verified install with a cache-busted script fetch:
-#   curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --version 0.6.0
+#   curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --version 0.6.1
 #
 # Install oraclemcp from a verified release archive, or from source when
 # explicitly requested. Service-manager mutation is opt-in only.
@@ -66,7 +66,7 @@ transport integrity, verifies cosign blob authenticity, verifies the cosign
 blob attestation, and does not install a service.
 
 Options:
-  --version <version>       Release version, e.g. 0.6.0 or v0.6.0 (default: latest)
+  --version <version>       Release version, e.g. 0.6.1 or v0.6.1 (default: latest)
   --target <triple>         Override detected target triple
   --prefix <dir>            Install prefix (default: $HOME/.local)
   --bin-dir <dir>           Binary directory (default: <prefix>/bin)

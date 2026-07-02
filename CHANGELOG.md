@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-07-02
+
+### Changed
+
+- Cut the interactive dashboard release line: governed Workbench, full dashboard
+  views, plsql-intelligence IDE wiring, global search, version history, and the
+  W8b proof bundle are release-gated through the B.8 dashboard acceptance suite.
+- The tag release workflow now validates the npm wrapper package without making
+  core signed releases fail on externally gated npm registry credentials. Actual
+  npm publication remains in the manual `publish-npm.yml` workflow until npm
+  package ownership or trusted publishing is configured.
+
 ## [0.6.0] — 2026-07-02
 
 ### Upgrade Notes
@@ -289,6 +301,7 @@ pure Rust. (Not affiliated with Oracle Corporation.)
   closed on desynchronized multi-statement input. It carries a differential
   adversarial corpus (run in CI) and a `cargo-fuzz` target.
 
+[0.6.1]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.6.1
 [0.6.0]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.6.0
 [0.4.1]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.4.1
 [0.4.0]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.4.0
