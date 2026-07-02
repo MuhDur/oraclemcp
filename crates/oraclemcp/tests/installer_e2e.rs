@@ -160,8 +160,11 @@ fn unix_installer_reinstall_is_idempotent_for_identical_files() {
         "mv -f \"$tmp_dest\" \"$dest\"",
         "path_export_line()",
         "bin_dir_on_path()",
+        "prompt_yes_no()",
         "print_next_steps()",
-        "Add %s to PATH in %s? [y/N]",
+        "Add $BIN_DIR to PATH in $rc_file?",
+        "Run oraclemcp doctor now?",
+        "Print an MCP client wiring snippet now?",
         "oraclemcp installer: next steps",
     ] {
         assert!(

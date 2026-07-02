@@ -96,8 +96,9 @@ Options:
   --dry-run                 Print every file/unit/command that would be touched
   -h, --help                Show this help
 
-The installer never mutates the service manager unless --service is supplied or
-an interactive user answers yes to the service prompt.
+The installer never mutates the service manager unless --service is supplied,
+--yes answers the guided service prompt, or an interactive user answers yes to
+the service prompt. Use --no-service to suppress the service prompt.
 Uninstall is also explicit: use --uninstall --dry-run to inspect, then
 --uninstall --yes to remove installed files. Add --service to remove the local
 service unit through oraclemcp service uninstall.
@@ -445,6 +446,44 @@ readyz_url() {
   esac
 }
 
+interactive_install() {
+  [ -t 0 ] && [ -t 1 ] && [ -z "${CI:-}" ]
+}
+
+prompt_yes_no() {
+  local prompt="$1" default_yes="$2" suffix answer
+  if [ "$YES" -eq 1 ]; then
+    return 0
+  fi
+  interactive_install || return 1
+  if have gum && [ -z "${NO_COLOR:-}" ]; then
+    if gum confirm --default="$default_yes" "$prompt"; then
+      return 0
+    fi
+    return 1
+  fi
+  if [ "$default_yes" = "true" ]; then
+    suffix="[Y/n]"
+  else
+    suffix="[y/N]"
+  fi
+  printf '%s %s ' "$prompt" "$suffix" >&2
+  if ! read -r answer; then
+    return 1
+  fi
+  case "$answer" in
+    "")
+      [ "$default_yes" = "true" ]
+      ;;
+    y | Y | yes | YES)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 shell_name() {
   local shell_path="${SHELL:-}"
   if [ -z "$shell_path" ] && have ps; then
@@ -524,22 +563,13 @@ append_path_to_rc() {
 }
 
 maybe_prompt_path_append() {
-  local rc_file="$1" line="$2" answer
+  local rc_file="$1" line="$2"
   [ -n "${HOME:-}" ] || return 0
-  [ -t 0 ] && [ -t 1 ] || return 0
-  printf 'Add %s to PATH in %s? [y/N] ' "$BIN_DIR" "$rc_file" >&2
-  if ! read -r answer; then
+  if prompt_yes_no "Add $BIN_DIR to PATH in $rc_file?" false; then
+    append_path_to_rc "$rc_file" "$line"
+  else
     printf 'oraclemcp installer: PATH update skipped\n' >&2
-    return 0
   fi
-  case "$answer" in
-    y | Y | yes | YES)
-      append_path_to_rc "$rc_file" "$line"
-      ;;
-    *)
-      printf 'oraclemcp installer: PATH update skipped\n' >&2
-      ;;
-  esac
 }
 
 print_path_guidance() {
@@ -569,6 +599,46 @@ print_next_steps() {
   printf '  1. Run diagnostics: %s --json doctor\n' "$cmd" >&2
   printf '  2. Write a starter profile: %s --json setup --write --profile db_ro\n' "$cmd" >&2
   printf '  3. Generate MCP client snippets: %s --json setup --profile db_ro\n' "$cmd" >&2
+}
+
+maybe_run_doctor() {
+  if ! interactive_install && [ "$YES" -ne 1 ]; then
+    return 0
+  fi
+  if ! prompt_yes_no "Run oraclemcp doctor now?" true; then
+    printf 'oraclemcp installer: doctor skipped\n' >&2
+    return 0
+  fi
+  if ! "$BIN_DIR/oraclemcp" --json doctor >&2; then
+    printf 'oraclemcp installer: doctor reported issues; continue with the next-step commands above\n' >&2
+  fi
+}
+
+print_client_snippet() {
+  local cmd
+  cmd="$(installed_command)"
+  cat >&2 <<SNIPPET
+oraclemcp installer: MCP client snippet (stdio)
+{
+  "mcpServers": {
+    "oracle": {
+      "command": "$cmd",
+      "args": ["serve", "--profile", "db_ro"]
+    }
+  }
+}
+SNIPPET
+}
+
+maybe_print_client_snippet() {
+  if ! interactive_install && [ "$YES" -ne 1 ]; then
+    return 0
+  fi
+  if prompt_yes_no "Print an MCP client wiring snippet now?" true; then
+    print_client_snippet
+  else
+    printf 'oraclemcp installer: MCP client snippet skipped\n' >&2
+  fi
 }
 
 service_install_args() {
@@ -1155,21 +1225,14 @@ maybe_prompt_for_service() {
   if [ "$SERVICE_REQUESTED" -eq 1 ]; then
     return 0
   fi
-  if [ "$PROMPT_SERVICE" -eq 0 ] || [ ! -t 0 ] || [ ! -t 1 ]; then
+  if [ "$PROMPT_SERVICE" -eq 0 ]; then
     return 1
   fi
-  printf 'Install and start the local oraclemcp service now? [y/N] ' >&2
-  local answer
-  read -r answer
-  case "$answer" in
-    y | Y | yes | YES)
-      SERVICE_REQUESTED=1
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  if prompt_yes_no "Install and start the local oraclemcp service now?" false; then
+    SERVICE_REQUESTED=1
+    return 0
+  fi
+  return 1
 }
 
 install_service() {
@@ -1255,13 +1318,16 @@ main() {
   install_completions
   register_client
 
+  print_path_guidance
+  maybe_run_doctor
+  maybe_print_client_snippet
+
   if [ "$SERVICE_REQUESTED" -eq 1 ] || maybe_prompt_for_service; then
     install_service
   else
     printf 'oraclemcp installer: service install skipped\n' >&2
   fi
 
-  print_path_guidance
   print_next_steps
   printf 'oraclemcp installer: installed %s/oraclemcp and %s/om\n' "$BIN_DIR" "$BIN_DIR" >&2
 }

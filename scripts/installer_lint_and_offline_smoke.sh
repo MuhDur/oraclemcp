@@ -336,7 +336,7 @@ not_contains "$on_path_output" "export PATH="
 contains "$on_path_output" "oraclemcp --json doctor"
 contains "$on_path_output" "oraclemcp --json setup --write --profile db_ro"
 
-if command -v script >/dev/null 2>&1; then
+if command -v script >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
   PTY_PREFIX="$SMOKE_ROOT/pty-prefix-$$"
   pty_command=""
   printf -v pty_command 'bash install.sh --offline %q --version %q --target %q --prefix %q --verify checksum-only --no-completions --no-service' \
@@ -345,16 +345,34 @@ if command -v script >/dev/null 2>&1; then
     "x86_64-unknown-linux-musl" \
     "$PTY_PREFIX"
   pty_output="$(
-    printf 'y\n' | env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    printf 'y\nn\nn\n' | env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
       SHELL="/bin/bash" PATH="/usr/bin:/bin" \
-      script -qefc "$pty_command" /dev/null 2>&1
+      timeout 20s script -qefc "$pty_command" /dev/null 2>&1
   )"
   contains "$pty_output" "Add $PTY_PREFIX/bin to PATH in $HOME_DIR/.bashrc? [y/N]"
   contains "$pty_output" "oraclemcp installer: appended PATH line to $HOME_DIR/.bashrc"
   rc_text="$(cat "$HOME_DIR/.bashrc")"
   contains "$rc_text" "export PATH='$PTY_PREFIX/bin':\"\$PATH\""
+
+  PTY_DEFAULT_PREFIX="$SMOKE_ROOT/pty-default-prefix-$$"
+  printf -v pty_command 'bash install.sh --offline %q --version %q --target %q --prefix %q --verify checksum-only --no-completions' \
+    "$NO_COSIGN_ARCHIVE" \
+    "$SMOKE_VERSION" \
+    "x86_64-unknown-linux-musl" \
+    "$PTY_DEFAULT_PREFIX"
+  pty_default_output="$(
+    printf '\n\n\n\n' | env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+      SHELL="/bin/bash" PATH="/usr/bin:/bin" \
+      timeout 20s script -qefc "$pty_command" /dev/null 2>&1
+  )"
+  contains "$pty_default_output" "Add $PTY_DEFAULT_PREFIX/bin to PATH in $HOME_DIR/.bashrc? [y/N]"
+  contains "$pty_default_output" "Run oraclemcp doctor now? [Y/n]"
+  contains "$pty_default_output" "Print an MCP client wiring snippet now? [Y/n]"
+  contains "$pty_default_output" '"args": ["serve", "--profile", "db_ro"]'
+  contains "$pty_default_output" "Install and start the local oraclemcp service now? [y/N]"
+  contains "$pty_default_output" "oraclemcp installer: service install skipped"
 else
-  printf 'installer-smoke: script not installed; skipping TTY PATH prompt smoke\n' >&2
+  printf 'installer-smoke: script or timeout not installed; skipping TTY prompt smoke\n' >&2
 fi
 
 UPDATE_DIR="$SMOKE_ROOT/update"
