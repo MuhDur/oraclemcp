@@ -637,6 +637,7 @@ Privileged actions are written to a hash-chained, HMAC-SHA256-signed audit log
 
 ```sh
 oraclemcp audit verify /path/to/audit.jsonl
+oraclemcp audit verify /path/to/audit.jsonl --with-db-evidence
 # Override the key id to verify against a rotated key:
 oraclemcp audit verify /path/to/audit.jsonl --key_id 2026-q2
 ```
@@ -656,6 +657,19 @@ Audit records are additive and format-versioned. Current records carry
 `schema_version = 3`, a structured server-derived `subject`, and optional
 database-evidence fields. `audit verify` still accepts signed v1/v2 records, so
 existing logs do not need to be rewritten.
+
+Use `--with-db-evidence` when reviewing a v3 audit chain after incident
+response or a dashboard proof-bundle export. The verifier still runs offline:
+it first verifies the signed hash-chain, then summarizes the hash-covered
+database evidence already present in the records. A `correlated` report means
+at least one verified record carries Oracle session correlation fields such as
+`sid`, `serial_number`, `client_identifier`, `module`, or `action`. A
+`degraded` report means those fields were missing or the recorder stored a
+stable `db_evidence_unavailable:*` marker, for example when the self-lane or
+monitor profile could not read the session metadata. The report includes
+counts and a bounded sample of non-secret sequence-to-session tags; it never
+prints raw SQL, bind values, credential references, or audit signing key
+material.
 
 For a 0.4.x layout that still has the default audit log at
 `~/.config/oraclemcp/audit.jsonl`, `oraclemcp doctor` reports the legacy layout.

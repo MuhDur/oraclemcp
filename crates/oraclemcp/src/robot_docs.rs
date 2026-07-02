@@ -273,7 +273,7 @@ pub(crate) fn mcp_cli_dashboard_parity_json() -> serde_json::Value {
             {
                 "id": "audit",
                 "capability": "audit-chain visibility and verification",
-                "cli": ["oraclemcp audit verify <file>"],
+                "cli": ["oraclemcp audit verify <file>", "oraclemcp audit verify <file> --with-db-evidence"],
                 "mcp": ["audit hash-chain records every privileged action out of band"],
                 "dashboard": ["audit timeline", "audit filters", "proof export"],
                 "status": "aligned"

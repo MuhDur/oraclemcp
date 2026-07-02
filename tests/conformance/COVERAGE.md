@@ -55,6 +55,8 @@ Harnesses:
   `crates/oraclemcp/tests/e2e_http_oauth.rs`,
   `crates/oraclemcp-db/tests/{cancel_correctness,load_soak,multi_lane_live_xe}.rs`,
   and `crates/oraclemcp/src/dispatch/tests.rs`
+- WP-G hardening and docs:
+  `crates/oraclemcp/src/main.rs` and `docs/operations.md`
 - B.13 cross-cutting edge/negative catalog:
   `crates/oraclemcp-core/tests/concurrency_contract.rs`,
   `crates/oraclemcp-guard/tests/{adversarial_corpus,proptest_invariants}.rs`,
@@ -98,8 +100,9 @@ Harnesses:
 | Durable SQL idempotency | 1 | 0 | 1 | 1 | 0 | 100% |
 | WP-S persistent service | 2 | 0 | 2 | 2 | 0 | 100% |
 | WP-N concurrency/session | 11 | 0 | 11 | 11 | 0 | 100% |
+| WP-G hardening/docs | 1 | 0 | 1 | 1 | 0 | 100% |
 
-Total tracked requirements: 74 MUST, 2 SHOULD, 76 tested.
+Total tracked requirements: 75 MUST, 2 SHOULD, 77 tested.
 
 ## Requirement IDs
 
@@ -171,6 +174,7 @@ Total tracked requirements: 74 MUST, 2 SHOULD, 76 tested.
 | WRITE-INTENT-001 | MUST | Durable SQL idempotency | Committing tools write a durable pre-execute intent, unresolved in-doubt intents fail writable startup closed, and recovered terminal history rejects exact confirmation-grant plus SQL replay after restart. |
 | WPS-BACKUP-001 | MUST | WP-S persistent service | Service backup snapshots the XDG state directory plus config under the service lock, restore verifies the backed-up audit hash-chain before recovering files, and audit data remains non-prunable. |
 | WPS-S4-001 | MUST | WP-S persistent service | Mimalloc is wired as an explicit opt-in allocator feature, background worker creation is gated by service/runtime admission, and the DL-4 lock hierarchy is documented and debug-asserted. |
+| WPG-G9-001 | MUST | WP-G hardening/docs | `audit verify --with-db-evidence` verifies the signed chain, correlates audit sequence numbers with signed Oracle session evidence when present, and reports degraded evidence without exposing SQL, bind values, or secrets. |
 | WPN-A-001 | MUST | WP-N concurrency/session | Per-session and per-subject lanes keep operating level, profile, connection, and session state isolated. |
 | WPN-A-002 | MUST | WP-N concurrency/session | Confirmation and execution grants are single-use and bound to lane, subject, session, profile, and generation. |
 | WPN-B-001 | MUST | WP-N concurrency/session | Different configured databases stay isolated under concurrent live lanes. |
@@ -227,6 +231,12 @@ Total tracked requirements: 74 MUST, 2 SHOULD, 76 tested.
 | --- | --- |
 | WPS-BACKUP-001 | `crates/oraclemcp/src/service_lifecycle.rs::tests::backup_restore_verifies_audit_chain`; `crates/oraclemcp-core/src/file_store.rs::tests::retention_prunes_metrics_but_never_audit` |
 | WPS-S4-001 | `cargo check -p oraclemcp --features mimalloc`; `crates/oraclemcp-core/src/lane.rs::tests::registry_lane_lock_order_ab_ba_unconstructible`; `crates/oraclemcp-core/src/http.rs::tests::serve_http_until_bounds_connection_workers_before_request_parse`; `crates/oraclemcp/src/main.rs::tests::stateless_http_read_workers_do_not_head_of_line_block`; `crates/oraclemcp/src/readiness.rs::tests::stub_connection_is_never_reachable`; `docs/operations.md` |
+
+## WP-G Proof Map
+
+| Requirement | Primary proof |
+| --- | --- |
+| WPG-G9-001 | `crates/oraclemcp/src/main.rs::tests::audit_verify_with_db_evidence_command_parses`; `crates/oraclemcp/src/main.rs::tests::audit_db_evidence_summary_correlates_signed_session_tags`; `crates/oraclemcp/src/main.rs::tests::audit_db_evidence_summary_degrades_when_evidence_unavailable`; `docs/operations.md` |
 
 ## WP-N Proof Map
 
