@@ -5,7 +5,7 @@
 # Dry-run preview with a cache-busted script fetch:
 #   curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --dry-run --version 0.6.1
 #
-# Normal verified install with a cache-busted script fetch:
+# Normal install with SHA-256 required and cosign preferred:
 #   curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --version 0.6.1
 #
 # Install oraclemcp from a verified release archive, or from source when
@@ -18,6 +18,7 @@ REPO="MuhDur/oraclemcp"
 VERSION="latest"
 RUST_TOOLCHAIN="nightly-2026-05-11"
 OIDC_ISSUER="https://token.actions.githubusercontent.com"
+COSIGN_BIN="${ORACLEMCP_COSIGN:-cosign}"
 
 PREFIX="${ORACLEMCP_INSTALL_PREFIX:-${HOME:-}/.local}"
 BIN_DIR=""
@@ -29,6 +30,7 @@ FORCE=0
 SOURCE=0
 UNINSTALL=0
 OFFLINE_ARCHIVE=""
+VERIFY_POSTURE="${ORACLEMCP_INSTALL_VERIFY:-prefer}"
 INSTALL_COMPLETIONS=1
 SERVICE_REQUESTED=0
 PROMPT_SERVICE=1
@@ -60,10 +62,11 @@ usage() {
   cat <<'USAGE'
 Usage: install.sh [options]
 
-Installs the verified oraclemcp release binary plus the om alias and shell
-completions. By default this downloads a prebuilt archive, verifies SHA-256
-transport integrity, verifies cosign blob authenticity, verifies the cosign
-blob attestation, and does not install a service.
+Installs the oraclemcp release binary plus the om alias and shell completions.
+By default this downloads a prebuilt archive, requires SHA-256 transport
+integrity, verifies cosign authenticity/provenance when cosign is installed,
+soft-skips cosign with an explicit notice when it is absent, and does not
+install a service.
 
 Options:
   --version <version>       Release version, e.g. 0.6.1 or v0.6.1 (default: latest)
@@ -73,6 +76,7 @@ Options:
   --repo <owner/repo>       GitHub repository (default: MuhDur/oraclemcp)
   --source                  Build with cargo instead of downloading a release archive
   --offline <archive>       Install from a local release archive plus sibling verification files
+  --verify <posture>        Verification posture: require, prefer, checksum-only (default: prefer)
   --uninstall               Remove installed oraclemcp files; add --service to remove the service
   --no-completions          Do not install shell completions
   --service                 Install/start the local service after binary install
@@ -137,6 +141,17 @@ normalize_version() {
   esac
 }
 
+normalize_verify_posture() {
+  case "$1" in
+    require | prefer | checksum-only)
+      printf '%s\n' "$1"
+      ;;
+    *)
+      fail "unsupported --verify posture '$1' (expected require, prefer, or checksum-only)"
+      ;;
+  esac
+}
+
 parse_args() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -173,6 +188,11 @@ parse_args() {
       --offline)
         [ "$#" -ge 2 ] || fail "--offline requires a release archive path"
         OFFLINE_ARCHIVE="$2"
+        shift 2
+        ;;
+      --verify)
+        [ "$#" -ge 2 ] || fail "--verify requires a value"
+        VERIFY_POSTURE="$(normalize_verify_posture "$2")"
         shift 2
         ;;
       --uninstall)
@@ -251,6 +271,7 @@ parse_args() {
         ;;
     esac
   done
+  VERIFY_POSTURE="$(normalize_verify_posture "$VERIFY_POSTURE")"
 }
 
 detect_rosetta() {
@@ -480,6 +501,7 @@ print_plan() {
     fi
     printf '  verification: source builds are explicit opt-in; release archive checksum/cosign verification is skipped\n'
   else
+    printf '  verification_posture: %s\n' "$VERIFY_POSTURE"
     if [ -n "$OFFLINE_ARCHIVE" ]; then
       printf '  offline_archive: %s\n' "$OFFLINE_ARCHIVE"
       printf '  offline_checksum: %s.sha256\n' "$OFFLINE_ARCHIVE"
@@ -491,7 +513,17 @@ print_plan() {
       printf '  cosign_signature: %s/%s.sig + %s/%s.crt\n' "$base" "$asset" "$base" "$asset"
       printf '  cosign_attestation: %s/%s.attestation.sigstore.json\n' "$base" "$asset"
     fi
-    printf '  sha256_note: checksum verifies transport integrity only; cosign verifies authenticity and provenance\n'
+    case "$VERIFY_POSTURE" in
+      require)
+        printf '  sha256_note: checksum verifies transport integrity; cosign authenticity/provenance verification is required\n'
+        ;;
+      prefer)
+        printf '  sha256_note: checksum verifies transport integrity; cosign verifies authenticity/provenance when available\n'
+        ;;
+      checksum-only)
+        printf '  sha256_note: checksum verifies transport integrity only; cosign authenticity/provenance is intentionally skipped\n'
+        ;;
+    esac
   fi
 
   printf '  files:\n'
@@ -575,22 +607,64 @@ verify_checksum() {
   fi
 }
 
+cosign_required_message() {
+  printf '%s\n' \
+    "ORACLEMCP_INSTALL_COSIGN_REQUIRED: --verify require needs cosign. Install cosign from https://docs.sigstore.dev/cosign/installation/ or set ORACLEMCP_COSIGN=/path/to/cosign, then rerun the installer."
+}
+
+should_download_cosign_metadata() {
+  case "$VERIFY_POSTURE" in
+    checksum-only)
+      return 1
+      ;;
+    require | prefer)
+      have "$COSIGN_BIN"
+      ;;
+  esac
+}
+
+require_readable_file() {
+  local path="$1"
+  [ -f "$path" ] || fail "ORACLEMCP_INSTALL_VERIFICATION_BUNDLE_MISSING: required verification file is missing: $path"
+  [ -r "$path" ] || fail "ORACLEMCP_INSTALL_VERIFICATION_BUNDLE_UNREADABLE: required verification file is not readable: $path"
+}
+
 verify_cosign() {
   local archive="$1" signature="$2" certificate="$3" attestation="$4"
   local identity_args=()
-  need cosign
+
+  if [ "$VERIFY_POSTURE" = "checksum-only" ]; then
+    printf 'oraclemcp installer: verification posture checksum-only: SHA-256 verified; cosign authenticity/provenance checks intentionally skipped\n' >&2
+    return 0
+  fi
+
+  if ! have "$COSIGN_BIN"; then
+    if [ "$VERIFY_POSTURE" = "require" ]; then
+      if [ -t 0 ] && [ -t 1 ]; then
+        printf 'oraclemcp installer: cosign is not installed; install it and rerun, or use --verify prefer/checksum-only if your policy allows weaker authenticity verification.\n' >&2
+      fi
+      fail "$(cosign_required_message)"
+    fi
+    printf 'oraclemcp installer: authenticity unverified: cosign not installed; SHA-256 checksum verified; install cosign or rerun with --verify require to enforce signature and attestation verification\n' >&2
+    return 0
+  fi
+
+  require_readable_file "$signature"
+  require_readable_file "$certificate"
+  require_readable_file "$attestation"
+
   while IFS= read -r -d '' arg; do
     identity_args+=("$arg")
   done < <(cosign_identity_args)
 
-  cosign verify-blob \
+  "$COSIGN_BIN" verify-blob \
     --certificate "$certificate" \
     --signature "$signature" \
     "${identity_args[@]}" \
     --certificate-oidc-issuer "$OIDC_ISSUER" \
     "$archive"
 
-  cosign verify-blob-attestation \
+  "$COSIGN_BIN" verify-blob-attestation \
     --bundle "$attestation" \
     --type slsaprovenance1 \
     "${identity_args[@]}" \
@@ -604,7 +678,14 @@ require_offline_bundle() {
   [ "$(basename "$archive")" = "$expected" ] || fail "ORACLEMCP_INSTALL_OFFLINE_TARGET_MISMATCH: expected offline archive named $expected for target $TARGET"
   for path in \
     "$archive" \
-    "$archive.sha256" \
+    "$archive.sha256"
+  do
+    [ -f "$path" ] || fail "ORACLEMCP_INSTALL_OFFLINE_BUNDLE_MISSING: required offline bundle file is missing: $path"
+    [ -r "$path" ] || fail "ORACLEMCP_INSTALL_OFFLINE_BUNDLE_UNREADABLE: required offline bundle file is not readable: $path"
+  done
+
+  should_download_cosign_metadata || return 0
+  for path in \
     "$archive.sig" \
     "$archive.crt" \
     "$archive.attestation.sigstore.json"
@@ -729,9 +810,11 @@ install_prebuilt() {
 
     download_file "$base/$asset" "$archive"
     download_file "$base/$asset.sha256" "$checksum"
-    download_file "$base/$asset.sig" "$signature"
-    download_file "$base/$asset.crt" "$certificate"
-    download_file "$base/$asset.attestation.sigstore.json" "$attestation"
+    if should_download_cosign_metadata; then
+      download_file "$base/$asset.sig" "$signature"
+      download_file "$base/$asset.crt" "$certificate"
+      download_file "$base/$asset.attestation.sigstore.json" "$attestation"
+    fi
   fi
 
   verify_checksum "$checksum"

@@ -34,6 +34,20 @@ checksum_file() {
   fi
 }
 
+write_fake_release_archive() {
+  local archive="$1" target="$2" root dist
+  root="$(dirname "$archive")"
+  dist="$root/oraclemcp-$target"
+  mkdir -p "$dist"
+  cat >"$dist/oraclemcp" <<'BIN'
+#!/usr/bin/env sh
+echo "oraclemcp installer smoke binary"
+BIN
+  chmod +x "$dist/oraclemcp"
+  (cd "$root" && tar czf "$(basename "$archive")" "oraclemcp-$target")
+  checksum_file "$archive"
+}
+
 run_built_artifact_smoke() {
   local built_binary="$1"
   local smoke_target="${ORACLEMCP_INSTALLER_SMOKE_TARGET:-x86_64-unknown-linux-musl}"
@@ -237,7 +251,8 @@ dry_output="$(
 contains "$dry_output" "mode: prebuilt"
 contains "$dry_output" "lock: $TMP_DIR/oraclemcp-install-"
 contains "$dry_output" "archive: https://github.com/MuhDur/oraclemcp/releases/download/v$SMOKE_VERSION/oraclemcp-x86_64-unknown-linux-musl.tar.gz"
-contains "$dry_output" "checksum verifies transport integrity only; cosign verifies authenticity and provenance"
+contains "$dry_output" "verification_posture: prefer"
+contains "$dry_output" "checksum verifies transport integrity; cosign verifies authenticity/provenance when available"
 contains "$dry_output" "$PREFIX/bin/oraclemcp"
 contains "$dry_output" "$PREFIX/bin/om"
 contains "$dry_output" "$PREFIX/share/bash-completion/completions/oraclemcp"
@@ -252,6 +267,104 @@ not_contains "$dry_output" "clients issue"
 if [ -e "$PREFIX/bin/oraclemcp" ] || [ -e "$PREFIX/bin/om" ]; then
   fail "dry-run created installed files under $PREFIX"
 fi
+
+NO_COSIGN_DIR="$SMOKE_ROOT/no-cosign"
+NO_COSIGN_ARCHIVE="$NO_COSIGN_DIR/oraclemcp-x86_64-unknown-linux-musl.tar.gz"
+NO_COSIGN_PREFIX="$SMOKE_ROOT/no-cosign-prefix"
+mkdir -p "$NO_COSIGN_DIR"
+write_fake_release_archive "$NO_COSIGN_ARCHIVE" x86_64-unknown-linux-musl
+
+no_cosign_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    ORACLEMCP_COSIGN="$SMOKE_ROOT/missing-cosign" \
+    bash install.sh \
+      --offline "$NO_COSIGN_ARCHIVE" \
+      --version "$SMOKE_VERSION" \
+      --target x86_64-unknown-linux-musl \
+      --prefix "$NO_COSIGN_PREFIX" \
+      --verify prefer \
+      --no-completions \
+      --no-service 2>&1
+)"
+contains "$no_cosign_output" "authenticity unverified: cosign not installed; SHA-256 checksum verified"
+[ -x "$NO_COSIGN_PREFIX/bin/oraclemcp" ] || fail "no-cosign prefer install did not install oraclemcp"
+
+set +e
+require_no_cosign_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    ORACLEMCP_COSIGN="$SMOKE_ROOT/missing-cosign" \
+    bash install.sh \
+      --offline "$NO_COSIGN_ARCHIVE" \
+      --version "$SMOKE_VERSION" \
+      --target x86_64-unknown-linux-musl \
+      --prefix "$SMOKE_ROOT/require-no-cosign-prefix" \
+      --verify require \
+      --no-completions \
+      --no-service 2>&1
+)"
+require_no_cosign_status=$?
+set -e
+[ "$require_no_cosign_status" -ne 0 ] || fail "--verify require without cosign unexpectedly succeeded"
+contains "$require_no_cosign_output" "ORACLEMCP_INSTALL_COSIGN_REQUIRED"
+
+: >"$NO_COSIGN_ARCHIVE.sig"
+: >"$NO_COSIGN_ARCHIVE.crt"
+: >"$NO_COSIGN_ARCHIVE.attestation.sigstore.json"
+FAILING_COSIGN="$NO_COSIGN_DIR/failing-cosign"
+cat >"$FAILING_COSIGN" <<'COSIGN'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  version)
+    exit 0
+    ;;
+  verify-blob | verify-blob-attestation)
+    printf 'fake-cosign: forced verification failure for %s\n' "$1" >&2
+    exit 9
+    ;;
+  *)
+    printf 'fake-cosign: unexpected command: %s\n' "${1:-<missing>}" >&2
+    exit 2
+    ;;
+esac
+COSIGN
+chmod +x "$FAILING_COSIGN"
+set +e
+bad_signature_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    ORACLEMCP_COSIGN="$FAILING_COSIGN" \
+    bash install.sh \
+      --offline "$NO_COSIGN_ARCHIVE" \
+      --version "$SMOKE_VERSION" \
+      --target x86_64-unknown-linux-musl \
+      --prefix "$SMOKE_ROOT/bad-signature-prefix" \
+      --verify prefer \
+      --no-completions \
+      --no-service 2>&1
+)"
+bad_signature_status=$?
+set -e
+[ "$bad_signature_status" -ne 0 ] || fail "bad cosign signature unexpectedly succeeded"
+contains "$bad_signature_output" "fake-cosign: forced verification failure"
+
+printf '0000000000000000000000000000000000000000000000000000000000000000  %s\n' \
+  "$(basename "$NO_COSIGN_ARCHIVE")" >"$NO_COSIGN_ARCHIVE.sha256"
+set +e
+tampered_checksum_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    bash install.sh \
+      --offline "$NO_COSIGN_ARCHIVE" \
+      --version "$SMOKE_VERSION" \
+      --target x86_64-unknown-linux-musl \
+      --prefix "$SMOKE_ROOT/tampered-prefix" \
+      --verify checksum-only \
+      --no-completions \
+      --no-service 2>&1
+)"
+tampered_checksum_status=$?
+set -e
+[ "$tampered_checksum_status" -ne 0 ] || fail "tampered checksum unexpectedly succeeded"
+contains "$tampered_checksum_output" "FAILED"
 
 service_output="$(
   env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \

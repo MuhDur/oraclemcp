@@ -44,4 +44,15 @@ assert.match(plan.asset, /^oraclemcp-.+\.(tar\.gz|zip)$/);
 assert.match(plan.archiveUrl, /github\.com\/MuhDur\/oraclemcp\/releases\/download\/v9\.9\.9-test\.1\/oraclemcp-/);
 assert.equal(plan.serviceMutation, false);
 assert.equal(plan.clientCredentialMutation, false);
-assert.deepEqual(plan.verification, ['sha256', 'cosign verify-blob', 'cosign verify-blob-attestation']);
+assert.equal(plan.verifyPosture, 'prefer');
+assert.deepEqual(plan.verification, ['sha256', 'cosign:prefer']);
+
+process.env.ORACLEMCP_NPM_VERIFY = 'checksum-only';
+const checksumOnlyPlan = buildPlan();
+assert.equal(checksumOnlyPlan.verifyPosture, 'checksum-only');
+assert.deepEqual(checksumOnlyPlan.verification, ['sha256', 'cosign:checksum-only']);
+
+process.env.ORACLEMCP_NPM_VERIFY = 'require';
+const requirePlan = buildPlan();
+assert.equal(requirePlan.verifyPosture, 'require');
+assert.deepEqual(requirePlan.verification, ['sha256', 'cosign:require']);

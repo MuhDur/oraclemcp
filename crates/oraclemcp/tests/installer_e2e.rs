@@ -465,6 +465,11 @@ fn npx_verifies_binary_no_postinstall_side_effects() {
         "verify-blob",
         "verify-blob-attestation",
         "sha256",
+        "ORACLEMCP_NPM_VERIFY",
+        "DEFAULT_VERIFY_POSTURE = 'prefer'",
+        "cosign:${verifyPosture}",
+        "checksum-only",
+        "authenticity unverified: cosign not installed",
         "ORACLEMCP_NPM_DRY_RUN",
     ] {
         assert!(

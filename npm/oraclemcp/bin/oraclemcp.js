@@ -11,6 +11,7 @@ const path = require('node:path');
 const DEFAULT_REPO = 'MuhDur/oraclemcp';
 const OIDC_ISSUER = 'https://token.actions.githubusercontent.com';
 const MAX_REDIRECTS = 5;
+const DEFAULT_VERIFY_POSTURE = 'prefer';
 
 function readPackage() {
   return JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
@@ -25,6 +26,14 @@ function normalizeVersion(version) {
     throw new Error(`unsupported ORACLEMCP_NPM_RELEASE '${version}'`);
   }
   return clean;
+}
+
+function normalizeVerifyPosture(posture) {
+  const value = posture || DEFAULT_VERIFY_POSTURE;
+  if (value === 'require' || value === 'prefer' || value === 'checksum-only') {
+    return value;
+  }
+  throw new Error(`unsupported ORACLEMCP_NPM_VERIFY '${posture}' (expected require, prefer, or checksum-only)`);
 }
 
 function targetFor(platform = process.platform, arch = process.arch) {
@@ -98,6 +107,7 @@ function cacheRoot() {
 function buildPlan() {
   const pkg = readPackage();
   const version = normalizeVersion(process.env.ORACLEMCP_NPM_RELEASE || pkg.version);
+  const verifyPosture = normalizeVerifyPosture(process.env.ORACLEMCP_NPM_VERIFY);
   const repo = process.env.ORACLEMCP_NPM_REPO || DEFAULT_REPO;
   const target = targetFor();
   const asset = assetName(target);
@@ -117,7 +127,8 @@ function buildPlan() {
     certificateUrl: `${archiveUrl}.crt`,
     attestationUrl: `${archiveUrl}.attestation.sigstore.json`,
     cacheBinary,
-    verification: ['sha256', 'cosign verify-blob', 'cosign verify-blob-attestation'],
+    verifyPosture,
+    verification: ['sha256', `cosign:${verifyPosture}`],
     serviceMutation: false,
     clientCredentialMutation: false,
   };
@@ -179,8 +190,41 @@ function runChecked(command, args, options = {}) {
   }
 }
 
+function commandAvailable(command) {
+  const result = childProcess.spawnSync(command, ['version'], { stdio: 'ignore' });
+  return !result.error;
+}
+
+function shouldUseCosign(plan) {
+  if (plan.verifyPosture === 'checksum-only') {
+    return false;
+  }
+  if (plan.verifyPosture === 'require') {
+    return true;
+  }
+  return commandAvailable(process.env.ORACLEMCP_COSIGN || 'cosign');
+}
+
 function verifyCosign(plan, archivePath, signaturePath, certificatePath, attestationPath) {
   const cosign = process.env.ORACLEMCP_COSIGN || 'cosign';
+  if (plan.verifyPosture === 'checksum-only') {
+    console.error(
+      'oraclemcp npm wrapper: verification posture checksum-only: SHA-256 verified; cosign authenticity/provenance checks intentionally skipped',
+    );
+    return;
+  }
+  if (!commandAvailable(cosign)) {
+    if (plan.verifyPosture === 'require') {
+      throw new Error(
+        'ORACLEMCP_NPM_COSIGN_REQUIRED: ORACLEMCP_NPM_VERIFY=require needs cosign. Install cosign from https://docs.sigstore.dev/cosign/installation/ or set ORACLEMCP_COSIGN=/path/to/cosign.',
+      );
+    }
+    console.error(
+      'oraclemcp npm wrapper: authenticity unverified: cosign not installed; SHA-256 checksum verified; install cosign or set ORACLEMCP_NPM_VERIFY=require to enforce signature and attestation verification',
+    );
+    return;
+  }
+
   const identity = identityArgs(plan.repo, plan.release);
   runChecked(cosign, [
     'verify-blob',
@@ -251,9 +295,11 @@ async function installToCache(plan) {
 
     await downloadFile(plan.archiveUrl, archivePath);
     await downloadFile(plan.checksumUrl, checksumPath);
-    await downloadFile(plan.signatureUrl, signaturePath);
-    await downloadFile(plan.certificateUrl, certificatePath);
-    await downloadFile(plan.attestationUrl, attestationPath);
+    if (shouldUseCosign(plan)) {
+      await downloadFile(plan.signatureUrl, signaturePath);
+      await downloadFile(plan.certificateUrl, certificatePath);
+      await downloadFile(plan.attestationUrl, attestationPath);
+    }
 
     verifyChecksum(archivePath, checksumPath);
     verifyCosign(plan, archivePath, signaturePath, certificatePath, attestationPath);
