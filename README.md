@@ -79,6 +79,16 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -Version 0.6.1
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.6.1
 ```
 
+The Windows installer accepts the same release operations: `-Update` for the
+explicit update path, `-NoService` to suppress service prompts, and
+`-Verify prefer`, `-Verify require`, or `-Verify checksum-only` for the
+verification posture. `prefer` installs after a hard SHA-256 check when cosign
+is missing; `require` fails without cosign.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Update -Version 0.6.1 -NoService
+```
+
 For air-gapped hosts, download the release archive plus its `.sha256`, `.sig`,
 `.crt`, and `.attestation.sigstore.json` siblings, then run a downloaded copy
 of the installer:
@@ -103,6 +113,11 @@ service-manager mutation:
 bash install.sh --uninstall --dry-run
 bash install.sh --uninstall --yes
 bash install.sh --uninstall --service --yes
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall -DryRun
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall -Yes
 ```
 
 Install the local service only with explicit consent. Keep it on loopback unless

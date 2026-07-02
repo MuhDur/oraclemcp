@@ -179,7 +179,25 @@ ps_text="$(tr -d '\r' < install.ps1)"
 contains "$ps_text" "certutil.exe -hashfile"
 contains "$ps_text" "cosign verify-blob"
 contains "$ps_text" "cosign verify-blob-attestation"
+contains "$ps_text" "Get-NormalizedVerifyPosture"
+contains "$ps_text" "cosign is required by -Verify require"
+contains "$ps_text" "authenticity unverified: cosign not installed; SHA-256 checksum verified"
+contains "$ps_text" "cosign verification intentionally skipped by -Verify checksum-only"
 contains "$ps_text" "completions powershell"
+contains "$ps_text" "Test-AlreadyCurrentByVersion"
+contains "$ps_text" "already current: installed oraclemcp \$installed matches target \$Version"
+contains "$ps_text" "ORACLEMCP_INSTALL_DOWNGRADE_REFUSED"
+contains "$ps_text" "Backup-ExistingFile"
+contains "$ps_text" "Install-ExecutableAtomically"
+contains "$ps_text" "Write-UninstallPlan"
+contains "$ps_text" "uninstall requires -Yes or -DryRun"
+contains "$ps_text" "-Uninstall cannot be combined with -Update"
+contains "$ps_text" "Write-PathGuidance"
+contains "$ps_text" "Run oraclemcp doctor now?"
+contains "$ps_text" "Print an MCP client wiring snippet now?"
+contains "$ps_text" "Install and start the local oraclemcp service now?"
+contains "$ps_text" "-HonorYes \$false"
+contains "$ps_text" "oraclemcp installer: next steps"
 contains "$ps_text" "service install requires -Service -Yes or -DryRun"
 contains "$ps_text" "service: not requested; no service-manager files or units will be touched"
 contains "$ps_text" "ORACLEMCP_INSTALL_OFFLINE_BUNDLE_MISSING"
@@ -236,10 +254,14 @@ if command -v pwsh >/dev/null 2>&1; then
       -DryRun \
       -Version "$SMOKE_VERSION" \
       -Prefix "$WIN_PREFIX" \
-      -Offline "$WIN_OFFLINE_ARCHIVE"
+      -Offline "$WIN_OFFLINE_ARCHIVE" \
+      -Verify checksum-only \
+      -NoService
   )"
   contains "$win_dry_output" "oraclemcp Windows installer plan"
   contains "$win_dry_output" "mode: offline"
+  contains "$win_dry_output" "update: False"
+  contains "$win_dry_output" "verify: checksum-only"
   contains "$win_dry_output" "offline_archive: $WIN_OFFLINE_ARCHIVE"
   contains "$win_dry_output" "offline_checksum: $WIN_OFFLINE_ARCHIVE.sha256"
   contains "$win_dry_output" "oraclemcp.exe"
@@ -259,6 +281,17 @@ if command -v pwsh >/dev/null 2>&1; then
   )"
   contains "$win_service_output" "service install --yes --name oraclemcp --listen 127.0.0.1:7070 --profile db_ro"
   contains "$win_service_output" "readyz_gate: Invoke-WebRequest -UseBasicParsing http://127.0.0.1:7070/readyz"
+
+  win_uninstall_output="$(
+    pwsh -NoLogo -NoProfile -File ./install.ps1 \
+      -DryRun \
+      -Uninstall \
+      -Prefix "$WIN_PREFIX"
+  )"
+  contains "$win_uninstall_output" "oraclemcp Windows uninstall plan"
+  contains "$win_uninstall_output" "$WIN_PREFIX"
+  contains "$win_uninstall_output" "oraclemcp.exe"
+  contains "$win_uninstall_output" "om.exe"
 fi
 
 dry_output="$(

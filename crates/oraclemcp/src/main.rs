@@ -342,13 +342,13 @@ struct SelfUpdateCliArgs {
     /// Release version to install, e.g. 0.6.1 or v0.6.1.
     #[arg(long, default_value = "latest")]
     version: String,
-    /// Verification posture forwarded to install.sh.
+    /// Verification posture forwarded to the platform installer.
     #[arg(long)]
     verify: Option<String>,
-    /// Forward --yes to install.sh for non-interactive consent.
+    /// Forward consent to the platform installer.
     #[arg(long)]
     yes: bool,
-    /// Forward --no-service to install.sh.
+    /// Forward no-service to the platform installer.
     #[arg(long)]
     no_service: bool,
     /// Print the installer command without executing it.
@@ -3448,9 +3448,24 @@ fn run_setup(
     }
 }
 
-const SELF_UPDATE_INSTALLER_URL: &str =
+#[cfg(not(windows))]
+const SELF_UPDATE_INSTALLER_SH_URL: &str =
     "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh";
+#[cfg(windows)]
+const SELF_UPDATE_INSTALLER_PS_URL: &str =
+    "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.ps1";
 
+#[cfg(not(windows))]
+fn self_update_installer_url() -> &'static str {
+    SELF_UPDATE_INSTALLER_SH_URL
+}
+
+#[cfg(windows)]
+fn self_update_installer_url() -> &'static str {
+    SELF_UPDATE_INSTALLER_PS_URL
+}
+
+#[cfg(not(windows))]
 fn self_update_argv(args: &SelfUpdateCliArgs) -> Vec<String> {
     let mut argv = vec![
         "bash".to_owned(),
@@ -3458,7 +3473,7 @@ fn self_update_argv(args: &SelfUpdateCliArgs) -> Vec<String> {
         "set -euo pipefail; url=\"$1\"; shift; curl -fsSL \"${url}?$(date +%s)\" | bash -s -- \"$@\""
             .to_owned(),
         "oraclemcp-self-update".to_owned(),
-        SELF_UPDATE_INSTALLER_URL.to_owned(),
+        SELF_UPDATE_INSTALLER_SH_URL.to_owned(),
         "--update".to_owned(),
         "--version".to_owned(),
         args.version.clone(),
@@ -3476,6 +3491,34 @@ fn self_update_argv(args: &SelfUpdateCliArgs) -> Vec<String> {
     argv
 }
 
+#[cfg(windows)]
+fn self_update_argv(args: &SelfUpdateCliArgs) -> Vec<String> {
+    let mut argv = vec![
+        "powershell.exe".to_owned(),
+        "-NoProfile".to_owned(),
+        "-ExecutionPolicy".to_owned(),
+        "Bypass".to_owned(),
+        "-Command".to_owned(),
+        "$ErrorActionPreference = 'Stop'; $url = $args[0]; $installer = Join-Path ([IO.Path]::GetTempPath()) ('oraclemcp-install-' + [guid]::NewGuid().ToString('N') + '.ps1'); Invoke-WebRequest -UseBasicParsing -Uri ($url + '?' + [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) -OutFile $installer; $installerArgs = @(); for ($i = 1; $i -lt $args.Count; $i++) { $installerArgs += $args[$i] }; try { & $installer @installerArgs; if ($LASTEXITCODE -is [int] -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } finally { Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue }"
+            .to_owned(),
+        SELF_UPDATE_INSTALLER_PS_URL.to_owned(),
+        "-Update".to_owned(),
+        "-Version".to_owned(),
+        args.version.clone(),
+    ];
+    if let Some(verify) = &args.verify {
+        argv.push("-Verify".to_owned());
+        argv.push(verify.clone());
+    }
+    if args.yes {
+        argv.push("-Yes".to_owned());
+    }
+    if args.no_service {
+        argv.push("-NoService".to_owned());
+    }
+    argv
+}
+
 fn exit_code_from_status(status: ExitStatus) -> ExitCode {
     match status.code() {
         Some(code) if (0..=255).contains(&code) => ExitCode::from(code as u8),
@@ -3485,20 +3528,21 @@ fn exit_code_from_status(status: ExitStatus) -> ExitCode {
 
 fn run_self_update_cmd(robot_json: bool, args: SelfUpdateCliArgs) -> ExitCode {
     let argv = self_update_argv(&args);
+    let installer_url = self_update_installer_url();
     if args.dry_run {
         let payload = serde_json::json!({
             "kind": "oraclemcp_self_update",
-            "installer_url": SELF_UPDATE_INSTALLER_URL,
+            "installer_url": installer_url,
             "version": args.version,
             "argv": argv,
             "notes": [
                 "self-update re-runs the same verified installer path as the one-line install",
-                "install.sh --update is an alias for the version-aware update path"
+                "the platform installer --update flag is an alias for the version-aware update path"
             ]
         });
         let mut text = String::new();
         text.push_str("oraclemcp self-update\n\n");
-        text.push_str(&format!("Installer:\n  {SELF_UPDATE_INSTALLER_URL}\n\n"));
+        text.push_str(&format!("Installer:\n  {installer_url}\n\n"));
         text.push_str("Command argv:\n");
         for arg in payload["argv"].as_array().expect("argv array") {
             text.push_str(&format!(
