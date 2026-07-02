@@ -84,6 +84,12 @@ fn readme_leads_with_hosted_install_one_liner_service_and_dashboard() {
         "om dashboard",
         "database Subject",
         "isolated per-principal lanes",
+        "Pending registry-backed channels",
+        "brew info MuhDur/oraclemcp/oraclemcp",
+        "winget search --id MuhDur.oraclemcp --exact",
+        "npm view oraclemcp@0.6.1 version",
+        "ORACLEMCP_NPM_VERIFY=require",
+        "npx oraclemcp serve --profile db_ro --allow-no-auth",
     ] {
         assert!(
             readme.contains(needle),

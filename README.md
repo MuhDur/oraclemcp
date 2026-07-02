@@ -134,20 +134,28 @@ connection, operating level, grants, cancellation, and audit context. Intentiona
 `--allow-no-auth` HTTP development uses one anonymous lane; stdio remains the
 single local client path.
 
-Other release channels come from the same signed archive matrix. The commands
-below are safe to copy-paste when the channel is available; registry-backed
-channels such as Homebrew, winget, and npm can lag the GitHub release tag.
+Other release channels come from the same signed archive matrix. These channels
+can lag the GitHub release tag, so use the check command first and install only
+after it resolves the target version.
 
 ```sh
 cargo binstall oraclemcp                # uses the GitHub release archive metadata
-brew install MuhDur/oraclemcp/oraclemcp # tap formula is generated at release time
-winget install MuhDur.oraclemcp         # community submission may lag the tag
 docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.1
 ```
 
-The npm wrapper is a verify-before-run package with no `postinstall` mutation,
-but `npx` only works after the npm registry entry exists. Check the channel
-first:
+Pending registry-backed channels:
+
+```sh
+brew info MuhDur/oraclemcp/oraclemcp      # then: brew install MuhDur/oraclemcp/oraclemcp
+winget search --id MuhDur.oraclemcp --exact # then: winget install --id MuhDur.oraclemcp --exact
+npm view oraclemcp@0.6.1 version          # then: npx oraclemcp serve --profile db_ro --allow-no-auth
+```
+
+The npm wrapper is a verify-before-run package with no `postinstall` mutation.
+It checks SHA-256 before running the binary and soft-skips cosign in the default
+`prefer` posture when cosign is not installed; set `ORACLEMCP_NPM_VERIFY=require`
+to require cosign. `npx` only works after the npm registry entry exists. Check
+the channel first:
 
 ```sh
 npm view oraclemcp@0.6.1 version
@@ -156,7 +164,7 @@ npm view oraclemcp@0.6.1 version
 When that prints `0.6.1`, this command is copy-pasteable:
 
 ```sh
-npx oraclemcp serve --allow-no-auth
+npx oraclemcp serve --profile db_ro --allow-no-auth
 ```
 
 ## Why oraclemcp
