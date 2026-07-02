@@ -71,7 +71,7 @@ investigate, not a blocker:
    ```sh
    cargo build -p oraclemcp
    TMPDIR=/dev/shm ORACLEMCP_INSTALLER_BUILT_BINARY="$PWD/target/debug/oraclemcp" \
-     bash scripts/installer_lint_and_offline_smoke.sh
+     bash scripts/installer_lint_and_offline_smoke.sh --log
    ```
 4. **Confirm CI is green on the RC commit.** Open the CI run for that exact SHA
    and confirm every **required** gate in the table above is green. The advisory

@@ -126,7 +126,7 @@ fi
 if ! e2e_run_command "assert" bash scripts/release_sbom_check.sh --source; then
   e2e_finish_fail "S-sbom release SBOM source gate failed"
 fi
-if ! e2e_run_command "assert" bash scripts/installer_lint_and_offline_smoke.sh; then
+if ! e2e_run_command "assert" bash scripts/installer_lint_and_offline_smoke.sh --log; then
   e2e_finish_fail "E7 installer lint/smoke failed"
 fi
 if ! e2e_run_command "assert" bash scripts/e2e/release_rollback_dry_run.sh --log --dry-run; then
@@ -143,5 +143,5 @@ if ! e2e_run_command "assert" bash scripts/oraclemcp_arch_fitness_lint.sh; then
   e2e_finish_fail "architecture fitness lint failed"
 fi
 
-e2e_log_event "suite_summary" "assert" "pass" 0 "DL-9 ERG-10 DOC-10 E0 S-sbom installer rollback feature-powerset arch-fitness accounted"
+e2e_log_event "suite_summary" "assert" "pass" 0 "DL-9 ERG-10 DOC-10 E0 S-sbom installer-jsonl rollback feature-powerset arch-fitness accounted"
 e2e_finish_pass

@@ -18,6 +18,7 @@ fn installer_lint_and_offline_smoke_passes() {
     let root = repo_root();
     let output = Command::new("bash")
         .arg(root.join("scripts/installer_lint_and_offline_smoke.sh"))
+        .arg("--log")
         .current_dir(&root)
         .output()
         .expect("run installer smoke");
@@ -27,6 +28,47 @@ fn installer_lint_and_offline_smoke_passes() {
         "installer smoke failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("installer smoke emits JSON lines"))
+        .collect::<Vec<_>>();
+    for expected in [
+        "static installer contracts",
+        "non-TTY dry-run agent path",
+        "cosign-absent prefer install path",
+        "update backup idempotency and rollback",
+        "verify-require without cosign fails closed",
+        "bad cosign signature fails closed",
+        "tampered checksum fails closed",
+        "service dry-run consent plan",
+        "offline plan and missing metadata failure",
+        "uninstall preview remove and idempotent rerun",
+    ] {
+        assert!(
+            events.iter().any(|event| event["event"] == "component_gate"
+                && event["outcome"] == "pass"
+                && event["message"].as_str() == Some(expected)),
+            "installer smoke JSONL missing pass event {expected}: {events:?}"
+        );
+    }
+    assert!(
+        events.iter().any(|event| event["event"] == "suite_summary"
+            && event["outcome"] == "pass"
+            && event["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("installer acceptance cases passed"))),
+        "installer smoke JSONL missing suite summary: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "scenario_complete"
+                && event["outcome"] == "pass"
+                && event["scenario"] == "installer_lint_and_offline_smoke"),
+        "installer smoke JSONL missing completion: {events:?}"
     );
 }
 
@@ -252,6 +294,7 @@ fn installer_ci_runs_built_artifact_and_windows_pssa_gates() {
         "ORACLEMCP_INSTALLER_REQUIRE_SHELLCHECK",
         "ORACLEMCP_INSTALLER_BUILT_BINARY",
         "target/x86_64-unknown-linux-musl/debug/oraclemcp",
+        "bash scripts/installer_lint_and_offline_smoke.sh --log",
         "Windows installer PSSA and dry-run",
         "Install-Module PSScriptAnalyzer",
         "Invoke-ScriptAnalyzer -Path \"install.ps1\"",
@@ -264,7 +307,7 @@ fn installer_ci_runs_built_artifact_and_windows_pssa_gates() {
         "installer lint and built-artifact smoke",
         "ORACLEMCP_INSTALLER_BUILT_BINARY",
         "Windows installer PSSA and dry-run",
-        "scripts/installer_lint_and_offline_smoke.sh",
+        "scripts/installer_lint_and_offline_smoke.sh --log",
     ] {
         assert!(
             release_acceptance.contains(needle),

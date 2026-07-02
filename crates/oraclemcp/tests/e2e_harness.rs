@@ -127,7 +127,7 @@ fn release_acceptance_suite_schedules_hci_component_gates() {
         "scripts/e2e/doctor_fixtures.sh --log",
         "scripts/dashboard_bundle_check.sh",
         "scripts/release_sbom_check.sh --source",
-        "scripts/installer_lint_and_offline_smoke.sh",
+        "scripts/installer_lint_and_offline_smoke.sh --log",
         "scripts/e2e/release_rollback_dry_run.sh --log --dry-run",
         "scripts/oraclemcp_feature_powerset.sh",
         "scripts/oraclemcp_arch_fitness_lint.sh",
@@ -146,6 +146,13 @@ fn release_acceptance_suite_schedules_hci_component_gates() {
                 && event["outcome"] == "pass"
                 && event["scenario"] == "release_acceptance_ci_suite"),
         "missing passing release-acceptance completion: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| event["event"] == "suite_summary"
+            && event["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("installer-jsonl"))),
+        "release acceptance summary must account for installer JSON-line logs: {events:?}"
     );
 }
 

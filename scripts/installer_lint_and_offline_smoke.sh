@@ -7,8 +7,60 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+E2E_LOG=0
+for arg in "$@"; do
+  case "$arg" in
+    --log)
+      E2E_LOG=1
+      ;;
+    --help | -h)
+      cat <<'USAGE'
+Run installer lint, offline smoke, idempotency, update, and reversibility checks.
+
+Options:
+  --log       emit structured JSON-line events to stderr
+  --help      show this help
+USAGE
+      exit 0
+      ;;
+    *)
+      printf 'installer-smoke: unknown argument: %s\n' "$arg" >&2
+      exit 2
+      ;;
+  esac
+done
+
+E2E_SCENARIO="${E2E_SCENARIO:-installer_lint_and_offline_smoke}"
+E2E_LANE="${E2E_LANE:-installer}"
+E2E_PROFILE="${E2E_PROFILE:-offline}"
+E2E_LEVEL="${E2E_LEVEL:-READ_ONLY}"
+export E2E_LOG E2E_SCENARIO E2E_LANE E2E_PROFILE E2E_LEVEL
+# shellcheck disable=SC1091 # ROOT is computed from this script's location.
+source "$ROOT/scripts/e2e/lib.sh"
+
+note() {
+  if [ "$E2E_LOG" = "1" ]; then
+    printf 'installer-smoke: %s\n' "$*"
+  else
+    printf 'installer-smoke: %s\n' "$*" >&2
+  fi
+}
+
+log_pass() {
+  e2e_log_event "component_gate" "assert" "pass" 0 "$1"
+}
+
+log_skip() {
+  e2e_log_event "component_gate" "assert" "skipped" 0 "$1"
+}
+
 fail() {
-  printf 'installer-smoke: %s\n' "$*" >&2
+  e2e_log_event "component_gate" "assert" "fail" 0 "$*"
+  if [ "$E2E_LOG" = "1" ]; then
+    printf 'installer-smoke: %s\n' "$*"
+  else
+    printf 'installer-smoke: %s\n' "$*" >&2
+  fi
   exit 1
 }
 
@@ -162,14 +214,18 @@ COSIGN
   contains "$reinstall_output" "oraclemcp installer: service install skipped"
   not_contains "$reinstall_output" "service install --yes"
   not_contains "$reinstall_output" "clients issue"
+  log_pass "built artifact offline install and idempotent reinstall"
 }
+
+e2e_log_event "scenario_start" "setup" "running" 0 "installer lint and offline acceptance suite"
 
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck install.sh scripts/installer_lint_and_offline_smoke.sh
 elif [ "${ORACLEMCP_INSTALLER_REQUIRE_SHELLCHECK:-0}" = "1" ]; then
   fail "shellcheck is required but not installed"
 else
-  printf 'installer-smoke: shellcheck not installed; skipping shellcheck\n' >&2
+  note "shellcheck not installed; skipping shellcheck"
+  log_skip "shellcheck unavailable"
 fi
 
 bash -n install.sh
@@ -201,6 +257,7 @@ contains "$ps_text" "oraclemcp installer: next steps"
 contains "$ps_text" "service install requires -Service -Yes or -DryRun"
 contains "$ps_text" "service: not requested; no service-manager files or units will be touched"
 contains "$ps_text" "ORACLEMCP_INSTALL_OFFLINE_BUNDLE_MISSING"
+log_pass "static installer contracts"
 
 if command -v pwsh >/dev/null 2>&1; then
   # shellcheck disable=SC2016 # PowerShell variables must not be expanded by Bash.
@@ -226,12 +283,14 @@ if command -v pwsh >/dev/null 2>&1; then
   elif [ "${ORACLEMCP_INSTALLER_REQUIRE_PSSA:-0}" = "1" ]; then
     fail "PSScriptAnalyzer is required but not installed"
   else
-    printf 'installer-smoke: PSScriptAnalyzer not installed; skipping PSSA\n' >&2
+    note "PSScriptAnalyzer not installed; skipping PSSA"
+    log_skip "PSScriptAnalyzer unavailable"
   fi
 elif [ "${ORACLEMCP_INSTALLER_REQUIRE_PWSH:-0}" = "1" ]; then
   fail "pwsh is required but not installed"
 else
-  printf 'installer-smoke: pwsh not installed; skipping install.ps1 parse/dry-run\n' >&2
+  note "pwsh not installed; skipping install.ps1 parse/dry-run"
+  log_skip "pwsh unavailable for Windows installer parse/dry-run"
 fi
 
 SMOKE_ROOT="$ROOT/target/installer-smoke"
@@ -244,6 +303,8 @@ mkdir -p "$SMOKE_ROOT" "$HOME_DIR" "$CONFIG_HOME" "$TMP_DIR"
 
 if [ -n "${ORACLEMCP_INSTALLER_BUILT_BINARY:-}" ]; then
   run_built_artifact_smoke "$ORACLEMCP_INSTALLER_BUILT_BINARY"
+else
+  log_skip "built artifact smoke not requested"
 fi
 
 if command -v pwsh >/dev/null 2>&1; then
@@ -292,6 +353,7 @@ if command -v pwsh >/dev/null 2>&1; then
   contains "$win_uninstall_output" "$WIN_PREFIX"
   contains "$win_uninstall_output" "oraclemcp.exe"
   contains "$win_uninstall_output" "om.exe"
+  log_pass "Windows installer dry-run service and uninstall contract"
 fi
 
 dry_output="$(
@@ -322,6 +384,7 @@ not_contains "$dry_output" "clients issue"
 if [ -e "$PREFIX/bin/oraclemcp" ] || [ -e "$PREFIX/bin/om" ]; then
   fail "dry-run created installed files under $PREFIX"
 fi
+log_pass "non-TTY dry-run agent path"
 
 NO_COSIGN_DIR="$SMOKE_ROOT/no-cosign"
 NO_COSIGN_ARCHIVE="$NO_COSIGN_DIR/oraclemcp-x86_64-unknown-linux-musl.tar.gz"
@@ -350,6 +413,7 @@ contains "$no_cosign_output" "$NO_COSIGN_PREFIX/bin/oraclemcp --json setup --wri
 contains "$no_cosign_output" "$NO_COSIGN_PREFIX/bin/oraclemcp --json setup --profile db_ro"
 not_contains "$no_cosign_output" "Add $NO_COSIGN_PREFIX/bin to PATH in"
 [ -x "$NO_COSIGN_PREFIX/bin/oraclemcp" ] || fail "no-cosign prefer install did not install oraclemcp"
+log_pass "cosign-absent prefer install path"
 
 ON_PATH_PREFIX="$SMOKE_ROOT/on-path-prefix"
 on_path_output="$(
@@ -368,6 +432,7 @@ not_contains "$on_path_output" "is not on PATH"
 not_contains "$on_path_output" "export PATH="
 contains "$on_path_output" "oraclemcp --json doctor"
 contains "$on_path_output" "oraclemcp --json setup --write --profile db_ro"
+log_pass "PATH-present install path"
 
 if command -v script >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
   PTY_PREFIX="$SMOKE_ROOT/pty-prefix-$$"
@@ -404,8 +469,10 @@ if command -v script >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
   contains "$pty_default_output" '"args": ["serve", "--profile", "db_ro"]'
   contains "$pty_default_output" "Install and start the local oraclemcp service now? [y/N]"
   contains "$pty_default_output" "oraclemcp installer: service install skipped"
+  log_pass "TTY guided install path"
 else
-  printf 'installer-smoke: script or timeout not installed; skipping TTY prompt smoke\n' >&2
+  note "script or timeout not installed; skipping TTY prompt smoke"
+  log_skip "TTY prompt smoke unavailable"
 fi
 
 UPDATE_DIR="$SMOKE_ROOT/update"
@@ -484,6 +551,7 @@ contains "$downgrade_output" "ORACLEMCP_INSTALL_DOWNGRADE_REFUSED"
 
 cp "$backup_file" "$UPDATE_PREFIX/bin/oraclemcp"
 cmp -s "$UPDATE_PREFIX/bin/oraclemcp" "$UPDATE_DIR/oraclemcp-old-copy" || fail "rollback from backup did not restore prior bytes"
+log_pass "update backup idempotency and rollback"
 
 set +e
 require_no_cosign_output="$(
@@ -502,6 +570,7 @@ require_no_cosign_status=$?
 set -e
 [ "$require_no_cosign_status" -ne 0 ] || fail "--verify require without cosign unexpectedly succeeded"
 contains "$require_no_cosign_output" "ORACLEMCP_INSTALL_COSIGN_REQUIRED"
+log_pass "verify-require without cosign fails closed"
 
 : >"$NO_COSIGN_ARCHIVE.sig"
 : >"$NO_COSIGN_ARCHIVE.crt"
@@ -542,6 +611,7 @@ bad_signature_status=$?
 set -e
 [ "$bad_signature_status" -ne 0 ] || fail "bad cosign signature unexpectedly succeeded"
 contains "$bad_signature_output" "fake-cosign: forced verification failure"
+log_pass "bad cosign signature fails closed"
 
 printf '0000000000000000000000000000000000000000000000000000000000000000  %s\n' \
   "$(basename "$NO_COSIGN_ARCHIVE")" >"$NO_COSIGN_ARCHIVE.sha256"
@@ -561,6 +631,7 @@ tampered_checksum_status=$?
 set -e
 [ "$tampered_checksum_status" -ne 0 ] || fail "tampered checksum unexpectedly succeeded"
 contains "$tampered_checksum_output" "FAILED"
+log_pass "tampered checksum fails closed"
 
 service_output="$(
   env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
@@ -578,6 +649,7 @@ service_output="$(
 contains "$service_output" "unit: $CONFIG_HOME/systemd/user/oraclemcp.service"
 contains "$service_output" "$PREFIX/bin/oraclemcp service install --yes --name oraclemcp --listen 127.0.0.1:7070 --profile db_ro"
 contains "$service_output" "readyz_gate: curl --fail --silent --show-error --noproxy '*' http://127.0.0.1:7070/readyz"
+log_pass "service dry-run consent plan"
 
 client_service_output="$(
   env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
@@ -598,6 +670,7 @@ client_service_output="$(
 contains "$client_service_output" "$PREFIX/bin/oraclemcp service install --yes --name oraclemcp --listen 127.0.0.1:7070 --profile db_ro --client-credentials"
 contains "$client_service_output" "$PREFIX/bin/oraclemcp clients issue --label codex-cli --scope oracle:read --scope oracle:execute"
 contains "$client_service_output" "secret_rule: bearer is printed once by the command"
+log_pass "client registration dry-run plan"
 
 source_output="$(
   env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
@@ -612,6 +685,7 @@ source_output="$(
 contains "$source_output" "mode: source"
 contains "$source_output" "cargo +nightly-2026-05-11 install oraclemcp --locked --version $SMOKE_VERSION --root $PREFIX"
 contains "$source_output" "source builds are explicit opt-in"
+log_pass "explicit source dry-run path"
 
 OFFLINE_DIR="$SMOKE_ROOT/offline"
 OFFLINE_ARCHIVE="$OFFLINE_DIR/oraclemcp-x86_64-unknown-linux-musl.tar.gz"
@@ -648,6 +722,7 @@ offline_missing_status=$?
 set -e
 [ "$offline_missing_status" -ne 0 ] || fail "offline install without bundle metadata unexpectedly succeeded"
 contains "$offline_missing_output" "ORACLEMCP_INSTALL_OFFLINE_BUNDLE_MISSING"
+log_pass "offline plan and missing metadata failure"
 
 UNINSTALL_PREFIX="$SMOKE_ROOT/uninstall-prefix-$$"
 UNINSTALL_BIN="$UNINSTALL_PREFIX/bin"
@@ -704,4 +779,7 @@ do
   fi
 done
 
+log_pass "uninstall preview remove and idempotent rerun"
+e2e_log_event "suite_summary" "assert" "pass" 0 "installer acceptance cases passed: static, agent dry-run, TTY, cosign, update, rollback, service, offline, uninstall"
+e2e_finish_pass
 printf 'installer-smoke: OK\n'

@@ -166,7 +166,7 @@ jobs:
         env:
           ORACLEMCP_INSTALLER_REQUIRE_SHELLCHECK: "1"
           ORACLEMCP_INSTALLER_BUILT_BINARY: target/x86_64-unknown-linux-musl/debug/oraclemcp
-        run: bash scripts/installer_lint_and_offline_smoke.sh
+        run: bash scripts/installer_lint_and_offline_smoke.sh --log
 
   windows-installer:
     name: Windows installer PSSA and dry-run
