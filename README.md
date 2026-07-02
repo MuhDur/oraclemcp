@@ -254,7 +254,7 @@ Wire it into an MCP client (e.g. Claude Desktop) over stdio:
   "mcpServers": {
     "oracle": {
       "command": "oraclemcp",
-      "args": ["serve", "--allow-no-auth"]
+      "args": ["serve", "--profile", "db_ro", "--allow-no-auth"]
     }
   }
 }
@@ -265,7 +265,7 @@ For Codex-style TOML config, the same command is:
 ```toml
 [mcp_servers.oracle]
 command = "oraclemcp"
-args = ["serve", "--allow-no-auth"]
+args = ["serve", "--profile", "db_ro", "--allow-no-auth"]
 ```
 
 Or run it directly:

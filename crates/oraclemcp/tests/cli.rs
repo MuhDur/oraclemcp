@@ -372,3 +372,109 @@ fn setup_write_round_trips_profiles_through_config_ops() {
         .expect("backup path");
     assert!(PathBuf::from(backup_path).exists());
 }
+
+#[test]
+fn setup_generated_client_snippet_launches_serve_as_written() {
+    let dir = temp_dir("setup-snippet-launch");
+    let config = dir.join("profiles.toml");
+    let state = dir.join("state");
+    let tools_dir = dir.join("tools.d");
+    fs::create_dir_all(&tools_dir).expect("create empty tools dir");
+    fs::write(
+        &config,
+        r#"
+schema_version = 2
+default_profile = "tenant_ro"
+
+[[profiles]]
+name = "tenant_ro"
+connect_string = "dbhost.example.com:1521/service_name"
+username = "APP_READONLY"
+credential_ref = "env:APP_PASSWORD"
+"#,
+    )
+    .expect("write starter config");
+
+    let mut setup = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    setup
+        .args([
+            "--json",
+            "setup",
+            "--profile",
+            "tenant_ro",
+            "--wrapper-path",
+            env!("CARGO_BIN_EXE_oraclemcp"),
+            "--config-path",
+        ])
+        .arg(&config)
+        .arg("--tools-dir")
+        .arg(&tools_dir)
+        .env("HOME", &dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let setup_output = wait_with_timeout(setup, Duration::from_secs(5));
+    assert_eq!(setup_output.status.code(), Some(0));
+    assert!(
+        setup_output.stderr.is_empty(),
+        "setup stderr should be empty: {}",
+        String::from_utf8_lossy(&setup_output.stderr)
+    );
+    let setup_json: serde_json::Value =
+        serde_json::from_slice(&setup_output.stdout).expect("setup JSON");
+    let server = &setup_json["claude_mcp_json"]["mcpServers"]["oracle"];
+    let command = server["command"].as_str().expect("snippet command");
+    assert!(
+        std::path::Path::new(command).is_absolute(),
+        "snippet command must be absolute: {command}"
+    );
+    assert!(!command.contains('~'), "snippet command must not contain ~");
+    let args = server["args"].as_array().expect("snippet args");
+    assert_eq!(args[0], serde_json::json!("serve"));
+    assert!(
+        args.windows(2).any(|window| window
+            == [
+                serde_json::json!("--profile"),
+                serde_json::json!("tenant_ro")
+            ]),
+        "snippet args must include --profile tenant_ro: {args:?}"
+    );
+    assert!(
+        setup_json["codex_config_toml"]
+            .as_str()
+            .expect("codex config")
+            .contains("--profile")
+    );
+    for client_surface in [
+        setup_json["claude_mcp_json"].to_string(),
+        setup_json["codex_config_toml"]
+            .as_str()
+            .expect("codex config")
+            .to_owned(),
+        setup_json["paths"].to_string(),
+    ] {
+        assert!(
+            !client_surface.contains("~/"),
+            "generated client/path surface must not contain unexpanded tilde paths: {client_surface}"
+        );
+    }
+
+    let mut serve = Command::new(command);
+    for arg in args {
+        serve.arg(arg.as_str().expect("arg string"));
+    }
+    serve
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", &state)
+        .env("HOME", &dir)
+        .env("ORACLEMCP_TOOLS_DIR", &tools_dir)
+        .env_remove("APP_PASSWORD")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let serve_output = wait_with_timeout(serve, Duration::from_secs(5));
+    assert_eq!(serve_output.status.code(), Some(0));
+    let serve_stderr = String::from_utf8(serve_output.stderr).expect("serve stderr is utf8");
+    assert!(
+        serve_stderr.contains("stdio transport ready"),
+        "serve must boot from generated snippet: {serve_stderr}"
+    );
+}

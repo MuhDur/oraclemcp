@@ -3043,6 +3043,26 @@ fn run_completions_cmd(binary_name: &'static str, shell: CompletionShell) -> Exi
     )
 }
 
+fn setup_display_path(path: &str) -> String {
+    let expanded = if path == "~" {
+        std::env::var_os("HOME").map(PathBuf::from)
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(rest))
+    } else {
+        Some(PathBuf::from(path))
+    };
+    let Some(expanded) = expanded else {
+        return path.to_owned();
+    };
+    if expanded.is_absolute() {
+        expanded.display().to_string()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&expanded).display().to_string())
+            .unwrap_or_else(|_| expanded.display().to_string())
+    }
+}
+
 fn run_info(robot_json: bool) -> ExitCode {
     let info = serde_json::json!({
         "binary": "oraclemcp",
@@ -3263,19 +3283,19 @@ fn run_setup(
     tools_dir: &str,
 ) -> ExitCode {
     let target_path = setup_write_target_path(config_path);
-    let config_path_display;
     let setup_config_path = if write {
-        config_path_display = target_path.display().to_string();
-        config_path_display.as_str()
+        target_path.display().to_string()
     } else {
-        config_path
+        setup_display_path(config_path)
     };
+    let setup_wrapper_path = setup_display_path(wrapper_path);
+    let setup_tools_dir = setup_display_path(tools_dir);
     let mut payload = setup_payload(
         profile,
         credential_env,
-        wrapper_path,
-        setup_config_path,
-        tools_dir,
+        &setup_wrapper_path,
+        &setup_config_path,
+        &setup_tools_dir,
     );
     let write_result = if write {
         let draft_toml = payload["profiles_toml"]
@@ -3331,12 +3351,12 @@ fn run_setup(
                 payload["profiles_toml"].as_str().unwrap_or("")
             ));
         }
-        output.push_str(&format!("Wrapper path:\n  {wrapper_path}\n\n"));
+        output.push_str(&format!("Wrapper path:\n  {setup_wrapper_path}\n\n"));
         output.push_str(&format!(
             "wrapper script template:\n{}\n\n",
             payload["wrapper_script"].as_str().unwrap_or("")
         ));
-        output.push_str(&format!("Custom tools path:\n  {tools_dir}\n\n"));
+        output.push_str(&format!("Custom tools path:\n  {setup_tools_dir}\n\n"));
         output.push_str(&format!(
             "custom tool template:\n{}\n\n",
             payload["custom_tool_toml"].as_str().unwrap_or("")
