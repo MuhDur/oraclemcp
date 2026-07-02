@@ -50,8 +50,28 @@ fn readme_leads_with_hosted_install_one_liner_service_and_dashboard() {
         install < source,
         "release installer must come before source-build instructions"
     );
+    let install_section = &readme[install..why];
+    let first_shell_fence = install_section
+        .find("```sh\n")
+        .expect("install section must have a shell code fence");
+    let first_shell_body = &install_section[first_shell_fence + "```sh\n".len()..];
+    let first_shell_end = first_shell_body
+        .find("\n```")
+        .expect("first shell fence must close");
+    let first_shell_command = first_shell_body[..first_shell_end].trim();
+    assert_eq!(
+        first_shell_command,
+        r#"curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --version 0.6.1"#,
+        "first install command must be the single copy-paste install/update line"
+    );
+    assert!(
+        !first_shell_command.contains("--dry-run"),
+        "dry-run must be advanced preview text, not the primary install command"
+    );
 
     for needle in [
+        "One line installs or updates `oraclemcp`",
+        "works as pasted",
         "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh",
         "bash -s -- --dry-run --version 0.6.1",
         "bash -s -- --version 0.6.1",
@@ -68,13 +88,14 @@ fn readme_leads_with_hosted_install_one_liner_service_and_dashboard() {
         "installs into `$HOME/.local`",
         "updates atomically after backing up the previous",
         "A downgrade is refused unless you pass `--force`",
-        "prints the exact export line for the detected shell",
-        "Every install finishes with next steps on stderr",
+        "exact `PATH` line plus next steps",
+        "next steps on stderr",
         "oraclemcp --json self-update --dry-run --version 0.6.1",
         "oraclemcp self-update --version 0.6.1 --no-service",
         "literal",
-        "copy-paste commands for release `0.6.1`",
-        "Later examples that contain `...`, `<pw>`, `<profile>`",
+        "copy-pasteable for release",
+        "### Advanced install paths",
+        "placeholder env values",
         "The release installer does not silently fall back",
         "bash install.sh --uninstall --dry-run",
         "bash install.sh --uninstall --service --yes",

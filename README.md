@@ -18,51 +18,57 @@
 
 ## Install, service, dashboard
 
-Use the verified release installer first. It downloads the platform archive,
-requires the SHA-256 digest check, verifies the cosign blob signature and
-provenance attestation when cosign is installed, and installs `oraclemcp` plus
-the short `om` alias. Missing cosign is a visible authenticity-unverified
-posture by default; use `--verify require` when your environment requires
-cosign to be present. The same script can print the service/client mutation plan
-with `--dry-run` before it changes the host.
-Re-running the same verified archive is a no-op for identical installed files;
-re-running with a newer target updates atomically after backing up the previous
-binary. A downgrade is refused unless you pass `--force`.
-The hosted installer URLs below target release `0.6.1` once the release
-artifacts are published; change only the version number when installing another
-release.
+One line installs or updates `oraclemcp` on macOS and Linux. It works as pasted
+for a human terminal and for a non-interactive agent run:
+
+```sh
+curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --version 0.6.1
+```
+
+The hosted script fetch includes a cache buster so stale CDN/proxy copies do not
+hide installer updates. This command is literal and copy-pasteable for release
+`0.6.1`; change only the version number when installing another release. Later
+examples that contain `...`, `<pw>`, `<profile>`, or placeholder env values are
+templates: replace those placeholders before running them.
+
+The normal command downloads, verifies, and installs into `$HOME/.local` unless
+you pass `--prefix`. It requires the SHA-256 digest check, verifies the cosign
+blob signature and provenance attestation when cosign is installed, and installs
+`oraclemcp` plus the short `om` alias. Missing cosign is a visible
+authenticity-unverified posture by default; use `--verify require` when your
+environment requires cosign to be present.
+
+In an interactive terminal, the installer then offers a short guided flow:
+append the binary directory to `PATH`, run `doctor`, print an MCP client snippet,
+and optionally install the loopback service. In a pipe, CI job, or agent run, it
+never prompts and never starts a service; it installs the binary and prints the
+exact `PATH` line plus next steps on stderr. Every install finishes with next
+steps on stderr: run `doctor`, write the starter profile, and generate MCP
+client snippets.
+
+Re-running the same one-liner is the update path. Re-running the same verified
+archive is a no-op for identical installed files; re-running with a newer target
+updates atomically after backing up the previous binary. A downgrade is refused unless you pass `--force`.
 
 Use the dry-run command first when you want a preview: it prints the archive,
 verification inputs, files, service plan, client-registration plan, and
 installer lock path, then exits before downloading, verifying, writing files, or
-touching the service manager. The normal command downloads, verifies, and
-installs into `$HOME/.local` unless you pass `--prefix`. After a normal install,
-the installer checks whether the binary directory is already on `PATH`. If it is
-missing, it prints the exact export line for the detected shell; in an
-interactive terminal it also offers to append that line to the shell rc file.
-Every install finishes with next steps on stderr: run `doctor`, write the
-starter profile, and generate MCP client snippets.
-The same one-liner is also the update path. From an installed binary, preview or
-run that path through:
+touching the service manager. Dry-run exists for review and automation plans;
+the normal command above is the install/update command.
+
+### Advanced install paths
+
+Preview the Linux/macOS host plan without changing the machine:
+
+```sh
+curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --dry-run --version 0.6.1
+```
+
+From an installed binary, preview or run the same update path:
 
 ```sh
 oraclemcp --json self-update --dry-run --version 0.6.1
 oraclemcp self-update --version 0.6.1 --no-service
-```
-
-The install, uninstall, and service commands in this section are literal
-copy-paste commands for release `0.6.1` after the `v0.6.1` artifacts exist.
-The hosted script fetches below include a cache buster so stale CDN/proxy copies
-do not hide installer updates.
-Later examples that contain `...`, `<pw>`, `<profile>`, or placeholder env
-values are templates: replace those placeholders before running them.
-
-```sh
-curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" \
-  | bash -s -- --dry-run --version 0.6.1
-
-curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" \
-  | bash -s -- --version 0.6.1
 ```
 
 On Windows, download and run the PowerShell installer:
@@ -78,8 +84,7 @@ For air-gapped hosts, download the release archive plus its `.sha256`, `.sig`,
 of the installer:
 
 ```sh
-bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz \
-  --version 0.6.1
+bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz --version 0.6.1
 ```
 
 ```powershell
@@ -100,23 +105,19 @@ bash install.sh --uninstall --yes
 bash install.sh --uninstall --service --yes
 ```
 
-For Windows service install, the PowerShell installer also requires explicit
-consent:
+Install the local service only with explicit consent. Keep it on loopback unless
+you deliberately configure remote HTTP, and use service-owned client credentials,
+OAuth, or mTLS for HTTP MCP clients. For Windows service install, the PowerShell
+installer also requires explicit consent.
+
+```sh
+oraclemcp --json service install --dry-run --profile db_ro --listen 127.0.0.1:7070 --client-credentials
+oraclemcp service install --yes --profile db_ro --listen 127.0.0.1:7070 --client-credentials
+oraclemcp --json clients issue --label claude --scope oracle:read
+```
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Service -Yes -Profile db_ro
-```
-
-Install the local service only with explicit consent. Keep it on loopback unless
-you deliberately configure remote HTTP, and use service-owned client credentials,
-OAuth, or mTLS for HTTP MCP clients.
-
-```sh
-oraclemcp --json service install --dry-run \
-  --profile db_ro --listen 127.0.0.1:7070 --client-credentials
-oraclemcp service install --yes \
-  --profile db_ro --listen 127.0.0.1:7070 --client-credentials
-oraclemcp --json clients issue --label claude --scope oracle:read
 ```
 
 Open the operator dashboard through the paired browser flow:
@@ -139,33 +140,31 @@ can lag the GitHub release tag, so use the check command first and install only
 after it resolves the target version.
 
 ```sh
-cargo binstall oraclemcp                # uses the GitHub release archive metadata
+cargo binstall oraclemcp
 docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.1
 ```
 
 Pending registry-backed channels:
 
 ```sh
-brew info MuhDur/oraclemcp/oraclemcp      # then: brew install MuhDur/oraclemcp/oraclemcp
-winget search --id MuhDur.oraclemcp --exact # then: winget install --id MuhDur.oraclemcp --exact
-npm view oraclemcp@0.6.1 version          # then: npx oraclemcp serve --profile db_ro --allow-no-auth
+brew info MuhDur/oraclemcp/oraclemcp
+winget search --id MuhDur.oraclemcp --exact
+npm view oraclemcp@0.6.1 version
+```
+
+After the relevant check resolves the target version, these commands are
+copy-pasteable:
+
+```sh
+brew install MuhDur/oraclemcp/oraclemcp
+winget install --id MuhDur.oraclemcp --exact
+npx oraclemcp serve --profile db_ro --allow-no-auth
 ```
 
 The npm wrapper is a verify-before-run package with no `postinstall` mutation.
 It checks SHA-256 before running the binary and soft-skips cosign in the default
 `prefer` posture when cosign is not installed; set `ORACLEMCP_NPM_VERIFY=require`
-to require cosign. `npx` only works after the npm registry entry exists. Check
-the channel first:
-
-```sh
-npm view oraclemcp@0.6.1 version
-```
-
-When that prints `0.6.1`, this command is copy-pasteable:
-
-```sh
-npx oraclemcp serve --profile db_ro --allow-no-auth
-```
+to require cosign.
 
 ## Why oraclemcp
 
