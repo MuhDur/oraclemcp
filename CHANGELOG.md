@@ -6,7 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.4] — 2026-07-02
+
+### Fixed
+
+- Recut the 0.6.3 release train as 0.6.4 after the pushed `v0.6.3` tag
+  failed in release gates before publishing crates, binaries, GHCR images, or
+  MCP registry metadata.
+- Made the installer TTY smoke test tolerant of pseudo-terminal line wrapping
+  around long PATH prompts while still verifying the exact prompt text after
+  unwrapping.
+
+### Included
+
+- Publishes the advanced dashboard release line: Change-Review board,
+  schema-diff and migration export workflows, the selected 2D BigBoard
+  signature skin, and release-gated per-view acceptance for those surfaces.
+- Publishes the one-line install/update experience: guided TTY flow,
+  non-interactive agent path, self-update, Windows installer parity, and
+  structured JSON-line installer acceptance evidence.
+
 ## [0.6.3] — 2026-07-02
+
+> The `v0.6.3` tag was pushed, but its workflow failed in release gates before
+> external artifacts were published. Use `0.6.4`.
 
 ### Fixed
 
@@ -19,17 +42,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Included
 
-- Publishes the advanced dashboard release line: Change-Review board,
+- Prepared the advanced dashboard release line: Change-Review board,
   schema-diff and migration export workflows, the selected 2D BigBoard
   signature skin, and release-gated per-view acceptance for those surfaces.
-- Publishes the one-line install/update experience: guided TTY flow,
+- Prepared the one-line install/update experience: guided TTY flow,
   non-interactive agent path, self-update, Windows installer parity, and
   structured JSON-line installer acceptance evidence.
 
 ## [0.6.2] — 2026-07-02
 
 > The `v0.6.2` tag was pushed, but its workflow failed in release gates before
-> external artifacts were published. Use `0.6.3`.
+> external artifacts were published. Use `0.6.4`.
 
 ### Added
 
@@ -344,6 +367,7 @@ pure Rust. (Not affiliated with Oracle Corporation.)
   closed on desynchronized multi-statement input. It carries a differential
   adversarial corpus (run in CI) and a `cargo-fuzz` target.
 
+[0.6.4]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.6.4
 [0.6.3]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.6.3
 [0.6.2]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.6.2
 [0.6.1]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.6.1

@@ -69,6 +69,13 @@ contains() {
   [[ "$haystack" == *"$needle"* ]] || fail "expected output to contain: $needle"
 }
 
+contains_unwrapped() {
+  local haystack="$1" needle="$2" normalized
+  normalized="${haystack//$'\r'/}"
+  normalized="${normalized//$'\n'/}"
+  [[ "$normalized" == *"$needle"* ]] || fail "expected unwrapped output to contain: $needle"
+}
+
 not_contains() {
   local haystack="$1" needle="$2"
   [[ "$haystack" != *"$needle"* ]] || fail "output unexpectedly contained: $needle"
@@ -447,7 +454,7 @@ if command -v script >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
       SHELL="/bin/bash" PATH="/usr/bin:/bin" \
       timeout 20s script -qefc "$pty_command" /dev/null 2>&1
   )"
-  contains "$pty_output" "Add $PTY_PREFIX/bin to PATH in $HOME_DIR/.bashrc? [y/N]"
+  contains_unwrapped "$pty_output" "Add $PTY_PREFIX/bin to PATH in $HOME_DIR/.bashrc? [y/N]"
   contains "$pty_output" "oraclemcp installer: appended PATH line to $HOME_DIR/.bashrc"
   rc_text="$(cat "$HOME_DIR/.bashrc")"
   contains "$rc_text" "export PATH='$PTY_PREFIX/bin':\"\$PATH\""
@@ -463,7 +470,7 @@ if command -v script >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
       SHELL="/bin/bash" PATH="/usr/bin:/bin" \
       timeout 20s script -qefc "$pty_command" /dev/null 2>&1
   )"
-  contains "$pty_default_output" "Add $PTY_DEFAULT_PREFIX/bin to PATH in $HOME_DIR/.bashrc? [y/N]"
+  contains_unwrapped "$pty_default_output" "Add $PTY_DEFAULT_PREFIX/bin to PATH in $HOME_DIR/.bashrc? [y/N]"
   contains "$pty_default_output" "Run oraclemcp doctor now? [Y/n]"
   contains "$pty_default_output" "Print an MCP client wiring snippet now? [Y/n]"
   contains "$pty_default_output" '"args": ["serve", "--profile", "db_ro"]'

@@ -4,7 +4,7 @@
       "live": true,
       "ready": true,
       "status": "ok",
-      "version": "0.6.3"
+      "version": "0.6.4"
     },
     "readiness": {
       "db_reachable": true,
