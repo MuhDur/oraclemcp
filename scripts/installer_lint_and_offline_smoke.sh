@@ -48,6 +48,28 @@ BIN
   checksum_file "$archive"
 }
 
+write_versioned_release_archive() {
+  local archive="$1" target="$2" version="$3" root dist
+  root="$(dirname "$archive")"
+  dist="$root/oraclemcp-$target"
+  mkdir -p "$dist"
+  cat >"$dist/oraclemcp" <<BIN
+#!/usr/bin/env sh
+if [ "\${1:-}" = "--version" ]; then
+  echo "oraclemcp $version"
+  exit 0
+fi
+if [ "\${1:-}" = "doctor" ] || { [ "\${1:-}" = "--json" ] && [ "\${2:-}" = "doctor" ]; }; then
+  echo '{"ok":true,"exit_code":0}'
+  exit 0
+fi
+echo "oraclemcp $version installer smoke binary"
+BIN
+  chmod +x "$dist/oraclemcp"
+  (cd "$root" && tar czf "$(basename "$archive")" "oraclemcp-$target")
+  checksum_file "$archive"
+}
+
 run_built_artifact_smoke() {
   local built_binary="$1"
   local smoke_target="${ORACLEMCP_INSTALLER_SMOKE_TARGET:-x86_64-unknown-linux-musl}"
@@ -334,6 +356,83 @@ if command -v script >/dev/null 2>&1; then
 else
   printf 'installer-smoke: script not installed; skipping TTY PATH prompt smoke\n' >&2
 fi
+
+UPDATE_DIR="$SMOKE_ROOT/update"
+UPDATE_TARGET="x86_64-unknown-linux-musl"
+UPDATE_ARCHIVE="$UPDATE_DIR/oraclemcp-$UPDATE_TARGET.tar.gz"
+UPDATE_PREFIX="$SMOKE_ROOT/update-prefix"
+mkdir -p "$UPDATE_DIR" "$UPDATE_PREFIX/bin"
+cat >"$UPDATE_PREFIX/bin/oraclemcp" <<'OLD_BIN'
+#!/usr/bin/env sh
+if [ "${1:-}" = "--version" ]; then
+  echo "oraclemcp 1.0.0"
+  exit 0
+fi
+echo old-oraclemcp
+OLD_BIN
+chmod +x "$UPDATE_PREFIX/bin/oraclemcp"
+cp "$UPDATE_PREFIX/bin/oraclemcp" "$UPDATE_DIR/oraclemcp-old-copy"
+write_versioned_release_archive "$UPDATE_ARCHIVE" "$UPDATE_TARGET" "1.1.0"
+
+update_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    PATH="/usr/bin:/bin" \
+    bash install.sh \
+      --offline "$UPDATE_ARCHIVE" \
+      --version 1.1.0 \
+      --target "$UPDATE_TARGET" \
+      --prefix "$UPDATE_PREFIX" \
+      --verify checksum-only \
+      --no-completions \
+      --no-service 2>&1
+)"
+contains "$update_output" "oraclemcp installer: backed up previous binary to"
+contains "$update_output" "oraclemcp installer: installed oraclemcp to $UPDATE_PREFIX/bin/oraclemcp"
+contains "$update_output" "oraclemcp installer: $UPDATE_PREFIX/bin is not on PATH"
+backup_file="$(find "$UPDATE_PREFIX/share/oraclemcp/backups" -type f -name 'oraclemcp-1.0.0-*' | head -n 1)"
+[ -n "$backup_file" ] || fail "update did not create a versioned backup"
+cmp -s "$backup_file" "$UPDATE_DIR/oraclemcp-old-copy" || fail "backup is not byte-identical to prior binary"
+new_version="$("$UPDATE_PREFIX/bin/oraclemcp" --version)"
+contains "$new_version" "oraclemcp 1.1.0"
+
+already_current_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    PATH="/usr/bin:/bin" \
+    bash install.sh \
+      --offline "$UPDATE_ARCHIVE" \
+      --version 1.1.0 \
+      --target "$UPDATE_TARGET" \
+      --prefix "$UPDATE_PREFIX" \
+      --verify checksum-only \
+      --no-completions \
+      --no-service 2>&1
+)"
+contains "$already_current_output" "oraclemcp installer: already current: installed oraclemcp 1.1.0 matches target 1.1.0"
+contains "$already_current_output" "$UPDATE_PREFIX/bin/oraclemcp --json doctor"
+
+DOWNGRADE_DIR="$SMOKE_ROOT/downgrade"
+DOWNGRADE_ARCHIVE="$DOWNGRADE_DIR/oraclemcp-$UPDATE_TARGET.tar.gz"
+mkdir -p "$DOWNGRADE_DIR"
+write_versioned_release_archive "$DOWNGRADE_ARCHIVE" "$UPDATE_TARGET" "0.9.0"
+set +e
+downgrade_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    bash install.sh \
+      --offline "$DOWNGRADE_ARCHIVE" \
+      --version 0.9.0 \
+      --target "$UPDATE_TARGET" \
+      --prefix "$UPDATE_PREFIX" \
+      --verify checksum-only \
+      --no-completions \
+      --no-service 2>&1
+)"
+downgrade_status=$?
+set -e
+[ "$downgrade_status" -ne 0 ] || fail "forced downgrade guard did not reject older target"
+contains "$downgrade_output" "ORACLEMCP_INSTALL_DOWNGRADE_REFUSED"
+
+cp "$backup_file" "$UPDATE_PREFIX/bin/oraclemcp"
+cmp -s "$UPDATE_PREFIX/bin/oraclemcp" "$UPDATE_DIR/oraclemcp-old-copy" || fail "rollback from backup did not restore prior bytes"
 
 set +e
 require_no_cosign_output="$(

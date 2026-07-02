@@ -26,7 +26,8 @@ posture by default; use `--verify require` when your environment requires
 cosign to be present. The same script can print the service/client mutation plan
 with `--dry-run` before it changes the host.
 Re-running the same verified archive is a no-op for identical installed files;
-use `--force` only when intentionally replacing different local content.
+re-running with a newer target updates atomically after backing up the previous
+binary. A downgrade is refused unless you pass `--force`.
 The hosted installer URLs below target release `0.6.1` once the release
 artifacts are published; change only the version number when installing another
 release.
@@ -41,6 +42,13 @@ missing, it prints the exact export line for the detected shell; in an
 interactive terminal it also offers to append that line to the shell rc file.
 Every install finishes with next steps on stderr: run `doctor`, write the
 starter profile, and generate MCP client snippets.
+The same one-liner is also the update path. From an installed binary, preview or
+run that path through:
+
+```sh
+oraclemcp --json self-update --dry-run --version 0.6.1
+oraclemcp self-update --version 0.6.1 --no-service
+```
 
 The install, uninstall, and service commands in this section are literal
 copy-paste commands for release `0.6.1` after the `v0.6.1` artifacts exist.

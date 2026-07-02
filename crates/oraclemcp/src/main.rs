@@ -32,7 +32,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command as ProcessCommand, ExitCode, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -226,6 +226,9 @@ enum Command {
         #[arg(long, default_value = "~/.config/oraclemcp/tools.d")]
         tools_dir: String,
     },
+    /// Re-run the release installer to update this binary.
+    #[command(name = "self-update", alias = "self_update")]
+    SelfUpdate(SelfUpdateCliArgs),
     /// Print HMAC signatures for operator-defined custom tool definitions.
     #[command(name = "sign-tool", alias = "sign_tools")]
     SignTool {
@@ -330,6 +333,25 @@ struct ServiceInstallCliArgs {
     #[arg(long)]
     yes: bool,
     /// Print the service-manager plan without writing files or running commands.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+struct SelfUpdateCliArgs {
+    /// Release version to install, e.g. 0.6.1 or v0.6.1.
+    #[arg(long, default_value = "latest")]
+    version: String,
+    /// Verification posture forwarded to install.sh.
+    #[arg(long)]
+    verify: Option<String>,
+    /// Forward --yes to install.sh for non-interactive consent.
+    #[arg(long)]
+    yes: bool,
+    /// Forward --no-service to install.sh.
+    #[arg(long)]
+    no_service: bool,
+    /// Print the installer command without executing it.
     #[arg(long)]
     dry_run: bool,
 }
@@ -558,6 +580,7 @@ fn main() -> ExitCode {
             &config_path,
             &tools_dir,
         ),
+        Command::SelfUpdate(args) => run_self_update_cmd(robot_json, args),
         Command::SignTool { path, tool } => run_sign_tool(robot_json, &path, tool.as_deref()),
         Command::Audit { command } => match command {
             AuditCommand::Verify {
@@ -3425,6 +3448,97 @@ fn run_setup(
     }
 }
 
+const SELF_UPDATE_INSTALLER_URL: &str =
+    "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh";
+
+fn self_update_argv(args: &SelfUpdateCliArgs) -> Vec<String> {
+    let mut argv = vec![
+        "bash".to_owned(),
+        "-c".to_owned(),
+        "set -euo pipefail; url=\"$1\"; shift; curl -fsSL \"${url}?$(date +%s)\" | bash -s -- \"$@\""
+            .to_owned(),
+        "oraclemcp-self-update".to_owned(),
+        SELF_UPDATE_INSTALLER_URL.to_owned(),
+        "--update".to_owned(),
+        "--version".to_owned(),
+        args.version.clone(),
+    ];
+    if let Some(verify) = &args.verify {
+        argv.push("--verify".to_owned());
+        argv.push(verify.clone());
+    }
+    if args.yes {
+        argv.push("--yes".to_owned());
+    }
+    if args.no_service {
+        argv.push("--no-service".to_owned());
+    }
+    argv
+}
+
+fn exit_code_from_status(status: ExitStatus) -> ExitCode {
+    match status.code() {
+        Some(code) if (0..=255).contains(&code) => ExitCode::from(code as u8),
+        Some(_) | None => ExitCode::from(1),
+    }
+}
+
+fn run_self_update_cmd(robot_json: bool, args: SelfUpdateCliArgs) -> ExitCode {
+    let argv = self_update_argv(&args);
+    if args.dry_run {
+        let payload = serde_json::json!({
+            "kind": "oraclemcp_self_update",
+            "installer_url": SELF_UPDATE_INSTALLER_URL,
+            "version": args.version,
+            "argv": argv,
+            "notes": [
+                "self-update re-runs the same verified installer path as the one-line install",
+                "install.sh --update is an alias for the version-aware update path"
+            ]
+        });
+        let mut text = String::new();
+        text.push_str("oraclemcp self-update\n\n");
+        text.push_str(&format!("Installer:\n  {SELF_UPDATE_INSTALLER_URL}\n\n"));
+        text.push_str("Command argv:\n");
+        for arg in payload["argv"].as_array().expect("argv array") {
+            text.push_str(&format!(
+                "  {}\n",
+                arg.as_str().expect("argv item is string")
+            ));
+        }
+        return if robot_json {
+            stdout_exit(
+                write_stdout_line(&serde_json::to_string(&payload).expect("self-update JSON")),
+                ExitCode::SUCCESS,
+            )
+        } else {
+            stdout_exit(write_stdout_text(&text), ExitCode::SUCCESS)
+        };
+    }
+
+    let Some((program, rest)) = argv.split_first() else {
+        emit_command_error(
+            robot_json,
+            "self-update",
+            "ORACLEMCP_SELF_UPDATE_COMMAND_EMPTY",
+            "internal self-update command was empty",
+        );
+        return ExitCode::from(2);
+    };
+    match ProcessCommand::new(program).args(rest).status() {
+        Ok(status) => exit_code_from_status(status),
+        Err(error) => {
+            emit_command_error(
+                robot_json,
+                "self-update",
+                "ORACLEMCP_SELF_UPDATE_FAILED",
+                &format!("failed to run installer: {error}"),
+            );
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn custom_tool_signatures(
     path: &Path,
     only_tool: Option<&str>,
@@ -5961,6 +6075,30 @@ mod tests {
                 ref credential_env,
                 ..
             }) if profile == "tenant_ro" && credential_env == "APP_PASSWORD"
+        ));
+
+        let self_update = Cli::try_parse_from([
+            "oraclemcp",
+            "--json",
+            "self-update",
+            "--dry-run",
+            "--version",
+            "0.6.2",
+            "--verify",
+            "require",
+            "--no-service",
+        ])
+        .expect("parse self-update");
+        assert!(self_update.robot_json);
+        assert!(matches!(
+            self_update.command,
+            Some(Command::SelfUpdate(SelfUpdateCliArgs {
+                ref version,
+                ref verify,
+                dry_run: true,
+                no_service: true,
+                ..
+            })) if version == "0.6.2" && verify.as_deref() == Some("require")
         ));
 
         let sign = Cli::try_parse_from([

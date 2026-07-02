@@ -29,6 +29,7 @@ YES=0
 FORCE=0
 SOURCE=0
 UNINSTALL=0
+UPDATE_REQUESTED=0
 OFFLINE_ARCHIVE=""
 VERIFY_POSTURE="${ORACLEMCP_INSTALL_VERIFY:-prefer}"
 INSTALL_COMPLETIONS=1
@@ -77,6 +78,7 @@ Options:
   --source                  Build with cargo instead of downloading a release archive
   --offline <archive>       Install from a local release archive plus sibling verification files
   --verify <posture>        Verification posture: require, prefer, checksum-only (default: prefer)
+  --update                  Explicitly run the install path as an update; re-running is already update-safe
   --uninstall               Remove installed oraclemcp files; add --service to remove the service
   --no-completions          Do not install shell completions
   --service                 Install/start the local service after binary install
@@ -194,6 +196,10 @@ parse_args() {
         [ "$#" -ge 2 ] || fail "--verify requires a value"
         VERIFY_POSTURE="$(normalize_verify_posture "$2")"
         shift 2
+        ;;
+      --update)
+        UPDATE_REQUESTED=1
+        shift
         ;;
       --uninstall)
         UNINSTALL=1
@@ -832,27 +838,106 @@ assert_replaceable() {
   fi
 }
 
-should_replace_file() {
-  local src="$1" dest="$2"
-  if [ -e "$dest" ] || [ -L "$dest" ]; then
-    if [ "$FORCE" -eq 0 ]; then
-      if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
-        return 1
-      fi
-      fail "$dest already exists with different content; rerun with --force to replace it"
-    fi
+parse_semver_core() {
+  local version="${1#v}" core major minor patch
+  core="${version%%-*}"
+  IFS=. read -r major minor patch <<EOF
+$core
+EOF
+  case "$major:$minor:$patch" in
+    *[!0-9:]* | :* | *: | *::*)
+      return 1
+      ;;
+  esac
+  printf '%s %s %s\n' "$major" "$minor" "$patch"
+}
+
+version_compare() {
+  local left="$1" right="$2" l_major l_minor l_patch r_major r_minor r_patch
+  read -r l_major l_minor l_patch < <(parse_semver_core "$left") || return 2
+  read -r r_major r_minor r_patch < <(parse_semver_core "$right") || return 2
+  if [ "$l_major" -gt "$r_major" ]; then
+    printf '1\n'
+  elif [ "$l_major" -lt "$r_major" ]; then
+    printf -- '-1\n'
+  elif [ "$l_minor" -gt "$r_minor" ]; then
+    printf '1\n'
+  elif [ "$l_minor" -lt "$r_minor" ]; then
+    printf -- '-1\n'
+  elif [ "$l_patch" -gt "$r_patch" ]; then
+    printf '1\n'
+  elif [ "$l_patch" -lt "$r_patch" ]; then
+    printf -- '-1\n'
+  else
+    printf '0\n'
   fi
+}
+
+installed_oraclemcp_version() {
+  local output version
+  [ -x "$BIN_DIR/oraclemcp" ] || return 1
+  output="$("$BIN_DIR/oraclemcp" --version 2>/dev/null || true)"
+  case "$output" in
+    oraclemcp\ *)
+      version="${output#oraclemcp }"
+      version="${version%%[[:space:]]*}"
+      [ -n "$version" ] || return 1
+      printf '%s\n' "$version"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+already_current_by_version() {
+  local installed
+  [ "$FORCE" -eq 0 ] || return 1
+  [ "$VERSION" != "latest" ] || return 1
+  installed="$(installed_oraclemcp_version || true)"
+  [ "$installed" = "$VERSION" ] || return 1
+  printf 'oraclemcp installer: already current: installed oraclemcp %s matches target %s\n' "$installed" "$VERSION" >&2
   return 0
 }
 
+guard_downgrade() {
+  local installed cmp
+  [ "$FORCE" -eq 0 ] || return 0
+  [ "$VERSION" != "latest" ] || return 0
+  installed="$(installed_oraclemcp_version || true)"
+  [ -n "$installed" ] || return 0
+  cmp="$(version_compare "$installed" "$VERSION" || true)"
+  [ "$cmp" = "1" ] || return 0
+  fail "ORACLEMCP_INSTALL_DOWNGRADE_REFUSED: installed oraclemcp $installed is newer than target $VERSION; rerun with --force only if you intentionally want to downgrade"
+}
+
+backup_existing_binary() {
+  local dest="$1" installed backup_dir backup_path stamp
+  [ -e "$dest" ] || return 0
+  installed="$(installed_oraclemcp_version || true)"
+  [ -n "$installed" ] || installed="unknown"
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  backup_dir="$PREFIX/share/oraclemcp/backups"
+  mkdir -p "$backup_dir"
+  backup_path="$backup_dir/oraclemcp-$installed-$stamp"
+  cp -p "$dest" "$backup_path"
+  printf 'oraclemcp installer: backed up previous binary to %s\n' "$backup_path" >&2
+}
+
 install_binary() {
-  local src="$1" dest="$BIN_DIR/oraclemcp"
+  local src="$1" dest="$BIN_DIR/oraclemcp" tmp_dest
   ensure_parent_dir "$dest"
-  if should_replace_file "$src" "$dest"; then
-    install -m 0755 "$src" "$dest"
-  else
+  guard_downgrade
+  if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
+    printf 'oraclemcp installer: already current: %s matches release archive\n' "$dest" >&2
     chmod 0755 "$dest"
+    return 0
   fi
+  backup_existing_binary "$dest"
+  tmp_dest="$(dirname "$dest")/.oraclemcp.tmp.$$"
+  install -m 0755 "$src" "$tmp_dest"
+  mv -f "$tmp_dest" "$dest"
+  printf 'oraclemcp installer: installed oraclemcp to %s\n' "$dest" >&2
 }
 
 install_om_alias() {
@@ -913,6 +998,9 @@ install_prebuilt() {
   local work_dir asset base archive checksum signature certificate attestation extracted
   need tar
   need install
+  if already_current_by_version; then
+    return 0
+  fi
   if [ -n "$OFFLINE_ARCHIVE" ]; then
     require_offline_bundle "$OFFLINE_ARCHIVE"
   fi
@@ -1034,6 +1122,9 @@ uninstall_oraclemcp() {
 install_source() {
   local args=("+$RUST_TOOLCHAIN" "install" "oraclemcp" "--locked" "--root" "$PREFIX")
   need cargo
+  if already_current_by_version; then
+    return 0
+  fi
   if [ "$VERSION" != "latest" ]; then
     args+=("--version" "$VERSION")
   fi
@@ -1133,6 +1224,9 @@ main() {
   fi
   if [ "$UNINSTALL" -eq 1 ] && [ "$CLIENT_REGISTER" -eq 1 ]; then
     fail "--uninstall cannot be combined with --register-client"
+  fi
+  if [ "$UNINSTALL" -eq 1 ] && [ "$UPDATE_REQUESTED" -eq 1 ]; then
+    fail "--uninstall cannot be combined with --update"
   fi
   if [ -z "$TARGET" ]; then
     TARGET="$(detect_target)"
