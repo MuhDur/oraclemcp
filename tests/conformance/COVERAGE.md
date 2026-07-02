@@ -204,7 +204,7 @@ Total tracked requirements: 75 MUST, 2 SHOULD, 77 tested.
 | HTTP-NEG-001 | `crates/oraclemcp-core/src/http.rs::tests::mcp_post_enforces_accept_and_content_type_negotiation` |
 | HTTP-MCP-VER-001 | `crates/oraclemcp-core/src/http.rs::tests::mcp_protocol_version_header_is_enforced_before_dispatch` |
 | OPERATOR-V1-001 | `crates/oraclemcp-core/src/operator_protocol.rs::tests::operator_schema_declares_every_route_and_event_contract`; `crates/oraclemcp-core/src/http.rs::tests::operator_v1_serves_schema_health_events_and_action_mapping` |
-| OPERATOR-V1-002 | `crates/oraclemcp-core/src/http.rs::tests::operator_v1_serves_schema_health_events_and_action_mapping`; `tests/fixtures/ui/operator-v1/*.json` |
+| OPERATOR-V1-002 | `crates/oraclemcp-core/src/http.rs::tests::operator_v1_serves_schema_health_events_and_action_mapping`; `crates/oraclemcp/tests/dashboard_e2e.rs::w9_read_only_health_stats_mirror_is_flag_gated`; `tests/fixtures/ui/operator-v1/*.json` |
 | OPERATOR-V1-003 | `crates/oraclemcp-core/src/http.rs::tests::operator_v1_serves_schema_health_events_and_action_mapping`; `tests/fixtures/ui/operator-v1/event-snapshot.json` |
 | OPERATOR-V1-004 | `crates/oraclemcp-core/src/http.rs::tests::operator_v1_serves_schema_health_events_and_action_mapping` |
 | OPERATOR-V1-005 | `scripts/ui_fixtures_validate_against_rust_schema.sh`; `crates/oraclemcp-core/src/operator_protocol.rs::tests::generated_operator_schema_artifacts_match_rust_contract` |
@@ -212,7 +212,7 @@ Total tracked requirements: 75 MUST, 2 SHOULD, 77 tested.
 | OPERATOR-V1-007 | `crates/oraclemcp-core/src/http.rs::tests::operator_action_idempotency_replays_same_response_and_conflicts_on_drift`; `crates/oraclemcp-core/src/http.rs::tests::operator_idempotency_ledger_reports_in_progress_before_completion` |
 | OPERATOR-V1-008 | `crates/oraclemcp-core/src/http.rs::tests::operator_events_resume_is_lane_scoped`; `crates/oraclemcp-core/src/http.rs::tests::operator_events_last_event_id_reports_gap_for_slow_consumer` |
 | OPERATOR-V1-009 | `crates/oraclemcp-core/src/http.rs::tests::cp_apply_reclassifies_never_trusts_stored_verdict` |
-| DASHBOARD-B8-001 | `crates/oraclemcp-core/src/http.rs::tests::dashboard_bundle_serves_html_without_api_fallback`; `scripts/dashboard_bundle_check.sh`; `crates/oraclemcp/tests/dashboard_e2e.rs::b8_dashboard_acceptance_suite_is_accounted` |
+| DASHBOARD-B8-001 | `crates/oraclemcp-core/src/http.rs::tests::dashboard_bundle_serves_html_without_api_fallback`; `crates/oraclemcp/tests/dashboard_e2e.rs::w9_read_only_health_stats_mirror_is_flag_gated`; `scripts/dashboard_bundle_check.sh`; `crates/oraclemcp/tests/dashboard_e2e.rs::b8_dashboard_acceptance_suite_is_accounted` |
 | DASHBOARD-B8-002 | `crates/oraclemcp-core/src/http.rs::tests::dashboard_pairing_sets_strict_cookie_and_session_view`; `crates/oraclemcp-core/src/http.rs::tests::malicious_page_cannot_trigger_dashboard_gated_action`; `scripts/sensitive_data_lint.sh`; `crates/oraclemcp/tests/dashboard_e2e.rs::skin_conformance_2d_fallback_a11y` |
 | DASHBOARD-B8-003 | `crates/oraclemcp-core/src/http.rs::tests::operator_config_draft_apply_and_rollback_are_redacted_and_audited`; `crates/oraclemcp-core/src/config_ops.rs`; `crates/oraclemcp-core/src/file_store.rs` |
 | DASHBOARD-B8-004 | `crates/oraclemcp-core/src/http.rs::tests::workbench_no_bypass_guard_is_the_feature`; `crates/oraclemcp-core/src/http.rs::tests::dashboard_workbench_ddl_apply_is_release_gated`; `crates/oraclemcp/tests/trust_safety.rs` |

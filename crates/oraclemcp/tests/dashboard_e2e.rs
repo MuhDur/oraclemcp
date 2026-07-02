@@ -219,6 +219,77 @@ fn read_only_dashboard_surface_contracts_are_registered() {
 }
 
 #[test]
+fn w9_read_only_health_stats_mirror_is_flag_gated() {
+    let app = read_repo_file("web/src/app/App.tsx");
+    let client = read_repo_file("web/src/app/operator-client.ts");
+    let http = read_repo_file("crates/oraclemcp-core/src/http.rs");
+    let bundle = read_repo_file("crates/oraclemcp-core/src/dashboard_bundle.rs");
+    let core_cargo = read_repo_file("crates/oraclemcp-core/Cargo.toml");
+    let configuration = read_repo_file("docs/configuration.md");
+
+    assert_contains_all(
+        "W9 dashboard health/stats mirror",
+        &app,
+        &[
+            "function OverviewPage",
+            "function HealthPage",
+            "function CapacityPage",
+            "fetchOperatorHealth",
+            "fetchOperatorMetrics",
+            "aria-label=\"overview metrics\"",
+            "aria-label=\"connection health\"",
+            "aria-label=\"capacity metrics\"",
+        ],
+    );
+    assert_contains_all(
+        "W9 read-only operator fetchers",
+        &client,
+        &[
+            "operatorGet(\"/operator/v1/health\")",
+            "operatorGet(\"/operator/v1/metrics\")",
+            "credentials: \"same-origin\"",
+        ],
+    );
+    assert!(
+        !client.contains("localStorage") && !client.contains("sessionStorage"),
+        "W9 mirror must not persist operator tokens in browser storage"
+    );
+    assert_contains_all(
+        "W9 operator route implementation",
+        &http,
+        &[
+            "OperatorRouteKind::Health => operator_json_response",
+            "OperatorRouteKind::Metrics =>",
+            "fn dashboard_bundle_is_absent_from_default_build",
+            "fn dashboard_bundle_serves_html_without_api_fallback",
+        ],
+    );
+    assert_contains_all(
+        "W9 bundle feature gate",
+        &bundle,
+        &[
+            "feature-gated",
+            "#[cfg(feature = \"dashboard-bundle\")]",
+            "#[cfg(not(feature = \"dashboard-bundle\"))]",
+        ],
+    );
+    assert_contains_all(
+        "W9 cargo feature gate",
+        &core_cargo,
+        &["default = []", "dashboard-bundle = [\"dep:rust-embed\"]"],
+    );
+    assert_contains_all(
+        "W9 operator docs",
+        &configuration,
+        &[
+            "The browser health/stats mirror is the dashboard Overview, Health, and Capacity",
+            "the `dashboard-bundle` feature",
+            "`GET /operator/v1/health`, `/metrics`",
+        ],
+    );
+}
+
+#[test]
 fn wd_search_global_explorer_uses_guarded_dictionary_tools() {
     let app = read_repo_file("web/src/app/App.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");
@@ -758,6 +829,8 @@ fn b8_dashboard_acceptance_suite_is_accounted() {
         &[
             "WP-W B.8 dashboard acceptance suite",
             "oraclemcp-epic-060-f4xo.8.20",
+            "W9 read-only health/stats mirror",
+            "oraclemcp-epic-060-f4xo.8.11",
             "W8b proof bundle for gated actions",
             "oraclemcp-epic-060-f4xo.8.10",
             "W10 client-credentials dashboard",

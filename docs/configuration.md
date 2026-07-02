@@ -405,6 +405,12 @@ redacted operator response, concurrent duplicates return typed
 `operator_idempotency_in_progress`, and drift under the same key returns
 `operator_idempotency_key_conflict`.
 
+The browser health/stats mirror is the dashboard Overview, Health, and Capacity
+pages over `GET /operator/v1/health`, `/metrics`, and active-lane summaries. It
+is optional: the embedded browser assets are present only in binaries built with
+the `dashboard-bundle` feature, and browser access still requires the paired
+dashboard session rather than loopback alone.
+
 ---
 
 ## Base inheritance
