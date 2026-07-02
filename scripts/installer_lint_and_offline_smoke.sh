@@ -390,7 +390,9 @@ for removed in \
   "$UNINSTALL_PREFIX/share/powershell/Completions/oraclemcp.ps1" \
   "$UNINSTALL_PREFIX/share/powershell/Completions/om.ps1"
 do
-  [ ! -e "$removed" ] && [ ! -L "$removed" ] || fail "uninstall left installed file: $removed"
+  if [ -e "$removed" ] || [ -L "$removed" ]; then
+    fail "uninstall left installed file: $removed"
+  fi
 done
 
 printf 'installer-smoke: OK\n'

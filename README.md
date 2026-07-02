@@ -37,14 +37,16 @@ installs into `$HOME/.local` unless you pass `--prefix`.
 
 The install, uninstall, and service commands in this section are literal
 copy-paste commands for release `0.6.0` after the `v0.6.0` artifacts exist.
+The hosted script fetches below include a cache buster so stale CDN/proxy copies
+do not hide installer updates.
 Later examples that contain `...`, `<pw>`, `<profile>`, or placeholder env
 values are templates: replace those placeholders before running them.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh \
+curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" \
   | bash -s -- --dry-run --version 0.6.0
 
-curl -fsSL https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh \
+curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" \
   | bash -s -- --version 0.6.0
 ```
 
