@@ -1881,7 +1881,7 @@ mod tests {
     #[test]
     fn operator_v1_serves_schema_health_events_and_action_mapping() {
         let (auditor, sink) = operator_auditor();
-        let health = oraclemcp_telemetry::HealthState::new("0.4.1");
+        let health = oraclemcp_telemetry::HealthState::new("0.6.0");
         health.set_ready(true);
         let metrics = Arc::new(oraclemcp_telemetry::Metrics::new());
         metrics.record_request("oracle_query", "ok");

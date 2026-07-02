@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-07-02
+
 ### Upgrade Notes
 
 - Query serialization now exposes structured Oracle values through the
@@ -264,6 +266,7 @@ pure Rust. (Not affiliated with Oracle Corporation.)
   closed on desynchronized multi-statement input. It carries a differential
   adversarial corpus (run in CI) and a `cargo-fuzz` target.
 
+[0.6.0]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.6.0
 [0.4.1]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.4.1
 [0.4.0]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/MuhDur/oraclemcp/releases/tag/v0.3.0

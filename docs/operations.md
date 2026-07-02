@@ -62,14 +62,14 @@ The default entrypoint serves MCP over stdio:
 
 ```sh
 # Tool surface only — no database. Safe to inspect anywhere.
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.4.1
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.0
 
 # Against a configured profile. Mount a read-only profiles config and pass the
 # credential the profile's credential_ref expects.
 docker run -i --rm \
   -v "$HOME/.config/oraclemcp:/root/.config/oraclemcp:ro" \
   -e ORACLE_APP_PASSWORD \
-  ghcr.io/muhdur/oraclemcp:0.4.1
+  ghcr.io/muhdur/oraclemcp:0.6.0
 ```
 
 `--allow-no-auth` is baked into the default `CMD` because, over stdio, the
@@ -79,8 +79,8 @@ that assumption over to the HTTP transport (see §4).
 To verify what you are about to run before wiring it into a client:
 
 ```sh
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.4.1 info       # version, tools, transports
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.4.1 --json doctor
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.0 info       # version, tools, transports
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.0 --json doctor
 ```
 
 The optional PL/SQL intelligence image uses the same runtime contract, but the
@@ -104,7 +104,7 @@ docker buildx build \
 docker run -i --rm oraclemcp:plsql-intelligence --json info
 ```
 
-Pin to an immutable tag (`:0.4.1`), not `:latest`, in any non-interactive
+Pin to an immutable tag (`:0.6.0`), not `:latest`, in any non-interactive
 deployment, and verify the image digest against the release. The exact
 verification commands — SBOM, provenance, and signatures for both the binaries
 and the image — are in [§6](#6-verifying-release-artifacts-sbom-provenance-signatures).
@@ -135,7 +135,7 @@ spec:
         fsGroup: 65532
       containers:
         - name: oraclemcp
-          image: ghcr.io/muhdur/oraclemcp:0.4.1
+          image: ghcr.io/muhdur/oraclemcp:0.6.0
           args:
             - serve
             - --listen

@@ -179,9 +179,9 @@ oraclemcp --json setup --write --profile db_ro
 docker run -i --rm \
   -v "$HOME/.config/oraclemcp:/root/.config/oraclemcp:ro" \
   -e ORACLE_APP_PASSWORD \
-  ghcr.io/muhdur/oraclemcp:0.4.1          # MCP over stdio, against the configured profile
+  ghcr.io/muhdur/oraclemcp:0.6.0          # MCP over stdio, against the configured profile
 
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.4.1   # tool surface only (no DB)
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.6.0   # tool surface only (no DB)
 ```
 
 An optional PL/SQL intelligence image is available from the manual Docker

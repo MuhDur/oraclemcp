@@ -85,6 +85,22 @@ server_version="$(jq -r '.version' server.json)"
 [ "$server_version" = "$version" ] ||
   fail "server.json version '$server_version' does not match workspace version '$version'"
 
+dashboard_version="$(jq -r '.version' web/package.json)"
+[ "$dashboard_version" = "$version" ] ||
+  fail "web/package.json version '$dashboard_version' does not match workspace version '$version'"
+
+dashboard_lock_version="$(jq -r '.version' web/package-lock.json)"
+[ "$dashboard_lock_version" = "$version" ] ||
+  fail "web/package-lock.json version '$dashboard_lock_version' does not match workspace version '$version'"
+
+dashboard_lock_package_version="$(jq -r '.packages[""].version' web/package-lock.json)"
+[ "$dashboard_lock_package_version" = "$version" ] ||
+  fail "web/package-lock.json root package version '$dashboard_lock_package_version' does not match workspace version '$version'"
+
+npm_wrapper_version="$(jq -r '.version' npm/oraclemcp/package.json)"
+[ "$npm_wrapper_version" = "$version" ] ||
+  fail "npm/oraclemcp/package.json version '$npm_wrapper_version' does not match workspace version '$version'"
+
 if ! grep -F "## [$version]" CHANGELOG.md >/dev/null; then
   fail "CHANGELOG.md does not contain an entry for $version"
 fi
@@ -101,9 +117,13 @@ if ! grep -F "ghcr.io/muhdur/oraclemcp:$version" README.md >/dev/null; then
   fail "README.md does not mention ghcr.io/muhdur/oraclemcp:$version"
 fi
 
+if ! grep -F "e.g. $version or v$version" install.sh >/dev/null; then
+  fail "install.sh help does not show the current release version example"
+fi
+
 stale_image_refs="$(
   grep -RInE 'ghcr\.io/muhdur/oraclemcp:[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' \
-    README.md server.json crates/oraclemcp/src .github/workflows Dockerfile 2>/dev/null |
+    README.md server.json docs/hardening.md docs/operations.md crates/oraclemcp/src .github/workflows Dockerfile 2>/dev/null |
     grep -Fv "ghcr.io/muhdur/oraclemcp:$version" || true
 )"
 if [ -n "$stale_image_refs" ]; then

@@ -15,12 +15,13 @@ support branch.
 
 | Version | Supported          |
 |---------|--------------------|
-| 0.4.x   | ✅ (current line)  |
+| 0.6.x   | ✅ (current line)  |
+| 0.4.x   | ⚠️ critical fixes only |
 | 0.3.x   | ⚠️ critical fixes only |
 | < 0.3   | ❌                 |
 
 The `0.3.0 → 0.4.0` transition is the production-hardening line; deploy the
-latest `0.4.x`.
+latest `0.6.x`.
 
 ## Reporting a vulnerability
 

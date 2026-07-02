@@ -524,7 +524,7 @@ pub fn operator_fixture_values() -> Vec<(&'static str, Value)> {
                 "/operator/v1/health",
                 json!({
                     "source": "self_lane",
-                    "liveness": { "status": "ok", "live": true, "ready": true, "version": "0.4.1" },
+                    "liveness": { "status": "ok", "live": true, "ready": true, "version": "0.6.0" },
                     "readiness": {
                         "status": "ok",
                         "ready": true,
