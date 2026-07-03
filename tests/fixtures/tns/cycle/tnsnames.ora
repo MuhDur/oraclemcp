@@ -1,0 +1,6 @@
+# oraclemcp canonical TNS-discovery fixture — IFILE include-cycle entry.
+# tnsnames.ora -> cycle_b.ora -> tnsnames.ora (cycle). The upstream reader
+# detects the cycle and returns a structured error (never a panic); the adapter
+# surfaces it as TnsParseError::Read.
+
+IFILE = cycle_b.ora

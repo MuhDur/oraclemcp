@@ -1,0 +1,8 @@
+# oraclemcp canonical TNS-discovery fixture — IFILE include target.
+# Included by the primary tnsnames.ora; contributes INCLUDED_ONE.
+
+INCLUDED_ONE =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = inc.example.com)(PORT = 1521))
+    (CONNECT_DATA = (SERVICE_NAME = INCLUDED.example.com))
+  )

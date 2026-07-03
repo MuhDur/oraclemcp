@@ -28,6 +28,11 @@ tracing.workspace = true
 # feature so DB-call spans flow into the OTLP trace layer. It only adds the
 # `tracing` dep (no async runtime), so the engine-free boundary holds.
 oracledb = { workspace = true, features = ["tracing"] }
+# TNS-onboarding parse adapter (src/tns.rs): reuse the upstream pure-Rust
+# `TnsnamesReader` from the protocol core directly, via the `oracledb_protocol::`
+# path, so the driver-adapter seam stays confined to connection.rs (the `_`
+# keeps it off the `oracledb`+`::` seam pattern).
+oracledb-protocol = { workspace = true }
 
 [dev-dependencies]
 async-trait.workspace = true

@@ -1817,6 +1817,7 @@ dependencies = [
  "async-trait",
  "criterion",
  "oracledb",
+ "oracledb-protocol",
  "oraclemcp-error",
  "oraclemcp-guard",
  "serde",

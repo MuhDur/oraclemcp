@@ -74,6 +74,7 @@ mod query;
 mod schema_diff;
 mod serialize;
 mod standby;
+mod tns;
 mod types;
 
 mod pool;
@@ -134,6 +135,10 @@ pub use serialize::{
     canonical_nls_statements, canonicalize_datetime, classify_type, serialize_cell, serialize_row,
 };
 pub use standby::{StandbyStatus, detect_standby};
+pub use tns::{
+    TnsDescriptorHints, TnsNetService, TnsParseError, TnsParseResult, extract_hints,
+    parse_tnsnames_dir,
+};
 pub use types::{
     DEFAULT_ORACLE_CALL_TIMEOUT, ORACLE_CELL_STRUCTURED_CONTRACT_VERSION, OracleBackend,
     OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow,

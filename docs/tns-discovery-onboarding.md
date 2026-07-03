@@ -2,9 +2,10 @@
 
 This is the single shared design contract for the *TNS-onboarding* feature: the
 `oraclemcp setup --discover` / init flow that finds a host's `tnsnames.ora`
-files, maps each net-service to a **safe-by-default** connection profile, and
-writes a self-documenting `profiles.toml` — only ever after explicit consent and
-never clobbering an existing config.
+files, maps each net-service to a **governed, least-privilege** connection
+profile (read-only by default, capped at `READ_ONLY`), and writes a
+self-documenting `profiles.toml` — only ever after explicit consent and never
+clobbering an existing config.
 
 It exists so no implementer of a downstream bead needs the originating
 conversation. The mapping tables, the search order, the consent matrix, the

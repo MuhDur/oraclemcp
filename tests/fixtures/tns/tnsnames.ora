@@ -1,0 +1,37 @@
+# oraclemcp canonical TNS-discovery fixture — primary tnsnames.ora.
+#
+# Owned by TNS-onboarding bead .3 (design spec §F, docs/tns-discovery-onboarding.md).
+# The edge-case (.16), unit (.17), and e2e (.18) beads REUSE this tree; no bead
+# creates a divergent copy. All hosts are synthetic (example.com); no secrets.
+#
+# Exercises: a TCPS descriptor with a wallet directory, an EZConnect-style
+# descriptor, a duplicate alias (last-definition-wins), and an IFILE include.
+
+PRIMARY_TCPS =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCPS)(HOST = tcps.example.com)(PORT = 2484))
+    (CONNECT_DATA = (SERVICE_NAME = PRIMARY.example.com))
+    (SECURITY =
+      (MY_WALLET_DIRECTORY = /etc/oracle/wallet/primary)
+      (SSL_SERVER_CERT_DN = "CN=tcps.example.com")
+    )
+  )
+
+EZ_PLAIN = ez.example.com:1521/EZSERVICE
+
+# First definition of DUP_ALIAS (old target); overridden below, after the IFILE.
+DUP_ALIAS =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = old.example.com)(PORT = 1521))
+    (CONNECT_DATA = (SERVICE_NAME = OLD.example.com))
+  )
+
+# Pulls in INCLUDED_ONE from the sibling file.
+IFILE = tnsnames_include.ora
+
+# Second definition of DUP_ALIAS — last definition wins (new target).
+DUP_ALIAS =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = new.example.com)(PORT = 1522))
+    (CONNECT_DATA = (SERVICE_NAME = NEW.example.com))
+  )

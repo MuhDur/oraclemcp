@@ -1,0 +1,4 @@
+# oraclemcp canonical TNS-discovery fixture — closes the include cycle back to
+# this directory's tnsnames.ora.
+
+IFILE = tnsnames.ora

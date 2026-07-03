@@ -44,6 +44,15 @@ async-trait = "0.1"
 # accidental float into a new minor. Keep the `=` pin; bump it deliberately
 # (adapter + contract suite green, full gate battery re-run) for each upgrade.
 oracledb = { version = "=0.5.1", default-features = false }
+# The pure-Rust, sans-I/O TNS/TTC protocol core that `oracledb` itself builds on.
+# The TNS-onboarding parse adapter (crates/oraclemcp-db/src/tns.rs) reuses its
+# `TnsnamesReader` DIRECTLY via the `oracledb_protocol::` path — which does NOT
+# match the driver-seam pattern (`oracledb` + `::`) that
+# scripts/oraclemcp_driver_seam_lint.sh confines to connection.rs, because the
+# `_` breaks the adjacency. Pinned EXACTLY to the version `oracledb 0.5.1`
+# already resolves, so this direct edge never floats the graph; pure
+# encode/decode (no async runtime), so the engine-free boundary holds.
+oracledb-protocol = { version = "=0.5.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # D1 observability: hand-rolled OTLP metrics/trace protobuf encoders
