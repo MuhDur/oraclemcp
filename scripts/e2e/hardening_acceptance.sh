@@ -67,7 +67,7 @@ required=(
   crates/oraclemcp/tests/e2e_http_oauth.rs
   crates/oraclemcp-core/tests/golden_behavior.rs
   crates/oraclemcp-core/tests/mcp_conformance.rs
-  crates/oraclemcp-core/src/http.rs
+  crates/oraclemcp-core/src/http/mod.rs
   crates/oraclemcp-core/src/doctor.rs
   crates/oraclemcp/src/main.rs
   crates/oraclemcp/src/service_lifecycle.rs

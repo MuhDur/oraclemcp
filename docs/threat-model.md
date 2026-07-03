@@ -210,7 +210,7 @@ binds require `ORACLEMCP_HTTP_ALLOW_REMOTE=1`; `Host`/`Origin` allowlists; nativ
 rustls TLS and optional mTLS. stdio's trust boundary is the parent process.
 
 *Evidence (green; CI):*
-- `crates/oraclemcp-core/src/http.rs` (OAuth enforcement, scope grants,
+- `crates/oraclemcp-core/src/http/mod.rs` (OAuth enforcement, scope grants,
   readiness) with its unit tests.
 - `crates/oraclemcp-core/src/tls.rs` — TLS/mTLS material handling with tests.
 - `crates/oraclemcp/src/main.rs` startup fail-closed checks (HTTP without auth is
@@ -231,7 +231,7 @@ budget (telemetry failure never blocks the request path).
 *Evidence (green; CI):*
 - `crates/oraclemcp-db/tests/load_soak.rs` — bounded / zero-leak invariants.
 - `crates/oraclemcp-core/src/request_budget.rs` — request budget with tests.
-- `crates/oraclemcp-core/src/http.rs` —
+- `crates/oraclemcp-core/src/http/mod.rs` —
   `serve_http_until_bounds_connection_workers_before_request_parse`,
   `served_stateful_get_sse_subscribers_are_capped`.
 - `crates/oraclemcp-telemetry/src/otlp/pump.rs` —
@@ -293,7 +293,7 @@ another lane or subject fails closed.
 - `crates/oraclemcp/tests/e2e_http_oauth.rs` —
   `stateful_http_lanes_keep_operating_level_isolated_per_session_and_subject`
   and `binary_http_rejects_bad_origin_and_forged_stateful_sessions`.
-- `crates/oraclemcp-core/src/http.rs` tests —
+- `crates/oraclemcp-core/src/http/mod.rs` tests —
   `stateful_requests_require_a_known_session_id_after_initialize`,
   `uniform_auth_errors_no_enumeration_oracle`, and
   `operator_session_set_level_is_lane_bound_preview_apply_drop`.
@@ -323,7 +323,7 @@ apply re-classifies every template and forwards through the same gated action
 route, so a stale stored proposal verdict cannot authorize execution.
 
 *Evidence (green; CI):*
-- `crates/oraclemcp-core/src/http.rs` tests —
+- `crates/oraclemcp-core/src/http/mod.rs` tests —
   `dashboard_pairing_sets_strict_cookie_and_session_view`,
   `malicious_page_cannot_trigger_dashboard_gated_action`,
   `dashboard_workbench_ddl_apply_is_release_gated`,

@@ -273,7 +273,8 @@ fn artifact_text(artifact: &str) -> &'static str {
             env!("CARGO_MANIFEST_DIR"),
             "/../oraclemcp/src/dispatch/tests.rs"
         )),
-        "http_runtime" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/http.rs")),
+        // http_runtime proofs are test-fn names -> read the extracted test module
+        "http_runtime" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/http/tests.rs")),
         _ => "",
     }
 }

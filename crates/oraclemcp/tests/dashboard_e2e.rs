@@ -59,6 +59,26 @@ fn read_repo_file(path: &str) -> String {
     fs::read_to_string(repo_root().join(path)).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
+/// Read the entire HTTP transport source by concatenating every `*.rs` file
+/// under `crates/oraclemcp-core/src/http/` (mod.rs + tests.rs + any future
+/// submodule). Marker assertions stay robust to internal module splits.
+fn read_http_source() -> String {
+    let dir = repo_root().join("crates/oraclemcp-core/src/http");
+    let mut paths: Vec<PathBuf> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("read dir {}: {e}", dir.display()))
+        .map(|entry| entry.expect("dir entry").path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+        .collect();
+    paths.sort();
+    paths
+        .iter()
+        .map(|path| {
+            fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn assert_contains_all(label: &str, haystack: &str, needles: &[&str]) {
     for needle in needles {
         assert!(
@@ -222,7 +242,7 @@ fn read_only_dashboard_surface_contracts_are_registered() {
 fn w9_read_only_health_stats_mirror_is_flag_gated() {
     let app = read_repo_file("web/src/app/App.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");
-    let http = read_repo_file("crates/oraclemcp-core/src/http.rs");
+    let http = read_http_source();
     let bundle = read_repo_file("crates/oraclemcp-core/src/dashboard_bundle.rs");
     let core_cargo = read_repo_file("crates/oraclemcp-core/Cargo.toml");
     let configuration = read_repo_file("docs/configuration.md");
@@ -347,7 +367,7 @@ fn wd_search_global_explorer_uses_guarded_dictionary_tools() {
 fn wd_ide_workbench_uses_static_plsql_tools() {
     let app = read_repo_file("web/src/app/App.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");
-    let http = read_repo_file("crates/oraclemcp-core/src/http.rs");
+    let http = read_http_source();
     let operations = read_repo_file("docs/operations.md");
     let readme = read_repo_file("README.md");
 
@@ -428,7 +448,7 @@ fn wd_ide_workbench_uses_static_plsql_tools() {
 fn w8b_proof_bundle_is_redacted_and_exportable() {
     let app = read_repo_file("web/src/app/App.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");
-    let http = read_repo_file("crates/oraclemcp-core/src/http.rs");
+    let http = read_http_source();
     let operations = read_repo_file("docs/operations.md");
     let conformance = read_repo_file("tests/conformance/COVERAGE.md");
     let e2e_coverage = read_repo_file("scripts/e2e/COVERAGE.md");
@@ -511,7 +531,7 @@ fn w8b_proof_bundle_is_redacted_and_exportable() {
 fn w10_client_credentials_screen_is_redacted_and_isolated() {
     let app = read_repo_file("web/src/app/App.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");
-    let http = read_repo_file("crates/oraclemcp-core/src/http.rs");
+    let http = read_http_source();
     let dashboard_auth = read_repo_file("crates/oraclemcp-core/src/dashboard_auth.rs");
     let conformance = read_repo_file("tests/conformance/COVERAGE.md");
     let e2e_coverage = read_repo_file("scripts/e2e/COVERAGE.md");
@@ -594,7 +614,7 @@ fn w10_client_credentials_screen_is_redacted_and_isolated() {
 fn wd_history_source_snapshots_and_revert_are_review_gated() {
     let app = read_repo_file("web/src/app/App.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");
-    let http = read_repo_file("crates/oraclemcp-core/src/http.rs");
+    let http = read_http_source();
     let source_history = read_repo_file("crates/oraclemcp-core/src/source_history.rs");
     let dashboard_auth = read_repo_file("crates/oraclemcp-core/src/dashboard_auth.rs");
     let readme = read_repo_file("README.md");
@@ -686,7 +706,7 @@ fn wd_history_source_snapshots_and_revert_are_review_gated() {
 fn wd_diff_schema_diff_exports_migration_through_reviews() {
     let app = read_repo_file("web/src/app/App.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");
-    let http = read_repo_file("crates/oraclemcp-core/src/http.rs");
+    let http = read_http_source();
     let dashboard_auth = read_repo_file("crates/oraclemcp-core/src/dashboard_auth.rs");
     let schema_diff = read_repo_file("crates/oraclemcp-core/src/schema_diff_export.rs");
     let e2e_coverage = read_repo_file("scripts/e2e/COVERAGE.md");
@@ -752,7 +772,7 @@ fn wd_diff_schema_diff_exports_migration_through_reviews() {
 fn dashboard_per_view_acceptance_suite_is_accounted() {
     let app = read_repo_file("web/src/app/App.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");
-    let http = read_repo_file("crates/oraclemcp-core/src/http.rs");
+    let http = read_http_source();
     let conformance = read_repo_file("tests/conformance/COVERAGE.md");
     let e2e_coverage = read_repo_file("scripts/e2e/COVERAGE.md");
 
@@ -905,7 +925,7 @@ fn skin_conformance_2d_fallback_a11y() {
 #[test]
 fn b8_dashboard_acceptance_suite_is_accounted() {
     let plan = read_repo_file("PLAN_0_6_0_INTERACTIVE_ALWAYS_ON.md");
-    let http = read_repo_file("crates/oraclemcp-core/src/http.rs");
+    let http = read_http_source();
     let bundle = read_repo_file("scripts/dashboard_bundle_check.sh");
     let readonly_gate = read_repo_file("scripts/e2e/dashboard_readonly.sh");
     let conformance = read_repo_file("tests/conformance/COVERAGE.md");
