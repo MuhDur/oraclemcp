@@ -61,6 +61,18 @@ impl DiscoveredNetService {
             ..Self::default()
         }
     }
+
+    /// Whether this descriptor implies a TCPS / wallet target — an explicit
+    /// `TCPS` protocol or a wallet-directory hint. Such a target additionally
+    /// wants a wallet-password secret-ref placeholder (bead `.6`).
+    #[must_use]
+    pub fn is_tcps_or_wallet(&self) -> bool {
+        self.wallet_location.is_some()
+            || self
+                .protocol
+                .as_deref()
+                .is_some_and(|p| p.eq_ignore_ascii_case("TCPS"))
+    }
 }
 
 /// How the synthesizer chose a profile's `connect_string` (design spec §B).
@@ -145,6 +157,29 @@ pub struct DiscoverySynthesis {
     pub notes: Vec<String>,
 }
 
+impl DiscoverySynthesis {
+    /// The environment variables the operator must export before going live,
+    /// keyed by profile in profile order (bead `.6`). Each entry is
+    /// `(profile_name, var_name)`; a TCPS / wallet profile contributes a second
+    /// entry for its `ORACLE_<NAME>_WALLET_PASSWORD`. Only variable *names* are
+    /// ever returned — never a secret value, since the value lives solely in the
+    /// environment and is never written to disk.
+    #[must_use]
+    pub fn required_env_vars(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for synth in &self.profiles {
+            out.push((
+                synth.plan.profile_name.clone(),
+                synth.plan.password_env_var.clone(),
+            ));
+            if let Some(wallet) = &synth.plan.wallet_password_env_var {
+                out.push((synth.plan.profile_name.clone(), wallet.clone()));
+            }
+        }
+        out
+    }
+}
+
 /// Synthesize one governed, least-privilege [`ConnectionProfile`] per
 /// net-service, plus the discovery report (design spec §B).
 ///
@@ -166,6 +201,16 @@ pub fn synthesize_profiles(
         let env_upper = profile_name.to_ascii_uppercase();
         let password_env_var = format!("ORACLE_{env_upper}_PASSWORD");
         let credential_ref = format!("env:{password_env_var}");
+
+        // A TCPS / wallet target also needs an external wallet-password ref. The
+        // writer renders a commented `wallet_password_ref = "env:…"` under
+        // [profiles.oci]; here we derive the deterministic, per-profile var name
+        // the operator must export. Never a literal, never written to disk.
+        let wallet_password_env_var = if service.is_tcps_or_wallet() {
+            Some(format!("ORACLE_{env_upper}_WALLET_PASSWORD"))
+        } else {
+            None
+        };
 
         let (connect_string, connect_string_kind, notes) = choose_connect_string(service, opts);
 
@@ -213,8 +258,7 @@ pub fn synthesize_profiles(
             source_alias: service.alias.clone(),
             connect_string_kind,
             password_env_var,
-            // Wallet-password guidance is filled by the secret-ref bead `.6`.
-            wallet_password_env_var: None,
+            wallet_password_env_var,
             // Verification posture is set by the read-only-safe bead `.7`.
             needs_verification: false,
             notes,
@@ -557,5 +601,138 @@ mod tests {
         assert!(synth.default_profile.is_none());
         // An empty profile set is still a valid config.
         OracleMcpConfig::from_toml_str(&minimal_toml(&synth)).expect("empty set parses");
+    }
+
+    // ---- bead .6: secret-ref placeholders + per-service env-var guidance ----
+
+    #[test]
+    fn env_var_names_are_deterministic_and_unique_per_profile() {
+        let synth = synthesize_profiles(
+            &[svc("SALES_RO"), svc("HR_RO"), svc("FIN_RO")],
+            &SynthOptions::default(),
+        );
+        let vars: Vec<&str> = synth
+            .profiles
+            .iter()
+            .map(|s| s.plan.password_env_var.as_str())
+            .collect();
+        assert_eq!(
+            vars,
+            vec![
+                "ORACLE_SALES_RO_PASSWORD",
+                "ORACLE_HR_RO_PASSWORD",
+                "ORACLE_FIN_RO_PASSWORD",
+            ]
+        );
+        // The credential_ref on each profile is exactly env:<that var>.
+        for s in &synth.profiles {
+            assert_eq!(
+                s.profile.credential_ref.as_deref(),
+                Some(format!("env:{}", s.plan.password_env_var).as_str())
+            );
+        }
+        let unique: BTreeSet<&str> = vars.iter().copied().collect();
+        assert_eq!(unique.len(), vars.len(), "env var names are unique");
+    }
+
+    #[test]
+    fn colliding_aliases_still_get_distinct_env_vars() {
+        // Two aliases sanitizing to the same base must not share an env var.
+        let synth = synthesize_profiles(
+            &[svc("SALES-RO"), svc("SALES_RO")],
+            &SynthOptions::default(),
+        );
+        assert_eq!(
+            synth.profiles[0].plan.password_env_var,
+            "ORACLE_SALES_RO_PASSWORD"
+        );
+        assert_eq!(
+            synth.profiles[1].plan.password_env_var,
+            "ORACLE_SALES_RO_2_PASSWORD"
+        );
+    }
+
+    #[test]
+    fn no_literal_secret_ref_anywhere() {
+        let mut tcps = svc("PRIMARY_TCPS");
+        tcps.protocol = Some("TCPS".to_owned());
+        tcps.wallet_location = Some("/etc/oracle/wallet/primary".to_owned());
+        let synth = synthesize_profiles(&[svc("SALES_RO"), tcps], &SynthOptions::default());
+        // Neither the profile credential_ref nor any report field is a literal.
+        for s in &synth.profiles {
+            assert!(
+                !s.profile
+                    .credential_ref
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("literal:")
+            );
+            assert!(!s.plan.password_env_var.contains("literal:"));
+            if let Some(w) = &s.plan.wallet_password_env_var {
+                assert!(!w.contains("literal:"));
+            }
+        }
+        // The whole rendered minimum carries no literal token either.
+        assert!(!minimal_toml(&synth).contains("literal:"));
+    }
+
+    #[test]
+    fn tcps_or_wallet_descriptor_surfaces_wallet_password_env_var() {
+        // A TCPS protocol implies a wallet-password placeholder.
+        let mut tcps = svc("PRIMARY_TCPS");
+        tcps.protocol = Some("TCPS".to_owned());
+        // A plain descriptor with only a wallet_location hint does too.
+        let mut walletonly = svc("WALLET_ONLY");
+        walletonly.wallet_location = Some("/etc/oracle/wallet".to_owned());
+        // A plain TCP EZConnect does NOT.
+        let mut plain = svc("PLAIN_TCP");
+        plain.protocol = Some("TCP".to_owned());
+
+        let synth = synthesize_profiles(&[tcps, walletonly, plain], &SynthOptions::default());
+        assert_eq!(
+            synth.profiles[0].plan.wallet_password_env_var.as_deref(),
+            Some("ORACLE_PRIMARY_TCPS_WALLET_PASSWORD")
+        );
+        assert_eq!(
+            synth.profiles[1].plan.wallet_password_env_var.as_deref(),
+            Some("ORACLE_WALLET_ONLY_WALLET_PASSWORD")
+        );
+        assert_eq!(
+            synth.profiles[2].plan.wallet_password_env_var, None,
+            "a plain TCP target needs no wallet-password ref"
+        );
+    }
+
+    #[test]
+    fn required_env_vars_matches_profiles_including_wallet() {
+        let mut tcps = svc("PRIMARY_TCPS");
+        tcps.wallet_location = Some("/etc/oracle/wallet/primary".to_owned());
+        let synth = synthesize_profiles(&[svc("SALES_RO"), tcps], &SynthOptions::default());
+        let env = synth.required_env_vars();
+        assert_eq!(
+            env,
+            vec![
+                ("sales_ro".to_owned(), "ORACLE_SALES_RO_PASSWORD".to_owned()),
+                (
+                    "primary_tcps".to_owned(),
+                    "ORACLE_PRIMARY_TCPS_PASSWORD".to_owned()
+                ),
+                (
+                    "primary_tcps".to_owned(),
+                    "ORACLE_PRIMARY_TCPS_WALLET_PASSWORD".to_owned()
+                ),
+            ],
+            "the env-var list enumerates every profile's password var, plus a \
+             wallet-password var for the TCPS/wallet target"
+        );
+        // Every listed profile name is a real synthesized profile.
+        let names: BTreeSet<&str> = synth
+            .profiles
+            .iter()
+            .map(|s| s.plan.profile_name.as_str())
+            .collect();
+        for (profile, _) in &env {
+            assert!(names.contains(profile.as_str()));
+        }
     }
 }
