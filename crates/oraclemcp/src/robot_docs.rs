@@ -15,6 +15,8 @@ description = "Read-only database profile"
 connect_string = "dbhost.example.com:1521/service_name"
 username = "APP_READONLY"
 credential_ref = "env:{credential_env}"
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
 "#
     )
 }

@@ -76,9 +76,11 @@ Parsing is **strict and fail-fast**:
 - **Net-service → profile mapping** — one profile per alias, named by a
   deterministic lower-snake sanitization of the alias (with a numeric suffix on
   collision). `default_profile` is set only when exactly one service is found.
-- **`connect_string`** — the TNS alias when the resolved `tnsnames.ora` directory
-  is itself reachable at runtime; otherwise a normalized EZConnect string built
-  from the descriptor's host/port/service.
+- **`connect_string`** — the TNS alias itself. The discovery flow points the
+  server at the resolved `tnsnames.ora` directory (via `TNS_ADMIN`), so the alias
+  resolves at runtime; the underlying synthesis library can instead emit a
+  normalized EZConnect string from the descriptor's host/port/service when that
+  directory is not made reachable.
 - **Secret references** — each profile gets `credential_ref = "env:ORACLE_<NAME>_PASSWORD"`
   (and a commented `[profiles.oci].wallet_password_ref` env placeholder for
   TCPS/wallet targets). No secret value is ever read, written, or printed; the
