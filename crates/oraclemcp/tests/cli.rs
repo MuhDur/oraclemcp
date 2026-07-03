@@ -478,3 +478,99 @@ credential_ref = "env:APP_PASSWORD"
         "serve must boot from generated snippet: {serve_stderr}"
     );
 }
+
+/// TNS-onboarding bead `.9` boot check: a config rendered by the annotated
+/// discovery writer must boot — `serve` loads it without a config error and
+/// `doctor` (offline) reports no config blocker.
+#[test]
+fn discovery_annotated_config_boots() {
+    use oraclemcp_config::discovery::render_annotated_config;
+    use oraclemcp_config::discovery::synth::{
+        DiscoveredNetService, SynthOptions, synthesize_profiles,
+    };
+
+    // A single discovered net-service so default_profile is set unambiguously.
+    let synth = synthesize_profiles(
+        &[DiscoveredNetService::new("SALES_RO")],
+        &SynthOptions::default(),
+    );
+    let rendered = render_annotated_config(&synth);
+    // Sanity: the writer chose sales_ro as the default.
+    assert!(rendered.contains("default_profile = \"sales_ro\""));
+
+    let dir = temp_dir("discovery-boot");
+    let config = dir.join("profiles.toml");
+    let state = dir.join("state");
+    let tools_dir = dir.join("tools.d");
+    fs::create_dir_all(&tools_dir).expect("create empty tools dir");
+    fs::write(&config, &rendered).expect("write rendered config");
+
+    // The rendered config loads through the same strict loader the binary uses.
+    let cfg = OracleMcpConfig::from_toml_str(&rendered).expect("rendered config parses");
+    assert_eq!(cfg.default_profile.as_deref(), Some("sales_ro"));
+    assert_eq!(
+        cfg.profile("sales_ro").expect("profile").max_level(),
+        OperatingLevel::ReadOnly
+    );
+
+    // serve boots to status output without a config error and without creating a
+    // writable-profile audit gate (every profile is READ_ONLY).
+    let mut serve = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    serve
+        .args([
+            "--json",
+            "serve",
+            "--allow-no-auth",
+            "--profile",
+            "sales_ro",
+        ])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", &state)
+        .env("HOME", &dir)
+        .env("ORACLEMCP_TOOLS_DIR", &tools_dir)
+        .env_remove("ORACLE_SALES_RO_PASSWORD")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let serve_output = wait_with_timeout(serve, Duration::from_secs(5));
+    assert_eq!(
+        serve_output.status.code(),
+        Some(0),
+        "serve should boot cleanly against the discovery-rendered config"
+    );
+    let serve_stderr = String::from_utf8(serve_output.stderr).expect("serve stderr is utf8");
+    assert!(
+        serve_stderr.contains("\"kind\":\"status\""),
+        "serve must boot to status output: {serve_stderr}"
+    );
+    assert!(
+        !serve_stderr.contains("ORACLEMCP_CONFIG_INVALID"),
+        "the rendered config must not be a config-load blocker: {serve_stderr}"
+    );
+    assert!(
+        !serve_stderr.contains("ORACLEMCP_AUDIT_KEY_REQUIRED"),
+        "a READ_ONLY discovery config must not create an audit-key gate: {serve_stderr}"
+    );
+
+    // doctor (offline) reports no config blocker for the profile.
+    let mut doctor = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    doctor
+        .args(["--json", "doctor", "--profile", "sales_ro"])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", &state)
+        .env("HOME", &dir)
+        .env("ORACLEMCP_TOOLS_DIR", &tools_dir)
+        .env_remove("ORACLE_SALES_RO_PASSWORD")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let doctor_output = wait_with_timeout(doctor, Duration::from_secs(5));
+    assert_eq!(doctor_output.status.code(), Some(0), "offline doctor is ok");
+    let doctor_json: serde_json::Value =
+        serde_json::from_slice(&doctor_output.stdout).expect("doctor JSON");
+    assert_eq!(doctor_json["ok"], serde_json::json!(true));
+    assert_eq!(
+        doctor_json["profile_caps"]["configured"]["max_level"],
+        serde_json::json!("READ_ONLY")
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
