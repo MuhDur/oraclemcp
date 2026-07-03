@@ -39,12 +39,30 @@ authenticity-unverified posture by default; use `--verify require` when your
 environment requires cosign to be present.
 
 In an interactive terminal, the installer then offers a short guided flow:
-append the binary directory to `PATH`, run `doctor`, print an MCP client snippet,
-and optionally install the loopback service. In a pipe, CI job, or agent run, it
-never prompts and never starts a service; it installs the binary and prints the
+append the binary directory to `PATH`, run `doctor`, offer zero-config database
+discovery from `tnsnames.ora`, print an MCP client snippet, and optionally
+install the loopback service. In a pipe, CI job, or agent run, it never prompts,
+never scans, and never starts a service; it installs the binary and prints the
 exact `PATH` line plus next steps on stderr. Every install finishes with next
-steps on stderr: run `doctor`, write the starter profile, and generate MCP
-client snippets.
+steps on stderr: discover databases, run `doctor`, write the starter profile,
+and generate MCP client snippets.
+
+### Get started in minutes: zero-config onboarding
+
+`oraclemcp setup --discover` finds every database defined in your `tnsnames.ora`
+and writes one **read-only** connection profile per net-service — through the
+same governed config-ops path (timestamped backup, atomic write, strict
+re-validation) used everywhere else. It is **consent-gated**: an interactive run
+asks before it scans and again before it writes; a non-interactive run without
+`--discover-tns` (or `--yes`) refuses with exit code 2 and scans nothing. It
+writes **no secrets to disk** — each profile references an environment variable
+(`env:ORACLE_<NAME>_PASSWORD`) you export yourself — keeps every profile capped
+at `READ_ONLY`, and is **idempotent and non-destructive**: existing profiles and
+hand edits are preserved, only new databases are added. When no `tnsnames.ora`
+is found it falls back to the minimal starter profile so you still boot. Add
+`--json` for a names-only agent report, or `--dry-run` to preview without
+writing. Run `oraclemcp doctor` afterwards to see exactly which credentials
+remain to be set. Full contract: `docs/tns-discovery-onboarding.md`.
 
 Re-running the same one-liner is the update path. Re-running the same verified
 archive is a no-op for identical installed files; re-running with a newer target

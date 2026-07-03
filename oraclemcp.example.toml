@@ -7,6 +7,12 @@
 # docs/configuration.md. Audit log shipping/operations is documented in
 # docs/operations.md (cross-linked; not duplicated here).
 #
+# FAST PATH: `oraclemcp setup --discover` scans your tnsnames.ora and generates
+# this same annotated shape automatically — one READ_ONLY profile per database,
+# each with an env: credential ref (never a literal secret) — writing it through
+# config-ops with a timestamped backup. This file stays the canonical field
+# reference; discovery emits the same structure. See docs/tns-discovery-onboarding.md.
+#
 # Parsing is STRICT: unknown keys are rejected (deny_unknown_fields) and the
 # whole config is validated at load (fail fast). This file is kept honest by the
 # test crates/oraclemcp-config/tests/example_config_parses.rs, which loads and

@@ -62,6 +62,38 @@ Parsing is **strict and fail-fast**:
 
 ---
 
+## Zero-config TNS discovery (`setup --discover`)
+
+`oraclemcp setup --discover` generates the profiles file for you from an existing
+`tnsnames.ora`, so you rarely hand-author the first config. Full contract:
+[`tns-discovery-onboarding.md`](tns-discovery-onboarding.md).
+
+- **Search order** — first directory that yields net-services wins, but all are
+  scanned for the report: `$TNS_ADMIN`, `$ORACLE_HOME/network/admin`,
+  `~/.config/oraclemcp/network`, `~`, `/etc`, common Instant Client dirs, and the
+  current directory. Candidates are de-duplicated by canonical path; a
+  permission-denied candidate is skipped with a note, never a hard failure.
+- **Net-service → profile mapping** — one profile per alias, named by a
+  deterministic lower-snake sanitization of the alias (with a numeric suffix on
+  collision). `default_profile` is set only when exactly one service is found.
+- **`connect_string`** — the TNS alias when the resolved `tnsnames.ora` directory
+  is itself reachable at runtime; otherwise a normalized EZConnect string built
+  from the descriptor's host/port/service.
+- **Secret references** — each profile gets `credential_ref = "env:ORACLE_<NAME>_PASSWORD"`
+  (and a commented `[profiles.oci].wallet_password_ref` env placeholder for
+  TCPS/wallet targets). No secret value is ever read, written, or printed; the
+  report lists only the variable *names* to export.
+- **READ_ONLY defaults** — `max_level` and `default_level` are both set explicitly
+  to `READ_ONLY`, and every profile is flagged needs-verification (no live
+  connection is attempted during discovery).
+- **Merge and backup** — writing goes through config-ops: an existing config is
+  never clobbered, only new profiles are added (hand edits preserved), and a
+  timestamped backup is taken before any change with a verify-before-mutate base
+  hash so a concurrent edit is rejected rather than overwritten. Finding no
+  `tnsnames.ora` falls back to the minimal starter profile.
+
+---
+
 ## Top-level fields
 
 | Field | Type | Default | Effect |
