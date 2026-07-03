@@ -1,0 +1,13 @@
+# oraclemcp TNS-discovery fixture — MALFORMED tnsnames.ora (bead .16).
+#
+# A syntactically broken descriptor sits alongside a recoverable EZConnect
+# alias. Discovery must recover what the reader can parse, note the rest, and
+# never panic or emit an invalid profile. All hosts are synthetic; no secrets.
+
+GOOD_EZ = good.example.com:1521/GOODSVC
+
+# Unbalanced parentheses + a truncated CONNECT_DATA: a broken descriptor.
+BROKEN_ENTRY =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = broken.example.com)(PORT = 1521)
+    (CONNECT_DATA = (SERVICE_NAME =

@@ -442,4 +442,23 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn malformed_tnsnames_recovers_without_panic() {
+        // A syntactically broken descriptor must never panic and must never
+        // yield an invalid (empty-named / empty-descriptor) net-service. The
+        // reader recovers what it can; the discovery flow degrades gracefully.
+        let dir = fixtures_root().join("malformed");
+        let result = parse_tnsnames_dir(&dir).expect("malformed dir must not error out");
+        for svc in &result.services {
+            assert!(!svc.service_name.is_empty(), "no empty-named service");
+            assert!(!svc.descriptor.is_empty(), "no empty-descriptor service");
+        }
+        // The valid EZConnect alias is recovered even though a sibling entry has
+        // a broken (unbalanced-paren, truncated) descriptor.
+        assert!(
+            result.services.iter().any(|s| s.service_name == "GOOD_EZ"),
+            "the valid EZConnect alias survives the broken sibling entry"
+        );
+    }
 }

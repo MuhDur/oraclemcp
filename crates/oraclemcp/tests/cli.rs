@@ -460,6 +460,33 @@ fn setup_discover_non_tty_without_consent_refuses_human() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+// bead .19: consent gates the SCAN itself, not just the write — a non-TTY
+// caller with no consent flag is refused before any filesystem scan, even when
+// a populated TNS_ADMIN is present, and leaves the target untouched.
+#[test]
+fn setup_discover_refuses_before_scanning_even_with_tns_admin_present() {
+    let dir = temp_dir("discover-refuse-prescan");
+    let config = dir.join("profiles.toml");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args(["setup", "--discover"])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("HOME", &dir)
+        .env("TNS_ADMIN", tns_fixture_dir())
+        .env_remove("ORACLE_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    assert_eq!(output.status.code(), Some(2), "refuses with exit 2");
+    assert!(output.stdout.is_empty());
+    assert!(
+        !config.exists(),
+        "a refusal writes nothing even with a populated TNS_ADMIN"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn setup_discover_dry_run_reports_net_services_and_writes_nothing() {
     let dir = temp_dir("discover-report");
@@ -518,6 +545,56 @@ fn setup_discover_dry_run_reports_net_services_and_writes_nothing() {
     assert!(names.contains(&"ORACLE_PRIMARY_TCPS_PASSWORD"));
     assert!(names.contains(&"ORACLE_PRIMARY_TCPS_WALLET_PASSWORD"));
     assert!(!config.exists(), "--dry-run writes nothing");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// bead .16: a malformed tnsnames.ora degrades gracefully — the flow recovers
+// what the reader can parse and STILL writes a valid, READ_ONLY config (config-
+// ops re-parses via the strict loader before writing, so written=true proves it
+// parsed) with no literal secret ref.
+#[test]
+fn setup_discover_over_malformed_tnsnames_writes_read_only_config() {
+    let dir = temp_dir("discover-malformed");
+    let config = dir.join("profiles.toml");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args(["--json", "setup", "--discover", "--discover-tns"])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("HOME", &dir)
+        .env("TNS_ADMIN", tns_fixture_dir().join("malformed"))
+        .env_remove("ORACLE_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "malformed input still succeeds"
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&String::from_utf8(output.stdout).expect("utf8")).expect("json");
+    assert_eq!(
+        value["written"],
+        serde_json::json!(true),
+        "the recovered config parsed via config-ops and was written"
+    );
+    let written = fs::read_to_string(&config).expect("config written");
+    assert!(
+        written.contains("max_level = \"READ_ONLY\""),
+        "written profiles are capped READ_ONLY"
+    );
+    assert!(
+        written.contains("default_level = \"READ_ONLY\""),
+        "written profiles default to READ_ONLY"
+    );
+    assert!(
+        !written.lines().any(|l| {
+            let t = l.trim_start();
+            !t.starts_with('#') && t.contains("literal:")
+        }),
+        "no literal secret ref is emitted"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
