@@ -259,8 +259,10 @@ pub fn synthesize_profiles(
             connect_string_kind,
             password_env_var,
             wallet_password_env_var,
-            // Verification posture is set by the read-only-safe bead `.7`.
-            needs_verification: false,
+            // Fail closed (bead `.7`): discovery makes no live connection, so a
+            // freshly synthesized profile is ALWAYS unverified — READ_ONLY and
+            // flagged needs-verification — never dropped and never loosened.
+            needs_verification: true,
             notes,
         };
 
@@ -734,5 +736,35 @@ mod tests {
         for (profile, _) in &env {
             assert!(names.contains(profile.as_str()));
         }
+    }
+
+    // ---- bead .7: read-only-safe defaults + fail-closed for unverifiable ----
+
+    #[test]
+    fn every_synthesized_profile_is_flagged_needs_verification() {
+        let synth = synthesize_profiles(&[svc("SALES_RO"), svc("HR_RO")], &SynthOptions::default());
+        for s in &synth.profiles {
+            assert!(
+                s.plan.needs_verification,
+                "a freshly discovered profile is never verified until doctor --online"
+            );
+        }
+    }
+
+    #[test]
+    fn unverifiable_bare_alias_stays_read_only_and_flagged() {
+        // A degenerate input — an alias with no descriptor hints at all — cannot
+        // be confirmed, but it must still yield a profile, capped READ_ONLY on
+        // both levels, present and flagged (fail closed, never dropped).
+        let synth = synthesize_profiles(&[svc("MYSTERY")], &SynthOptions::default());
+        assert_eq!(synth.profiles.len(), 1, "unverifiable input is not dropped");
+        let only = &synth.profiles[0];
+        assert_eq!(only.profile.max_level, Some(OperatingLevel::ReadOnly));
+        assert_eq!(only.profile.default_level, Some(OperatingLevel::ReadOnly));
+        assert_eq!(
+            only.profile.protected, None,
+            "an unverifiable target is never opted up to protected/READ_WRITE"
+        );
+        assert!(only.plan.needs_verification);
     }
 }

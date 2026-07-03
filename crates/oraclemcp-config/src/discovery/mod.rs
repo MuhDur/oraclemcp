@@ -42,6 +42,7 @@
 pub mod contract;
 pub mod search;
 pub mod synth;
+pub mod writer;
 
 pub use contract::{
     CONNECTION_PROFILE_FIELD_DISPOSITIONS, Disposition, FieldDisposition,
@@ -55,3 +56,4 @@ pub use synth::{
     ConnectStringKind, DiscoveredNetService, DiscoveredProfilePlan, DiscoverySynthesis,
     SynthOptions, SynthesizedProfile, synthesize_profiles,
 };
+pub use writer::{read_only_safety_comment, render_annotated_config};
