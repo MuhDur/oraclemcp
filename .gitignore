@@ -50,3 +50,6 @@ venv/
 # only at release tags per spec §4). Matches the store wherever the
 # loop's cwd places it (repo root, tools/usr-loop, …).
 .usr/
+
+# Strictly local live-test reports (never publish)
+/todelete/
