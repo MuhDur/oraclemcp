@@ -806,6 +806,123 @@ fn setup_discover_refuses_over_an_invalid_existing_config() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+// ---- bead .13: agent / non-TTY structured JSON path + CLI contract ----
+
+#[test]
+fn setup_discover_yes_json_is_a_complete_agent_report() {
+    let dir = temp_dir("discover-agent-json");
+    let config = dir.join("profiles.toml");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args(["--json", "setup", "--discover", "--yes"])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("HOME", &dir)
+        .env("TNS_ADMIN", tns_fixture_dir())
+        .env_remove("ORACLE_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("agent JSON");
+
+    // Every field an agent needs is present.
+    for key in [
+        "searched_directories",
+        "net_services",
+        "profiles",
+        "profiles_created",
+        "profiles_skipped_already_configured",
+        "env_vars",
+        "target_path",
+        "backup_path",
+        "written",
+        "next_actions",
+    ] {
+        assert!(value.get(key).is_some(), "missing agent JSON key {key}");
+    }
+    assert_eq!(value["written"], serde_json::json!(true));
+    assert_eq!(
+        value["target_path"],
+        serde_json::json!(config.display().to_string())
+    );
+    assert!(value["backup_path"].as_str().is_some());
+
+    // Per-profile connect-string STRATEGY is reported (not the raw string).
+    let profile0 = &value["profiles"][0];
+    assert!(
+        profile0["connect_string_strategy"].as_str().is_some(),
+        "connect_string strategy per profile: {profile0}"
+    );
+    assert!(profile0["password_env_var"].as_str().is_some());
+
+    // next_actions is ordered: env vars first, then doctor, then doctor --online.
+    let actions: Vec<&str> = value["next_actions"]
+        .as_array()
+        .expect("next_actions")
+        .iter()
+        .map(|a| a.as_str().expect("action string"))
+        .collect();
+    let doctor_idx = actions
+        .iter()
+        .position(|a| *a == "oraclemcp doctor")
+        .expect("offline doctor action");
+    let online_idx = actions
+        .iter()
+        .position(|a| a.starts_with("oraclemcp doctor --online --profile "))
+        .expect("online doctor action");
+    assert!(
+        actions[..doctor_idx]
+            .iter()
+            .any(|a| a.starts_with("export ")),
+        "env-var exports come first: {actions:?}"
+    );
+    assert!(doctor_idx < online_idx, "doctor before doctor --online");
+
+    // NAMES ONLY: no secret values, and no raw draft TOML echoed.
+    for forbidden in [
+        "credential_ref =",
+        "connect_string =",
+        "literal:",
+        "[[profiles]]",
+    ] {
+        assert!(
+            !stdout.contains(forbidden),
+            "agent JSON leaked raw draft material {forbidden}: {stdout}"
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cli_contract_advertises_setup_discover_under_dangerous_operations() {
+    let output = run_binary(&["--json", "robot-docs", "guide"]);
+    assert_eq!(output.status.code(), Some(0));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("robot-docs guide JSON");
+    let dangerous = value["cli_contract"]["dangerous_operations"]
+        .as_array()
+        .expect("dangerous_operations array");
+    let discover = dangerous
+        .iter()
+        .find(|op| op["command"] == serde_json::json!("oraclemcp setup --discover"))
+        .expect("setup --discover is advertised as a dangerous operation");
+    // safe_preview is the --dry-run form; execute_gate names the consent flags.
+    let safe_preview: Vec<&str> = discover["safe_preview"]
+        .as_array()
+        .expect("safe_preview array")
+        .iter()
+        .map(|p| p.as_str().expect("arg"))
+        .collect();
+    assert!(safe_preview.contains(&"--dry-run"));
+    assert!(safe_preview.contains(&"--discover"));
+    let gate = discover["execute_gate"].as_str().expect("execute_gate");
+    assert!(gate.contains("--discover-tns") || gate.contains("--yes"));
+    assert!(gate.contains("exits 2") || gate.contains("exit 2"));
+}
+
 #[test]
 fn setup_generated_client_snippet_launches_serve_as_written() {
     let dir = temp_dir("setup-snippet-launch");

@@ -504,17 +504,23 @@ fn connect_kind_label(kind: ConnectStringKind) -> &'static str {
     }
 }
 
-/// The ordered next actions an agent/operator runs after a write (bead `.13`).
+/// The ordered next actions an agent/operator runs after a write (bead `.13`):
+/// set the credential env vars, run offline doctor, then verify a live
+/// connection. Every entry is a command runnable verbatim (the export lines name
+/// the exact env var; the operator supplies the secret value).
 fn next_actions(synth: &DiscoverySynthesis) -> Vec<String> {
     let mut actions = Vec::new();
     for (profile, var) in synth.required_env_vars() {
-        actions.push(format!("export {var} for profile {profile}"));
+        actions.push(format!("export {var}=<db-password for {profile}>"));
     }
-    actions.push("run `oraclemcp doctor` to validate the config offline".to_owned());
-    actions.push(
-        "run `oraclemcp doctor --online --profile <profile>` to verify a live connection"
-            .to_owned(),
-    );
+    actions.push("oraclemcp doctor".to_owned());
+    match synth.profiles.first() {
+        Some(first) => actions.push(format!(
+            "oraclemcp doctor --online --profile {}",
+            first.plan.profile_name
+        )),
+        None => actions.push("oraclemcp doctor --online --profile <profile>".to_owned()),
+    }
     actions
 }
 

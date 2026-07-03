@@ -102,6 +102,11 @@ pub(crate) fn cli_contract_json() -> serde_json::Value {
         ],
         "dangerous_operations": [
             {
+                "command": "oraclemcp setup --discover",
+                "safe_preview": ["oraclemcp", "--json", "setup", "--discover", "--dry-run", "--discover-tns"],
+                "execute_gate": "--discover-tns or --yes (explicit scan+write consent); a non-TTY caller without a consent flag refuses to scan/write and exits 2"
+            },
+            {
                 "command": "oraclemcp service install",
                 "safe_preview": ["oraclemcp", "--json", "service", "install", "--dry-run", "--profile", "<profile>"],
                 "execute_gate": "--yes"
