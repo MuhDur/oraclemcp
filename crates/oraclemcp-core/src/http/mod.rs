@@ -1119,6 +1119,16 @@ enum HttpResultWait {
     Timeout,
 }
 
+mod request_target;
+mod sse_writer;
+mod wire;
+use request_target::split_request_target;
+use sse_writer::{
+    write_chunked_sse_comment, write_chunked_sse_event, write_final_chunk, write_sse_event,
+    write_streaming_sse_headers,
+};
+use wire::{read_http_request, write_http_response};
+
 #[cfg(test)]
 mod tests;
 
@@ -1265,67 +1275,6 @@ impl HttpRequest {
             }
         })
     }
-}
-
-fn split_request_target(target: &str) -> (String, Option<String>, Vec<(String, String)>) {
-    let (path, query_string) = target
-        .split_once('?')
-        .map_or((target, None), |(path, query)| {
-            (path, Some(query.to_owned()))
-        });
-    let query = query_string
-        .as_deref()
-        .map(parse_query_string)
-        .unwrap_or_default();
-    (path.to_owned(), query_string, query)
-}
-
-fn parse_query_string(query: &str) -> Vec<(String, String)> {
-    query
-        .split('&')
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            let (name, value) = part.split_once('=').unwrap_or((part, ""));
-            (percent_decode_query(name), percent_decode_query(value))
-        })
-        .collect()
-}
-
-fn percent_decode_query(input: &str) -> String {
-    fn hex(value: u8) -> Option<u8> {
-        match value {
-            b'0'..=b'9' => Some(value - b'0'),
-            b'a'..=b'f' => Some(value - b'a' + 10),
-            b'A'..=b'F' => Some(value - b'A' + 10),
-            _ => None,
-        }
-    }
-
-    let mut out = Vec::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
-                    out.push((hi << 4) | lo);
-                    i += 3;
-                } else {
-                    out.push(bytes[i]);
-                    i += 1;
-                }
-            }
-            byte => {
-                out.push(byte);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// A native HTTP response used by the listener and by protocol tests.
@@ -5481,79 +5430,6 @@ fn sse_response(
     }
 }
 
-fn write_sse_event(
-    body: &mut Vec<u8>,
-    event: Option<&str>,
-    id: Option<&str>,
-    retry: Option<u64>,
-    data: Option<&Value>,
-) {
-    if let Some(event) = event {
-        body.extend_from_slice(format!("event: {event}\n").as_bytes());
-    }
-    if let Some(id) = id {
-        body.extend_from_slice(format!("id: {id}\n").as_bytes());
-    }
-    if let Some(retry) = retry {
-        body.extend_from_slice(format!("retry: {retry}\n").as_bytes());
-    }
-    if let Some(data) = data {
-        if data.is_null() {
-            body.extend_from_slice(b"data:\n");
-        } else {
-            body.extend_from_slice(b"data: ");
-            body.extend_from_slice(
-                serde_json::to_string(data)
-                    .expect("SSE event data serializes")
-                    .as_bytes(),
-            );
-            body.push(b'\n');
-        }
-    }
-    body.push(b'\n');
-}
-
-fn write_streaming_sse_headers(stream: &mut impl Write) -> std::io::Result<()> {
-    write!(
-        stream,
-        "HTTP/1.1 200 {}\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\ntransfer-encoding: chunked\r\nconnection: close\r\nx-accel-buffering: no\r\n\r\n",
-        reason_phrase(200)
-    )?;
-    stream.flush()
-}
-
-fn write_chunked_sse_event(
-    stream: &mut impl Write,
-    event: Option<&str>,
-    id: Option<&str>,
-    retry: Option<u64>,
-    data: Option<&Value>,
-) -> std::io::Result<()> {
-    let mut body = Vec::new();
-    write_sse_event(&mut body, event, id, retry, data);
-    write_chunked_bytes(stream, &body)
-}
-
-fn write_chunked_sse_comment(stream: &mut impl Write, comment: &str) -> std::io::Result<()> {
-    let mut body = Vec::with_capacity(comment.len().saturating_add(4));
-    body.extend_from_slice(b": ");
-    body.extend_from_slice(comment.as_bytes());
-    body.extend_from_slice(b"\n\n");
-    write_chunked_bytes(stream, &body)
-}
-
-fn write_chunked_bytes(stream: &mut impl Write, bytes: &[u8]) -> std::io::Result<()> {
-    write!(stream, "{:x}\r\n", bytes.len())?;
-    stream.write_all(bytes)?;
-    stream.write_all(b"\r\n")?;
-    stream.flush()
-}
-
-fn write_final_chunk(stream: &mut impl Write) -> std::io::Result<()> {
-    stream.write_all(b"0\r\n\r\n")?;
-    stream.flush()
-}
-
 fn new_session_id() -> String {
     // Mint an unpredictable UUIDv4-shaped id from the OS CSPRNG. A monotonic
     // counter would let a client guess other sessions' ids; the session-id is a
@@ -5920,113 +5796,6 @@ fn handle_stream(
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(30);
-
-fn read_http_request(stream: &mut impl Read) -> std::io::Result<Option<HttpRequest>> {
-    let mut buf = Vec::new();
-    let mut chunk = [0_u8; 8192];
-    let header_end = loop {
-        let n = stream.read(&mut chunk)?;
-        if n == 0 {
-            if buf.is_empty() {
-                return Ok(None);
-            }
-            return Err(invalid_data("incomplete HTTP request"));
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        if let Some(end) = find_header_end(&buf) {
-            break end;
-        }
-        if buf.len() > MAX_HEADER_BYTES {
-            return Err(invalid_data("HTTP headers exceed native transport limit"));
-        }
-    };
-
-    let header_text = std::str::from_utf8(&buf[..header_end])
-        .map_err(|_| invalid_data("HTTP headers are not UTF-8"))?;
-    let mut lines = header_text.split("\r\n");
-    let request_line = lines
-        .next()
-        .ok_or_else(|| invalid_data("missing HTTP request line"))?;
-    let mut request_parts = request_line.split_whitespace();
-    let method = request_parts
-        .next()
-        .ok_or_else(|| invalid_data("missing HTTP method"))?;
-    let target = request_parts
-        .next()
-        .ok_or_else(|| invalid_data("missing HTTP target"))?;
-    let version = request_parts
-        .next()
-        .ok_or_else(|| invalid_data("missing HTTP version"))?;
-    if !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
-        return Err(invalid_data("unsupported HTTP version"));
-    }
-
-    let mut headers = Vec::new();
-    for line in lines {
-        let Some((name, value)) = line.split_once(':') else {
-            return Err(invalid_data("malformed HTTP header"));
-        };
-        headers.push((name.trim().to_owned(), value.trim().to_owned()));
-    }
-    let mut request = HttpRequest::new(method, target, headers, Vec::new());
-    let content_length = request
-        .header("content-length")
-        .map(str::parse::<usize>)
-        .transpose()
-        .map_err(|_| invalid_data("invalid Content-Length"))?
-        .unwrap_or(0);
-    if content_length > MAX_BODY_BYTES {
-        return Err(invalid_data("HTTP body exceeds native transport limit"));
-    }
-    let body_start = header_end + 4;
-    request.body.extend_from_slice(&buf[body_start..]);
-    while request.body.len() < content_length {
-        let n = stream.read(&mut chunk)?;
-        if n == 0 {
-            return Err(invalid_data("incomplete HTTP body"));
-        }
-        request.body.extend_from_slice(&chunk[..n]);
-    }
-    request.body.truncate(content_length);
-    Ok(Some(request))
-}
-
-fn find_header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|window| window == b"\r\n\r\n")
-}
-
-fn invalid_data(message: &'static str) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
-}
-
-fn write_http_response(stream: &mut impl Write, response: &HttpResponse) -> std::io::Result<()> {
-    write!(
-        stream,
-        "HTTP/1.1 {} {}\r\n",
-        response.status,
-        reason_phrase(response.status)
-    )?;
-    let mut has_content_length = false;
-    let mut has_connection = false;
-    for (name, value) in &response.headers {
-        if name.eq_ignore_ascii_case("content-length") {
-            has_content_length = true;
-        }
-        if name.eq_ignore_ascii_case("connection") {
-            has_connection = true;
-        }
-        write!(stream, "{name}: {value}\r\n")?;
-    }
-    if !has_content_length {
-        write!(stream, "content-length: {}\r\n", response.body.len())?;
-    }
-    if !has_connection {
-        write!(stream, "connection: close\r\n")?;
-    }
-    stream.write_all(b"\r\n")?;
-    stream.write_all(&response.body)?;
-    stream.flush()
-}
 
 fn reason_phrase(status: u16) -> &'static str {
     match status {
