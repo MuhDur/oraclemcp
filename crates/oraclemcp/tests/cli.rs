@@ -923,6 +923,121 @@ fn cli_contract_advertises_setup_discover_under_dangerous_operations() {
     assert!(gate.contains("exits 2") || gate.contains("exit 2"));
 }
 
+// ---- bead .14: doctor validation of the discovered config ----
+
+#[test]
+fn doctor_offline_on_discovered_config_hints_missing_credentials() {
+    let dir = temp_dir("doctor-discovered");
+    let config = dir.join("profiles.toml");
+    let state = dir.join("state");
+
+    // Discover a fresh config from the fixture.
+    let mut discover = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    discover
+        .args(["setup", "--discover", "--yes"])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", &state)
+        .env("HOME", &dir)
+        .env("TNS_ADMIN", tns_fixture_dir())
+        .env_remove("ORACLE_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    assert_eq!(
+        wait_with_timeout(discover, Duration::from_secs(5))
+            .status
+            .code(),
+        Some(0)
+    );
+
+    // Offline doctor on the discovered config, credential env var unset.
+    let mut doctor = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    doctor
+        .args(["--json", "doctor", "--profile", "primary_tcps"])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", &state)
+        .env("HOME", &dir)
+        .env("TNS_ADMIN", tns_fixture_dir())
+        .env_remove("ORACLE_PRIMARY_TCPS_PASSWORD")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(doctor, Duration::from_secs(5));
+
+    // Offline doctor on a freshly discovered config is not a blocker.
+    assert_eq!(output.status.code(), Some(0), "offline doctor exits 0");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
+    assert_eq!(json["ok"], serde_json::json!(true));
+    assert_eq!(json["exit_code"], serde_json::json!(0));
+
+    let checks = json["checks"].as_array().expect("checks");
+    // TNS_ADMIN is reported when set: the TNS/wallet check passes.
+    let tns = checks
+        .iter()
+        .find(|c| c["id"] == serde_json::json!(2))
+        .expect("tns check");
+    assert_eq!(tns["status"], serde_json::json!("pass"));
+
+    // The connectivity check is a non-blocking needs-verification skip whose fix
+    // names the exact per-profile credential env var and the online command.
+    let conn = checks
+        .iter()
+        .find(|c| c["id"] == serde_json::json!(3))
+        .expect("connectivity check");
+    assert_eq!(conn["status"], serde_json::json!("skip"));
+    let fix = conn["fix"].as_str().expect("credential hint fix");
+    assert!(
+        fix.contains("ORACLE_PRIMARY_TCPS_PASSWORD"),
+        "hint names the exact env var: {fix}"
+    );
+    assert!(
+        fix.contains("oraclemcp doctor --online --profile primary_tcps"),
+        "hint names the verify command: {fix}"
+    );
+
+    // The unverifiable profile remains READ_ONLY (fail closed).
+    assert_eq!(
+        json["profile_caps"]["configured"]["max_level"],
+        serde_json::json!("READ_ONLY")
+    );
+
+    // No secret value is printed anywhere.
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    assert!(!stdout.contains("literal:"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn doctor_no_profiles_guidance_advertises_setup_discover() {
+    let dir = temp_dir("doctor-guidance");
+    let config = dir.join("profiles.toml");
+    fs::write(&config, "schema_version = 2\n").expect("write empty config");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args(["--json", "doctor"])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("HOME", &dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    assert_eq!(output.status.code(), Some(2));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
+    let conn = json["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .find(|c| c["id"] == serde_json::json!(3))
+        .expect("connectivity check");
+    let rendered = conn.to_string();
+    assert!(
+        rendered.contains("oraclemcp setup --discover"),
+        "the no-profiles guidance advertises the discovery fast path: {rendered}"
+    );
+    // The existing setup --write path is still offered.
+    assert!(rendered.contains("setup --write"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn setup_generated_client_snippet_launches_serve_as_written() {
     let dir = temp_dir("setup-snippet-launch");

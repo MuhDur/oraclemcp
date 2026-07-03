@@ -4270,6 +4270,7 @@ struct DoctorProfileContext {
     profile_caps: Option<DoctorProfileCaps>,
     auth_capabilities: Option<DoctorAuthCapabilities>,
     sensitive_values: Vec<String>,
+    credential_env_hint: Option<String>,
 }
 
 impl DoctorProfileContext {
@@ -4287,8 +4288,29 @@ impl DoctorProfileContext {
             profile_caps: None,
             auth_capabilities: None,
             sensitive_values: Vec::new(),
+            credential_env_hint: None,
         }
     }
+}
+
+/// Build a non-blocking, offline credential-verification hint for a profile
+/// whose `env:`-backed credential is still unset (TNS-onboarding bead `.14`).
+/// Names the exact env var to export and the `doctor --online` command to
+/// verify the profile; returns `None` when the credential is already set, is not
+/// an `env:` ref, or is absent. Only the variable NAME is used — never a value.
+fn doctor_credential_env_hint(profile: &ConnectionProfile) -> Option<String> {
+    let var = profile
+        .credential_ref
+        .as_deref()?
+        .strip_prefix("env:")?
+        .trim();
+    if var.is_empty() || std::env::var_os(var).is_some() {
+        return None;
+    }
+    Some(format!(
+        "export {var}, then run `oraclemcp doctor --online --profile {}` to verify this profile",
+        profile.name
+    ))
 }
 
 fn doctor_sensitive_values(opts: &OracleConnectOptions) -> Vec<String> {
@@ -4443,6 +4465,7 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
         profile_caps: Some(doctor_profile_caps(chosen, &level)),
         auth_capabilities: Some(doctor_auth_capabilities_for_profile(chosen)),
         sensitive_values: Vec::new(),
+        credential_env_hint: doctor_credential_env_hint(chosen),
     }
 }
 
@@ -4455,7 +4478,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
                     Ok(Some(chosen)) => doctor_profile_metadata_context(&chosen.name),
                     Ok(None) if cfg.profiles.is_empty() => DoctorProfileContext {
                         connection_error: Some(
-                            "no connection profiles are configured; run `oraclemcp --json setup --write --profile db_ro`, then export ORACLE_APP_PASSWORD for the generated credential_ref and rerun `oraclemcp --json doctor --profile db_ro`"
+                            "no connection profiles are configured; run `oraclemcp setup --discover` to auto-discover profiles from tnsnames.ora (the zero-config fast path), or `oraclemcp --json setup --write --profile db_ro` then export ORACLE_APP_PASSWORD for the generated credential_ref and rerun `oraclemcp --json doctor --profile db_ro`"
                                 .to_owned(),
                         ),
                         ..DoctorProfileContext::offline()
@@ -4511,6 +4534,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
             profile_caps: None,
             auth_capabilities: None,
             sensitive_values: Vec::new(),
+            credential_env_hint: None,
         },
         Err(e) => DoctorProfileContext {
             conn: None,
@@ -4525,6 +4549,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
             profile_caps: None,
             auth_capabilities: None,
             sensitive_values: Vec::new(),
+            credential_env_hint: None,
         },
     }
 }
@@ -4571,6 +4596,9 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
             profile_caps,
             auth_capabilities,
             sensitive_values,
+            // Online: a live connection is attempted; the offline credential
+            // hint does not apply.
+            credential_env_hint: None,
         },
         Err(e) => DoctorProfileContext {
             conn: None,
@@ -4585,6 +4613,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
             profile_caps,
             auth_capabilities,
             sensitive_values,
+            credential_env_hint: None,
         },
     }
 }
@@ -4620,6 +4649,7 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
         service_unit_caps: service_lifecycle::doctor_service_unit_caps(),
         state_layout,
         sensitive_values: profile_ctx.sensitive_values,
+        credential_env_hint: profile_ctx.credential_env_hint,
     };
     let mut report = block_on_connect(|cx| async move { run_doctor(&cx, &ctx).await });
     if fix {

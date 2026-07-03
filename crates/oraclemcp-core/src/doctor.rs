@@ -473,6 +473,12 @@ pub struct DoctorContext<'a> {
     pub state_layout: Option<DoctorStateLayout>,
     /// Exact setup values that must never appear in doctor output.
     pub sensitive_values: Vec<String>,
+    /// A non-blocking, offline credential hint for a profile whose credential
+    /// env var is still unset — names the exact env var to export and the
+    /// `doctor --online --profile <name>` command to verify it (TNS-onboarding
+    /// bead `.14`). `None` when the credential is already set or not an `env:`
+    /// ref. Never a secret value; only the variable NAME.
+    pub credential_env_hint: Option<String>,
 }
 
 /// The full diagnostic report.
@@ -1235,7 +1241,7 @@ fn connectivity_fix(error: &str) -> &'static str {
     if let Some(wallet) = classify_wallet_error(error) {
         wallet_connectivity_fix(&wallet)
     } else if lower.contains("no connection profiles are configured") {
-        "run `oraclemcp --json setup --write --profile db_ro`, then export ORACLE_APP_PASSWORD for the generated credential_ref and rerun `oraclemcp --json doctor --profile db_ro`"
+        "run `oraclemcp setup --discover` to auto-discover profiles from tnsnames.ora (the zero-config fast path), or `oraclemcp --json setup --write --profile db_ro` then export ORACLE_APP_PASSWORD for the generated credential_ref and rerun `oraclemcp --json doctor --profile db_ro`"
     } else if lower.contains("proxy_auth") {
         "set both profiles.proxy_auth.proxy_user and target_schema; if username is present it must match proxy_user"
     } else if lower.contains("connection profile") || lower.contains("default_profile") {
@@ -1317,6 +1323,21 @@ async fn check_connectivity(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     }
     match ctx.conn {
         None => {
+            if !ctx.online
+                && let Some(hint) = &ctx.credential_env_hint
+            {
+                // A discovered/configured profile whose credential env var is
+                // still unset: a non-blocking needs-verification hint that names
+                // the exact env var to export. Fail closed — the profile stays
+                // READ_ONLY and is never treated as verified.
+                return CheckResult::new(
+                    3,
+                    "Connectivity",
+                    CheckStatus::Skip,
+                    "offline — profile needs verification before live use",
+                )
+                .with_fix(hint.clone());
+            }
             let detail = if ctx.online {
                 "online requested, but no profile resolved to a live connection"
             } else if ctx.profile_caps.is_some() {
