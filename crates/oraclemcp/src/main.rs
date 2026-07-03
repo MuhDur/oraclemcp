@@ -24,6 +24,7 @@
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod audit_evidence;
+mod discover;
 mod readiness;
 mod robot_docs;
 mod service_lifecycle;
@@ -215,6 +216,20 @@ enum Command {
         /// Write the generated profile config through the SCFG config-ops backend.
         #[arg(long)]
         write: bool,
+        /// Discover tnsnames.ora net-services and synthesize read-only profiles.
+        /// Interactive on a TTY; a non-TTY caller must add --discover-tns/--yes.
+        #[arg(long)]
+        discover: bool,
+        /// Non-interactive consent to scan for tnsnames.ora and write the
+        /// discovered read-only profiles (required by --discover on a non-TTY).
+        #[arg(long = "discover-tns")]
+        discover_tns: bool,
+        /// Grant non-interactive consent (scan and write) for --discover.
+        #[arg(long)]
+        yes: bool,
+        /// With --discover, scan and report the plan without writing any config.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
         /// Example profile name to use in generated snippets.
         #[arg(long, default_value = "db_ro")]
         profile: String,
@@ -571,20 +586,40 @@ fn main() -> ExitCode {
         },
         Command::Setup {
             write,
+            discover,
+            discover_tns,
+            yes,
+            dry_run,
             profile,
             credential_env,
             wrapper_path,
             config_path,
             tools_dir,
-        } => run_setup(
-            robot_json,
-            write,
-            &profile,
-            &credential_env,
-            &wrapper_path,
-            &config_path,
-            &tools_dir,
-        ),
+        } => {
+            if discover || discover_tns {
+                let flags = discover::DiscoverFlags {
+                    interactive: discover::stdin_is_interactive(),
+                    discover_tns,
+                    yes,
+                    dry_run,
+                };
+                discover::run_setup_discover(
+                    robot_json,
+                    flags,
+                    setup_write_target_path(&config_path),
+                )
+            } else {
+                run_setup(
+                    robot_json,
+                    write,
+                    &profile,
+                    &credential_env,
+                    &wrapper_path,
+                    &config_path,
+                    &tools_dir,
+                )
+            }
+        }
         Command::SelfUpdate(args) => run_self_update_cmd(robot_json, args),
         Command::SignTool { path, tool } => run_sign_tool(robot_json, &path, tool.as_deref()),
         Command::Audit { command } => match command {

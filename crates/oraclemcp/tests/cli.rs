@@ -373,6 +373,141 @@ fn setup_write_round_trips_profiles_through_config_ops() {
     assert!(PathBuf::from(backup_path).exists());
 }
 
+/// The committed canonical TNS fixture tree (design spec §F), at the workspace
+/// root `tests/fixtures/tns`.
+fn tns_fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("fixtures")
+        .join("tns")
+}
+
+// ---- bead .4: consent model (never scan/write without consent) ----
+
+#[test]
+fn setup_discover_non_tty_without_consent_refuses_json() {
+    let dir = temp_dir("discover-refuse-json");
+    let config = dir.join("profiles.toml");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args(["--json", "setup", "--discover"])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("HOME", &dir)
+        .env_remove("TNS_ADMIN")
+        .env_remove("ORACLE_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a non-TTY refusal is a usage/safety block (exit 2)"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a refusal writes nothing to stdout"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+    let value: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("structured refusal on stderr");
+    assert_eq!(value["kind"], serde_json::json!("error"));
+    assert_eq!(
+        value["code"],
+        serde_json::json!("ORACLEMCP_DISCOVER_CONSENT_REQUIRED")
+    );
+    let message = value["message"].as_str().expect("refusal message");
+    assert!(
+        message.contains("refusing to scan for tnsnames.ora without consent"),
+        "refusal names the safety block: {message}"
+    );
+    assert!(
+        message.contains("--discover-tns"),
+        "refusal names the exact consent flag: {message}"
+    );
+    assert!(!config.exists(), "a refusal creates no config file");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn setup_discover_non_tty_without_consent_refuses_human() {
+    let dir = temp_dir("discover-refuse-human");
+    let config = dir.join("profiles.toml");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args(["setup", "--discover"])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("HOME", &dir)
+        .env_remove("TNS_ADMIN")
+        .env_remove("ORACLE_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+    assert_eq!(
+        stderr.trim(),
+        "refusing to scan for tnsnames.ora without consent: re-run on an interactive terminal, or pass --discover-tns (or --yes) to consent explicitly (non-interactive).",
+        "the human refusal is the exact spec §D sentence"
+    );
+    assert!(!config.exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn setup_discover_with_consent_reports_net_services() {
+    let dir = temp_dir("discover-report");
+    let config = dir.join("profiles.toml");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    // Explicit non-interactive scan consent + a fixture TNS_ADMIN. The report
+    // must enumerate the discovered net-services and the env vars to export.
+    cmd.args(["--json", "setup", "--discover", "--discover-tns"])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("HOME", &dir)
+        .env("TNS_ADMIN", tns_fixture_dir())
+        .env_remove("ORACLE_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+
+    assert_eq!(output.status.code(), Some(0), "consented scan proceeds");
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("discovery JSON");
+    assert_eq!(value["ok"], serde_json::json!(true));
+    assert_eq!(value["kind"], serde_json::json!("oraclemcp_discover"));
+    assert_eq!(
+        value["net_services_found"],
+        serde_json::json!(4),
+        "the primary fixture defines four effective aliases"
+    );
+    let profiles: Vec<&str> = value["profiles"]
+        .as_array()
+        .expect("profiles array")
+        .iter()
+        .map(|p| p.as_str().expect("profile name"))
+        .collect();
+    assert!(profiles.contains(&"primary_tcps"));
+    assert!(profiles.contains(&"ez_plain"));
+
+    // Only env-var NAMES appear — never a secret value.
+    let env_vars = value["env_vars"].as_array().expect("env vars array");
+    let names: Vec<&str> = env_vars
+        .iter()
+        .map(|e| e["env_var"].as_str().expect("env var name"))
+        .collect();
+    assert!(names.contains(&"ORACLE_PRIMARY_TCPS_PASSWORD"));
+    assert!(names.contains(&"ORACLE_PRIMARY_TCPS_WALLET_PASSWORD"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn setup_generated_client_snippet_launches_serve_as_written() {
     let dir = temp_dir("setup-snippet-launch");
