@@ -23,6 +23,10 @@
 //! safety note. Discovery never marks a profile `protected` or raises a level;
 //! an unverified profile stays `READ_ONLY` and is flagged needs-verification.
 
+use crate::discovery::contract::{
+    CONNECTION_PROFILE_FIELD_DISPOSITIONS, Disposition, FieldDisposition,
+    TOP_LEVEL_FIELD_DISPOSITIONS,
+};
 use crate::discovery::synth::{DiscoverySynthesis, SynthesizedProfile};
 
 /// The commented, governed/least-privilege safety block the writer emits once
@@ -34,8 +38,8 @@ use crate::discovery::synth::{DiscoverySynthesis, SynthesizedProfile};
 /// verbatim and the file still parses.
 #[must_use]
 pub fn read_only_safety_comment() -> String {
-    // Framing note: governed, least-privilege / read-only by default — NOT
-    // "safe-by-default". Keep this wording aligned with the honesty-grep gate.
+    // Framing note: governed, least-privilege / read-only by default. Keep this
+    // wording aligned with the honesty-grep gate (no over-claiming framing).
     let lines = [
         "# ── Governed, least-privilege posture (read-only by default) ──────────────",
         "# Discovery writes every profile capped at READ_ONLY on BOTH max_level and",
@@ -59,16 +63,21 @@ pub fn read_only_safety_comment() -> String {
     lines.join("\n")
 }
 
-/// Render a discovery [`DiscoverySynthesis`] into the annotated `profiles.toml`.
+/// Render a discovery [`DiscoverySynthesis`] into the annotated `profiles.toml`
+/// (design spec §C).
 ///
-/// The output parses through [`crate::OracleMcpConfig::from_toml_str`] and
-/// satisfies `deny_unknown_fields`.
+/// A **bootable minimum** (the SET keys of a valid, governed, least-privilege
+/// profile) plus a **self-documenting commented menu**: every remaining serde
+/// field of [`crate::OracleMcpConfig`] and [`crate::ConnectionProfile`] is
+/// present but commented, each with a one-line help string using its exact serde
+/// name. Both structs are `#[serde(deny_unknown_fields)]`, so every uncommented
+/// key is a real field and no unknown key appears; the output round-trips
+/// through [`crate::OracleMcpConfig::from_toml_str`].
 ///
-/// This bead (`.7`) renders the top-level bootable keys, the read-only-safety
-/// comment block, and each profile's bootable minimum (with `max_level` /
-/// `default_level` SET to `READ_ONLY`). The annotated writer bead (`.8`) extends
-/// it with `monitor_profile`, the `[http]`/`[audit]` pointers, and the full
-/// commented optional-field menu.
+/// The render is driven by the disposition tables
+/// ([`TOP_LEVEL_FIELD_DISPOSITIONS`] / [`CONNECTION_PROFILE_FIELD_DISPOSITIONS`])
+/// so a new serde field cannot be added without surfacing here — the parity /
+/// anti-rot test (bead `.9`) fails until the writer renders it.
 #[must_use]
 pub fn render_annotated_config(synth: &DiscoverySynthesis) -> String {
     let mut out = String::new();
@@ -83,16 +92,9 @@ pub fn render_annotated_config(synth: &DiscoverySynthesis) -> String {
     );
     out.push('\n');
 
-    // ── Top-level ──────────────────────────────────────────────────────────
-    out.push_str("schema_version = 2\n");
-    if let Some(default_profile) = &synth.default_profile {
-        out.push_str(&format!(
-            "default_profile = {}\n",
-            toml_basic_string(default_profile)
-        ));
-    }
-    out.push('\n');
+    render_top_level(&mut out, synth);
 
+    out.push('\n');
     out.push_str(&read_only_safety_comment());
     out.push('\n');
 
@@ -104,56 +106,204 @@ pub fn render_annotated_config(synth: &DiscoverySynthesis) -> String {
     out
 }
 
-/// Render one `[[profiles]]` block.
+/// Render the six top-level [`crate::OracleMcpConfig`] fields, driven by
+/// [`TOP_LEVEL_FIELD_DISPOSITIONS`] so all six are surfaced (bead `.8`/`.9`).
+fn render_top_level(out: &mut String, synth: &DiscoverySynthesis) {
+    for fd in TOP_LEVEL_FIELD_DISPOSITIONS {
+        match fd.field {
+            "schema_version" => out.push_str("schema_version = 2\n"),
+            "default_profile" => match &synth.default_profile {
+                Some(default_profile) => out.push_str(&format!(
+                    "default_profile = {}\n",
+                    toml_basic_string(default_profile)
+                )),
+                // Ambiguous (many profiles): leave it commented — the loader
+                // rejects a default_profile naming no profile.
+                None => {
+                    push_help(out, fd.help);
+                    out.push_str("# default_profile = \"pick_one\"\n");
+                }
+            },
+            "monitor_profile" => {
+                push_help(out, fd.help);
+                out.push_str("# monitor_profile = \"monitor_ro\"\n");
+            }
+            // http / audit are POINTERs: a short commented pointer to
+            // oraclemcp.example.toml, never a reproduction of the surface.
+            "http" | "audit" => {
+                out.push('\n');
+                push_help(out, fd.help);
+            }
+            // The [[profiles]] array is structural — rendered as blocks below.
+            "profiles" => {}
+            _ => {}
+        }
+    }
+}
+
+/// Render one `[[profiles]]` block: the bootable minimum plus the full commented
+/// optional-field menu, driven by [`CONNECTION_PROFILE_FIELD_DISPOSITIONS`].
 ///
-/// Bead `.7` renders the bootable minimum plus the needs-verification marker.
-/// Bead `.8` extends this with the full commented optional-field menu.
+/// All scalar keys (SET and commented) are emitted before any `[profiles.*]`
+/// sub-table header, so that uncommenting a commented scalar never lands it
+/// inside the wrong sub-table.
 fn render_profile_block(synth_profile: &SynthesizedProfile) -> String {
     let profile = &synth_profile.profile;
     let plan = &synth_profile.plan;
-    let mut out = String::new();
 
+    let mut scalars = String::new();
+    let mut sections = String::new();
+
+    for fd in CONNECTION_PROFILE_FIELD_DISPOSITIONS {
+        match fd.field {
+            // ── SET (bootable minimum) ──────────────────────────────────────
+            "name" => scalars.push_str(&format!("name = {}\n", toml_basic_string(&profile.name))),
+            "description" => {
+                if let Some(description) = &profile.description {
+                    scalars.push_str(&format!(
+                        "description = {}\n",
+                        toml_basic_string(description)
+                    ));
+                }
+            }
+            "connect_string" => {
+                if let Some(connect_string) = &profile.connect_string {
+                    scalars.push_str(&format!(
+                        "connect_string = {}\n",
+                        toml_basic_string(connect_string)
+                    ));
+                }
+            }
+            "credential_ref" => {
+                if let Some(credential_ref) = &profile.credential_ref {
+                    scalars.push_str(&format!(
+                        "credential_ref = {}\n",
+                        toml_basic_string(credential_ref)
+                    ));
+                }
+            }
+            "max_level" => {
+                if let Some(max_level) = profile.max_level {
+                    scalars.push_str(&format!("max_level = \"{}\"\n", max_level.as_str()));
+                }
+            }
+            "default_level" => {
+                if let Some(default_level) = profile.default_level {
+                    scalars.push_str(&format!("default_level = \"{}\"\n", default_level.as_str()));
+                }
+            }
+            // ── SET-WHEN-KNOWN: username, not known here → commented ─────────
+            "username" => push_commented_scalar(&mut scalars, fd, "\"APP_READONLY\""),
+            // ── COMMENTED scalars ───────────────────────────────────────────
+            "login_script" => {
+                push_commented_scalar(&mut scalars, fd, "\"/home/operator/login.sql\"");
+            }
+            "login_statements" => push_commented_scalar(
+                &mut scalars,
+                fd,
+                "[\"ALTER SESSION SET NLS_LANGUAGE = english\"]",
+            ),
+            "trusted_session_statements" => push_commented_scalar(
+                &mut scalars,
+                fd,
+                "[\"BEGIN DBMS_OUTPUT.ENABLE(500000); END;\"]",
+            ),
+            "call_timeout_seconds" => push_commented_scalar(&mut scalars, fd, "30"),
+            "connect_timeout_seconds" => push_commented_scalar(&mut scalars, fd, "20"),
+            "sdu" => push_commented_scalar(&mut scalars, fd, "32768"),
+            // protected = true is the safe, instructive value: it pins the
+            // ceiling immutable and requires max_level = READ_ONLY (which we set).
+            "protected" => push_commented_scalar(&mut scalars, fd, "true"),
+            "require_signed_tools" => push_commented_scalar(&mut scalars, fd, "true"),
+            "read_only_standby" => push_commented_scalar(&mut scalars, fd, "false"),
+            // mcp_exposed = false is the instructive opt-out value.
+            "mcp_exposed" => push_commented_scalar(&mut scalars, fd, "false"),
+            "dashboard_ddl_workbench" => push_commented_scalar(&mut scalars, fd, "false"),
+            // base is a scalar — must precede any sub-table header, so it lives
+            // with the scalars even though it is last in the disposition table.
+            "base" => push_commented_scalar(&mut scalars, fd, "\"another_profile\""),
+            // ── COMMENTED sections ──────────────────────────────────────────
+            "session_identity" => {
+                push_help(&mut sections, fd.help);
+                sections.push_str("# [profiles.session_identity]\n");
+                sections.push_str("# program = \"oraclemcp\"\n");
+                sections.push_str("# module = \"oraclemcp\"\n");
+                sections.push_str("# action = \"inspect\"\n");
+                sections.push_str("# client_identifier = \"agent\"\n");
+            }
+            "pool" => {
+                push_help(&mut sections, fd.help);
+                sections.push_str("# [profiles.pool]\n");
+                sections.push_str("# max_size = 4\n");
+                sections.push_str("# min_idle = 1\n");
+                sections.push_str("# acquire_timeout_secs = 5\n");
+                sections.push_str("# statement_cache_size = 50\n");
+            }
+            "oci" => {
+                push_help(&mut sections, fd.help);
+                sections.push_str("# [profiles.oci]\n");
+                sections.push_str("# wallet_location = \"/etc/oracle/wallet\"\n");
+                // A TCPS / wallet target additionally surfaces the wallet-password
+                // secret-ref placeholder (bead `.6`) — never a literal.
+                if let Some(wallet_env) = &plan.wallet_password_env_var {
+                    sections.push_str(&format!("# wallet_password_ref = \"env:{wallet_env}\"\n"));
+                }
+            }
+            "drcp" => {
+                push_help(&mut sections, fd.help);
+                sections.push_str("# [profiles.drcp]\n");
+                sections.push_str("# pooled = true\n");
+                sections.push_str("# connection_class = \"ORACLE_MCP_AGENTS\"\n");
+                sections.push_str("# purity = \"reuse\"\n");
+            }
+            "proxy_auth" => {
+                push_help(&mut sections, fd.help);
+                sections.push_str("# [profiles.proxy_auth]\n");
+                sections.push_str("# proxy_user = \"MCP_PROXY\"\n");
+                sections.push_str("# target_schema = \"APP_OWNER\"\n");
+            }
+            "app_context" => {
+                push_help(&mut sections, fd.help);
+                sections.push_str("# [[profiles.app_context]]\n");
+                sections.push_str("# namespace = \"ORACLEMCP_CTX\"\n");
+                sections.push_str("# key = \"tenant_id\"\n");
+                sections.push_str("# value = \"tenant-123\"\n");
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = String::new();
     out.push_str("[[profiles]]\n");
     out.push_str(&format!(
         "# Unverified until you export {} and run `oraclemcp doctor --online`.\n",
         plan.password_env_var
     ));
-
-    // name / description / connect_string / credential_ref (bootable minimum).
-    out.push_str(&format!("name = {}\n", toml_basic_string(&profile.name)));
-    if let Some(description) = &profile.description {
-        out.push_str(&format!(
-            "description = {}\n",
-            toml_basic_string(description)
-        ));
+    out.push_str(&scalars);
+    if !sections.is_empty() {
+        out.push_str(&sections);
     }
-    if let Some(connect_string) = &profile.connect_string {
-        out.push_str(&format!(
-            "connect_string = {}\n",
-            toml_basic_string(connect_string)
-        ));
-    }
-    // username is left commented — discovery never guesses a real account.
-    out.push_str(
-        "# username = \"APP_READONLY\"   # Oracle username; set only when a \
-         least-privilege convention is known, else leave commented.\n",
-    );
-    if let Some(credential_ref) = &profile.credential_ref {
-        out.push_str(&format!(
-            "credential_ref = {}\n",
-            toml_basic_string(credential_ref)
-        ));
-    }
-
-    // The READ_ONLY safety ceiling, SET explicitly on both levels (bead `.7`).
-    if let Some(max_level) = profile.max_level {
-        out.push_str(&format!("max_level = \"{}\"\n", max_level.as_str()));
-    }
-    if let Some(default_level) = profile.default_level {
-        out.push_str(&format!("default_level = \"{}\"\n", default_level.as_str()));
-    }
-
     out
+}
+
+/// Append a `# <help>` comment line.
+fn push_help(out: &mut String, help: &str) {
+    out.push_str(&format!("# {help}\n"));
+}
+
+/// Append a commented scalar menu entry: a `# <help>` help line followed by a
+/// `# <field> = <example>` line whose key, when uncommented, is a valid serde
+/// field (design spec §C — exact serde name).
+fn push_commented_scalar(out: &mut String, fd: &FieldDisposition, example: &str) {
+    debug_assert!(
+        matches!(
+            fd.disposition,
+            Disposition::Commented | Disposition::SetWhenKnown
+        ),
+        "only commented / set-when-known fields render as a commented scalar",
+    );
+    push_help(out, fd.help);
+    out.push_str(&format!("# {} = {example}\n", fd.field));
 }
 
 /// Quote and escape a string as a TOML basic string (`"…"`). Escapes `\`, `"`,
@@ -190,6 +340,43 @@ mod tests {
             .map(|a| DiscoveredNetService::new(*a))
             .collect();
         synthesize_profiles(&services, &SynthOptions::default())
+    }
+
+    /// The canonical two-net-service golden input: one plain alias and one
+    /// TCPS + wallet target (so the `[profiles.oci] wallet_password_ref`
+    /// placeholder path is exercised).
+    fn golden_synth() -> DiscoverySynthesis {
+        let mut tcps = DiscoveredNetService::new("PRIMARY_TCPS");
+        tcps.protocol = Some("TCPS".to_owned());
+        tcps.host = Some("tcps.example.com".to_owned());
+        tcps.port = Some(2484);
+        tcps.service_name = Some("PRIMARY.example.com".to_owned());
+        tcps.wallet_location = Some("/etc/oracle/wallet/primary".to_owned());
+        let services = vec![DiscoveredNetService::new("SALES_RO"), tcps];
+        synthesize_profiles(&services, &SynthOptions::default())
+    }
+
+    #[test]
+    fn golden_snapshot_matches() {
+        let rendered = render_annotated_config(&golden_synth());
+        let golden = include_str!("../../tests/golden/discovery_annotated.toml");
+        if std::env::var_os("OMCP_UPDATE_GOLDEN").is_some() {
+            std::fs::write(
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/golden/discovery_annotated.toml"
+                ),
+                &rendered,
+            )
+            .expect("write golden");
+        }
+        assert_eq!(
+            rendered, golden,
+            "annotated writer output drifted from the golden snapshot — review the \
+             change, then re-run with OMCP_UPDATE_GOLDEN=1 to regenerate"
+        );
+        // The golden is not just text: it must parse through the strict loader.
+        OracleMcpConfig::from_toml_str(golden).expect("golden parses + validates");
     }
 
     #[test]
@@ -254,14 +441,152 @@ mod tests {
 
     #[test]
     fn honesty_no_over_claiming_framing() {
-        // The writer's own rendered text must pass the honesty posture: no
-        // "safe-by-default" / "read-only binary" / "fully audited" framing.
+        // The writer's own rendered text must pass the honesty posture; the
+        // forbidden phrases below are negative examples asserted ABSENT.
         let rendered = render_annotated_config(&synth(&["SALES_RO"])).to_ascii_lowercase();
-        for forbidden in ["safe-by-default", "read-only binary", "fully audited"] {
+        let forbidden_framings = ["safe-by-default", "read-only binary", "fully audited"]; // honesty-allow: negative examples asserted absent
+        for forbidden in forbidden_framings {
             assert!(
                 !rendered.contains(forbidden),
-                "rendered output must not use the framing {forbidden:?}"
+                "rendered output must not use the forbidden framing {forbidden:?}"
             );
         }
+    }
+
+    // ---- bead .8: full annotated menu (all fields, optional commented) ----
+
+    /// Extract the set of config keys the rendered output touches — each serde
+    /// field name that appears either SET (`key =`) or commented
+    /// (`# key =`, `# [profiles.key]`, `# [[profiles.key]]`).
+    fn rendered_profile_keys(rendered: &str) -> std::collections::BTreeSet<String> {
+        use crate::discovery::contract::CONNECTION_PROFILE_FIELD_DISPOSITIONS;
+        let mut present = std::collections::BTreeSet::new();
+        for fd in CONNECTION_PROFILE_FIELD_DISPOSITIONS {
+            let field = fd.field;
+            let set_line = format!("\n{field} = ");
+            let commented_scalar = format!("# {field} = ");
+            let sub_table = format!("[profiles.{field}]");
+            let sub_array = format!("[[profiles.{field}]]");
+            if rendered.contains(&set_line)
+                || rendered.contains(&commented_scalar)
+                || rendered.contains(&sub_table)
+                || rendered.contains(&sub_array)
+            {
+                present.insert(field.to_owned());
+            }
+        }
+        present
+    }
+
+    #[test]
+    fn every_connection_profile_serde_field_appears_set_or_commented() {
+        use crate::discovery::contract::connection_profile_field_names;
+        let rendered = render_annotated_config(&golden_synth());
+        let present = rendered_profile_keys(&rendered);
+        let expected: std::collections::BTreeSet<String> = connection_profile_field_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            present,
+            expected,
+            "every ConnectionProfile serde field must appear SET or commented; \
+             missing: {:?}",
+            expected.difference(&present).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn every_top_level_field_is_represented() {
+        let rendered = render_annotated_config(&synth(&["SALES_RO", "HR_RO"]));
+        // schema_version SET; default_profile commented (ambiguous, 2 profiles);
+        // monitor_profile commented; http/audit via the example.toml pointers;
+        // profiles as [[profiles]] blocks.
+        assert!(rendered.contains("\nschema_version = 2\n"));
+        assert!(rendered.contains("# default_profile = "));
+        assert!(rendered.contains("# monitor_profile = "));
+        assert!(rendered.contains("oraclemcp.example.toml [http]"));
+        assert!(rendered.contains("oraclemcp.example.toml [audit]"));
+        assert!(rendered.contains("[[profiles]]"));
+    }
+
+    #[test]
+    fn single_service_sets_default_profile_uncommented() {
+        let rendered = render_annotated_config(&synth(&["SALES_RO"]));
+        assert!(
+            rendered.contains("\ndefault_profile = \"sales_ro\"\n"),
+            "an unambiguous single service sets default_profile"
+        );
+    }
+
+    #[test]
+    fn oci_wallet_password_ref_only_for_tcps_or_wallet() {
+        // Plain alias: no wallet_password_ref KEY line (the oci help string does
+        // mention the field name in prose, so match the `key = ` form instead).
+        let plain = render_annotated_config(&synth(&["SALES_RO"]));
+        assert!(!plain.contains("wallet_password_ref = "));
+        // TCPS/wallet target: the commented placeholder appears under oci.
+        let golden = render_annotated_config(&golden_synth());
+        assert!(
+            golden.contains("# wallet_password_ref = \"env:ORACLE_PRIMARY_TCPS_WALLET_PASSWORD\"")
+        );
+    }
+
+    #[test]
+    fn no_literal_secret_value_is_emitted() {
+        // The word "literal:" may appear in the `protected` help (it warns that
+        // protected rejects literal: refs), but no credential/wallet/key line may
+        // carry a literal: VALUE.
+        let rendered = render_annotated_config(&golden_synth());
+        for line in rendered.lines() {
+            let trimmed = line.trim_start_matches("# ").trim();
+            if trimmed.starts_with("credential_ref")
+                || trimmed.starts_with("wallet_password_ref")
+                || trimmed.starts_with("key_ref")
+            {
+                assert!(
+                    !trimmed.contains("\"literal:"),
+                    "no secret line may carry a literal: value: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn uncommenting_a_sampled_scalar_and_section_still_parses() {
+        let rendered = render_annotated_config(&golden_synth());
+        // Uncomment call_timeout_seconds (a scalar; valid under each profile) and
+        // the FIRST [profiles.oci] section together with its wallet_location key,
+        // leaving every other commented line untouched. Uncommenting a section
+        // key without its header would land it in the wrong table, so the header
+        // and its one key must be uncommented as a unit.
+        let mut oci_header_done = false;
+        let mut in_first_oci = false;
+        let mut wallet_done = false;
+        let mut uncommented = String::new();
+        for line in rendered.lines() {
+            let mut emit = line.to_owned();
+            if line == "# call_timeout_seconds = 30" {
+                emit = "call_timeout_seconds = 30".to_owned();
+            } else if !oci_header_done && line == "# [profiles.oci]" {
+                oci_header_done = true;
+                in_first_oci = true;
+                emit = "[profiles.oci]".to_owned();
+            } else if in_first_oci
+                && !wallet_done
+                && line == "# wallet_location = \"/etc/oracle/wallet\""
+            {
+                wallet_done = true;
+                in_first_oci = false;
+                emit = "wallet_location = \"/etc/oracle/wallet\"".to_owned();
+            }
+            uncommented.push_str(&emit);
+            uncommented.push('\n');
+        }
+        let cfg = OracleMcpConfig::from_toml_str(&uncommented)
+            .expect("uncommenting a sampled scalar + section still parses");
+        let first = &cfg.profiles[0];
+        assert_eq!(first.call_timeout_seconds, Some(30));
+        assert!(first.oci.is_some(), "the uncommented [profiles.oci] loaded");
     }
 }
