@@ -71,7 +71,9 @@ install a service.
 
 Options:
   --version <version>       Release version, e.g. 0.6.6 or v0.6.6 (default: latest)
-  --target <triple>         Override detected target triple
+  --target <triple>         Override detected target triple; Linux gnu triples
+                            (x86_64/aarch64-unknown-linux-gnu) are accepted here
+                            even though auto-detection always picks musl
   --prefix <dir>            Install prefix (default: $HOME/.local)
   --bin-dir <dir>           Binary directory (default: <prefix>/bin)
   --repo <owner/repo>       GitHub repository (default: MuhDur/oraclemcp)
@@ -317,6 +319,13 @@ detect_target() {
 validate_target() {
   case "$1" in
     x86_64-unknown-linux-musl | aarch64-unknown-linux-musl | x86_64-apple-darwin | aarch64-apple-darwin)
+      ;;
+    x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu)
+      # Published gnu tarballs are reachable only by explicit request; the
+      # static musl build stays the auto-detected default on Linux.
+      if [ "$TARGET_EXPLICIT" -ne 1 ]; then
+        fail "gnu target '$1' is only supported when passed explicitly via --target; the auto-detected Linux default is musl"
+      fi
       ;;
     *)
       fail "install.sh supports Unix release tarballs only; unsupported target '$1'"
@@ -745,6 +754,18 @@ print_plan() {
         printf '  sha256_note: checksum verifies transport integrity only; cosign authenticity/provenance is intentionally skipped\n'
         ;;
     esac
+    # Keep the plan honest about what the real run will do: without cosign the
+    # run soft-skips the authenticity check (prefer) or fails closed (require).
+    if ! have "$COSIGN_BIN"; then
+      case "$VERIFY_POSTURE" in
+        prefer)
+          printf '  cosign: not installed - authenticity check will be skipped (SHA-256 still enforced); install cosign or use --verify require to change this\n'
+          ;;
+        require)
+          printf '  cosign: not installed - the real run will fail closed (ORACLEMCP_INSTALL_COSIGN_REQUIRED); install cosign before rerunning\n'
+          ;;
+      esac
+    fi
   fi
 
   printf '  files:\n'

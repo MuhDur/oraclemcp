@@ -517,10 +517,19 @@ impl OracleMcpServer {
     }
 
     /// Build the native MCP `initialize` result object.
+    ///
+    /// Version negotiation per the MCP lifecycle spec: when the client
+    /// requested a protocol version the server supports, respond with that
+    /// same version; otherwise respond with the server's latest.
     #[must_use]
-    pub fn initialize_result_json(&self) -> Value {
+    pub fn initialize_result_json(&self, client_protocol_version: Option<&str>) -> Value {
+        let negotiated = client_protocol_version
+            .filter(|requested| {
+                crate::capabilities::SUPPORTED_PROTOCOL_VERSIONS.contains(requested)
+            })
+            .unwrap_or(crate::capabilities::PROTOCOL_VERSION);
         json!({
-            "protocolVersion": "2025-11-25",
+            "protocolVersion": negotiated,
             "capabilities": served_capabilities_json(self.subscriptions.supports_subscriptions()),
             "serverInfo": {
                 "name": "oraclemcp",
@@ -879,7 +888,10 @@ impl OracleMcpServer {
                 return jsonrpc_error(id, JSONRPC_INVALID_REQUEST, e.to_string());
             }
         }
-        jsonrpc_result(id, self.initialize_result_json())
+        let client_protocol_version = params
+            .and_then(|params| params.get("protocolVersion"))
+            .and_then(Value::as_str);
+        jsonrpc_result(id, self.initialize_result_json(client_protocol_version))
     }
 
     fn handle_prompts_list(&self, id: Value) -> Value {
@@ -2174,10 +2186,59 @@ mod tests {
 
     #[test]
     fn initialize_result_advertises_tools_and_protocol() {
-        let info = server().initialize_result_json();
+        let info = server().initialize_result_json(None);
         assert_eq!(info["protocolVersion"], serde_json::json!("2025-11-25"));
         assert_eq!(info["serverInfo"]["name"], "oraclemcp");
         assert!(info["capabilities"].get("tools").is_some());
+    }
+
+    /// Field-test regression: per the MCP lifecycle spec, when the client
+    /// offers a protocol version the server supports, the server MUST respond
+    /// with the same version; an unknown version negotiates up to the server's
+    /// latest.
+    #[test]
+    fn initialize_echoes_a_supported_client_protocol_version() {
+        let s = server();
+        for supported in crate::capabilities::SUPPORTED_PROTOCOL_VERSIONS {
+            let info = s.initialize_result_json(Some(supported));
+            assert_eq!(
+                info["protocolVersion"],
+                serde_json::json!(supported),
+                "server must echo supported client version {supported}"
+            );
+        }
+        // Latest stays the same when echoed.
+        let info = s.initialize_result_json(Some("2025-11-25"));
+        assert_eq!(info["protocolVersion"], serde_json::json!("2025-11-25"));
+        // Unknown or absent versions negotiate up to the server's latest.
+        for unsupported in [Some("1.0.0"), Some("1899-01-01"), None] {
+            let info = s.initialize_result_json(unsupported);
+            assert_eq!(info["protocolVersion"], serde_json::json!("2025-11-25"));
+        }
+    }
+
+    /// End-to-end through the JSON-RPC frame: a 2024-11-05 client gets
+    /// 2024-11-05 back from `initialize`.
+    #[test]
+    fn initialize_frame_negotiates_older_client_version() {
+        let s = server();
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "old-client", "version": "0.1.0" }
+            }
+        });
+        let response = s
+            .handle_jsonrpc_request(request, None)
+            .expect("initialize returns a response");
+        assert_eq!(
+            response["result"]["protocolVersion"],
+            serde_json::json!("2024-11-05")
+        );
     }
 
     #[test]

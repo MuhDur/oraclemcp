@@ -397,6 +397,76 @@ if [ -e "$PREFIX/bin/oraclemcp" ] || [ -e "$PREFIX/bin/om" ]; then
 fi
 log_pass "non-TTY dry-run agent path"
 
+# Field-test bead: gnu triples are reachable, but only via explicit --target
+# (auto-detection stays musl); anything outside the release matrix still fails.
+gnu_dry_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    bash install.sh \
+      --dry-run \
+      --version "$SMOKE_VERSION" \
+      --target x86_64-unknown-linux-gnu \
+      --prefix "$PREFIX"
+)"
+contains "$gnu_dry_output" "mode: prebuilt"
+contains "$gnu_dry_output" "archive: https://github.com/MuhDur/oraclemcp/releases/download/v$SMOKE_VERSION/oraclemcp-x86_64-unknown-linux-gnu.tar.gz"
+log_pass "explicit --target linux-gnu dry-run plans the published gnu tarball"
+
+set +e
+unsupported_target_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    bash install.sh \
+      --dry-run \
+      --version "$SMOKE_VERSION" \
+      --target x86_64-pc-windows-msvc \
+      --prefix "$PREFIX" 2>&1
+)"
+unsupported_target_status=$?
+set -e
+[ "$unsupported_target_status" -ne 0 ] || fail "unsupported target triple unexpectedly accepted"
+contains "$unsupported_target_output" "unsupported target"
+log_pass "non-Unix target triple still rejected"
+
+# Field-test bead: the dry-run plan must be honest about the cosign soft-skip.
+# Without cosign, posture prefer skips authenticity (SHA-256 still enforced)
+# and posture require will fail closed; with cosign present no notice appears.
+no_cosign_dry_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    ORACLEMCP_COSIGN="$SMOKE_ROOT/missing-cosign" \
+    bash install.sh \
+      --dry-run \
+      --version "$SMOKE_VERSION" \
+      --target x86_64-unknown-linux-musl \
+      --prefix "$PREFIX"
+)"
+contains "$no_cosign_dry_output" "verification_posture: prefer"
+contains "$no_cosign_dry_output" "cosign: not installed - authenticity check will be skipped (SHA-256 still enforced); install cosign or use --verify require to change this"
+log_pass "dry-run surfaces the cosign soft-skip under posture prefer"
+
+no_cosign_require_dry_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    ORACLEMCP_COSIGN="$SMOKE_ROOT/missing-cosign" \
+    bash install.sh \
+      --dry-run \
+      --version "$SMOKE_VERSION" \
+      --target x86_64-unknown-linux-musl \
+      --prefix "$PREFIX" \
+      --verify require
+)"
+contains "$no_cosign_require_dry_output" "cosign: not installed - the real run will fail closed (ORACLEMCP_INSTALL_COSIGN_REQUIRED); install cosign before rerunning"
+log_pass "dry-run surfaces the cosign fail-closed gap under posture require"
+
+with_cosign_dry_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    ORACLEMCP_COSIGN="/bin/true" \
+    bash install.sh \
+      --dry-run \
+      --version "$SMOKE_VERSION" \
+      --target x86_64-unknown-linux-musl \
+      --prefix "$PREFIX"
+)"
+not_contains "$with_cosign_dry_output" "cosign: not installed"
+log_pass "dry-run stays quiet about cosign when it is present"
+
 NO_COSIGN_DIR="$SMOKE_ROOT/no-cosign"
 NO_COSIGN_ARCHIVE="$NO_COSIGN_DIR/oraclemcp-x86_64-unknown-linux-musl.tar.gz"
 NO_COSIGN_PREFIX="$SMOKE_ROOT/no-cosign-prefix"
@@ -453,9 +523,12 @@ if command -v script >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
     "$SMOKE_VERSION" \
     "x86_64-unknown-linux-musl" \
     "$PTY_PREFIX"
+  # NO_COLOR=1 pins prompt_yes_no to its plain read-based prompts: the piped
+  # line answers (and the prompt-text assertions below) are written for that
+  # path, and a host-installed gum would otherwise swallow keypresses and hang.
   pty_output="$(
     printf 'y\nn\nn\nn\n' | env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
-      CI= SHELL="/bin/bash" PATH="/usr/bin:/bin" \
+      CI= SHELL="/bin/bash" PATH="/usr/bin:/bin" NO_COLOR=1 \
       timeout 20s script -qefc "$pty_command" /dev/null 2>&1
   )"
   contains_unwrapped_fragments "$pty_output" "PATH prompt" \
@@ -474,7 +547,7 @@ if command -v script >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
     "$PTY_DEFAULT_PREFIX"
   pty_default_output="$(
     printf '\n\n\n\n\n' | env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
-      CI= SHELL="/bin/bash" PATH="/usr/bin:/bin" \
+      CI= SHELL="/bin/bash" PATH="/usr/bin:/bin" NO_COLOR=1 \
       timeout 20s script -qefc "$pty_command" /dev/null 2>&1
   )"
   contains_unwrapped_fragments "$pty_default_output" "PATH prompt" \

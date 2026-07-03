@@ -124,6 +124,11 @@ The release installer does not silently fall back from a missing release archive
 to a source build. Use `--source` explicitly when you want `cargo install`
 instead of the verified archive path.
 
+On Linux the installer auto-detects the static musl build, which runs everywhere
+(including WSL2). The published glibc tarballs are also installable, but only by
+explicit request: `--target x86_64-unknown-linux-gnu` (or
+`aarch64-unknown-linux-gnu`).
+
 Uninstall is preview-first and idempotent. Service removal remains an explicit
 service-manager mutation:
 
@@ -687,8 +692,9 @@ oraclemcp serve --allow-no-auth
 Config discovery order is:
 
 1. `$ORACLEMCP_CONFIG`
-2. `~/.config/oraclemcp/profiles.toml`
-3. `~/.config/oraclemcp/config.toml`
+2. `$XDG_CONFIG_HOME/oraclemcp/profiles.toml`, then `config.toml` (only when
+   `XDG_CONFIG_HOME` is set to an absolute path)
+3. `~/.config/oraclemcp/profiles.toml`, then `config.toml`
 
 `credential_ref` and `wallet_password_ref` resolve through the same
 SecretResolver seam as audit and HTTP secrets. Supported forms are `env:VAR`,

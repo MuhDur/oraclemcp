@@ -976,8 +976,8 @@ pub async fn run_doctor(cx: &Cx, ctx: &DoctorContext<'_>) -> DoctorReport {
         check_virtual_tools(),
         check_dba_suite_preflight(cx, ctx).await,
         check_write_posture(cx, ctx).await,
-        check_state_layout(ctx),
         check_call_timeout(ctx),
+        check_state_layout(ctx),
     ];
     DoctorReport {
         checks,
@@ -1973,6 +1973,17 @@ mod tests {
         assert_eq!(report.checks.len(), 13);
         let selftest = report.checks.iter().find(|c| c.id == 8).unwrap();
         assert_eq!(selftest.status, CheckStatus::Pass, "{}", selftest.detail);
+    }
+
+    /// Field-test regression: checks print in numeric id order (13 used to
+    /// render before 12 in the human-readable output).
+    #[test]
+    fn checks_are_ordered_by_id() {
+        let report = doctor(&DoctorContext::default());
+        let ids: Vec<u8> = report.checks.iter().map(|c| c.id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "doctor checks must be in ascending id order");
     }
 
     #[test]

@@ -1158,6 +1158,7 @@ fn setup_payload_is_generic_and_client_ready() {
         "tenant_ro",
         "APP_PASSWORD",
         "/opt/oraclemcp-wrapper",
+        Some("/opt/oraclemcp-wrapper"),
         "/etc/oraclemcp/profiles.toml",
         "/etc/oraclemcp/tools.d",
     );
@@ -1233,6 +1234,81 @@ fn setup_payload_is_generic_and_client_ready() {
     let serialized = serde_json::to_string(&out).expect("json");
     assert!(serialized.contains("dbhost.example.com"));
     assert!(!serialized.contains("literal:"));
+    // Explicit wrapper flow: the payload must say the wrapper has to exist first.
+    assert_eq!(
+        out["paths"]["wrapper"],
+        serde_json::json!("/opt/oraclemcp-wrapper")
+    );
+    assert!(
+        out["snippet_command"]["source"]
+            .as_str()
+            .expect("snippet command source")
+            .contains("the wrapper must exist")
+    );
+    assert!(serialized.contains("create the wrapper first"));
+}
+
+/// Field-test bead `.3`: without `--wrapper-path` the snippets must point at
+/// the real resolved binary — never the historical `~/.local/bin/oraclemcp-local`
+/// wrapper that nothing ever creates.
+#[test]
+fn setup_payload_default_snippets_use_the_real_binary_not_a_wrapper() {
+    let binary = setup_snippet_command();
+    let out = setup_payload(
+        "tenant_ro",
+        "APP_PASSWORD",
+        &binary,
+        None,
+        "/etc/oraclemcp/profiles.toml",
+        "/etc/oraclemcp/tools.d",
+    );
+    assert_eq!(
+        out["claude_mcp_json"]["mcpServers"]["oracle"]["command"],
+        serde_json::json!(binary)
+    );
+    assert!(
+        out["codex_config_toml"]
+            .as_str()
+            .expect("codex config")
+            .contains(&format!("command = \"{binary}\"")),
+        "Codex TOML must use the same command as the Claude JSON snippet"
+    );
+    assert_eq!(out["paths"]["wrapper"], serde_json::Value::Null);
+    assert_eq!(
+        out["snippet_command"]["source"],
+        serde_json::json!("resolved oraclemcp binary")
+    );
+    let serialized = serde_json::to_string(&out).expect("json");
+    assert!(
+        !serialized.contains("oraclemcp-local"),
+        "default setup output must never advertise the uncreated wrapper path"
+    );
+    // Install hints must match the supported channels (field-test bead `.4`).
+    assert!(
+        out["install"]["one_line"]
+            .as_str()
+            .expect("one-line install")
+            .contains("install.sh")
+    );
+    assert_eq!(
+        out["install"]["self_update"],
+        serde_json::json!("oraclemcp self-update")
+    );
+    assert_eq!(
+        out["install"]["cargo_binstall"],
+        serde_json::json!("cargo binstall oraclemcp")
+    );
+    assert!(
+        out["install"]["source_build"]
+            .as_str()
+            .expect("source build hint")
+            .starts_with("cargo +nightly-2026-05-11 install oraclemcp"),
+        "source build must carry the nightly pin; plain cargo install fails on stable"
+    );
+    assert!(
+        !serialized.contains("\"cargo install oraclemcp\""),
+        "bare cargo install (stable) must not be advertised"
+    );
 }
 
 #[test]

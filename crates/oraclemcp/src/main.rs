@@ -236,9 +236,12 @@ enum Command {
         /// Environment variable name used by credential_ref in the profile template.
         #[arg(long, default_value = "ORACLE_APP_PASSWORD")]
         credential_env: String,
-        /// Wrapper path shown in client snippets.
-        #[arg(long, default_value = "~/.local/bin/oraclemcp-local")]
-        wrapper_path: String,
+        /// Use this wrapper script as the client-snippet command instead of the
+        /// resolved oraclemcp binary. Setup only prints a wrapper template; you
+        /// must create the wrapper (and make it executable) before the snippets
+        /// work.
+        #[arg(long)]
+        wrapper_path: Option<String>,
         /// Config path shown in generated guidance.
         #[arg(long, default_value = DEFAULT_SETUP_CONFIG_PATH)]
         config_path: String,
@@ -614,7 +617,7 @@ fn main() -> ExitCode {
                     write,
                     &profile,
                     &credential_env,
-                    &wrapper_path,
+                    wrapper_path.as_deref(),
                     &config_path,
                     &tools_dir,
                 )
@@ -2242,9 +2245,12 @@ fn operator_config_target_path() -> PathBuf {
     if let Some(path) = OracleMcpConfig::default_config_path() {
         return path;
     }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".config").join("oraclemcp").join("profiles.toml"))
+    // Fresh write target: the highest-precedence search dir, so an XDG-native
+    // box (XDG_CONFIG_HOME set) gets its config created where discovery reads.
+    OracleMcpConfig::config_search_dirs()
+        .into_iter()
+        .next()
+        .map(|dir| dir.join("profiles.toml"))
         .unwrap_or_else(|| PathBuf::from("profiles.toml"))
 }
 
@@ -3144,26 +3150,51 @@ fn run_info(robot_json: bool) -> ExitCode {
     stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
 }
 
+/// The command MCP client snippets launch by default: the real, currently
+/// running binary — the same resolution the installer's `print_client_snippet`
+/// performs — never a wrapper script that nothing creates.
+fn setup_snippet_command() -> String {
+    std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "oraclemcp".to_owned())
+}
+
 fn setup_payload(
     profile: &str,
     credential_env: &str,
-    wrapper_path: &str,
+    snippet_command: &str,
+    explicit_wrapper: Option<&str>,
     config_path: &str,
     tools_dir: &str,
 ) -> serde_json::Value {
+    let one_line_install = format!(
+        "curl -fsSL \"https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)\" | bash -s -- --version {}",
+        env!("CARGO_PKG_VERSION")
+    );
     serde_json::json!({
         "ok": true,
         "kind": "oraclemcp_setup",
         "principle": "one generic binary; all environment-specific database names, credentials, session identity, and custom tools live in local config",
         "install": {
-            "cargo": "cargo install oraclemcp",
+            "one_line": one_line_install,
+            "self_update": "oraclemcp self-update",
+            "cargo_binstall": "cargo binstall oraclemcp",
+            "source_build": "cargo +nightly-2026-05-11 install oraclemcp (source-build escape hatch; the workspace is pinned to nightly, plain cargo install fails on stable)",
             "docker_stdio": format!("docker run -i --rm ghcr.io/muhdur/oraclemcp:{}", env!("CARGO_PKG_VERSION"))
         },
         "paths": {
             "profiles": config_path,
             "custom_tools": tools_dir,
-            "wrapper": wrapper_path,
+            "wrapper": explicit_wrapper,
             "full_profile_example": "oraclemcp.example.toml"
+        },
+        "snippet_command": {
+            "command": snippet_command,
+            "source": if explicit_wrapper.is_some() {
+                "explicit --wrapper-path; the wrapper must exist before the snippets work (setup only prints a template, it never writes the wrapper)"
+            } else {
+                "resolved oraclemcp binary"
+            }
         },
         "profiles_toml": robot_docs::setup_profiles_template(profile, credential_env),
         "wrapper_script": robot_docs::setup_wrapper_template(),
@@ -3171,13 +3202,13 @@ fn setup_payload(
         "claude_mcp_json": {
             "mcpServers": {
                 "oracle": {
-                    "command": wrapper_path,
+                    "command": snippet_command,
                     "args": ["serve", "--profile", profile, "--allow-no-auth"]
                 }
             }
         },
         "codex_config_toml": format!(
-            "[mcp_servers.oracle]\ncommand = \"{wrapper_path}\"\nargs = [\"serve\", \"--profile\", \"{profile}\", \"--allow-no-auth\"]\n"
+            "[mcp_servers.oracle]\ncommand = \"{snippet_command}\"\nargs = [\"serve\", \"--profile\", \"{profile}\", \"--allow-no-auth\"]\n"
         ),
         "secure_stdio": {
             "env": { "ORACLEMCP_STDIO_TOKEN": "<shared-init-token>" },
@@ -3204,7 +3235,10 @@ fn setup_payload(
         "next_actions": [
             format!("write the minimal profiles template to {config_path} after replacing placeholders"),
             "use oraclemcp.example.toml when you need the fully annotated profile reference",
-            format!("write the wrapper template to {wrapper_path} and make it executable if Oracle client environment setup is needed"),
+            match explicit_wrapper {
+                Some(path) => format!("create the wrapper first: write the wrapper_script template to {path} and make it executable — the client snippets point at it and nothing creates it automatically"),
+                None => "optionally re-run setup --wrapper-path <path> after writing the wrapper_script template there, if Oracle Net environment setup (e.g. TNS_ADMIN) is needed".to_owned(),
+            },
             "for HTTP clients, issue one per-client bearer and configure --client-credentials on the service",
             "configure every stdio MCP client to call the same wrapper and args",
             "restart each MCP client after changing the binary, wrapper, or profile",
@@ -3365,7 +3399,7 @@ fn run_setup(
     write: bool,
     profile: &str,
     credential_env: &str,
-    wrapper_path: &str,
+    wrapper_path: Option<&str>,
     config_path: &str,
     tools_dir: &str,
 ) -> ExitCode {
@@ -3375,12 +3409,16 @@ fn run_setup(
     } else {
         setup_display_path(config_path)
     };
-    let setup_wrapper_path = setup_display_path(wrapper_path);
+    let explicit_wrapper = wrapper_path.map(setup_display_path);
+    let snippet_command = explicit_wrapper
+        .clone()
+        .unwrap_or_else(setup_snippet_command);
     let setup_tools_dir = setup_display_path(tools_dir);
     let mut payload = setup_payload(
         profile,
         credential_env,
-        &setup_wrapper_path,
+        &snippet_command,
+        explicit_wrapper.as_deref(),
         &setup_config_path,
         &setup_tools_dir,
     );
@@ -3417,7 +3455,16 @@ fn run_setup(
     } else {
         let mut output = String::new();
         output.push_str("oraclemcp setup\n\n");
-        output.push_str("Install:\n  cargo install oraclemcp\n\n");
+        output.push_str("Install / update:\n");
+        output.push_str(&format!(
+            "  {}\n",
+            payload["install"]["one_line"].as_str().unwrap_or("")
+        ));
+        output.push_str("  oraclemcp self-update        (existing installs)\n");
+        output.push_str("  cargo binstall oraclemcp     (prebuilt via cargo ecosystem)\n");
+        output.push_str(
+            "  cargo +nightly-2026-05-11 install oraclemcp   (source-build escape hatch; plain cargo install fails on stable)\n\n",
+        );
         output.push_str(&format!("Profiles path:\n  {setup_config_path}\n\n"));
         if let Some(result) = write_result.as_ref() {
             output.push_str("profiles.toml written through config-ops:\n");
@@ -3438,7 +3485,13 @@ fn run_setup(
                 payload["profiles_toml"].as_str().unwrap_or("")
             ));
         }
-        output.push_str(&format!("Wrapper path:\n  {setup_wrapper_path}\n\n"));
+        output.push_str(&format!("Snippet command:\n  {snippet_command}\n"));
+        if let Some(wrapper) = explicit_wrapper.as_deref() {
+            output.push_str(&format!(
+                "  (explicit --wrapper-path: create this wrapper first — write the wrapper script template to {wrapper} and make it executable; setup never writes it)\n"
+            ));
+        }
+        output.push('\n');
         output.push_str(&format!(
             "wrapper script template:\n{}\n\n",
             payload["wrapper_script"].as_str().unwrap_or("")

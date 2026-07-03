@@ -373,6 +373,46 @@ fn setup_write_round_trips_profiles_through_config_ops() {
     assert!(PathBuf::from(backup_path).exists());
 }
 
+/// Field-test bead `.5`: on a fresh XDG-native box (XDG_CONFIG_HOME set, no
+/// config anywhere yet, no ORACLEMCP_CONFIG), the default `setup --write`
+/// target must land under `$XDG_CONFIG_HOME/oraclemcp/` — the same place
+/// discovery now reads first.
+#[test]
+fn setup_write_default_target_honors_xdg_config_home() {
+    let dir = temp_dir("setup-write-xdg");
+    let xdg = dir.join("xdg");
+    let state = dir.join("state");
+    let expected = xdg.join("oraclemcp").join("profiles.toml");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args(["--json", "setup", "--write", "--profile", "tenant_ro"])
+        .env_remove(CONFIG_PATH_ENV)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .env("XDG_STATE_HOME", &state)
+        .env("HOME", &dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "setup --write under XDG_CONFIG_HOME failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("setup JSON parses");
+    assert_eq!(
+        value["write"]["target_path"],
+        serde_json::json!(expected.display().to_string()),
+        "default write target must follow XDG_CONFIG_HOME"
+    );
+    assert!(expected.is_file(), "profiles.toml written under XDG dir");
+    assert!(
+        !dir.join(".config").join("oraclemcp").exists(),
+        "nothing must be written to the ~/.config fallback when XDG_CONFIG_HOME is set"
+    );
+}
+
 /// The committed canonical TNS fixture tree (design spec §F), at the workspace
 /// root `tests/fixtures/tns`.
 fn tns_fixture_dir() -> PathBuf {
@@ -1218,6 +1258,111 @@ credential_ref = "env:APP_PASSWORD"
     assert!(
         serve_stderr.contains("stdio transport ready"),
         "serve must boot from generated snippet: {serve_stderr}"
+    );
+}
+
+/// Field-test bead `.3`: the default (no `--wrapper-path`) snippet command must
+/// be the resolved real binary — the same resolution install.sh's
+/// `print_client_snippet` performs — never the historical
+/// `~/.local/bin/oraclemcp-local` wrapper that nothing creates.
+#[test]
+fn setup_default_snippet_command_is_the_resolved_binary() {
+    let dir = temp_dir("setup-default-snippet");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args(["--json", "setup", "--profile", "tenant_ro"])
+        .env("HOME", &dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).expect("setup JSON is utf8");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("setup JSON");
+    let command = value["claude_mcp_json"]["mcpServers"]["oracle"]["command"]
+        .as_str()
+        .expect("snippet command");
+    let resolved = fs::canonicalize(command).expect("snippet command must be an existing binary");
+    let expected = fs::canonicalize(env!("CARGO_BIN_EXE_oraclemcp")).expect("test binary resolves");
+    assert_eq!(
+        resolved, expected,
+        "default snippet command must be the resolved running binary"
+    );
+    assert!(
+        value["codex_config_toml"]
+            .as_str()
+            .expect("codex config")
+            .contains(&format!("command = \"{command}\"")),
+        "Codex TOML must use the same command as the Claude JSON snippet"
+    );
+    assert!(
+        !stdout.contains("oraclemcp-local"),
+        "default setup output must never advertise the uncreated wrapper path: {stdout}"
+    );
+    assert_eq!(value["paths"]["wrapper"], serde_json::Value::Null);
+}
+
+/// Field-test bead `.3`, explicit flow: `--wrapper-path` still produces
+/// wrapper-command snippets, but only with a clear "create this wrapper first"
+/// statement — setup never writes the wrapper itself.
+#[test]
+fn setup_explicit_wrapper_path_snippets_state_wrapper_must_exist() {
+    let dir = temp_dir("setup-wrapper-snippet");
+    let wrapper = dir.join("bin").join("oraclemcp-wrapped");
+    let wrapper_str = wrapper.display().to_string();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args([
+        "--json",
+        "setup",
+        "--profile",
+        "tenant_ro",
+        "--wrapper-path",
+    ])
+    .arg(&wrapper)
+    .env("HOME", &dir)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    assert_eq!(output.status.code(), Some(0));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("setup JSON parses");
+    assert_eq!(
+        value["claude_mcp_json"]["mcpServers"]["oracle"]["command"],
+        serde_json::json!(wrapper_str)
+    );
+    assert!(
+        value["codex_config_toml"]
+            .as_str()
+            .expect("codex config")
+            .contains(&format!("command = \"{wrapper_str}\"")),
+        "Codex TOML must use the explicit wrapper path too"
+    );
+    assert_eq!(value["paths"]["wrapper"], serde_json::json!(wrapper_str));
+    assert!(
+        value["snippet_command"]["source"]
+            .as_str()
+            .expect("snippet command source")
+            .contains("the wrapper must exist"),
+        "explicit wrapper flow must state the wrapper has to exist first"
+    );
+    let next_actions = value["next_actions"].to_string();
+    assert!(
+        next_actions.contains("create the wrapper first"),
+        "next_actions must lead with creating the wrapper: {next_actions}"
+    );
+
+    // Human-readable mode carries the same warning.
+    let mut human = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    human
+        .args(["setup", "--profile", "tenant_ro", "--wrapper-path"])
+        .arg(&wrapper)
+        .env("HOME", &dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let human_output = wait_with_timeout(human, Duration::from_secs(5));
+    assert_eq!(human_output.status.code(), Some(0));
+    let human_stdout = String::from_utf8(human_output.stdout).expect("setup text is utf8");
+    assert!(
+        human_stdout.contains("create this wrapper first"),
+        "human setup output must warn the wrapper is not created automatically: {human_stdout}"
     );
 }
 

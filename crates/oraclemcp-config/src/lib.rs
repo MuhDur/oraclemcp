@@ -476,24 +476,44 @@ fn validate_non_empty_list(field: &'static str, values: &[String]) -> Result<(),
 }
 
 impl OracleMcpConfig {
+    /// Directories searched for a default config file, in precedence order:
+    /// `$XDG_CONFIG_HOME/oraclemcp` (when set to an absolute path, per the XDG
+    /// Base Directory spec) ahead of the `~/.config/oraclemcp` fallback. On
+    /// most machines `XDG_CONFIG_HOME` is unset or already `~/.config`, so the
+    /// two collapse into one entry.
+    #[must_use]
+    pub fn config_search_dirs() -> Vec<PathBuf> {
+        let mut dirs = Vec::with_capacity(2);
+        if let Some(base) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
+            && base.is_absolute()
+        {
+            dirs.push(base.join("oraclemcp"));
+        }
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            let fallback = home.join(".config").join("oraclemcp");
+            if !dirs.contains(&fallback) {
+                dirs.push(fallback);
+            }
+        }
+        dirs
+    }
+
     /// Return the default config file if one is configured or present.
     ///
     /// Precedence:
     /// 1. `$ORACLEMCP_CONFIG`
-    /// 2. `~/.config/oraclemcp/profiles.toml`
-    /// 3. `~/.config/oraclemcp/config.toml`
+    /// 2. `$XDG_CONFIG_HOME/oraclemcp/profiles.toml`, then `config.toml`
+    ///    (only when `XDG_CONFIG_HOME` is set to an absolute path)
+    /// 3. `~/.config/oraclemcp/profiles.toml`, then `config.toml`
     #[must_use]
     pub fn default_config_path() -> Option<PathBuf> {
         if let Some(path) = std::env::var_os(CONFIG_PATH_ENV).map(PathBuf::from) {
             return Some(path);
         }
-        let home = std::env::var_os("HOME").map(PathBuf::from)?;
-        [
-            home.join(".config").join("oraclemcp").join("profiles.toml"),
-            home.join(".config").join("oraclemcp").join("config.toml"),
-        ]
-        .into_iter()
-        .find(|path| path.is_file())
+        Self::config_search_dirs()
+            .into_iter()
+            .flat_map(|dir| [dir.join("profiles.toml"), dir.join("config.toml")])
+            .find(|path| path.is_file())
     }
 
     /// Build the layered [`Figment`] (defaults < `config.toml` < env), without
@@ -1356,10 +1376,113 @@ mod tests {
             )?;
             let home = jail.directory().display().to_string();
             jail.set_env("HOME", home);
+            // Pin the fallback path: an XDG_CONFIG_HOME without oraclemcp
+            // config must not disturb ~/.config discovery.
+            jail.set_env(
+                "XDG_CONFIG_HOME",
+                jail.directory().join("xdg-empty").display().to_string(),
+            );
 
             let cfg = OracleMcpConfig::load(None).expect("loads discovered profile");
 
             assert!(cfg.profile("dev").is_some());
+            Ok(())
+        });
+    }
+
+    /// Field-test regression: config discovery precedence is
+    /// `$ORACLEMCP_CONFIG` > `$XDG_CONFIG_HOME/oraclemcp/...` >
+    /// `~/.config/oraclemcp/...`, and a relative `XDG_CONFIG_HOME` is ignored
+    /// per the XDG Base Directory spec.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn xdg_config_home_precedes_home_config_and_explicit_env_stays_highest() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_dir(".config/oraclemcp")?;
+            jail.create_file(
+                ".config/oraclemcp/profiles.toml",
+                r#"
+                [[profiles]]
+                name = "home_profile"
+                connect_string = "localhost:1521/FREEPDB1"
+                "#,
+            )?;
+            jail.create_dir("xdg/oraclemcp")?;
+            jail.create_file(
+                "xdg/oraclemcp/profiles.toml",
+                r#"
+                [[profiles]]
+                name = "xdg_profile"
+                connect_string = "localhost:1521/FREEPDB1"
+                "#,
+            )?;
+            jail.create_file(
+                "explicit.toml",
+                r#"
+                [[profiles]]
+                name = "explicit_profile"
+                connect_string = "localhost:1521/FREEPDB1"
+                "#,
+            )?;
+            let home = jail.directory().display().to_string();
+            jail.set_env("HOME", &home);
+            jail.set_env(
+                "XDG_CONFIG_HOME",
+                jail.directory().join("xdg").display().to_string(),
+            );
+
+            // XDG_CONFIG_HOME beats the ~/.config fallback.
+            let cfg = OracleMcpConfig::load(None).expect("loads XDG profile");
+            assert!(cfg.profile("xdg_profile").is_some());
+            assert!(cfg.profile("home_profile").is_none());
+            assert_eq!(
+                OracleMcpConfig::default_config_path(),
+                Some(
+                    jail.directory()
+                        .join("xdg")
+                        .join("oraclemcp")
+                        .join("profiles.toml")
+                )
+            );
+
+            // ORACLEMCP_CONFIG stays highest.
+            jail.set_env(
+                CONFIG_PATH_ENV,
+                jail.directory().join("explicit.toml").display().to_string(),
+            );
+            let cfg = OracleMcpConfig::load(None).expect("loads explicit config");
+            assert!(cfg.profile("explicit_profile").is_some());
+            assert!(cfg.profile("xdg_profile").is_none());
+            Ok(())
+        });
+        // A relative XDG_CONFIG_HOME is ignored per the XDG spec: discovery
+        // falls back to ~/.config.
+        figment::Jail::expect_with(|jail| {
+            jail.create_dir(".config/oraclemcp")?;
+            jail.create_file(
+                ".config/oraclemcp/profiles.toml",
+                r#"
+                [[profiles]]
+                name = "home_profile"
+                connect_string = "localhost:1521/FREEPDB1"
+                "#,
+            )?;
+            jail.create_dir("xdg-rel/oraclemcp")?;
+            jail.create_file(
+                "xdg-rel/oraclemcp/profiles.toml",
+                r#"
+                [[profiles]]
+                name = "relative_xdg_profile"
+                connect_string = "localhost:1521/FREEPDB1"
+                "#,
+            )?;
+            let home = jail.directory().display().to_string();
+            jail.set_env("HOME", &home);
+            jail.set_env("XDG_CONFIG_HOME", "xdg-rel");
+
+            let cfg = OracleMcpConfig::load(None).expect("falls back to ~/.config");
+            assert!(cfg.profile("home_profile").is_some());
+            assert!(cfg.profile("relative_xdg_profile").is_none());
             Ok(())
         });
     }

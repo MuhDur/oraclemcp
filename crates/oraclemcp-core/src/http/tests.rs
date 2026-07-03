@@ -696,7 +696,26 @@ fn mcp_protocol_version_header_is_enforced_before_dispatch() {
         body["error"],
         serde_json::json!("unsupported_protocol_version")
     );
-    assert_eq!(body["supported"], serde_json::json!(["2025-11-25"]));
+    assert_eq!(
+        body["supported"],
+        serde_json::json!(["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"])
+    );
+
+    // Field-test regression: every negotiable protocol revision is accepted in
+    // the header, so a client that negotiated an older version during
+    // initialize is not rejected on subsequent requests.
+    for supported in crate::capabilities::SUPPORTED_PROTOCOL_VERSIONS {
+        let mut ok_request = post(&init_body());
+        ok_request
+            .headers
+            .push(("mcp-protocol-version".to_owned(), (*supported).to_owned()));
+        let ok_response =
+            handle_http_request(&test_server(), &HttpTransportConfig::default(), ok_request);
+        assert_ne!(
+            ok_response.status, 400,
+            "supported protocol version {supported} must not be rejected"
+        );
+    }
 }
 
 struct StaticReadinessProbe(bool);

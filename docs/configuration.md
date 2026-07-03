@@ -26,8 +26,16 @@ order and uses the first that exists:
 
 1. `$ORACLEMCP_CONFIG` — an explicit path (launcher/control variable, not part
    of the schema).
-2. `~/.config/oraclemcp/profiles.toml`
-3. `~/.config/oraclemcp/config.toml`
+2. `$XDG_CONFIG_HOME/oraclemcp/profiles.toml`, then
+   `$XDG_CONFIG_HOME/oraclemcp/config.toml` — honored only when
+   `XDG_CONFIG_HOME` is set to an absolute path (per the XDG Base Directory
+   spec); a relative value is ignored. On most machines `XDG_CONFIG_HOME` is
+   unset or already `~/.config`, so this collapses into the next entry.
+3. `~/.config/oraclemcp/profiles.toml`, then `~/.config/oraclemcp/config.toml`
+
+State (write-intents, audit, service files) separately follows
+`XDG_STATE_HOME`; setting `XDG_CONFIG_HOME` relocates config discovery and the
+default `setup --write` target on a fresh machine.
 
 ### Layer precedence
 

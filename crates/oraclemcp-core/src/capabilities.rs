@@ -11,8 +11,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::tools::ToolDescriptor;
 
-/// The MCP spec baseline this server implements (§2.5).
+/// The MCP spec baseline this server implements (§2.5); the latest revision
+/// it will offer during `initialize` version negotiation.
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// Every published MCP protocol revision this server accepts during
+/// `initialize` version negotiation. Per the MCP lifecycle spec, when the
+/// client requests one of these the server MUST respond with the same
+/// version; anything else negotiates up to [`PROTOCOL_VERSION`].
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
+    &["2024-11-05", "2025-03-26", "2025-06-18", PROTOCOL_VERSION];
 
 /// The operating-level view in the capability report (§6.6).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

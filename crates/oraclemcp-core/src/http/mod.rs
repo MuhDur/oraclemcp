@@ -2049,7 +2049,7 @@ fn operator_audit_failed_response() -> HttpResponse {
 
 fn enforce_mcp_protocol_version(request: &HttpRequest) -> Option<HttpResponse> {
     let presented = request.header("mcp-protocol-version")?;
-    if presented.trim() == PROTOCOL_VERSION {
+    if crate::capabilities::SUPPORTED_PROTOCOL_VERSIONS.contains(&presented.trim()) {
         return None;
     }
     Some(
@@ -2059,7 +2059,7 @@ fn enforce_mcp_protocol_version(request: &HttpRequest) -> Option<HttpResponse> {
                 "error": "unsupported_protocol_version",
                 "message": "unsupported MCP-Protocol-Version header",
                 "presented": presented,
-                "supported": [PROTOCOL_VERSION],
+                "supported": crate::capabilities::SUPPORTED_PROTOCOL_VERSIONS,
             }),
         )
         .with_header("mcp-protocol-version", PROTOCOL_VERSION),
