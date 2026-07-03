@@ -1777,6 +1777,7 @@ dependencies = [
  "oraclemcp-guard",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 

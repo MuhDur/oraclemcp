@@ -11,10 +11,13 @@
 //!   only when known, comments it, points at `oraclemcp.example.toml`, or
 //!   handles it structurally. Downstream synthesis (`.5`) and the writer (`.8`)
 //!   build on this, and a schema-drift test keeps it honest against the structs.
+//! - [`search`] — the pure-`std` **search-path resolver**: enumerates the
+//!   candidate directories that may hold a `tnsnames.ora`, in precedence order,
+//!   de-duplicated by canonical path, with permission-denied = skip-with-note.
 //!
 //! The Oracle-Net *parse adapter* (reusing the upstream `TnsnamesReader`) lives
-//! in `oraclemcp-db` near the driver seam, not here — this module is pure config
-//! mapping and has no Oracle dependency.
+//! in `oraclemcp-db` near the driver seam, not here — this module has no Oracle
+//! dependency; it is pure config mapping and pure-`std` filesystem discovery.
 //!
 //! # Design summary (authoritative detail in the doc)
 //!
@@ -37,8 +40,13 @@
 //! Nothing here weakens the `AGENTS.md` safety invariant.
 
 pub mod contract;
+pub mod search;
 
 pub use contract::{
     CONNECTION_PROFILE_FIELD_DISPOSITIONS, Disposition, FieldDisposition,
     TOP_LEVEL_FIELD_DISPOSITIONS, connection_profile_field_names, top_level_field_names,
+};
+pub use search::{
+    CandidateSource, CandidateStatus, DiscoveryEnv, TnsCandidateDir, resolve_candidate_dirs,
+    resolve_candidate_dirs_with,
 };

@@ -19,6 +19,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 figment = { version = "0.10", features = ["toml", "env", "test"] }
+tempfile = "3"
 
 [lints]
 workspace = true
