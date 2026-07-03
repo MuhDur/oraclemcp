@@ -9,6 +9,7 @@
 //! (`deny_unknown_fields`), validation runs at load (fail fast), and `base`
 //! inheritance across connection profiles is resolved with cycle detection.
 
+pub mod discovery;
 mod profile;
 
 use std::collections::{BTreeMap, BTreeSet};
