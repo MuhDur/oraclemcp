@@ -3258,6 +3258,30 @@ fn setup_apply_config_with_backend(
     })
 }
 
+/// Apply a discovered/merged config through config-ops, guarding against a
+/// concurrent external edit since the bytes the merge was computed from
+/// (`expected_current_sha256`). Used by `setup --discover` (TNS-onboarding beads
+/// `.10`–`.12`): the merge in `discover` reads the current target, so the apply
+/// must reject a racing write (`ConfigOpsError::CurrentChanged`) rather than
+/// clobber it — verify-before-mutate on top of the same backup + atomic-rename +
+/// strict-revalidate path `setup --write` uses.
+fn setup_apply_discovery_config(
+    target_path: PathBuf,
+    draft_toml: &str,
+    expected_current_sha256: &str,
+) -> Result<SetupWriteResult, ConfigOpsError> {
+    let backend = ConfigOpsBackend::open_default()?;
+    let service = ConfigOpsService::new(backend, target_path, None);
+    let preview = service.stage(draft_toml)?;
+    let outcome = service.apply(draft_toml, Some(expected_current_sha256))?;
+    let status = service.status()?;
+    Ok(SetupWriteResult {
+        preview,
+        outcome,
+        status,
+    })
+}
+
 fn setup_write_payload(
     mut payload: serde_json::Value,
     target_path: &Path,

@@ -461,21 +461,28 @@ fn setup_discover_non_tty_without_consent_refuses_human() {
 }
 
 #[test]
-fn setup_discover_with_consent_reports_net_services() {
+fn setup_discover_dry_run_reports_net_services_and_writes_nothing() {
     let dir = temp_dir("discover-report");
     let config = dir.join("profiles.toml");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
-    // Explicit non-interactive scan consent + a fixture TNS_ADMIN. The report
-    // must enumerate the discovered net-services and the env vars to export.
-    cmd.args(["--json", "setup", "--discover", "--discover-tns"])
-        .env(CONFIG_PATH_ENV, &config)
-        .env("XDG_STATE_HOME", dir.join("state"))
-        .env("HOME", &dir)
-        .env("TNS_ADMIN", tns_fixture_dir())
-        .env_remove("ORACLE_HOME")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    // Explicit non-interactive scan consent + a fixture TNS_ADMIN + --dry-run.
+    // The report enumerates the discovered net-services and the env vars to
+    // export, and writes nothing.
+    cmd.args([
+        "--json",
+        "setup",
+        "--discover",
+        "--discover-tns",
+        "--dry-run",
+    ])
+    .env(CONFIG_PATH_ENV, &config)
+    .env("XDG_STATE_HOME", dir.join("state"))
+    .env("HOME", &dir)
+    .env("TNS_ADMIN", tns_fixture_dir())
+    .env_remove("ORACLE_HOME")
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
     let output = wait_with_timeout(cmd, Duration::from_secs(5));
 
     assert_eq!(output.status.code(), Some(0), "consented scan proceeds");
@@ -483,16 +490,21 @@ fn setup_discover_with_consent_reports_net_services() {
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("discovery JSON");
     assert_eq!(value["ok"], serde_json::json!(true));
     assert_eq!(value["kind"], serde_json::json!("oraclemcp_discover"));
+    assert_eq!(value["dry_run"], serde_json::json!(true));
+    assert_eq!(value["written"], serde_json::json!(false));
     assert_eq!(
-        value["net_services_found"],
-        serde_json::json!(4),
+        value["net_services"]
+            .as_array()
+            .expect("net services")
+            .len(),
+        4,
         "the primary fixture defines four effective aliases"
     );
     let profiles: Vec<&str> = value["profiles"]
         .as_array()
         .expect("profiles array")
         .iter()
-        .map(|p| p.as_str().expect("profile name"))
+        .map(|p| p["name"].as_str().expect("profile name"))
         .collect();
     assert!(profiles.contains(&"primary_tcps"));
     assert!(profiles.contains(&"ez_plain"));
@@ -505,6 +517,109 @@ fn setup_discover_with_consent_reports_net_services() {
         .collect();
     assert!(names.contains(&"ORACLE_PRIMARY_TCPS_PASSWORD"));
     assert!(names.contains(&"ORACLE_PRIMARY_TCPS_WALLET_PASSWORD"));
+    assert!(!config.exists(), "--dry-run writes nothing");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---- bead .10: setup --discover orchestration (write through config-ops) ----
+
+#[test]
+fn setup_discover_writes_discovered_profiles_through_config_ops() {
+    let dir = temp_dir("discover-write");
+    let config = dir.join("profiles.toml");
+    let state = dir.join("state");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args(["--json", "setup", "--discover", "--discover-tns"])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", &state)
+        .env("HOME", &dir)
+        .env("TNS_ADMIN", tns_fixture_dir())
+        .env_remove("ORACLE_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("discovery JSON");
+    assert_eq!(value["written"], serde_json::json!(true));
+    assert_eq!(value["dry_run"], serde_json::json!(false));
+    assert_eq!(value["write_mode"], serde_json::json!("fresh"));
+    assert_eq!(
+        value["target_path"],
+        serde_json::json!(config.display().to_string())
+    );
+    assert!(
+        value["backup_path"].as_str().is_some(),
+        "config-ops wrote a timestamped backup"
+    );
+    let created: Vec<&str> = value["profiles_created"]
+        .as_array()
+        .expect("profiles_created")
+        .iter()
+        .map(|p| p.as_str().expect("name"))
+        .collect();
+    assert!(created.contains(&"primary_tcps"));
+    assert!(created.contains(&"included_one"));
+
+    // The spec §D success line is on stderr.
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+    assert!(
+        stderr.contains("wrote 4 read-only profiles to")
+            && stderr.contains("discovered 4 net-services"),
+        "spec §D success line on stderr: {stderr}"
+    );
+
+    // The written config loads, parses, and every profile is READ_ONLY.
+    let written = fs::read_to_string(&config).expect("config written");
+    let cfg = OracleMcpConfig::from_toml_str(&written).expect("written config parses");
+    assert_eq!(cfg.profiles.len(), 4);
+    let profile = cfg.profile("primary_tcps").expect("primary_tcps profile");
+    assert_eq!(profile.max_level(), OperatingLevel::ReadOnly);
+    assert_eq!(profile.default_level(), OperatingLevel::ReadOnly);
+    // No secret value is echoed in the JSON — only env-var names.
+    assert!(!stdout.contains("credential_ref = "));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn setup_discover_zero_found_falls_back_to_minimal_starter() {
+    let dir = temp_dir("discover-fallback");
+    let config = dir.join("profiles.toml");
+    let state = dir.join("state");
+    // An empty TNS_ADMIN directory: no tnsnames.ora anywhere reachable.
+    let empty_tns = dir.join("empty-tns");
+    fs::create_dir_all(&empty_tns).expect("create empty tns dir");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args(["--json", "setup", "--discover", "--yes"])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", &state)
+        .env("HOME", &empty_tns)
+        .env("TNS_ADMIN", &empty_tns)
+        .env_remove("ORACLE_HOME")
+        .current_dir(&empty_tns)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("discovery JSON");
+    assert_eq!(
+        value["net_services"]
+            .as_array()
+            .expect("net services")
+            .len(),
+        0
+    );
+    assert_eq!(value["fallback_minimal_starter"], serde_json::json!(true));
+    assert_eq!(value["written"], serde_json::json!(true));
+
+    let written = fs::read_to_string(&config).expect("starter written");
+    let cfg = OracleMcpConfig::from_toml_str(&written).expect("starter parses");
+    assert_eq!(cfg.default_profile.as_deref(), Some("db_ro"));
     let _ = fs::remove_dir_all(&dir);
 }
 
