@@ -623,6 +623,189 @@ fn setup_discover_zero_found_falls_back_to_minimal_starter() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+// ---- bead .11: idempotent, non-destructive merge and backup ----
+
+/// Run `setup --discover --discover-tns` (non-interactive consent) against the
+/// canonical fixture, returning the parsed JSON report.
+fn run_discover_write(dir: &std::path::Path, config: &std::path::Path) -> serde_json::Value {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args(["--json", "setup", "--discover", "--discover-tns"])
+        .env(CONFIG_PATH_ENV, config)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("HOME", dir)
+        .env("TNS_ADMIN", tns_fixture_dir())
+        .env_remove("ORACLE_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "discover write stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("discovery JSON")
+}
+
+#[test]
+fn setup_discover_second_run_is_a_noop() {
+    let dir = temp_dir("discover-idempotent");
+    let config = dir.join("profiles.toml");
+
+    let first = run_discover_write(&dir, &config);
+    assert_eq!(first["written"], serde_json::json!(true));
+    let after_first = fs::read(&config).expect("config after first run");
+
+    let second = run_discover_write(&dir, &config);
+    assert_eq!(
+        second["written"],
+        serde_json::json!(false),
+        "a second identical run writes nothing"
+    );
+    assert!(
+        second["profiles_created"]
+            .as_array()
+            .expect("profiles_created")
+            .is_empty(),
+        "nothing new on the second run"
+    );
+    let after_second = fs::read(&config).expect("config after second run");
+    assert_eq!(
+        after_first, after_second,
+        "the config is byte-identical after an idempotent re-run"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn setup_discover_merge_adds_only_new_and_preserves_existing() {
+    let dir = temp_dir("discover-merge");
+    let config = dir.join("profiles.toml");
+    // Pre-seed a config with a hand-edited profile plus one profile whose name
+    // collides with a discovered net-service (primary_tcps) — both must be left
+    // byte-untouched.
+    let seed = r#"schema_version = 2
+default_profile = "hand_edited"
+
+# operator-authored note that must survive the merge verbatim
+[[profiles]]
+name = "hand_edited"
+description = "my own profile"
+connect_string = "myhost:1521/MY"
+credential_ref = "env:MY_PW"
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
+
+[[profiles]]
+name = "primary_tcps"
+description = "pre-existing, must not be overwritten"
+connect_string = "custom-do-not-touch"
+credential_ref = "env:CUSTOM_PW"
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
+"#;
+    fs::write(&config, seed).expect("seed config");
+
+    let value = run_discover_write(&dir, &config);
+    assert_eq!(value["written"], serde_json::json!(true));
+    assert_eq!(value["write_mode"], serde_json::json!("add_only_merge"));
+
+    let skipped: Vec<&str> = value["profiles_skipped_already_configured"]
+        .as_array()
+        .expect("skipped array")
+        .iter()
+        .map(|p| p.as_str().expect("name"))
+        .collect();
+    assert!(
+        skipped.contains(&"primary_tcps"),
+        "the colliding name is reported skipped: {skipped:?}"
+    );
+    let created: Vec<&str> = value["profiles_created"]
+        .as_array()
+        .expect("created array")
+        .iter()
+        .map(|p| p.as_str().expect("name"))
+        .collect();
+    assert!(created.contains(&"ez_plain"));
+    assert!(created.contains(&"included_one"));
+    assert!(
+        !created.contains(&"primary_tcps"),
+        "the pre-existing profile is never re-created"
+    );
+
+    let written = fs::read_to_string(&config).expect("config re-read");
+    assert!(
+        written.contains("# operator-authored note that must survive the merge verbatim"),
+        "the operator comment is preserved"
+    );
+    assert!(
+        written.contains("connect_string = \"custom-do-not-touch\""),
+        "the pre-existing primary_tcps is not overwritten"
+    );
+
+    let cfg = OracleMcpConfig::from_toml_str(&written).expect("merged config parses");
+    assert_eq!(cfg.default_profile.as_deref(), Some("hand_edited"));
+    // hand_edited + primary_tcps + ez_plain + dup_alias + included_one.
+    assert_eq!(cfg.profiles.len(), 5);
+    assert_eq!(
+        cfg.profile("primary_tcps")
+            .expect("primary_tcps")
+            .connect_string
+            .as_deref(),
+        Some("custom-do-not-touch")
+    );
+
+    // A backup of the pre-existing bytes was captured on the mutating write.
+    let backup_path = value["backup_path"].as_str().expect("backup path");
+    assert!(PathBuf::from(backup_path).exists());
+    let backup = fs::read_to_string(backup_path).expect("backup readable");
+    assert!(
+        backup.contains("custom-do-not-touch"),
+        "the backup holds the pre-existing bytes verbatim"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn setup_discover_refuses_over_an_invalid_existing_config() {
+    let dir = temp_dir("discover-invalid-existing");
+    let config = dir.join("profiles.toml");
+    let invalid = "this is = = not valid toml [[[\n";
+    fs::write(&config, invalid).expect("seed invalid config");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args(["--json", "setup", "--discover", "--discover-tns"])
+        .env(CONFIG_PATH_ENV, &config)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("HOME", &dir)
+        .env("TNS_ADMIN", tns_fixture_dir())
+        .env_remove("ORACLE_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(5));
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "an invalid target is rejected"
+    );
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+    assert!(
+        stderr.contains("not valid"),
+        "the error names the cause: {stderr}"
+    );
+    // Nothing was written: the invalid file is unchanged.
+    assert_eq!(
+        fs::read_to_string(&config).expect("config still present"),
+        invalid,
+        "a rejected run never mutates the target"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn setup_generated_client_snippet_launches_serve_as_written() {
     let dir = temp_dir("setup-snippet-launch");
