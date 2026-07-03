@@ -41,6 +41,7 @@
 
 pub mod contract;
 pub mod search;
+pub mod synth;
 
 pub use contract::{
     CONNECTION_PROFILE_FIELD_DISPOSITIONS, Disposition, FieldDisposition,
@@ -49,4 +50,8 @@ pub use contract::{
 pub use search::{
     CandidateSource, CandidateStatus, DiscoveryEnv, TnsCandidateDir, resolve_candidate_dirs,
     resolve_candidate_dirs_with,
+};
+pub use synth::{
+    ConnectStringKind, DiscoveredNetService, DiscoveredProfilePlan, DiscoverySynthesis,
+    SynthOptions, SynthesizedProfile, synthesize_profiles,
 };
