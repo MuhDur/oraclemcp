@@ -596,6 +596,7 @@ print_next_steps() {
   local cmd
   cmd="$(installed_command)"
   printf 'oraclemcp installer: next steps\n' >&2
+  printf '  * Fastest path: discover databases from tnsnames.ora: %s setup --discover\n' "$cmd" >&2
   printf '  1. Run diagnostics: %s --json doctor\n' "$cmd" >&2
   printf '  2. Write a starter profile: %s --json setup --write --profile db_ro\n' "$cmd" >&2
   printf '  3. Generate MCP client snippets: %s --json setup --profile db_ro\n' "$cmd" >&2
@@ -611,6 +612,24 @@ maybe_run_doctor() {
   fi
   if ! "$BIN_DIR/oraclemcp" --json doctor >&2; then
     printf 'oraclemcp installer: doctor reported issues; continue with the next-step commands above\n' >&2
+  fi
+}
+
+# Offer zero-config TNS discovery, INTERACTIVE ONLY and defaulting to No. The
+# installer never scans or parses tnsnames.ora itself: it delegates to
+# `oraclemcp setup --discover`, which carries the fail-closed consent gate and
+# writes READ_ONLY profiles through config-ops. A non-interactive install never
+# scans; print_next_steps advertises the command so it can be run deliberately.
+maybe_offer_discovery() {
+  if ! interactive_install; then
+    return 0
+  fi
+  if ! prompt_yes_no "Discover databases from tnsnames.ora now?" false; then
+    printf 'oraclemcp installer: discovery skipped; run %s setup --discover anytime\n' "$(installed_command)" >&2
+    return 0
+  fi
+  if ! "$BIN_DIR/oraclemcp" setup --discover >&2; then
+    printf 'oraclemcp installer: discovery reported issues; re-run %s setup --discover\n' "$(installed_command)" >&2
   fi
 }
 
@@ -1320,6 +1339,7 @@ main() {
 
   print_path_guidance
   maybe_run_doctor
+  maybe_offer_discovery
   maybe_print_client_snippet
 
   if [ "$SERVICE_REQUESTED" -eq 1 ] || maybe_prompt_for_service; then

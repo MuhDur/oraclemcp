@@ -847,3 +847,43 @@ fn expand_binstall_template(
         .replace("{ bin }", "oraclemcp")
         .replace("{ binary-ext }", binary_ext)
 }
+
+// bead .15: an interactive install OFFERS zero-config TNS discovery (default
+// No) and every install advertises the next-step command — but the shells never
+// scan or parse tnsnames.ora themselves. Discovery lives in ONE place, the
+// binary (`setup --discover`), which carries the consent gate and the config-ops
+// write; the installers only invoke it, in Unix/PowerShell parity.
+#[test]
+fn installers_offer_consent_gated_tns_discovery_via_the_binary() {
+    let root = repo_root();
+    let sh = fs::read_to_string(root.join("install.sh")).expect("read install.sh");
+    for needle in [
+        "maybe_offer_discovery()",
+        "Discover databases from tnsnames.ora now?",
+        "\"$BIN_DIR/oraclemcp\" setup --discover",
+        "discover databases from tnsnames.ora: %s setup --discover",
+        "  maybe_offer_discovery\n",
+    ] {
+        assert!(
+            sh.contains(needle),
+            "install.sh must integrate binary-delegated discovery: {needle}"
+        );
+    }
+    assert!(
+        sh.contains("maybe_offer_discovery() {\n  if ! interactive_install; then"),
+        "discovery is offered only in an interactive install (never scans non-interactively)"
+    );
+
+    let ps = fs::read_to_string(root.join("install.ps1")).expect("read install.ps1");
+    for needle in [
+        "function Invoke-OptionalDiscovery",
+        "Discover databases from tnsnames.ora now?",
+        "& $oraclemcp setup --discover",
+        "    Invoke-OptionalDiscovery\n",
+    ] {
+        assert!(
+            ps.contains(needle),
+            "install.ps1 must reach discovery parity: {needle}"
+        );
+    }
+}

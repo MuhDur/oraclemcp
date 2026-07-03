@@ -720,6 +720,22 @@ function Invoke-OptionalDoctor {
     }
 }
 
+# Offer zero-config TNS discovery, defaulting to No. The installer never scans
+# or parses tnsnames.ora itself: it delegates to `oraclemcp setup --discover`,
+# which carries the fail-closed consent gate and writes READ_ONLY profiles
+# through config-ops. Parity with the Unix installer's maybe_offer_discovery.
+function Invoke-OptionalDiscovery {
+    if (-not (Read-InstallerConsent -Prompt "Discover databases from tnsnames.ora now?" -DefaultYes $false)) {
+        Write-Output "oraclemcp installer: discovery skipped (run 'oraclemcp setup --discover' anytime)"
+        return
+    }
+    $oraclemcp = Join-Path -Path $BinDir -ChildPath "oraclemcp.exe"
+    & $oraclemcp setup --discover
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output "oraclemcp installer: discovery reported issues; re-run 'oraclemcp setup --discover'"
+    }
+}
+
 function Write-ClientSnippet {
     $oraclemcp = Join-Path -Path $BinDir -ChildPath "oraclemcp.exe"
     Write-Output "oraclemcp installer: MCP client snippet (stdio)"
@@ -744,6 +760,7 @@ function Invoke-OptionalClientSnippet {
 function Write-NextStep {
     $oraclemcp = Join-Path -Path $BinDir -ChildPath "oraclemcp.exe"
     Write-Output "oraclemcp installer: next steps"
+    Write-Output "  * Fastest path: discover databases from tnsnames.ora: $oraclemcp setup --discover"
     Write-Output "  1. Run doctor: $oraclemcp --json doctor"
     Write-Output "  2. Write a starter profile: $oraclemcp --json setup --write --profile db_ro"
     Write-Output "  3. Generate MCP client snippets: $oraclemcp --json setup --profile db_ro"
@@ -784,6 +801,7 @@ function Invoke-Main {
     Invoke-InstallCompletionSet
     Write-PathGuidance
     Invoke-OptionalDoctor
+    Invoke-OptionalDiscovery
     Invoke-OptionalClientSnippet
     Invoke-ServiceInstall
     Write-NextStep
