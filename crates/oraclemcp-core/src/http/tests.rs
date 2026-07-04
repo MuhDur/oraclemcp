@@ -718,6 +718,123 @@ fn mcp_protocol_version_header_is_enforced_before_dispatch() {
     }
 }
 
+/// Bead oraclemcp-s693 — per-session protocol-revision hygiene over HTTP:
+/// the negotiated version is stored per session; sessions that negotiated
+/// 2025-06-18 or later must send MCP-Protocol-Version on every post-init
+/// POST; older-negotiated sessions keep the historical leniency; and a
+/// second initialize on a live session is rejected with a structured error.
+#[test]
+fn post_init_requests_require_the_protocol_version_header_per_negotiated_revision() {
+    let cfg = HttpTransportConfig {
+        json_response: true,
+        stateful: true,
+        session_store: Some(Arc::new(HttpSessionStore::default())),
+        ..Default::default()
+    };
+
+    let session_for = |requested: &str| -> String {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": requested,
+                "capabilities": {},
+                "clientInfo": { "name": "t", "version": "1.0" }
+            }
+        });
+        handle_http_request(&test_server(), &cfg, post(&body))
+            .header("mcp-session-id")
+            .expect("initialize returns a session id")
+            .to_owned()
+    };
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": { "name": "oracle_preview_sql", "arguments": { "sql": "SELECT 1 FROM dual" } }
+    });
+    let call_request = |session_id: &str, header: Option<&str>| {
+        let mut headers = vec![
+            ("host".to_owned(), "127.0.0.1".to_owned()),
+            ("content-type".to_owned(), "application/json".to_owned()),
+            (
+                "accept".to_owned(),
+                "application/json, text/event-stream".to_owned(),
+            ),
+            ("mcp-session-id".to_owned(), session_id.to_owned()),
+        ];
+        if let Some(header) = header {
+            headers.push(("mcp-protocol-version".to_owned(), header.to_owned()));
+        }
+        HttpRequest::new("POST", MCP_PATH, headers, call.to_string().into_bytes())
+    };
+
+    // A 2025-11-25 session: the header is REQUIRED after initialize.
+    let modern = session_for("2025-11-25");
+    let missing = handle_http_request(&scope_echo_server(), &cfg, call_request(&modern, None));
+    assert_eq!(missing.status, 400);
+    let body = response_json(&missing);
+    assert_eq!(
+        body["error"],
+        serde_json::json!("missing_protocol_version_header")
+    );
+    assert_eq!(body["negotiated"], serde_json::json!("2025-11-25"));
+    let with_header = handle_http_request(
+        &scope_echo_server(),
+        &cfg,
+        call_request(&modern, Some("2025-11-25")),
+    );
+    assert_eq!(with_header.status, 200, "header satisfies the requirement");
+
+    // A 2025-03-26 session keeps the pre-2025-06-18 leniency.
+    let legacy = session_for("2025-03-26");
+    let lenient = handle_http_request(&scope_echo_server(), &cfg, call_request(&legacy, None));
+    assert_eq!(
+        lenient.status, 200,
+        "older-negotiated sessions are not retroactively held to the header requirement"
+    );
+
+    // Re-initialize on a live session is a lifecycle violation.
+    let reinit = HttpRequest::new(
+        "POST",
+        MCP_PATH,
+        [
+            ("host", "127.0.0.1"),
+            ("content-type", "application/json"),
+            ("accept", "application/json, text/event-stream"),
+            ("mcp-session-id", modern.as_str()),
+        ],
+        init_body().to_string().into_bytes(),
+    );
+    let rejected = handle_http_request(&test_server(), &cfg, reinit);
+    assert_eq!(rejected.status, 400);
+    assert_eq!(
+        response_json(&rejected)["error"],
+        serde_json::json!("session_already_initialized")
+    );
+
+    // An initialize with a STALE/unknown session id still starts fresh.
+    let fresh = HttpRequest::new(
+        "POST",
+        MCP_PATH,
+        [
+            ("host", "127.0.0.1"),
+            ("content-type", "application/json"),
+            ("accept", "application/json, text/event-stream"),
+            ("mcp-session-id", "00000000-0000-4000-8000-deadbeefdead"),
+        ],
+        init_body().to_string().into_bytes(),
+    );
+    let fresh = handle_http_request(&test_server(), &cfg, fresh);
+    assert_eq!(
+        fresh.status, 200,
+        "stale session id does not block a new initialize"
+    );
+    assert!(fresh.header("mcp-session-id").is_some());
+}
+
 struct StaticReadinessProbe(bool);
 
 impl ReadinessProbe for StaticReadinessProbe {
@@ -2801,6 +2918,8 @@ fn stateful_get_replays_buffered_lane_results_by_cursor() {
             ("content-type", "application/json"),
             ("accept", "application/json, text/event-stream"),
             ("mcp-session-id", session_id),
+            // Session negotiated 2025-11-25 → post-init POSTs carry the header.
+            ("mcp-protocol-version", "2025-11-25"),
         ],
         call.to_string().into_bytes(),
     );
@@ -2854,7 +2973,14 @@ fn stateful_get_reports_typed_expiry_when_cursor_falls_out_of_ring() {
     let session_store = Arc::new(HttpSessionStore::default());
     let result_store = Arc::new(HttpResultStore::new());
     let session_id = "expired-cursor-session";
-    session_store.insert(session_id.to_owned(), "anonymous-http".to_owned());
+    // Seeded session pins the pre-2025-06-18 revision: these tests exercise
+    // session/cursor semantics, not the post-init protocol-version header
+    // requirement (covered by its own tests).
+    session_store.insert(
+        session_id.to_owned(),
+        "anonymous-http".to_owned(),
+        "2025-03-26".to_owned(),
+    );
     for i in 0..=MAX_BUFFERED_MCP_EVENTS_PER_SESSION {
         result_store.append_response(session_id, serde_json::json!({ "seq": i }));
     }
@@ -2896,7 +3022,14 @@ fn stateful_get_last_event_id_reports_gap_marker_for_slow_consumer() {
     let session_store = Arc::new(HttpSessionStore::default());
     let result_store = Arc::new(HttpResultStore::new());
     let session_id = "slow-consumer-session";
-    session_store.insert(session_id.to_owned(), "anonymous-http".to_owned());
+    // Seeded session pins the pre-2025-06-18 revision: these tests exercise
+    // session/cursor semantics, not the post-init protocol-version header
+    // requirement (covered by its own tests).
+    session_store.insert(
+        session_id.to_owned(),
+        "anonymous-http".to_owned(),
+        "2025-03-26".to_owned(),
+    );
     for i in 0..=MAX_BUFFERED_MCP_EVENTS_PER_SESSION {
         result_store.append_response(session_id, serde_json::json!({ "seq": i }));
     }
@@ -2949,7 +3082,14 @@ fn served_stateful_get_streams_chunked_sse_until_session_closes() {
     let session_store = Arc::new(HttpSessionStore::default());
     let result_store = Arc::new(HttpResultStore::new());
     let session_id = "served-stream-session";
-    session_store.insert(session_id.to_owned(), "anonymous-http".to_owned());
+    // Seeded session pins the pre-2025-06-18 revision: these tests exercise
+    // session/cursor semantics, not the post-init protocol-version header
+    // requirement (covered by its own tests).
+    session_store.insert(
+        session_id.to_owned(),
+        "anonymous-http".to_owned(),
+        "2025-03-26".to_owned(),
+    );
     result_store.ensure_session(session_id);
     let config = HttpTransportConfig {
         stateful: true,
@@ -3034,7 +3174,11 @@ fn stateful_idle_reaper_closes_by_timeout_and_clears_buffers() {
     let result_store = Arc::new(HttpResultStore::new());
     let lifecycle = Arc::new(RecordingLifecycle::default());
     let session_id = "idle-session";
-    session_store.insert(session_id.to_owned(), "principal-a".to_owned());
+    session_store.insert(
+        session_id.to_owned(),
+        "principal-a".to_owned(),
+        "2025-03-26".to_owned(),
+    );
     result_store.append_response(session_id, serde_json::json!({ "stale": true }));
     session_store.force_idle_for_test(session_id, Duration::from_secs(901));
     let cfg = HttpTransportConfig {
@@ -3101,9 +3245,21 @@ fn principal_session_close_clears_sessions_buffers_and_lanes() {
     let session_store = Arc::new(HttpSessionStore::default());
     let result_store = Arc::new(HttpResultStore::new());
     let lifecycle = Arc::new(RecordingLifecycle::default());
-    session_store.insert("sess-a".to_owned(), "client:sha256:aaa".to_owned());
-    session_store.insert("sess-b".to_owned(), "client:sha256:aaa".to_owned());
-    session_store.insert("sess-c".to_owned(), "client:sha256:bbb".to_owned());
+    session_store.insert(
+        "sess-a".to_owned(),
+        "client:sha256:aaa".to_owned(),
+        "2025-03-26".to_owned(),
+    );
+    session_store.insert(
+        "sess-b".to_owned(),
+        "client:sha256:aaa".to_owned(),
+        "2025-03-26".to_owned(),
+    );
+    session_store.insert(
+        "sess-c".to_owned(),
+        "client:sha256:bbb".to_owned(),
+        "2025-03-26".to_owned(),
+    );
     result_store.append_response("sess-a", serde_json::json!({ "a": true }));
     result_store.append_response("sess-b", serde_json::json!({ "b": true }));
     result_store.append_response("sess-c", serde_json::json!({ "c": true }));
@@ -3947,6 +4103,9 @@ fn stateful_requests_require_a_known_session_id_after_initialize() {
             ("content-type", "application/json"),
             ("accept", "application/json, text/event-stream"),
             ("mcp-session-id", session_id.as_str()),
+            // The session negotiated 2025-11-25, so post-init POSTs must carry
+            // the MCP-Protocol-Version header (2025-06-18 requirement).
+            ("mcp-protocol-version", "2025-11-25"),
         ],
         call.to_string().into_bytes(),
     );
@@ -4307,7 +4466,14 @@ fn served_stateful_get_sse_subscribers_are_capped() {
     let session_store = Arc::new(HttpSessionStore::default());
     let result_store = Arc::new(HttpResultStore::new());
     let session_id = "subscriber-cap-session";
-    session_store.insert(session_id.to_owned(), "anonymous-http".to_owned());
+    // Seeded session pins the pre-2025-06-18 revision: these tests exercise
+    // session/cursor semantics, not the post-init protocol-version header
+    // requirement (covered by its own tests).
+    session_store.insert(
+        session_id.to_owned(),
+        "anonymous-http".to_owned(),
+        "2025-03-26".to_owned(),
+    );
     result_store.ensure_session(session_id);
     let config = HttpTransportConfig {
         stateful: true,
@@ -5014,8 +5180,16 @@ fn operator_client_credentials_screen_lists_rotates_revokes_without_token_leak()
     let session_store = Arc::new(HttpSessionStore::default());
     let result_store = Arc::new(HttpResultStore::new());
     let lifecycle = Arc::new(RecordingLifecycle::default());
-    session_store.insert("read-session".to_owned(), read_principal.clone());
-    session_store.insert("execute-session".to_owned(), execute_principal.clone());
+    session_store.insert(
+        "read-session".to_owned(),
+        read_principal.clone(),
+        "2025-03-26".to_owned(),
+    );
+    session_store.insert(
+        "execute-session".to_owned(),
+        execute_principal.clone(),
+        "2025-03-26".to_owned(),
+    );
     result_store.append_response("read-session", serde_json::json!({ "stale": "read" }));
     result_store.append_response("execute-session", serde_json::json!({ "stale": "execute" }));
 
@@ -5348,7 +5522,11 @@ fn uniform_auth_errors_no_enumeration_oracle() {
     );
 
     let session_store = Arc::new(HttpSessionStore::default());
-    session_store.insert("known-session".to_owned(), "oauth:owner".to_owned());
+    session_store.insert(
+        "known-session".to_owned(),
+        "oauth:owner".to_owned(),
+        "2025-03-26".to_owned(),
+    );
     let stateful_cfg = HttpTransportConfig {
         stateful: true,
         session_store: Some(session_store),

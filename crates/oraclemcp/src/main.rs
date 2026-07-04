@@ -1342,7 +1342,13 @@ fn build_auditor(
         }
         None => local,
     };
-    Ok(Some(Arc::new(Auditor::new(local, key))))
+    // Head anchor sidecar (bead oraclemcp-xb51): `<audit path>.anchor` tracks
+    // the durable chain head so `audit verify` detects tail truncation. Record
+    // fsync always precedes the anchor update (never anchor-ahead).
+    let anchor_path = oraclemcp_audit::anchor_path_for(&path);
+    Ok(Some(Arc::new(
+        Auditor::new(local, key).with_head_anchor(anchor_path),
+    )))
 }
 
 fn build_write_intent_log(
@@ -3834,7 +3840,10 @@ fn run_audit_verify(
     key_id_override: Option<&str>,
     with_db_evidence: bool,
 ) -> ExitCode {
-    use oraclemcp_audit::{VerifyOutcome, parse_jsonl, verify_records};
+    use oraclemcp_audit::{
+        AnchorStatus, AnchorViolation, VerifyOutcome, anchor_path_for, check_anchor, load_anchor,
+        parse_jsonl, verify_records,
+    };
 
     let keys = match audit_verification_keys(key_id_override) {
         Ok(keys) => keys,
@@ -3867,10 +3876,81 @@ fn run_audit_verify(
         VerifyOutcome::Ok {
             records: record_count,
         } => {
+            // Hash-link/MAC verification passed — a valid PREFIX is a valid
+            // chain, so cross-check the sidecar head anchor (bead
+            // oraclemcp-xb51) to detect tail truncation. Fail closed on a
+            // present-but-invalid anchor; report an explicit advisory when the
+            // sidecar is absent (legacy log, or removed with the tail).
+            let anchor_path = anchor_path_for(file);
+            let anchor = match load_anchor(&anchor_path) {
+                Ok(anchor) => anchor,
+                Err(e) => {
+                    emit_status_error(robot_json, "ORACLEMCP_AUDIT_ANCHOR_INVALID", &e.to_string());
+                    return ExitCode::from(2);
+                }
+            };
+            let anchor_payload = match anchor.as_ref() {
+                None => serde_json::json!({
+                    "status": "absent",
+                    "note": "no head anchor sidecar; tail truncation is not locally detectable \
+                             for this log (legacy log, or the anchor was removed)",
+                }),
+                Some(anchor) => match check_anchor(&records, anchor, &keys) {
+                    Ok(AnchorStatus::Match) => serde_json::json!({
+                        "status": "match",
+                        "seq": anchor.seq,
+                    }),
+                    Ok(AnchorStatus::Behind { behind_by }) => serde_json::json!({
+                        "status": "behind",
+                        "seq": anchor.seq,
+                        "behind_by": behind_by,
+                        "note": "anchor is behind the chain head — explainable (crash between \
+                                 record fsync and anchor update, or buffered read records); \
+                                 never tamper evidence on its own",
+                    }),
+                    // `AnchorStatus` is #[non_exhaustive]; fail closed on any
+                    // future variant this binary does not understand.
+                    Ok(_) => {
+                        emit_status_error(
+                            robot_json,
+                            "ORACLEMCP_AUDIT_UNVERIFIABLE",
+                            "unrecognized head-anchor status",
+                        );
+                        return ExitCode::from(2);
+                    }
+                    Err(violation) => {
+                        let truncated = matches!(violation, AnchorViolation::Truncated { .. });
+                        let payload = serde_json::json!({
+                            "ok": false,
+                            "file": file.display().to_string(),
+                            "records": record_count,
+                            "anchor_file": anchor_path.display().to_string(),
+                            "anchor_seq": anchor.seq,
+                            "reason": violation.to_string(),
+                            "truncated": truncated,
+                        });
+                        if robot_json {
+                            let _ = write_stdout_line(&serde_json::to_string(&payload).unwrap());
+                        } else if truncated {
+                            let _ = write_stdout_line(&format!(
+                                "TRUNCATED: {violation} (anchor: {})",
+                                anchor_path.display()
+                            ));
+                        } else {
+                            let _ = write_stdout_line(&format!(
+                                "BROKEN: head anchor check failed: {violation} (anchor: {})",
+                                anchor_path.display()
+                            ));
+                        }
+                        return ExitCode::from(2);
+                    }
+                },
+            };
             let mut payload = serde_json::json!({
                 "ok": true,
                 "file": file.display().to_string(),
                 "records": record_count,
+                "anchor": anchor_payload,
             });
             let db_evidence_summary = with_db_evidence.then(|| audit_db_evidence_summary(&records));
             if let Some(summary) = db_evidence_summary.as_ref()
@@ -3878,15 +3958,23 @@ fn run_audit_verify(
             {
                 obj.insert("db_evidence".to_owned(), audit_db_evidence_payload(summary));
             }
+            let anchor_text = match payload["anchor"]["status"].as_str() {
+                Some("match") => "; anchor: match".to_owned(),
+                Some("behind") => format!(
+                    "; anchor: behind by {} (explainable crash/buffer window)",
+                    payload["anchor"]["behind_by"]
+                ),
+                _ => "; anchor: absent (tail truncation not locally detectable)".to_owned(),
+            };
             let output = if robot_json {
                 serde_json::to_string(&payload).unwrap()
             } else if let Some(summary) = db_evidence_summary.as_ref() {
                 format!(
-                    "OK: audit chain verified ({record_count} records); {}",
+                    "OK: audit chain verified ({record_count} records){anchor_text}; {}",
                     audit_db_evidence_text(summary)
                 )
             } else {
-                format!("OK: audit chain verified ({record_count} records)")
+                format!("OK: audit chain verified ({record_count} records){anchor_text}")
             };
             stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
         }

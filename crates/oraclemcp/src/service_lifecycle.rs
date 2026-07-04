@@ -994,6 +994,17 @@ fn copy_audit_for_backup(
         })?;
         return file_manifest_for(audit_path, &output.join("state").join(relative));
     }
+    // Outside the state dir the audit log is copied explicitly; bring the head
+    // anchor sidecar (bead oraclemcp-xb51) along so a restored log still
+    // carries its tail-truncation evidence. (Inside the state dir the whole-dir
+    // snapshot already copies the sidecar.)
+    let anchor_source = oraclemcp_audit::anchor_path_for(audit_path);
+    if anchor_source.exists() {
+        copy_regular_file(
+            &anchor_source,
+            &output.join("audit").join("audit.jsonl.anchor"),
+        )?;
+    }
     copy_optional_file(audit_path, &output.join("audit").join("audit.jsonl"))
 }
 
@@ -1076,6 +1087,15 @@ fn restore_from_manifest(
     {
         let source = manifest_backup_path(backup, &manifest.audit)?;
         copy_regular_file(&source, Path::new(&manifest.audit.source_path))?;
+        // Restore the head anchor sidecar next to the audit log when the
+        // backup carried one (bead oraclemcp-xb51).
+        let anchor_source = oraclemcp_audit::anchor_path_for(&source);
+        if anchor_source.exists() {
+            copy_regular_file(
+                &anchor_source,
+                &oraclemcp_audit::anchor_path_for(Path::new(&manifest.audit.source_path)),
+            )?;
+        }
     }
     Ok(())
 }
@@ -1341,10 +1361,40 @@ fn verify_backup_audit(
         )
     })?;
     match verify_records(&records, keys) {
-        VerifyOutcome::Ok { records } => Ok(RestoreAuditVerification::Verified {
-            records,
-            file: path.display().to_string(),
-        }),
+        VerifyOutcome::Ok {
+            records: record_count,
+        } => {
+            // Cross-check the head anchor sidecar when the backup carries one
+            // (bead oraclemcp-xb51): a truncated backup must not restore as
+            // "verified". Absent sidecar keeps the legacy behavior.
+            let anchor_path = oraclemcp_audit::anchor_path_for(&path);
+            match oraclemcp_audit::load_anchor(&anchor_path) {
+                Ok(None) => {}
+                Ok(Some(anchor)) => {
+                    if let Err(violation) = oraclemcp_audit::check_anchor(&records, &anchor, keys) {
+                        return Err(ServiceError::new(
+                            "ORACLEMCP_SERVICE_RESTORE_AUDIT_BROKEN",
+                            format!(
+                                "backup audit chain {} failed the head-anchor check: {violation}",
+                                path.display()
+                            ),
+                            2,
+                        ));
+                    }
+                }
+                Err(e) => {
+                    return Err(ServiceError::new(
+                        "ORACLEMCP_SERVICE_RESTORE_AUDIT_BROKEN",
+                        format!("backup audit head anchor is unreadable: {e}"),
+                        2,
+                    ));
+                }
+            }
+            Ok(RestoreAuditVerification::Verified {
+                records: record_count,
+                file: path.display().to_string(),
+            })
+        }
         VerifyOutcome::Broken { seq, index, reason } => Err(ServiceError::new(
             "ORACLEMCP_SERVICE_RESTORE_AUDIT_BROKEN",
             format!(

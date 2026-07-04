@@ -96,14 +96,19 @@ vulnerability-reporting policy and supported versions are in the repo-root
 - [ ] Configure `[audit]` with a signing key (`key_ref` as a secret-ref) and a
       labeled `key_id` for rotation. Privileged actions write to a hash-chained,
       HMAC-SHA256-signed log.
-- [ ] Protect and back up the audit log; treat it as a security record.
+- [ ] Protect and back up the audit log; treat it as a security record. Keep
+      the `<audit path>.anchor` sidecar with it — the server-maintained head
+      anchor is what lets `audit verify` detect tail truncation (deleting the
+      last N records), and an unexpectedly missing anchor should itself be
+      treated as suspicious.
 - [ ] For any profile that can reach `READ_WRITE` or above, mount a persistent,
       private state directory and set `XDG_STATE_HOME` so the durable
       write-intent log survives restarts. An unresolved intent must be treated
       as in-doubt and verified before a writable server is restarted.
 - [ ] Periodically and after any incident, run `oraclemcp audit verify <file>`
-      — it recomputes every hash link and re-checks the keyed MAC, exiting
-      non-zero on tampering. See
+      — it recomputes every hash link, re-checks the keyed MAC, and cross-checks
+      the head anchor (reporting `TRUNCATED` when trailing records were
+      removed), exiting non-zero on tampering. See
       [`operations.md` §5.4](operations.md#54-verify-the-audit-trail).
 - [ ] For defense in depth, ship the signed log to an external WORM store / SIEM
       via `[audit.shipping]` (off by default). The mirror is tamper-evident end

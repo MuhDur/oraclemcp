@@ -195,9 +195,13 @@ class Ladder:
     # -- tool helpers -------------------------------------------------------
 
     def query_rows(self, sql):
-        content = structured(self.session.call("oracle_query", {"sql": sql}))
+        # Read isError from the TOP-LEVEL tool result (the MCP-authoritative
+        # field), matching query_refused — not from structuredContent's
+        # embedded copy, which is a server convenience that could drift.
+        result = self.session.call("oracle_query", {"sql": sql})
+        content = structured(result)
         require(
-            content.get("isError") is not True,
+            result.get("isError") is not True,
             "read-only query succeeds",
             content,
         )
@@ -504,6 +508,24 @@ def verify_audit_records(args, harness):
             if line.strip():
                 records.append(json.loads(line))
     require(records, "audit chain has records", audit_path)
+
+    # AuditRecord skip-serializes signature/key_id when the record is unsigned,
+    # so their absence means the signing key never reached the oraclemcp binary
+    # (the wrapper exports ORACLEMCP_AUDIT_KEY). Fail with a clear diagnosis
+    # instead of a bare per-field assertion.
+    unsigned = [
+        index
+        for index, record in enumerate(records)
+        if "signature" not in record or "key_id" not in record
+    ]
+    if unsigned:
+        raise StepFailure(
+            "audit records are UNSIGNED (no signature/key_id) at indices "
+            f"{unsigned[:5]}{'...' if len(unsigned) > 5 else ''} of {len(records)}: "
+            "the audit signing key did not reach the oraclemcp binary — ensure "
+            "ORACLEMCP_AUDIT_KEY is exported in the server's environment "
+            "(oracle_version_matrix.sh sets it before launching the ladder)"
+        )
 
     chain_fields = ("seq", "prev_hash", "entry_hash", "signature", "key_id", "tool")
     previous_hash = None

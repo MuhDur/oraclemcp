@@ -32,6 +32,11 @@
 #   ORACLE_MATRIX_<LANE>_DSN          (defaults: localhost:1518/XEPDB1,
 #                                         localhost:1520/XEPDB1, localhost:1522/FREEPDB1)
 #   ORACLE_MATRIX_<LANE>_BANNER_REGEX (defaults pin the lane's Oracle release)
+#   ORACLE_MATRIX_LANE_TIMEOUT_SECS   (default 900: per-lane wall-clock ceiling
+#                                         on the ladder session — a hung lane
+#                                         fails the lane instead of hanging
+#                                         run_all)
+#   ORACLE_MATRIX_DOCTOR_TIMEOUT_SECS (default 120: ceiling on doctor --online)
 #   --lane xe18|xe21|free23              (repeatable; default: all three — the
 #                                         release gate requires all three green)
 set -euo pipefail
@@ -131,7 +136,11 @@ require_matrix_env() {
     user="$(lane_user "$lane")"
     password="$(lane_password "$lane")"
     if [ -z "$user" ] || [ -z "$password" ]; then
-      e2e_finish_skip "set ORACLE_MATRIX_$(printf '%s' "$lane" | tr '[:lower:]' '[:upper:]')_USER and _PASSWORD for lane $lane"
+      # ORACLEMCP_LIVE_XE=1 is an EXPLICIT live opt-in: a selected lane with
+      # missing credentials is a misconfigured request and must hard-fail, not
+      # silently skip (skip-accounting green-wash). The whole-suite skip when
+      # ORACLEMCP_LIVE_XE is unset (above) stays a skip.
+      e2e_finish_fail "ORACLEMCP_LIVE_XE=1 is set but lane $lane is missing ORACLE_MATRIX_$(printf '%s' "$lane" | tr '[:lower:]' '[:upper:]')_USER / _PASSWORD"
     fi
     if e2e_value_has_production_marker "$dsn" || e2e_value_has_production_marker "$user"; then
       e2e_finish_fail "refusing production-looking target for lane $lane"
@@ -166,10 +175,21 @@ mkdir -p "$matrix_dir"
 
 audit_key="$(openssl rand -hex 32 2>/dev/null || date +%s%N | sha256sum | cut -d' ' -f1)"
 
+# Per-lane wall-clock ceilings: a hung lane (stuck DB, wedged stdio session)
+# must fail THAT lane, never hang the whole matrix / run_all. GNU coreutils
+# `timeout` exits 124 on expiry; -k adds a SIGKILL grace window.
+lane_timeout_secs="${ORACLE_MATRIX_LANE_TIMEOUT_SECS:-900}"
+doctor_timeout_secs="${ORACLE_MATRIX_DOCTOR_TIMEOUT_SECS:-120}"
+
 overall_fail=0
 lane_summaries=()
 
 run_lane() {
+  # The caller invokes run_lane in a `set +e` subshell, which turns errexit OFF
+  # in here; re-enable it so an unchecked setup failure (mkdir/heredoc/export)
+  # aborts the lane instead of running the ladder against broken state. The
+  # local `set +e` / `set -e` pairs around doctor/ladder still toggle correctly.
+  set -e
   local lane="$1"
   local dsn user password banner_regex
   dsn="$(lane_dsn "$lane")"
@@ -209,9 +229,14 @@ PROFILES
   e2e_log_event "doctor_online" "act" "running" 0 "lane $lane: --json doctor --online --profile $lane"
   local doctor_json="$lane_dir/doctor_online.json"
   set +e
-  "$BINARY" --json doctor --online --profile "$lane" >"$doctor_json" 2>"$lane_dir/doctor_online.stderr"
+  timeout -k 10 "$doctor_timeout_secs" \
+    "$BINARY" --json doctor --online --profile "$lane" >"$doctor_json" 2>"$lane_dir/doctor_online.stderr"
   local doctor_status=$?
   set -e
+  if [ "$doctor_status" -eq 124 ]; then
+    e2e_log_event "doctor_online" "assert" "fail" 0 "lane $lane: doctor --online timed out after ${doctor_timeout_secs}s (hung lane failed, not hung)"
+    return 1
+  fi
   if [ "$doctor_status" -ne 0 ]; then
     e2e_log_event "doctor_online" "assert" "fail" 0 "lane $lane: doctor exit=$doctor_status (see $doctor_json)"
     return 1
@@ -231,12 +256,17 @@ PROFILES
   local table="E2E_LADDER_$$"
   e2e_log_event "ladder_session" "act" "running" 0 "lane $lane: MCP stdio ladder session (table $table)"
   set +e
-  python3 "$ROOT/scripts/e2e/oracle_ladder_session.py" \
+  timeout -k 15 "$lane_timeout_secs" \
+    python3 "$ROOT/scripts/e2e/oracle_ladder_session.py" \
     --binary "$BINARY" --profile "$lane" --banner-regex "$banner_regex" \
     --table "$table" --evidence "$evidence" >"$lane_dir/ladder_stdout.txt"
   local ladder_status=$?
   set -e
   cat "$lane_dir/ladder_stdout.txt"
+  if [ "$ladder_status" -eq 124 ]; then
+    e2e_log_event "ladder_session" "assert" "fail" 0 "lane $lane: ladder session exceeded the ${lane_timeout_secs}s wall-clock ceiling (hung lane failed, not hung; evidence: $evidence)"
+    return 1
+  fi
   if [ "$ladder_status" -ne 0 ]; then
     e2e_log_event "ladder_session" "assert" "fail" 0 "lane $lane: ladder session failed (evidence: $evidence)"
     return 1
@@ -247,7 +277,7 @@ PROFILES
   # verifier (recomputes every link + keyed MAC with the run's key).
   local audit_file="$state_dir/oraclemcp/audit/audit.jsonl"
   local audit_json="$lane_dir/audit_verify.json"
-  if ! "$BINARY" --json audit verify "$audit_file" >"$audit_json" 2>"$lane_dir/audit_verify.stderr"; then
+  if ! timeout -k 10 60 "$BINARY" --json audit verify "$audit_file" >"$audit_json" 2>"$lane_dir/audit_verify.stderr"; then
     e2e_log_event "audit_verify" "assert" "fail" 0 "lane $lane: audit verify failed (see $audit_json)"
     return 1
   fi
@@ -255,9 +285,39 @@ PROFILES
     e2e_log_event "audit_verify" "assert" "fail" 0 "lane $lane: audit chain not ok or too few records (see $audit_json)"
     return 1
   fi
+  # The server maintains the head anchor sidecar; a fresh single-run log must
+  # verify with the anchor matching (or explainably behind) the chain head.
+  if ! jq -e '.anchor.status == "match" or .anchor.status == "behind"' "$audit_json" >/dev/null; then
+    e2e_log_event "audit_verify" "assert" "fail" 0 "lane $lane: head anchor missing or not tracking the chain (see $audit_json)"
+    return 1
+  fi
   local audit_records
   audit_records="$(jq -r '.records' "$audit_json")"
-  e2e_log_event "audit_verify" "assert" "pass" 0 "lane $lane: signed hash-chain verified ($audit_records records)"
+  e2e_log_event "audit_verify" "assert" "pass" 0 "lane $lane: signed hash-chain verified ($audit_records records, anchor $(jq -r '.anchor.status' "$audit_json"))"
+
+  # Step 6b (bead oraclemcp-xb51): tail-truncation tamper evidence. Cut the
+  # copied chain to just below the anchored head and expect verify to report
+  # TRUNCATED (exit non-zero) — a valid prefix must NOT verify clean once the
+  # anchor attests a longer durable chain.
+  local anchor_seq
+  anchor_seq="$(jq -r '.anchor.seq' "$audit_json")"
+  local truncated_file="$lane_dir/audit_truncated.jsonl"
+  local truncated_json="$lane_dir/audit_truncated_verify.json"
+  head -n "$((anchor_seq - 1))" "$audit_file" >"$truncated_file"
+  cp "$audit_file.anchor" "$truncated_file.anchor"
+  set +e
+  timeout -k 10 60 "$BINARY" --json audit verify "$truncated_file" >"$truncated_json" 2>"$lane_dir/audit_truncated_verify.stderr"
+  local truncated_status=$?
+  set -e
+  if [ "$truncated_status" -eq 0 ]; then
+    e2e_log_event "audit_truncation_detect" "assert" "fail" 0 "lane $lane: truncated chain verified CLEAN — tail truncation undetected (see $truncated_json)"
+    return 1
+  fi
+  if ! jq -e '.ok == false and .truncated == true' "$truncated_json" >/dev/null; then
+    e2e_log_event "audit_truncation_detect" "assert" "fail" 0 "lane $lane: truncated chain refused for the wrong reason (see $truncated_json)"
+    return 1
+  fi
+  e2e_log_event "audit_truncation_detect" "assert" "pass" 0 "lane $lane: tail truncation detected (anchor seq $anchor_seq, exit $truncated_status)"
   return 0
 }
 

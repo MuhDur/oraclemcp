@@ -53,3 +53,6 @@ venv/
 
 # Strictly local live-test reports (never publish)
 /todelete/
+
+# Agent scratch (never commit)
+/.claude-tmp/

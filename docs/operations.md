@@ -659,7 +659,27 @@ oraclemcp audit verify /path/to/audit.jsonl --key_id 2026-q2
 
 `verify` re-walks the file, recomputes every hash link, and re-checks the keyed
 MAC with the configured key(s); it exits non-zero on a broken link or a
-recompute-without-key forgery. Configure the log under `[audit]` in your config
+recompute-without-key forgery. It also cross-checks the **head anchor sidecar**
+(`<audit path>.anchor`), which the server maintains automatically: a keyed-MAC
+attestation of the last durably-fsynced record (`seq` + `entry_hash`). Because
+a valid *prefix* of a chain is itself a valid chain, the anchor is what makes
+**tail truncation** (deleting the last N records) detectable — `verify` reports
+`TRUNCATED` and exits non-zero when the chain ends before the anchored head,
+and fails closed on a rewritten, forged, or corrupt anchor.
+
+Anchor crash-consistency semantics: the record fsync always happens **before**
+the anchor update, so after a crash the anchor may be *behind* the chain head
+(reported as `anchor: behind`, explainable — never tamper evidence on its own),
+but can never be *ahead* of it. A log without a sidecar (written by a pre-anchor
+release, or with the anchor removed) still verifies, with an explicit
+`anchor: absent` advisory — treat an unexpectedly missing anchor as suspicious.
+Local anchoring cannot detect a full-state rollback (an old anchor replayed
+together with its matching chain prefix) or an attacker holding the signing
+key; the WORM/SIEM mirror (§5.6) covers those. When you copy an audit log for
+offline verification, copy the `.anchor` sidecar along with it (`service
+backup` does this for you).
+
+Configure the log under `[audit]` in your config
 (`path`, `key_ref` as a secret-ref like `env:ORACLEMCP_AUDIT_KEY`, and `key_id`
 to label the active key for rotation; the default key id is `default`). When
 `[audit].path` is unset, the binary writes to

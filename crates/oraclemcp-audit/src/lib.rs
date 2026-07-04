@@ -11,6 +11,7 @@
 //! timestamp, is the chain's order key (§5.10). Records carry the SQL SHA-256 +
 //! a truncated preview, never bind values or secrets.
 
+mod anchor;
 mod hmac;
 mod record;
 mod shipping;
@@ -18,6 +19,10 @@ mod sink;
 mod unified;
 mod verify;
 
+pub use anchor::{
+    ANCHOR_VERSION, AnchorFile, AnchorLoadError, AnchorStatus, AnchorViolation, ChainAnchor,
+    anchor_path_for, check_anchor, load_anchor,
+};
 pub use hmac::{ct_eq, hmac_sha256, hmac_sha256_hex};
 pub use record::{
     AUDIT_SCHEMA_VERSION, AuditCancel, AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord,

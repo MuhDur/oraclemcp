@@ -187,6 +187,18 @@ const REQUIREMENTS: &[Requirement] = &[
         level: RequirementLevel::Must,
         description: "notifications/tools/list_changed is advertised (tools.listChanged) and emitted when the served tool set changes",
     },
+    Requirement {
+        id: "MCP-STDIO-020",
+        section: "Initialize",
+        level: RequirementLevel::Must,
+        description: "served capabilities degrade to the negotiated revision: completions (added 2025-03-26) is not advertised to a 2024-11-05 client; refusal fields (isError + content text) are revision-independent",
+    },
+    Requirement {
+        id: "MCP-STDIO-021",
+        section: "Initialize",
+        level: RequirementLevel::Must,
+        description: "a session initializes exactly once: a second initialize is rejected with a JSON-RPC error and keeps the originally negotiated version",
+    },
 ];
 
 struct EchoDispatch;
@@ -506,7 +518,7 @@ fn json_type_matches(name: &str, value: &Value) -> bool {
 
 #[test]
 fn conformance_requirement_matrix_is_accounted_for() {
-    assert_eq!(REQUIREMENTS.len(), 25);
+    assert_eq!(REQUIREMENTS.len(), 27);
     let must = REQUIREMENTS
         .iter()
         .filter(|requirement| requirement.level == RequirementLevel::Must)
@@ -515,7 +527,7 @@ fn conformance_requirement_matrix_is_accounted_for() {
         .iter()
         .filter(|requirement| requirement.level == RequirementLevel::Should)
         .count();
-    assert_eq!(must, 23);
+    assert_eq!(must, 25);
     assert_eq!(should, 2);
     let mut ids = REQUIREMENTS
         .iter()
@@ -558,6 +570,122 @@ fn initialize_returns_mcp_2025_11_25_server_info_and_tools_capability() {
     assert_eq!(
         result["capabilities"]["prompts"]["listChanged"],
         json!(false)
+    );
+}
+
+/// MCP-STDIO-020 (bead oraclemcp-s693): per-revision capability degradation.
+#[test]
+fn capabilities_degrade_to_the_negotiated_revision_per_conformance() {
+    fn initialize_with_version(version: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": version,
+                "capabilities": {},
+                "clientInfo": { "name": "mcp-conformance", "version": "1.0" }
+            }
+        })
+    }
+
+    // 2024-11-05 pre-dates the completions capability: not advertised.
+    let old = run_frames(
+        StdioAuthPolicy::Disabled,
+        vec![frame(&initialize_with_version("2024-11-05"))],
+    );
+    assert_eq!(old[0]["result"]["protocolVersion"], json!("2024-11-05"));
+    assert!(
+        old[0]["result"]["capabilities"]
+            .get("completions")
+            .is_none(),
+        "completions must not be advertised to a 2024-11-05 client"
+    );
+    // Revision-agnostic capabilities stay served.
+    assert!(old[0]["result"]["capabilities"]["tools"].is_object());
+    assert!(old[0]["result"]["capabilities"]["resources"].is_object());
+    assert!(old[0]["result"]["capabilities"]["prompts"].is_object());
+
+    // Every revision that knows the capability gets it.
+    for revision in ["2025-03-26", "2025-06-18", "2025-11-25"] {
+        let replies = run_frames(
+            StdioAuthPolicy::Disabled,
+            vec![frame(&initialize_with_version(revision))],
+        );
+        assert_eq!(replies[0]["result"]["protocolVersion"], json!(revision));
+        assert!(
+            replies[0]["result"]["capabilities"]["completions"].is_object(),
+            "completions advertised at {revision}"
+        );
+    }
+
+    // Revision-independent refusal envelope: an unknown tool refusal carries
+    // isError + content[0].text on the OLD revision exactly as on the newest.
+    let refusal_script = |version: &str| {
+        run_frames(
+            StdioAuthPolicy::Disabled,
+            vec![
+                frame(&initialize_with_version(version)),
+                frame(&json!({
+                    "jsonrpc": "2.0",
+                    "id": "refuse",
+                    "method": "tools/call",
+                    "params": { "name": "not_a_tool", "arguments": {} }
+                })),
+            ],
+        )
+    };
+    for version in ["2024-11-05", "2025-11-25"] {
+        let replies = refusal_script(version);
+        let refusal = replies
+            .iter()
+            .find(|reply| reply["id"] == json!("refuse"))
+            .expect("refusal reply");
+        assert_eq!(refusal["result"]["isError"], json!(true));
+        assert!(
+            refusal["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()),
+            "refusal text rides content[0].text at {version}"
+        );
+    }
+}
+
+/// MCP-STDIO-021 (bead oraclemcp-s693): initialize happens exactly once per
+/// session.
+#[test]
+fn second_initialize_is_rejected_on_the_same_stdio_session() {
+    let replies = run_frames(
+        StdioAuthPolicy::Disabled,
+        vec![
+            frame(&initialize(None)),
+            frame(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "initialize",
+                "params": { "protocolVersion": "2024-11-05" }
+            })),
+        ],
+    );
+    let first = replies
+        .iter()
+        .find(|reply| reply["id"] == json!(1))
+        .expect("first initialize reply");
+    assert_eq!(first["result"]["protocolVersion"], json!("2025-11-25"));
+    let second = replies
+        .iter()
+        .find(|reply| reply["id"] == json!(2))
+        .expect("second initialize reply");
+    assert!(
+        second.get("result").is_none(),
+        "re-initialize must not renegotiate: {second}"
+    );
+    assert_eq!(second["error"]["code"], json!(-32600));
+    assert!(
+        second["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("already completed")),
+        "clear lifecycle error message: {second}"
     );
 }
 

@@ -12,11 +12,12 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
 use thiserror::Error;
 
+use crate::anchor::AnchorFile;
 use crate::record::{AuditEntryDraft, AuditRecord, GENESIS_HASH, SigningKey};
 
 /// Audit sink errors.
@@ -143,6 +144,12 @@ pub struct Auditor {
     /// configured (the binary does this before any operating level above
     /// ReadOnly is reachable).
     key: SigningKey,
+    /// Optional sidecar head anchor (bead oraclemcp-xb51): after every durable
+    /// fsync the anchor is atomically rewritten to name the durable chain head,
+    /// so `audit verify` can detect tail truncation. Record fsync always comes
+    /// FIRST — the anchor can be behind (explainable crash window) but never
+    /// ahead of the durable chain. See `crate::anchor` for the semantics.
+    anchor: Option<AnchorFile>,
     state: Mutex<ChainState>,
 }
 
@@ -153,12 +160,25 @@ impl Auditor {
         Auditor {
             sink,
             key,
+            anchor: None,
             state: Mutex::new(ChainState {
                 seq: 0,
                 last_hash: GENESIS_HASH.to_owned(),
                 poisoned: false,
             }),
         }
+    }
+
+    /// Maintain a sidecar head anchor at `path` (normally
+    /// [`crate::anchor_path_for`] of the audit log), signed with this
+    /// auditor's key. The anchor is updated after every durable append and
+    /// every explicit flush; an anchor update failure fails the call closed
+    /// (the record is already durably logged, so the chain state still
+    /// advances and the chain never forks).
+    #[must_use]
+    pub fn with_head_anchor(mut self, path: impl Into<PathBuf>) -> Self {
+        self.anchor = Some(AnchorFile::new(path.into(), self.key.clone()));
+        self
     }
 
     /// Append a chained record. When `durable` is true the record is fsynced
@@ -192,6 +212,7 @@ impl Auditor {
                 return Err(AuditError::Poisoned);
             }
         }
+        let mut anchor_outcome: Result<(), AuditError> = Ok(());
         if durable {
             // The seq=N line is now in the byte stream but not yet durable. If
             // the fsync fails or panics we must NOT advance state and must NOT
@@ -207,15 +228,48 @@ impl Auditor {
                     return Err(AuditError::Poisoned);
                 }
             }
+            // Head anchor, strictly AFTER the record fsync (never anchor-ahead;
+            // see `crate::anchor`). An anchor failure does not fork the chain —
+            // the record is durably on disk, so state advances below either
+            // way — but it fails this call closed: privileged statements must
+            // not run while truncation tamper-evidence cannot be maintained. A
+            // later successful durable append re-anchors (self-healing), so
+            // this does not poison.
+            if let Some(anchor) = &self.anchor {
+                anchor_outcome = catch_unwind(AssertUnwindSafe(|| {
+                    anchor.record_head(seq, &record.entry_hash)
+                }))
+                .unwrap_or_else(|_| {
+                    Err(AuditError::Io(
+                        "audit head anchor update panicked".to_owned(),
+                    ))
+                });
+            }
         }
         state.seq = seq;
         state.last_hash = record.entry_hash.clone();
+        anchor_outcome?;
         Ok(record)
     }
 
-    /// Force a flush (group-commit point for buffered reads).
+    /// Force a flush (group-commit point for buffered reads). Holding the
+    /// chain-state lock across the fsync keeps the subsequent anchor update
+    /// consistent with the exact head that was flushed.
     pub fn flush(&self) -> Result<(), AuditError> {
-        self.sink.flush()
+        let state = self.state.lock();
+        // Fail closed while poisoned: the byte stream may hold an uncertain
+        // record past `state`, so neither a fresh fsync promise nor a
+        // re-anchor of the stale head is trustworthy.
+        if state.poisoned {
+            return Err(AuditError::Poisoned);
+        }
+        self.sink.flush()?;
+        if let Some(anchor) = &self.anchor
+            && state.seq > 0
+        {
+            anchor.record_head(state.seq, &state.last_hash)?;
+        }
+        Ok(())
     }
 }
 
@@ -380,6 +434,92 @@ mod tests {
         seqs.sort_unstable();
         seqs.dedup();
         assert_eq!(seqs.len(), before, "no duplicate seq in the audit stream");
+    }
+
+    #[test]
+    fn durable_appends_maintain_the_head_anchor() {
+        // Bead oraclemcp-xb51: every durable append fsyncs the record FIRST and
+        // then re-anchors the durable head, so the anchor tracks the chain and
+        // is never ahead of it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let anchor_path = crate::anchor_path_for(&path);
+        let auditor = Auditor::new(
+            Box::new(FileAuditSink::open(&path).expect("open")),
+            test_key(),
+        )
+        .with_head_anchor(&anchor_path);
+
+        let r1 = auditor
+            .append(
+                &draft("DELETE FROM t WHERE id=1", "GUARDED"),
+                "t0".to_owned(),
+                true,
+            )
+            .expect("durable append 1");
+        let anchor = crate::load_anchor(&anchor_path)
+            .expect("load")
+            .expect("present");
+        assert_eq!(
+            (anchor.seq, anchor.entry_hash.as_str()),
+            (1, r1.entry_hash.as_str())
+        );
+
+        let r2 = auditor
+            .append(
+                &draft("DELETE FROM t WHERE id=2", "GUARDED"),
+                "t1".to_owned(),
+                true,
+            )
+            .expect("durable append 2");
+        let anchor = crate::load_anchor(&anchor_path)
+            .expect("load")
+            .expect("present");
+        assert_eq!(
+            (anchor.seq, anchor.entry_hash.as_str()),
+            (2, r2.entry_hash.as_str())
+        );
+        assert!(anchor.mac_is_valid(&test_key()));
+
+        // The verified chain matches its anchor exactly.
+        let records = crate::parse_jsonl(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            crate::verify_records(&records, &[test_key()]),
+            crate::VerifyOutcome::Ok { records: 2 }
+        );
+        assert_eq!(
+            crate::check_anchor(&records, &anchor, &[test_key()]),
+            Ok(crate::AnchorStatus::Match)
+        );
+    }
+
+    #[test]
+    fn non_durable_appends_anchor_only_on_flush() {
+        // Group-commit reads are not fsynced per call, so the anchor must NOT
+        // run ahead of durability; it catches up at the explicit flush.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let anchor_path = crate::anchor_path_for(&path);
+        let auditor = Auditor::new(
+            Box::new(FileAuditSink::open(&path).expect("open")),
+            test_key(),
+        )
+        .with_head_anchor(&anchor_path);
+
+        auditor
+            .append(&draft("SELECT 1 FROM dual", "SAFE"), "t0".to_owned(), false)
+            .expect("read append");
+        assert_eq!(
+            crate::load_anchor(&anchor_path).expect("load"),
+            None,
+            "no anchor before the record is durable"
+        );
+
+        auditor.flush().expect("group-commit flush");
+        let anchor = crate::load_anchor(&anchor_path)
+            .expect("load")
+            .expect("present");
+        assert_eq!(anchor.seq, 1, "flush anchors the flushed head");
     }
 
     #[test]

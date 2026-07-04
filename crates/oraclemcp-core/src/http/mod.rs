@@ -902,15 +902,20 @@ pub struct HttpSessionStore {
 struct HttpSessionEntry {
     principal_key: String,
     last_seen: Instant,
+    /// The protocol revision negotiated by this session's `initialize` (bead
+    /// oraclemcp-s693). Drives the post-init `MCP-Protocol-Version` header
+    /// requirement for sessions that negotiated >= 2025-06-18.
+    protocol_version: String,
 }
 
 impl HttpSessionStore {
-    fn insert(&self, id: String, principal_key: String) {
+    fn insert(&self, id: String, principal_key: String, protocol_version: String) {
         self.owners.lock().insert(
             id,
             HttpSessionEntry {
                 principal_key,
                 last_seen: Instant::now(),
+                protocol_version,
             },
         );
     }
@@ -920,6 +925,14 @@ impl HttpSessionStore {
         let entry = owners.get_mut(id)?;
         entry.last_seen = Instant::now();
         Some(entry.principal_key.clone())
+    }
+
+    /// The protocol revision the session negotiated at `initialize`.
+    fn protocol_version_for(&self, id: &str) -> Option<String> {
+        self.owners
+            .lock()
+            .get(id)
+            .map(|entry| entry.protocol_version.clone())
     }
 
     fn remove(&self, id: &str) -> bool {
@@ -2044,6 +2057,54 @@ fn operator_audit_failed_response() -> HttpResponse {
             "error": "operator_audit_failed",
             "message": "operator API audit append failed; action refused",
         }),
+    )
+}
+
+/// Post-initialize `MCP-Protocol-Version` header requirement (bead
+/// oraclemcp-s693). The 2025-06-18 Streamable HTTP spec makes the header
+/// mandatory on every request after `initialize`; sessions that negotiated an
+/// OLDER revision keep the historical leniency (header validated only when
+/// present, by [`enforce_mcp_protocol_version`]).
+///
+/// Enforced on POST (the JSON-RPC request channel) only: the GET SSE resume
+/// path deliberately supports browser `EventSource` clients (cookie + Origin
+/// auth), and `EventSource` cannot set custom request headers — requiring the
+/// header there would break the documented dashboard flow, not tighten
+/// anything (GET carries no JSON-RPC request). DELETE follows GET's leniency.
+fn require_negotiated_protocol_version_header(
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+    session: &ValidatedStatefulSession<'_>,
+) -> Option<HttpResponse> {
+    let store = config.session_store.as_ref()?;
+    let negotiated = store.protocol_version_for(session.session_id)?;
+    if !crate::capabilities::revision_at_least(
+        &negotiated,
+        crate::capabilities::HTTP_PROTOCOL_VERSION_HEADER_REQUIRED_SINCE,
+    ) {
+        return None;
+    }
+    if request.header("mcp-protocol-version").is_some() {
+        // Presence is required here; supported-ness (and the 400 for junk
+        // values) is already enforced globally by enforce_mcp_protocol_version.
+        return None;
+    }
+    Some(
+        json_response(
+            400,
+            &json!({
+                "error": "missing_protocol_version_header",
+                "message": format!(
+                    "MCP-Protocol-Version header is required on every request after \
+                     initialize for sessions that negotiated {negotiated} (spec revision \
+                     2025-06-18 and later)"
+                ),
+                "negotiated": negotiated,
+                "next_step": "send MCP-Protocol-Version with the negotiated revision on \
+                              every post-initialize request",
+            }),
+        )
+        .with_header("mcp-protocol-version", PROTOCOL_VERSION),
     )
 }
 
@@ -4928,10 +4989,40 @@ fn handle_mcp_post(
         .map(str::to_owned);
     let http_session_id = if config.stateful {
         if method.as_deref() == Some("initialize") {
+            // MCP lifecycle (bead oraclemcp-s693): a session initializes
+            // exactly once. An initialize that PRESENTS a live session id is a
+            // re-initialize on that session — reject it with a structured
+            // error instead of silently minting a replacement session.
+            if let Some(presented) = stateful_session_id(request, false)
+                && config
+                    .session_store
+                    .as_ref()
+                    .is_some_and(|store| store.principal_for(presented).is_some())
+            {
+                return json_response(
+                    400,
+                    &json!({
+                        "error": "session_already_initialized",
+                        "message": "initialize was already completed for this MCP session; \
+                                    the lifecycle negotiates the protocol version exactly \
+                                    once per session",
+                        "next_step": "omit mcp-session-id on initialize to open a new \
+                                      session, or keep using the existing session without \
+                                      re-initializing",
+                    }),
+                );
+            }
             Some(new_session_id())
         } else {
             match validate_stateful_session(config, request, Some(session_principal_key), false) {
-                Ok(session) => Some(session.session_id.to_owned()),
+                Ok(session) => {
+                    if let Some(response) =
+                        require_negotiated_protocol_version_header(config, request, &session)
+                    {
+                        return response;
+                    }
+                    Some(session.session_id.to_owned())
+                }
                 Err(response) => return response,
             }
         }
@@ -5391,6 +5482,15 @@ fn sse_response(
     response_event_id: Option<&str>,
 ) -> HttpResponse {
     let mut body = Vec::new();
+    // The negotiated revision rides in the initialize result; store it with the
+    // session (bead oraclemcp-s693) so post-init requests can be held to the
+    // 2025-06-18 MCP-Protocol-Version header requirement when applicable.
+    let negotiated_version = response
+        .get("result")
+        .and_then(|result| result.get("protocolVersion"))
+        .and_then(Value::as_str)
+        .unwrap_or(PROTOCOL_VERSION)
+        .to_owned();
     let session_id = if method == Some("initialize") {
         write_sse_event(&mut body, None, Some("0"), Some(3000), Some(&Value::Null));
         write_sse_event(&mut body, None, None, None, Some(&response));
@@ -5412,7 +5512,11 @@ fn sse_response(
     ];
     if let Some(session_id) = session_id {
         if let Some(store) = &config.session_store {
-            store.insert(session_id.clone(), principal_key.to_owned());
+            store.insert(
+                session_id.clone(),
+                principal_key.to_owned(),
+                negotiated_version,
+            );
         }
         if let Some(store) = &config.result_store {
             store.ensure_session(&session_id);

@@ -150,8 +150,18 @@ covers the seq + content + `prev_hash` (catches in-place edits and reorders),
 and the keyed MAC over `entry_hash` (which a forger without the key cannot
 reproduce) catches a recompute-from-genesis forgery. The monotonic `seq`, not
 the wall clock, is the order key. `oraclemcp audit verify` re-walks and checks
-all three. Optional WORM/SIEM shipping (D2) makes tampering detectable at an
-independent destination ([ADR 0003](adr/0003-keyed-mac-audit-chain.md)).
+all three. **Tail truncation** (deleting the last N records — a valid prefix is
+itself a valid chain) is caught by the **head anchor sidecar**
+(`<audit path>.anchor`): a keyed-MAC-signed attestation of the durable chain
+head, atomically rewritten after every durable record fsync (record fsync
+FIRST, so the anchor can be *behind* after a crash — explainable — but never
+*ahead*); `audit verify` reports `TRUNCATED` when the chain ends before the
+anchor and fails closed on a rewritten/forged/corrupt anchor. Residual: an
+attacker who replays an *old* anchor together with the matching chain prefix
+(full-state rollback), or one who holds the signing key, is not locally
+detectable — optional WORM/SIEM shipping (D2) makes that tampering detectable
+at an independent destination
+([ADR 0003](adr/0003-keyed-mac-audit-chain.md)).
 
 *Evidence (green; CI):*
 - `crates/oraclemcp-audit/src/record.rs` tests (in-place edit detected;
@@ -159,6 +169,11 @@ independent destination ([ADR 0003](adr/0003-keyed-mac-audit-chain.md)).
   wrong key fails).
 - `crates/oraclemcp-audit/src/verify.rs` tests (hash-link / monotonic-seq /
   keyed-MAC verification; rotated keys verify end to end).
+- `crates/oraclemcp-audit/src/anchor.rs` tests (tail truncation detected;
+  anchor-behind crash window explainable; anchor rewrite without the key fails
+  the MAC; record-signature replay as anchor MAC is domain-separated away).
+- `crates/oraclemcp-audit/src/sink.rs` tests (durable appends maintain the
+  anchor; non-durable appends anchor only at flush — never anchor-ahead).
 - `crates/oraclemcp-audit/src/shipping.rs` tests (forwarded/WORM stream
   re-verifies; a forwarding failure never loses the local durable record; local
   fsync failure skips forwarding).

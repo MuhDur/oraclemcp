@@ -22,6 +22,36 @@ pub const PROTOCOL_VERSION: &str = "2025-11-25";
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
     &["2024-11-05", "2025-03-26", "2025-06-18", PROTOCOL_VERSION];
 
+/// The revision that introduced the `completions` server capability
+/// (2025-03-26 changelog: "Added completions capability"). Advertising it to
+/// an older-revision client would post-date that client's spec.
+pub const COMPLETIONS_CAPABILITY_SINCE: &str = "2025-03-26";
+
+/// The revision that made the `MCP-Protocol-Version` HTTP header mandatory on
+/// every post-initialize request (2025-06-18 transport changelog).
+pub const HTTP_PROTOCOL_VERSION_HEADER_REQUIRED_SINCE: &str = "2025-06-18";
+
+/// Negotiate the protocol revision for an `initialize` request: echo a
+/// supported requested version, otherwise offer the server's latest.
+#[must_use]
+pub fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    requested
+        .and_then(|requested| {
+            SUPPORTED_PROTOCOL_VERSIONS
+                .iter()
+                .find(|supported| **supported == requested)
+        })
+        .copied()
+        .unwrap_or(PROTOCOL_VERSION)
+}
+
+/// Whether a negotiated revision is at least `baseline`. MCP revisions are
+/// ISO dates, so lexicographic order IS chronological order.
+#[must_use]
+pub fn revision_at_least(negotiated: &str, baseline: &str) -> bool {
+    negotiated >= baseline
+}
+
 /// The operating-level view in the capability report (§6.6).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperatingLevelReport {

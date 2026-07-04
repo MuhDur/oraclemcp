@@ -303,6 +303,13 @@ pub struct OracleMcpServer {
     /// with the dispatcher so a long tool call can enqueue progress and a
     /// profile switch can signal the tool set changed.
     notifications: Arc<crate::notifications::NotificationHub>,
+    /// The stdio session's negotiated protocol revision (bead oraclemcp-s693).
+    /// stdio serves exactly one MCP session per process, so the negotiated
+    /// version lives on the server; HTTP sessions store theirs per session id
+    /// in the transport's `HttpSessionStore`. Set once by the first successful
+    /// `initialize`; a second stdio `initialize` is rejected (MCP lifecycle:
+    /// initialize happens exactly once per session).
+    stdio_negotiated: Arc<parking_lot::Mutex<Option<String>>>,
 }
 
 impl OracleMcpServer {
@@ -347,7 +354,16 @@ impl OracleMcpServer {
             exports,
             subscriptions: Arc::new(crate::subscriptions::SubscriptionHub::unsupported()),
             notifications: Arc::new(crate::notifications::NotificationHub::new()),
+            stdio_negotiated: Arc::new(parking_lot::Mutex::new(None)),
         }
+    }
+
+    /// The stdio session's negotiated protocol revision, once `initialize`
+    /// completed over stdio (bead oraclemcp-s693). `None` before initialize
+    /// and on HTTP-only servers.
+    #[must_use]
+    pub fn stdio_negotiated_protocol_version(&self) -> Option<String> {
+        self.stdio_negotiated.lock().clone()
     }
 
     /// The shared export registry (E3). Exposed so the binary wiring can hand
@@ -474,6 +490,11 @@ impl OracleMcpServer {
         R: Read,
         W: Write,
     {
+        // One stdio serve loop == one MCP session (bead oraclemcp-s693): reset
+        // the per-session lifecycle so a NEW connection (tests drive several
+        // per server object; production runs one per process) may initialize,
+        // while a second initialize WITHIN this session stays rejected.
+        *self.stdio_negotiated.lock() = None;
         let mut reader = BufReader::new(reader);
         let mut frame = Vec::new();
         loop {
@@ -520,17 +541,21 @@ impl OracleMcpServer {
     ///
     /// Version negotiation per the MCP lifecycle spec: when the client
     /// requested a protocol version the server supports, respond with that
-    /// same version; otherwise respond with the server's latest.
+    /// same version; otherwise respond with the server's latest. The served
+    /// capability object is degraded to the negotiated revision (bead
+    /// oraclemcp-s693) — capabilities that post-date the client's revision are
+    /// not advertised. Refusal-carrying result fields (`isError` +
+    /// `content[0].text`) are valid in EVERY revision and are never gated:
+    /// downgrading the protocol version can never bypass the guard.
     #[must_use]
     pub fn initialize_result_json(&self, client_protocol_version: Option<&str>) -> Value {
-        let negotiated = client_protocol_version
-            .filter(|requested| {
-                crate::capabilities::SUPPORTED_PROTOCOL_VERSIONS.contains(requested)
-            })
-            .unwrap_or(crate::capabilities::PROTOCOL_VERSION);
+        let negotiated = crate::capabilities::negotiate_protocol_version(client_protocol_version);
         json!({
             "protocolVersion": negotiated,
-            "capabilities": served_capabilities_json(self.subscriptions.supports_subscriptions()),
+            "capabilities": served_capabilities_json(
+                self.subscriptions.supports_subscriptions(),
+                negotiated,
+            ),
             "serverInfo": {
                 "name": "oraclemcp",
                 "version": self.version,
@@ -891,6 +916,30 @@ impl OracleMcpServer {
         let client_protocol_version = params
             .and_then(|params| params.get("protocolVersion"))
             .and_then(Value::as_str);
+        // Per-session lifecycle (bead oraclemcp-s693): stdio (auth is Some)
+        // serves exactly one MCP session per process, so a second successful
+        // `initialize` is a lifecycle violation — reject it and keep the
+        // originally negotiated version. HTTP passes `auth: None`; its
+        // sessions are minted per initialize by the transport, which stores
+        // the negotiated version in its session store and rejects re-init on
+        // an existing session there.
+        if auth.is_some() {
+            let mut negotiated_slot = self.stdio_negotiated.lock();
+            if let Some(negotiated) = negotiated_slot.as_deref() {
+                return jsonrpc_error(
+                    id,
+                    JSONRPC_INVALID_REQUEST,
+                    format!(
+                        "initialize was already completed for this session (negotiated \
+                         protocol version {negotiated}); the MCP lifecycle initializes a \
+                         session exactly once — open a new connection to renegotiate"
+                    ),
+                );
+            }
+            *negotiated_slot = Some(
+                crate::capabilities::negotiate_protocol_version(client_protocol_version).to_owned(),
+            );
+        }
         jsonrpc_result(id, self.initialize_result_json(client_protocol_version))
     }
 
@@ -1651,7 +1700,7 @@ fn cursor_from_params(params: Option<&Value>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn served_capabilities_json(subscribe_supported: bool) -> Value {
+fn served_capabilities_json(subscribe_supported: bool, negotiated_version: &str) -> Value {
     // Keep this in lockstep with `handle_jsonrpc_request_with_context`.
     // Resource/prompt listChanged stays false (those catalogs are static), but
     // the served arms below ARE all wired now.
@@ -1665,8 +1714,12 @@ fn served_capabilities_json(subscribe_supported: bool) -> Value {
     // served tool set, so the client re-fetches `tools/list`.
     //
     // E7: `completions: {}` — `completion/complete` is served (owner→type→object
-    // autocomplete for the dictionary tools), so it is now advertised.
-    json!({
+    // autocomplete for the dictionary tools), so it is advertised — but only to
+    // clients whose negotiated revision knows the capability (added in the
+    // 2025-03-26 changelog; bead oraclemcp-s693). Only clearly-versioned
+    // advertisements are gated; refusal-carrying fields (`isError` +
+    // `content[0].text`) are valid in every revision and never depend on this.
+    let mut capabilities = json!({
         "tools": {
             "listChanged": true,
         },
@@ -1677,8 +1730,15 @@ fn served_capabilities_json(subscribe_supported: bool) -> Value {
         "prompts": {
             "listChanged": false,
         },
-        "completions": {},
-    })
+    });
+    if crate::capabilities::revision_at_least(
+        negotiated_version,
+        crate::capabilities::COMPLETIONS_CAPABILITY_SINCE,
+    ) && let Value::Object(map) = &mut capabilities
+    {
+        map.insert("completions".to_owned(), json!({}));
+    }
+    capabilities
 }
 
 fn served_resources_json() -> Vec<Value> {
@@ -2520,11 +2580,148 @@ mod tests {
             run_stdio_raw_with_auth(&s, initialize_frame(None), &StdioAuthPolicy::Disabled);
         assert!(missing[0].get("result").is_some());
 
+        // A separate serve loop is a separate stdio session (oraclemcp-s693),
+        // so this second initialize on the same server object is allowed.
         let any = run_stdio_raw_with_auth(
             &s,
             initialize_frame(Some("whatever")),
             &StdioAuthPolicy::Disabled,
         );
         assert!(any[0].get("result").is_some());
+    }
+
+    /// Bead oraclemcp-s693 — MCP lifecycle: a stdio session (one serve loop)
+    /// initializes exactly once; a second initialize WITHIN the session is
+    /// rejected with a structured JSON-RPC error and the originally
+    /// negotiated version stays; a NEW serve loop (new session) may
+    /// renegotiate.
+    #[test]
+    fn stdio_second_initialize_is_rejected_within_a_session() {
+        let s = server();
+        let mut input = stdio_frame(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "protocolVersion": "2025-03-26" },
+        }));
+        input.extend(stdio_frame(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "initialize",
+            "params": { "protocolVersion": "2025-11-25" },
+        })));
+        let replies = run_stdio_raw_with_auth(&s, input, &StdioAuthPolicy::Disabled);
+
+        let first = replies
+            .iter()
+            .find(|reply| reply["id"] == json!(1))
+            .expect("first initialize reply");
+        assert_eq!(first["result"]["protocolVersion"], json!("2025-03-26"));
+        assert_eq!(
+            s.stdio_negotiated_protocol_version().as_deref(),
+            Some("2025-03-26"),
+            "negotiated version is stored per session"
+        );
+
+        let second = replies
+            .iter()
+            .find(|reply| reply["id"] == json!(2))
+            .expect("second initialize reply");
+        assert!(
+            second.get("result").is_none(),
+            "re-initialize must not renegotiate: {second}"
+        );
+        assert_eq!(second["error"]["code"], json!(JSONRPC_INVALID_REQUEST));
+        let message = second["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("already completed"),
+            "clear lifecycle error, got {message:?}"
+        );
+        assert_eq!(
+            s.stdio_negotiated_protocol_version().as_deref(),
+            Some("2025-03-26"),
+            "a rejected re-initialize must not swap the stored version"
+        );
+
+        // A NEW serve loop is a NEW session: initialize succeeds again.
+        let fresh = run_stdio_raw_with_auth(
+            &s,
+            stdio_frame(&json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "initialize",
+                "params": { "protocolVersion": "2025-11-25" },
+            })),
+            &StdioAuthPolicy::Disabled,
+        );
+        assert_eq!(fresh[0]["result"]["protocolVersion"], json!("2025-11-25"));
+    }
+
+    /// Bead oraclemcp-s693 — capability degradation: the completions
+    /// capability (added in the 2025-03-26 revision) is not advertised to a
+    /// 2024-11-05 client, while revision-agnostic capabilities stay served.
+    #[test]
+    fn capabilities_degrade_to_the_negotiated_revision() {
+        let s = server();
+        let old = s.initialize_result_json(Some("2024-11-05"));
+        assert_eq!(old["protocolVersion"], json!("2024-11-05"));
+        assert!(
+            old["capabilities"].get("completions").is_none(),
+            "completions post-dates 2024-11-05 and must not be advertised"
+        );
+        assert!(old["capabilities"]["tools"].is_object());
+        assert!(old["capabilities"]["resources"].is_object());
+        assert!(old["capabilities"]["prompts"].is_object());
+
+        for revision in ["2025-03-26", "2025-06-18", "2025-11-25"] {
+            let info = s.initialize_result_json(Some(revision));
+            assert_eq!(info["protocolVersion"], json!(revision));
+            assert!(
+                info["capabilities"]["completions"].is_object(),
+                "completions IS advertised at {revision}"
+            );
+        }
+    }
+
+    /// Bead oraclemcp-s693 — the audited no-downgrade property: refusals ride
+    /// `isError: true` + `content[0].text` in EVERY revision, so pinning an
+    /// old protocol version can never strip the refusal envelope.
+    #[test]
+    fn refusal_envelope_is_identical_across_negotiated_revisions() {
+        let mut shapes = Vec::new();
+        for revision in ["2024-11-05", "2025-11-25"] {
+            // `boom` makes the EchoDispatcher return an error envelope — the
+            // same shape a guard refusal rides.
+            let s = server_with_tools(&["boom"]);
+            let mut input = stdio_frame(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "protocolVersion": revision },
+            }));
+            input.extend(stdio_frame(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": { "name": "boom", "arguments": {} },
+            })));
+            let replies = run_stdio_raw_with_auth(&s, input, &StdioAuthPolicy::Disabled);
+            let refusal = replies
+                .iter()
+                .find(|reply| reply["id"] == json!(2))
+                .expect("refusal reply");
+            assert_eq!(refusal["result"]["isError"], json!(true));
+            assert!(
+                refusal["result"]["content"][0]["text"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()),
+                "refusal text present at {revision}"
+            );
+            shapes.push(refusal["result"].clone());
+        }
+        assert_eq!(
+            shapes[0], shapes[1],
+            "refusal envelope must be byte-identical regardless of the negotiated revision"
+        );
     }
 }
