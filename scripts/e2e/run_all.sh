@@ -41,6 +41,7 @@ scenarios=(
   scripts/e2e/live_oracle.sh
   scripts/e2e/load_soak.sh
   scripts/e2e/live_xe_headline.sh
+  scripts/e2e/oracle_version_matrix.sh
   scripts/e2e/clean_machine_e2e.sh
 )
 

@@ -385,11 +385,97 @@ pub type oraclemcp_db::ChangeKind::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ChangeKind where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ChangeKind where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::ChangeKind::vzip(self) -> V
+#[non_exhaustive] pub enum oraclemcp_db::ConnectFailureKind
+pub oraclemcp_db::ConnectFailureKind::ConnectResendLoop
+pub oraclemcp_db::ConnectFailureKind::ConnectResendLoop::rounds: u8
+pub oraclemcp_db::ConnectFailureKind::FastAuthNotAdvertised
+pub oraclemcp_db::ConnectFailureKind::HandshakeProtocol
+pub oraclemcp_db::ConnectFailureKind::ListenerRedirectUnsupported
+pub oraclemcp_db::ConnectFailureKind::ListenerRefused
+pub oraclemcp_db::ConnectFailureKind::ListenerRefused::err_code: core::option::Option<u32>
+pub oraclemcp_db::ConnectFailureKind::ServerGenerationUnsupported
+pub oraclemcp_db::ConnectFailureKind::ServerGenerationUnsupported::tns_version: core::option::Option<u16>
+pub oraclemcp_db::ConnectFailureKind::UnexpectedTnsPacket
+pub oraclemcp_db::ConnectFailureKind::UnexpectedTnsPacket::packet_type: u8
+pub oraclemcp_db::ConnectFailureKind::UnsupportedWireFeature
+pub oraclemcp_db::ConnectFailureKind::UnsupportedWireFeature::feature: alloc::string::String
+impl oraclemcp_db::ConnectFailureKind
+pub fn oraclemcp_db::ConnectFailureKind::describe(&self) -> alloc::string::String
+pub const fn oraclemcp_db::ConnectFailureKind::label(&self) -> &'static str
+pub const fn oraclemcp_db::ConnectFailureKind::ora_code(&self) -> core::option::Option<i32>
+impl core::clone::Clone for oraclemcp_db::ConnectFailureKind
+pub fn oraclemcp_db::ConnectFailureKind::clone(&self) -> oraclemcp_db::ConnectFailureKind
+impl core::cmp::Eq for oraclemcp_db::ConnectFailureKind
+impl core::cmp::PartialEq for oraclemcp_db::ConnectFailureKind
+pub fn oraclemcp_db::ConnectFailureKind::eq(&self, &oraclemcp_db::ConnectFailureKind) -> bool
+impl core::fmt::Debug for oraclemcp_db::ConnectFailureKind
+pub fn oraclemcp_db::ConnectFailureKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::ConnectFailureKind
+impl serde_core::ser::Serialize for oraclemcp_db::ConnectFailureKind
+pub fn oraclemcp_db::ConnectFailureKind::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::ConnectFailureKind
+pub fn oraclemcp_db::ConnectFailureKind::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::ConnectFailureKind
+impl core::marker::Send for oraclemcp_db::ConnectFailureKind
+impl core::marker::Sync for oraclemcp_db::ConnectFailureKind
+impl core::marker::Unpin for oraclemcp_db::ConnectFailureKind
+impl core::marker::UnsafeUnpin for oraclemcp_db::ConnectFailureKind
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::ConnectFailureKind
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::ConnectFailureKind
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::ConnectFailureKind where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::ConnectFailureKind where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::ConnectFailureKind where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::ConnectFailureKind::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::ConnectFailureKind where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::ConnectFailureKind where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::ConnectFailureKind where U: core::convert::From<T>
+pub fn oraclemcp_db::ConnectFailureKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::ConnectFailureKind where U: core::convert::Into<T>
+pub type oraclemcp_db::ConnectFailureKind::Error = core::convert::Infallible
+pub fn oraclemcp_db::ConnectFailureKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::ConnectFailureKind where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::ConnectFailureKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::ConnectFailureKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::ConnectFailureKind where T: core::clone::Clone
+pub type oraclemcp_db::ConnectFailureKind::Owned = T
+pub fn oraclemcp_db::ConnectFailureKind::clone_into(&self, &mut T)
+pub fn oraclemcp_db::ConnectFailureKind::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::ConnectFailureKind
+impl<T> core::any::Any for oraclemcp_db::ConnectFailureKind where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::ConnectFailureKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::ConnectFailureKind where T: ?core::marker::Sized
+pub fn oraclemcp_db::ConnectFailureKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::ConnectFailureKind where T: ?core::marker::Sized
+pub fn oraclemcp_db::ConnectFailureKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::ConnectFailureKind where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::ConnectFailureKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::ConnectFailureKind
+pub fn oraclemcp_db::ConnectFailureKind::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::ConnectFailureKind
+pub type oraclemcp_db::ConnectFailureKind::Init = T
+pub const oraclemcp_db::ConnectFailureKind::ALIGN: usize
+pub unsafe fn oraclemcp_db::ConnectFailureKind::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::ConnectFailureKind::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::ConnectFailureKind::drop(usize)
+pub unsafe fn oraclemcp_db::ConnectFailureKind::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::ConnectFailureKind
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ConnectFailureKind
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::ConnectFailureKind where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ConnectFailureKind
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ConnectFailureKind
+impl<T> typenum::type_operators::Same for oraclemcp_db::ConnectFailureKind
+pub type oraclemcp_db::ConnectFailureKind::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ConnectFailureKind where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ConnectFailureKind where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::ConnectFailureKind::vzip(self) -> V
 #[non_exhaustive] pub enum oraclemcp_db::DbError
 pub oraclemcp_db::DbError::BackendNotCompiled
 pub oraclemcp_db::DbError::BackendNotCompiled::backend: oraclemcp_db::OracleBackend
 pub oraclemcp_db::DbError::Cancelled(alloc::string::String)
 pub oraclemcp_db::DbError::Connect(alloc::string::String)
+pub oraclemcp_db::DbError::ConnectHandshake
+pub oraclemcp_db::DbError::ConnectHandshake::kind: oraclemcp_db::ConnectFailureKind
+pub oraclemcp_db::DbError::ConnectHandshake::message: alloc::string::String
 pub oraclemcp_db::DbError::Execute(alloc::string::String)
 pub oraclemcp_db::DbError::Internal(alloc::string::String)
 pub oraclemcp_db::DbError::LeaseNotFound(alloc::string::String)
@@ -5865,6 +5951,7 @@ pub type oraclemcp_db::WritePosture::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::WritePosture where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::WritePosture where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::WritePosture::vzip(self) -> V
+pub const oraclemcp_db::CONNECT_TRACE_NEXT_STEP: &str
 pub const oraclemcp_db::DEFAULT_ORACLE_CALL_TIMEOUT: core::time::Duration
 pub const oraclemcp_db::ORACLE_CELL_STRUCTURED_CONTRACT_VERSION: u16
 pub trait oraclemcp_db::IamTokenSource

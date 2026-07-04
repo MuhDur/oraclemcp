@@ -1236,9 +1236,69 @@ fn wallet_connectivity_fix(wallet: &DoctorWalletDiagnostic) -> &'static str {
     }
 }
 
-fn connectivity_fix(error: &str) -> &'static str {
+/// The doctor-facing rendering of the driver handshake-trace instruction:
+/// the concrete command an operator can rerun for protocol-level triage.
+const DOCTOR_TRACE_FIX: &str = "capture a driver handshake trace for protocol-level triage: \
+     ORACLEDB_TRACE_CONNECT=1 oraclemcp --json doctor --online --profile <profile> \
+     (the trace prints to stderr)";
+
+/// Fix guidance for the structured connect/handshake failure classes minted
+/// by the driver-seam adapter (`connect handshake failed [label]: …`).
+/// Returns `None` when the error carries no handshake class token.
+fn handshake_connectivity_fix(lower: &str) -> Option<String> {
+    let fix = if lower.contains("[unexpected-tns-packet]") {
+        format!(
+            "verify the host:port points at an Oracle listener (not another service) of a \
+             supported generation; then {DOCTOR_TRACE_FIX}"
+        )
+    } else if lower.contains("[connect-resend-loop]") {
+        format!(
+            "check the listener log for redirect loops and retry; if it persists, \
+             {DOCTOR_TRACE_FIX}"
+        )
+    } else if lower.contains("[fast-auth-not-advertised]") {
+        "token/IAM authentication requires a server that advertises fast auth (Oracle 23ai or \
+         newer); use username/password credential_ref auth for this profile, or point token \
+         auth at a 23ai+ service"
+            .to_owned()
+    } else if lower.contains("[unsupported-wire-feature]") {
+        "the server demands a wire feature this thin build does not support (e.g. Native \
+         Network Encryption); set SQLNET.ENCRYPTION_SERVER / SQLNET.CRYPTO_CHECKSUM_SERVER to \
+         `accepted` on the server, or use TCPS/TLS transport instead"
+            .to_owned()
+    } else if lower.contains("[listener-refused]") {
+        "the listener actively refused the connection; verify the service name is registered \
+         (`lsnrctl services` on the database host) — ERR=12514 means the service name in the \
+         connect string is wrong or the database has not registered it yet"
+            .to_owned()
+    } else if lower.contains("[listener-redirect-unsupported]") {
+        format!(
+            "the listener issued a TNS redirect this thin driver cannot follow; connect \
+             directly to the redirect target (dedicated handler host:port) instead of a \
+             CMAN/shared-server endpoint; {DOCTOR_TRACE_FIX}"
+        )
+    } else if lower.contains("[server-generation-unsupported]") {
+        "the server's TNS protocol generation is below the driver minimum (Oracle 12.1); this \
+         thin driver cannot connect to older servers"
+            .to_owned()
+    } else if lower.contains("[handshake-protocol-error]") {
+        format!(
+            "the TNS/TTC connect handshake failed at the wire-protocol layer; verify the \
+             endpoint is an Oracle listener of a supported generation (12.1+); then \
+             {DOCTOR_TRACE_FIX}"
+        )
+    } else {
+        return None;
+    };
+    Some(fix)
+}
+
+fn connectivity_fix(error: &str) -> String {
     let lower = error.to_ascii_lowercase();
-    if let Some(wallet) = classify_wallet_error(error) {
+    if let Some(fix) = handshake_connectivity_fix(&lower) {
+        return fix;
+    }
+    let fix = if let Some(wallet) = classify_wallet_error(error) {
         wallet_connectivity_fix(&wallet)
     } else if lower.contains("no connection profiles are configured") {
         "run `oraclemcp setup --discover` to auto-discover profiles from tnsnames.ora (the zero-config fast path), or `oraclemcp --json setup --write --profile db_ro` then export ORACLE_APP_PASSWORD for the generated credential_ref and rerun `oraclemcp --json doctor --profile db_ro`"
@@ -1276,7 +1336,8 @@ fn connectivity_fix(error: &str) -> &'static str {
         "verify the wallet directory, cwallet.sso/tnsnames.ora presence, TCPS alias, and file permissions"
     } else {
         "verify the connect string, credentials, and listener reachability"
-    }
+    };
+    fix.to_owned()
 }
 
 fn connectivity_failure_class(error: &str) -> ErrorClass {
@@ -1294,6 +1355,20 @@ fn connectivity_failure_class(error: &str) -> ErrorClass {
             | DoctorWalletErrorKind::NoCertificates
             | DoctorWalletErrorKind::Sso => ErrorClass::ConnectionFailed,
         }
+    } else if lower.contains("[fast-auth-not-advertised]")
+        || lower.contains("[unsupported-wire-feature]")
+        || lower.contains("[server-generation-unsupported]")
+    {
+        // Structured handshake classes where retrying cannot help: the
+        // profile or the server generation has to change.
+        ErrorClass::InvalidArguments
+    } else if lower.contains("[unexpected-tns-packet]")
+        || lower.contains("[connect-resend-loop]")
+        || lower.contains("[listener-refused]")
+        || lower.contains("[listener-redirect-unsupported]")
+        || lower.contains("[handshake-protocol-error]")
+    {
+        ErrorClass::ConnectionFailed
     } else if lower.contains("config load failed")
         || lower.contains("connection profile")
         || lower.contains("default_profile")
@@ -2562,6 +2637,92 @@ mod tests {
                 .unwrap()
                 .contains("username plus credential_ref")
         );
+    }
+
+    /// bhw6.2 — a simulated driver handshake failure (the structured
+    /// `connect handshake failed [label]: …` envelope minted by the
+    /// driver-seam adapter) surfaces the same plain-language guidance in the
+    /// doctor's `fix:` line, including how to capture a handshake trace with
+    /// ORACLEDB_TRACE_CONNECT=1. No raw driver string without next actions.
+    #[test]
+    fn simulated_handshake_failure_gets_actionable_fix_with_trace_guidance() {
+        let cases: [(&str, &[&str], oraclemcp_error::ErrorClass); 8] = [
+            (
+                "connect handshake failed [unexpected-tns-packet]: the server replied with \
+                 unexpected low-level TNS packet type 11 during the connect handshake \
+                 (network layer, before authentication): unexpected TNS packet type 11 (Resend)",
+                &["Oracle listener", "ORACLEDB_TRACE_CONNECT=1"],
+                oraclemcp_error::ErrorClass::ConnectionFailed,
+            ),
+            (
+                "connect handshake failed [connect-resend-loop]: the listener kept demanding \
+                 CONNECT resends (5 rounds): server kept requesting CONNECT resend",
+                &["listener log", "ORACLEDB_TRACE_CONNECT=1"],
+                oraclemcp_error::ErrorClass::ConnectionFailed,
+            ),
+            (
+                "connect handshake failed [fast-auth-not-advertised]: token/IAM authentication \
+                 needs a server that advertises fast authentication: server did not advertise \
+                 fast authentication",
+                &["23ai", "credential_ref"],
+                oraclemcp_error::ErrorClass::InvalidArguments,
+            ),
+            (
+                "connect handshake failed [unsupported-wire-feature]: the server requires \
+                 `Native Network Encryption and Data Integrity`: unsupported feature",
+                &["SQLNET.ENCRYPTION_SERVER", "TCPS"],
+                oraclemcp_error::ErrorClass::InvalidArguments,
+            ),
+            (
+                "connect handshake failed [listener-refused]: the listener refused the \
+                 connection (ERR=12514): it does not currently know the service name in the \
+                 connect string: (DESCRIPTION=(ERR=12514))",
+                &["lsnrctl services", "ERR=12514"],
+                oraclemcp_error::ErrorClass::ConnectionFailed,
+            ),
+            (
+                "connect handshake failed [listener-redirect-unsupported]: the listener \
+                 redirected the connection to another endpoint: listener redirected this \
+                 connection",
+                &["connect directly", "ORACLEDB_TRACE_CONNECT=1"],
+                oraclemcp_error::ErrorClass::ConnectionFailed,
+            ),
+            (
+                "connect handshake failed [server-generation-unsupported]: the server \
+                 negotiated TNS protocol version 298, below the minimum this thin driver \
+                 supports (300 = Oracle 12.1): unsupported TNS version 298",
+                &["Oracle 12.1"],
+                oraclemcp_error::ErrorClass::InvalidArguments,
+            ),
+            (
+                "connect handshake failed [handshake-protocol-error]: the TNS/TTC connect \
+                 handshake failed at the protocol layer (wire framing/decode, not SQL): \
+                 unknown TTC message type 11 at position 4",
+                &["wire-protocol layer", "ORACLEDB_TRACE_CONNECT=1"],
+                oraclemcp_error::ErrorClass::ConnectionFailed,
+            ),
+        ];
+        for (error, expected_fix_fragments, expected_class) in cases {
+            let ctx = DoctorContext {
+                connection_error: Some(error.to_owned()),
+                ..DoctorContext::default()
+            };
+            let report = doctor(&ctx);
+            let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
+            assert_eq!(connectivity.status, CheckStatus::Fail, "{error}");
+            assert_eq!(
+                connectivity.failure_class,
+                Some(expected_class),
+                "failure class for: {error}"
+            );
+            let fix = connectivity.fix.as_deref().unwrap_or_default();
+            for fragment in expected_fix_fragments {
+                assert!(
+                    fix.contains(fragment),
+                    "fix for `{error}` must mention `{fragment}`, got: {fix}"
+                );
+            }
+        }
     }
 
     /// A5 (R4 acceptance) — the doctor distinguishes driver-unsupported auth

@@ -38,6 +38,41 @@ evidence is the CI run for that commit (linked below at release time).
 All twelve run on the pinned nightly (every toolchain-bearing job derives its
 toolchain from `env.RUST_TOOLCHAIN` in `ci.yml`).
 
+### Required operator-run gate: Oracle version matrix (pre-23ai coverage)
+
+CI has no live databases, so this gate is run by the release operator on the
+frozen RC — it is **required**, not advisory. A release must not ship with
+live verification that has only ever seen Oracle 23ai: the 0.6.x field test
+proved a connect path that could not reach *any* pre-23ai server can pass
+every offline gate and first fail at a customer install.
+
+| Gate | Command | Where |
+| --- | --- | --- |
+| Oracle version matrix (XE 18 + XE 21 + FREE 23ai, full operating-level ladder over MCP stdio) | `bash scripts/e2e/oracle_version_matrix.sh --log` | operator-run, lab lanes |
+
+Bring up the three throwaway lab lanes (any local ports; the defaults below
+match the script), export the opt-in env, and require **all three lanes
+green** — `free23` is the regression bar, `xe18`/`xe21` are the pre-23ai
+coverage this gate exists for:
+
+```sh
+docker run -d --name oracle-xe18 -p 1518:1521 -e ORACLE_PASSWORD=<pw> gvenzl/oracle-xe:18-slim
+docker run -d --name oracle-xe21 -p 1520:1521 -e ORACLE_PASSWORD=<pw> gvenzl/oracle-xe:21-slim
+docker run -d --name oracle-free -p 1522:1521 -e ORACLE_PASSWORD=<pw> gvenzl/oracle-free:23-slim
+
+ORACLEMCP_LIVE_XE=1 \
+ORACLE_MATRIX_XE18_USER=<lab-user>  ORACLE_MATRIX_XE18_PASSWORD=<lab-pw> \
+ORACLE_MATRIX_XE21_USER=<lab-user>  ORACLE_MATRIX_XE21_PASSWORD=<lab-pw> \
+ORACLE_MATRIX_FREE23_USER=<lab-user> ORACLE_MATRIX_FREE23_PASSWORD=<lab-pw> \
+bash scripts/e2e/oracle_version_matrix.sh --log
+```
+
+Per lane it drives the real binary end-to-end (doctor `--online`, READ_ONLY
+row-value asserts + refusal, READ_WRITE preview→grant→rollback/commit, governed
+DDL create/drop, drop back to READ_ONLY, audit hash-chain verify); details in
+[`operations.md`](operations.md) §5.7.1. An optional genuine-19c lane is
+documented there as an operator-run extra, not a gate requirement.
+
 ### Advisory (not release-blocking)
 
 These jobs run but do **not** gate the tag; a red square is a signal to
@@ -151,6 +186,8 @@ Required gates green on the RC commit:
 - [ ] release-acceptance (B.12: DL-9 + ERG-10 + DOC-10 + E0 + feature-powerset + arch-fitness)
 - [ ] release-metadata (release_preflight.sh)
 - [ ] rollback dry-run (scripts/e2e/release_rollback_dry_run.sh --log --dry-run)
+- [ ] oracle-version-matrix (operator-run: scripts/e2e/oracle_version_matrix.sh --log,
+      all three lanes xe18/xe21/free23 green)
 ```
 
 > **This checklist proves the gates are _green_; it does not by itself qualify

@@ -45,6 +45,8 @@ required=(
   scripts/e2e/live_oracle.sh
   scripts/e2e/load_soak.sh
   scripts/e2e/live_xe_headline.sh
+  scripts/e2e/oracle_version_matrix.sh
+  scripts/e2e/oracle_ladder_session.py
   scripts/e2e/clean_machine_e2e.sh
   scripts/e2e/COVERAGE.md
   scripts/e2e/PROVENANCE.md
@@ -136,6 +138,12 @@ if ! grep -F "G6 live-XE headline" scripts/e2e/COVERAGE.md >/dev/null; then
 fi
 if ! grep -F "scripts/e2e/live_xe_headline.sh" scripts/e2e/PROVENANCE.md >/dev/null; then
   e2e_finish_fail "PROVENANCE.md must document the G6 live-XE headline command"
+fi
+if ! grep -F "Oracle version matrix ladder" scripts/e2e/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "COVERAGE.md must account for the Oracle version-matrix ladder gate"
+fi
+if ! grep -F "scripts/e2e/oracle_version_matrix.sh" scripts/e2e/PROVENANCE.md >/dev/null; then
+  e2e_finish_fail "PROVENANCE.md must document the Oracle version-matrix command"
 fi
 if ! grep -F "H5 clean-machine e2e" scripts/e2e/COVERAGE.md >/dev/null; then
   e2e_finish_fail "COVERAGE.md must account for the H5 clean-machine e2e harness"

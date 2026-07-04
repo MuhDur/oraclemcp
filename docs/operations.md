@@ -908,6 +908,71 @@ on top of the connection env) and skips with a clear message when it is unset.
 Latency thresholds and the run-recording table are in
 [`performance-footprint.md`](performance-footprint.md).
 
+### 5.7.1 Oracle version matrix (pre-23ai coverage — required release gate)
+
+A single 23ai test lane is not enough: the 0.6.x field test shipped a driver
+connect path that worked against 23ai and failed against every older server.
+`scripts/e2e/oracle_version_matrix.sh` closes that gap by running the **full
+operating-level ladder end-to-end over MCP stdio** against three throwaway lab
+lanes — Oracle XE 18, XE 21, and FREE 23ai (`free23` is the regression bar).
+It is a **required** item on the [release checklist](release-checklist.md)
+(operator-run; CI has no live databases).
+
+Per lane, against the real binary with a lane-scoped `max_level = "DDL"` lab
+profile and an isolated `XDG_STATE_HOME`:
+
+1. `--json doctor --online --profile <lane>` — connectivity green;
+2. READ_ONLY — `oracle_query` row-VALUE assertions (per-lane `v$version`
+   banner match, arithmetic), and an INSERT refused with the structured
+   `OPERATING_LEVEL_TOO_LOW` envelope;
+3. READ_WRITE — `oracle_preview_sql` verdict → `oracle_set_session_level`
+   preview → confirmation grant → elevation; `oracle_execute` without commit
+   proves rollback-by-default (row absent), then preview → grant →
+   `commit=true` proves persistence (row counts asserted via `oracle_query`);
+4. DDL — governed `CREATE TABLE` / `DROP TABLE` through the
+   preview → confirmation-grant → execute gate, existence verified via
+   `oracle_describe` + `oracle_query` (throwaway `E2E_LADDER_<pid>` names,
+   cleaned up through the same governed path);
+5. drop back to READ_ONLY (`action=drop`) and prove writes refuse again;
+6. audit evidence — the signed hash-chain in the run's isolated state dir
+   holds records for every privileged step, re-verified with
+   `oraclemcp audit verify`.
+
+```sh
+# Throwaway lab lanes (distinct host ports, mirroring the driver repo matrix):
+docker run -d --name oracle-xe18 -p 1518:1521 -e ORACLE_PASSWORD=<pw> gvenzl/oracle-xe:18-slim
+docker run -d --name oracle-xe21 -p 1520:1521 -e ORACLE_PASSWORD=<pw> gvenzl/oracle-xe:21-slim
+docker run -d --name oracle-free -p 1522:1521 -e ORACLE_PASSWORD=<pw> gvenzl/oracle-free:23-slim
+
+# The lane DB user needs CREATE TABLE in its own schema (gvenzl's APP_USER is fine).
+ORACLEMCP_LIVE_XE=1 \
+ORACLE_MATRIX_XE18_USER=<lab-user>  ORACLE_MATRIX_XE18_PASSWORD=<lab-pw> \
+ORACLE_MATRIX_XE21_USER=<lab-user>  ORACLE_MATRIX_XE21_PASSWORD=<lab-pw> \
+ORACLE_MATRIX_FREE23_USER=<lab-user> ORACLE_MATRIX_FREE23_PASSWORD=<lab-pw> \
+bash scripts/e2e/oracle_version_matrix.sh --log
+```
+
+`ORACLE_MATRIX_<LANE>_DSN` overrides the default `localhost` ports and
+`--lane xe18|xe21|free23` runs a subset while debugging (the release gate
+requires all three green). The script refuses production-looking DSNs/users,
+keeps credentials out of the generated profile file (`credential_ref`
+indirection), and writes per-step JSON evidence plus the doctor/audit JSON
+under `target/e2e/oracle_version_matrix/<run>/<lane>/`.
+
+**Optional genuine-19c lane (operator-run extra, not a gate requirement).**
+The gvenzl matrix has no 19c image, but Oracle publishes a full EE image on
+the Oracle Container Registry, free for dev/test after accepting the terms
+with an OTN (oracle.com) login: sign in at `container-registry.oracle.com`,
+accept the Database repository terms, then
+`docker login container-registry.oracle.com` and run e.g.
+`container-registry.oracle.com/database/enterprise:19.19.0.0` (or the current
+19c tag) with a PDB service, create a lab user with `CREATE SESSION` +
+`CREATE TABLE` + quota, and point a lane at it, e.g.
+`ORACLE_MATRIX_XE18_DSN=localhost:<port>/<pdb-service>` with an adjusted
+`ORACLE_MATRIX_XE18_BANNER_REGEX='Oracle Database 19c'` (the lane slot names
+are fixed; the endpoint is yours). Note the EE image is large (multi-GB) and
+takes several minutes to initialize on first start.
+
 ---
 
 ## 6. Verifying release artifacts (SBOM, provenance, signatures)

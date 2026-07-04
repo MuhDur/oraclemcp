@@ -44,6 +44,149 @@ impl std::fmt::Display for QuarantineOutcome {
     }
 }
 
+/// Structured classification of a driver connect/handshake failure.
+///
+/// Built **only** inside the driver-seam adapter (`connection.rs`), which is
+/// the single place allowed to inspect the driver's error variants. Each kind
+/// carries enough context to render a plain-language message plus concrete
+/// `next_steps` — no raw driver string is ever surfaced without guidance.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+#[non_exhaustive]
+pub enum ConnectFailureKind {
+    /// The server replied with an unexpected low-level TNS packet during the
+    /// connect handshake (network layer, before any SQL).
+    UnexpectedTnsPacket {
+        /// The raw TNS packet type byte the server sent.
+        packet_type: u8,
+    },
+    /// The listener kept demanding CONNECT resends and the driver gave up.
+    ConnectResendLoop {
+        /// How many resend rounds were attempted before giving up.
+        rounds: u8,
+    },
+    /// Token/IAM authentication was requested but the server never advertised
+    /// fast authentication (pre-23ai servers do not).
+    FastAuthNotAdvertised,
+    /// The server requires or negotiated a wire feature this pure-Rust thin
+    /// build does not support (e.g. Native Network Encryption, pipelining).
+    UnsupportedWireFeature {
+        /// The feature named by the driver.
+        feature: String,
+    },
+    /// The listener actively refused the connection with a TNS refuse packet.
+    ListenerRefused {
+        /// The `ERR=` code extracted from the refuse payload, when present.
+        err_code: Option<u32>,
+    },
+    /// The listener redirected the connection; the thin driver does not
+    /// follow TNS redirects.
+    ListenerRedirectUnsupported,
+    /// The server negotiated a TNS protocol generation below the thin
+    /// driver's supported floor.
+    ServerGenerationUnsupported {
+        /// The TNS version the server offered, when known.
+        tns_version: Option<u16>,
+    },
+    /// A connect-phase protocol failure with no more specific classification
+    /// (framing/decode errors on the TNS/TTC layer during handshake).
+    HandshakeProtocol,
+}
+
+impl ConnectFailureKind {
+    /// Stable, grep-able class token, rendered as `[label]` in messages so
+    /// operators, doctor, and log pipelines can match it without parsing
+    /// free-form prose.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            ConnectFailureKind::UnexpectedTnsPacket { .. } => "unexpected-tns-packet",
+            ConnectFailureKind::ConnectResendLoop { .. } => "connect-resend-loop",
+            ConnectFailureKind::FastAuthNotAdvertised => "fast-auth-not-advertised",
+            ConnectFailureKind::UnsupportedWireFeature { .. } => "unsupported-wire-feature",
+            ConnectFailureKind::ListenerRefused { .. } => "listener-refused",
+            ConnectFailureKind::ListenerRedirectUnsupported => "listener-redirect-unsupported",
+            ConnectFailureKind::ServerGenerationUnsupported { .. } => {
+                "server-generation-unsupported"
+            }
+            ConnectFailureKind::HandshakeProtocol => "handshake-protocol-error",
+        }
+    }
+
+    /// Plain-language interpretation of the failure, naming the protocol
+    /// phase honestly (the field bug this fixes: a network-layer TNS packet
+    /// was misreported under an application-layer TTC name).
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            ConnectFailureKind::UnexpectedTnsPacket { packet_type } => format!(
+                "the server replied with unexpected low-level TNS packet type {packet_type} \
+                 during the connect handshake (network layer, before authentication) — the \
+                 endpoint is not an Oracle listener, or speaks a protocol generation this \
+                 driver does not recognise"
+            ),
+            ConnectFailureKind::ConnectResendLoop { rounds } => format!(
+                "the listener kept demanding CONNECT resends ({rounds} rounds) and the driver \
+                 gave up — usually a listener redirect loop or connect-data size problem"
+            ),
+            ConnectFailureKind::FastAuthNotAdvertised => "token/IAM authentication needs a \
+                 server that advertises fast authentication, and this server does not \
+                 (pre-23ai servers never do)"
+                .to_owned(),
+            ConnectFailureKind::UnsupportedWireFeature { feature } => format!(
+                "the server requires `{feature}`, which this pure-Rust thin build does not \
+                 support"
+            ),
+            ConnectFailureKind::ListenerRefused { err_code } => match err_code {
+                Some(12514) => "the listener refused the connection (ERR=12514): it does not \
+                     currently know the service name in the connect string — the service name \
+                     is wrong, or the database has not (yet) registered it"
+                    .to_owned(),
+                Some(12505) => "the listener refused the connection (ERR=12505): it does not \
+                     currently know the SID in the connect string"
+                    .to_owned(),
+                Some(code) => {
+                    format!("the listener actively refused the connection (ERR={code})")
+                }
+                None => "the listener actively refused the connection".to_owned(),
+            },
+            ConnectFailureKind::ListenerRedirectUnsupported => "the listener redirected the \
+                 connection to another endpoint; this thin driver does not follow TNS \
+                 redirects"
+                .to_owned(),
+            ConnectFailureKind::ServerGenerationUnsupported { tns_version } => match tns_version {
+                Some(version) => format!(
+                    "the server negotiated TNS protocol version {version}, below the minimum \
+                     this thin driver supports (300 = Oracle 12.1)"
+                ),
+                None => "the server's TNS protocol generation is below the minimum this thin \
+                     driver supports (Oracle 12.1)"
+                    .to_owned(),
+            },
+            ConnectFailureKind::HandshakeProtocol => "the TNS/TTC connect handshake failed at \
+                 the protocol layer (wire framing/decode, not SQL)"
+                .to_owned(),
+        }
+    }
+
+    /// The `ORA-` code implied by this failure, when one is well-defined.
+    #[must_use]
+    pub const fn ora_code(&self) -> Option<i32> {
+        match self {
+            ConnectFailureKind::ListenerRefused {
+                err_code: Some(code),
+            } => Some(*code as i32),
+            _ => None,
+        }
+    }
+}
+
+/// The standing next-step for protocol-level connect triage: how to capture a
+/// driver handshake trace.
+pub const CONNECT_TRACE_NEXT_STEP: &str = "capture a driver handshake trace for protocol-level \
+     triage: set ORACLEDB_TRACE_CONNECT=1 in the server environment and reconnect (the trace \
+     prints to stderr); attach it when reporting the issue";
+
 /// An error from the Oracle connectivity layer.
 #[derive(Clone, Debug, Error)]
 #[non_exhaustive]
@@ -57,6 +200,15 @@ pub enum DbError {
     /// Opening the connection failed.
     #[error("oracle connect failed: {0}")]
     Connect(String),
+    /// Opening the connection failed during the TNS/TTC handshake, with a
+    /// structured classification from the driver-seam adapter.
+    #[error("connect handshake failed [{}]: {}: {message}", kind.label(), kind.describe())]
+    ConnectHandshake {
+        /// The structured failure classification.
+        kind: ConnectFailureKind,
+        /// The sanitized driver detail (secrets redacted).
+        message: String,
+    },
     /// A query failed.
     #[error("oracle query failed: {0}")]
     Query(String),
@@ -103,6 +255,7 @@ impl DbError {
         match self {
             DbError::Cancelled(_)
             | DbError::Connect(_)
+            | DbError::ConnectHandshake { .. }
             | DbError::Pool(_)
             | DbError::Quarantined { .. } => true,
             DbError::Query(message) | DbError::Execute(message) => {
@@ -117,7 +270,27 @@ impl DbError {
     #[must_use]
     pub fn into_envelope(self) -> ErrorEnvelope {
         match self {
-            DbError::Connect(msg) | DbError::Query(msg) | DbError::Execute(msg) => {
+            DbError::Connect(msg) => {
+                // Classify via the embedded ORA- code where present.
+                let env = envelope_from_oracle_message(&msg);
+                if env.error_class == ErrorClass::Internal {
+                    // No ORA- code recognised: keep it as a connection-class
+                    // failure rather than a bare Internal — and never surface
+                    // a raw driver string without concrete next actions.
+                    ErrorEnvelope::new(ErrorClass::ConnectionFailed, msg)
+                        .with_next_step(
+                            "verify the connect string (host, port, service name), credentials, \
+                             and listener reachability",
+                        )
+                        .with_next_step(CONNECT_TRACE_NEXT_STEP)
+                } else {
+                    env
+                }
+            }
+            DbError::ConnectHandshake { kind, message } => {
+                connect_handshake_envelope(&kind, &message)
+            }
+            DbError::Query(msg) | DbError::Execute(msg) => {
                 // Classify via the embedded ORA- code where present.
                 let env = envelope_from_oracle_message(&msg);
                 if env.error_class == ErrorClass::Internal {
@@ -156,6 +329,97 @@ impl DbError {
             }),
             DbError::Internal(msg) => ErrorEnvelope::new(ErrorClass::Internal, msg),
         }
+    }
+}
+
+/// Render the agent-facing envelope for a classified connect/handshake
+/// failure: a plain-language message headed by the stable `[label]` token,
+/// the implied `ORA-` code when well-defined, and concrete `next_steps` for
+/// every class — a raw driver string never travels without guidance.
+fn connect_handshake_envelope(kind: &ConnectFailureKind, detail: &str) -> ErrorEnvelope {
+    let class = match kind {
+        // Server/config capability mismatches: retrying cannot help, the
+        // profile or the server has to change.
+        ConnectFailureKind::FastAuthNotAdvertised
+        | ConnectFailureKind::UnsupportedWireFeature { .. }
+        | ConnectFailureKind::ServerGenerationUnsupported { .. } => ErrorClass::InvalidArguments,
+        _ => ErrorClass::ConnectionFailed,
+    };
+    let message = format!(
+        "connect handshake failed [{}]: {}: {detail}",
+        kind.label(),
+        kind.describe()
+    );
+    let mut env = ErrorEnvelope::new(class, message);
+    if let Some(code) = kind.ora_code() {
+        env = env.with_ora_code(code);
+    }
+    match kind {
+        ConnectFailureKind::UnexpectedTnsPacket { .. } => env
+            .with_next_step(
+                "verify the host:port in the connect string points at an Oracle listener and \
+                 not another service",
+            )
+            .with_next_step(CONNECT_TRACE_NEXT_STEP),
+        ConnectFailureKind::ConnectResendLoop { .. } => env
+            .with_next_step(
+                "check the listener log for redirect loops and retry; shorten the connect data \
+                 (long service names / descriptors) if the loop persists",
+            )
+            .with_next_step(CONNECT_TRACE_NEXT_STEP),
+        ConnectFailureKind::FastAuthNotAdvertised => env.with_next_step(
+            "use username/password authentication (profile credential_ref) for this server, or \
+             point token/IAM auth at an Oracle 23ai or newer service",
+        ),
+        ConnectFailureKind::UnsupportedWireFeature { feature } => {
+            let mut env = env.with_next_step(
+                "connect to a server/service that does not require this wire feature, or \
+                 disable the requirement on the server",
+            );
+            if feature
+                .to_ascii_lowercase()
+                .contains("native network encryption")
+            {
+                env = env.with_next_step(
+                    "Native Network Encryption is required by the server's sqlnet.ora \
+                     (SQLNET.ENCRYPTION_SERVER / SQLNET.CRYPTO_CHECKSUM_SERVER = required); \
+                     set them to `accepted` or use TCPS/TLS transport instead",
+                );
+            }
+            env
+        }
+        ConnectFailureKind::ListenerRefused { err_code } => {
+            let mut env = env.with_next_step(
+                "verify the service name in the connect string against the services the \
+                 listener actually knows (`lsnrctl services` on the database host)",
+            );
+            if *err_code == Some(12514) {
+                env = env.with_next_step(
+                    "if the service name is right, the database may still be starting or has \
+                     not registered with the listener yet — retry once it is open",
+                );
+            }
+            env.with_next_step(
+                "verify host and port reach the intended listener (a wrong port can hit a \
+                 different listener that refuses the service)",
+            )
+        }
+        ConnectFailureKind::ListenerRedirectUnsupported => env
+            .with_next_step(
+                "connect directly to the redirect target (the dedicated server's host:port) \
+                 instead of an endpoint that issues TNS redirects (e.g. CMAN or a \
+                 shared-server dispatcher)",
+            )
+            .with_next_step(CONNECT_TRACE_NEXT_STEP),
+        ConnectFailureKind::ServerGenerationUnsupported { .. } => env.with_next_step(
+            "this thin driver supports Oracle 12.1 and newer; connect to a supported database \
+             generation",
+        ),
+        ConnectFailureKind::HandshakeProtocol => env
+            .with_next_step(
+                "verify the endpoint is an Oracle listener of a supported generation (12.1+)",
+            )
+            .with_next_step(CONNECT_TRACE_NEXT_STEP),
     }
 }
 
@@ -199,6 +463,175 @@ mod tests {
         let env = DbError::Pool("timed out waiting for connection".to_owned()).into_envelope();
         assert_eq!(env.error_class, ErrorClass::Busy);
         assert_eq!(env.retry_after_ms, Some(250));
+    }
+
+    #[test]
+    fn generic_connect_error_always_carries_next_actions() {
+        // A raw driver string with no ORA- code must never surface without
+        // concrete next steps (field-test bead bhw6.2).
+        let env = DbError::Connect("socket closed mid-handshake".to_owned()).into_envelope();
+        assert_eq!(env.error_class, ErrorClass::ConnectionFailed);
+        assert!(!env.next_steps.is_empty());
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("ORACLEDB_TRACE_CONNECT=1")),
+            "generic connect failures must point at the handshake trace: {:?}",
+            env.next_steps
+        );
+    }
+
+    #[test]
+    fn unexpected_tns_packet_names_the_network_layer_with_trace_guidance() {
+        let env = DbError::ConnectHandshake {
+            kind: ConnectFailureKind::UnexpectedTnsPacket { packet_type: 11 },
+            message: "unexpected TNS packet type 11 (Resend)".to_owned(),
+        }
+        .into_envelope();
+        assert_eq!(env.error_class, ErrorClass::ConnectionFailed);
+        assert!(env.message.contains("[unexpected-tns-packet]"));
+        assert!(env.message.contains("TNS packet type 11"));
+        // Honest layering: this is the network-layer handshake, not TTC/SQL.
+        assert!(env.message.contains("network layer"));
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("ORACLEDB_TRACE_CONNECT=1"))
+        );
+    }
+
+    #[test]
+    fn connect_resend_loop_reports_rounds_and_trace_guidance() {
+        let env = DbError::ConnectHandshake {
+            kind: ConnectFailureKind::ConnectResendLoop { rounds: 5 },
+            message: "server kept requesting CONNECT resend (5 rounds); giving up".to_owned(),
+        }
+        .into_envelope();
+        assert_eq!(env.error_class, ErrorClass::ConnectionFailed);
+        assert!(env.message.contains("[connect-resend-loop]"));
+        assert!(env.message.contains("5 rounds"));
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("ORACLEDB_TRACE_CONNECT=1"))
+        );
+    }
+
+    #[test]
+    fn fast_auth_not_advertised_points_at_password_auth_or_23ai() {
+        let env = DbError::ConnectHandshake {
+            kind: ConnectFailureKind::FastAuthNotAdvertised,
+            message: "server did not advertise fast authentication".to_owned(),
+        }
+        .into_envelope();
+        assert_eq!(env.error_class, ErrorClass::InvalidArguments);
+        assert!(env.message.contains("[fast-auth-not-advertised]"));
+        assert!(env.message.contains("pre-23ai"));
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("credential_ref"))
+        );
+    }
+
+    #[test]
+    fn unsupported_wire_feature_names_the_feature_and_na_encryption_remedy() {
+        let env = DbError::ConnectHandshake {
+            kind: ConnectFailureKind::UnsupportedWireFeature {
+                feature: "Native Network Encryption and Data Integrity".to_owned(),
+            },
+            message: "unsupported feature: Native Network Encryption and Data Integrity".to_owned(),
+        }
+        .into_envelope();
+        assert_eq!(env.error_class, ErrorClass::InvalidArguments);
+        assert!(env.message.contains("[unsupported-wire-feature]"));
+        assert!(env.message.contains("Native Network Encryption"));
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("SQLNET.ENCRYPTION_SERVER"))
+        );
+    }
+
+    #[test]
+    fn listener_refused_extracts_err_code_and_names_invalid_service() {
+        let env = DbError::ConnectHandshake {
+            kind: ConnectFailureKind::ListenerRefused {
+                err_code: Some(12514),
+            },
+            message: "(DESCRIPTION=(ERR=12514))".to_owned(),
+        }
+        .into_envelope();
+        assert_eq!(env.error_class, ErrorClass::ConnectionFailed);
+        assert_eq!(env.ora_code, Some(12514));
+        assert!(env.message.contains("[listener-refused]"));
+        assert!(env.message.contains("service name"));
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("lsnrctl services"))
+        );
+    }
+
+    #[test]
+    fn listener_redirect_unsupported_suggests_direct_connect() {
+        let env = DbError::ConnectHandshake {
+            kind: ConnectFailureKind::ListenerRedirectUnsupported,
+            message: "listener redirected this connection".to_owned(),
+        }
+        .into_envelope();
+        assert_eq!(env.error_class, ErrorClass::ConnectionFailed);
+        assert!(env.message.contains("[listener-redirect-unsupported]"));
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("connect directly"))
+        );
+    }
+
+    #[test]
+    fn server_generation_unsupported_names_the_version_floor() {
+        let env = DbError::ConnectHandshake {
+            kind: ConnectFailureKind::ServerGenerationUnsupported {
+                tns_version: Some(298),
+            },
+            message: "unsupported TNS version 298".to_owned(),
+        }
+        .into_envelope();
+        assert_eq!(env.error_class, ErrorClass::InvalidArguments);
+        assert!(env.message.contains("[server-generation-unsupported]"));
+        assert!(env.message.contains("298"));
+        assert!(env.message.contains("Oracle 12.1"));
+        assert!(!env.next_steps.is_empty());
+    }
+
+    #[test]
+    fn handshake_protocol_error_names_the_phase_and_trace() {
+        let env = DbError::ConnectHandshake {
+            kind: ConnectFailureKind::HandshakeProtocol,
+            message: "unknown TTC message type 11 at position 4".to_owned(),
+        }
+        .into_envelope();
+        assert_eq!(env.error_class, ErrorClass::ConnectionFailed);
+        assert!(env.message.contains("[handshake-protocol-error]"));
+        assert!(env.message.contains("connect handshake"));
+        // The sanitized driver detail is preserved for triage…
+        assert!(env.message.contains("unknown TTC message type 11"));
+        // …but never without next actions.
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("ORACLEDB_TRACE_CONNECT=1"))
+        );
+    }
+
+    #[test]
+    fn connect_handshake_is_uncertain_session_state() {
+        let err = DbError::ConnectHandshake {
+            kind: ConnectFailureKind::HandshakeProtocol,
+            message: "boom".to_owned(),
+        };
+        assert!(err.is_uncertain_session_state());
     }
 
     #[test]

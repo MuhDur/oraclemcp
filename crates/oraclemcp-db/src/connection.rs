@@ -509,7 +509,7 @@ mod driver {
         DbmsOutput, ExecuteOutcome, OracleRoutineArg, RustOracleConnection, oracle_bind_to_driver,
     };
     use crate::auth_adapter::AuthAdapter;
-    use crate::error::DbError;
+    use crate::error::{ConnectFailureKind, DbError};
     use crate::serialize::{SerializeOptions, StructuredDecodeCaps, json_byte_len};
     use crate::types::{
         OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleNestedResult,
@@ -568,7 +568,7 @@ mod driver {
     ) -> Result<RustOracleConnection, DbError> {
         let mut inner = oracledb::Connection::connect(cx, to_connect_options(&opts)?)
             .await
-            .map_err(|err| DbError::Connect(sanitize_driver_error(err, &opts)))?;
+            .map_err(|err| connect_error_to_db_error(&err, &opts))?;
         apply_session_identity(cx, &mut inner, opts.session_identity.as_ref(), &opts).await?;
         for stmt in crate::serialize::canonical_nls_statements() {
             execute_raw(cx, &mut inner, stmt, &[], &opts, "connect").await?;
@@ -3331,6 +3331,89 @@ mod driver {
         message
     }
 
+    /// Extract the `ERR=` code from a TNS listener refuse payload, e.g.
+    /// `(DESCRIPTION=(TMP=)(VSNNUM=...)(ERR=12514)(ERROR_STACK=...))`.
+    pub(super) fn parse_listener_refuse_code(payload: &str) -> Option<u32> {
+        let start = payload.find("(ERR=")? + "(ERR=".len();
+        let digits: String = payload[start..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits.parse().ok()
+    }
+
+    /// Classify a driver connect/handshake failure into the driver-agnostic
+    /// [`ConnectFailureKind`]. This function is the **only** place that reads
+    /// `oracledb::Error` connect variants — everything downstream (envelope
+    /// rendering, doctor guidance) works from the structured kind. `None`
+    /// means "no handshake-specific classification" and the caller keeps the
+    /// plain `DbError::Connect` path (wallet errors deliberately stay there:
+    /// their existing diagnostics are already precise).
+    pub(super) fn classify_connect_failure(err: &oracledb::Error) -> Option<ConnectFailureKind> {
+        match err {
+            oracledb::Error::UnexpectedPacket(packet_type) => {
+                Some(ConnectFailureKind::UnexpectedTnsPacket {
+                    packet_type: *packet_type,
+                })
+            }
+            oracledb::Error::ConnectResendLoop(rounds) => {
+                Some(ConnectFailureKind::ConnectResendLoop { rounds: *rounds })
+            }
+            oracledb::Error::FastAuthRequired => Some(ConnectFailureKind::FastAuthNotAdvertised),
+            oracledb::Error::RedirectUnsupported => {
+                Some(ConnectFailureKind::ListenerRedirectUnsupported)
+            }
+            oracledb::Error::ListenerRefused(payload) => {
+                Some(ConnectFailureKind::ListenerRefused {
+                    err_code: parse_listener_refuse_code(payload),
+                })
+            }
+            oracledb::Error::Protocol(protocol) => match protocol {
+                oracledb::protocol::ProtocolError::UnsupportedVersion { version } => {
+                    Some(ConnectFailureKind::ServerGenerationUnsupported {
+                        tns_version: Some(*version),
+                    })
+                }
+                oracledb::protocol::ProtocolError::UnsupportedFeature(feature) => {
+                    Some(ConnectFailureKind::UnsupportedWireFeature {
+                        feature: (*feature).to_owned(),
+                    })
+                }
+                // Any other protocol-layer failure during connect is, by
+                // construction, a handshake-phase framing/decode problem —
+                // name the phase honestly instead of leaking a bare driver
+                // string (the field bug: "unknown TTC message type 11" was a
+                // network-layer TNS packet misread as application-layer TTC).
+                oracledb::protocol::ProtocolError::TruncatedHeader { .. }
+                | oracledb::protocol::ProtocolError::InvalidPacketLength { .. }
+                | oracledb::protocol::ProtocolError::IncompletePacket { .. }
+                | oracledb::protocol::ProtocolError::PacketTooLarge { .. }
+                | oracledb::protocol::ProtocolError::UnknownMessageType { .. }
+                | oracledb::protocol::ProtocolError::TtcDecode(_)
+                | oracledb::protocol::ProtocolError::InvalidServerResponse => {
+                    Some(ConnectFailureKind::HandshakeProtocol)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Map a driver connect failure to a [`DbError`]: structured
+    /// [`DbError::ConnectHandshake`] when the failure classifies, the plain
+    /// sanitized [`DbError::Connect`] otherwise (both fail closed; the
+    /// envelope layer guarantees `next_steps` either way).
+    pub(super) fn connect_error_to_db_error(
+        err: &oracledb::Error,
+        opts: &OracleConnectOptions,
+    ) -> DbError {
+        let message = sanitize_driver_error(err, opts);
+        match classify_connect_failure(err) {
+            Some(kind) => DbError::ConnectHandshake { kind, message },
+            None => DbError::Connect(message),
+        }
+    }
+
     #[async_trait::async_trait(?Send)]
     impl super::OracleConnection for RustOracleConnection {
         fn backend(&self) -> crate::types::OracleBackend {
@@ -4430,6 +4513,153 @@ mod tests {
             assert!(!redacted.contains(forbidden), "{redacted}");
         }
         assert!(redacted.contains("<redacted>"));
+    }
+
+    // --- connect/handshake failure classification (bead bhw6.2) -----------
+    //
+    // These construct real `oracledb::Error` connect variants and assert the
+    // seam maps each to the driver-agnostic `ConnectFailureKind`, so an
+    // opaque driver string can never again ship as the whole diagnosis.
+
+    use crate::error::ConnectFailureKind;
+
+    #[test]
+    fn classify_unexpected_packet_maps_to_unexpected_tns_packet() {
+        let kind = driver::classify_connect_failure(&oracledb::Error::UnexpectedPacket(11));
+        assert_eq!(
+            kind,
+            Some(ConnectFailureKind::UnexpectedTnsPacket { packet_type: 11 })
+        );
+    }
+
+    #[test]
+    fn classify_connect_resend_loop_carries_rounds() {
+        let kind = driver::classify_connect_failure(&oracledb::Error::ConnectResendLoop(5));
+        assert_eq!(
+            kind,
+            Some(ConnectFailureKind::ConnectResendLoop { rounds: 5 })
+        );
+    }
+
+    #[test]
+    fn classify_fast_auth_required_maps_to_token_auth_on_old_server() {
+        let kind = driver::classify_connect_failure(&oracledb::Error::FastAuthRequired);
+        assert_eq!(kind, Some(ConnectFailureKind::FastAuthNotAdvertised));
+    }
+
+    #[test]
+    fn classify_redirect_unsupported_maps_to_listener_redirect() {
+        let kind = driver::classify_connect_failure(&oracledb::Error::RedirectUnsupported);
+        assert_eq!(kind, Some(ConnectFailureKind::ListenerRedirectUnsupported));
+    }
+
+    #[test]
+    fn classify_listener_refused_extracts_the_err_code() {
+        let payload = "(DESCRIPTION=(TMP=)(VSNNUM=301989888)(ERR=12514)(ERROR_STACK=(ERROR=(CODE=12514)(EMFI=4))))";
+        let kind =
+            driver::classify_connect_failure(&oracledb::Error::ListenerRefused(payload.to_owned()));
+        assert_eq!(
+            kind,
+            Some(ConnectFailureKind::ListenerRefused {
+                err_code: Some(12514),
+            })
+        );
+    }
+
+    #[test]
+    fn classify_listener_refused_without_code_still_classifies() {
+        let kind = driver::classify_connect_failure(&oracledb::Error::ListenerRefused(
+            "connection refused".to_owned(),
+        ));
+        assert_eq!(
+            kind,
+            Some(ConnectFailureKind::ListenerRefused { err_code: None })
+        );
+    }
+
+    #[test]
+    fn classify_unsupported_tns_version_maps_to_server_generation() {
+        let kind = driver::classify_connect_failure(&oracledb::Error::Protocol(
+            oracledb::protocol::ProtocolError::UnsupportedVersion { version: 298 },
+        ));
+        assert_eq!(
+            kind,
+            Some(ConnectFailureKind::ServerGenerationUnsupported {
+                tns_version: Some(298),
+            })
+        );
+    }
+
+    #[test]
+    fn classify_unsupported_feature_names_the_feature() {
+        let kind = driver::classify_connect_failure(&oracledb::Error::Protocol(
+            oracledb::protocol::ProtocolError::UnsupportedFeature(
+                "Native Network Encryption and Data Integrity",
+            ),
+        ));
+        assert_eq!(
+            kind,
+            Some(ConnectFailureKind::UnsupportedWireFeature {
+                feature: "Native Network Encryption and Data Integrity".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn classify_unknown_ttc_message_type_is_a_handshake_protocol_error() {
+        // The field bug: this exact driver error surfaced raw, naming the TTC
+        // application layer while the failing byte was a network-layer TNS
+        // packet. It must classify as a handshake-phase protocol error.
+        let kind = driver::classify_connect_failure(&oracledb::Error::Protocol(
+            oracledb::protocol::ProtocolError::UnknownMessageType {
+                message_type: 11,
+                position: 4,
+            },
+        ));
+        assert_eq!(kind, Some(ConnectFailureKind::HandshakeProtocol));
+    }
+
+    #[test]
+    fn classify_wallet_error_keeps_the_plain_connect_path() {
+        // Wallet diagnostics are already precise; they stay on DbError::Connect.
+        let err =
+            oracledb::Error::Wallet(oracledb::protocol::tls::wallet::WalletError::NoCertificates);
+        assert_eq!(driver::classify_connect_failure(&err), None);
+    }
+
+    #[test]
+    fn parse_listener_refuse_code_handles_absent_and_malformed_codes() {
+        assert_eq!(
+            driver::parse_listener_refuse_code("(ERR=12505)"),
+            Some(12505)
+        );
+        assert_eq!(driver::parse_listener_refuse_code("(ERR=)"), None);
+        assert_eq!(driver::parse_listener_refuse_code("no code here"), None);
+    }
+
+    #[test]
+    fn connect_error_to_db_error_sanitizes_and_classifies() {
+        let opts = crate::types::OracleConnectOptions {
+            connect_string: "dbhost:1521/private_service".to_owned(),
+            ..Default::default()
+        };
+        let err = oracledb::Error::ListenerRefused(
+            "(ERR=12514) for dbhost:1521/private_service".to_owned(),
+        );
+        let mapped = driver::connect_error_to_db_error(&err, &opts);
+        match mapped {
+            DbError::ConnectHandshake { kind, message } => {
+                assert_eq!(
+                    kind,
+                    ConnectFailureKind::ListenerRefused {
+                        err_code: Some(12514),
+                    }
+                );
+                assert!(!message.contains("private_service"), "{message}");
+                assert!(message.contains("<redacted>"), "{message}");
+            }
+            other => panic!("expected ConnectHandshake, got {other:?}"),
+        }
     }
 }
 
