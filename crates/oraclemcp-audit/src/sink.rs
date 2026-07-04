@@ -17,8 +17,9 @@ use std::path::{Path, PathBuf};
 use parking_lot::Mutex;
 use thiserror::Error;
 
-use crate::anchor::AnchorFile;
+use crate::anchor::{AnchorFile, load_anchor};
 use crate::record::{AuditEntryDraft, AuditRecord, GENESIS_HASH, SigningKey};
+use crate::verify::parse_jsonl;
 
 /// Audit sink errors.
 #[derive(Debug, Error)]
@@ -36,6 +37,13 @@ pub enum AuditError {
     /// Operator action (inspect/repair the audit log) is required.
     #[error("audit sink poisoned after uncertain append")]
     Poisoned,
+    /// Chain resume refused at startup: an existing audit log cannot seed a
+    /// continuing hash chain without forking it or masking a truncation (a
+    /// malformed tail, or a tail that contradicts the head anchor). The server
+    /// must not start until an operator inspects/repairs the log — the message
+    /// names the file and the repair path. See [`Auditor::resume_from`].
+    #[error("audit chain resume refused: {0}")]
+    ResumeRefused(String),
 }
 
 /// An append-only, durable audit sink.
@@ -179,6 +187,93 @@ impl Auditor {
     pub fn with_head_anchor(mut self, path: impl Into<PathBuf>) -> Self {
         self.anchor = Some(AnchorFile::new(path.into(), self.key.clone()));
         self
+    }
+
+    /// Resume the hash chain from an existing on-disk audit log so a server
+    /// **restart continues ONE verifiable chain** instead of re-issuing seq=1
+    /// off genesis into the same file (bead oraclemcp-ow3v).
+    ///
+    /// Reads the audit log at `audit_path`. If it is absent or empty the chain
+    /// starts fresh at genesis (state stays seq=0). Otherwise its LAST record
+    /// seeds the chain state (`seq` + `entry_hash`), so the next append chains
+    /// onto it and the head anchor **advances** rather than regressing below the
+    /// prior run's head.
+    ///
+    /// Fails closed — the server must not start — when:
+    ///  - the log exists but cannot be read, or any record is malformed: a torn
+    ///    or tampered tail must be inspected/repaired by an operator, never
+    ///    silently continued;
+    ///  - a head anchor sidecar is present and the on-disk tail contradicts it,
+    ///    i.e. the chain ends *before* the anchored durable head (tail
+    ///    truncation) or the record at the anchored `seq` diverges from the
+    ///    attested `entry_hash` (rewritten history).
+    ///
+    /// Call this AFTER [`with_head_anchor`](Self::with_head_anchor) so the
+    /// anchor cross-check runs. It writes nothing, so the
+    /// record-fsync-before-anchor ordering the writer maintains is untouched.
+    pub fn resume_from(self, audit_path: &Path) -> Result<Self, AuditError> {
+        let disp = audit_path.display();
+        let body = match std::fs::read_to_string(audit_path) {
+            Ok(body) => body,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                return Err(AuditError::ResumeRefused(format!(
+                    "cannot read audit log {disp} to resume the hash chain: {e}; inspect the file \
+                     and its permissions, then restart"
+                )));
+            }
+        };
+        let records = parse_jsonl(&body).map_err(|e| {
+            AuditError::ResumeRefused(format!(
+                "audit log {disp} has a malformed record ({e}); a torn or tampered tail cannot \
+                 seed a continuing chain — run `oraclemcp audit verify {disp}`, then repair or \
+                 roll the file back to its last well-formed line before restarting"
+            ))
+        })?;
+        let Some(tail) = records.last() else {
+            // Empty log: nothing to resume; the fresh genesis state is correct.
+            return Ok(self);
+        };
+
+        // Anchor cross-check: the sidecar attests the durable chain head. The
+        // tail we are about to resume from must neither fall short of it
+        // (truncation) nor diverge from it (rewritten history). A tail AHEAD of
+        // the anchor is the explainable crash/group-commit window — accepted.
+        if let Some(anchor_file) = &self.anchor
+            && let Some(anchor) = load_anchor(anchor_file.path()).map_err(|e| {
+                AuditError::ResumeRefused(format!(
+                    "head anchor sidecar {} is present but unreadable ({e}); refusing to resume \
+                     without confirming the durable chain head",
+                    anchor_file.path().display()
+                ))
+            })?
+        {
+            if anchor.seq > tail.seq {
+                return Err(AuditError::ResumeRefused(format!(
+                    "head anchor attests durable seq {} but the audit log {disp} ends at seq {} — \
+                     trailing records were removed (tail truncation); restore the missing tail, or \
+                     only if the loss is understood reset the anchor, before restarting",
+                    anchor.seq, tail.seq
+                )));
+            }
+            if let Some(anchored) = records.iter().find(|r| r.seq == anchor.seq)
+                && anchored.entry_hash != anchor.entry_hash
+            {
+                return Err(AuditError::ResumeRefused(format!(
+                    "record at the anchored seq {} in {disp} does not match the head anchor's \
+                     attested entry_hash — the chain diverged from the attested history; inspect \
+                     with `oraclemcp audit verify {disp}` before restarting",
+                    anchor.seq
+                )));
+            }
+        }
+
+        {
+            let mut state = self.state.lock();
+            state.seq = tail.seq;
+            state.last_hash = tail.entry_hash.clone();
+        }
+        Ok(self)
     }
 
     /// Append a chained record. When `durable` is true the record is fsynced
@@ -520,6 +615,204 @@ mod tests {
             .expect("load")
             .expect("present");
         assert_eq!(anchor.seq, 1, "flush anchors the flushed head");
+    }
+
+    #[test]
+    fn resume_on_absent_or_empty_log_starts_fresh_at_genesis() {
+        // A first-ever run (FileAuditSink::open creates an empty file) resumes
+        // to the fresh genesis state, so the first append is seq=1 off genesis.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let auditor = Auditor::new(
+            Box::new(FileAuditSink::open(&path).expect("open")),
+            test_key(),
+        )
+        .resume_from(&path)
+        .expect("resume absent/empty log");
+        let r1 = auditor
+            .append(&draft("SELECT 1 FROM dual", "SAFE"), "t0".to_owned(), true)
+            .expect("append");
+        assert_eq!(r1.seq, 1);
+        assert_eq!(r1.prev_hash, GENESIS_HASH);
+    }
+
+    #[test]
+    fn restart_resumes_one_verifiable_chain_and_advances_the_anchor() {
+        // Bead oraclemcp-ow3v: a restart must continue ONE verifiable chain
+        // (not re-issue seq=1/genesis after the previous run), and the head
+        // anchor must advance across the restart rather than regress.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let anchor_path = crate::anchor_path_for(&path);
+
+        // First run: two durable records, then the auditor drops (server exits).
+        {
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open")),
+                test_key(),
+            )
+            .with_head_anchor(&anchor_path)
+            .resume_from(&path)
+            .expect("resume empty log");
+            auditor
+                .append(
+                    &draft("DELETE FROM t WHERE id=1", "GUARDED"),
+                    "t0".to_owned(),
+                    true,
+                )
+                .expect("run1 append 1");
+            let r2 = auditor
+                .append(
+                    &draft("DELETE FROM t WHERE id=2", "GUARDED"),
+                    "t1".to_owned(),
+                    true,
+                )
+                .expect("run1 append 2");
+            assert_eq!(r2.seq, 2);
+        }
+        let anchor_run1 = crate::load_anchor(&anchor_path)
+            .expect("load")
+            .expect("present");
+        assert_eq!(anchor_run1.seq, 2);
+
+        // Second run: reopen the SAME file (append mode) and resume.
+        {
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open")),
+                test_key(),
+            )
+            .with_head_anchor(&anchor_path)
+            .resume_from(&path)
+            .expect("resume non-empty log");
+            let r3 = auditor
+                .append(
+                    &draft("DELETE FROM t WHERE id=3", "GUARDED"),
+                    "t2".to_owned(),
+                    true,
+                )
+                .expect("run2 append 1");
+            let r4 = auditor
+                .append(
+                    &draft("DELETE FROM t WHERE id=4", "GUARDED"),
+                    "t3".to_owned(),
+                    true,
+                )
+                .expect("run2 append 2");
+            assert_eq!(r3.seq, 3, "second run continues the sequence, not seq=1");
+            assert_eq!(r4.seq, 4);
+        }
+
+        // The whole file is ONE verifiable chain across the restart boundary.
+        let records = crate::parse_jsonl(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(records.len(), 4);
+        assert_eq!(
+            crate::verify_records(&records, &[test_key()]),
+            crate::VerifyOutcome::Ok { records: 4 }
+        );
+
+        // The anchor advanced across the restart (never regressed below seq=2).
+        let anchor_run2 = crate::load_anchor(&anchor_path)
+            .expect("load")
+            .expect("present");
+        assert!(
+            anchor_run2.seq >= anchor_run1.seq,
+            "anchor must not regress across a restart"
+        );
+        assert_eq!(anchor_run2.seq, 4);
+        assert_eq!(
+            crate::check_anchor(&records, &anchor_run2, &[test_key()]),
+            Ok(crate::AnchorStatus::Match)
+        );
+    }
+
+    #[test]
+    fn resume_refuses_a_malformed_tail_with_a_repair_message() {
+        // A torn final append (partial JSON) must refuse startup fail-closed,
+        // with an operator-repair message — never silently continue.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let anchor_path = crate::anchor_path_for(&path);
+        {
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open")),
+                test_key(),
+            )
+            .with_head_anchor(&anchor_path);
+            auditor
+                .append(
+                    &draft("DELETE FROM t WHERE id=1", "GUARDED"),
+                    "t0".to_owned(),
+                    true,
+                )
+                .expect("good record");
+        }
+        {
+            let mut f = OpenOptions::new().append(true).open(&path).expect("reopen");
+            f.write_all(b"{\"seq\":2,\"partial\":")
+                .expect("write torn tail");
+        }
+        let refused = Auditor::new(
+            Box::new(FileAuditSink::open(&path).expect("open")),
+            test_key(),
+        )
+        .with_head_anchor(&anchor_path)
+        .resume_from(&path);
+        match refused {
+            Err(AuditError::ResumeRefused(msg)) => {
+                assert!(
+                    msg.contains("malformed") && msg.contains("audit verify"),
+                    "operator-repair message expected, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected ResumeRefused, got {other:?}"),
+            Ok(_) => panic!("malformed tail must refuse startup"),
+        }
+    }
+
+    #[test]
+    fn resume_refuses_when_the_tail_is_behind_the_head_anchor() {
+        // Tail truncation vs. a surviving anchor: the anchor attests seq=3 but
+        // the log was cut back to two records. Resume must fail closed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let anchor_path = crate::anchor_path_for(&path);
+        {
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open")),
+                test_key(),
+            )
+            .with_head_anchor(&anchor_path);
+            for i in 1..=3 {
+                auditor
+                    .append(
+                        &draft(&format!("DELETE FROM t WHERE id={i}"), "GUARDED"),
+                        format!("t{i}"),
+                        true,
+                    )
+                    .expect("append");
+            }
+        }
+        // Cut the log back to two records; the anchor still attests seq=3.
+        let body = std::fs::read_to_string(&path).unwrap();
+        let two: String = body.lines().take(2).map(|l| format!("{l}\n")).collect();
+        std::fs::write(&path, two).unwrap();
+
+        let refused = Auditor::new(
+            Box::new(FileAuditSink::open(&path).expect("open")),
+            test_key(),
+        )
+        .with_head_anchor(&anchor_path)
+        .resume_from(&path);
+        match refused {
+            Err(AuditError::ResumeRefused(msg)) => {
+                assert!(
+                    msg.contains("truncation"),
+                    "expected truncation message, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected ResumeRefused, got {other:?}"),
+            Ok(_) => panic!("tail truncation vs the anchor must refuse startup"),
+        }
     }
 
     #[test]

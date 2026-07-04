@@ -273,9 +273,44 @@ PROFILES
   fi
   e2e_log_event "ladder_session" "assert" "pass" 0 "lane $lane: full ladder green (evidence: $evidence)"
 
-  # Step 6: re-verify the signed audit hash-chain with the binary's own
-  # verifier (recomputes every link + keyed MAC with the run's key).
+  # Step 5b (bead oraclemcp-ow3v): restart-resume across server sessions. A
+  # SECOND oraclemcp process opening the SAME audit.jsonl must CONTINUE the one
+  # signed hash-chain (seeding seq/last_hash from the durable tail), not
+  # re-issue seq=1/genesis after the first run's records. The ladder harness's
+  # own verifier already requires a single chain-from-genesis across the whole
+  # file, so a broken resume fails this second session outright; we also assert
+  # the record count GREW (the chain continued rather than resetting).
   local audit_file="$state_dir/oraclemcp/audit/audit.jsonl"
+  local records_run1
+  records_run1="$(grep -c . "$audit_file" 2>/dev/null || true)"
+  : "${records_run1:=0}"
+  local evidence_r2="$lane_dir/ladder_evidence_r2.jsonl"
+  local table_r2="${table}_R2"
+  e2e_log_event "ladder_resume_session" "act" "running" 0 "lane $lane: restart-resume MCP stdio ladder session (table $table_r2)"
+  set +e
+  timeout -k 15 "$lane_timeout_secs" \
+    python3 "$ROOT/scripts/e2e/oracle_ladder_session.py" \
+    --binary "$BINARY" --profile "$lane" --banner-regex "$banner_regex" \
+    --table "$table_r2" --evidence "$evidence_r2" >"$lane_dir/ladder_stdout_r2.txt"
+  local resume_status=$?
+  set -e
+  cat "$lane_dir/ladder_stdout_r2.txt"
+  if [ "$resume_status" -ne 0 ]; then
+    e2e_log_event "ladder_resume_session" "assert" "fail" 0 "lane $lane: restart-resume ladder session failed — the resumed audit chain did not continue as ONE chain-from-genesis (evidence: $evidence_r2)"
+    return 1
+  fi
+  local records_run2
+  records_run2="$(grep -c . "$audit_file" 2>/dev/null || true)"
+  : "${records_run2:=0}"
+  if [ "$records_run2" -le "$records_run1" ]; then
+    e2e_log_event "ladder_resume_session" "assert" "fail" 0 "lane $lane: audit chain did not grow across the restart (run1=$records_run1 run2=$records_run2) — resume regressed"
+    return 1
+  fi
+  e2e_log_event "ladder_resume_session" "assert" "pass" 0 "lane $lane: restart resumed ONE signed chain across sessions (run1=$records_run1 -> run2=$records_run2 records)"
+
+  # Step 6: re-verify the signed audit hash-chain with the binary's own
+  # verifier (recomputes every link + keyed MAC with the run's key). After the
+  # restart-resume above this covers BOTH sessions as one chain.
   local audit_json="$lane_dir/audit_verify.json"
   if ! timeout -k 10 60 "$BINARY" --json audit verify "$audit_file" >"$audit_json" 2>"$lane_dir/audit_verify.stderr"; then
     e2e_log_event "audit_verify" "assert" "fail" 0 "lane $lane: audit verify failed (see $audit_json)"

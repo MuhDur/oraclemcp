@@ -128,11 +128,20 @@ mod tests {
             }));
             let _ = tx.send(result.map_err(|_| "asupersync test future panicked"));
         });
-        match rx.recv_timeout(Duration::from_secs(5)) {
+        // This wall-clock budget is a HANG BACKSTOP, not a performance bound: a
+        // genuine lost wakeup parks `block_on` forever (the asupersync
+        // current-thread runtime has no deadlock detection), so without a
+        // timeout a broken invariant would hang CI indefinitely. It is
+        // deliberately generous (30s, was 5s) so that legitimate completion
+        // never *races* the clock under CI load — only an actually-hung future
+        // trips it. The lost-wakeup invariant itself is pinned deterministically
+        // by `wait_does_not_lose_wakeup_under_signal_race`, which needs no
+        // runtime, no spawn, and no wall clock at all.
+        match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(Ok(())) => handle.join().expect("asupersync test thread joins"),
             Ok(Err(message)) => panic!("{message}"),
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                panic!("asupersync test future did not complete within 5s")
+                panic!("asupersync test future hung (no completion within the 30s backstop)")
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 panic!("asupersync test thread disconnected")
@@ -194,28 +203,96 @@ mod tests {
         });
     }
 
-    // Regression for oracle-qm3q.15: a waiter that races shutdown must not park
-    // forever if shutdown fires around the first poll. Asupersync `wait_until`
-    // owns the predicate-check loop, so this test guards our integration with
-    // that primitive rather than reimplementing waiter registration by hand.
+    // Regression for oracle-qm3q.15 (lost-wakeup TOCTOU) — made deterministic
+    // for bead oraclemcp-shutdown-race-flake-hwcl.
+    //
+    // The prior version spawned a waiter and fired the signal after a
+    // `yield_now`, then relied on a 5s wall-clock harness budget to catch a
+    // hang. That is a *probabilistic* race stress loop bounded by wall clock:
+    // under CI load its 1000 iterations could exceed the budget and time out
+    // even though nothing was actually wrong (observed on run 28691901965).
+    //
+    // Here we instead drive `wait_for_shutdown()` by hand with a controlled,
+    // wake-counting `Waker` and force the exact interleavings that pin the
+    // invariant. No runtime, no spawn, no timeout — so there is no wall clock
+    // to race, yet the assertion is *stronger*: we observe the wake edge
+    // directly (a lost wakeup would show a wake count of 0). This mirrors how
+    // asupersync's own `Notify` tests poll `notified()` manually.
     #[test]
     fn wait_does_not_lose_wakeup_under_signal_race() {
-        run_asupersync_test(async move {
-            for _ in 0..1_000 {
-                let coord = ShutdownCoordinator::new(HealthState::new("0.1.0"));
-                let waiter = {
-                    let c = coord.clone();
-                    Runtime::current_handle()
-                        .expect("asupersync test runtime installed")
-                        .try_spawn(async move { c.wait_for_shutdown().await })
-                        .expect("waiter spawned")
-                };
-                // Yield once so the waiter has a chance to begin its first poll,
-                // then fire the signal to interleave with registration.
-                yield_now().await;
-                coord.begin_shutdown();
-                waiter.await;
+        use std::future::Future;
+        use std::pin::pin;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll, Wake, Waker};
+
+        // A waker that counts how many times it was invoked, so the test can
+        // assert the wakeup was actually *delivered* (not lost).
+        struct CountingWaker {
+            wakes: AtomicUsize,
+        }
+        impl Wake for CountingWaker {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
             }
-        });
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.wakes.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        // Interleaving 1 — the signal arrives AFTER the waiter has parked. The
+        // registered waker MUST fire (the wakeup is not lost) and the next poll
+        // observes shutdown and completes.
+        {
+            let coord = ShutdownCoordinator::new(HealthState::new("0.1.0"));
+            let counter = Arc::new(CountingWaker {
+                wakes: AtomicUsize::new(0),
+            });
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut cx = Context::from_waker(&waker);
+            let mut fut = pin!(coord.wait_for_shutdown());
+
+            assert_eq!(
+                fut.as_mut().poll(&mut cx),
+                Poll::Pending,
+                "waiter parks while shutdown has not begun"
+            );
+            assert_eq!(
+                counter.wakes.load(Ordering::SeqCst),
+                0,
+                "no wake before the signal"
+            );
+
+            coord.begin_shutdown();
+            assert!(
+                counter.wakes.load(Ordering::SeqCst) >= 1,
+                "begin_shutdown must deliver the wake to the parked waiter (wakeup not lost)"
+            );
+            assert_eq!(
+                fut.as_mut().poll(&mut cx),
+                Poll::Ready(()),
+                "the woken waiter observes shutdown and completes"
+            );
+        }
+
+        // Interleaving 2 — the signal arrives BEFORE the waiter's first poll.
+        // The predicate check that precedes any park must observe the already
+        // set flag and complete immediately, never parking on an edge that has
+        // already fired.
+        {
+            let coord = ShutdownCoordinator::new(HealthState::new("0.1.0"));
+            coord.begin_shutdown();
+            let counter = Arc::new(CountingWaker {
+                wakes: AtomicUsize::new(0),
+            });
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut cx = Context::from_waker(&waker);
+            let mut fut = pin!(coord.wait_for_shutdown());
+
+            assert_eq!(
+                fut.as_mut().poll(&mut cx),
+                Poll::Ready(()),
+                "a signal that fired before the first poll is not lost — immediate completion"
+            );
+        }
     }
 }

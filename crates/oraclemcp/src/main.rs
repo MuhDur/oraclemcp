@@ -1346,9 +1346,25 @@ fn build_auditor(
     // the durable chain head so `audit verify` detects tail truncation. Record
     // fsync always precedes the anchor update (never anchor-ahead).
     let anchor_path = oraclemcp_audit::anchor_path_for(&path);
-    Ok(Some(Arc::new(
-        Auditor::new(local, key).with_head_anchor(anchor_path),
-    )))
+    // Chain resume (bead oraclemcp-ow3v): a restart must continue the SAME
+    // hash chain, not re-issue seq=1/genesis after the previous run's records
+    // (which `audit verify` would report BROKEN at the run boundary). Seed the
+    // chain state from the log's last well-formed record; fail closed if that
+    // tail is malformed or contradicts the head anchor.
+    let auditor = Auditor::new(local, key)
+        .with_head_anchor(anchor_path)
+        .resume_from(&path)
+        .map_err(|e| {
+            (
+                "ORACLEMCP_AUDIT_CHAIN_RESUME_REFUSED",
+                format!(
+                    "refusing to start: the existing audit log at {} cannot seed a continuing \
+                     signed hash chain: {e}",
+                    path.display()
+                ),
+            )
+        })?;
+    Ok(Some(Arc::new(auditor)))
 }
 
 fn build_write_intent_log(
