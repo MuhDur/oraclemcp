@@ -101,33 +101,40 @@ fn readme_leads_with_hosted_install_one_liner_service_and_dashboard() {
         .find("\n```")
         .expect("first shell fence must close");
     let first_shell_command = first_shell_body[..first_shell_end].trim();
+    let expected_one_liner = format!(
+        r#"curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --version {}"#,
+        env!("CARGO_PKG_VERSION")
+    );
     assert_eq!(
-        first_shell_command,
-        r#"curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --version 0.6.6"#,
-        "first install command must be the single copy-paste install/update line"
+        first_shell_command, expected_one_liner,
+        "first install command must be the single copy-paste install/update line, \
+         pinned to the current workspace version"
     );
     assert!(
         !first_shell_command.contains("--dry-run"),
         "dry-run must be advanced preview text, not the primary install command"
     );
 
+    let v = env!("CARGO_PKG_VERSION");
     for needle in [
         "One line installs or updates `oraclemcp`",
         "works as pasted",
         "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh",
-        "bash -s -- --dry-run --version 0.6.6",
-        "bash -s -- --version 0.6.6",
+        &format!("bash -s -- --dry-run --version {v}"),
+        &format!("bash -s -- --version {v}"),
         "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.ps1",
-        "powershell -ExecutionPolicy Bypass -File .\\install.ps1 -DryRun -Version 0.6.6",
-        "powershell -ExecutionPolicy Bypass -File .\\install.ps1 -Version 0.6.6",
+        &format!("powershell -ExecutionPolicy Bypass -File .\\install.ps1 -DryRun -Version {v}"),
+        &format!("powershell -ExecutionPolicy Bypass -File .\\install.ps1 -Version {v}"),
         "The Windows installer accepts the same release operations",
         "-Verify prefer",
         "-Verify require",
         "-Verify checksum-only",
-        "powershell -ExecutionPolicy Bypass -File .\\install.ps1 -Update -Version 0.6.6 -NoService",
+        &format!(
+            "powershell -ExecutionPolicy Bypass -File .\\install.ps1 -Update -Version {v} -NoService"
+        ),
         "bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz",
         "powershell -ExecutionPolicy Bypass -File .\\install.ps1 `",
-        "-Offline .\\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.6.6",
+        &format!("-Offline .\\oraclemcp-x86_64-pc-windows-msvc.zip -Version {v}"),
         "Use the dry-run command first when you want a preview",
         "installer lock path",
         "exits before downloading, verifying, writing files, or",
@@ -137,8 +144,8 @@ fn readme_leads_with_hosted_install_one_liner_service_and_dashboard() {
         "A downgrade is refused unless you pass `--force`",
         "exact `PATH` line plus next steps",
         "next steps on stderr",
-        "oraclemcp --json self-update --dry-run --version 0.6.6",
-        "oraclemcp self-update --version 0.6.6 --no-service",
+        &format!("oraclemcp --json self-update --dry-run --version {v}"),
+        &format!("oraclemcp self-update --version {v} --no-service"),
         "literal",
         "copy-pasteable for release",
         "### Advanced install paths",

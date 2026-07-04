@@ -6,6 +6,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-04
+
+**oraclemcp now works against pre-23ai Oracle servers (18c/19c/21c
+generation).** A fresh-install field test against a 19c fleet found that every
+connect failed during the TNS handshake; the root causes were fixed upstream in
+the thin driver and adopted here, with a standing multi-server-version test
+gate so the server-generation envelope can never silently narrow again.
+
+### Added
+
+- Adopted `oracledb` 0.6.0 (deliberate exact-pin bump): TNS RESEND handling,
+  classic (non-fast-auth) session establishment, version-gated function
+  headers, and classic response framing. Live-verified end to end on Oracle XE
+  18, XE 21, and FREE 23ai — `doctor --online` connectivity and real
+  `oracle_query` calls through the MCP surface.
+- Operating-level ladder e2e across the Oracle version matrix
+  (`scripts/e2e/oracle_version_matrix.sh`): per-lane doctor, READ_ONLY
+  value-asserted reads plus write refusal, preview → grant → elevation → DML
+  rollback-by-default then granted commit, governed DDL create/drop, drop back
+  to READ_ONLY, audit evidence. Wired into the release checklist as a required
+  gate.
+- Actionable connect-failure envelopes (`ConnectFailureKind`): driver handshake
+  failures map to structured error classes with plain-language messages and
+  `next_actions` (including `ORACLEDB_TRACE_CONNECT` triage guidance), surfaced
+  identically by `doctor --online`.
+- Config discovery honors `$XDG_CONFIG_HOME/oraclemcp` ahead of
+  `~/.config/oraclemcp` (`ORACLEMCP_CONFIG` stays highest).
+- `install.sh`: explicit `--target` accepts the published `linux-gnu` triples;
+  `--dry-run` states the cosign soft-skip / require-mode posture up front.
+
+### Fixed
+
+- `setup` MCP snippets default to the resolved real binary instead of a
+  never-created wrapper path; explicit `--wrapper-path` states the wrapper must
+  exist first.
+- `setup` install hint no longer suggests bare `cargo install` (which fails on
+  stable); it lists the installer one-liner, `self-update`, and
+  `cargo binstall`, with the nightly-pinned source build as the escape hatch.
+- `initialize` echoes a supported client-offered `protocolVersion` per the MCP
+  spec, and the HTTP `MCP-Protocol-Version` gate accepts the same enumerated
+  set (still fail-closed on unknown versions).
+- `doctor` prints its checks in numeric order.
+
 ## [0.6.6] — 2026-07-02
 
 ### Fixed

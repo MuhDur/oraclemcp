@@ -1,6 +1,6 @@
 [package]
 name = "oraclemcp-error"
-version = "0.6.6"
+version = "0.7.0"
 description = "Structured, agent-facing error envelope for the oraclemcp Oracle MCP server (Apache-2.0 OR MIT)"
 edition.workspace = true
 license.workspace = true
