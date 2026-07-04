@@ -1,6 +1,6 @@
 [package]
 name = "oraclemcp"
-version = "0.7.0"
+version = "0.7.1"
 description = "Engine-free, governed least-privilege Oracle Database MCP server with a fail-closed SQL guard and confirmation-gated operating levels (independent open-source project)."
 edition.workspace = true
 license.workspace = true
@@ -56,14 +56,14 @@ dashboard-bundle = ["oraclemcp-core/dashboard-bundle"]
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]
-oraclemcp-core = { path = "../oraclemcp-core", version = "0.7.0" }
-oraclemcp-db = { path = "../oraclemcp-db", version = "0.7.0" }
-oraclemcp-config = { path = "../oraclemcp-config", version = "0.7.0" }
-oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.7.0" }
-oraclemcp-auth = { path = "../oraclemcp-auth", version = "0.7.0" }
-oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.7.0" }
-oraclemcp-error = { path = "../oraclemcp-error", version = "0.7.0" }
-oraclemcp-telemetry = { path = "../oraclemcp-telemetry", version = "0.7.0" }
+oraclemcp-core = { path = "../oraclemcp-core", version = "0.7.1" }
+oraclemcp-db = { path = "../oraclemcp-db", version = "0.7.1" }
+oraclemcp-config = { path = "../oraclemcp-config", version = "0.7.1" }
+oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.7.1" }
+oraclemcp-auth = { path = "../oraclemcp-auth", version = "0.7.1" }
+oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.7.1" }
+oraclemcp-error = { path = "../oraclemcp-error", version = "0.7.1" }
+oraclemcp-telemetry = { path = "../oraclemcp-telemetry", version = "0.7.1" }
 asupersync.workspace = true
 async-trait.workspace = true
 clap = { version = "4", features = ["derive"] }

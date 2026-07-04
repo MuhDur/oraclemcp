@@ -28,7 +28,7 @@
           "description": "Governed, least-privilege Oracle Database MCP server with a fail-closed SQL guard and PL/SQL intelligence.",
           "name": "oraclemcp",
           "title": "Oracle MCP server",
-          "version": "0.7.0"
+          "version": "0.7.1"
         }
       }
     },

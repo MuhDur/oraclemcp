@@ -1,6 +1,6 @@
 {
   "name": "oraclemcp",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Verified npx wrapper for the oraclemcp Oracle Database MCP server.",
   "license": "MIT OR Apache-2.0",
   "homepage": "https://github.com/MuhDur/oraclemcp",

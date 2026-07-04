@@ -3369,11 +3369,12 @@ mod driver {
                 })
             }
             oracledb::Error::Protocol(protocol) => match protocol {
-                oracledb::protocol::ProtocolError::UnsupportedVersion { version } => {
-                    Some(ConnectFailureKind::ServerGenerationUnsupported {
-                        tns_version: Some(*version),
-                    })
-                }
+                oracledb::protocol::ProtocolError::UnsupportedVersion {
+                    version,
+                    minimum: _,
+                } => Some(ConnectFailureKind::ServerGenerationUnsupported {
+                    tns_version: Some(*version),
+                }),
                 oracledb::protocol::ProtocolError::UnsupportedFeature(feature) => {
                     Some(ConnectFailureKind::UnsupportedWireFeature {
                         feature: (*feature).to_owned(),
@@ -4580,7 +4581,10 @@ mod tests {
     #[test]
     fn classify_unsupported_tns_version_maps_to_server_generation() {
         let kind = driver::classify_connect_failure(&oracledb::Error::Protocol(
-            oracledb::protocol::ProtocolError::UnsupportedVersion { version: 298 },
+            oracledb::protocol::ProtocolError::UnsupportedVersion {
+                version: 298,
+                minimum: 315,
+            },
         ));
         assert_eq!(
             kind,
@@ -4743,25 +4747,25 @@ mod driver_seam {
     }
 
     #[test]
-    fn pin_is_0_6_0_and_seam_intact() {
+    fn pin_is_0_7_1_and_seam_intact() {
         let root = workspace_root();
         let manifest =
             std::fs::read_to_string(root.join("Cargo.toml")).expect("read workspace Cargo.toml");
         assert!(
-            manifest.contains(r#"oracledb = { version = "=0.6.0", default-features = false }"#),
-            "workspace Cargo.toml must keep the oracledb dependency exactly pinned at =0.6.0"
+            manifest.contains(r#"oracledb = { version = "=0.7.1", default-features = false }"#),
+            "workspace Cargo.toml must keep the oracledb dependency exactly pinned at =0.7.1"
         );
 
         let lock = std::fs::read_to_string(root.join("Cargo.lock")).expect("read Cargo.lock");
         assert_eq!(
             lock_package_versions(&lock, "oracledb"),
-            vec!["0.6.0".to_owned()],
-            "Cargo.lock must resolve exactly one oracledb package at 0.6.0"
+            vec!["0.7.1".to_owned()],
+            "Cargo.lock must resolve exactly one oracledb package at 0.7.1"
         );
         assert_eq!(
             lock_package_versions(&lock, "oracledb-protocol"),
-            vec!["0.6.0".to_owned()],
-            "Cargo.lock must resolve the matching oracledb-protocol 0.6.0 package"
+            vec!["0.7.1".to_owned()],
+            "Cargo.lock must resolve the matching oracledb-protocol 0.7.1 package"
         );
 
         assert_eq!(

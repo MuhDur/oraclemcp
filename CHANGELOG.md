@@ -6,6 +6,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-07-04
+
+### Added
+
+- Adopted `oracledb` 0.7.1: OCI wallet parity (encrypted `ewallet.pem`
+  decryption, first-class `ewallet.p12`, always-on `cwallet.sso`) so an
+  untouched ADB wallet zip connects directly; Oracle 11g and older servers are
+  refused with a structured protocol-floor error instead of a decode error;
+  a failed login on pre-23ai servers surfaces the real `ORA-01017` instead of
+  an unexpected-MARKER connect error.
+
+### Fixed
+
+- Classifier (tightening): `WITH cte … UPDATE/DELETE/INSERT/MERGE` — a
+  CTE-smuggled top-level write that parses as a query — is now always
+  classified as a guarded write, never read-only.
+- Fixed chrono `TIMESTAMP WITH TIME ZONE` values shifting the instant by the
+  display offset (driver 0.7.1; found by the new rust-vs-python ground-truth
+  differential, which now runs an identical 29-case statement corpus through
+  both drivers field-by-field).
+- An explicit `ORACLEMCP_CONFIG` that is empty, relative, missing, or a
+  directory is now a hard, actionable error (or falls through to discovery for
+  the empty case) instead of silently loading an empty config.
+- `setup` Codex snippets emit the command as a TOML literal string, so
+  backslash paths and quotes can no longer produce unparseable TOML.
+- e2e harness: skips can no longer be miscounted as passes; the version-matrix
+  e2e hard-fails when live mode is requested but lane credentials are missing.
+
 ## [0.7.0] — 2026-07-04
 
 **oraclemcp now works against pre-23ai Oracle servers (18c/19c/21c

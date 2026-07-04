@@ -387,6 +387,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "block-padding"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8894febbff9f758034a5b8e12d87918f56dfc64a8e1fe757d65e29041538d93"
+dependencies = [
+ "generic-array",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -415,6 +424,15 @@ name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
+
+[[package]]
+name = "cbc"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26b52a9543ae338f279b96b0b9fed9c8093744685043739079ce85cd58f289a6"
+dependencies = [
+ "cipher",
+]
 
 [[package]]
 name = "cc"
@@ -1301,6 +1319,7 @@ version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
+ "block-padding",
  "generic-array",
 ]
 
@@ -1670,9 +1689,9 @@ dependencies = [
 
 [[package]]
 name = "oracledb"
-version = "0.6.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53db0a269a8a268f31d54ea4a9af65f9cf2f799d20351b7cbc5f47edb9ade864"
+checksum = "d39de955def24f0894fedeae588222000918000395f190c9541ee04f8b3d2fc3"
 dependencies = [
  "asupersync",
  "oracledb-protocol",
@@ -1686,12 +1705,15 @@ dependencies = [
 
 [[package]]
 name = "oracledb-protocol"
-version = "0.6.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1dd5125f851a4904d1ae580631f3879ac5a8f4dad89ae596862a46cce64a1e5"
+checksum = "a84a09fccc9f0a48ee2da39ba09a7529bf2c7aa02fdab9badea59915471cad0c"
 dependencies = [
  "aes",
+ "cbc",
+ "der",
  "hex",
+ "hmac 0.12.1",
  "md-5",
  "pbkdf2",
  "rand 0.8.6",
@@ -1704,7 +1726,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "asupersync",
  "async-trait",
@@ -1743,7 +1765,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-audit"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "oraclemcp-error",
  "parking_lot 0.12.5",
@@ -1757,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-auth"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "oraclemcp-audit",
  "oraclemcp-error",
@@ -1771,7 +1793,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-config"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "figment",
  "oraclemcp-error",
@@ -1784,7 +1806,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "asupersync",
  "async-trait",
@@ -1812,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-db"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "asupersync",
  "async-trait",
@@ -1830,7 +1852,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-error"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1839,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-guard"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "oraclemcp-audit",
  "oraclemcp-error",
@@ -1854,7 +1876,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-telemetry"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "asupersync",
  "oraclemcp-error",
