@@ -90,6 +90,7 @@ plsql-output = { workspace = true, optional = true }
 
 [dev-dependencies]
 rcgen = "0.13"
+toml = "0.8"
 
 [lints]
 workspace = true

@@ -64,15 +64,29 @@ for script in "${scenarios[@]}"; do
   [ "$E2E_DRY_RUN" = "1" ] && args+=(--dry-run)
 
   e2e_log_event "scenario_dispatch" "act" "running" 0 "$script"
+  # Plain redirects (not `tee` via process substitution): bash does not wait for
+  # a process-substitution child before the grep below, so a `> >(tee …)` skip
+  # line could still be unflushed and miscounted as a pass. Capture to files,
+  # then replay to the terminal after the exit code is known.
   set +e
-  bash "$script" "${args[@]}" > >(tee "$out") 2> >(tee "$err" >&2)
+  bash "$script" "${args[@]}" >"$out" 2>"$err"
   status=$?
   set -e
+  cat "$out"
+  cat "$err" >&2
 
+  # Skip detection must be independent of E2E_LOG. `e2e_finish_skip` emits the
+  # `scenario_complete`/`skipped` JSON event ONLY under --log, and a plain
+  # `SKIP <scenario>: …` stderr sentinel ONLY without --log — so check both, or
+  # a skip run without --log (e.g. the version matrix with no live creds) is
+  # silently counted as a pass and green-washes the release gate. The
+  # `scenario_complete` filter on the JSON path avoids matching the unrelated
+  # `command_dry_run`/`skipped` events emitted in --dry-run mode.
   if [ "$status" -ne 0 ]; then
     failed=$((failed + 1))
     e2e_log_event "scenario_result" "assert" "fail" 0 "$name status=$status"
-  elif grep -F '"event":"scenario_complete"' "$err" | grep -F '"outcome":"skipped"' >/dev/null 2>&1; then
+  elif { grep -F '"event":"scenario_complete"' "$err" | grep -Fq '"outcome":"skipped"'; } ||
+    grep -Eq '^SKIP ' "$err"; then
     skipped=$((skipped + 1))
     e2e_log_event "scenario_result" "assert" "skipped" 0 "$name skipped"
   else

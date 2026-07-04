@@ -920,6 +920,32 @@ fn query_base_objects(query: &sqlparser::ast::Query) -> Vec<ObjectRef> {
     objects
 }
 
+/// Whether a `SELECT`/`WITH` query body carries a DML `SetExpr` at any depth
+/// (recursing through parenthesized subquery bodies and set operations).
+///
+/// sqlparser 0.62 maps `WITH cte {INSERT|UPDATE|DELETE|MERGE} …` to a
+/// `Statement::Query` whose `body` is `SetExpr::{Insert,Update,Delete,Merge}`
+/// — the trailing DML is absorbed as a "query body" rather than surfacing as a
+/// separate `Statement::Update`/… . A genuine read body is only
+/// `Select`/`Values`/`Table`/set-ops of the same, so the presence of a DML
+/// `SetExpr` means a top-level write was smuggled in under a CTE. The classifier
+/// must NOT tier such text `Safe`/`ReadOnly` (fail-closed; oracle-cte-dml-body).
+///
+/// The match is exhaustive on purpose: `SetExpr` is not `#[non_exhaustive]`, so
+/// a future sqlparser bump that adds a body variant breaks the build and forces
+/// a deliberate read-vs-write triage rather than silently defaulting to read.
+fn set_expr_carries_dml(body: &sqlparser::ast::SetExpr) -> bool {
+    use sqlparser::ast::SetExpr;
+    match body {
+        SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Delete(_) | SetExpr::Merge(_) => true,
+        SetExpr::Query(q) => set_expr_carries_dml(&q.body),
+        SetExpr::SetOperation { left, right, .. } => {
+            set_expr_carries_dml(left) || set_expr_carries_dml(right)
+        }
+        SetExpr::Select(_) | SetExpr::Values(_) | SetExpr::Table(_) => false,
+    }
+}
+
 /// Classify a single pre-split, pure-SQL statement (Stage B + purity consult).
 fn classify_statement(
     sql: &str,
@@ -996,6 +1022,16 @@ fn classify_statement(
     };
     match parsed {
         Statement::Query(ref query) => {
+            // A `Statement::Query` whose body is (or contains, under a set
+            // operation / parenthesized subquery) a DML `SetExpr` is a
+            // CTE-smuggled write: `WITH a AS (SELECT …) UPDATE t SET …` parses
+            // as Query→SetExpr::Update, not Statement::Update. Fail closed to a
+            // write classification so a READ_ONLY session never sees an
+            // `allow`/ReadOnly verdict for text carrying a top-level
+            // UPDATE/DELETE/MERGE/INSERT (oracle-cte-dml-body).
+            if set_expr_carries_dml(&query.body) {
+                return guarded_rw(Vec::new());
+            }
             // SELECT/WITH: Safe only if it calls no unproven user-defined
             // function (R15). Any UDF not ProvenReadOnly → Guarded.
             let calls = user_defined_calls(sql);
@@ -1526,6 +1562,71 @@ mod tests {
         // ...and through a CTE body, even though the outer FROM names the alias.
         let cte = c.classify("WITH x AS (SELECT id FROM orders) SELECT * FROM x");
         assert_eq!(cte.danger, DangerLevel::Guarded);
+    }
+
+    #[test]
+    fn cte_smuggled_dml_body_is_never_read_only() {
+        // oracle-cte-dml-body: sqlparser 0.62 maps `WITH cte {UPDATE|DELETE|
+        // MERGE|INSERT} …` to a Statement::Query whose *body* is a DML SetExpr
+        // (the trailing DML is absorbed as the "query body"). A READ_ONLY
+        // profile must never see this text tiered Safe/ReadOnly — even though
+        // Oracle itself rejects the syntax (ORA-00928), the classifier verdict
+        // must fail closed. The dangerous variants (WITH FUNCTION autonomous
+        // DML, WITH … DROP/TRUNCATE/GRANT) already fail parse and are caught by
+        // the buried-verb / leading-verb scans; this closes the one parse-OK
+        // form that slipped through to the Query arm.
+        for sql in [
+            "WITH a AS (SELECT 1 x FROM dual) UPDATE t SET x = 1",
+            "WITH a AS (SELECT 1 x FROM dual) DELETE FROM t",
+            "WITH a AS (SELECT 1 x FROM dual) INSERT INTO t SELECT * FROM a",
+            "WITH a AS (SELECT 1 x FROM dual) MERGE INTO t USING a ON (1=1) \
+             WHEN MATCHED THEN UPDATE SET x = 1",
+        ] {
+            let d = classify(sql);
+            assert_ne!(
+                d.danger,
+                DangerLevel::Safe,
+                "CTE-smuggled DML must not be Safe: {sql}"
+            );
+            assert_ne!(
+                d.required_level,
+                Some(OperatingLevel::ReadOnly),
+                "CTE-smuggled DML must not be admitted at READ_ONLY: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn legitimate_cte_reads_stay_safe_after_dml_body_tightening() {
+        // Regression guard for the fix above: the tightening is purely
+        // structural (it inspects the query body AST, never scans text), so a
+        // genuine CTE read — including one whose columns/tables are spelled with
+        // non-reserved words that a text scan would false-positive on
+        // (PURGE/AUDIT/FLASHBACK are legal Oracle identifiers) — must stay Safe.
+        for sql in [
+            "WITH x AS (SELECT id FROM orders) SELECT * FROM x",
+            "SELECT purge, audit, flashback FROM app_log",
+            "WITH a AS (SELECT 1 x FROM dual) SELECT * FROM a UNION ALL SELECT 2 FROM dual",
+        ] {
+            let d = classify(sql);
+            assert_eq!(
+                d.danger,
+                DangerLevel::Safe,
+                "legit read must stay Safe: {sql}"
+            );
+            assert_eq!(
+                d.required_level,
+                Some(OperatingLevel::ReadOnly),
+                "legit read must stay READ_ONLY: {sql}"
+            );
+        }
+        // `SELECT … FOR UPDATE` takes row locks: it must remain Guarded/ReadWrite
+        // (a legitimate step-up-able lockable read), NOT be over-tightened to
+        // Forbidden by the DML-body check — the ` UPDATE ` there is a lock
+        // clause, not a smuggled DML SetExpr.
+        let locked = classify("SELECT * FROM orders FOR UPDATE");
+        assert_eq!(locked.danger, DangerLevel::Guarded);
+        assert_eq!(locked.required_level, Some(OperatingLevel::ReadWrite));
     }
 
     #[test]

@@ -1290,7 +1290,7 @@ fn setup_default_snippet_command_is_the_resolved_binary() {
         value["codex_config_toml"]
             .as_str()
             .expect("codex config")
-            .contains(&format!("command = \"{command}\"")),
+            .contains(&format!("command = '{command}'")),
         "Codex TOML must use the same command as the Claude JSON snippet"
     );
     assert!(
@@ -1332,7 +1332,7 @@ fn setup_explicit_wrapper_path_snippets_state_wrapper_must_exist() {
         value["codex_config_toml"]
             .as_str()
             .expect("codex config")
-            .contains(&format!("command = \"{wrapper_str}\"")),
+            .contains(&format!("command = '{wrapper_str}'")),
         "Codex TOML must use the explicit wrapper path too"
     );
     assert_eq!(value["paths"]["wrapper"], serde_json::json!(wrapper_str));

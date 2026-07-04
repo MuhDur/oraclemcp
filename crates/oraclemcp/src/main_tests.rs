@@ -1270,7 +1270,7 @@ fn setup_payload_default_snippets_use_the_real_binary_not_a_wrapper() {
         out["codex_config_toml"]
             .as_str()
             .expect("codex config")
-            .contains(&format!("command = \"{binary}\"")),
+            .contains(&format!("command = {}", toml_string_encode(&binary))),
         "Codex TOML must use the same command as the Claude JSON snippet"
     );
     assert_eq!(out["paths"]["wrapper"], serde_json::Value::Null);
@@ -1309,6 +1309,51 @@ fn setup_payload_default_snippets_use_the_real_binary_not_a_wrapper() {
         !serialized.contains("\"cargo install oraclemcp\""),
         "bare cargo install (stable) must not be advertised"
     );
+}
+
+/// The hand-rolled `codex_config_toml` snippet must be VALID TOML for any
+/// binary path — including a Windows path whose backslashes would be treated as
+/// (invalid) escapes in a basic double-quoted string, and a path containing a
+/// literal quote. Regression for the 2026-07 bug hunt A1 finding.
+#[test]
+fn codex_config_toml_is_valid_toml_for_awkward_paths() {
+    for (label, command) in [
+        ("windows backslash path", r"C:\Users\alice\oraclemcp.exe"),
+        ("unix path", "/usr/local/bin/oraclemcp"),
+        ("path with spaces", "/opt/My Tools/oraclemcp"),
+        ("path with a single quote", "/opt/o'brien/oraclemcp"),
+        ("path with a double quote", "/opt/wat\"quote/oraclemcp"),
+    ] {
+        let out = setup_payload(
+            "tenant_ro",
+            "APP_PASSWORD",
+            command,
+            None,
+            "/etc/oraclemcp/profiles.toml",
+            "/etc/oraclemcp/tools.d",
+        );
+        let snippet = out["codex_config_toml"].as_str().expect("codex config");
+        let parsed: toml::Value = toml::from_str(snippet)
+            .unwrap_or_else(|e| panic!("codex TOML must parse ({label}): {e}\n{snippet}"));
+        // The parsed command must equal the exact input path (no escape mangling).
+        assert_eq!(
+            parsed["mcp_servers"]["oracle"]["command"].as_str(),
+            Some(command),
+            "round-trip command mismatch for {label}"
+        );
+    }
+}
+
+/// `toml_string_encode` prefers a literal for backslash paths and escapes only
+/// when a single-quote / control char forces a basic string.
+#[test]
+fn toml_string_encode_prefers_literal_then_escapes() {
+    assert_eq!(toml_string_encode(r"C:\x\y"), r"'C:\x\y'");
+    assert_eq!(toml_string_encode("/usr/bin/x"), "'/usr/bin/x'");
+    // A single quote cannot live in a literal → escaped basic string.
+    assert_eq!(toml_string_encode("o'brien"), "\"o'brien\"");
+    // In the basic-string fallback, backslashes are doubled.
+    assert_eq!(toml_string_encode("a'b\\c"), "\"a'b\\\\c\"");
 }
 
 #[test]

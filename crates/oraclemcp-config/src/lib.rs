@@ -498,17 +498,77 @@ impl OracleMcpConfig {
         dirs
     }
 
-    /// Return the default config file if one is configured or present.
+    /// Resolve and validate an explicit `$ORACLEMCP_CONFIG` pointer.
     ///
-    /// Precedence:
-    /// 1. `$ORACLEMCP_CONFIG`
+    /// An explicit operator pointer is a hard contract: if it is set but cannot
+    /// be used as a config file, we fail closed with an actionable error rather
+    /// than silently booting with defaults + zero profiles (which figment's
+    /// `Toml::file` would otherwise do for a missing/directory path). The value
+    /// is trimmed first; an *empty* value (exported but blank) is treated as
+    /// unset so normal XDG/`~/.config` discovery still runs.
+    ///
+    /// - non-absolute → rejected: a relative value makes figment walk the
+    ///   current + ancestor directories, so the loaded profiles/ceilings would
+    ///   depend on the launch directory (security-relevant).
+    /// - not an existing regular file (missing, or a directory) → rejected,
+    ///   distinguishing the two so the operator knows which to fix.
+    fn resolve_explicit_config_path() -> Result<Option<PathBuf>, ConfigError> {
+        let Some(raw) = std::env::var_os(CONFIG_PATH_ENV) else {
+            return Ok(None);
+        };
+        // Trim surrounding whitespace: a value with a stray trailing newline /
+        // space must not silently resolve to a different (or no) file.
+        let trimmed = raw.to_string_lossy();
+        let trimmed = trimmed.trim();
+        if trimmed.is_empty() {
+            // Exported-but-empty: behave as if unset and fall through to
+            // discovery instead of loading nothing AND suppressing the fallback.
+            return Ok(None);
+        }
+        let path = PathBuf::from(trimmed);
+        if !path.is_absolute() {
+            return Err(ConfigError::ExplicitConfigPathUnusable {
+                path: trimmed.to_owned(),
+                reason: "path must be absolute (a relative value would resolve \
+                         against the launch directory); use a full path",
+            });
+        }
+        if path.is_dir() {
+            return Err(ConfigError::ExplicitConfigPathUnusable {
+                path: trimmed.to_owned(),
+                reason: "path is a directory, not a file; point ORACLEMCP_CONFIG \
+                         at the profiles.toml / config.toml file itself",
+            });
+        }
+        if !path.is_file() {
+            return Err(ConfigError::ExplicitConfigPathUnusable {
+                path: trimmed.to_owned(),
+                reason: "no such file; create it or unset ORACLEMCP_CONFIG to use \
+                         XDG / ~/.config discovery",
+            });
+        }
+        Ok(Some(path))
+    }
+
+    /// Return the discovered default config file, if one is present. This is the
+    /// **discovery** path only (`$XDG_CONFIG_HOME` then `~/.config`); an explicit
+    /// `$ORACLEMCP_CONFIG` pointer is resolved+validated separately by
+    /// [`figment`](Self::figment) / [`load`](Self::load) via
+    /// [`resolve_explicit_config_path`](Self::resolve_explicit_config_path).
+    ///
+    /// Precedence (across discovery + explicit env, as applied by `figment`):
+    /// 1. `$ORACLEMCP_CONFIG` (must resolve to an absolute, existing file)
     /// 2. `$XDG_CONFIG_HOME/oraclemcp/profiles.toml`, then `config.toml`
     ///    (only when `XDG_CONFIG_HOME` is set to an absolute path)
     /// 3. `~/.config/oraclemcp/profiles.toml`, then `config.toml`
     #[must_use]
     pub fn default_config_path() -> Option<PathBuf> {
-        if let Some(path) = std::env::var_os(CONFIG_PATH_ENV).map(PathBuf::from) {
-            return Some(path);
+        // An explicit, valid ORACLEMCP_CONFIG still wins for callers (e.g. the
+        // setup write-target) that ask for "the effective config path"; an
+        // invalid one is ignored here (this getter is infallible) and surfaces
+        // as a hard error only on the actual load path.
+        if let Ok(Some(explicit)) = Self::resolve_explicit_config_path() {
+            return Some(explicit);
         }
         Self::config_search_dirs()
             .into_iter()
@@ -519,25 +579,31 @@ impl OracleMcpConfig {
     /// Build the layered [`Figment`] (defaults < `config.toml` < env), without
     /// extracting. Callers (the binary) may `.merge()` CLI overrides last —
     /// CLI has the highest precedence — before calling [`Self::from_figment`].
-    #[must_use]
-    pub fn figment(config_path: Option<&Path>) -> Figment {
+    ///
+    /// Fails closed if `$ORACLEMCP_CONFIG` is set to an unusable path (see
+    /// [`resolve_explicit_config_path`](Self::resolve_explicit_config_path)).
+    pub fn figment(config_path: Option<&Path>) -> Result<Figment, ConfigError> {
         let mut fig = Figment::from(Serialized::defaults(OracleMcpConfig::default()));
-        let discovered_path;
-        let path = match config_path {
-            Some(path) => Some(path),
-            None => {
-                discovered_path = Self::default_config_path();
-                discovered_path.as_deref()
-            }
+        // Precedence: an explicit CLI `config_path` wins; else a validated
+        // `$ORACLEMCP_CONFIG`; else XDG/`~/.config` discovery.
+        let resolved = match config_path {
+            Some(path) => Some(path.to_path_buf()),
+            None => match Self::resolve_explicit_config_path()? {
+                Some(explicit) => Some(explicit),
+                None => Self::config_search_dirs()
+                    .into_iter()
+                    .flat_map(|dir| [dir.join("profiles.toml"), dir.join("config.toml")])
+                    .find(|path| path.is_file()),
+            },
         };
-        if let Some(path) = path {
+        if let Some(path) = resolved {
             fig = fig.merge(Toml::file(path));
         }
-        fig.merge(
+        Ok(fig.merge(
             Env::prefixed(ENV_PREFIX)
                 .split("__")
                 .ignore(IGNORED_ENV_KEYS),
-        )
+        ))
     }
 
     /// Extract and validate from a composed [`Figment`].
@@ -550,7 +616,7 @@ impl OracleMcpConfig {
     /// path). Use [`figment`](Self::figment) + [`from_figment`](Self::from_figment)
     /// to also layer CLI overrides.
     pub fn load(config_path: Option<&Path>) -> Result<Self, ConfigError> {
-        Self::from_figment(&Self::figment(config_path))
+        Self::from_figment(&Self::figment(config_path)?)
     }
 
     /// Parse + validate directly from a TOML string (tests / embedding).
@@ -864,6 +930,17 @@ pub enum ConfigError {
     /// figment parse / extract failure (unknown keys, type errors, …).
     #[error("config error: {0}")]
     Figment(String),
+    /// `$ORACLEMCP_CONFIG` was set to an explicit path that cannot be used as a
+    /// config file. An explicit operator pointer must resolve to a real file:
+    /// silently ignoring it (booting with zero profiles) would violate
+    /// fail-closed. `reason` distinguishes not-absolute / missing / a directory.
+    #[error("ORACLEMCP_CONFIG points at {path:?} which is unusable: {reason}")]
+    ExplicitConfigPathUnusable {
+        /// The (trimmed) value of `$ORACLEMCP_CONFIG`.
+        path: String,
+        /// Why it cannot be used, with the actionable next step.
+        reason: &'static str,
+    },
     /// A profile has no usable `connect_string` after inheritance.
     #[error("connection profile `{0}` is missing a connect_string")]
     MissingConnectString(String),
@@ -1483,6 +1560,119 @@ mod tests {
             let cfg = OracleMcpConfig::load(None).expect("falls back to ~/.config");
             assert!(cfg.profile("home_profile").is_some());
             assert!(cfg.profile("relative_xdg_profile").is_none());
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn explicit_config_env_is_validated_fail_closed() {
+        // An explicit ORACLEMCP_CONFIG is an operator contract: an unusable
+        // pointer must be a hard, actionable error, never a silent boot with
+        // defaults + zero profiles (F1/F2/F3 from the 2026-07 bug hunt).
+
+        // F2a — a missing path is rejected (not silently ignored by figment).
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("HOME", jail.directory().display().to_string());
+            jail.set_env(
+                CONFIG_PATH_ENV,
+                jail.directory()
+                    .join("does-not-exist.toml")
+                    .display()
+                    .to_string(),
+            );
+            let err = OracleMcpConfig::load(None).expect_err("missing explicit path must error");
+            assert!(
+                matches!(err, ConfigError::ExplicitConfigPathUnusable { .. }),
+                "expected ExplicitConfigPathUnusable, got {err:?}"
+            );
+            assert!(err.to_string().contains("no such file"));
+            Ok(())
+        });
+
+        // F2b — a directory is rejected, distinguished from a missing file.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("HOME", jail.directory().display().to_string());
+            jail.create_dir("a-dir")?;
+            jail.set_env(
+                CONFIG_PATH_ENV,
+                jail.directory().join("a-dir").display().to_string(),
+            );
+            let err = OracleMcpConfig::load(None).expect_err("directory must error");
+            assert!(err.to_string().contains("is a directory"), "got {err}");
+            Ok(())
+        });
+
+        // F1 — a relative value is rejected (would resolve against the launch
+        // directory / ancestors, making the loaded config depend on cwd).
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("HOME", jail.directory().display().to_string());
+            jail.create_file(
+                "rel.toml",
+                "[[profiles]]\nname=\"p\"\nconnect_string=\"localhost:1521/FREEPDB1\"\n",
+            )?;
+            jail.set_env(CONFIG_PATH_ENV, "rel.toml");
+            let err = OracleMcpConfig::load(None).expect_err("relative path must error");
+            assert!(err.to_string().contains("must be absolute"), "got {err}");
+            Ok(())
+        });
+
+        // F2c — trailing whitespace is trimmed, then validated as its real
+        // target (here: an existing file, which loads).
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("HOME", jail.directory().display().to_string());
+            jail.create_file(
+                "ws.toml",
+                "[[profiles]]\nname=\"ws_profile\"\nconnect_string=\"localhost:1521/FREEPDB1\"\n",
+            )?;
+            let with_ws = format!("{}\n  ", jail.directory().join("ws.toml").display());
+            jail.set_env(CONFIG_PATH_ENV, with_ws);
+            let cfg = OracleMcpConfig::load(None).expect("trimmed explicit path loads");
+            assert!(cfg.profile("ws_profile").is_some());
+            Ok(())
+        });
+
+        // F3 — an exported-but-empty value behaves as unset: discovery still
+        // runs (does not load nothing AND suppress the ~/.config fallback).
+        figment::Jail::expect_with(|jail| {
+            jail.create_dir(".config/oraclemcp")?;
+            jail.create_file(
+                ".config/oraclemcp/profiles.toml",
+                "[[profiles]]\nname=\"home_profile\"\nconnect_string=\"localhost:1521/FREEPDB1\"\n",
+            )?;
+            jail.set_env("HOME", jail.directory().display().to_string());
+            jail.set_env(CONFIG_PATH_ENV, "   ");
+            let cfg = OracleMcpConfig::load(None).expect("empty env falls back to discovery");
+            assert!(
+                cfg.profile("home_profile").is_some(),
+                "empty ORACLEMCP_CONFIG must fall back to ~/.config discovery"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn empty_xdg_is_ignored_and_empty_discovery_yields_none() {
+        // NOTE: this crate is `#![forbid(unsafe_code)]`, and edition-2024
+        // `std::env::remove_var` is `unsafe`, so we cannot truly UNSET HOME in a
+        // test. Instead we assert the equivalent observable behavior with a
+        // fresh (empty) HOME and an empty-string XDG_CONFIG_HOME.
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().display().to_string();
+            jail.set_env("HOME", &home);
+            // An empty-string XDG_CONFIG_HOME is not absolute → ignored, so
+            // discovery collapses to just the single ~/.config fallback dir.
+            jail.set_env("XDG_CONFIG_HOME", "");
+            let dirs = OracleMcpConfig::config_search_dirs();
+            assert_eq!(
+                dirs,
+                vec![PathBuf::from(&home).join(".config").join("oraclemcp")],
+                "empty XDG_CONFIG_HOME must be ignored as non-absolute"
+            );
+            // No config file exists under the fresh HOME and ORACLEMCP_CONFIG is
+            // unset (ambient) → discovery finds nothing.
+            assert_eq!(OracleMcpConfig::default_config_path(), None);
             Ok(())
         });
     }

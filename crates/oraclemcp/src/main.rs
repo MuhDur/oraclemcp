@@ -3159,6 +3159,33 @@ fn setup_snippet_command() -> String {
         .unwrap_or_else(|_| "oraclemcp".to_owned())
 }
 
+/// Encode `value` as a TOML string for the hand-rolled `codex_config_toml`
+/// snippet. Prefers a **literal** (single-quoted) string so a Windows path like
+/// `C:\Users\alice\oraclemcp.exe` survives verbatim — a basic double-quoted
+/// string would treat `\U`/`\a`/… as (invalid) escapes and emit un-parseable
+/// TOML. Falls back to a properly-escaped basic string when the value contains a
+/// single quote or a control char (which a literal string cannot carry).
+fn toml_string_encode(value: &str) -> String {
+    if !value.contains('\'') && !value.chars().any(char::is_control) {
+        return format!("'{value}'");
+    }
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn setup_payload(
     profile: &str,
     credential_env: &str,
@@ -3208,7 +3235,9 @@ fn setup_payload(
             }
         },
         "codex_config_toml": format!(
-            "[mcp_servers.oracle]\ncommand = \"{snippet_command}\"\nargs = [\"serve\", \"--profile\", \"{profile}\", \"--allow-no-auth\"]\n"
+            "[mcp_servers.oracle]\ncommand = {}\nargs = [\"serve\", \"--profile\", {}, \"--allow-no-auth\"]\n",
+            toml_string_encode(snippet_command),
+            toml_string_encode(profile),
         ),
         "secure_stdio": {
             "env": { "ORACLEMCP_STDIO_TOKEN": "<shared-init-token>" },
