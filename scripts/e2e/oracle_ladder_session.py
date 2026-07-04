@@ -174,6 +174,18 @@ class Ladder:
         self.table = args.table
         self.table_created = False
         self.table_dropped = False
+        # Throwaway source objects for the create_or_replace / compile_object /
+        # patch_source governed-DDL sub-ladder. A VIEW exercises
+        # oracle_create_or_replace's own DDL grant flow (a PL/SQL body would
+        # classify READ_WRITE and delegate to the general execute path); a
+        # PROCEDURE exercises compile_object + patch_source (both DDL-gated).
+        self.view = f"{args.table}_V"
+        self.proc = f"{args.table}_P"
+        self.proc_owner = None
+        self.view_created = False
+        self.view_dropped = False
+        self.proc_created = False
+        self.proc_dropped = False
         self.failures = 0
 
     # -- step plumbing ------------------------------------------------------
@@ -376,6 +388,227 @@ class Ladder:
             require(count == 0, "fresh table is empty", count)
             return {"describe_ok": True, "row_count": count}
 
+        # --- Source-object governed-DDL sub-ladder (still at DDL) -----------
+        # Exercises oracle_create_or_replace / oracle_compile_object /
+        # oracle_patch_source through the preview -> single-use grant -> execute
+        # gate, asserting VALUES (object status, patched source text) rather than
+        # exit codes, plus a wrong-grant refusal. Ground truth wired in here:
+        #   * oracle_create_or_replace mints its OWN DDL grant only for a
+        #     DDL-classified object (a VIEW); a PL/SQL body classifies READ_WRITE
+        #     and the tool delegates to the general execute path. So the VIEW
+        #     drives the create_or_replace grant flow.
+        #   * oracle_patch_source ALWAYS forces the DDL gate (dispatch/mod.rs
+        #     patch_required_level = Some(Ddl)) and mints its own grant, so a
+        #     PROCEDURE drives compile_object + patch_source.
+        # The audit assertions for these tools live in verify_audit_records.
+        view = self.view
+        proc = self.proc
+        view_src = f"CREATE OR REPLACE VIEW {view} AS SELECT 1 AS id FROM dual"
+        proc_src = f"CREATE OR REPLACE PROCEDURE {proc} AS BEGIN NULL; END;"
+
+        def source_create_or_replace_view():
+            preview = structured(
+                self.session.call(
+                    "oracle_create_or_replace", {"source_code": view_src}
+                )
+            )
+            require(
+                preview.get("gate_decision") == "allow",
+                "create_or_replace(view) preview allows at DDL",
+                preview,
+            )
+            require(
+                preview.get("required_level") == "DDL",
+                "create_or_replace of a VIEW is DDL-gated",
+                preview,
+            )
+            token = (preview.get("confirmation") or {}).get("confirm")
+            require(
+                token, "create_or_replace(view) preview mints a single-use grant", preview
+            )
+            detected = preview.get("detected_object") or {}
+            require(
+                str(detected.get("name", "")).upper() == view.upper()
+                and detected.get("object_type") == "VIEW",
+                "preview detects the target VIEW",
+                detected,
+            )
+            self.harness.grant = "execute"
+            out = structured(
+                self.session.call(
+                    "oracle_create_or_replace",
+                    {"source_code": view_src, "execute": True, "confirm": token},
+                )
+            )
+            self.harness.grant = "none"
+            require(out.get("applied") is True, "create_or_replace(view) applied", out)
+            require(out.get("committed") is True, "create_or_replace(view) committed", out)
+            self.view_created = True
+            self.proc_owner = (out.get("detected_object") or detected).get("owner")
+            rows = self.query_rows(
+                "SELECT status FROM user_objects "
+                f"WHERE object_name = '{view.upper()}' AND object_type = 'VIEW'"
+            )
+            require(
+                rows and rows[0].get("STATUS") == "VALID",
+                "created VIEW exists and is VALID",
+                rows,
+            )
+            # VALUE assertion: the governed VIEW round-trips a row.
+            vrows = self.query_rows(f"SELECT id FROM {view}")
+            require(
+                vrows and vrows[0].get("ID") == "1",
+                "governed VIEW returns its row",
+                vrows,
+            )
+            return {"detected_object": detected, "status": "VALID"}
+
+        def source_create_or_replace_wrong_grant_refused():
+            # Mint a real single-use grant via a fresh preview, then present a
+            # WRONG confirmation token: the apply must be refused fail-closed and
+            # nothing may be applied.
+            structured(
+                self.session.call(
+                    "oracle_create_or_replace", {"source_code": view_src}
+                )
+            )
+            result = self.session.call(
+                "oracle_create_or_replace",
+                {
+                    "source_code": view_src,
+                    "execute": True,
+                    "confirm": "not-a-valid-grant-token",
+                },
+            )
+            content = structured(result)
+            require(
+                result.get("isError") is True,
+                "a wrong/stale execution grant is refused",
+                content,
+            )
+            require(
+                isinstance(content.get("error_class"), str)
+                and content.get("error_class"),
+                "the refusal carries a structured error_class",
+                content,
+            )
+            require(
+                content.get("applied") in (None, False),
+                "nothing is applied on a refused grant",
+                content,
+            )
+            return {"error_class": content.get("error_class")}
+
+        def source_create_procedure_via_execute():
+            # A PL/SQL CREATE OR REPLACE classifies READ_WRITE and flows through
+            # the GENERAL preview -> grant -> execute path (governed_execute).
+            result = self.governed_execute(
+                proc_src, commit=True, expect={"committed": True}
+            )
+            self.proc_created = True
+            rows = self.query_rows(
+                "SELECT status FROM user_objects "
+                f"WHERE object_name = '{proc.upper()}' AND object_type = 'PROCEDURE'"
+            )
+            require(
+                rows and rows[0].get("STATUS") == "VALID",
+                "created PROCEDURE exists and is VALID",
+                rows,
+            )
+            return result
+
+        def source_compile_object():
+            args_c = {"object_type": "PROCEDURE", "name": proc}
+            if self.proc_owner:
+                args_c["owner"] = self.proc_owner
+            preview = structured(self.session.call("oracle_compile_object", args_c))
+            require(
+                preview.get("gate_decision") == "allow",
+                "compile_object preview allows at DDL",
+                preview,
+            )
+            require(
+                preview.get("required_level") == "DDL",
+                "compile_object requires the DDL level (ALTER ... COMPILE is DDL)",
+                preview,
+            )
+            token = (preview.get("confirmation") or {}).get("confirm")
+            require(token, "compile_object preview mints a single-use grant", preview)
+            execute_args = dict(args_c)
+            execute_args["execute"] = True
+            execute_args["confirmation_token"] = token
+            out = structured(self.session.call("oracle_compile_object", execute_args))
+            require(out.get("compiled") is True, "object compiled", out)
+            rows = self.query_rows(
+                "SELECT status FROM user_objects "
+                f"WHERE object_name = '{proc.upper()}' AND object_type = 'PROCEDURE'"
+            )
+            require(
+                rows and rows[0].get("STATUS") == "VALID",
+                "compiled procedure is VALID",
+                rows,
+            )
+            return {"compiled": True}
+
+        def source_patch_source():
+            args_p = {
+                "object_type": "PROCEDURE",
+                "name": proc,
+                "old_text": "NULL",
+                "new_text": "NULL; NULL",
+            }
+            if self.proc_owner:
+                args_p["owner"] = self.proc_owner
+            preview = structured(self.session.call("oracle_patch_source", args_p))
+            require(
+                preview.get("match_count") == 1,
+                "patch old_text matches the source exactly once",
+                preview,
+            )
+            require(
+                preview.get("required_level") == "DDL",
+                "patch_source enforces the DDL gate",
+                preview,
+            )
+            token = (preview.get("confirmation") or {}).get("confirm")
+            require(token, "patch_source preview mints a single-use grant", preview)
+            execute_args = dict(args_p)
+            execute_args["execute"] = True
+            execute_args["confirm"] = token
+            out = structured(self.session.call("oracle_patch_source", execute_args))
+            require(out.get("applied") is True, "patch_source applied", out)
+            rows = self.query_rows(
+                "SELECT COUNT(*) AS n FROM user_source "
+                f"WHERE name = '{proc.upper()}' AND type = 'PROCEDURE' "
+                "AND INSTR(text, 'NULL; NULL') > 0"
+            )
+            require(
+                rows and int(next(iter(rows[0].values()))) >= 1,
+                "patched source text is present in user_source",
+                rows,
+            )
+            return {"applied": True}
+
+        def source_drop_objects():
+            self.governed_execute(
+                f"DROP PROCEDURE {proc}", commit=True, expect={"committed": True}
+            )
+            self.proc_dropped = True
+            self.governed_execute(
+                f"DROP VIEW {view}", commit=True, expect={"committed": True}
+            )
+            self.view_dropped = True
+            rows = self.query_rows(
+                "SELECT COUNT(*) AS n FROM user_objects "
+                f"WHERE object_name IN ('{proc.upper()}', '{view.upper()}')"
+            )
+            require(
+                rows and int(next(iter(rows[0].values()))) == 0,
+                "both throwaway objects are gone from user_objects",
+                rows,
+            )
+            return {"dropped": [proc, view]}
+
         def drop_to_read_only_mid():
             dropped = self.drop_level()
             refusal = self.query_refused(
@@ -460,6 +693,15 @@ class Ladder:
             ("elevate_ddl", elevate_ddl),
             ("ddl_create_table", ddl_create_table),
             ("verify_table_exists", verify_table_exists),
+            ("source_create_or_replace_view", source_create_or_replace_view),
+            (
+                "source_create_or_replace_wrong_grant_refused",
+                source_create_or_replace_wrong_grant_refused,
+            ),
+            ("source_create_procedure_via_execute", source_create_procedure_via_execute),
+            ("source_compile_object", source_compile_object),
+            ("source_patch_source", source_patch_source),
+            ("source_drop_objects", source_drop_objects),
             ("drop_to_read_only_mid", drop_to_read_only_mid),
             ("elevate_read_write", elevate_read_write),
             ("dml_rollback_by_default", dml_rollback_by_default),
@@ -476,7 +718,28 @@ class Ladder:
             self.cleanup()
 
     def cleanup(self):
-        """Best-effort governed teardown of the throwaway table, then exit."""
+        """Best-effort governed teardown of the throwaway objects, then exit."""
+        leftovers = []
+        if self.proc_created and not self.proc_dropped:
+            leftovers.append(("PROCEDURE", self.proc))
+        if self.view_created and not self.view_dropped:
+            leftovers.append(("VIEW", self.view))
+        if leftovers:
+            try:
+                self.elevate("DDL")
+                for kind, name in leftovers:
+                    self.governed_execute(
+                        f"DROP {kind} {name}", commit=True, expect={}
+                    )
+                self.harness.emit(
+                    "cleanup_drop_source_objects", "teardown", "pass", 0,
+                    "governed teardown dropped the throwaway source objects",
+                )
+            except (StepFailure, OSError, ValueError) as exc:
+                self.harness.emit(
+                    "cleanup_drop_source_objects", "teardown", "fail", 0,
+                    f"governed teardown failed; throwaway objects may remain: {exc}",
+                )
         if self.table_created and not self.table_dropped:
             try:
                 self.elevate("DDL")
@@ -564,6 +827,20 @@ def verify_audit_records(args, harness):
     require(
         has("oracle_execute", outcome="SUCCEEDED", decision="ALLOWED"),
         "audit chain records the committed governed executes",
+        len(records),
+    )
+    # Source-object governed-DDL sub-ladder: compile_object and patch_source
+    # each write their own signed, ALLOWED, SUCCEEDED audit record. (Ground
+    # truth: oracle_create_or_replace delegates to the shared execute path, so
+    # it is audited under tool `oracle_execute`, not its own name.)
+    require(
+        has("oracle_compile_object", outcome="SUCCEEDED", decision="ALLOWED"),
+        "audit chain records the governed compile_object",
+        len(records),
+    )
+    require(
+        has("oracle_patch_source", outcome="SUCCEEDED", decision="ALLOWED"),
+        "audit chain records the governed patch_source",
         len(records),
     )
     harness.evidence_line(

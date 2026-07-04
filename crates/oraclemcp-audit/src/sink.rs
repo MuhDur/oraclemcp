@@ -132,6 +132,48 @@ impl AuditSink for MemoryAuditSink {
     }
 }
 
+/// Keyless structural walk of a persisted chain prefix: each record's own
+/// `entry_hash` must recompute from its content, `prev_hash` must link to the
+/// previous record's `entry_hash` (genesis for the first), and `seq` must
+/// increase by exactly one. Returns a human description of the first break, or
+/// `None` for a structurally intact prefix.
+///
+/// This is the subset of [`crate::verify_records`] that needs no signing key,
+/// so [`Auditor::resume_from`] can reject a forked interior at startup without
+/// false-refusing a legitimately key-rotated chain (whose MAC walk needs keys
+/// this auditor may not hold).
+fn structural_break(records: &[AuditRecord]) -> Option<String> {
+    let mut prev_hash: &str = GENESIS_HASH;
+    let mut prev_seq: Option<u64> = None;
+    for (index, record) in records.iter().enumerate() {
+        let pos = index + 1;
+        if !record.hash_is_valid() {
+            return Some(format!(
+                "record #{pos} (seq {}) entry_hash does not recompute from its content \
+                 (in-place edit)",
+                record.seq
+            ));
+        }
+        if record.prev_hash.as_str() != prev_hash {
+            return Some(format!(
+                "record #{pos} (seq {}) prev_hash does not link to the previous record's \
+                 entry_hash (reordered, inserted, or deleted record)",
+                record.seq
+            ));
+        }
+        let expected = prev_seq.map_or(1, |s| s + 1);
+        if record.seq != expected {
+            return Some(format!(
+                "record #{pos} has a non-monotonic seq (expected {expected}, found {})",
+                record.seq
+            ));
+        }
+        prev_hash = &record.entry_hash;
+        prev_seq = Some(record.seq);
+    }
+    None
+}
+
 struct ChainState {
     seq: u64,
     last_hash: String,
@@ -230,6 +272,26 @@ impl Auditor {
                  roll the file back to its last well-formed line before restarting"
             ))
         })?;
+
+        // Keyless structural pre-check of the whole on-disk prefix BEFORE we seed
+        // the chain state from its tail. `parse_jsonl` only proves each line is
+        // well-formed JSON; on its own it would let resume blindly continue from
+        // `records.last()` even when the interior is forked — a deleted/reordered
+        // middle record, or an in-place edit — as long as the LAST line still
+        // parses. The head anchor does not cover this: it attests only the head
+        // seq/hash, so an interior deletion whose surviving tail still matches
+        // the anchored head slips the anchor cross-check entirely. Walking the
+        // hash links + monotonic seq here catches it at startup and fails closed.
+        // The keyed MAC is deliberately NOT checked (a legitimately rotated chain
+        // carries records under prior key_ids that this auditor's single active
+        // key cannot verify — that stays the job of `oraclemcp audit verify`).
+        if let Some(reason) = structural_break(&records) {
+            return Err(AuditError::ResumeRefused(format!(
+                "audit log {disp} has a broken chain interior ({reason}); a tampered or torn \
+                 interior cannot seed a continuing chain — run `oraclemcp audit verify {disp}`, \
+                 then repair before restarting"
+            )));
+        }
         let Some(tail) = records.last() else {
             // Empty log: nothing to resume; the fresh genesis state is correct.
             return Ok(self);
@@ -813,6 +875,147 @@ mod tests {
             Err(other) => panic!("expected ResumeRefused, got {other:?}"),
             Ok(_) => panic!("tail truncation vs the anchor must refuse startup"),
         }
+    }
+
+    #[test]
+    fn resume_refuses_a_deleted_interior_even_with_a_matching_anchor() {
+        // The head anchor attests only the HEAD seq/hash. A tamperer who deletes
+        // an *interior* record but leaves the surviving tail (which still matches
+        // the anchored head) would slip the anchor cross-check entirely: the
+        // chain still ends at the anchored seq with the anchored entry_hash. The
+        // keyless structural pre-check catches the forked interior (the surviving
+        // tail's prev_hash no longer links to its new predecessor) and refuses.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let anchor_path = crate::anchor_path_for(&path);
+        {
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open")),
+                test_key(),
+            )
+            .with_head_anchor(&anchor_path);
+            for i in 1..=3 {
+                auditor
+                    .append(
+                        &draft(&format!("DELETE FROM t WHERE id={i}"), "GUARDED"),
+                        format!("t{i}"),
+                        true,
+                    )
+                    .expect("append");
+            }
+        }
+        // Anchor attests seq=3; drop the MIDDLE record but keep the head line.
+        let body = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 3);
+        let kept = format!("{}\n{}\n", lines[0], lines[2]); // seq 1 then seq 3
+        std::fs::write(&path, kept).unwrap();
+        let anchor = crate::load_anchor(&anchor_path)
+            .expect("load")
+            .expect("present");
+        assert_eq!(
+            anchor.seq, 3,
+            "anchor still attests the (surviving) head seq"
+        );
+
+        let refused = Auditor::new(
+            Box::new(FileAuditSink::open(&path).expect("open")),
+            test_key(),
+        )
+        .with_head_anchor(&anchor_path)
+        .resume_from(&path);
+        match refused {
+            Err(AuditError::ResumeRefused(msg)) => {
+                assert!(
+                    msg.contains("broken chain interior") && msg.contains("audit verify"),
+                    "expected structural-break message, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected ResumeRefused, got {other:?}"),
+            Ok(_) => panic!("a deleted interior record must refuse startup even with an anchor"),
+        }
+    }
+
+    #[test]
+    fn resume_refuses_a_reordered_interior_without_an_anchor() {
+        // No anchor at all (legacy log): a reordered interior — the pure-JSONL
+        // parse still succeeds — must still fail closed at startup rather than
+        // seed a continuing chain onto a forked prefix.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        {
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open")),
+                test_key(),
+            );
+            for i in 1..=3 {
+                auditor
+                    .append(
+                        &draft(&format!("DELETE FROM t WHERE id={i}"), "GUARDED"),
+                        format!("t{i}"),
+                        true,
+                    )
+                    .expect("append");
+            }
+        }
+        // Swap the last two records: every line is still valid JSON.
+        let body = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        let reordered = format!("{}\n{}\n{}\n", lines[0], lines[2], lines[1]);
+        std::fs::write(&path, reordered).unwrap();
+
+        let refused = Auditor::new(
+            Box::new(FileAuditSink::open(&path).expect("open")),
+            test_key(),
+        )
+        .resume_from(&path);
+        match refused {
+            Err(AuditError::ResumeRefused(msg)) => {
+                assert!(
+                    msg.contains("broken chain interior"),
+                    "expected structural-break message, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected ResumeRefused, got {other:?}"),
+            Ok(_) => panic!("a reordered interior must refuse startup"),
+        }
+    }
+
+    #[test]
+    fn resume_accepts_a_structurally_intact_multi_record_log() {
+        // Guard against over-tightening: a clean, structurally intact chain must
+        // still resume (the structural pre-check is a no-op on a good prefix).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        {
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open")),
+                test_key(),
+            );
+            for i in 1..=3 {
+                auditor
+                    .append(
+                        &draft(&format!("DELETE FROM t WHERE id={i}"), "GUARDED"),
+                        format!("t{i}"),
+                        true,
+                    )
+                    .expect("append");
+            }
+        }
+        let auditor = Auditor::new(
+            Box::new(FileAuditSink::open(&path).expect("open")),
+            test_key(),
+        )
+        .resume_from(&path)
+        .expect("intact log resumes");
+        let next = auditor
+            .append(
+                &draft("DELETE FROM t WHERE id=4", "GUARDED"),
+                "t4".to_owned(),
+                true,
+            )
+            .expect("append after resume");
+        assert_eq!(next.seq, 4, "resume continues the sequence");
     }
 
     #[test]

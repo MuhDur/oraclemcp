@@ -1653,6 +1653,89 @@ mod tests {
 
     #[test]
     #[allow(clippy::result_large_err)]
+    fn explicit_config_env_rejects_nonregular_and_edge_paths() {
+        // Pass-1 bug-hunt (2026-07): an explicit ORACLEMCP_CONFIG that resolves
+        // to anything other than a real regular file must fail closed, never
+        // silently boot with defaults + zero profiles. Probes: a symlink to a
+        // directory, a FIFO, a real file with a trailing slash, and a very long
+        // path.
+
+        // A symlink TO A DIRECTORY: `is_dir()` follows the link, so it must be
+        // rejected as a directory (not silently followed to nothing).
+        #[cfg(unix)]
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("HOME", jail.directory().display().to_string());
+            jail.create_dir("realdir")?;
+            let link = jail.directory().join("link-to-dir");
+            std::os::unix::fs::symlink(jail.directory().join("realdir"), &link)
+                .expect("create symlink");
+            jail.set_env(CONFIG_PATH_ENV, link.display().to_string());
+            let err = OracleMcpConfig::load(None).expect_err("symlink-to-dir must error");
+            assert!(
+                matches!(err, ConfigError::ExplicitConfigPathUnusable { .. }),
+                "expected ExplicitConfigPathUnusable, got {err:?}"
+            );
+            assert!(err.to_string().contains("is a directory"), "got {err}");
+            Ok(())
+        });
+
+        // A FIFO (named pipe) is not a regular file: fail closed rather than
+        // block forever trying to read it as a config file.
+        #[cfg(unix)]
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("HOME", jail.directory().display().to_string());
+            let fifo = jail.directory().join("cfg.fifo");
+            let made = std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if made {
+                jail.set_env(CONFIG_PATH_ENV, fifo.display().to_string());
+                let err = OracleMcpConfig::load(None).expect_err("FIFO must error");
+                assert!(
+                    matches!(err, ConfigError::ExplicitConfigPathUnusable { .. }),
+                    "a FIFO must fail closed, got {err:?}"
+                );
+            }
+            Ok(())
+        });
+
+        // A real regular file with a TRAILING SLASH: POSIX stat of "file/"
+        // yields ENOTDIR, so it is neither a dir nor a regular file → rejected.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("HOME", jail.directory().display().to_string());
+            jail.create_file(
+                "cfg.toml",
+                "[[profiles]]\nname=\"p\"\nconnect_string=\"localhost:1521/FREEPDB1\"\n",
+            )?;
+            let with_slash = format!("{}/", jail.directory().join("cfg.toml").display());
+            jail.set_env(CONFIG_PATH_ENV, with_slash);
+            let err = OracleMcpConfig::load(None).expect_err("file-with-trailing-slash must error");
+            assert!(
+                matches!(err, ConfigError::ExplicitConfigPathUnusable { .. }),
+                "trailing slash on a regular file must fail closed, got {err:?}"
+            );
+            Ok(())
+        });
+
+        // A very long absolute path: no panic, no silent fallback — rejected as
+        // a missing/unusable file.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("HOME", jail.directory().display().to_string());
+            let long = format!("/{}", "a".repeat(5000));
+            jail.set_env(CONFIG_PATH_ENV, long);
+            let err = OracleMcpConfig::load(None).expect_err("very long path must error");
+            assert!(
+                matches!(err, ConfigError::ExplicitConfigPathUnusable { .. }),
+                "a very long unusable path must fail closed, got {err:?}"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
     fn empty_xdg_is_ignored_and_empty_discovery_yields_none() {
         // NOTE: this crate is `#![forbid(unsafe_code)]`, and edition-2024
         // `std::env::remove_var` is `unsafe`, so we cannot truly UNSET HOME in a
