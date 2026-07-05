@@ -172,6 +172,9 @@ class Ladder:
         self.harness = harness
         self.session = McpSession(args.binary, args.profile)
         self.table = args.table
+        self.primary_profile = args.profile
+        self.ro_profile = getattr(args, "ro_profile", None)
+        self.custom_tool = getattr(args, "custom_tool", None)
         self.table_created = False
         self.table_dropped = False
         # Throwaway source objects for the create_or_replace / compile_object /
@@ -321,6 +324,90 @@ class Ladder:
         require(len(rows) == 1, "count query returns one row", rows)
         return int(next(iter(rows[0].values())))
 
+    # -- additional governed-surface helpers (bead oraclemcp-rsya) ----------
+
+    def explain_plan_refused(self, arguments, expect_class):
+        """oracle_explain_plan must be REFUSED (structured error_class) before it
+        writes PLAN_TABLE. Asserts the VALUE of error_class, not an exit code."""
+        result = self.session.call("oracle_explain_plan", arguments)
+        content = structured(result)
+        require(
+            result.get("isError") is True,
+            "explain_plan is refused before the PLAN_TABLE diagnostic write",
+            content,
+        )
+        require(
+            content.get("error_class") == expect_class,
+            f"explain_plan refusal carries error_class {expect_class} (got {content.get('error_class')!r})",
+            content,
+        )
+        return content
+
+    def sample_rows(self, arguments):
+        result = self.session.call("oracle_sample_rows", arguments)
+        content = structured(result)
+        require(
+            result.get("isError") is not True, "oracle_sample_rows succeeds", content
+        )
+        return content
+
+    def read_clob(self, arguments):
+        result = self.session.call("oracle_read_clob", arguments)
+        content = structured(result)
+        require(
+            result.get("isError") is not True, "oracle_read_clob succeeds", content
+        )
+        clob = content.get("clob") or {}
+        require(clob, "read_clob returns a clob structure", content)
+        return clob
+
+    def governed_execute_capture(self, sql, dbms_output_max_lines):
+        """preview -> single-use grant -> oracle_execute with DBMS_OUTPUT capture.
+        Returns the dbms_output object so the caller can assert the line/char caps."""
+        preview = self.preview(sql)
+        require(
+            preview.get("gate_decision") == "allow",
+            "DBMS_OUTPUT block preview allows at the current level",
+            preview,
+        )
+        token = (preview.get("execute_confirmation") or {}).get("confirm")
+        require(token, "DBMS_OUTPUT block preview mints a single-use grant", preview)
+        self.harness.grant = "execute"
+        outcome = structured(
+            self.session.call(
+                "oracle_execute",
+                {
+                    "sql": sql,
+                    "commit": False,
+                    "confirm": token,
+                    "capture_dbms_output": True,
+                    "dbms_output_max_lines": dbms_output_max_lines,
+                },
+            )
+        )
+        self.harness.grant = "none"
+        require(outcome.get("executed") is True, "DBMS_OUTPUT block executed", outcome)
+        dbms = outcome.get("dbms_output") or {}
+        require(dbms.get("enabled") is True, "DBMS_OUTPUT capture is enabled", outcome)
+        return dbms
+
+    def switch_profile(self, profile):
+        result = self.session.call("oracle_switch_profile", {"profile": profile})
+        content = structured(result)
+        require(
+            result.get("isError") is not True,
+            f"oracle_switch_profile to {profile} succeeds",
+            content,
+        )
+        return content
+
+    def preview_elevation(self, level):
+        """Preview-only oracle_set_session_level (no execute); returns the raw
+        structured response so the caller can assert gate posture."""
+        return structured(
+            self.session.call("oracle_set_session_level", {"level": level})
+        )
+
     # -- the ladder ---------------------------------------------------------
 
     def run(self):
@@ -387,6 +474,68 @@ class Ladder:
             )
             return {"error_class": content.get("error_class")}
 
+        def explain_plan_refused_at_read_only():
+            # oracle_explain_plan writes PLAN_TABLE. Without an explicit
+            # allow_plan_table_write it is refused (POLICY_DENIED) regardless of
+            # level — a diagnostic write is never implicit. Identical every lane.
+            content = self.explain_plan_refused(
+                {"sql": "SELECT 1 FROM dual"}, "POLICY_DENIED"
+            )
+            return {"error_class": content.get("error_class")}
+
+        def explain_plan_refused_on_standby():
+            # Even with allow_plan_table_write=true, a read-only standby refuses
+            # the PLAN_TABLE write fail-closed (POLICY_DENIED). We assert the
+            # server honours a caller-declared standby; a live standby is not
+            # required to prove the gate.
+            content = self.explain_plan_refused(
+                {
+                    "sql": "SELECT 1 FROM dual",
+                    "allow_plan_table_write": True,
+                    "read_only_standby": True,
+                },
+                "POLICY_DENIED",
+            )
+            return {"error_class": content.get("error_class")}
+
+        def explain_plan_allow_requires_read_write_at_read_only():
+            # With allow_plan_table_write=true but the session at READ_ONLY, the
+            # PLAN_TABLE write is gated up to READ_WRITE (OPERATING_LEVEL_TOO_LOW).
+            content = self.explain_plan_refused(
+                {"sql": "SELECT 1 FROM dual", "allow_plan_table_write": True},
+                "OPERATING_LEVEL_TOO_LOW",
+            )
+            return {"error_class": content.get("error_class")}
+
+        def custom_read_only_tool_callable():
+            # An operator-defined READ_ONLY custom tool (from ORACLEMCP_TOOLS_DIR)
+            # is served and returns its computed VALUE. A write/DDL custom tool is
+            # refused at LOAD (fail closed) — that half is asserted by the wrapper
+            # (custom_tool_write_refused), since a refused tool never reaches a
+            # live MCP session.
+            if not self.custom_tool:
+                return {"skipped": "no --custom-tool provided"}
+            tools = self.session.rpc("tools/list").get("result", {}).get("tools", [])
+            names = {t.get("name") for t in tools}
+            require(
+                self.custom_tool in names,
+                f"the READ_ONLY custom tool {self.custom_tool!r} is served",
+                sorted(n for n in names if n and not n.startswith("oracle_")),
+            )
+            content = structured(self.session.call(self.custom_tool, {}))
+            rows = content.get("rows") or []
+            require(
+                rows and rows[0].get("ANSWER") == "42",
+                "custom READ_ONLY tool returns its computed value (6*7=42)",
+                content,
+            )
+            require(
+                rows[0].get("TAG") == "matrix",
+                "custom tool string literal round-trips",
+                content,
+            )
+            return {"rows": rows}
+
         def preview_insert_requires_step_up():
             verdict = self.preview(
                 f"INSERT INTO {table} (id, note) VALUES (1, 'preview')"
@@ -412,8 +561,10 @@ class Ladder:
             return self.elevate("DDL")
 
         def ddl_create_table():
+            # A CLOB column (`body`) is carried so the READ_WRITE phase can prove
+            # oracle_read_clob's value + byte/char caps against a real LOB.
             result = self.governed_execute(
-                f"CREATE TABLE {table} (id NUMBER PRIMARY KEY, note VARCHAR2(40))",
+                f"CREATE TABLE {table} (id NUMBER PRIMARY KEY, note VARCHAR2(40), body CLOB)",
                 commit=True,
                 expect={"committed": True},
             )
@@ -689,6 +840,147 @@ class Ladder:
             result["row_count_after"] = count
             return result
 
+        def dml_commit_clob_row():
+            # A second committed row carrying a known CLOB body (100 'X'), so the
+            # sample_rows cap and read_clob value/cap steps have real data.
+            result = self.governed_execute(
+                f"INSERT INTO {table} (id, note, body) "
+                f"VALUES (4, 'clob-row', RPAD('X', 100, 'X'))",
+                commit=True,
+                expect={"committed": True, "rolled_back": False, "rows_affected": 1},
+            )
+            count = self.count_rows(f"SELECT COUNT(*) AS n FROM {table}")
+            require(count == 2, "table now holds exactly two committed rows", count)
+            return result
+
+        def sample_rows_values_and_cap():
+            # VALUE assertion: sampled rows carry the committed values; the cap is
+            # enforced. Identical structured shape on every lane/version.
+            full = self.sample_rows({"table": table})
+            require(
+                full.get("row_count") == 2, "sample_rows returns both rows", full
+            )
+            by_id = {
+                str(r.get("ID")): r for r in full.get("rows", []) if r.get("ID")
+            }
+            require(
+                by_id.get("2", {}).get("NOTE") == "commit-me",
+                "sampled row id=2 carries its committed NOTE value",
+                full,
+            )
+            require(
+                by_id.get("4", {}).get("NOTE") == "clob-row",
+                "sampled row id=4 carries its committed NOTE value",
+                full,
+            )
+            capped = self.sample_rows({"table": table, "max_rows": 1})
+            require(
+                capped.get("row_count") == 1,
+                "sample_rows honours the max_rows cap (1 of 2)",
+                capped,
+            )
+            return {"row_count": full.get("row_count"), "capped": capped.get("row_count")}
+
+        def read_clob_value_and_cap():
+            # Full read: the 100-char CLOB round-trips, not truncated.
+            full = self.read_clob(
+                {
+                    "table": table,
+                    "clob_column": "body",
+                    "pk_column": "id",
+                    "pk_value": "4",
+                }
+            )
+            require(
+                full.get("char_count") == 100 and full.get("truncated") is False,
+                "read_clob returns the full 100-char CLOB, not truncated",
+                full,
+            )
+            require(
+                full.get("value") == "X" * 100,
+                "read_clob value round-trips the stored CLOB bytes",
+                full,
+            )
+            # Capped read: max_chars=10 truncates the decoded cell; char_count
+            # still reports the true length.
+            capped = self.read_clob(
+                {
+                    "table": table,
+                    "clob_column": "body",
+                    "pk_column": "id",
+                    "pk_value": "4",
+                    "max_chars": 10,
+                }
+            )
+            require(
+                capped.get("truncated") is True
+                and capped.get("value") == "X" * 10
+                and capped.get("char_count") == 100,
+                "read_clob honours the max_chars byte/char cap (decode cap)",
+                capped,
+            )
+            return {"char_count": full.get("char_count")}
+
+        def dbms_output_capture_caps():
+            # A PL/SQL block emitting 50 DBMS_OUTPUT lines, captured with a
+            # 10-line cap: the capture is truncated and the line cap is enforced.
+            dbms = self.governed_execute_capture(
+                "BEGIN FOR i IN 1..50 LOOP "
+                "DBMS_OUTPUT.PUT_LINE('ladder line '||i); END LOOP; END;",
+                dbms_output_max_lines=10,
+            )
+            require(
+                dbms.get("max_lines") == 10,
+                "the requested DBMS_OUTPUT line cap is echoed",
+                dbms,
+            )
+            require(
+                dbms.get("line_count") == 10 and len(dbms.get("lines", [])) == 10,
+                "DBMS_OUTPUT capture is bounded to the line cap",
+                dbms,
+            )
+            require(
+                dbms.get("truncated") is True,
+                "DBMS_OUTPUT capture reports truncation past the cap",
+                dbms,
+            )
+            require(
+                dbms.get("lines", [None])[0] == "ladder line 1",
+                "captured DBMS_OUTPUT lines carry their emitted values",
+                dbms,
+            )
+            return {"line_count": dbms.get("line_count"), "truncated": dbms.get("truncated")}
+
+        def explain_plan_read_write_allowed():
+            # At READ_WRITE with allow_plan_table_write=true the PLAN_TABLE
+            # diagnostic write is permitted and a real plan comes back.
+            result = self.session.call(
+                "oracle_explain_plan",
+                {"sql": f"SELECT * FROM {table}", "allow_plan_table_write": True},
+            )
+            content = structured(result)
+            require(
+                result.get("isError") is not True,
+                "explain_plan executes at READ_WRITE with the diagnostic write allowed",
+                content,
+            )
+            plan = content.get("plan") or []
+            plan_text = " ".join(
+                str(row.get("PLAN_TABLE_OUTPUT", "")) for row in plan
+            )
+            require(
+                len(plan) >= 1 and "SELECT STATEMENT" in plan_text.upper(),
+                "explain_plan returns a non-empty plan naming the SELECT STATEMENT",
+                content,
+            )
+            require(
+                (content.get("diagnostic_write") or {}).get("explicitly_allowed")
+                is True,
+                "the plan result records the explicit PLAN_TABLE write consent",
+                content,
+            )
+            return {"plan_rows": len(plan)}
+
         def ddl_requires_step_up_at_read_write():
             verdict = self.preview(f"DROP TABLE {table} PURGE")
             require(
@@ -726,6 +1018,62 @@ class Ladder:
             )
             return {"dropped": dropped, "refusal": refusal}
 
+        def switch_profile_reconnect_and_posture():
+            # oracle_switch_profile: reconnect to a READ_ONLY-ceiling sibling and
+            # prove the posture CHANGED (elevation blocked by the ceiling), then
+            # reconnect back to the primary and prove the DDL ceiling is restored.
+            # VALUE + structured-gate assertions, identical on every lane.
+            if not self.ro_profile:
+                return {"skipped": "no --ro-profile provided"}
+
+            switched = self.switch_profile(self.ro_profile)
+            require(
+                switched.get("connected") is True
+                and switched.get("active_profile") == self.ro_profile,
+                "switch reconnects to the read-only sibling profile",
+                switched,
+            )
+            require(
+                (switched.get("connection") or {}).get("server_version"),
+                "the reconnected session reports a live server version",
+                switched,
+            )
+            self.harness.profile = self.ro_profile
+
+            blocked = self.preview_elevation("READ_WRITE")
+            gate = blocked.get("gate") or {}
+            reason = gate.get("reason") or {}
+            require(
+                gate.get("decision") == "blocked"
+                and reason.get("type") == "exceeds_ceiling",
+                "posture: READ_WRITE elevation is ceiling-blocked on the RO profile",
+                blocked,
+            )
+            require(
+                (blocked.get("session") or {}).get("max_level") == "READ_ONLY",
+                "posture: the RO profile reports a READ_ONLY ceiling",
+                blocked,
+            )
+
+            back = self.switch_profile(self.primary_profile)
+            require(
+                back.get("connected") is True
+                and back.get("active_profile") == self.primary_profile,
+                "switch reconnects back to the primary profile",
+                back,
+            )
+            self.harness.profile = self.primary_profile
+
+            restored = self.preview_elevation("READ_WRITE")
+            require(
+                (restored.get("execute_confirmation") is not None)
+                or ((restored.get("confirmation") or {}).get("confirm"))
+                or restored.get("gate", {}).get("decision") != "blocked",
+                "posture: the primary profile again permits a READ_WRITE step-up",
+                restored,
+            )
+            return {"switched_to": self.ro_profile, "restored": self.primary_profile}
+
         steps = [
             ("session_initialize", session_initialize),
             ("read_only_banner", read_only_banner),
@@ -739,6 +1087,13 @@ class Ladder:
                 "read_only_smuggled_dml_not_served_as_read",
                 read_only_smuggled_dml_not_served_as_read,
             ),
+            ("explain_plan_refused_at_read_only", explain_plan_refused_at_read_only),
+            ("explain_plan_refused_on_standby", explain_plan_refused_on_standby),
+            (
+                "explain_plan_allow_requires_read_write_at_read_only",
+                explain_plan_allow_requires_read_write_at_read_only,
+            ),
+            ("custom_read_only_tool_callable", custom_read_only_tool_callable),
             ("preview_insert_requires_step_up", preview_insert_requires_step_up),
             ("elevate_ddl", elevate_ddl),
             ("ddl_create_table", ddl_create_table),
@@ -756,10 +1111,19 @@ class Ladder:
             ("elevate_read_write", elevate_read_write),
             ("dml_rollback_by_default", dml_rollback_by_default),
             ("dml_commit", dml_commit),
+            ("dml_commit_clob_row", dml_commit_clob_row),
+            ("sample_rows_values_and_cap", sample_rows_values_and_cap),
+            ("read_clob_value_and_cap", read_clob_value_and_cap),
+            ("dbms_output_capture_caps", dbms_output_capture_caps),
+            ("explain_plan_read_write_allowed", explain_plan_read_write_allowed),
             ("ddl_requires_step_up_at_read_write", ddl_requires_step_up_at_read_write),
             ("elevate_ddl_again", elevate_ddl_again),
             ("ddl_drop_table", ddl_drop_table),
             ("drop_to_read_only_final", drop_to_read_only_final),
+            (
+                "switch_profile_reconnect_and_posture",
+                switch_profile_reconnect_and_posture,
+            ),
         ]
         try:
             for name, fn in steps:
@@ -912,6 +1276,14 @@ def main():
     parser.add_argument("--banner-regex", required=True)
     parser.add_argument("--table", required=True)
     parser.add_argument("--evidence", required=True)
+    # A READ_ONLY-ceiling sibling profile (same lane DSN) for the
+    # oracle_switch_profile reconnect + posture assertions. The wrapper adds it
+    # to the generated config. Absent -> the switch-profile step is skipped
+    # (kept optional so the driver still runs standalone).
+    parser.add_argument("--ro-profile", default=None)
+    # An operator-defined READ_ONLY custom tool the wrapper wrote into
+    # ORACLEMCP_TOOLS_DIR; the ladder asserts it is served and returns its value.
+    parser.add_argument("--custom-tool", default=None)
     args = parser.parse_args()
 
     harness = Harness(args.evidence)

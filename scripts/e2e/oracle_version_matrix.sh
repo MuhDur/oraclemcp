@@ -203,7 +203,10 @@ run_lane() {
 
   # Lane-scoped profile config: writable lab profile with max_level = DDL for
   # the ladder tests; READ_ONLY stays the default level (the ladder proves the
-  # step-ups). Secrets go through credential_ref, never into the file.
+  # step-ups). A second READ_ONLY-ceiling sibling profile ("${lane}_ro", same
+  # lane DSN) backs the oracle_switch_profile reconnect + posture assertions.
+  # Secrets go through credential_ref, never into the file.
+  local ro_profile="${lane}_ro"
   local profiles_file="$lane_dir/profiles.toml"
   cat >"$profiles_file" <<PROFILES
 schema_version = 2
@@ -217,13 +220,67 @@ username = "$user"
 credential_ref = "env:ORACLE_MATRIX_ACTIVE_PASSWORD"
 max_level = "DDL"
 default_level = "READ_ONLY"
+
+[[profiles]]
+name = "$ro_profile"
+description = "version-matrix lab lane $lane read-only sibling (throwaway)"
+connect_string = "$dsn"
+username = "$user"
+credential_ref = "env:ORACLE_MATRIX_ACTIVE_PASSWORD"
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
 PROFILES
+
+  # Operator-defined custom tools: a READ_ONLY tool the ladder proves is served
+  # and returns its value. The fail-closed load-refusal of a write/DDL tool is
+  # asserted separately below (custom_tool_write_refused).
+  local tools_dir="$lane_dir/tools.d"
+  mkdir -p "$tools_dir"
+  cat >"$tools_dir/matrix_ro_probe.toml" <<'TOOLS'
+[[tool]]
+name = "matrix_ro_probe"
+description = "version-matrix READ_ONLY operator tool (throwaway): returns 6*7"
+sql = "SELECT 6*7 AS answer, 'matrix' AS tag FROM dual"
+output_mode = "rows"
+TOOLS
 
   export ORACLEMCP_CONFIG="$profiles_file"
   export ORACLE_MATRIX_ACTIVE_PASSWORD="$password"
   export XDG_STATE_HOME="$state_dir"
   export ORACLEMCP_AUDIT_KEY="$audit_key"
+  export ORACLEMCP_TOOLS_DIR="$tools_dir"
   export E2E_LANE="$lane" E2E_PROFILE="$lane"
+
+  # Fail-closed custom-tool load: a write/DDL custom tool must be REFUSED at
+  # LOAD (the server exits non-zero with ORACLEMCP_CUSTOM_TOOLS_INVALID and
+  # never serves it). Asserted per lane; the behavior must be identical.
+  local bad_tools_dir="$lane_dir/tools.d.bad"
+  mkdir -p "$bad_tools_dir"
+  cat >"$bad_tools_dir/writer.toml" <<'BADTOOL'
+[[tool]]
+name = "matrix_writer_refused"
+description = "write custom tool: must be refused at load (fail closed)"
+sql = "UPDATE matrix_probe_target SET x = 1"
+output_mode = "rows"
+BADTOOL
+  local bad_load_stderr="$lane_dir/custom_tool_write_refused.stderr"
+  e2e_log_event "custom_tool_write_refused" "act" "running" 0 "lane $lane: a write custom tool must refuse to load"
+  set +e
+  ORACLEMCP_TOOLS_DIR="$bad_tools_dir" timeout -k 5 30 \
+    "$BINARY" --json serve --profile "$lane" --allow-no-auth </dev/null \
+    >"$lane_dir/custom_tool_write_refused.stdout" 2>"$bad_load_stderr"
+  local bad_load_status=$?
+  set -e
+  if [ "$bad_load_status" -eq 0 ]; then
+    e2e_log_event "custom_tool_write_refused" "assert" "fail" 0 "lane $lane: server did NOT refuse a write custom tool (exit 0) — fail-open load"
+    return 1
+  fi
+  if ! grep -q "ORACLEMCP_CUSTOM_TOOLS_INVALID" "$bad_load_stderr" \
+     || ! grep -q "refuses to load" "$bad_load_stderr"; then
+    e2e_log_event "custom_tool_write_refused" "assert" "fail" 0 "lane $lane: write custom tool refused for the wrong reason (see $bad_load_stderr)"
+    return 1
+  fi
+  e2e_log_event "custom_tool_write_refused" "assert" "pass" 0 "lane $lane: write custom tool refused at load (exit $bad_load_status, ORACLEMCP_CUSTOM_TOOLS_INVALID)"
 
   # Step 1: doctor --online connectivity gate.
   e2e_log_event "doctor_online" "act" "running" 0 "lane $lane: --json doctor --online --profile $lane"
@@ -259,6 +316,7 @@ PROFILES
   timeout -k 15 "$lane_timeout_secs" \
     python3 "$ROOT/scripts/e2e/oracle_ladder_session.py" \
     --binary "$BINARY" --profile "$lane" --banner-regex "$banner_regex" \
+    --ro-profile "$ro_profile" --custom-tool matrix_ro_probe \
     --table "$table" --evidence "$evidence" >"$lane_dir/ladder_stdout.txt"
   local ladder_status=$?
   set -e
@@ -291,6 +349,7 @@ PROFILES
   timeout -k 15 "$lane_timeout_secs" \
     python3 "$ROOT/scripts/e2e/oracle_ladder_session.py" \
     --binary "$BINARY" --profile "$lane" --banner-regex "$banner_regex" \
+    --ro-profile "$ro_profile" --custom-tool matrix_ro_probe \
     --table "$table_r2" --evidence "$evidence_r2" >"$lane_dir/ladder_stdout_r2.txt"
   local resume_status=$?
   set -e

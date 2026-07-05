@@ -423,6 +423,15 @@ fn connect_handshake_envelope(kind: &ConnectFailureKind, detail: &str) -> ErrorE
     }
 }
 
+/// Defense-in-depth fallback for **driver-originated** `Query`/`Execute` errors
+/// whose only signal is an `ORA-`/`DPY-` code (a stable structural identifier)
+/// or a driver connection-state phrase we do not model as a typed variant.
+///
+/// oraclemcp's *own* uncertain-state paths (mid-cancel, fetch-loop call timeout)
+/// never rely on this text match — they return a structural variant
+/// ([`DbError::Cancelled`] / [`DbError::ConnectHandshake`] / …) that
+/// [`DbError::is_uncertain_session_state`] flags from the kind. This list only
+/// catches strings we cannot restructure because they arrive from the driver.
 fn message_is_uncertain_connection_state(message: &str) -> bool {
     const MARKERS: &[&str] = &[
         "dpy-4011",

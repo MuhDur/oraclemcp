@@ -1280,7 +1280,10 @@ mod driver {
             }
             Err(FetchBatchError::Timeout(timeout_ms)) => match inner.cancel(cx).await {
                 Ok(()) => Err(fetch_batch_call_timeout(timeout_ms)),
-                Err(err) => Err(DbError::Query(format!(
+                // Recovery cancel failed: the session is definitively dirty. Use
+                // the structurally-uncertain `Cancelled` variant so quarantine
+                // never rides on message-text matching.
+                Err(err) => Err(DbError::Cancelled(format!(
                     "fetch loop: call timeout of {timeout_ms} ms exceeded; recovery failed: {}",
                     sanitize_driver_error(err, opts)
                 ))),
@@ -1288,8 +1291,15 @@ mod driver {
         }
     }
 
+    /// A per-batch call timeout in the fetch loop. After the timeout we issue an
+    /// out-of-band `cancel` to the driver, which leaves the session in an
+    /// **uncertain** state (a cursor may be partially drained). Return the
+    /// structural [`DbError::Cancelled`] variant — `is_uncertain_session_state`
+    /// then flags it fail-closed from the error *kind*, never from the message
+    /// wording, so editing this literal can never silently un-quarantine a
+    /// mid-timeout session.
     pub(super) fn fetch_batch_call_timeout(timeout_ms: u32) -> DbError {
-        DbError::Query(format!(
+        DbError::Cancelled(format!(
             "fetch loop: call timeout of {timeout_ms} ms exceeded"
         ))
     }
@@ -3274,33 +3284,99 @@ mod driver {
         }
     }
 
+    const REDACTED: &str = "<redacted>";
+
+    /// Minimum length for the case-insensitive, token-boundary identifier pass.
+    /// Anything shorter is redacted only by exact (case-sensitive) substring so a
+    /// 1-2 char token can never scrub swathes of unrelated prose.
+    const CI_MIN_IDENTIFIER_LEN: usize = 3;
+
+    /// An ASCII byte that can appear inside an Oracle/SQL identifier or a
+    /// hostname label. Used as the token boundary for [`redact_identifier_ci`]:
+    /// a match only counts when neither neighbour is one of these, so redacting
+    /// `SYS` never touches `SYSDATE` and redacting `1521` never touches `215210`.
+    fn is_identifier_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b == b'#'
+    }
+
+    /// Case-insensitively remove every **token-boundary** occurrence of `needle`
+    /// from `haystack`. Oracle upper-cases unquoted identifiers, so a lower-case
+    /// schema/service/host in the profile re-appears upper-cased in an `ORA-`
+    /// server message; matching ASCII-case-insensitively closes that leak. The
+    /// boundary check keeps the pass from over-redacting unrelated text.
+    fn redact_identifier_ci(haystack: &str, needle: &str) -> String {
+        // Too short to fold casing safely: fall back to an exact (casing-precise)
+        // substring pass, which cannot over-match on a short common word.
+        if needle.len() < CI_MIN_IDENTIFIER_LEN {
+            return haystack.replace(needle, REDACTED);
+        }
+        // `to_ascii_lowercase` preserves byte length (only ASCII A-Z change), so
+        // byte indices computed on the lower-cased copies align with `haystack`.
+        let hay_lower = haystack.to_ascii_lowercase();
+        let needle_lower = needle.to_ascii_lowercase();
+        let hay_bytes = hay_lower.as_bytes();
+        let mut out = String::with_capacity(haystack.len());
+        let mut last = 0usize;
+        let mut search = 0usize;
+        while let Some(rel) = hay_lower[search..].find(&needle_lower) {
+            let start = search + rel;
+            let end = start + needle_lower.len();
+            let before_boundary = start == 0 || !is_identifier_byte(hay_bytes[start - 1]);
+            let after_boundary = end == hay_bytes.len() || !is_identifier_byte(hay_bytes[end]);
+            if before_boundary && after_boundary {
+                out.push_str(&haystack[last..start]);
+                out.push_str(REDACTED);
+                last = end;
+                search = end;
+            } else {
+                // Overlapping/embedded occurrence: advance one byte and retry.
+                search = start + 1;
+            }
+        }
+        out.push_str(&haystack[last..]);
+        out
+    }
+
+    /// Redact every operator-facing rendering of a driver error.
+    ///
+    /// Two passes, each fail-closed:
+    ///  1. **Exact secrets** — high-entropy or free-form material (passwords,
+    ///     tokens, wallet paths/passwords, the full connect string, cert DN,
+    ///     app-context + session-identity values) removed verbatim. Longest
+    ///     first, so a superstring is scrubbed before any of its substrings.
+    ///  2. **Topology identifiers** — the host, port, service name (decomposed
+    ///     from the connect string) and the username/schema, removed
+    ///     case-insensitively on token boundaries. This closes the two leaks the
+    ///     verbatim pass alone misses: a *decomposed* connect string (an `ORA-`
+    ///     message that names only the host, or only the service) and an
+    ///     Oracle-**upper-cased** identifier that no longer byte-matches the
+    ///     lower-case profile value.
     pub(super) fn sanitize_driver_error(err: impl Display, opts: &OracleConnectOptions) -> String {
         let mut message = err.to_string();
-        let mut secrets = vec![opts.connect_string.clone()];
-        if let Some(username) = &opts.username {
-            secrets.push(username.clone());
-        }
+
+        // --- Pass 1: exact, case-sensitive secrets -------------------------
+        let mut exact_secrets = vec![opts.connect_string.clone()];
         if let Some(password) = &opts.password {
-            secrets.push(password.clone());
+            exact_secrets.push(password.clone());
         }
         if let Some(token) = &opts.iam_token {
-            secrets.push(token.clone());
+            exact_secrets.push(token.clone());
         }
         if let Some(wallet) = &opts.wallet_location {
-            secrets.push(wallet.display().to_string());
+            exact_secrets.push(wallet.display().to_string());
         }
         if let Some(wallet_password) = &opts.wallet_password {
-            secrets.push(wallet_password.clone());
+            exact_secrets.push(wallet_password.clone());
         }
         if let Some(dn) = &opts.ssl_server_cert_dn {
-            secrets.push(dn.clone());
+            exact_secrets.push(dn.clone());
         }
         for (namespace, key, value) in &opts.app_context {
-            secrets.push(namespace.clone());
-            secrets.push(key.clone());
-            secrets.push(value.clone());
+            exact_secrets.push(namespace.clone());
+            exact_secrets.push(key.clone());
+            exact_secrets.push(value.clone());
         }
-        secrets.extend(
+        exact_secrets.extend(
             opts.auth_adapter
                 .sensitive_values()
                 .into_iter()
@@ -3322,11 +3398,32 @@ mod driver {
             .into_iter()
             .flatten()
             {
-                secrets.push(value.clone());
+                exact_secrets.push(value.clone());
             }
         }
-        for secret in secrets.iter().filter(|value| !value.is_empty()) {
-            message = message.replace(secret, "<redacted>");
+        exact_secrets.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        for secret in exact_secrets.iter().filter(|value| !value.is_empty()) {
+            message = message.replace(secret.as_str(), REDACTED);
+        }
+
+        // --- Pass 2: decomposed / upper-cased topology identifiers ---------
+        let mut identifiers: Vec<String> = Vec::new();
+        if let Some(username) = &opts.username {
+            identifiers.push(username.clone());
+        }
+        let hints = crate::tns::extract_hints(&opts.connect_string);
+        if let Some(host) = hints.host {
+            identifiers.push(host);
+        }
+        if let Some(service) = hints.service_name {
+            identifiers.push(service);
+        }
+        if let Some(port) = hints.port {
+            identifiers.push(port.to_string());
+        }
+        identifiers.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        for identifier in identifiers.iter().filter(|value| !value.is_empty()) {
+            message = redact_identifier_ci(&message, identifier);
         }
         message
     }
@@ -4514,6 +4611,135 @@ mod tests {
             assert!(!redacted.contains(forbidden), "{redacted}");
         }
         assert!(redacted.contains("<redacted>"));
+    }
+
+    // --- structured / decomposed / upper-cased redaction (bead p0sd) ------
+    //
+    // Exact-substring redaction alone leaks a *decomposed* connect string (an
+    // `ORA-` message naming only the host, or only the service) and an
+    // Oracle-**upper-cased** identifier. These pin the structured pass.
+
+    fn ezconnect_opts() -> OracleConnectOptions {
+        OracleConnectOptions {
+            connect_string: "db.internal.example:1599/appsvc".to_owned(),
+            username: Some("appschema".to_owned()),
+            password: Some("hunter2pw".to_owned()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn redaction_scrubs_decomposed_host_alone() {
+        let out = driver::sanitize_driver_error(
+            "ORA-12545: Connect failed because host db.internal.example is unreachable",
+            &ezconnect_opts(),
+        );
+        assert!(!out.contains("db.internal.example"), "{out}");
+        assert!(out.contains("<redacted>"), "{out}");
+    }
+
+    #[test]
+    fn redaction_scrubs_decomposed_port_alone() {
+        let out = driver::sanitize_driver_error(
+            "TNS listener on port 1599 refused the request",
+            &ezconnect_opts(),
+        );
+        assert!(!out.contains("1599"), "{out}");
+        assert!(out.contains("<redacted>"), "{out}");
+    }
+
+    #[test]
+    fn redaction_scrubs_decomposed_service_alone() {
+        let out = driver::sanitize_driver_error(
+            "ORA-12514: listener does not currently know of service appsvc",
+            &ezconnect_opts(),
+        );
+        assert!(!out.contains("appsvc"), "{out}");
+        assert!(out.contains("<redacted>"), "{out}");
+    }
+
+    #[test]
+    fn redaction_scrubs_oracle_uppercased_service_and_schema() {
+        // Oracle upper-cases unquoted identifiers, so the lower-case profile
+        // values re-appear as APPSVC / APPSCHEMA in the server message.
+        let out = driver::sanitize_driver_error(
+            "ORA-12514: TNS:listener does not currently know of service APPSVC \
+             requested for schema APPSCHEMA",
+            &ezconnect_opts(),
+        );
+        assert!(!out.contains("APPSVC"), "{out}");
+        assert!(!out.contains("APPSCHEMA"), "{out}");
+        assert!(out.contains("<redacted>"), "{out}");
+    }
+
+    #[test]
+    fn redaction_scrubs_full_connect_string_verbatim() {
+        let out = driver::sanitize_driver_error(
+            "failed to connect to db.internal.example:1599/appsvc as appschema",
+            &ezconnect_opts(),
+        );
+        for leak in [
+            "db.internal.example",
+            "1599",
+            "appsvc",
+            "appschema",
+            "db.internal.example:1599/appsvc",
+        ] {
+            assert!(!out.contains(leak), "leaked {leak}: {out}");
+        }
+    }
+
+    #[test]
+    fn redaction_does_not_over_scrub_a_benign_message() {
+        // No secret component appears here — the message must pass through
+        // byte-for-byte, and the short-identifier boundary rule must not fire.
+        let benign = "ORA-00942: table or view does not exist";
+        let out = driver::sanitize_driver_error(benign, &ezconnect_opts());
+        assert_eq!(out, benign, "benign message was altered: {out}");
+    }
+
+    #[test]
+    fn redaction_boundary_rule_spares_embedded_lookalikes() {
+        // Service "appsvc" / port "1599" as *substrings* of longer tokens must
+        // survive; only whole-token matches are topology leaks.
+        let opts = ezconnect_opts();
+        let out =
+            driver::sanitize_driver_error("note: myappsvcx and 15990 are unrelated tokens", &opts);
+        assert!(
+            out.contains("myappsvcx"),
+            "over-redacted a superstring: {out}"
+        );
+        assert!(out.contains("15990"), "over-redacted a superstring: {out}");
+        assert!(!out.contains("<redacted>"), "{out}");
+    }
+
+    #[test]
+    fn redaction_handles_tns_descriptor_connect_string() {
+        let opts = OracleConnectOptions {
+            connect_string:
+                "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=vault-db.example)(PORT=2484))\
+                 (CONNECT_DATA=(SERVICE_NAME=vaultsvc)))"
+                    .to_owned(),
+            username: Some("vaultuser".to_owned()),
+            ..Default::default()
+        };
+        let out = driver::sanitize_driver_error(
+            "ORA-12514 for VAULTSVC on VAULT-DB.EXAMPLE:2484 user VAULTUSER",
+            &opts,
+        );
+        for leak in ["VAULTSVC", "VAULT-DB.EXAMPLE", "2484", "VAULTUSER"] {
+            assert!(!out.contains(leak), "leaked {leak}: {out}");
+        }
+    }
+
+    #[test]
+    fn fetch_call_timeout_is_structurally_uncertain_not_marker_dependent() {
+        // Regression guard for the marker-fragility half of bead p0sd: the
+        // in-house call-timeout path must flag uncertain session state from the
+        // error *kind*, independent of the message wording.
+        let err = driver::fetch_batch_call_timeout(25);
+        assert!(matches!(err, DbError::Cancelled(_)), "{err:?}");
+        assert!(err.is_uncertain_session_state(), "{err}");
     }
 
     // --- connect/handshake failure classification (bead bhw6.2) -----------
