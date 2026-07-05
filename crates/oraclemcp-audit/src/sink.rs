@@ -161,6 +161,55 @@ fn read_holder_pid(lock_path: &Path) -> Option<u32> {
         .ok()
 }
 
+// Test-only observability for the parent-directory fsync (bead
+// oraclemcp-g4xi). Thread-local so it is immune to other tests opening sinks
+// in parallel: `fsync_parent_dir` runs synchronously on the caller's thread,
+// so a test reads the count it caused and nothing else.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PARENT_DIR_FSYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// fsync the parent directory of `path` so a *newly created* file's directory
+/// entry is itself durable (bead oraclemcp-g4xi). Creating and even fsyncing a
+/// file only guarantees its contents are on disk once the directory entry that
+/// names it is also fsynced; without this a crash immediately after creating the
+/// audit log (or its lock sidecar) could lose the file entirely, taking with it
+/// the tamper-evidence for everything logged in that window. Fails closed: audit
+/// durability is not best-effort.
+#[cfg(unix)]
+fn fsync_parent_dir(path: &Path) -> Result<(), AuditError> {
+    #[cfg(test)]
+    PARENT_DIR_FSYNCS.with(|c| c.set(c.get() + 1));
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let handle = File::open(dir).map_err(|e| {
+        AuditError::Io(format!(
+            "cannot open audit directory {} to fsync it: {e}",
+            dir.display()
+        ))
+    })?;
+    handle.sync_all().map_err(|e| {
+        AuditError::Io(format!(
+            "cannot fsync audit directory {}: {e}",
+            dir.display()
+        ))
+    })
+}
+
+/// Non-Unix fallback: `fsync` of a directory handle is a POSIX primitive and
+/// `File::open` on a directory is unsupported on Windows, whose create/rename
+/// durability story differs. The append-fd fsync in [`FileAuditSink::flush`]
+/// remains the durability guarantee there.
+#[cfg(not(unix))]
+fn fsync_parent_dir(_path: &Path) -> Result<(), AuditError> {
+    #[cfg(test)]
+    PARENT_DIR_FSYNCS.with(|c| c.set(c.get() + 1));
+    Ok(())
+}
+
 /// A durable append-only file sink. Each record is one JSON line; `flush`
 /// performs an `fsync` (`File::sync_all`).
 ///
@@ -184,6 +233,11 @@ impl FileAuditSink {
     /// on the same log fails closed instead of forking the hash chain.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AuditError> {
         let path = path.as_ref();
+        // Whether the durable entries already exist decides whether opening will
+        // *create* anything — and thus whether the parent directory entry needs
+        // an fsync to be crash-durable (bead oraclemcp-g4xi).
+        let audit_pre_existing = path.exists();
+        let lock_pre_existing = lock_path_for(path).exists();
         // Lock BEFORE opening the append fd: fail fast on contention, and never
         // leave a half-armed writer if the lock is already held.
         let lock = AuditLogLock::acquire(path)?;
@@ -192,6 +246,12 @@ impl FileAuditSink {
             .append(true)
             .open(path)
             .map_err(|e| AuditError::Io(e.to_string()))?;
+        // Directory durability: if we just created the audit log or its lock
+        // sidecar, fsync the parent directory so the new file survives a crash
+        // instead of vanishing with the tamper-evidence it was about to hold.
+        if !audit_pre_existing || !lock_pre_existing {
+            fsync_parent_dir(path)?;
+        }
         Ok(FileAuditSink {
             file: Mutex::new(file),
             _lock: lock,
@@ -416,6 +476,27 @@ impl Auditor {
                  then repair before restarting"
             )));
         }
+
+        // Keyed full-chain BODY check (bead oraclemcp-g4xi): the structural walk
+        // above proves the hash chain is internally consistent, but a tamperer
+        // who repairs the hashes (recompute `entry_hash`, relink `prev_hash`)
+        // makes a forged interior pass it. The keyed MAC is the only thing they
+        // cannot reproduce without the signing key. Since the active auditor holds
+        // exactly ONE key, we verify the MAC of every record signed *under that
+        // key* and fail closed on the first mismatch — not just the head anchor.
+        // Records under a *different* `key_id` (a genuine cross-run key rotation)
+        // cannot be verified with the single active key and are deliberately left
+        // to `oraclemcp audit verify` with the full key ring; skipping them keeps
+        // the keyless structural walk as the no-key floor without false-refusing a
+        // rotated interior.
+        if let Some(seq) = self.keyed_body_break(&records) {
+            return Err(AuditError::ResumeRefused(format!(
+                "audit log {disp} has a record at seq {seq} whose keyed MAC does not verify under \
+                 the active signing key — a structurally-repaired forgery re-hashed without the key; \
+                 run `oraclemcp audit verify {disp}` (with the anchoring key available) and restore \
+                 the authentic records before restarting"
+            )));
+        }
         let Some(tail) = records.last() else {
             // Empty log: nothing to resume; the fresh genesis state is correct.
             return Ok(self);
@@ -483,6 +564,21 @@ impl Auditor {
     /// itself a refusal, exactly as `check_anchor` treats `UnknownKeyId`; a
     /// genuine cross-run key rotation is reconciled by an operator via `audit
     /// verify`, never by silently resuming past an unverifiable anchor.
+    /// Keyed full-chain body walk for [`resume_from`](Self::resume_from) (bead
+    /// oraclemcp-g4xi): return the `seq` of the first record that names the
+    /// active `key_id` but whose keyed MAC does not verify under the active key —
+    /// a structurally-repaired forgery. Records under a different `key_id`
+    /// (rotation) are skipped: the single active key cannot verify them, and that
+    /// reconciliation is `oraclemcp audit verify`'s job with the full key ring.
+    fn keyed_body_break(&self, records: &[AuditRecord]) -> Option<u64> {
+        records
+            .iter()
+            .find(|r| {
+                r.key_id.as_deref() == Some(self.key.key_id()) && !r.signature_is_valid(&self.key)
+            })
+            .map(|r| r.seq)
+    }
+
     fn verify_anchor_authenticity(&self, anchor: &ChainAnchor) -> Result<(), AuditError> {
         if anchor.key_id != self.key.key_id() {
             return Err(AuditError::ResumeRefused(format!(
@@ -1454,6 +1550,154 @@ mod tests {
             crate::verify_records(&records, &[test_key()]),
             crate::VerifyOutcome::Ok { records: 1 }
         );
+    }
+
+    #[test]
+    fn resume_refuses_a_forged_interior_with_valid_structure_but_bad_mac() {
+        // Bead oraclemcp-g4xi: a tamperer who rewrites an INTERIOR record and
+        // repairs the hash chain (recompute entry_hash, relink prev_hash) passes
+        // the keyless structural walk — but cannot re-sign without the key. The
+        // keyed body check must catch the bad MAC at resume when the key is
+        // present, and name the offending seq. Modelled by signing records 2..3
+        // under the ACTIVE key_id but the WRONG key bytes (a forger who knows the
+        // key_id label but not the secret).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let forger = SigningKey::new(test_key().key_id(), b"not-the-real-key".to_vec());
+        let r1 = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=1", "GUARDED"),
+            1,
+            GENESIS_HASH,
+            "t1".to_owned(),
+            &test_key(),
+        );
+        let r2 = AuditRecord::chained_signed(
+            &draft("SELECT secret FROM dual", "GUARDED"),
+            2,
+            &r1.entry_hash,
+            "t2".to_owned(),
+            &forger,
+        );
+        let r3 = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=3", "GUARDED"),
+            3,
+            &r2.entry_hash,
+            "t3".to_owned(),
+            &forger,
+        );
+        let body: String = [&r1, &r2, &r3]
+            .iter()
+            .map(|r| serde_json::to_string(r).expect("serialize") + "\n")
+            .collect();
+        std::fs::write(&path, body).unwrap();
+
+        // Sanity: the forged chain is structurally intact (hashes recompute and
+        // link), so ONLY the keyed body check can catch it.
+        let records = crate::parse_jsonl(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            structural_break(&records).is_none(),
+            "forgery is structurally intact"
+        );
+
+        let refused = Auditor::new(
+            Box::new(FileAuditSink::open(&path).expect("open")),
+            test_key(),
+        )
+        .resume_from(&path);
+        match refused {
+            Err(AuditError::ResumeRefused(msg)) => {
+                assert!(
+                    msg.contains("keyed MAC does not verify")
+                        && msg.contains("seq 2")
+                        && msg.contains("audit verify"),
+                    "expected keyed-MAC refusal naming seq 2, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected ResumeRefused, got {other:?}"),
+            Ok(_) => {
+                panic!("a forged interior with a bad MAC must refuse startup when key present")
+            }
+        }
+    }
+
+    #[test]
+    fn resume_tolerates_a_rotated_interior_under_a_different_key_id() {
+        // Guard against over-tightening the keyed body check (bead
+        // oraclemcp-g4xi): a genuine cross-run key rotation leaves interior
+        // records under a PRIOR key_id that the single active key cannot verify.
+        // Those are `oraclemcp audit verify`'s job (full key ring), so resume
+        // must skip them rather than false-refuse — while still seeding from a
+        // tail signed under the active key.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let old_key = SigningKey::new("old-key", b"prior-rotation-key".to_vec());
+        let r1 = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=1", "GUARDED"),
+            1,
+            GENESIS_HASH,
+            "t1".to_owned(),
+            &old_key,
+        );
+        let r2 = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=2", "GUARDED"),
+            2,
+            &r1.entry_hash,
+            "t2".to_owned(),
+            &test_key(),
+        );
+        let body: String = [&r1, &r2]
+            .iter()
+            .map(|r| serde_json::to_string(r).expect("serialize") + "\n")
+            .collect();
+        std::fs::write(&path, body).unwrap();
+
+        let auditor = Auditor::new(
+            Box::new(FileAuditSink::open(&path).expect("open")),
+            test_key(),
+        )
+        .resume_from(&path)
+        .expect("rotated interior under a prior key_id must not false-refuse resume");
+        // The chain seeded from the tail (seq 2): the next append is seq 3.
+        let r3 = auditor
+            .append(
+                &draft("DELETE FROM t WHERE id=3", "GUARDED"),
+                "t3".to_owned(),
+                true,
+            )
+            .expect("append after rotated-interior resume");
+        assert_eq!(r3.seq, 3);
+        assert_eq!(
+            r3.prev_hash, r2.entry_hash,
+            "resume chained onto the active-key tail"
+        );
+    }
+
+    #[test]
+    fn open_fsyncs_parent_dir_on_create_only() {
+        // Bead oraclemcp-g4xi (b): creating the audit log fsyncs its parent
+        // directory so the new file survives a crash; reopening an already-present
+        // log (and lock sidecar) creates nothing and needs no directory fsync. The
+        // counter is thread-local, so a parallel test opening its own sink cannot
+        // perturb this one.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let before = PARENT_DIR_FSYNCS.with(std::cell::Cell::get);
+        let sink = FileAuditSink::open(&path).expect("open new");
+        let after_create = PARENT_DIR_FSYNCS.with(std::cell::Cell::get);
+        assert_eq!(
+            after_create,
+            before + 1,
+            "creating a new audit log fsyncs its parent directory exactly once"
+        );
+        drop(sink); // release the advisory writer lock before reopening
+
+        let sink2 = FileAuditSink::open(&path).expect("reopen existing");
+        let after_reopen = PARENT_DIR_FSYNCS.with(std::cell::Cell::get);
+        assert_eq!(
+            after_reopen, after_create,
+            "reopening an existing log + lock sidecar creates nothing, so no dir fsync"
+        );
+        drop(sink2);
     }
 
     // A sink that forwards to a shared Arc<MemoryAuditSink> (so the test keeps a
