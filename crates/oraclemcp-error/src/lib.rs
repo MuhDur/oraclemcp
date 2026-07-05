@@ -232,8 +232,25 @@ pub fn classify_ora_code(code: i32) -> ErrorClass {
         // Object resolution (handled before the 900..=999 syntax range so
         // ORA-00942 classifies as a missing object, not a syntax error).
         942 | 4043 => ErrorClass::ObjectNotFound,
-        // Privilege / authentication.
-        1031 | 1017 | 1045 | 28009 => ErrorClass::InsufficientPrivilege,
+        // Privilege / authentication — all TERMINAL (never auto-retried; not in
+        // resilience.rs TRANSIENT_ORA_CODES), so a wrong password or a locked
+        // account can never drive a reconnect loop that locks the account harder.
+        //   1031 insufficient privileges · 1017 invalid credential · 1045 no
+        //   CREATE SESSION · 28009 must connect AS SYSDBA/SYSOPER.
+        // Account/password lifecycle (multi-pass 2026-07): these previously fell
+        // through to Internal and were rewritten on the connect path to
+        // `ConnectionFailed` with "verify the connect string … reconnect" —
+        // confidently WRONG guidance (a reconnect never clears a locked account or
+        // an expired password; a DBA unlock / password change is required).
+        // Classifying them as a terminal auth failure stops the misdirection and
+        // keeps them non-retryable; the raw `ORA-2800x`/`ORA-01005` message (e.g.
+        // "the account is locked") is still surfaced verbatim so the agent /
+        // operator sees the real cause.
+        //   28000 account locked · 28001 password expired · 28002 grace period ·
+        //   28011 password will expire soon · 1005 null password given.
+        1031 | 1017 | 1045 | 28009 | 28000 | 28001 | 28002 | 28011 | 1005 => {
+            ErrorClass::InsufficientPrivilege
+        }
         // Read-only transaction violation (SET TRANSACTION READ ONLY, §6.3).
         1456 | 16000 => ErrorClass::ForbiddenStatement,
         // Connection / network — transient & retryable.
@@ -392,6 +409,31 @@ mod tests {
         assert_eq!(classify_ora_code(12519), ErrorClass::Busy);
         assert_eq!(classify_ora_code(923), ErrorClass::SyntaxError);
         assert_eq!(classify_ora_code(7777), ErrorClass::Internal);
+    }
+
+    #[test]
+    fn account_lifecycle_codes_are_terminal_auth_not_retryable_connection_failures() {
+        // multi-pass 2026-07: these must classify as a terminal auth failure, NOT
+        // fall to Internal (which the connect path rewrites to a retry-oriented
+        // ConnectionFailed with reconnect guidance). They must never be retryable.
+        for code in [28000, 28001, 28002, 28011, 1005, 1017, 1045, 28009] {
+            let class = classify_ora_code(code);
+            assert_eq!(
+                class,
+                ErrorClass::InsufficientPrivilege,
+                "ORA-{code:05} must be a terminal auth failure"
+            );
+            assert!(
+                !class.is_retryable(),
+                "auth failure ORA-{code:05} must never be retryable (no lockout amplification)"
+            );
+            // And never mis-guides the agent to reconnect.
+            assert_eq!(class.default_suggested_tool(), None);
+        }
+        // A raw locked-account message classifies end-to-end without misdirection.
+        let env = envelope_from_oracle_message("ORA-28000: the account is locked");
+        assert_eq!(env.error_class, ErrorClass::InsufficientPrivilege);
+        assert_eq!(env.ora_code, Some(28000));
     }
 
     #[test]

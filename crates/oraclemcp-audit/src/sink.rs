@@ -9,15 +9,15 @@
 //! calls the record is fsynced *before* the statement executes (at-least-once
 //! log, at-most-once execute); pure reads may use a batched group-commit flush.
 
-use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io::{Seek, SeekFrom, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
 use thiserror::Error;
 
-use crate::anchor::{AnchorFile, load_anchor};
+use crate::anchor::{AnchorFile, ChainAnchor, load_anchor};
 use crate::record::{AuditEntryDraft, AuditRecord, GENESIS_HASH, SigningKey};
 use crate::verify::parse_jsonl;
 
@@ -44,6 +44,25 @@ pub enum AuditError {
     /// names the file and the repair path. See [`Auditor::resume_from`].
     #[error("audit chain resume refused: {0}")]
     ResumeRefused(String),
+    /// A writable [`FileAuditSink`] could not take the exclusive advisory OS
+    /// lock on the audit log because another oraclemcp instance already holds
+    /// it (bead oraclemcp-mbu1). Two writers on one log would each resume from
+    /// the same tail and both issue seq=N+1, FORKING the tamper-evident hash
+    /// chain. The second instance fails closed at open time rather than forking.
+    /// This is advisory `flock`/`LockFileEx`: a crashed holder releases the lock
+    /// on process exit, so a clean restart re-acquires without operator action.
+    #[error(
+        "audit log {path} is locked by another oraclemcp instance{}; \
+         refusing to fork the hash-chain",
+        .holder_pid.map_or_else(String::new, |pid| format!(" (pid {pid})"))
+    )]
+    Locked {
+        /// The audit log path whose lock is contended.
+        path: String,
+        /// The holding process id, if the lock sidecar recorded a readable one
+        /// (best-effort operator hint; `None` when it could not be read).
+        holder_pid: Option<u32>,
+    },
 }
 
 /// An append-only, durable audit sink.
@@ -55,15 +74,119 @@ pub trait AuditSink: Send + Sync {
     fn flush(&self) -> Result<(), AuditError>;
 }
 
+/// The sidecar lock path for an audit log: `<audit path>.lock`. The advisory
+/// OS lock is taken on this sibling file, never the data file itself, so the
+/// lock is independent of the append fd and of the separate read fds that
+/// `Auditor::resume_from` / `audit verify` open, and so the sidecar can carry
+/// the holder pid as an operator hint on contention.
+fn lock_path_for(audit_path: &Path) -> PathBuf {
+    let mut path = audit_path.as_os_str().to_owned();
+    path.push(".lock");
+    PathBuf::from(path)
+}
+
+/// An exclusive advisory OS lock held for a writable audit sink's lifetime
+/// (bead oraclemcp-mbu1). Acquired on the `<audit>.lock` sibling with
+/// `File::try_lock` (`flock(LOCK_EX|LOCK_NB)` on Unix, `LockFileEx` on
+/// Windows). A second oraclemcp opening the same log fails closed with
+/// [`AuditError::Locked`] instead of silently forking the hash chain. The lock
+/// releases on `Drop` (and, since it is an OS advisory lock tied to the open
+/// file description, also on process exit — a crashed holder never permanently
+/// wedges a restart).
+struct AuditLogLock {
+    file: File,
+}
+
+impl AuditLogLock {
+    /// Take the exclusive advisory lock guarding writes to `audit_path`, or
+    /// fail closed if another instance already holds it.
+    fn acquire(audit_path: &Path) -> Result<Self, AuditError> {
+        let lock_path = lock_path_for(audit_path);
+        let mut file = OpenOptions::new()
+            .create(true)
+            // Never truncate on open: a contender must not wipe the holder's
+            // recorded pid. The holder truncates via `set_len(0)` only AFTER it
+            // owns the lock (below).
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| {
+                AuditError::Io(format!(
+                    "cannot open audit lock sidecar {}: {e}",
+                    lock_path.display()
+                ))
+            })?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return Err(AuditError::Locked {
+                    path: audit_path.display().to_string(),
+                    holder_pid: read_holder_pid(&lock_path),
+                });
+            }
+            Err(TryLockError::Error(e)) => {
+                return Err(AuditError::Io(format!(
+                    "cannot lock audit log {}: {e}",
+                    audit_path.display()
+                )));
+            }
+        }
+        // We hold the lock. Record our pid so the NEXT contender can name us in
+        // its fail-closed message. Best-effort: a failure here does not
+        // surrender the lock (the lock is the fd's, not the file content's).
+        let _ = file.set_len(0);
+        let _ = file.seek(SeekFrom::Start(0));
+        let _ = writeln!(file, "{}", std::process::id());
+        Ok(AuditLogLock { file })
+    }
+}
+
+impl Drop for AuditLogLock {
+    fn drop(&mut self) {
+        // The OS releases the advisory lock when this fd closes (and on process
+        // exit), so this explicit unlock is belt-and-braces for a prompt,
+        // well-documented release on clean shutdown.
+        let _ = self.file.unlock();
+    }
+}
+
+/// Read a pid previously written to the lock sidecar. Best-effort: any I/O or
+/// parse failure yields `None` (the contention message just omits the pid).
+fn read_holder_pid(lock_path: &Path) -> Option<u32> {
+    std::fs::read_to_string(lock_path)
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
 /// A durable append-only file sink. Each record is one JSON line; `flush`
 /// performs an `fsync` (`File::sync_all`).
+///
+/// Opening a writable sink takes an exclusive advisory OS lock on the log's
+/// `<path>.lock` sidecar (bead oraclemcp-mbu1). A second oraclemcp instance
+/// pointed at the same log fails closed at open time with
+/// [`AuditError::Locked`] rather than both instances resuming from the same
+/// tail and forking the tamper-evident hash chain. The lock is held for the
+/// sink's lifetime and released on drop / process exit.
 pub struct FileAuditSink {
     file: Mutex<File>,
+    /// The advisory lock guarding this log against a concurrent writer. Held
+    /// for the sink's lifetime; released when the sink drops. Never read after
+    /// construction — its lifetime IS its purpose.
+    _lock: AuditLogLock,
 }
 
 impl FileAuditSink {
-    /// Open (creating + appending) the audit file at `path`.
+    /// Open (creating + appending) the audit file at `path`, taking the
+    /// exclusive advisory writer lock first so a concurrent oraclemcp instance
+    /// on the same log fails closed instead of forking the hash chain.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AuditError> {
+        let path = path.as_ref();
+        // Lock BEFORE opening the append fd: fail fast on contention, and never
+        // leave a half-armed writer if the lock is already held.
+        let lock = AuditLogLock::acquire(path)?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -71,6 +194,7 @@ impl FileAuditSink {
             .map_err(|e| AuditError::Io(e.to_string()))?;
         Ok(FileAuditSink {
             file: Mutex::new(file),
+            _lock: lock,
         })
     }
 }
@@ -310,6 +434,11 @@ impl Auditor {
                 ))
             })?
         {
+            // The anchor's keyed MAC is what binds its plaintext seq/entry_hash
+            // to the real durable head — verify it BEFORE trusting either, or a
+            // forged/rewritten sidecar defeats the truncation/divergence checks
+            // below (multi-pass 2026-07).
+            self.verify_anchor_authenticity(&anchor)?;
             if anchor.seq > tail.seq {
                 return Err(AuditError::ResumeRefused(format!(
                     "head anchor attests durable seq {} but the audit log {disp} ends at seq {} — \
@@ -336,6 +465,44 @@ impl Auditor {
             state.last_hash = tail.entry_hash.clone();
         }
         Ok(self)
+    }
+
+    /// Fail-closed MAC/key cross-check of a loaded head anchor at resume time,
+    /// mirroring [`crate::anchor::check_anchor`]'s posture (the `oraclemcp audit
+    /// verify` reference): an anchor under an unknown `key_id`, or whose keyed
+    /// MAC does not verify under the active key, is refused BEFORE its plaintext
+    /// `seq`/`entry_hash` are trusted.
+    ///
+    /// This closes the tail-truncation bypass (multi-pass 2026-07): the anchor's
+    /// keyed MAC is the *only* thing binding its `seq`/`entry_hash` to the real
+    /// durable head. Trusting the anchor's plaintext without verifying its MAC let
+    /// a tamperer with file-write access (but no signing key) delete durable
+    /// records, truncate the log, and rewrite the sidecar plaintext down to the
+    /// truncated tail — the old cross-check compared only plaintext and passed. An
+    /// unknown `key_id` (e.g. an attacker swapping it to dodge verification) is
+    /// itself a refusal, exactly as `check_anchor` treats `UnknownKeyId`; a
+    /// genuine cross-run key rotation is reconciled by an operator via `audit
+    /// verify`, never by silently resuming past an unverifiable anchor.
+    fn verify_anchor_authenticity(&self, anchor: &ChainAnchor) -> Result<(), AuditError> {
+        if anchor.key_id != self.key.key_id() {
+            return Err(AuditError::ResumeRefused(format!(
+                "head anchor names key_id {:?} but the active signing key is {:?} — the anchor \
+                 cannot be authenticated with this key; run `oraclemcp audit verify` (with the \
+                 anchoring key available) to reconcile, or reset the anchor only if the key \
+                 rotation is understood, before restarting",
+                anchor.key_id,
+                self.key.key_id()
+            )));
+        }
+        if !anchor.mac_is_valid(&self.key) {
+            return Err(AuditError::ResumeRefused(
+                "head anchor MAC does not verify under the active signing key — the sidecar was \
+                 rewritten or forged (a truncated-head rewrite without the signing key); inspect \
+                 with `oraclemcp audit verify` and restore the durable tail before restarting"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// Append a chained record. When `durable` is true the record is fsynced
@@ -536,6 +703,96 @@ mod tests {
             assert_eq!(rec.seq, (i + 1) as u64);
             prev = rec.entry_hash;
         }
+    }
+
+    #[test]
+    fn second_writer_on_the_same_log_fails_closed_then_recovers_on_release() {
+        // Bead oraclemcp-mbu1: two oraclemcp instances pointed at one audit log
+        // must NOT both open a writable sink — each would resume from the same
+        // tail and issue seq=N+1, forking the tamper-evident hash chain. The
+        // exclusive advisory OS lock makes the SECOND open fail closed. Two
+        // separate `File::open`s hold two distinct open file descriptions, so
+        // `flock(LOCK_EX)` contends between them exactly as it does across two
+        // processes — this in-process test drives the same OS primitive.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+
+        // First writer holds the log.
+        let first = FileAuditSink::open(&path).expect("first writer opens");
+
+        // Second writer on the SAME path fails closed with the typed error,
+        // naming the path and (best-effort) the holding pid.
+        match FileAuditSink::open(&path) {
+            Err(AuditError::Locked {
+                path: p,
+                holder_pid,
+            }) => {
+                assert!(
+                    p.contains("audit.jsonl"),
+                    "the fail-closed message names the log path, got {p}"
+                );
+                assert_eq!(
+                    holder_pid,
+                    Some(std::process::id()),
+                    "the lock sidecar records the holder pid for the operator hint"
+                );
+            }
+            Err(other) => panic!("expected AuditError::Locked, got {other:?}"),
+            Ok(_) => panic!("a second writer on the same audit log must fail closed"),
+        }
+
+        // The sidecar lock file exists alongside the log.
+        assert!(
+            lock_path_for(&path).exists(),
+            "the .lock sidecar guards the log"
+        );
+
+        // Release the first holder (server exits / clean shutdown → Drop).
+        drop(first);
+
+        // A THIRD open now succeeds — a clean restart after the holder is gone
+        // re-acquires the lock. (Advisory flock also releases on process exit,
+        // so a crashed holder does not permanently wedge a restart.)
+        let third = FileAuditSink::open(&path).expect("open succeeds after the holder releases");
+        // And it is a working writer: an appended record lands in the log.
+        let auditor = Auditor::new(Box::new(third), test_key());
+        auditor
+            .append(&draft("SELECT 1 FROM dual", "SAFE"), "t0".to_owned(), true)
+            .expect("append after re-acquire");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().lines().count(),
+            1,
+            "the re-acquired writer appends normally"
+        );
+    }
+
+    #[test]
+    fn writer_lock_message_is_actionable() {
+        // The Display of the fail-closed error is the operator-facing message:
+        // it must name the log and refuse-to-fork intent.
+        let err = AuditError::Locked {
+            path: "/var/lib/oraclemcp/audit.jsonl".to_owned(),
+            holder_pid: Some(4242),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/var/lib/oraclemcp/audit.jsonl"),
+            "names path: {msg}"
+        );
+        assert!(
+            msg.contains("locked by another oraclemcp instance"),
+            "{msg}"
+        );
+        assert!(msg.contains("(pid 4242)"), "names holder pid: {msg}");
+        assert!(msg.contains("refusing to fork the hash-chain"), "{msg}");
+
+        // With no discoverable pid the message stays clean (no dangling "pid").
+        let err = AuditError::Locked {
+            path: "/tmp/a.jsonl".to_owned(),
+            holder_pid: None,
+        };
+        let msg = err.to_string();
+        assert!(!msg.contains("pid"), "no pid clause when unknown: {msg}");
     }
 
     #[test]
@@ -874,6 +1131,117 @@ mod tests {
             }
             Err(other) => panic!("expected ResumeRefused, got {other:?}"),
             Ok(_) => panic!("tail truncation vs the anchor must refuse startup"),
+        }
+    }
+
+    #[test]
+    fn resume_refuses_a_forged_anchor_masking_a_tail_truncation() {
+        // The tail-truncation bypass (multi-pass 2026-07): a tamperer with file
+        // write access but NO signing key deletes durable records, truncates the
+        // log, and rewrites the anchor sidecar's *plaintext* (seq + entry_hash)
+        // down to the truncated tail so the plaintext cross-check passes. Only the
+        // keyed MAC binds the anchor to the real head — resume MUST verify it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let anchor_path = crate::anchor_path_for(&path);
+        {
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open")),
+                test_key(),
+            )
+            .with_head_anchor(&anchor_path);
+            for i in 1..=5 {
+                auditor
+                    .append(
+                        &draft(&format!("DELETE FROM t WHERE id={i}"), "GUARDED"),
+                        format!("t{i}"),
+                        true,
+                    )
+                    .expect("append");
+            }
+        }
+        // Truncate the log to its first 3 records; capture record 3's entry_hash.
+        let body = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        let three: String = lines.iter().take(3).map(|l| format!("{l}\n")).collect();
+        std::fs::write(&path, &three).unwrap();
+        let rec3: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+        let entry_hash3 = rec3["entry_hash"].as_str().unwrap().to_owned();
+
+        // Forge the sidecar: correct plaintext for the truncated head (seq 3),
+        // correct active key_id, but a MAC the attacker could not compute.
+        let forged = ChainAnchor {
+            anchor_version: 1,
+            seq: 3,
+            entry_hash: entry_hash3,
+            key_id: test_key().key_id().to_owned(),
+            mac: "hmac-sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .to_owned(),
+        };
+        let mut buf = serde_json::to_vec(&forged).unwrap();
+        buf.push(b'\n');
+        std::fs::write(&anchor_path, buf).unwrap();
+
+        let refused = Auditor::new(
+            Box::new(FileAuditSink::open(&path).expect("open")),
+            test_key(),
+        )
+        .with_head_anchor(&anchor_path)
+        .resume_from(&path);
+        match refused {
+            Err(AuditError::ResumeRefused(msg)) => assert!(
+                msg.contains("MAC does not verify"),
+                "expected anchor-MAC refusal, got: {msg}"
+            ),
+            Err(other) => panic!("expected ResumeRefused, got {other:?}"),
+            Ok(_) => panic!("forged anchor masking truncation must refuse startup"),
+        }
+    }
+
+    #[test]
+    fn resume_refuses_an_anchor_under_an_unknown_key_id() {
+        // A tamperer cannot dodge the MAC check by swapping the anchor's key_id to
+        // an unknown value: an anchor the active key cannot authenticate is itself
+        // a refusal (mirrors check_anchor's UnknownKeyId), never a silent resume.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let anchor_path = crate::anchor_path_for(&path);
+        {
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open")),
+                test_key(),
+            )
+            .with_head_anchor(&anchor_path);
+            for i in 1..=3 {
+                auditor
+                    .append(
+                        &draft(&format!("DELETE FROM t WHERE id={i}"), "GUARDED"),
+                        format!("t{i}"),
+                        true,
+                    )
+                    .expect("append");
+            }
+        }
+        // Rewrite the anchor's key_id to a value the active key does not match.
+        let mut anchor = crate::load_anchor(&anchor_path).unwrap().unwrap();
+        anchor.key_id = "attacker-swapped-key".to_owned();
+        let mut buf = serde_json::to_vec(&anchor).unwrap();
+        buf.push(b'\n');
+        std::fs::write(&anchor_path, buf).unwrap();
+
+        let refused = Auditor::new(
+            Box::new(FileAuditSink::open(&path).expect("open")),
+            test_key(),
+        )
+        .with_head_anchor(&anchor_path)
+        .resume_from(&path);
+        match refused {
+            Err(AuditError::ResumeRefused(msg)) => assert!(
+                msg.contains("key_id") && msg.contains("audit verify"),
+                "expected unknown-key_id refusal, got: {msg}"
+            ),
+            Err(other) => panic!("expected ResumeRefused, got {other:?}"),
+            Ok(_) => panic!("anchor under an unknown key_id must refuse startup"),
         }
     }
 

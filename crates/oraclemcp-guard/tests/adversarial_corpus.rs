@@ -184,6 +184,46 @@ const CORPUS: &[(&str, DangerLevel)] = &[
         "SELECT 1 FROM dual /* outer /* inner */ dangling */",
         DangerLevel::Guarded,
     ),
+    // --- Derived-subquery-smuggled DML (oracle-derived-dml-body, 2026-07) ---
+    // sqlparser 0.62 accepts a DML `SetExpr` wrapped in a FROM/JOIN derived
+    // subquery, a UNION branch's `FROM (…)`, or a WHERE/scalar Expr subquery. The
+    // top-level-only CTE-DML check missed all of these and cleared them to Safe.
+    // Every read shell that carries a reachable write MUST fail closed to >= a
+    // write classification (Guarded), never ReadOnly.
+    ("SELECT * FROM (UPDATE t SET x=1)", DangerLevel::Guarded),
+    ("SELECT * FROM (DELETE FROM t)", DangerLevel::Guarded),
+    (
+        "SELECT * FROM (INSERT INTO t VALUES (1))",
+        DangerLevel::Guarded,
+    ),
+    (
+        "SELECT * FROM (MERGE INTO t USING s ON (t.id=s.id) WHEN MATCHED THEN UPDATE SET t.v=s.v)",
+        DangerLevel::Guarded,
+    ),
+    (
+        "SELECT * FROM (SELECT * FROM (UPDATE t SET x=1))",
+        DangerLevel::Guarded,
+    ),
+    (
+        "SELECT 1 FROM dual UNION SELECT * FROM (DELETE FROM t)",
+        DangerLevel::Guarded,
+    ),
+    (
+        "SELECT * FROM a JOIN (UPDATE t SET x=1) b ON a.id=b.id",
+        DangerLevel::Guarded,
+    ),
+    (
+        "SELECT * FROM a WHERE id IN (UPDATE t SET x=1)",
+        DangerLevel::Guarded,
+    ),
+    (
+        "SELECT * FROM a WHERE EXISTS (INSERT INTO t VALUES (1))",
+        DangerLevel::Guarded,
+    ),
+    (
+        "WITH a AS (SELECT 1 x FROM dual) SELECT * FROM (WITH b AS (SELECT 1 y FROM dual) UPDATE t SET v=1)",
+        DangerLevel::Guarded,
+    ),
 ];
 
 #[test]
@@ -204,6 +244,51 @@ fn corpus_is_never_underclassified() {
         "fail-closed violations:\n{}",
         failures.join("\n")
     );
+}
+
+#[test]
+fn derived_subquery_smuggled_dml_is_never_read_only() {
+    // The fail-closed-net hole (oracle-derived-dml-body): a DML SetExpr hidden in
+    // a derived / JOIN / UNION-branch / Expr subquery escaped the top-level-only
+    // CTE-DML check and cleared to Safe. Assert the write is caught AND that
+    // legitimate nested reads (incl. columns/tables whose names merely contain a
+    // DML verb, and literals carrying DML words) stay Safe — no false positives.
+    let c = Classifier::default();
+    let writes = [
+        "SELECT * FROM (UPDATE t SET x=1)",
+        "SELECT * FROM (DELETE FROM t)",
+        "SELECT * FROM (INSERT INTO t VALUES (1))",
+        "SELECT * FROM (SELECT * FROM (DELETE FROM t))",
+        "SELECT 1 FROM dual UNION SELECT * FROM (UPDATE t SET x=1)",
+        "SELECT * FROM a JOIN (DELETE FROM t) b ON a.id=b.id",
+        "SELECT * FROM a WHERE id IN (UPDATE t SET x=1)",
+    ];
+    for w in writes {
+        let d = c.classify(w);
+        assert!(
+            d.danger >= DangerLevel::Guarded
+                && d.required_level != Some(oraclemcp_guard::OperatingLevel::ReadOnly),
+            "smuggled DML must never be ReadOnly/Safe: {w:?} -> {d:?}"
+        );
+    }
+    let reads = [
+        "SELECT * FROM (SELECT 1 FROM dual)",
+        "SELECT * FROM (SELECT * FROM (SELECT 1 FROM dual))",
+        "SELECT * FROM a JOIN (SELECT id FROM b) x ON a.id=x.id",
+        "SELECT 1 FROM dual UNION SELECT 2 FROM dual",
+        "SELECT updated_at, inserted_by, deleted_flag FROM audit_view",
+        "SELECT COUNT(*) FROM merge_staging",
+        "SELECT 'insert update delete' FROM dual",
+        "SELECT q'{ UPDATE x; DELETE y; }' AS payload FROM dual",
+    ];
+    for r in reads {
+        let d = c.classify(r);
+        assert_eq!(
+            d.danger,
+            DangerLevel::Safe,
+            "legitimate read must stay Safe (no false positive): {r:?} -> {d:?}"
+        );
+    }
 }
 
 #[test]

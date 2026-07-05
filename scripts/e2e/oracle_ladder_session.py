@@ -230,6 +230,25 @@ class Ladder:
         )
         return content
 
+    def query_governed_refusal(self, sql, allowed_classes):
+        """oracle_query on a governed statement must be REFUSED before execution
+        with a structured error_class in `allowed_classes` (asserts the value, not
+        an exit code). Used for the always-forbidden and smuggled-DML paths."""
+        result = self.session.call("oracle_query", {"sql": sql})
+        content = structured(result)
+        require(
+            result.get("isError") is True,
+            "governed statement via oracle_query is refused before execution",
+            content,
+        )
+        cls = content.get("error_class")
+        require(
+            cls in allowed_classes,
+            f"refusal carries a governed error_class in {sorted(allowed_classes)} (got {cls!r})",
+            content,
+        )
+        return content
+
     def preview(self, sql):
         return structured(self.session.call("oracle_preview_sql", {"sql": sql}))
 
@@ -344,6 +363,29 @@ class Ladder:
             return self.query_refused(
                 f"INSERT INTO {table} (id, note) VALUES (1, 'refused')"
             )
+
+        def read_only_forbidden_statement_refused():
+            # A statement the fail-closed classifier marks Forbidden (a dynamic-SQL
+            # PL/SQL block) is NEVER dispatchable at ANY level, so oracle_query must
+            # refuse it with the FORBIDDEN_STATEMENT class — distinct from the
+            # level-gated OPERATING_LEVEL_TOO_LOW. Identical on every lane/version.
+            content = self.query_governed_refusal(
+                "BEGIN EXECUTE IMMEDIATE 'DROP TABLE x'; END;",
+                {"FORBIDDEN_STATEMENT"},
+            )
+            return {"error_class": content.get("error_class")}
+
+        def read_only_smuggled_dml_not_served_as_read():
+            # Regression for the derived-subquery-smuggled-DML classifier fix
+            # (oracle-derived-dml-body): a write hidden in a FROM-derived subquery
+            # must NOT be served as a READ_ONLY read. At READ_ONLY the guard sees a
+            # write classification and refuses (OPERATING_LEVEL_TOO_LOW), or marks
+            # it FORBIDDEN — either way it is refused, never executed as a read.
+            content = self.query_governed_refusal(
+                f"SELECT * FROM (UPDATE {table} SET note = 'x')",
+                {"OPERATING_LEVEL_TOO_LOW", "FORBIDDEN_STATEMENT"},
+            )
+            return {"error_class": content.get("error_class")}
 
         def preview_insert_requires_step_up():
             verdict = self.preview(
@@ -689,6 +731,14 @@ class Ladder:
             ("read_only_banner", read_only_banner),
             ("read_only_arithmetic", read_only_arithmetic),
             ("read_only_write_refused", read_only_write_refused),
+            (
+                "read_only_forbidden_statement_refused",
+                read_only_forbidden_statement_refused,
+            ),
+            (
+                "read_only_smuggled_dml_not_served_as_read",
+                read_only_smuggled_dml_not_served_as_read,
+            ),
             ("preview_insert_requires_step_up", preview_insert_requires_step_up),
             ("elevate_ddl", elevate_ddl),
             ("ddl_create_table", ddl_create_table),

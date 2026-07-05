@@ -52,8 +52,8 @@ use oraclemcp::dispatch::{
 };
 use oraclemcp::registry;
 use oraclemcp_audit::{
-    AuditSink, AuditSubject, Auditor, FileAuditSink, ShippingAuditSink, ShippingForwarder,
-    SigningKey, WormFileForwarder,
+    AuditError, AuditSink, AuditSubject, Auditor, FileAuditSink, ShippingAuditSink,
+    ShippingForwarder, SigningKey, WormFileForwarder,
 };
 use oraclemcp_auth::{
     Hs256Verifier, ResourceServerConfig, SecretError, SecretResolver, SystemSecretResolver,
@@ -1323,11 +1323,18 @@ fn build_auditor(
             )
         })?;
     }
-    let sink = FileAuditSink::open(&path).map_err(|e| {
-        (
+    let sink = FileAuditSink::open(&path).map_err(|e| match e {
+        // A concurrent oraclemcp instance already holds the writer lock on this
+        // log (bead oraclemcp-mbu1). Fail closed at startup with a distinct,
+        // actionable code rather than letting both instances fork the chain.
+        AuditError::Locked { .. } => (
+            "ORACLEMCP_AUDIT_LOG_LOCKED",
+            format!("refusing to start: {e}"),
+        ),
+        other => (
             "ORACLEMCP_AUDIT_PATH_INVALID",
-            format!("failed to open audit log {}: {e}", path.display()),
-        )
+            format!("failed to open audit log {}: {other}", path.display()),
+        ),
     })?;
     tracing::info!(path = %path.display(), key_id = %audit.key_id_or_default(), "audit log armed");
 

@@ -920,20 +920,32 @@ fn query_base_objects(query: &sqlparser::ast::Query) -> Vec<ObjectRef> {
     objects
 }
 
-/// Whether a `SELECT`/`WITH` query body carries a DML `SetExpr` at any depth
-/// (recursing through parenthesized subquery bodies and set operations).
+/// Whether a `SELECT`/`WITH` query body carries a DML `SetExpr` at any depth —
+/// recursing through parenthesized subquery bodies, set operations, CTE bodies,
+/// **and the derived (FROM/JOIN) subqueries of a `SELECT`**.
 ///
 /// sqlparser 0.62 maps `WITH cte {INSERT|UPDATE|DELETE|MERGE} …` to a
 /// `Statement::Query` whose `body` is `SetExpr::{Insert,Update,Delete,Merge}`
 /// — the trailing DML is absorbed as a "query body" rather than surfacing as a
 /// separate `Statement::Update`/… . A genuine read body is only
 /// `Select`/`Values`/`Table`/set-ops of the same, so the presence of a DML
-/// `SetExpr` means a top-level write was smuggled in under a CTE. The classifier
+/// `SetExpr` means a write was smuggled in under a read shell. The classifier
 /// must NOT tier such text `Safe`/`ReadOnly` (fail-closed; oracle-cte-dml-body).
 ///
-/// The match is exhaustive on purpose: `SetExpr` is not `#[non_exhaustive]`, so
-/// a future sqlparser bump that adds a body variant breaks the build and forces
-/// a deliberate read-vs-write triage rather than silently defaulting to read.
+/// The original fix only inspected the *top-level* body, so a DML `SetExpr`
+/// wrapped in a FROM-derived subquery, a JOIN-derived subquery, a nested join,
+/// or a UNION branch's `FROM (…)` (`SELECT * FROM (UPDATE t SET x=1)`,
+/// `SELECT 1 FROM dual UNION SELECT * FROM (DELETE FROM t)`, …) slipped through
+/// to `Safe` — a fail-closed-net hole in the same smuggled-DML class
+/// (oracle-derived-dml-body, multi-pass 2026-07). Descending into the `Select`
+/// arm's derived tables closes it. Expr-embedded subqueries (a DML in a
+/// `WHERE … IN (…)` / scalar subquery) are covered by the reserved-verb
+/// canonical scan in [`query_embeds_reserved_dml_verb`].
+///
+/// The `SetExpr` match is exhaustive on purpose: `SetExpr` is not
+/// `#[non_exhaustive]`, so a future sqlparser bump that adds a body variant
+/// breaks the build and forces a deliberate read-vs-write triage rather than
+/// silently defaulting to read.
 fn set_expr_carries_dml(body: &sqlparser::ast::SetExpr) -> bool {
     use sqlparser::ast::SetExpr;
     match body {
@@ -942,8 +954,66 @@ fn set_expr_carries_dml(body: &sqlparser::ast::SetExpr) -> bool {
         SetExpr::SetOperation { left, right, .. } => {
             set_expr_carries_dml(left) || set_expr_carries_dml(right)
         }
-        SetExpr::Select(_) | SetExpr::Values(_) | SetExpr::Table(_) => false,
+        SetExpr::Select(select) => select.from.iter().any(table_with_joins_carries_dml),
+        SetExpr::Values(_) | SetExpr::Table(_) => false,
     }
+}
+
+/// Whether a `Query` (its CTE bodies or its body `SetExpr`) carries DML anywhere.
+fn query_carries_dml(query: &sqlparser::ast::Query) -> bool {
+    if let Some(with) = &query.with
+        && with.cte_tables.iter().any(|c| query_carries_dml(&c.query))
+    {
+        return true;
+    }
+    set_expr_carries_dml(&query.body)
+}
+
+/// Whether any relation of a `FROM` item (its base factor or its joins) is a
+/// derived subquery / nested join that carries DML.
+fn table_with_joins_carries_dml(twj: &sqlparser::ast::TableWithJoins) -> bool {
+    table_factor_carries_dml(&twj.relation)
+        || twj
+            .joins
+            .iter()
+            .any(|j| table_factor_carries_dml(&j.relation))
+}
+
+/// Whether a single table factor is a derived subquery / nested join whose body
+/// carries DML. Non-subquery factors (base tables, table functions, pivots, …)
+/// name no DML body here — a table *function* that calls a side-effecting
+/// routine is caught separately by the UDF purity consult.
+fn table_factor_carries_dml(factor: &sqlparser::ast::TableFactor) -> bool {
+    use sqlparser::ast::TableFactor;
+    match factor {
+        TableFactor::Derived { subquery, .. } => query_carries_dml(subquery),
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => table_with_joins_carries_dml(table_with_joins),
+        _ => false,
+    }
+}
+
+/// Fail-closed net for a reserved DML verb (`INSERT` / `UPDATE` / `DELETE`)
+/// smuggled inside an **expression** subquery of a `SELECT` — a `WHERE … IN
+/// (UPDATE …)`, a scalar `(DELETE …)`, `EXISTS (INSERT …)`, etc. — which the
+/// structural [`set_expr_carries_dml`] walk (FROM/JOIN/CTE/set-op only) does not
+/// descend into. These three verbs are Oracle **reserved** words: in a genuine
+/// read they can appear only as `FOR UPDATE` (which the caller already forces
+/// `Guarded` via `query.locks`), never as an identifier, so scanning the
+/// canonicalized token stream (string/`q'[…]'`/quoted-identifier literals and
+/// comments already collapsed by [`canonical_marker_scan`], word-boundaried by
+/// the surrounding spaces) adds **no** false positive on a legitimate read while
+/// closing the Expr-embedded smuggled-DML case (oracle-derived-dml-body).
+/// `MERGE` is deliberately excluded — it is a *non-reserved* Oracle keyword that
+/// may legally be a column/table/alias name, so a bare-token scan for it would
+/// over-restrict real reads; a structural `MERGE` is still caught by
+/// [`set_expr_carries_dml`].
+fn query_embeds_reserved_dml_verb(sql: &str) -> bool {
+    let scan = canonical_marker_scan(&sql.to_ascii_uppercase());
+    [" INSERT ", " UPDATE ", " DELETE "]
+        .iter()
+        .any(|verb| scan.contains(verb))
 }
 
 /// Classify a single pre-split, pure-SQL statement (Stage B + purity consult).
@@ -1023,13 +1093,18 @@ fn classify_statement(
     match parsed {
         Statement::Query(ref query) => {
             // A `Statement::Query` whose body is (or contains, under a set
-            // operation / parenthesized subquery) a DML `SetExpr` is a
-            // CTE-smuggled write: `WITH a AS (SELECT …) UPDATE t SET …` parses
-            // as Query→SetExpr::Update, not Statement::Update. Fail closed to a
+            // operation / parenthesized subquery / CTE body / FROM-JOIN derived
+            // subquery) a DML `SetExpr` is a smuggled write: `WITH a AS (SELECT …)
+            // UPDATE t SET …` parses as Query→SetExpr::Update, and
+            // `SELECT * FROM (UPDATE t SET x=1)` hides the write in a derived
+            // subquery — neither surfaces as `Statement::Update`. Fail closed to a
             // write classification so a READ_ONLY session never sees an
-            // `allow`/ReadOnly verdict for text carrying a top-level
-            // UPDATE/DELETE/MERGE/INSERT (oracle-cte-dml-body).
-            if set_expr_carries_dml(&query.body) {
+            // `allow`/ReadOnly verdict for text carrying a
+            // UPDATE/DELETE/MERGE/INSERT (oracle-cte-dml-body /
+            // oracle-derived-dml-body). The reserved-verb canonical scan closes
+            // the remaining Expr-embedded case (`WHERE … IN (UPDATE …)`, scalar
+            // `(DELETE …)`) the structural walk does not descend into.
+            if set_expr_carries_dml(&query.body) || query_embeds_reserved_dml_verb(sql) {
                 return guarded_rw(Vec::new());
             }
             // SELECT/WITH: Safe only if it calls no unproven user-defined
