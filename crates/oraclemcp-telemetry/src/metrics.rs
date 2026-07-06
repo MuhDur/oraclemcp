@@ -62,7 +62,7 @@ pub struct Metrics {
     requests: Mutex<BTreeMap<(String, String), u64>>, // (tool, status) -> count
     errors: Mutex<BTreeMap<i32, u64>>,                // ora_code -> count
     lane_requests: Mutex<BTreeMap<LaneRequestKey, u64>>,
-    lane_blocked: Mutex<BTreeMap<LaneSubjectKey, u64>>,
+    lane_blocked: Mutex<BTreeMap<LaneBlockedKey, u64>>,
     lane_request_duration_ms: Mutex<BTreeMap<LaneRequestDurationKey, Histogram>>,
     active_lane_labels: Mutex<BTreeMap<LaneSubjectKey, u64>>,
     query_duration_ms: Histogram,
@@ -122,14 +122,30 @@ impl Metrics {
             .observe(ms);
     }
 
-    /// Record a request that was blocked before useful DB work could happen:
-    /// capacity/backpressure, policy, classifier, or operating-level refusal.
-    pub fn record_lane_blocked(&self, lane_id: &str, subject_id_hash: &str) {
+    /// Record a request that was blocked before useful DB work could happen,
+    /// labeled (K4) with *why* — `reason_class` (`capacity` / `policy` /
+    /// `classifier` / `operating_level` / `other`) — and the operating level the
+    /// statement required (`READ_ONLY` / `READ_WRITE` / `DDL` / `ADMIN` / `n/a`).
+    /// Both labels are drawn from bounded sets so cardinality stays fixed: a
+    /// broken meter can never weaken the guard, and operators see what agents
+    /// *attempt*, not just what runs.
+    pub fn record_lane_blocked(
+        &self,
+        lane_id: &str,
+        subject_id_hash: &str,
+        reason_class: &str,
+        operating_level: &str,
+    ) {
         *self
             .lane_blocked
             .lock()
             .expect("metrics mutex poisoned")
-            .entry(LaneSubjectKey::new(lane_id, subject_id_hash))
+            .entry(LaneBlockedKey::new(
+                lane_id,
+                subject_id_hash,
+                reason_class,
+                operating_level,
+            ))
             .or_insert(0) += 1;
     }
 
@@ -211,6 +227,8 @@ impl Metrics {
                 .map(|(key, c)| LaneBlockedCount {
                     lane_id: key.lane_id.clone(),
                     subject_id_hash: key.subject_id_hash.clone(),
+                    reason_class: key.reason_class.clone(),
+                    operating_level: key.operating_level.clone(),
                     count: *c,
                 })
                 .collect(),
@@ -282,9 +300,11 @@ impl Metrics {
         out.push_str("# TYPE mcp_lane_blocked_total counter\n");
         for r in &s.lane_blocked {
             out.push_str(&format!(
-                "mcp_lane_blocked_total{{lane_id=\"{}\",subject_id_hash=\"{}\"}} {}\n",
+                "mcp_lane_blocked_total{{lane_id=\"{}\",subject_id_hash=\"{}\",reason_class=\"{}\",operating_level=\"{}\"}} {}\n",
                 escape_label(&r.lane_id),
                 escape_label(&r.subject_id_hash),
+                escape_label(&r.reason_class),
+                escape_label(&r.operating_level),
                 r.count
             ));
         }
@@ -351,6 +371,30 @@ impl LaneSubjectKey {
         Self {
             lane_id: lane_id.to_owned(),
             subject_id_hash: subject_id_hash.to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct LaneBlockedKey {
+    lane_id: String,
+    subject_id_hash: String,
+    reason_class: String,
+    operating_level: String,
+}
+
+impl LaneBlockedKey {
+    fn new(
+        lane_id: &str,
+        subject_id_hash: &str,
+        reason_class: &str,
+        operating_level: &str,
+    ) -> Self {
+        Self {
+            lane_id: lane_id.to_owned(),
+            subject_id_hash: subject_id_hash.to_owned(),
+            reason_class: reason_class.to_owned(),
+            operating_level: operating_level.to_owned(),
         }
     }
 }
@@ -433,13 +477,22 @@ pub struct LaneRequestCount {
     pub count: u64,
 }
 
-/// A per-lane/per-subject blocked counter.
+/// A per-lane/per-subject blocked counter, labeled by the bounded reason class
+/// and required operating level (K4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneBlockedCount {
     /// Stable lane id.
     pub lane_id: String,
     /// Redacted subject id hash.
     pub subject_id_hash: String,
+    /// Bounded reason class: `capacity` / `policy` / `classifier` /
+    /// `operating_level` / `other`. Defaults empty for legacy snapshots.
+    #[serde(default)]
+    pub reason_class: String,
+    /// Bounded required operating level: `READ_ONLY` / `READ_WRITE` / `DDL` /
+    /// `ADMIN` / `n/a`. Defaults empty for legacy snapshots.
+    #[serde(default)]
+    pub operating_level: String,
     /// Count.
     pub count: u64,
 }
@@ -510,7 +563,12 @@ mod tests {
         m.record_request("oracle_query", "error");
         m.record_lane_request("lane-a", "subject-sha256:abc", "oracle_query", "ok");
         m.record_lane_request_duration_ms("lane-a", "subject-sha256:abc", "oracle_query", 37);
-        m.record_lane_blocked("lane-a", "subject-sha256:abc");
+        m.record_lane_blocked(
+            "lane-a",
+            "subject-sha256:abc",
+            "operating_level",
+            "READ_WRITE",
+        );
         m.set_active_lanes(&[("lane-a".to_owned(), "subject-sha256:abc".to_owned())]);
         m.record_error(942);
         m.record_error(942);
@@ -526,6 +584,8 @@ mod tests {
         assert_eq!(lane_ok.subject_id_hash, "subject-sha256:abc");
         assert_eq!(lane_ok.count, 1);
         assert_eq!(s.lane_blocked[0].count, 1);
+        assert_eq!(s.lane_blocked[0].reason_class, "operating_level");
+        assert_eq!(s.lane_blocked[0].operating_level, "READ_WRITE");
         assert_eq!(s.lane_request_duration_ms[0].histogram.count, 1);
         assert_eq!(s.lane_request_duration_ms[0].histogram.sum, 37);
         assert_eq!(s.active_lanes, 1);
@@ -563,7 +623,7 @@ mod tests {
         m.record_request("oracle_query", "ok");
         m.record_lane_request("lane-a", "subject-sha256:abc", "oracle_query", "ok");
         m.record_lane_request_duration_ms("lane-a", "subject-sha256:abc", "oracle_query", 12);
-        m.record_lane_blocked("lane-a", "subject-sha256:abc");
+        m.record_lane_blocked("lane-a", "subject-sha256:abc", "classifier", "n/a");
         m.set_active_lanes(&[("lane-a".to_owned(), "subject-sha256:abc".to_owned())]);
         m.record_error(942);
         m.set_pool_active(2);
@@ -576,7 +636,7 @@ mod tests {
             )
         );
         assert!(text.contains(
-            "mcp_lane_blocked_total{lane_id=\"lane-a\",subject_id_hash=\"subject-sha256:abc\"} 1"
+            "mcp_lane_blocked_total{lane_id=\"lane-a\",subject_id_hash=\"subject-sha256:abc\",reason_class=\"classifier\",operating_level=\"n/a\"} 1"
         ));
         assert!(text.contains("mcp_active_lanes 1"));
         assert!(text.contains("db_errors_total{ora_code=\"942\"} 1"));

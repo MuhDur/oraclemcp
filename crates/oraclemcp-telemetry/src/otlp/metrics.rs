@@ -86,19 +86,23 @@ pub fn build_request(
         ));
     }
 
-    // mcp.server.lane.blocked.count {lane_id, subject_id_hash} — monotonic
-    // counter for policy/capacity/classifier refusals.
+    // mcp.server.lane.blocked.count {lane_id, subject_id_hash, reason_class,
+    // operating_level} — monotonic counter for policy/capacity/classifier/level
+    // refusals, labeled (K4) so operators see what agents ATTEMPT. Both extra
+    // labels are drawn from bounded sets, so cardinality stays fixed.
     for r in &snapshot.lane_blocked {
         let attrs = redact_labels(
             redactor,
             &[
                 ("lane_id", &r.lane_id),
                 ("subject_id_hash", &r.subject_id_hash),
+                ("reason_class", &r.reason_class),
+                ("operating_level", &r.operating_level),
             ],
         );
         metrics.push(sum_metric(
             "mcp.server.lane.blocked.count",
-            "Count of blocked MCP dispatches by lane and subject hash.",
+            "Count of blocked MCP dispatches by lane, subject hash, reason class, and required operating level.",
             "1",
             attrs,
             i64::try_from(r.count).unwrap_or(i64::MAX),
@@ -412,7 +416,7 @@ mod tests {
         m.record_request("oracle_query", "ok");
         m.record_request("oracle_query", "error");
         m.record_lane_request("lane-a", SUBJECT_HASH, "oracle_query", "blocked");
-        m.record_lane_blocked("lane-a", SUBJECT_HASH);
+        m.record_lane_blocked("lane-a", SUBJECT_HASH, "operating_level", "DDL");
         m.record_lane_request_duration_ms("lane-a", SUBJECT_HASH, "oracle_query", 42);
         m.set_active_lanes(&[("lane-a".to_owned(), SUBJECT_HASH.to_owned())]);
         m.record_error(942);

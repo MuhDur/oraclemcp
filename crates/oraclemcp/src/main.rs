@@ -1703,8 +1703,13 @@ impl ToolDispatch for MetricsDispatch {
                 name,
                 u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             );
-            if metrics_is_blocked(&result) {
-                self.metrics.record_lane_blocked(&lane_id, &subject_id_hash);
+            if let Some((reason_class, operating_level)) = blocked_labels(&result) {
+                self.metrics.record_lane_blocked(
+                    &lane_id,
+                    &subject_id_hash,
+                    reason_class,
+                    operating_level,
+                );
             }
             result
         })
@@ -1744,19 +1749,40 @@ fn metrics_status(outcome: &DispatchOutcome) -> &'static str {
     }
 }
 
-fn metrics_is_blocked(outcome: &DispatchOutcome) -> bool {
-    matches!(
-        outcome,
-        asupersync::Outcome::Err(envelope)
-            if matches!(
-                envelope.error_class,
-                ErrorClass::Busy
-                    | ErrorClass::AtCapacity
-                    | ErrorClass::PolicyDenied
-                    | ErrorClass::ForbiddenStatement
-                    | ErrorClass::OperatingLevelTooLow
-            )
-    )
+/// K4: the bounded `(reason_class, operating_level)` labels for a blocked
+/// dispatch, or `None` when the outcome was not a pre-DB refusal. `reason_class`
+/// buckets the blocking `ErrorClass`; `operating_level` is the required level
+/// from the guard's structured reason (K8) when present, else `n/a`. Both stay
+/// within fixed sets so the metric's label cardinality is bounded.
+fn blocked_labels(outcome: &DispatchOutcome) -> Option<(&'static str, &'static str)> {
+    let asupersync::Outcome::Err(envelope) = outcome else {
+        return None;
+    };
+    let reason_class = match envelope.error_class {
+        ErrorClass::Busy | ErrorClass::AtCapacity => "capacity",
+        ErrorClass::PolicyDenied => "policy",
+        ErrorClass::ForbiddenStatement => "classifier",
+        ErrorClass::OperatingLevelTooLow => "operating_level",
+        _ => return None,
+    };
+    let operating_level = envelope
+        .structured_reason
+        .as_ref()
+        .and_then(|reason| reason.required_level.as_deref())
+        .map_or("n/a", bounded_operating_level);
+    Some((reason_class, operating_level))
+}
+
+/// Clamp a required-level string to the bounded label set (defends the metric's
+/// cardinality even if an unexpected value ever reaches here).
+fn bounded_operating_level(level: &str) -> &'static str {
+    match level {
+        "READ_ONLY" => "READ_ONLY",
+        "READ_WRITE" => "READ_WRITE",
+        "DDL" => "DDL",
+        "ADMIN" => "ADMIN",
+        _ => "n/a",
+    }
 }
 
 fn maybe_wrap_metrics_dispatch(

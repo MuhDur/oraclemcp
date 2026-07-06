@@ -2009,3 +2009,47 @@ fn build_server_advertises_the_registered_tools_plus_capabilities() {
     // Smoke: the server clones (it is Clone) — proves it is fully built.
     let _ = server.clone();
 }
+
+// ---- K4: bounded reason_class + operating_level labels on the blocked counter ----
+
+#[test]
+fn blocked_labels_bucket_reason_class_and_required_level() {
+    use oraclemcp_error::{ErrorEnvelope, ReasonCategory, StructuredReason};
+
+    // Capacity backpressure: bucketed as `capacity`, no level context -> `n/a`.
+    let busy: DispatchOutcome = asupersync::Outcome::Err(ErrorEnvelope::new(ErrorClass::Busy, "x"));
+    assert_eq!(blocked_labels(&busy), Some(("capacity", "n/a")));
+
+    // A level gate carries the required level from the K8 structured reason.
+    let gated: DispatchOutcome = asupersync::Outcome::Err(
+        ErrorEnvelope::new(ErrorClass::OperatingLevelTooLow, "needs a higher level")
+            .with_structured_reason(
+                StructuredReason::new(ReasonCategory::RequiresHigherLevel)
+                    .with_required_level("READ_WRITE"),
+            ),
+    );
+    assert_eq!(
+        blocked_labels(&gated),
+        Some(("operating_level", "READ_WRITE"))
+    );
+
+    // A classifier refusal with no level context.
+    let forbidden: DispatchOutcome = asupersync::Outcome::Err(ErrorEnvelope::new(
+        ErrorClass::ForbiddenStatement,
+        "refused",
+    ));
+    assert_eq!(blocked_labels(&forbidden), Some(("classifier", "n/a")));
+
+    // A non-blocking error yields no blocked-counter labels.
+    let other: DispatchOutcome =
+        asupersync::Outcome::Err(ErrorEnvelope::new(ErrorClass::ObjectNotFound, "x"));
+    assert_eq!(blocked_labels(&other), None);
+
+    // An out-of-range level is clamped to `n/a` so cardinality stays bounded.
+    let weird: DispatchOutcome = asupersync::Outcome::Err(
+        ErrorEnvelope::new(ErrorClass::ForbiddenStatement, "x").with_structured_reason(
+            StructuredReason::new(ReasonCategory::Other).with_required_level("WAT"),
+        ),
+    );
+    assert_eq!(blocked_labels(&weird), Some(("classifier", "n/a")));
+}
