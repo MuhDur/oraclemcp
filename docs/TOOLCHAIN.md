@@ -21,7 +21,7 @@ The current pin is **`nightly-2026-05-11`**.
 The thin-native line runs on the **asupersync 0.3.4** async runtime, and
 asupersync uses nightly-only language features (`#![feature(try_trait_v2)]` and
 `try_trait_v2_residual`). There is therefore **no stable MSRV** for this
-workspace. The pinned `oracledb` 0.7.1 driver is **stable-clean** and is *not*
+workspace. The pinned `oracledb` 0.7.2 driver is **stable-clean** and is *not*
 the reason for the nightly pin; asupersync is the constraint, and it is pre-1.0
 and still moving. We pin a single nightly and bump it **deliberately**, rather
 than tracking `nightly` automatically, so a surprise upstream toolchain change

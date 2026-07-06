@@ -1689,9 +1689,9 @@ dependencies = [
 
 [[package]]
 name = "oracledb"
-version = "0.7.1"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d39de955def24f0894fedeae588222000918000395f190c9541ee04f8b3d2fc3"
+checksum = "b96f68b175f8716e44f47c2fdd6b26060ba1d9752ba2914ce6949f4c52680faa"
 dependencies = [
  "asupersync",
  "oracledb-protocol",
@@ -1705,9 +1705,9 @@ dependencies = [
 
 [[package]]
 name = "oracledb-protocol"
-version = "0.7.1"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a84a09fccc9f0a48ee2da39ba09a7529bf2c7aa02fdab9badea59915471cad0c"
+checksum = "72d381ebb5c62cc39d49f9ef121a9e2639d0258cce1782bc6c94bdceac4472a9"
 dependencies = [
  "aes",
  "cbc",
@@ -1726,7 +1726,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "asupersync",
  "async-trait",
@@ -1765,7 +1765,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-audit"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "oraclemcp-error",
  "parking_lot 0.12.5",
@@ -1779,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-auth"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "oraclemcp-audit",
  "oraclemcp-error",
@@ -1793,7 +1793,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-config"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "figment",
  "oraclemcp-error",
@@ -1806,7 +1806,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-core"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "asupersync",
  "async-trait",
@@ -1834,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-db"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "asupersync",
  "async-trait",
@@ -1852,7 +1852,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-error"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1861,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-guard"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "oraclemcp-audit",
  "oraclemcp-error",
@@ -1876,7 +1876,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-telemetry"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "asupersync",
  "oraclemcp-error",

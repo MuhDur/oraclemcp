@@ -118,7 +118,7 @@ vulnerability-reporting policy and supported versions are in the repo-root
 
 ### Container / runtime
 
-- [ ] Pin the image to an immutable tag (`ghcr.io/muhdur/oraclemcp:0.7.1`), not
+- [ ] Pin the image to an immutable tag (`ghcr.io/muhdur/oraclemcp:0.7.2`), not
       `:latest`, and verify the digest.
 - [ ] Run as non-root with `readOnlyRootFilesystem`,
       `allowPrivilegeEscalation: false`, and all capabilities dropped (see the

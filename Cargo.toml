@@ -19,7 +19,7 @@ repository = "https://github.com/MuhDur/oraclemcp"
 homepage = "https://github.com/MuhDur/oraclemcp"
 # No `rust-version`: the thin-native line is pinned to nightly because
 # asupersync uses nightly-only language features (try_trait_v2 + its residual).
-# The oracledb 0.7.1 driver is stable-clean and is NOT the reason for the pin.
+# The oracledb 0.7.2 driver is stable-clean and is NOT the reason for the pin.
 keywords = ["oracle", "mcp", "database", "sql"]
 categories = ["database", "development-tools"]
 
@@ -43,16 +43,16 @@ async-trait = "0.1"
 # the deliberate, single-file change that exact pin guarantees — never an
 # accidental float into a new minor. Keep the `=` pin; bump it deliberately
 # (adapter + contract suite green, full gate battery re-run) for each upgrade.
-oracledb = { version = "=0.7.1", default-features = false }
+oracledb = { version = "=0.7.2", default-features = false }
 # The pure-Rust, sans-I/O TNS/TTC protocol core that `oracledb` itself builds on.
 # The TNS-onboarding parse adapter (crates/oraclemcp-db/src/tns.rs) reuses its
 # `TnsnamesReader` DIRECTLY via the `oracledb_protocol::` path — which does NOT
 # match the driver-seam pattern (`oracledb` + `::`) that
 # scripts/oraclemcp_driver_seam_lint.sh confines to connection.rs, because the
-# `_` breaks the adjacency. Pinned EXACTLY to the version `oracledb 0.7.1`
+# `_` breaks the adjacency. Pinned EXACTLY to the version `oracledb 0.7.2`
 # already resolves, so this direct edge never floats the graph; pure
 # encode/decode (no async runtime), so the engine-free boundary holds.
-oracledb-protocol = { version = "=0.7.1", default-features = false }
+oracledb-protocol = { version = "=0.7.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # D1 observability: hand-rolled OTLP metrics/trace protobuf encoders

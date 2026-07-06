@@ -12,7 +12,7 @@ query text.
 | --- | --- | --- |
 | Workspace | Cargo workspace with 9 crates plus `oraclemcp` binary, `resolver = "2"`, edition 2024, pinned nightly `nightly-2026-05-11`, and no stable MSRV on the thin-native line. | `Cargo.toml`, `rust-toolchain.toml` |
 | Safety posture | Every crate forbids unsafe code; raw SQL safety is centered on `oraclemcp-guard`. | `Cargo.toml`, crate roots, `AGENTS.md` |
-| Current release line | All package versions and `server.json` are aligned at 0.7.1. | `Cargo.toml`, crate `Cargo.toml` files, `server.json` |
+| Current release line | All package versions and `server.json` are aligned at 0.7.2. | `Cargo.toml`, crate `Cargo.toml` files, `server.json` |
 | Current DB mode | Default build includes live Oracle support through the pure-Rust `oracledb` thin driver. | `README.md`, `crates/oraclemcp-db/Cargo.toml` |
 | Current runtime/transport | Native stdio and native Streamable HTTP live in `oraclemcp-core`; dispatch receives explicit Asupersync `Cx` contexts; Tokio, `rmcp`, Axum, Hyper, ODPI-C, and `r2d2` are absent from the current manifests and lockfile. | `crates/oraclemcp-core/src/server.rs`, `crates/oraclemcp-core/src/http/mod.rs`, `Cargo.lock`, `Cargo.toml` |
 | Current bead state | Repo-local `.beads/` contains the migration graph and W-series release hardening work. | `br list --json`, `bv --robot-triage` |

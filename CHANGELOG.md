@@ -6,6 +6,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-07-06
+
+### Security
+
+- **PL/SQL `CREATE OR REPLACE` now requires the `DDL` operating level (bead
+  `p0d6`).** Replacing a stored `PROCEDURE`/`FUNCTION`/`PACKAGE`/`TRIGGER` was
+  leveled by its PL/SQL body and floored at `READ_WRITE` — one tier below
+  `CREATE OR REPLACE VIEW` and `oracle_patch_source` — letting a `READ_WRITE`
+  principal replace stored code (definer-rights escalation). It now floors at
+  `DDL` (`max(Ddl, body_level)`; a dangerous body still escalates to
+  `Forbidden`), and `oracle_create_or_replace` audits under its own tool name.
+- Closed a classifier subquery-DML bypass, an audit forged-anchor bypass, an
+  auth misclassification, and an audit file-lock gap; interior-fork resume now
+  refuses fail-closed.
+
+### Added
+
+- **Keyed full-chain audit verification on resume + parent-directory fsync
+  (bead `g4xi`).** A forged interior audit record with a bad MAC now refuses
+  startup when the key is present; the audit log's directory entry is fsynced
+  so it survives a crash immediately after create.
+- Broader governed-tool e2e coverage across all live lanes (bead `rsya`):
+  `switch_profile`, `sample_rows`, `read_clob` caps, custom-tool `READ_ONLY`
+  enforcement, `DBMS_OUTPUT` caps, `explain_plan`/`PLAN_TABLE` gating.
+- Adopted `oracledb` 0.7.2 — pre-23ai cross-version driver fixes (direct-path
+  load, break/cancel recovery framing, TPC token, and the below-floor 12.2
+  `al8sqlsig`/`oaccolid` write-gate fixes).
+
+### Fixed
+
+- **Connect-error redaction hardened (bead `p0sd`).** Redaction now scrubs
+  decomposed host/port/service and case-insensitive Oracle-uppercased
+  identifiers (closing two leak paths), with min-length + word-boundary guards
+  so it never over-redacts. Mid-cancel/timeout session discard now keys off the
+  structural `Cancelled` error kind, not fragile message-text markers.
+- Audit hash-chain resumes across restarts; tail-truncation anchor detection;
+  MCP protocol-revision hygiene; deterministic shutdown wakeup.
+
 ## [0.7.1] — 2026-07-04
 
 ### Added
