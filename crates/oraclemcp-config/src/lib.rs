@@ -44,6 +44,7 @@ const IGNORED_ENV_KEYS: &[&str] = &[
     "audit_key",
     "config",
     "custom_tools_hmac_key",
+    "http_allow_remote",
     "live_xe",
     "live_xe_contention",
     "log",
@@ -265,6 +266,12 @@ pub struct HttpConfig {
     /// disabled unless this is explicitly enabled and the runtime profile
     /// ceiling still admits the requested operation.
     pub dashboard_workbench: bool,
+    /// Allow binding to non-loopback addresses without auth/TLS when combined
+    /// with `serve --allow-no-auth`. Default `false` (fail-closed). Can also be
+    /// enabled at serve time via `ORACLEMCP_HTTP_ALLOW_REMOTE=1` (ignored during
+    /// config load; see `IGNORED_ENV_KEYS`).
+    #[serde(default)]
+    pub allow_remote: bool,
 }
 
 impl Default for HttpConfig {
@@ -280,6 +287,7 @@ impl Default for HttpConfig {
             tls: None,
             operator: HttpOperatorConfig::default(),
             dashboard_workbench: false,
+            allow_remote: false,
         }
     }
 }
@@ -1094,6 +1102,21 @@ mod tests {
     }
 
     #[test]
+    fn http_allow_remote_loads_from_toml() {
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [http]
+            allow_remote = true
+            "#,
+        )
+        .expect("allow_remote loads");
+        assert!(cfg.http.allow_remote);
+
+        let default_cfg = OracleMcpConfig::from_toml_str("").expect("empty loads");
+        assert!(!default_cfg.http.allow_remote);
+    }
+
+    #[test]
     fn schema_v2_dashboard_and_monitor_fields_load_and_validate() {
         let cfg = OracleMcpConfig::from_toml_str(
             r#"
@@ -1795,6 +1818,7 @@ mod tests {
             jail.set_env("ORACLEMCP_TEST_USE_SNI", "true");
             jail.set_env("ORACLEMCP_TEST_PROXY_USER", "PROXY_USER");
             jail.set_env("ORACLEMCP_TEST_PROXY_TARGET_SCHEMA", "TARGET_SCHEMA");
+            jail.set_env("ORACLEMCP_HTTP_ALLOW_REMOTE", "1");
 
             let cfg = OracleMcpConfig::load(None).expect("control env vars are ignored");
 

@@ -69,17 +69,18 @@ use oraclemcp_core::{
     ClientCredentialIssueRequest, ClientCredentialLifecycle, ClientCredentialStore,
     ConfigApplyOutcome, ConfigDraftPreview, ConfigOpsBackend, ConfigOpsError, ConfigOpsService,
     ConfigOpsStatus, ConfigReloadApplier, ConfigReloadApplyReport, CustomToolCatalog,
-    CustomToolDef, DashboardAuth, DispatchCloseReason, DispatchContext, DispatchFuture,
-    DispatchOutcome, DoctorAuthCapabilities, DoctorAuthModeKind, DoctorContext, DoctorLevelCaps,
-    DoctorProfileCaps, DoctorStateLayout, ExportRegistry, FeatureTiers, HttpSessionLifecycle,
-    HttpTransportConfig, LaneContext, LaneDispatchFactory, LaneRuntime, MCP_PATH, McpSurfaceDetail,
-    McpSurfaceFuture, MtlsClientRegistry, OAuthEnforcement, ObservabilityState,
-    OperatorAuthorityPolicy, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, ServiceTransport,
-    ShutdownCoordinator, SiemFormat, SiemHttpForwarder, SourceHistoryStore, StatefulLaneDispatch,
-    StdioAuthPolicy, TlsMaterial, TlsServerConfig, ToolDispatch, WriteIntentLog,
-    apply_legacy_state_migration, build_server_config, default_dashboard_ticket_dir, load_tools,
-    load_tools_for_profile, mint_dashboard_pairing_ticket, operator_subject_id_hash,
-    parse_tools_file, requires_mtls, run_doctor, service_app_doctor_snapshot, sign,
+    CustomToolDef, DashboardAuth, DashboardAuthError, DispatchCloseReason, DispatchContext,
+    DispatchFuture, DispatchOutcome, DoctorAuthCapabilities, DoctorAuthModeKind, DoctorContext,
+    DoctorLevelCaps, DoctorProfileCaps, DoctorStateLayout, ExportRegistry, FeatureTiers,
+    HttpSessionLifecycle, HttpTransportConfig, LaneContext, LaneDispatchFactory, LaneRuntime,
+    MCP_PATH, McpSurfaceDetail, McpSurfaceFuture, MtlsClientRegistry, OAuthEnforcement,
+    ObservabilityState, OperatorAuthorityPolicy, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH,
+    ServiceTransport, ShutdownCoordinator, SiemFormat, SiemHttpForwarder, SourceHistoryStore,
+    StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial, TlsServerConfig, ToolDispatch,
+    WriteIntentLog, apply_legacy_state_migration, build_server_config,
+    default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
+    mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file,
+    probe_dashboard_http_service, requires_mtls, run_doctor, service_app_doctor_snapshot, sign,
     start_oraclemcp_service_app_with_transport,
 };
 use oraclemcp_db::{
@@ -2239,6 +2240,7 @@ struct ResolvedHttpTransportConfig {
     transport: HttpTransportConfig,
     tls: Option<Arc<TlsServerConfig>>,
     mtls_required: bool,
+    allow_remote: bool,
 }
 
 #[derive(Clone)]
@@ -2417,7 +2419,18 @@ fn http_transport_config_from_merged(
         transport,
         tls,
         mtls_required,
+        allow_remote: http.allow_remote,
     })
+}
+
+fn http_allow_remote_from_env() -> bool {
+    std::env::var("ORACLEMCP_HTTP_ALLOW_REMOTE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn effective_http_allow_remote(config_allow_remote: bool) -> bool {
+    config_allow_remote || http_allow_remote_from_env()
 }
 
 fn tls_material_from_config(
@@ -2637,9 +2650,7 @@ fn run_serve(
             let client_credentials_enabled = resolved_http.transport.client_credentials.is_some();
             let auth_enabled =
                 oauth_enabled || resolved_http.mtls_required || client_credentials_enabled;
-            let allow_remote = std::env::var("ORACLEMCP_HTTP_ALLOW_REMOTE")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
+            let allow_remote = effective_http_allow_remote(resolved_http.allow_remote);
             if let Err((code, message)) = http_listen_guard(
                 allow_no_auth,
                 auth_enabled,
@@ -2998,8 +3009,9 @@ fn http_listen_guard(
             "ORACLEMCP_HTTP_REMOTE_BIND_REFUSED",
             format!(
                 "refusing to bind {} to non-loopback {addr}; bind a loopback \
-                 address or set ORACLEMCP_HTTP_ALLOW_REMOTE=1 when equivalent \
-                 network controls are in front",
+                 address, set [http] allow_remote = true in config, or set \
+                 ORACLEMCP_HTTP_ALLOW_REMOTE=1 when equivalent network controls \
+                 are in front",
                 if tls_enabled {
                     "HTTPS"
                 } else {
@@ -3030,6 +3042,26 @@ fn run_dashboard_cmd(
     no_open: bool,
 ) -> ExitCode {
     let ticket_dir = default_dashboard_ticket_dir();
+    if let Err(e) = probe_dashboard_http_service(base_url) {
+        let code = if matches!(e, DashboardAuthError::ServiceUnreachable { .. }) {
+            "ORACLEMCP_DASHBOARD_SERVICE_UNREACHABLE"
+        } else {
+            "ORACLEMCP_DASHBOARD_PROBE_FAILED"
+        };
+        if robot_json {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "kind": "error",
+                    "code": code,
+                    "message": e.to_string(),
+                })
+            );
+        } else {
+            eprintln!("{binary_name} dashboard: {e}");
+        }
+        return ExitCode::from(2);
+    }
     let ticket = match mint_dashboard_pairing_ticket(&ticket_dir, base_url) {
         Ok(ticket) => ticket,
         Err(e) => {
@@ -4507,58 +4539,7 @@ fn doctor_credential_env_hint(profile: &ConnectionProfile) -> Option<String> {
 }
 
 fn doctor_sensitive_values(opts: &OracleConnectOptions) -> Vec<String> {
-    let mut values = Vec::new();
-    values.push(opts.connect_string.clone());
-    if let Some(username) = &opts.username {
-        values.push(username.clone());
-    }
-    if let Some(password) = &opts.password {
-        values.push(password.clone());
-    }
-    values.extend(
-        opts.auth_adapter
-            .sensitive_values()
-            .into_iter()
-            .map(ToOwned::to_owned),
-    );
-    if let Some(token) = &opts.iam_token {
-        values.push(token.clone());
-    }
-    if let Some(wallet) = &opts.wallet_location {
-        values.push(wallet.display().to_string());
-    }
-    if let Some(wallet_password) = &opts.wallet_password {
-        values.push(wallet_password.clone());
-    }
-    if let Some(dn) = &opts.ssl_server_cert_dn {
-        values.push(dn.clone());
-    }
-    for (namespace, key, value) in &opts.app_context {
-        values.push(namespace.clone());
-        values.push(key.clone());
-        values.push(value.clone());
-    }
-    if let Some(identity) = &opts.session_identity {
-        for value in [
-            &identity.edition,
-            &identity.program,
-            &identity.machine,
-            &identity.os_user,
-            &identity.terminal,
-            &identity.module,
-            &identity.action,
-            &identity.client_identifier,
-            &identity.client_info,
-            &identity.driver_name,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            values.push(value.clone());
-        }
-    }
-    values.retain(|value| !value.is_empty());
-    values
+    opts.doctor_redaction_values()
 }
 
 fn doctor_connection_error(error: DbError) -> String {

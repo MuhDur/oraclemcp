@@ -11,6 +11,11 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use asupersync::Cx;
+use asupersync::http::h1::http_client::HttpClient;
+use asupersync::http::h1::types::Method;
+use asupersync::runtime::RuntimeBuilder;
+
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -23,6 +28,10 @@ use thiserror::Error;
 pub const DASHBOARD_PAIR_PATH: &str = "/dashboard/pair";
 /// Same-origin session-info route used by the SPA to get CSRF/action tickets.
 pub const DASHBOARD_SESSION_PATH: &str = "/dashboard/session";
+/// Liveness path probed before minting a dashboard pairing ticket (B3.1 / D1).
+pub const DASHBOARD_HTTP_PROBE_PATH: &str = "/healthz";
+/// Short timeout for the pre-mint dashboard HTTP probe.
+pub const DASHBOARD_HTTP_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Dashboard session cookie. It is deliberately distinct from the MCP cookie.
 pub const DASHBOARD_SESSION_COOKIE: &str = "oraclemcp_dashboard_session";
 /// Header carrying the session CSRF token for dashboard POST requests.
@@ -123,6 +132,10 @@ pub enum DashboardAuthError {
         operation: &'static str,
         message: String,
     },
+    #[error(
+        "no oraclemcp HTTP service at {base_url} — start it with `oraclemcp service install` or `oraclemcp serve --listen …` ({detail})"
+    )]
+    ServiceUnreachable { base_url: String, detail: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -272,6 +285,63 @@ pub fn default_dashboard_ticket_dir() -> PathBuf {
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "unknown".to_owned());
     std::env::temp_dir().join(format!("oraclemcp-dashboard-{user}"))
+}
+
+/// Probe `base_url` for a running oraclemcp HTTP listener before minting a pairing
+/// ticket. Uses `/healthz` (liveness — OK even when the DB is down).
+pub fn probe_dashboard_http_service(base_url: &str) -> Result<(), DashboardAuthError> {
+    let base = base_url.trim();
+    if base.is_empty() {
+        return Err(DashboardAuthError::ServiceUnreachable {
+            base_url: base_url.to_owned(),
+            detail: "empty base URL".to_owned(),
+        });
+    }
+    let probe_url = format!(
+        "{}{}",
+        base.trim_end_matches('/'),
+        DASHBOARD_HTTP_PROBE_PATH
+    );
+    let reactor =
+        asupersync::runtime::reactor::create_reactor().map_err(|e| DashboardAuthError::Io {
+            operation: "create dashboard probe reactor",
+            message: e.to_string(),
+        })?;
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .map_err(|e| DashboardAuthError::Io {
+            operation: "build dashboard probe runtime",
+            message: e.to_string(),
+        })?;
+    let timeout = DASHBOARD_HTTP_PROBE_TIMEOUT;
+    let base_owned = base.to_owned();
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("asupersync block_on installs a current Cx");
+        let client = HttpClient::new();
+        let response = asupersync::time::timeout(cx.now(), timeout, async {
+            client
+                .request(&cx, Method::Get, &probe_url, Vec::new(), Vec::new())
+                .await
+        })
+        .await
+        .map_err(|_| DashboardAuthError::ServiceUnreachable {
+            base_url: base_owned.clone(),
+            detail: "probe timed out".to_owned(),
+        })?
+        .map_err(|e| DashboardAuthError::ServiceUnreachable {
+            base_url: base_owned.clone(),
+            detail: e.to_string(),
+        })?;
+        if (200..300).contains(&response.status) {
+            Ok(())
+        } else {
+            Err(DashboardAuthError::ServiceUnreachable {
+                base_url: base_owned,
+                detail: format!("HTTP {}", response.status),
+            })
+        }
+    })
 }
 
 /// Create a 0600, short-lived local pairing ticket and return the browser URL.
@@ -522,5 +592,55 @@ mod tests {
             ),
             Err(DashboardAuthError::InvalidCsrf)
         ));
+    }
+
+    fn spawn_healthz_stub() -> (
+        u16,
+        std::thread::JoinHandle<()>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind healthz stub");
+        let port = listener.local_addr().expect("stub addr").port();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_flag = Arc::clone(&shutdown);
+        let handle = thread::spawn(move || {
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking stub listener");
+            let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+            while !shutdown_flag.load(Ordering::Relaxed) {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+                    let mut buf = [0u8; 2048];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(response.as_bytes());
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+        (port, handle, shutdown)
+    }
+
+    #[test]
+    fn probe_dashboard_http_service_refuses_unreachable_base_url() {
+        let err = probe_dashboard_http_service("http://127.0.0.1:1").expect_err("closed port");
+        assert!(matches!(err, DashboardAuthError::ServiceUnreachable { .. }));
+        assert!(err.to_string().contains("no oraclemcp HTTP service at"));
+    }
+
+    #[test]
+    fn probe_dashboard_http_service_accepts_healthz_liveness() {
+        let (port, handle, shutdown) = spawn_healthz_stub();
+        let base = format!("http://127.0.0.1:{port}");
+        probe_dashboard_http_service(&base).expect("healthz stub answers");
+        shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = handle.join();
     }
 }

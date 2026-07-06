@@ -61,6 +61,9 @@ stateful_idle_ttl_seconds = 900
 # enabled, all SQL still routes through the normal classifier, profile ceiling,
 # confirmation-token, rollback/audit, and idempotency path.
 dashboard_workbench = false
+# Allow binding HTTP to non-loopback addresses (e.g. 0.0.0.0). Default: false.
+# Can also opt in at serve time via ORACLEMCP_HTTP_ALLOW_REMOTE=1 (not a config field).
+# allow_remote = false
 # The embedded browser dashboard still requires local pairing even on loopback:
 # run `oraclemcp dashboard` to mint a 60s one-time ticket that becomes an
 # HttpOnly SameSite=Strict cookie. Dashboard POSTs require CSRF + action tickets.

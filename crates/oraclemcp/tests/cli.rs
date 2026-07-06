@@ -1,6 +1,11 @@
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use oraclemcp_config::{CONFIG_PATH_ENV, OperatingLevel, OracleMcpConfig};
@@ -65,6 +70,40 @@ fn run_binary(args: &[&str]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     wait_with_timeout(cmd, Duration::from_secs(5))
+}
+
+fn spawn_healthz_stub() -> (u16, thread::JoinHandle<()>, Arc<AtomicBool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind healthz stub");
+    let port = listener.local_addr().expect("stub addr").port();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_flag = Arc::clone(&shutdown);
+    let handle = thread::spawn(move || {
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking stub listener");
+        let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+        while !shutdown_flag.load(Ordering::Relaxed) {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response.as_bytes());
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    });
+    (port, handle, shutdown)
+}
+
+fn count_dashboard_ticket_files(dir: &std::path::Path) -> usize {
+    fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("pairing-"))
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 #[test]
@@ -144,9 +183,38 @@ fn completions_subcommand_emits_supported_shells() {
 }
 
 #[test]
+fn dashboard_refuses_pairing_when_http_service_unreachable() {
+    let dir = temp_dir("dashboard-no-service");
+    let ticket_dir = dir.join("oraclemcp");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args([
+        "--json",
+        "dashboard",
+        "--url",
+        "http://127.0.0.1:1",
+        "--no-open",
+    ])
+    .env("XDG_RUNTIME_DIR", &dir)
+    .env("HOME", &dir)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let output = wait_with_timeout(cmd, Duration::from_secs(10));
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let err: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("dashboard stderr JSON");
+    assert_eq!(err["kind"], "error");
+    assert_eq!(err["code"], "ORACLEMCP_DASHBOARD_SERVICE_UNREACHABLE");
+    assert_eq!(count_dashboard_ticket_files(&ticket_dir), 0);
+}
+
+#[test]
 fn om_alias_argv0_aware_runs_dashboard_pairing() {
     let dir = temp_dir("om-alias");
     let alias = make_om_alias(&dir);
+    let (port, handle, shutdown) = spawn_healthz_stub();
+    let base_url = format!("http://127.0.0.1:{port}");
 
     let mut help_cmd = Command::new(&alias);
     help_cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -162,17 +230,14 @@ fn om_alias_argv0_aware_runs_dashboard_pairing() {
 
     let mut dashboard_cmd = Command::new(&alias);
     dashboard_cmd
-        .args([
-            "--json",
-            "dashboard",
-            "--url",
-            "http://127.0.0.1:7777",
-            "--no-open",
-        ])
+        .args(["--json", "dashboard", "--url", &base_url, "--no-open"])
         .env("XDG_RUNTIME_DIR", &dir)
+        .env("HOME", &dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let dashboard_output = wait_with_timeout(dashboard_cmd, Duration::from_secs(5));
+    let dashboard_output = wait_with_timeout(dashboard_cmd, Duration::from_secs(10));
+    shutdown.store(true, Ordering::Relaxed);
+    let _ = handle.join();
     assert_eq!(dashboard_output.status.code(), Some(0));
     assert!(
         dashboard_output.stderr.is_empty(),
@@ -187,7 +252,7 @@ fn om_alias_argv0_aware_runs_dashboard_pairing() {
         value["url"]
             .as_str()
             .expect("url string")
-            .starts_with("http://127.0.0.1:7777/dashboard/pair?ticket=")
+            .starts_with(&format!("{base_url}/dashboard/pair?ticket="))
     );
 }
 

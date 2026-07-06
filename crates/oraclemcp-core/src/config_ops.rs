@@ -512,6 +512,7 @@ struct RedactedHttpSnapshot {
     operator_loopback_owner: bool,
     operator_allowed_subject_count: usize,
     dashboard_workbench: bool,
+    allow_remote: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -550,6 +551,7 @@ fn redacted_snapshot(config: &OracleMcpConfig) -> RedactedConfigSnapshot {
             operator_loopback_owner: config.http.operator.allow_loopback_owner,
             operator_allowed_subject_count: config.http.operator.allowed_subjects.len(),
             dashboard_workbench: config.http.dashboard_workbench,
+            allow_remote: config.http.allow_remote,
         },
         audit: RedactedAuditSnapshot {
             path_configured: config.audit.path.is_some(),

@@ -201,9 +201,41 @@ Probe semantics, once the endpoints are mounted:
 - `/healthz` (**liveness**) is 200 while the process is up, 503 only when the
   process is down. A failed Oracle round trip does **not** flip liveness — that
   would cause needless restarts on transient DB blips.
-- `/readyz` (**readiness**) is 200 only when a pool connection pings *and* the
-  server is not shutting down. On `SIGTERM` it flips to 503 immediately so the
-  load balancer drains in-flight traffic before the pod exits.
+- `/readyz` (**readiness**) is 200 only when a background DB-reachability probe
+  succeeds *and* the server is not shutting down. On `SIGTERM` it flips to 503
+  immediately so the load balancer drains in-flight traffic before the pod exits.
+
+**`/readyz` returning HTTP 503 without a live database is correct behavior**, not
+a misconfiguration or a broken install. Readiness means “safe to send *new* MCP
+traffic that needs Oracle,” not “the process failed.” Typical cases that
+correctly yield **503**:
+
+- Oracle is down, unreachable, or credentials/TNS/wallet resolution fails.
+- The server has started but the readiness pinger has not yet observed a
+  successful `ping` (brief window right after `serve --listen`).
+- Graceful shutdown: `draining` is true even if the database is still up.
+
+The JSON body is intentionally small and secret-free, for example:
+
+```json
+{"status":"unavailable","ready":false,"db_reachable":false,"draining":false}
+```
+
+Use the fields as follows:
+
+| Field | Meaning |
+| --- | --- |
+| `ready` | `true` only when both the process accepts work and `db_reachable` is true. |
+| `db_reachable` | Result of the latest background pool `ping` (not a full tool call). |
+| `draining` | `true` during `SIGTERM` drain; readiness stays 503 until exit. |
+
+**Do not** point liveness probes at `/readyz` or restart the pod because Oracle
+is offline — use `/healthz` for liveness and `/readyz` for readiness only.
+While `/readyz` is 503, `/healthz` should still be **200** so Kubernetes (or
+systemd) keeps the process running and MCP discovery can remain available; live
+tool calls that need Oracle return structured errors until the DB probe recovers.
+`oraclemcp doctor --online` is the operator check for *why* the DB is
+unreachable; a 503 on `/readyz` alone is not a defect in the HTTP stack.
 
 ---
 

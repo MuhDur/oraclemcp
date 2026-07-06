@@ -97,7 +97,7 @@ jobs:
       - run: bash scripts/oraclemcp_boundary_lint.sh
       - run: bash scripts/oraclemcp_agent_surface_lint.sh
       - run: bash scripts/oraclemcp_concurrency_lint.sh
-      - run: bash scripts/sensitive_data_lint.sh
+      - run: bash scripts/secret_scan.sh
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check
       - run: cargo deny --features oraclemcp/dashboard-bundle,oraclemcp-core/dashboard-bundle check

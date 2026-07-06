@@ -351,6 +351,62 @@ fn rollback_runbook_dry_run_covers_release_surfaces() {
 }
 
 #[test]
+fn release_surface_sync_check_passes_on_workspace() {
+    let output = run_script("scripts/release_surface_sync_check.sh", &[]);
+    assert!(
+        output.status.success(),
+        "release surface sync check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("release-surface-sync: OK"),
+        "unexpected sync check output: {stdout}"
+    );
+}
+
+#[test]
+fn release_surface_drift_fails_fast() {
+    let root = repo_root();
+    let health = root.join("tests/fixtures/ui/operator-v1/health.json");
+    let original = std::fs::read_to_string(&health).expect("read health fixture");
+    let temp = std::env::temp_dir().join(format!(
+        "oraclemcp-health-drift-{}.json",
+        std::process::id()
+    ));
+    let bad = original.replace(
+        &format!(
+            "\"version\": \"{}\"",
+            serde_json::from_str::<Value>(&original)
+                .expect("health json")
+                .pointer("/data/liveness/version")
+                .and_then(Value::as_str)
+                .expect("liveness.version")
+        ),
+        "\"version\": \"0.0.0-drift-drill\"",
+    );
+    std::fs::write(&temp, bad).expect("write drift health fixture");
+    let output = Command::new("bash")
+        .arg(root.join("scripts/release_surface_sync_check.sh"))
+        .current_dir(&root)
+        .env("ORACLEMCP_RELEASE_SURFACE_SYNC_HEALTH_PATH", &temp)
+        .output()
+        .expect("run drift drill");
+    let _ = std::fs::remove_file(&temp);
+    assert!(
+        !output.status.success(),
+        "drift drill should fail fast: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("release-surface-sync:") && stderr.contains("liveness.version"),
+        "drift drill stderr should name the mismatch: {stderr}"
+    );
+}
+
+#[test]
 fn e2e_live_scripts_refuse_production_looking_targets() {
     let root = repo_root();
     let output = Command::new("bash")

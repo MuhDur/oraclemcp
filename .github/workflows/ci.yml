@@ -438,7 +438,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - run: bash scripts/sensitive_data_lint.sh
+      - run: bash scripts/secret_scan.sh
 
   # Compile the cargo-fuzz targets so they cannot silently rot (the classifier
   # and ALTER SESSION allowlist each ship one). Build-only; campaigns run

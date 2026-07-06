@@ -1003,15 +1003,7 @@ fn check_oracle_driver() -> CheckResult {
 }
 
 fn sanitized_detail(ctx: &DoctorContext, detail: impl Into<String>) -> String {
-    let mut message = detail.into();
-    for value in ctx
-        .sensitive_values
-        .iter()
-        .filter(|value| !value.is_empty())
-    {
-        message = message.replace(value, "<redacted>");
-    }
-    message
+    crate::redacted::redact_exact_substrings(&detail.into(), &ctx.sensitive_values)
 }
 
 fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
@@ -1389,12 +1381,12 @@ async fn check_connectivity(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     if let Some(error) = &ctx.connection_error {
         let detail = sanitized_detail(ctx, format!("connect failed: {error}"));
         let fix = connectivity_fix(&detail);
-        return CheckResult::new(3, "Connectivity", CheckStatus::Fail, detail)
+        return CheckResult::new(3, "Connectivity", CheckStatus::Fail, detail.clone())
             .with_fix(fix)
             .with_failure_class(connectivity_failure_class(error))
             .with_auth_mode(classify_auth_mode(error))
             .with_wallet_error(classify_wallet_error(error))
-            .with_oracle_error(error);
+            .with_oracle_error(&detail);
     }
     match ctx.conn {
         None => {
@@ -1430,17 +1422,20 @@ async fn check_connectivity(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
                 );
                 CheckResult::new(3, "Connectivity", CheckStatus::Pass, detail)
             }
-            Err(e) => CheckResult::new(
-                3,
-                "Connectivity",
-                CheckStatus::Fail,
-                sanitized_detail(ctx, format!("ping failed: {e}")),
-            )
-            .with_fix(connectivity_fix(&e.to_string()))
-            .with_failure_class(connectivity_failure_class(&e.to_string()))
-            .with_auth_mode(classify_auth_mode(&e.to_string()))
-            .with_wallet_error(classify_wallet_error(&e.to_string()))
-            .with_oracle_error(&e.to_string()),
+            Err(e) => {
+                let raw = e.to_string();
+                CheckResult::new(
+                    3,
+                    "Connectivity",
+                    CheckStatus::Fail,
+                    sanitized_detail(ctx, format!("ping failed: {raw}")),
+                )
+                .with_fix(connectivity_fix(&sanitized_detail(ctx, &raw)))
+                .with_failure_class(connectivity_failure_class(&raw))
+                .with_auth_mode(classify_auth_mode(&raw))
+                .with_wallet_error(classify_wallet_error(&raw))
+                .with_oracle_error(&sanitized_detail(ctx, &raw))
+            }
         },
     }
 }
@@ -2286,6 +2281,40 @@ mod tests {
                 .unwrap()
                 .contains("wallet_password_ref")
         );
+    }
+
+    #[test]
+    fn wallet_decrypt_password_echo_is_redacted() {
+        const PASSWORD: &str = "PlainWalletPasswordEcho";
+        let ctx = DoctorContext {
+            connection_error: Some(format!(
+                "wallet error: PKCS12 decrypt failed: invalid password `{PASSWORD}`"
+            )),
+            sensitive_values: vec![PASSWORD.to_owned()],
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let serialized = serde_json::to_string(&report.to_json()).expect("json");
+        assert!(!serialized.contains(PASSWORD), "{serialized}");
+        let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
+        assert!(connectivity.detail.contains(crate::redacted::REDACTED));
+    }
+
+    #[test]
+    fn iam_token_refresh_failure_redacts_jwt() {
+        const TOKEN: &str = "synthetic-iam-refresh-token-fixture";
+        let ctx = DoctorContext {
+            connection_error: Some(format!(
+                "IAM token refresh failed: TokenSourceError: {TOKEN}"
+            )),
+            sensitive_values: vec![TOKEN.to_owned()],
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let serialized = serde_json::to_string(&report.to_json()).expect("json");
+        assert!(!serialized.contains(TOKEN), "{serialized}");
+        let connectivity = report.checks.iter().find(|c| c.id == 3).unwrap();
+        assert!(connectivity.detail.contains(crate::redacted::REDACTED));
     }
 
     #[test]

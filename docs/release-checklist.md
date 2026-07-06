@@ -31,11 +31,12 @@ evidence is the CI run for that commit (linked below at release time).
 | Agent surface lint | `scripts/oraclemcp_agent_surface_lint.sh` | `boundary` |
 | Driver-adapter seam | `scripts/oraclemcp_driver_seam_lint.sh` | `boundary` |
 | Honesty framing | `scripts/oraclemcp_honesty_grep.sh` | `boundary` |
-| Sensitive-data lint | `scripts/sensitive_data_lint.sh` | `sensitive-data` |
+| Sensitive-data lint | `scripts/secret_scan.sh` (structural + rendered surfaces) | `sensitive-data` |
 | Release acceptance suite | `scripts/release_acceptance_ci_suite.sh` | `release-acceptance` |
+| Release version surfaces (D3.1) | `scripts/release_surface_sync_check.sh` | `release-metadata` |
 | Release metadata sync | `scripts/release_preflight.sh` | `release-metadata` |
 
-All twelve run on the pinned nightly (every toolchain-bearing job derives its
+All thirteen run on the pinned nightly (every toolchain-bearing job derives its
 toolchain from `env.RUST_TOOLCHAIN` in `ci.yml`).
 
 ### Required operator-run gate: Oracle version matrix (pre-23ai coverage)
@@ -100,6 +101,11 @@ investigate, not a blocker:
    linger, the boundary lint holds, and the honesty gate passes. With
    `RELEASE_TAG` set it also checks the tag is `vX.Y.Z` and matches the
    workspace version.
+   Also run the confidentiality gate self-test before tagging:
+   ```sh
+   bash scripts/secret_scan.sh --self-test
+   bash scripts/secret_scan.sh
+   ```
 3. **Run the installer sandbox smoke against the built binary.** This exercises
    the real offline Unix installer path in a disposable prefix under
    `target/installer-smoke`; it does not request a service install:
@@ -182,7 +188,7 @@ Required gates green on the RC commit:
 - [ ] pinned-nightly   (cargo build --workspace)
 - [ ] supply-chain     (cargo deny check)
 - [ ] boundary         (engine-free + forbidden-deps + driver-seam + honesty)
-- [ ] sensitive-data   (sensitive_data_lint.sh)
+- [ ] sensitive-data   (secret_scan.sh)
 - [ ] release-acceptance (B.12: DL-9 + ERG-10 + DOC-10 + E0 + feature-powerset + arch-fitness)
 - [ ] release-metadata (release_preflight.sh)
 - [ ] rollback dry-run (scripts/e2e/release_rollback_dry_run.sh --log --dry-run)

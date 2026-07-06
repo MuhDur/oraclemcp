@@ -1576,6 +1576,110 @@ fn execute_steps(steps: &[ServiceStep]) -> Result<(), ServiceError> {
     Ok(())
 }
 
+/// Returns whether `pid` still refers to a live process on this host.
+///
+/// Used to distinguish a stale instance lock left by a crashed or killed service
+/// from a lock held by a running peer.
+fn service_instance_pid_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    if pid == std::process::id() {
+        return true;
+    }
+    service_instance_pid_is_alive_platform(pid)
+}
+
+#[cfg(unix)]
+fn service_instance_pid_is_alive_platform(pid: u32) -> bool {
+    use std::process::Command;
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn service_instance_pid_is_alive_platform(pid: u32) -> bool {
+    use std::process::Command;
+    Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .map(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line.contains(&pid.to_string()))
+        })
+        .unwrap_or(false)
+}
+
+/// If `path` exists and records a dead pid, remove the stale lock file.
+fn try_clear_stale_service_instance_lock_at(path: &Path) -> bool {
+    let ServiceInstanceDiscovery::Present { pid, .. } = discover_service_instance_at(path) else {
+        return false;
+    };
+    if service_instance_pid_is_alive(pid) {
+        return false;
+    }
+    if fs::remove_file(path).is_ok() {
+        let _ = sync_parent_dir(path);
+        return true;
+    }
+    false
+}
+
+fn service_instance_already_running_error(path: &Path) -> ServiceError {
+    ServiceError::new(
+        "ORACLEMCP_SERVICE_ALREADY_RUNNING",
+        format!(
+            "another oraclemcp service instance is already registered; refusing to \
+             start a second instance ({}). This prevents silent takeover of a different \
+             port or socket; inspect service status/logs before clearing a stale lock.",
+            render_instance_discovery(&discover_service_instance_at(path))
+        ),
+        3,
+    )
+}
+
+fn create_service_instance_lock_file(
+    path: &Path,
+    _body: &[u8],
+) -> Result<std::fs::File, ServiceError> {
+    match create_new_private_file(path) {
+        Ok(file) => Ok(file),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            if try_clear_stale_service_instance_lock_at(path) {
+                create_new_private_file(path).map_err(|retry| {
+                    if retry.kind() == io::ErrorKind::AlreadyExists {
+                        service_instance_already_running_error(path)
+                    } else {
+                        ServiceError::new(
+                            "ORACLEMCP_SERVICE_LOCK_UNAVAILABLE",
+                            format!(
+                                "failed to create service instance lock at {} after clearing stale lock: {retry}",
+                                path.display()
+                            ),
+                            3,
+                        )
+                    }
+                })
+            } else {
+                Err(service_instance_already_running_error(path))
+            }
+        }
+        Err(e) => Err(ServiceError::new(
+            "ORACLEMCP_SERVICE_LOCK_UNAVAILABLE",
+            format!(
+                "failed to create service instance lock at {}: {e}",
+                path.display()
+            ),
+            3,
+        )),
+    }
+}
+
 fn acquire_service_instance_guard_at(
     path: &Path,
     listen: &str,
@@ -1613,31 +1717,7 @@ fn acquire_service_instance_guard_at(
         })?;
     }
 
-    let mut file = match create_new_private_file(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            return Err(ServiceError::new(
-                "ORACLEMCP_SERVICE_ALREADY_RUNNING",
-                format!(
-                    "another oraclemcp service instance is already registered; refusing to \
-                     start a second instance ({}). This prevents silent takeover of a different \
-                     port or socket; inspect service status/logs before clearing a stale lock.",
-                    render_instance_discovery(&discover_service_instance_at(path))
-                ),
-                3,
-            ));
-        }
-        Err(e) => {
-            return Err(ServiceError::new(
-                "ORACLEMCP_SERVICE_LOCK_UNAVAILABLE",
-                format!(
-                    "failed to create service instance lock {}: {e}",
-                    path.display()
-                ),
-                3,
-            ));
-        }
-    };
+    let mut file = create_service_instance_lock_file(path, &body)?;
 
     let write_result = file.write_all(&body).and_then(|()| file.sync_all());
     drop(file);
@@ -2676,6 +2756,39 @@ mod tests {
         assert_eq!(listen, "127.0.0.1:7071");
 
         drop(second);
+    }
+
+    #[test]
+    fn service_instance_guard_clears_stale_lock_when_recorded_pid_is_dead() {
+        let path = test_root("service-instance-stale-dead-pid").join("service-instance.json");
+        let stale_pid = 4_194_304_u32;
+        assert!(
+            !service_instance_pid_is_alive(stale_pid),
+            "test requires a non-running pid for stale-lock simulation"
+        );
+        let stale = ServiceInstanceMetadata {
+            schema_version: SERVICE_INSTANCE_SCHEMA_VERSION,
+            pid: stale_pid,
+            listen: "127.0.0.1:7070".to_owned(),
+            started_unix_ms: 1,
+            token: "stale-token".to_owned(),
+        };
+        fs::create_dir_all(path.parent().expect("lock parent")).expect("runtime dir");
+        fs::write(
+            &path,
+            serde_json::to_vec(&stale).expect("serialize stale lock"),
+        )
+        .expect("write stale lock");
+
+        let guard = acquire_service_instance_guard_at(&path, "127.0.0.1:7071")
+            .expect("stale lock should be cleared and replaced");
+        let discovery = discover_service_instance_at(&path);
+        let ServiceInstanceDiscovery::Present { pid, listen, .. } = discovery else {
+            panic!("replacement lock must be present after stale clear");
+        };
+        assert_eq!(listen, "127.0.0.1:7071");
+        assert_eq!(pid, std::process::id());
+        drop(guard);
     }
 
     #[test]

@@ -806,6 +806,64 @@ impl std::fmt::Debug for OracleConnectOptions {
     }
 }
 
+impl OracleConnectOptions {
+    /// Substrings that must be scrubbed from doctor connectivity detail/fix text.
+    #[must_use]
+    pub fn doctor_redaction_values(&self) -> Vec<String> {
+        let mut values = vec![self.connect_string.clone()];
+        if let Some(username) = &self.username {
+            values.push(username.clone());
+        }
+        if let Some(password) = &self.password {
+            values.push(password.clone());
+        }
+        if let Some(token) = &self.iam_token {
+            values.push(token.clone());
+        }
+        if let Some(wallet) = &self.wallet_location {
+            values.push(wallet.display().to_string());
+        }
+        if let Some(wallet_password) = &self.wallet_password {
+            values.push(wallet_password.clone());
+        }
+        if let Some(dn) = &self.ssl_server_cert_dn {
+            values.push(dn.clone());
+        }
+        for (namespace, key, value) in &self.app_context {
+            values.push(namespace.clone());
+            values.push(key.clone());
+            values.push(value.clone());
+        }
+        values.extend(
+            self.auth_adapter
+                .sensitive_values()
+                .into_iter()
+                .map(ToOwned::to_owned),
+        );
+        if let Some(identity) = &self.session_identity {
+            for value in [
+                &identity.edition,
+                &identity.program,
+                &identity.machine,
+                &identity.os_user,
+                &identity.terminal,
+                &identity.module,
+                &identity.action,
+                &identity.client_identifier,
+                &identity.client_info,
+                &identity.driver_name,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                values.push(value.clone());
+            }
+        }
+        values.retain(|value| !value.is_empty());
+        values
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
