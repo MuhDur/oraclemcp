@@ -6,7 +6,6 @@ pub oraclemcp_guard::classifier::StageA::AllowListed
 pub oraclemcp_guard::classifier::StageA::BlockListed(alloc::string::String)
 pub oraclemcp_guard::classifier::StageA::PlSqlBlock
 pub oraclemcp_guard::classifier::StageA::PlSqlBlock::dangerous: bool
-pub oraclemcp_guard::classifier::StageA::PlSqlBlock::plsql_create: bool
 pub oraclemcp_guard::classifier::StageA::PureSql
 impl core::clone::Clone for oraclemcp_guard::classifier::StageA
 pub fn oraclemcp_guard::classifier::StageA::clone(&self) -> oraclemcp_guard::classifier::StageA
@@ -2097,7 +2096,6 @@ pub oraclemcp_guard::StageA::AllowListed
 pub oraclemcp_guard::StageA::BlockListed(alloc::string::String)
 pub oraclemcp_guard::StageA::PlSqlBlock
 pub oraclemcp_guard::StageA::PlSqlBlock::dangerous: bool
-pub oraclemcp_guard::StageA::PlSqlBlock::plsql_create: bool
 pub oraclemcp_guard::StageA::PureSql
 impl core::clone::Clone for oraclemcp_guard::classifier::StageA
 pub fn oraclemcp_guard::classifier::StageA::clone(&self) -> oraclemcp_guard::classifier::StageA

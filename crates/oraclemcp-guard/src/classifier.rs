@@ -142,15 +142,6 @@ pub enum StageA {
     PlSqlBlock {
         /// Whether a dangerous side-effect marker was found.
         dangerous: bool,
-        /// Whether the block is a PL/SQL-bearing `CREATE [OR REPLACE] <object>`
-        /// (PROCEDURE / FUNCTION / PACKAGE [BODY] / TRIGGER — see
-        /// [`PLSQL_BEARING_CREATE_FORMS`]) rather than an anonymous
-        /// `DECLARE`/`BEGIN` block. Such a create REPLACES a stored object and is
-        /// DDL: it floors at `OperatingLevel::Ddl` in [`Classifier::classify`],
-        /// consistent with `CREATE OR REPLACE VIEW`, `oracle_patch_source`, and
-        /// the ladder doc (`levels.rs`: "CREATE OR REPLACE → Ddl"). An anonymous
-        /// block is NOT a create and keeps its body-derived `ReadWrite` floor.
-        plsql_create: bool,
     },
     /// Pure SQL → proceed to the splitter + Stage B.
     PureSql,
@@ -314,6 +305,22 @@ const PLSQL_BEARING_CREATE_FORMS: &[&str] = &[
     "CREATE OR REPLACE TRIGGER ",
 ];
 
+/// Whether the statement is a PL/SQL-bearing `CREATE [OR REPLACE]` of a stored
+/// object (PROCEDURE/FUNCTION/PACKAGE/TRIGGER). A pure function of the SQL text
+/// (canonical marker scan + [`PLSQL_BEARING_CREATE_FORMS`]) so `stage_a` (block
+/// detection) and `Classifier::classify` (the `OperatingLevel::Ddl` floor,
+/// oracle-p0d6) derive it IDENTICALLY from a single source — without threading
+/// it through the public `StageA` enum (which would be a breaking API change for
+/// an internal classifier detail).
+fn is_plsql_bearing_create(sql: &str) -> bool {
+    let upper = sql.trim_start().to_ascii_uppercase();
+    let scan = canonical_marker_scan(&upper);
+    let leading = scan.strip_prefix(' ').unwrap_or(&scan);
+    PLSQL_BEARING_CREATE_FORMS
+        .iter()
+        .any(|f| leading.starts_with(f))
+}
+
 /// Whether the (already-uppercased) statement text begins with an admin/DCL verb
 /// requiring `OperatingLevel::Admin`. Runs over [`canonical_marker_scan`] so the
 /// match is literal/quote-aware and word-boundaried (see [`LEADING_ADMIN_VERBS`]).
@@ -429,10 +436,6 @@ pub fn stage_a(sql: &str, config: &ClassifierConfig) -> StageA {
     // (oracle-rwjl.1). Single-token markers (DBMS_SQL/UTL_FILE/…) match either
     // way; they contain no internal whitespace.
     let scan = canonical_marker_scan(&upper);
-    // `scan` is `" TOK1 TOK2 … "`; strip the leading pad so a leading marker
-    // sits at offset 0 and the trailing space in each pattern enforces a word
-    // boundary, exactly as the admin/DDL leading-verb scans do.
-    let leading = scan.strip_prefix(' ').unwrap_or(&scan);
     // Only PL/SQL-bearing CREATE forms take the fail-closed PL/SQL-block path;
     // pure-DDL replace forms fall through so Stage B / the DDL floor tiers them
     // Destructive/Ddl rather than under-levelling them to Guarded/ReadWrite (see
@@ -443,19 +446,14 @@ pub fn stage_a(sql: &str, config: &ClassifierConfig) -> StageA {
     // (oracle-p0d6) — the same object-clobbering-replace fail-open-tier fix
     // oracle-y54x.1 applied to the pure-DDL create forms — while leaving an
     // anonymous `DECLARE`/`BEGIN` block at its body-derived `ReadWrite` floor.
-    let plsql_create = PLSQL_BEARING_CREATE_FORMS
-        .iter()
-        .any(|f| leading.starts_with(f));
+    let plsql_create = is_plsql_bearing_create(sql);
     let starts_block = upper.starts_with("DECLARE")
         || upper.starts_with("BEGIN")
         || sql.trim() == "/"
         || plsql_create;
     let dangerous = PLSQL_SIDE_EFFECT_MARKERS.iter().any(|m| scan.contains(m));
     if starts_block || dangerous {
-        return StageA::PlSqlBlock {
-            dangerous,
-            plsql_create,
-        };
+        return StageA::PlSqlBlock { dangerous };
     }
     StageA::PureSql
 }
@@ -1296,10 +1294,13 @@ impl Classifier {
             StageA::BlockListed(pat) => {
                 return forbidden_decision(format!("matched block-list pattern: {pat}"));
             }
-            StageA::PlSqlBlock {
-                dangerous,
-                plsql_create,
-            } => {
+            StageA::PlSqlBlock { dangerous } => {
+                // Re-derive (single source: `is_plsql_bearing_create`) whether
+                // this is a PL/SQL-bearing CREATE [OR REPLACE] of a stored
+                // object, rather than threading it through the public `StageA`
+                // enum (that would break the crate API for an internal detail).
+                // oracle-p0d6.
+                let plsql_create = is_plsql_bearing_create(sql);
                 // Any PL/SQL block is at minimum Guarded; a dangerous
                 // side-effect marker (EXECUTE IMMEDIATE / UTL_FILE / …) is
                 // Forbidden (fail-closed — we cannot prove its purity here).
