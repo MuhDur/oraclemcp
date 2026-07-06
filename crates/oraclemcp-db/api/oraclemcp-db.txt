@@ -2933,6 +2933,8 @@ pub oraclemcp_db::OracleConnectOptions::use_sni: core::option::Option<bool>
 pub oraclemcp_db::OracleConnectOptions::username: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectOptions::wallet_location: core::option::Option<std::path::PathBuf>
 pub oraclemcp_db::OracleConnectOptions::wallet_password: core::option::Option<alloc::string::String>
+impl oraclemcp_db::OracleConnectOptions
+pub fn oraclemcp_db::OracleConnectOptions::doctor_redaction_values(&self) -> alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for oraclemcp_db::OracleConnectOptions
 pub fn oraclemcp_db::OracleConnectOptions::clone(&self) -> oraclemcp_db::OracleConnectOptions
 impl core::cmp::Eq for oraclemcp_db::OracleConnectOptions

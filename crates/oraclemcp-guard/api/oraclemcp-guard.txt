@@ -167,7 +167,9 @@ pub type oraclemcp_guard::classifier::ClassifierConfig::Output = T
 pub struct oraclemcp_guard::classifier::GuardDecision
 pub oraclemcp_guard::classifier::GuardDecision::danger: oraclemcp_guard::levels::DangerLevel
 pub oraclemcp_guard::classifier::GuardDecision::objects_affected: alloc::vec::Vec<alloc::string::String>
+pub oraclemcp_guard::classifier::GuardDecision::offending_construct: core::option::Option<alloc::string::String>
 pub oraclemcp_guard::classifier::GuardDecision::reason: alloc::string::String
+pub oraclemcp_guard::classifier::GuardDecision::reason_category: core::option::Option<oraclemcp_error::ReasonCategory>
 pub oraclemcp_guard::classifier::GuardDecision::required_level: core::option::Option<oraclemcp_guard::levels::OperatingLevel>
 pub oraclemcp_guard::classifier::GuardDecision::safe_alternative: core::option::Option<alloc::string::String>
 impl oraclemcp_guard::classifier::GuardDecision
@@ -1128,6 +1130,8 @@ pub fn oraclemcp_guard::purity::SideEffectOracle::statement_purity(&self, &[orac
 impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_guard::purity::UnknownOracle
 pub fn oraclemcp_guard::purity::UnknownOracle::routine_purity(&self, &oraclemcp_guard::purity::ObjectRef) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::purity::UnknownOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
+pub mod oraclemcp_guard::rewrite
+pub fn oraclemcp_guard::rewrite::suggest_parameterized_form(&str) -> core::option::Option<alloc::string::String>
 pub mod oraclemcp_guard::stepup
 pub enum oraclemcp_guard::stepup::ChallengeStatus
 pub oraclemcp_guard::stepup::ChallengeStatus::ExpiredOrUnknown
@@ -2512,7 +2516,9 @@ pub type oraclemcp_guard::exec_grant::ExecGrantStore::Output = T
 pub struct oraclemcp_guard::GuardDecision
 pub oraclemcp_guard::GuardDecision::danger: oraclemcp_guard::levels::DangerLevel
 pub oraclemcp_guard::GuardDecision::objects_affected: alloc::vec::Vec<alloc::string::String>
+pub oraclemcp_guard::GuardDecision::offending_construct: core::option::Option<alloc::string::String>
 pub oraclemcp_guard::GuardDecision::reason: alloc::string::String
+pub oraclemcp_guard::GuardDecision::reason_category: core::option::Option<oraclemcp_error::ReasonCategory>
 pub oraclemcp_guard::GuardDecision::required_level: core::option::Option<oraclemcp_guard::levels::OperatingLevel>
 pub oraclemcp_guard::GuardDecision::safe_alternative: core::option::Option<alloc::string::String>
 impl oraclemcp_guard::classifier::GuardDecision
@@ -2969,3 +2975,4 @@ pub fn oraclemcp_guard::is_allowed_alter_session(&str) -> bool
 pub fn oraclemcp_guard::read_only_setup_statements(oraclemcp_guard::levels::OperatingLevel) -> alloc::vec::Vec<&'static str>
 pub fn oraclemcp_guard::sql_digest(&str) -> alloc::string::String
 pub fn oraclemcp_guard::stage_a(&str, &oraclemcp_guard::classifier::ClassifierConfig) -> oraclemcp_guard::classifier::StageA
+pub fn oraclemcp_guard::suggest_parameterized_form(&str) -> core::option::Option<alloc::string::String>
