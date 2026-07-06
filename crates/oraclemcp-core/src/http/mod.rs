@@ -4113,6 +4113,7 @@ fn redacted_audit_record(record: &AuditRecord) -> Value {
         "outcome": record.outcome,
         "rows_affected": record.rows_affected,
         "sql_sha256": record.sql_sha256,
+        "sql_normalized_sha256": record.sql_normalized_sha256,
         "sql_text": {
             "availability": "not_exported",
             "reason": "timeline and proof bundle expose sql_sha256 only; SQL text may contain inlined literals"

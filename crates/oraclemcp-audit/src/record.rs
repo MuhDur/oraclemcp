@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::hmac::{ct_eq, hmac_sha256_hex};
 
 /// Current on-disk audit record schema.
-pub const AUDIT_SCHEMA_VERSION: u16 = 3;
+pub const AUDIT_SCHEMA_VERSION: u16 = 4;
 
 /// The guard decision being audited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +61,27 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 fn legacy_schema_version() -> u16 {
     1
+}
+
+/// Compute `sha256:<hex>` of the SQL after a whitespace/case normalization
+/// (trim, collapse internal runs of whitespace to a single space, lowercase).
+///
+/// This is a **hash-only** fingerprint (K5): unlike [`AuditRecord::sql_sha256`]
+/// — which hashes the exact bytes — this collapses trivial whitespace/case
+/// variants of the *same* statement to a single value so repeated blocked
+/// attempts correlate and dedupe in a SIEM. It intentionally has **no**
+/// accompanying preview, so it adds no new literal-exposure surface beyond the
+/// existing exact-hash. The normalization mirrors the guard's allow-list
+/// normalizer (`oraclemcp-guard` `normalized_sha256`); it is replicated here to
+/// keep this crate a dependency-free leaf.
+#[must_use]
+pub fn normalized_sql_sha256(sql: &str) -> String {
+    let normalized = sql
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    sha256_hex(normalized.as_bytes())
 }
 
 /// Server-derived subject identity for an audited action.
@@ -247,6 +268,12 @@ pub struct AuditRecord {
     pub tool: String,
     /// `sha256:<hex>` of the exact SQL bytes (never the bind values).
     pub sql_sha256: String,
+    /// `sha256:<hex>` of the **normalized** SQL (whitespace-collapsed,
+    /// lowercased) — a hash-only fingerprint (K5) that lets repeated attempts
+    /// with trivial whitespace/case variance correlate/dedupe. Empty for legacy
+    /// v1–v3 records that predate the field; covered by the v4 chain hash.
+    #[serde(default)]
+    pub sql_normalized_sha256: String,
     /// A short, truncated preview of the SQL (no bind values / secrets).
     pub sql_preview: String,
     /// The classifier danger tier (as a string, to avoid a guard dep).
@@ -368,9 +395,10 @@ impl AuditRecord {
         timestamp: String,
     ) -> Self {
         let sql_sha256 = sha256_hex(draft.sql.as_bytes());
+        let sql_normalized_sha256 = normalized_sql_sha256(&draft.sql);
         let sql_preview: String = draft.sql.chars().take(PREVIEW_LEN).collect();
         let agent_identity = draft.subject.legacy_agent_identity();
-        let entry_hash = compute_entry_hash_v3(
+        let entry_hash = compute_entry_hash_v4(
             seq,
             &timestamp,
             &agent_identity,
@@ -379,6 +407,7 @@ impl AuditRecord {
             draft.cancel.as_ref(),
             &draft.tool,
             &sql_sha256,
+            &sql_normalized_sha256,
             &sql_preview,
             &draft.danger_level,
             draft.decision,
@@ -396,6 +425,7 @@ impl AuditRecord {
             cancel: draft.cancel.clone(),
             tool: draft.tool.clone(),
             sql_sha256,
+            sql_normalized_sha256,
             sql_preview,
             danger_level: draft.danger_level.clone(),
             decision: draft.decision,
@@ -455,6 +485,24 @@ impl AuditRecord {
                 self.cancel.as_ref(),
                 &self.tool,
                 &self.sql_sha256,
+                &self.sql_preview,
+                &self.danger_level,
+                self.decision,
+                self.rows_affected,
+                self.outcome,
+                &self.prev_hash,
+            )
+        } else if self.schema_version == 4 {
+            compute_entry_hash_v4(
+                self.seq,
+                &self.timestamp,
+                &self.agent_identity,
+                &self.subject,
+                self.db_evidence.as_ref(),
+                self.cancel.as_ref(),
+                &self.tool,
+                &self.sql_sha256,
+                &self.sql_normalized_sha256,
                 &self.sql_preview,
                 &self.danger_level,
                 self.decision,
@@ -692,6 +740,57 @@ fn compute_entry_hash_v3(
     out
 }
 
+/// Deterministically hash a v4 entry's seq + content + prev_hash. Schema 4
+/// extends v3 with the hash-only normalized-SQL fingerprint (K5); verification
+/// keeps v1–v3 hashing intact so existing logs still verify unchanged.
+#[allow(clippy::too_many_arguments)]
+fn compute_entry_hash_v4(
+    seq: u64,
+    timestamp: &str,
+    agent_identity: &str,
+    subject: &AuditSubject,
+    db_evidence: Option<&DbEvidence>,
+    cancel: Option<&AuditCancel>,
+    tool: &str,
+    sql_sha256: &str,
+    sql_normalized_sha256: &str,
+    sql_preview: &str,
+    danger_level: &str,
+    decision: AuditDecision,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+    prev_hash: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(4_u16.to_be_bytes());
+    hasher.update(seq.to_be_bytes());
+    for field in [
+        timestamp,
+        agent_identity,
+        tool,
+        sql_sha256,
+        sql_normalized_sha256,
+        sql_preview,
+        danger_level,
+    ] {
+        hash_str(&mut hasher, field);
+    }
+    hash_subject(&mut hasher, subject);
+    hash_db_evidence_v3(&mut hasher, db_evidence);
+    hash_cancel(&mut hasher, cancel);
+    hasher.update(format!("{decision:?}").as_bytes());
+    hasher.update(rows_affected.unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(format!("{outcome:?}").as_bytes());
+    hasher.update(prev_hash.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(7 + digest.len() * 2);
+    out.push_str("sha256:");
+    for b in digest {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
 /// The genesis prev-hash for the first entry.
 pub const GENESIS_HASH: &str = "genesis";
 
@@ -787,6 +886,7 @@ mod tests {
             cancel: None,
             tool: d.tool.clone(),
             sql_sha256,
+            sql_normalized_sha256: String::new(),
             sql_preview,
             danger_level: d.danger_level.clone(),
             decision: d.decision,
@@ -896,6 +996,124 @@ mod tests {
         assert_eq!(r.sql_preview.chars().count(), PREVIEW_LEN);
     }
 
+    // ---- K5: normalized-SQL fingerprint (schema v4) ----
+
+    #[test]
+    fn normalized_fingerprint_collapses_whitespace_and_case() {
+        // Two trivial variants of the SAME statement must share the normalized
+        // fingerprint even though their exact-byte hashes differ.
+        let mut a = draft();
+        a.sql = "SELECT   *\nFROM  Orders WHERE Id = :id".to_owned();
+        let mut b = draft();
+        b.sql = "select * from orders where id = :id".to_owned();
+        let ra = AuditRecord::chained_unsigned(&a, 1, GENESIS_HASH, "t".to_owned());
+        let rb = AuditRecord::chained_unsigned(&b, 1, GENESIS_HASH, "t".to_owned());
+        assert_eq!(ra.schema_version, 4);
+        assert!(ra.sql_normalized_sha256.starts_with("sha256:"));
+        assert_eq!(
+            ra.sql_normalized_sha256, rb.sql_normalized_sha256,
+            "whitespace/case variants must share the normalized fingerprint"
+        );
+        assert_ne!(
+            ra.sql_sha256, rb.sql_sha256,
+            "the exact-byte hash must still distinguish the variants"
+        );
+    }
+
+    #[test]
+    fn normalized_fingerprint_is_hash_covered() {
+        // The v4 chain hash must cover the normalized fingerprint: forging it
+        // (e.g. to hide that a blocked attempt matched a known-bad statement)
+        // must break verification.
+        let mut r = AuditRecord::chained_unsigned(
+            &draft(),
+            1,
+            GENESIS_HASH,
+            "2026-06-01T00:00:00Z".to_owned(),
+        );
+        assert!(r.hash_is_valid());
+        r.sql_normalized_sha256 = sha256_hex(b"something else");
+        assert!(
+            !r.hash_is_valid(),
+            "tampered normalized fingerprint must fail verification"
+        );
+    }
+
+    #[test]
+    fn v3_records_still_verify_against_the_chain() {
+        // A schema-3 record (no normalized fingerprint) written before the v4
+        // bump must keep verifying byte-for-byte after the field is added.
+        let d = draft();
+        let sql_sha256 = sha256_hex(d.sql.as_bytes());
+        let sql_preview = d.sql.chars().take(PREVIEW_LEN).collect::<String>();
+        let agent_identity = d.subject.legacy_agent_identity();
+        let entry_hash = compute_entry_hash_v3(
+            1,
+            "2026-06-01T00:00:00Z",
+            &agent_identity,
+            &d.subject,
+            None,
+            None,
+            &d.tool,
+            &sql_sha256,
+            &sql_preview,
+            &d.danger_level,
+            d.decision,
+            d.rows_affected,
+            d.outcome,
+            GENESIS_HASH,
+        );
+        let r = AuditRecord {
+            schema_version: 3,
+            seq: 1,
+            timestamp: "2026-06-01T00:00:00Z".to_owned(),
+            agent_identity,
+            subject: d.subject.clone(),
+            db_evidence: None,
+            cancel: None,
+            tool: d.tool.clone(),
+            sql_sha256,
+            sql_normalized_sha256: String::new(),
+            sql_preview,
+            danger_level: d.danger_level.clone(),
+            decision: d.decision,
+            rows_affected: d.rows_affected,
+            outcome: d.outcome,
+            prev_hash: GENESIS_HASH.to_owned(),
+            entry_hash,
+            key_id: None,
+            signature: None,
+        };
+        assert!(
+            r.hash_is_valid(),
+            "schema-3 records must keep verifying after the v4 field is added"
+        );
+    }
+
+    #[test]
+    fn pre_v4_json_without_field_deserializes() {
+        // Older JSONL lines have no `sql_normalized_sha256`; #[serde(default)]
+        // must let them deserialize (empty) so historical logs still load.
+        let json = r#"{
+            "schema_version": 3,
+            "seq": 7,
+            "timestamp": "2026-06-01T00:00:00Z",
+            "agent_identity": "agent:agent-1",
+            "subject": {"kind": "agent", "stable_id": "agent-1"},
+            "tool": "oracle_query",
+            "sql_sha256": "sha256:deadbeef",
+            "sql_preview": "SELECT 1",
+            "danger_level": "SAFE",
+            "decision": "ALLOWED",
+            "outcome": "SUCCEEDED",
+            "prev_hash": "genesis",
+            "entry_hash": "sha256:abc"
+        }"#;
+        let r: AuditRecord = serde_json::from_str(json).expect("legacy record deserializes");
+        assert_eq!(r.schema_version, 3);
+        assert_eq!(r.sql_normalized_sha256, "");
+    }
+
     #[test]
     fn signed_record_verifies_under_its_key() {
         let r = AuditRecord::chained_signed(
@@ -946,7 +1164,7 @@ mod tests {
         // Forge the operator-legible field and recompute the (unkeyed) hash so
         // the bare-hash check would pass — but leave the old MAC in place.
         forged.sql_preview = "SELECT 1".to_owned();
-        forged.entry_hash = compute_entry_hash_v3(
+        forged.entry_hash = compute_entry_hash_v4(
             forged.seq,
             &forged.timestamp,
             &forged.agent_identity,
@@ -955,6 +1173,7 @@ mod tests {
             forged.cancel.as_ref(),
             &forged.tool,
             &forged.sql_sha256,
+            &forged.sql_normalized_sha256,
             &forged.sql_preview,
             &forged.danger_level,
             forged.decision,

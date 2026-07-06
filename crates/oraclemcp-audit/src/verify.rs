@@ -287,6 +287,7 @@ mod tests {
             records[1].timestamp.clone(),
         );
         records[1].sql_sha256 = forged.sql_sha256.clone();
+        records[1].sql_normalized_sha256 = forged.sql_normalized_sha256.clone();
         records[1].sql_preview = forged.sql_preview.clone();
         records[1].entry_hash = forged.entry_hash.clone();
         // hash_is_valid now passes for record 2, but the MAC was computed over
@@ -368,6 +369,7 @@ mod tests {
             cancel: None,
             tool: "oracle_execute".to_owned(),
             sql_sha256,
+            sql_normalized_sha256: String::new(),
             sql_preview,
             danger_level: "GUARDED".to_owned(),
             decision: AuditDecision::Allowed,
