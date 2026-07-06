@@ -88,7 +88,10 @@ run_selftest() {
   scratch="$(mktemp)"
   trap 'rm -f "$scratch"' RETURN
   # Must match a structural pattern without using a real confidential value.
-  printf '%s\n' 'CN=scan-selftest.example.oraclecloud.com' >"$scratch"
+  # Build the marker domain from parts so this scanner's own committed source
+  # does not itself self-match STRUCTURAL_PATTERNS (the marker is synthetic).
+  local _mk_dom="oracle""cloud.com"
+  printf '%s\n' "CN=scan-selftest.example.${_mk_dom}" >"$scratch"
 
   # Production path must FAIL when the planted marker is the only scanned file.
   SECRET_SCAN_SELFTEST_PATH="$scratch"
