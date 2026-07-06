@@ -19,6 +19,7 @@ pub mod exec_grant;
 pub mod levels;
 pub mod policy;
 pub mod purity;
+pub mod rewrite;
 pub mod stepup;
 pub mod token;
 
@@ -36,6 +37,7 @@ pub use levels::{
 };
 pub use policy::{DefaultMode, PolicyDecision, SchemaPolicy, SchemaPolicyRaw, SchemaPolicySet};
 pub use purity::{ObjectRef, Purity, SideEffectOracle, UnknownOracle};
+pub use rewrite::suggest_parameterized_form;
 pub use stepup::{
     ChallengeStatus, CiToken, StepUpChallenge, StepUpOption, StepUpRegistry, StepUpResolution,
 };

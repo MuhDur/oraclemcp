@@ -4694,6 +4694,95 @@ fn cancellation_after_mutating_execute_rolls_back_dirty_session() {
     );
 }
 
+/// K7: the read-only gate attaches a "parameterize inline literals" next step
+/// when a refused statement carries bind-safe literals, and omits it when there
+/// is nothing to suggest. Purely additive — the class and refusal are unchanged.
+mod parameterization_hint {
+    use super::*;
+
+    #[test]
+    fn refused_write_with_inline_literal_gets_a_parameterization_hint() {
+        let err = ensure_read_only("UPDATE orders SET status = 'X' WHERE id = 42")
+            .expect_err("a write is refused by the read-only gate");
+        assert_eq!(err.error_class, ErrorClass::OperatingLevelTooLow);
+        let hint = err
+            .next_steps
+            .iter()
+            .find(|s| s.contains("parameterize inline literals"))
+            .expect("a parameterization hint is attached");
+        assert!(
+            hint.contains(":id"),
+            "the hint suggests binding the literal named after its column: {hint}"
+        );
+    }
+
+    #[test]
+    fn refused_statement_without_bindable_literal_has_no_hint() {
+        // A DDL refusal with no bind-safe literal must not fabricate a hint.
+        let err = ensure_read_only("DROP TABLE orders")
+            .expect_err("DDL is refused by the read-only gate");
+        assert!(
+            !err.next_steps.iter().any(|s| s.contains("parameterize")),
+            "no parameterization hint when there is nothing bind-safe to suggest"
+        );
+    }
+}
+
+/// K8: the read-only gate attaches a structured "why blocked + minimal safe
+/// rewrite" reason. Each refusal class returns a valid category, and a minimal
+/// rewrite where one exists (or none, deferring to `suggested_tool`).
+mod structured_reason {
+    use super::*;
+    use oraclemcp_error::ReasonCategory;
+
+    fn reason_for(sql: &str) -> oraclemcp_error::StructuredReason {
+        ensure_read_only(sql)
+            .expect_err("statement is refused")
+            .structured_reason
+            .expect("a structured reason is attached to a guard refusal")
+    }
+
+    #[test]
+    fn write_needs_higher_level_with_minimal_rewrite() {
+        let reason = reason_for("UPDATE orders SET status = 'X' WHERE id = 42");
+        assert_eq!(reason.category, ReasonCategory::RequiresHigherLevel);
+        assert_eq!(reason.required_level.as_deref(), Some("READ_WRITE"));
+        assert!(
+            reason
+                .minimal_rewrite
+                .as_deref()
+                .is_some_and(|r| r.contains("READ_WRITE")),
+            "a level-gated write suggests running at the required level"
+        );
+    }
+
+    #[test]
+    fn multi_statement_batch_suggests_splitting() {
+        // Trailing top-level SQL after a PL/SQL block rebalances the depth
+        // counter — a stacking evasion the guard refuses fail-closed.
+        let reason = reason_for("BEGIN NULL; END; DROP TABLE orders");
+        assert_eq!(reason.category, ReasonCategory::MultiStatementBatch);
+        assert!(
+            reason
+                .minimal_rewrite
+                .as_deref()
+                .is_some_and(|r| r.contains("its own")),
+            "a stacked batch suggests submitting statements separately"
+        );
+    }
+
+    #[test]
+    fn dynamic_sql_has_category_but_no_minimal_rewrite() {
+        let reason = reason_for("BEGIN EXECUTE IMMEDIATE 'DROP TABLE orders'; END;");
+        assert_eq!(reason.category, ReasonCategory::DynamicSql);
+        assert!(
+            reason.minimal_rewrite.is_none(),
+            "dynamic SQL has no single safe rewrite; defer to suggested_tool"
+        );
+        assert!(reason.offending_construct.is_some());
+    }
+}
+
 /// A8: the hash-chained, keyed-MAC auditor is wired into the SERVED dispatch
 /// path (not just the standalone `oracle_query_execute` helper). These prove the
 /// wiring end to end: writes/DDL and escalations are chained; pure reads are not.

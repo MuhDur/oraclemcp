@@ -38,6 +38,8 @@ use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
+use oraclemcp_error::ReasonCategory;
+
 use crate::levels::{DangerLevel, LevelDecision, OperatingLevel, SessionLevelState};
 use crate::purity::{ObjectRef, Purity, SideEffectOracle, UnknownOracle};
 
@@ -54,6 +56,14 @@ pub struct GuardDecision {
     pub safe_alternative: Option<String>,
     /// Human/audit explanation of the decision.
     pub reason: String,
+    /// Machine-stable category of *why* this decision refused or level-gated the
+    /// statement (K8), or `None` for an allowed/safe decision. Additive and
+    /// observational — it never affects the danger tier or required level.
+    pub reason_category: Option<ReasonCategory>,
+    /// The specific construct that triggered a refusal, when the guard can name
+    /// it (a marker keyword, the matched block pattern, `BEGIN/END`, …). Never
+    /// contains bind values or secrets.
+    pub offending_construct: Option<String>,
 }
 
 impl GuardDecision {
@@ -63,6 +73,16 @@ impl GuardDecision {
     #[must_use]
     pub fn gate(&self, session: &SessionLevelState) -> LevelDecision {
         session.evaluate(self.required_level)
+    }
+
+    /// Set the K8 structured-reason fields fluently (category + the construct
+    /// that triggered the refusal). Purely additive: it touches neither the
+    /// danger tier nor the required level.
+    #[must_use]
+    fn categorized(mut self, category: ReasonCategory, offending: Option<String>) -> Self {
+        self.reason_category = Some(category);
+        self.offending_construct = offending;
+        self
     }
 }
 
@@ -1278,6 +1298,8 @@ impl Classifier {
                 objects_affected: Vec::new(),
                 safe_alternative: None,
                 reason: "empty input".to_owned(),
+                reason_category: None,
+                offending_construct: None,
             };
         }
 
@@ -1289,10 +1311,13 @@ impl Classifier {
                     objects_affected: Vec::new(),
                     safe_alternative: None,
                     reason: "operator allow-listed".to_owned(),
+                    reason_category: None,
+                    offending_construct: None,
                 };
             }
             StageA::BlockListed(pat) => {
-                return forbidden_decision(format!("matched block-list pattern: {pat}"));
+                return forbidden_decision(format!("matched block-list pattern: {pat}"))
+                    .categorized(ReasonCategory::BlockListed, Some(pat));
             }
             StageA::PlSqlBlock { dangerous } => {
                 // Re-derive (single source: `is_plsql_bearing_create`) whether
@@ -1311,12 +1336,20 @@ impl Classifier {
                 if dangerous {
                     return forbidden_decision(
                         "PL/SQL block contains a dynamic-SQL / file / network / scheduler side-effect marker".to_owned(),
+                    )
+                    .categorized(
+                        ReasonCategory::DynamicSql,
+                        Some("dynamic-SQL / file / network / scheduler side-effect marker".to_owned()),
                     );
                 }
                 let shape = analyze_batch(sql);
                 if !shape.balanced {
                     return forbidden_decision(
                         "PL/SQL block has unbalanced BEGIN/END (desync) — fail-closed".to_owned(),
+                    )
+                    .categorized(
+                        ReasonCategory::UnbalancedBlock,
+                        Some("unbalanced BEGIN/END".to_owned()),
                     );
                 }
                 // oracle-lokg.1: a balanced anonymous block followed by trailing
@@ -1329,6 +1362,10 @@ impl Classifier {
                     return forbidden_decision(
                         "PL/SQL block followed by trailing top-level SQL after END — fail-closed"
                             .to_owned(),
+                    )
+                    .categorized(
+                        ReasonCategory::MultiStatementBatch,
+                        Some("trailing top-level SQL after END".to_owned()),
                     );
                 }
                 // Body-derived floor for a benign, balanced block: ReadWrite (it
@@ -1365,6 +1402,8 @@ impl Classifier {
                             .to_owned(),
                     ),
                     reason,
+                    reason_category: Some(ReasonCategory::PlSqlBlock),
+                    offending_construct: Some("PL/SQL block".to_owned()),
                 };
             }
             StageA::PureSql => {}
@@ -1376,6 +1415,10 @@ impl Classifier {
             return forbidden_decision(
                 "lexer desync (unbalanced BEGIN/END or unterminated literal) — fail-closed"
                     .to_owned(),
+            )
+            .categorized(
+                ReasonCategory::UnbalancedBlock,
+                Some("unbalanced BEGIN/END or unterminated literal".to_owned()),
             );
         }
         // We reached this branch via `StageA::PureSql`, so there is no PL/SQL
@@ -1393,6 +1436,10 @@ impl Classifier {
             return forbidden_decision(
                 "pure-SQL batch hides a `;` boundary inside CASE/IF/LOOP depth (desync) — fail-closed"
                     .to_owned(),
+            )
+            .categorized(
+                ReasonCategory::MultiStatementBatch,
+                Some("hidden `;` boundary inside CASE/IF/LOOP depth".to_owned()),
             );
         }
 
@@ -1427,7 +1474,13 @@ impl Classifier {
             .max()
             .unwrap_or(DangerLevel::Forbidden);
         if danger == DangerLevel::Forbidden {
-            return forbidden_decision("a sub-statement is Forbidden".to_owned());
+            let category = if shape.statement_count > 1 {
+                ReasonCategory::MultiStatementBatch
+            } else {
+                ReasonCategory::Other
+            };
+            return forbidden_decision("a sub-statement is Forbidden".to_owned())
+                .categorized(category, None);
         }
         // Required level = the max over statements (None only if Forbidden,
         // already handled).
@@ -1438,6 +1491,10 @@ impl Classifier {
             .or(Some(OperatingLevel::ReadOnly));
         let objects_affected: Vec<String> =
             classes.iter().flat_map(|c| c.objects.clone()).collect();
+        // A well-formed statement that needs more than READ_ONLY is a level gate
+        // (K8: RequiresHigherLevel); a proven read stays uncategorized.
+        let needs_escalation = required_level.is_some_and(|level| level > OperatingLevel::ReadOnly);
+        let reason_category = needs_escalation.then_some(ReasonCategory::RequiresHigherLevel);
         GuardDecision {
             danger,
             required_level,
@@ -1447,6 +1504,8 @@ impl Classifier {
                 "classified {} statement(s) as {danger:?}",
                 shape.statement_count.max(1)
             ),
+            reason_category,
+            offending_construct: None,
         }
     }
 }
@@ -1458,6 +1517,10 @@ fn forbidden_decision(reason: String) -> GuardDecision {
         objects_affected: Vec::new(),
         safe_alternative: None,
         reason,
+        // Default category for a bare forbidden decision; call sites refine it
+        // via `categorized` where they can name the specific construct.
+        reason_category: Some(ReasonCategory::Other),
+        offending_construct: None,
     }
 }
 
@@ -1475,6 +1538,32 @@ mod tests {
         let d = classify("SELECT id, name FROM employees WHERE id = 42");
         assert_eq!(d.danger, DangerLevel::Safe);
         assert_eq!(d.required_level, Some(OperatingLevel::ReadOnly));
+        // K8: an allowed read carries no refusal category.
+        assert_eq!(d.reason_category, None);
+    }
+
+    #[test]
+    fn k8_reason_category_names_the_refusal_cause() {
+        // A benign write that only needs a higher level.
+        let write = classify("UPDATE t SET a = 1 WHERE id = 2");
+        assert_eq!(
+            write.reason_category,
+            Some(ReasonCategory::RequiresHigherLevel)
+        );
+        // Dynamic SQL inside a PL/SQL block.
+        let dynamic = classify("BEGIN EXECUTE IMMEDIATE 'DROP TABLE t'; END;");
+        assert_eq!(dynamic.reason_category, Some(ReasonCategory::DynamicSql));
+        assert!(dynamic.offending_construct.is_some());
+        // A block-list hit names the matched pattern.
+        let blocked = Classifier::new(ClassifierConfig::new().with_block_pattern("(?i)shutdown"))
+            .classify("SHUTDOWN ABORT");
+        assert_eq!(blocked.reason_category, Some(ReasonCategory::BlockListed));
+        // Trailing SQL after a balanced block is a stacking refusal.
+        let stacked = classify("BEGIN NULL; END; DROP TABLE t");
+        assert_eq!(
+            stacked.reason_category,
+            Some(ReasonCategory::MultiStatementBatch)
+        );
     }
 
     #[test]

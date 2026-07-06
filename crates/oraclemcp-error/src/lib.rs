@@ -103,6 +103,99 @@ impl ErrorClass {
     }
 }
 
+/// A machine-stable category for *why* the fail-closed guard refused (or
+/// step-up-gated) a statement (K8). Distinct from [`ErrorClass`], which names
+/// the error family: this names the specific refused construct, so an agent can
+/// branch on the cause and apply the minimal safe rewrite carried alongside it.
+///
+/// Serialized as `SCREAMING_SNAKE_CASE`; `#[non_exhaustive]` so new categories
+/// are additive, never breaking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
+pub enum ReasonCategory {
+    /// A stacked/multi-statement batch, a buried `;`, or trailing top-level SQL
+    /// after a PL/SQL block — each statement must be submitted on its own.
+    MultiStatementBatch,
+    /// Dynamic SQL or a side-effecting marker (EXECUTE IMMEDIATE, DBMS_SQL,
+    /// UTL_FILE/HTTP/TCP/SMTP, a scheduler/job) the guard cannot prove safe.
+    DynamicSql,
+    /// A PL/SQL `BEGIN`/`END` desync or an unterminated literal — the batch does
+    /// not lex cleanly, so it is refused fail-closed.
+    UnbalancedBlock,
+    /// A benign but unanalysable PL/SQL block — wrap the logic in a package and
+    /// call it, or run pure SQL.
+    PlSqlBlock,
+    /// The statement is well-formed but needs a higher operating level than the
+    /// session currently permits (a write, DDL, or DCL under a lower cap).
+    RequiresHigherLevel,
+    /// The statement matched an operator-curated block-list pattern.
+    BlockListed,
+    /// A `SELECT` (or a base object it reads) the engine could not prove
+    /// side-effect-free.
+    UnprovenSideEffect,
+    /// A refusal that does not fit the categories above.
+    Other,
+}
+
+/// The structured "why blocked + minimal safe rewrite" reason (K8) attached to
+/// a refusal envelope. Additive and observational: it never changes the class
+/// or the refusal, it only explains it and — where one exists — offers the
+/// smallest edit that would make the statement acceptable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructuredReason {
+    /// The machine-stable cause category.
+    pub category: ReasonCategory,
+    /// The specific construct that triggered the refusal (a marker keyword, the
+    /// matched pattern, `BEGIN/END`, …), when the guard can name it. Never
+    /// contains bind values or secrets.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub offending_construct: Option<String>,
+    /// The smallest rewrite that would make the statement acceptable (bind the
+    /// literal, add a `WHERE`, submit statements separately, use the right
+    /// level). `None` when no minimal rewrite exists — the agent should fall
+    /// back to `suggested_tool`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub minimal_rewrite: Option<String>,
+    /// The operating level the statement requires, when it is a level gate.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub required_level: Option<String>,
+}
+
+impl StructuredReason {
+    /// A reason of the given category with no extra detail yet.
+    #[must_use]
+    pub fn new(category: ReasonCategory) -> Self {
+        Self {
+            category,
+            offending_construct: None,
+            minimal_rewrite: None,
+            required_level: None,
+        }
+    }
+
+    /// Name the offending construct.
+    #[must_use]
+    pub fn with_offending_construct(mut self, construct: impl Into<String>) -> Self {
+        self.offending_construct = Some(construct.into());
+        self
+    }
+
+    /// Attach the minimal safe rewrite.
+    #[must_use]
+    pub fn with_minimal_rewrite(mut self, rewrite: impl Into<String>) -> Self {
+        self.minimal_rewrite = Some(rewrite.into());
+        self
+    }
+
+    /// Attach the required operating level.
+    #[must_use]
+    pub fn with_required_level(mut self, level: impl Into<String>) -> Self {
+        self.required_level = Some(level.into());
+        self
+    }
+}
+
 /// The actionable, agent-facing error payload (plan §8.2).
 ///
 /// `is_error` is serialized as `isError` to match the MCP tool-result shape.
@@ -132,6 +225,11 @@ pub struct ErrorEnvelope {
     /// For `Busy`/`Transient`: how long to wait before retrying.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub retry_after_ms: Option<u64>,
+    /// The structured "why blocked + minimal safe rewrite" reason (K8), when the
+    /// refusal came from the fail-closed guard. Additive; absent for non-guard
+    /// errors and for older readers.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub structured_reason: Option<StructuredReason>,
 }
 
 impl ErrorEnvelope {
@@ -148,6 +246,7 @@ impl ErrorEnvelope {
             fuzzy_matches: Vec::new(),
             next_steps: Vec::new(),
             retry_after_ms: None,
+            structured_reason: None,
         }
     }
 
@@ -183,6 +282,13 @@ impl ErrorEnvelope {
     #[must_use]
     pub fn with_retry_after_ms(mut self, ms: u64) -> Self {
         self.retry_after_ms = Some(ms);
+        self
+    }
+
+    /// Attach the structured "why blocked" reason (K8).
+    #[must_use]
+    pub fn with_structured_reason(mut self, reason: StructuredReason) -> Self {
+        self.structured_reason = Some(reason);
         self
     }
 
@@ -485,6 +591,43 @@ mod tests {
         let json = serde_json::to_string(&env).expect("serialize");
         let back: ErrorEnvelope = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(env, back);
+    }
+
+    #[test]
+    fn structured_reason_roundtrips_and_omits_empty_fields() {
+        let env = ErrorEnvelope::new(ErrorClass::OperatingLevelTooLow, "needs a higher level")
+            .with_structured_reason(
+                StructuredReason::new(ReasonCategory::RequiresHigherLevel)
+                    .with_required_level("READ_WRITE")
+                    .with_minimal_rewrite("run this at operating level READ_WRITE"),
+            );
+        let json = serde_json::to_value(&env).expect("serialize");
+        assert_eq!(
+            json["structured_reason"]["category"],
+            serde_json::json!("REQUIRES_HIGHER_LEVEL")
+        );
+        assert_eq!(
+            json["structured_reason"]["required_level"],
+            serde_json::json!("READ_WRITE")
+        );
+        // offending_construct is None -> omitted from the wire form.
+        assert!(
+            json["structured_reason"]
+                .get("offending_construct")
+                .is_none()
+        );
+        let back: ErrorEnvelope = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(env, back);
+    }
+
+    #[test]
+    fn structured_reason_absent_by_default() {
+        let env = ErrorEnvelope::new(ErrorClass::ObjectNotFound, "missing");
+        let json = serde_json::to_value(&env).expect("serialize");
+        assert!(
+            json.get("structured_reason").is_none(),
+            "non-guard envelopes carry no structured reason"
+        );
     }
 
     #[test]

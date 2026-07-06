@@ -40,7 +40,7 @@ use oraclemcp_db::{
     plscope_identifiers, plscope_statements, read_lob, read_query, read_query_named, sample_rows,
     search_objects, search_source, serialize_row,
 };
-use oraclemcp_error::{ErrorClass, ErrorEnvelope};
+use oraclemcp_error::{ErrorClass, ErrorEnvelope, ReasonCategory, StructuredReason};
 use oraclemcp_guard::{
     Classifier, ClassifierConfig, DangerLevel, EscalationError, ExecGrantBinding, ExecGrantError,
     ExecGrantStore, GuardDecision, LevelDecision, ObjectRef, OperatingLevel, Purity,
@@ -1304,6 +1304,27 @@ async fn owner_and_name_arg(
 /// `SELECT`/`WITH` and dictionary introspection pass.
 fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
     ensure_read_only_decision(DEFAULT_CLASSIFIER.classify(sql))
+        .map_err(|envelope| attach_parameterization_hint(envelope, sql))
+}
+
+/// K7: if a refused statement carries inline literals at bind-safe positions,
+/// append a concrete "parameterize these literals" next step. Purely additive
+/// coaching — it never changes the class or the refusal, only the guidance —
+/// and it is skipped when there is nothing bind-safe to suggest.
+fn attach_parameterization_hint(envelope: ErrorEnvelope, sql: &str) -> ErrorEnvelope {
+    if !matches!(
+        envelope.error_class,
+        ErrorClass::ForbiddenStatement | ErrorClass::OperatingLevelTooLow
+    ) {
+        return envelope;
+    }
+    match oraclemcp_guard::suggest_parameterized_form(sql) {
+        Some(rewrite) => envelope.with_next_step(format!(
+            "parameterize inline literals to enable cursor sharing and avoid literal exposure, \
+             e.g. `{rewrite}`"
+        )),
+        None => envelope,
+    }
 }
 
 fn ensure_read_only_decision(decision: GuardDecision) -> Result<(), ErrorEnvelope> {
@@ -1321,6 +1342,9 @@ fn ensure_read_only_decision(decision: GuardDecision) -> Result<(), ErrorEnvelop
     } else {
         ErrorClass::OperatingLevelTooLow
     };
+    // K8: build the structured "why blocked + minimal safe rewrite" reason from
+    // the decision before we consume its fields for the legacy next step.
+    let structured = structured_reason_for(&decision, class);
     Err(ErrorEnvelope::new(
         class,
         format!(
@@ -1328,6 +1352,7 @@ fn ensure_read_only_decision(decision: GuardDecision) -> Result<(), ErrorEnvelop
             decision.reason
         ),
     )
+    .with_structured_reason(structured)
     .with_next_step(decision.safe_alternative.unwrap_or_else(|| {
         "this server accepts only read-only statements — SELECT/WITH plus the \
          dictionary tools (oracle_schema_inspect, oracle_describe, oracle_get_ddl, \
@@ -1336,6 +1361,55 @@ fn ensure_read_only_decision(decision: GuardDecision) -> Result<(), ErrorEnvelop
          oracle_compile_errors, oracle_search_source, oracle_plscope_inspect)"
             .to_owned()
     })))
+}
+
+/// K8: translate a refusing [`GuardDecision`] into the structured reason carried
+/// on the error envelope — the machine-stable category, the offending construct,
+/// the required level (for a level gate), and the *minimal* rewrite that would
+/// make the statement acceptable. Some refusals (an unbalanced block, dynamic
+/// SQL) have no minimal rewrite; the agent should then fall back to
+/// `suggested_tool`. Purely additive: it reads the decision, never alters it.
+fn structured_reason_for(decision: &GuardDecision, class: ErrorClass) -> StructuredReason {
+    let category = decision.reason_category.unwrap_or(ReasonCategory::Other);
+    let mut reason = StructuredReason::new(category);
+    if let Some(construct) = &decision.offending_construct {
+        reason = reason.with_offending_construct(construct.clone());
+    }
+    // The required operating level is only meaningful for a level gate.
+    if class == ErrorClass::OperatingLevelTooLow
+        && let Some(level) = decision.required_level
+    {
+        reason = reason.with_required_level(level.as_str());
+    }
+    if let Some(rewrite) = minimal_rewrite_for(decision) {
+        reason = reason.with_minimal_rewrite(rewrite);
+    }
+    reason
+}
+
+/// The smallest edit that would make a refused statement acceptable, or `None`
+/// when no minimal rewrite exists (fall back to `suggested_tool`).
+fn minimal_rewrite_for(decision: &GuardDecision) -> Option<String> {
+    match decision.reason_category {
+        Some(ReasonCategory::MultiStatementBatch) => Some(
+            "submit each statement in its own oracle_query / oracle_execute call so the \
+             classifier can level them individually"
+                .to_owned(),
+        ),
+        // A benign PL/SQL block carries its own packaging suggestion.
+        Some(ReasonCategory::PlSqlBlock) => decision.safe_alternative.clone(),
+        // A well-formed write/DDL that only needs a higher level: the minimal
+        // change is to run it at that level (surfaced via `required_level`).
+        Some(ReasonCategory::RequiresHigherLevel) => decision.required_level.map(|level| {
+            format!(
+                "run this at operating level {} (oracle_set_session_level), or issue a read instead",
+                level.as_str()
+            )
+        }),
+        // Dynamic SQL, unbalanced blocks, block-list hits, and unproven
+        // side-effects have no single safe rewrite.
+        _ => None,
+    }
 }
 
 fn explain_plan_gate_error(gate: LevelDecision, session: &SessionLevelState) -> ErrorEnvelope {
