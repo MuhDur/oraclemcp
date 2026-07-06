@@ -178,10 +178,11 @@ class Ladder:
         self.table_created = False
         self.table_dropped = False
         # Throwaway source objects for the create_or_replace / compile_object /
-        # patch_source governed-DDL sub-ladder. A VIEW exercises
-        # oracle_create_or_replace's own DDL grant flow (a PL/SQL body would
-        # classify READ_WRITE and delegate to the general execute path); a
-        # PROCEDURE exercises compile_object + patch_source (both DDL-gated).
+        # patch_source governed-DDL sub-ladder. Both a VIEW and a PL/SQL
+        # PROCEDURE exercise oracle_create_or_replace's own DDL grant flow
+        # (oracle-p0d6: PL/SQL CREATE OR REPLACE floors at DDL, no longer
+        # delegating to the general execute path); the PROCEDURE additionally
+        # exercises compile_object + patch_source (both DDL-gated).
         self.view = f"{args.table}_V"
         self.proc = f"{args.table}_P"
         self.proc_owner = None
@@ -586,10 +587,12 @@ class Ladder:
         # oracle_patch_source through the preview -> single-use grant -> execute
         # gate, asserting VALUES (object status, patched source text) rather than
         # exit codes, plus a wrong-grant refusal. Ground truth wired in here:
-        #   * oracle_create_or_replace mints its OWN DDL grant only for a
-        #     DDL-classified object (a VIEW); a PL/SQL body classifies READ_WRITE
-        #     and the tool delegates to the general execute path. So the VIEW
-        #     drives the create_or_replace grant flow.
+        #   * oracle_create_or_replace mints its OWN DDL grant for every
+        #     DDL-classified object. A VIEW is DDL; and as of oracle-p0d6 a
+        #     PL/SQL-bearing CREATE OR REPLACE (PROCEDURE/FUNCTION/…) also floors
+        #     at DDL (was READ_WRITE), so BOTH the VIEW and the PROCEDURE drive
+        #     the create_or_replace grant flow and are audited under the tool's
+        #     own name.
         #   * oracle_patch_source ALWAYS forces the DDL gate (dispatch/mod.rs
         #     patch_required_level = Some(Ddl)) and mints its own grant, so a
         #     PROCEDURE drives compile_object + patch_source.
@@ -692,11 +695,48 @@ class Ladder:
             )
             return {"error_class": content.get("error_class")}
 
-        def source_create_procedure_via_execute():
-            # A PL/SQL CREATE OR REPLACE classifies READ_WRITE and flows through
-            # the GENERAL preview -> grant -> execute path (governed_execute).
-            result = self.governed_execute(
-                proc_src, commit=True, expect={"committed": True}
+        def source_create_procedure_via_create_or_replace():
+            # oracle-p0d6: a PL/SQL CREATE OR REPLACE now floors at DDL (was
+            # READ_WRITE) and drives oracle_create_or_replace's OWN DDL grant
+            # flow (preview -> single-use grant -> apply), exactly like the VIEW.
+            # It must be audited under `oracle_create_or_replace`, not the
+            # delegated `oracle_execute`.
+            preview = structured(
+                self.session.call(
+                    "oracle_create_or_replace", {"source_code": proc_src}
+                )
+            )
+            require(
+                preview.get("gate_decision") == "allow",
+                "create_or_replace(procedure) preview allows at DDL",
+                preview,
+            )
+            require(
+                preview.get("required_level") == "DDL",
+                "create_or_replace of a PL/SQL PROCEDURE floors at DDL (not READ_WRITE)",
+                preview,
+            )
+            token = (preview.get("confirmation") or {}).get("confirm")
+            require(
+                token,
+                "create_or_replace(procedure) preview mints its OWN single-use grant",
+                preview,
+            )
+            self.harness.grant = "execute"
+            out = structured(
+                self.session.call(
+                    "oracle_create_or_replace",
+                    {"source_code": proc_src, "execute": True, "confirm": token},
+                )
+            )
+            self.harness.grant = "none"
+            require(
+                out.get("applied") is True, "create_or_replace(procedure) applied", out
+            )
+            require(
+                out.get("committed") is True,
+                "create_or_replace(procedure) committed",
+                out,
             )
             self.proc_created = True
             rows = self.query_rows(
@@ -708,7 +748,7 @@ class Ladder:
                 "created PROCEDURE exists and is VALID",
                 rows,
             )
-            return result
+            return out
 
         def source_compile_object():
             args_c = {"object_type": "PROCEDURE", "name": proc}
@@ -1103,7 +1143,10 @@ class Ladder:
                 "source_create_or_replace_wrong_grant_refused",
                 source_create_or_replace_wrong_grant_refused,
             ),
-            ("source_create_procedure_via_execute", source_create_procedure_via_execute),
+            (
+                "source_create_procedure_via_create_or_replace",
+                source_create_procedure_via_create_or_replace,
+            ),
             ("source_compile_object", source_compile_object),
             ("source_patch_source", source_patch_source),
             ("source_drop_objects", source_drop_objects),
@@ -1243,10 +1286,17 @@ def verify_audit_records(args, harness):
         "audit chain records the committed governed executes",
         len(records),
     )
-    # Source-object governed-DDL sub-ladder: compile_object and patch_source
-    # each write their own signed, ALLOWED, SUCCEEDED audit record. (Ground
-    # truth: oracle_create_or_replace delegates to the shared execute path, so
-    # it is audited under tool `oracle_execute`, not its own name.)
+    # Source-object governed-DDL sub-ladder: create_or_replace, compile_object,
+    # and patch_source each write their own signed, ALLOWED, SUCCEEDED audit
+    # record. (oracle-p0d6: a PL/SQL CREATE OR REPLACE now floors at DDL and
+    # mints its own grant, so it is audited under `oracle_create_or_replace`,
+    # NOT the delegated `oracle_execute` — both the VIEW and the PROCEDURE apply
+    # under the tool's own name.)
+    require(
+        has("oracle_create_or_replace", outcome="SUCCEEDED", decision="ALLOWED"),
+        "audit chain records the governed create_or_replace under its own tool name",
+        len(records),
+    )
     require(
         has("oracle_compile_object", outcome="SUCCEEDED", decision="ALLOWED"),
         "audit chain records the governed compile_object",

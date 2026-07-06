@@ -142,6 +142,15 @@ pub enum StageA {
     PlSqlBlock {
         /// Whether a dangerous side-effect marker was found.
         dangerous: bool,
+        /// Whether the block is a PL/SQL-bearing `CREATE [OR REPLACE] <object>`
+        /// (PROCEDURE / FUNCTION / PACKAGE [BODY] / TRIGGER — see
+        /// [`PLSQL_BEARING_CREATE_FORMS`]) rather than an anonymous
+        /// `DECLARE`/`BEGIN` block. Such a create REPLACES a stored object and is
+        /// DDL: it floors at `OperatingLevel::Ddl` in [`Classifier::classify`],
+        /// consistent with `CREATE OR REPLACE VIEW`, `oracle_patch_source`, and
+        /// the ladder doc (`levels.rs`: "CREATE OR REPLACE → Ddl"). An anonymous
+        /// block is NOT a create and keeps its body-derived `ReadWrite` floor.
+        plsql_create: bool,
     },
     /// Pure SQL → proceed to the splitter + Stage B.
     PureSql,
@@ -428,15 +437,25 @@ pub fn stage_a(sql: &str, config: &ClassifierConfig) -> StageA {
     // pure-DDL replace forms fall through so Stage B / the DDL floor tiers them
     // Destructive/Ddl rather than under-levelling them to Guarded/ReadWrite (see
     // [`PLSQL_BEARING_CREATE_FORMS`] — oracle-y54x.1).
+    // A PL/SQL-bearing `CREATE [OR REPLACE] <object>` REPLACES a stored object
+    // and is DDL. Tracked separately from the anonymous-block detectors so the
+    // `Classifier::classify` caller can floor it at `OperatingLevel::Ddl`
+    // (oracle-p0d6) — the same object-clobbering-replace fail-open-tier fix
+    // oracle-y54x.1 applied to the pure-DDL create forms — while leaving an
+    // anonymous `DECLARE`/`BEGIN` block at its body-derived `ReadWrite` floor.
+    let plsql_create = PLSQL_BEARING_CREATE_FORMS
+        .iter()
+        .any(|f| leading.starts_with(f));
     let starts_block = upper.starts_with("DECLARE")
         || upper.starts_with("BEGIN")
         || sql.trim() == "/"
-        || PLSQL_BEARING_CREATE_FORMS
-            .iter()
-            .any(|f| leading.starts_with(f));
+        || plsql_create;
     let dangerous = PLSQL_SIDE_EFFECT_MARKERS.iter().any(|m| scan.contains(m));
     if starts_block || dangerous {
-        return StageA::PlSqlBlock { dangerous };
+        return StageA::PlSqlBlock {
+            dangerous,
+            plsql_create,
+        };
     }
     StageA::PureSql
 }
@@ -1277,10 +1296,17 @@ impl Classifier {
             StageA::BlockListed(pat) => {
                 return forbidden_decision(format!("matched block-list pattern: {pat}"));
             }
-            StageA::PlSqlBlock { dangerous } => {
+            StageA::PlSqlBlock {
+                dangerous,
+                plsql_create,
+            } => {
                 // Any PL/SQL block is at minimum Guarded; a dangerous
                 // side-effect marker (EXECUTE IMMEDIATE / UTL_FILE / …) is
                 // Forbidden (fail-closed — we cannot prove its purity here).
+                // This runs BEFORE the create-form floor so a dangerous body
+                // (e.g. `CREATE TRIGGER … EXECUTE IMMEDIATE 'DROP …'`) still
+                // escalates ABOVE Ddl to Forbidden — the create-form floor only
+                // ever RAISES a benign body's level, never lowers this one.
                 if dangerous {
                     return forbidden_decision(
                         "PL/SQL block contains a dynamic-SQL / file / network / scheduler side-effect marker".to_owned(),
@@ -1304,15 +1330,40 @@ impl Classifier {
                             .to_owned(),
                     );
                 }
+                // Body-derived floor for a benign, balanced block: ReadWrite (it
+                // may run DML we cannot prove side-effect-free). A PL/SQL-bearing
+                // `CREATE [OR REPLACE] <object>` additionally REPLACES a stored
+                // object — that is DDL — so it floors at Ddl. Written as a pure
+                // MAX (`max(Ddl, body_level)`), never a replacement, so the change
+                // can only ever RAISE the level: benign anonymous blocks stay
+                // ReadWrite, benign creates rise ReadWrite→Ddl, and nothing that
+                // already earned Ddl+ (or Forbidden, above) is lowered
+                // (oracle-p0d6 — the object-clobbering-replace fail-open-tier fix,
+                // mirroring oracle-y54x.1 for the pure-DDL create forms).
+                let body_level = OperatingLevel::ReadWrite;
+                let (required, danger, reason) = if plsql_create {
+                    (
+                        body_level.max(OperatingLevel::Ddl),
+                        DangerLevel::Destructive,
+                        "CREATE [OR REPLACE] of a PL/SQL stored object (DDL — replaces stored code)"
+                            .to_owned(),
+                    )
+                } else {
+                    (
+                        body_level,
+                        DangerLevel::Guarded,
+                        "PL/SQL block (cannot be proven side-effect-free here)".to_owned(),
+                    )
+                };
                 return GuardDecision {
-                    danger: DangerLevel::Guarded,
-                    required_level: Some(OperatingLevel::ReadWrite),
+                    danger,
+                    required_level: Some(required),
                     objects_affected: Vec::new(),
                     safe_alternative: Some(
                         "wrap the logic in an analysable package and call it, or run pure SQL"
                             .to_owned(),
                     ),
-                    reason: "PL/SQL block (cannot be proven side-effect-free here)".to_owned(),
+                    reason,
                 };
             }
             StageA::PureSql => {}
@@ -1924,26 +1975,96 @@ mod tests {
     }
 
     #[test]
-    fn plsql_bearing_create_still_takes_block_path() {
-        // The narrowing must not stop PL/SQL-bearing creates from being
-        // side-effect-scanned. A clean CREATE OR REPLACE PROCEDURE stays on the
-        // PL/SQL-block path (Guarded/ReadWrite); one carrying a dynamic-SQL marker
-        // must still fail closed to Forbidden — even with inter-keyword spacing.
-        let clean = classify("CREATE OR REPLACE PROCEDURE p IS BEGIN NULL; END;");
-        assert_eq!(
-            clean.danger,
-            DangerLevel::Guarded,
-            "clean proc → block path"
-        );
-        assert_eq!(clean.required_level, Some(OperatingLevel::ReadWrite));
+    fn plsql_bearing_create_floors_at_ddl_and_still_scans_body() {
+        // oracle-p0d6: a PL/SQL-bearing CREATE [OR REPLACE] REPLACES a stored
+        // object — that is DDL. A clean body must FLOOR at Destructive/Ddl (the
+        // object-clobbering-replace fail-open-tier fix, mirroring oracle-y54x.1
+        // for the pure-DDL create forms and consistent with `CREATE OR REPLACE
+        // VIEW`, `oracle_patch_source`, and the levels.rs ladder doc). The body
+        // side-effect scan is UNCHANGED: a dynamic-SQL marker must still escalate
+        // ABOVE Ddl to Forbidden — even with inter-keyword spacing. This is a pure
+        // tightening: the floor only ever RAISES a benign body's level.
+        for (kind, sql) in [
+            (
+                "or-replace procedure",
+                "CREATE OR REPLACE PROCEDURE p IS BEGIN NULL; END;",
+            ),
+            ("plain procedure", "CREATE PROCEDURE p IS BEGIN NULL; END;"),
+            (
+                "or-replace function",
+                "CREATE OR REPLACE FUNCTION f RETURN NUMBER IS BEGIN RETURN 1; END;",
+            ),
+            (
+                "or-replace trigger",
+                "CREATE OR REPLACE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW BEGIN NULL; END;",
+            ),
+            // NOTE: a PACKAGE / PACKAGE BODY spec is not balanceable by the
+            // generic BEGIN/END counter (it fails closed to Forbidden on the
+            // create_or_replace path and is handled by oracle_patch_source's
+            // body-balance override) — so it is deliberately excluded here; the
+            // point of this case set is the ReadWrite→Ddl floor on the forms that
+            // DO reach the non-dangerous PL/SQL-block arm.
+        ] {
+            let clean = classify(sql);
+            assert_eq!(
+                clean.danger,
+                DangerLevel::Destructive,
+                "clean PL/SQL create must be Destructive (DDL replace): {kind}"
+            );
+            assert_eq!(
+                clean.required_level,
+                Some(OperatingLevel::Ddl),
+                "clean PL/SQL create must FLOOR at Ddl (not ReadWrite): {kind}"
+            );
+        }
 
+        // The dangerous-body escalation is preserved and lands ABOVE Ddl: a
+        // dynamic-SQL-bearing body fails closed to Forbidden regardless of the
+        // inter-keyword spacing that the canonical scan collapses.
         let dynamic = classify(
             "CREATE  OR  REPLACE  PROCEDURE p IS BEGIN EXECUTE IMMEDIATE 'DROP TABLE t'; END;",
         );
         assert_eq!(
             dynamic.danger,
             DangerLevel::Forbidden,
-            "a dynamic-SQL-bearing proc body must fail closed regardless of spacing"
+            "a dynamic-SQL-bearing proc body must fail closed (above Ddl) regardless of spacing"
+        );
+        assert_eq!(
+            dynamic.required_level, None,
+            "a Forbidden body has no admitting level — strictly above the Ddl floor"
+        );
+    }
+
+    #[test]
+    fn plsql_create_ddl_floor_is_pure_tightening() {
+        // Prove monotonicity for oracle-p0d6: the Ddl floor may only RAISE the
+        // level of a PL/SQL-bearing create, and must not touch anything else.
+        // (a) A benign anonymous PL/SQL block is NOT a create — it keeps its
+        //     body-derived Guarded/ReadWrite floor (unaffected by the change).
+        for anon in ["BEGIN NULL; END;", "DECLARE x NUMBER; BEGIN x := 1; END;"] {
+            let d = classify(anon);
+            assert_eq!(
+                d.danger,
+                DangerLevel::Guarded,
+                "anonymous block stays Guarded: {anon:?}"
+            );
+            assert_eq!(
+                d.required_level,
+                Some(OperatingLevel::ReadWrite),
+                "anonymous block keeps its ReadWrite body floor (not floored to Ddl): {anon:?}"
+            );
+        }
+        // (b) The create floor never LOWERS a level: a PL/SQL create is >= Ddl,
+        //     strictly above the ReadWrite it earned before, and never below the
+        //     plain anonymous-block body floor.
+        let create = classify("CREATE OR REPLACE PROCEDURE p IS BEGIN NULL; END;");
+        assert!(
+            create.required_level >= Some(OperatingLevel::Ddl),
+            "PL/SQL create must be at least Ddl"
+        );
+        assert!(
+            create.required_level > Some(OperatingLevel::ReadWrite),
+            "PL/SQL create must tier strictly ABOVE the old ReadWrite floor"
         );
     }
 

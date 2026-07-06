@@ -3000,6 +3000,57 @@ fn create_or_replace_preview_is_default_and_does_not_execute() {
 }
 
 #[test]
+fn create_or_replace_plsql_procedure_floors_at_ddl_and_mints_own_grant() {
+    // oracle-p0d6: a PL/SQL-bearing CREATE OR REPLACE PROCEDURE now floors at
+    // DDL (was READ_WRITE), consistent with CREATE OR REPLACE VIEW and
+    // oracle_patch_source. At a DDL-level session the preview therefore Allows,
+    // mints its OWN single-use confirmation grant, and attributes the apply to
+    // oracle_create_or_replace (no delegation to oracle_execute).
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(OneRowMock),
+        Some("dev".to_owned()),
+        ddl_level(),
+    );
+    let source = "CREATE OR REPLACE PROCEDURE p IS BEGIN NULL; END;";
+    let out = dispatcher
+        .dispatch("oracle_create_or_replace", json!({ "source_code": source }))
+        .expect("plsql create-or-replace preview");
+    assert_eq!(out["preview"], json!(true));
+    assert_eq!(
+        out["required_level"],
+        json!("DDL"),
+        "PL/SQL CREATE OR REPLACE must require DDL, not READ_WRITE"
+    );
+    assert_eq!(out["gate_decision"], json!("allow"));
+    assert_eq!(
+        out["confirmation"]["tool"],
+        json!("oracle_create_or_replace")
+    );
+    assert!(
+        out["confirmation"]["confirm"].is_string(),
+        "a DDL-level PL/SQL CoR must mint its own single-use grant (not confirmation=None): {out:#}"
+    );
+    assert_eq!(
+        out["next_actions"][0]["tool"],
+        json!("oracle_create_or_replace"),
+        "the apply action must stay on oracle_create_or_replace, not delegate to oracle_execute"
+    );
+
+    // At READ_WRITE the same statement now requires a step-up to DDL (a DML
+    // principal must NOT be able to replace stored code — definer-rights escalation).
+    let rw = OracleDispatcher::new_with_profile_level(
+        Box::new(OneRowMock),
+        Some("dev".to_owned()),
+        SessionLevelState::new(OperatingLevel::Ddl, false),
+    );
+    let preview = rw
+        .dispatch("oracle_create_or_replace", json!({ "source_code": source }))
+        .expect("preview inspectable below current level");
+    assert_eq!(preview["gate_decision"], json!("require_step_up"));
+    assert_eq!(preview["step_up_target"], json!("DDL"));
+}
+
+#[test]
 fn create_or_replace_requires_ddl_level_without_executing() {
     let dispatcher = OracleDispatcher::new_with_profile_level(
         Box::new(NoExecMock),
@@ -3091,6 +3142,15 @@ fn create_or_replace_execute_applies_and_reports_compile_errors() {
     assert!(
         executed[0].0.starts_with("/* oraclemcp llm="),
         "executed SQL should carry the A3 audit marker: {}",
+        executed[0].0
+    );
+    // oracle-p0d6: the audit marker (and the persisted audit record it mirrors)
+    // must attribute the CREATE OR REPLACE to `oracle_create_or_replace`, NOT the
+    // delegated `oracle_execute`. The apply path threads the canonical tool name
+    // into execute_sql so V$SQL / the audit chain / write-intents all carry it.
+    assert!(
+        executed[0].0.contains("tool=oracle_create_or_replace"),
+        "executed SQL marker must attribute tool=oracle_create_or_replace: {}",
         executed[0].0
     );
     assert!(executed[0].0.ends_with(source));

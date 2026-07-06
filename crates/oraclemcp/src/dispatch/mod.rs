@@ -2985,19 +2985,27 @@ fn quarantined_db_error(outcome: QuarantineOutcome, message: impl Into<String>) 
     }
 }
 
-async fn execute_sql(ctx: DbToolCtx<'_>, args: ExecuteArgs) -> Result<Value, ErrorEnvelope> {
+async fn execute_sql(
+    ctx: DbToolCtx<'_>,
+    audit_tool: &str,
+    args: ExecuteArgs,
+) -> Result<Value, ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
     with_call_timeout(
         ctx.cx,
         ctx.conn,
         ctx.request_budget,
         timeout_seconds,
-        || execute_sql_inner(ctx, args),
+        || execute_sql_inner(ctx, audit_tool, args),
     )
     .await
 }
 
-async fn execute_sql_inner(ctx: DbToolCtx<'_>, args: ExecuteArgs) -> Result<Value, ErrorEnvelope> {
+async fn execute_sql_inner(
+    ctx: DbToolCtx<'_>,
+    audit_tool: &str,
+    args: ExecuteArgs,
+) -> Result<Value, ErrorEnvelope> {
     let cx = ctx.cx;
     let conn = ctx.conn;
     let active_profile = ctx.active_profile;
@@ -3059,7 +3067,7 @@ async fn execute_sql_inner(ctx: DbToolCtx<'_>, args: ExecuteArgs) -> Result<Valu
     // additionally assert that here — defense in depth — and fail closed on any
     // divergence so a marker can never change what runs. The marked text is what
     // we execute AND what the audit log records (A8 digest covers the real text).
-    let executed_sql = with_audit_marker(&args.sql, active_profile, "oracle_execute");
+    let executed_sql = with_audit_marker(&args.sql, active_profile, audit_tool);
     if DEFAULT_CLASSIFIER.classify(&executed_sql) != decision {
         return Err(ErrorEnvelope::new(
             ErrorClass::Internal,
@@ -3071,9 +3079,7 @@ async fn execute_sql_inner(ctx: DbToolCtx<'_>, args: ExecuteArgs) -> Result<Valu
     // rejected above, so this is always a Guarded/Destructive write/DDL/Admin.
     let danger_str = audit_danger_string(decision.danger);
     let write_intent_id = match commit_idempotency_key.as_deref() {
-        Some(key) => {
-            append_write_intent(&ctx, "oracle_execute", &executed_sql, required_level, key)?
-        }
+        Some(key) => append_write_intent(&ctx, audit_tool, &executed_sql, required_level, key)?,
         None => None,
     };
     let db_evidence = collect_audit_db_evidence(cx, audit.auditor, conn).await;
@@ -3088,7 +3094,7 @@ async fn execute_sql_inner(ctx: DbToolCtx<'_>, args: ExecuteArgs) -> Result<Valu
     // database untouched. A failed durable append fails the call closed.
     if let Err(err) = append_audit(
         audit_entry,
-        "oracle_execute",
+        audit_tool,
         &executed_sql,
         &danger_str,
         None,
@@ -3137,7 +3143,7 @@ async fn execute_sql_inner(ctx: DbToolCtx<'_>, args: ExecuteArgs) -> Result<Valu
             // Durably log the failed outcome before propagating.
             append_audit(
                 audit_entry,
-                "oracle_execute",
+                audit_tool,
                 &executed_sql,
                 &danger_str,
                 None,
@@ -3170,7 +3176,7 @@ async fn execute_sql_inner(ctx: DbToolCtx<'_>, args: ExecuteArgs) -> Result<Valu
             )?;
             append_audit(
                 audit_entry,
-                "oracle_execute",
+                audit_tool,
                 &executed_sql,
                 &danger_str,
                 Some(rows_affected),
@@ -3193,7 +3199,7 @@ async fn execute_sql_inner(ctx: DbToolCtx<'_>, args: ExecuteArgs) -> Result<Valu
             )?;
             append_audit(
                 audit_entry,
-                "oracle_execute",
+                audit_tool,
                 &executed_sql,
                 &danger_str,
                 Some(rows_affected),
@@ -3217,7 +3223,7 @@ async fn execute_sql_inner(ctx: DbToolCtx<'_>, args: ExecuteArgs) -> Result<Valu
     };
     append_audit(
         audit_entry,
-        "oracle_execute",
+        audit_tool,
         &executed_sql,
         &danger_str,
         Some(rows_affected),
@@ -4015,7 +4021,10 @@ fn contains_patch_side_effect_marker(source: &str) -> bool {
     // not the canonicalized scan. Avoids drifting from the guard's marker set.
     matches!(
         stage_a(source, &ClassifierConfig::new()),
-        StageA::PlSqlBlock { dangerous: true } | StageA::BlockListed(_)
+        StageA::PlSqlBlock {
+            dangerous: true,
+            ..
+        } | StageA::BlockListed(_)
     )
 }
 
@@ -4513,6 +4522,7 @@ async fn create_or_replace_inner(
     }
     let mut executed = execute_sql(
         ctx,
+        canonical_tool_name(tool_name),
         ExecuteArgs {
             sql: source.clone(),
             binds: Vec::new(),
@@ -4658,6 +4668,7 @@ async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Val
 
     let mut out = execute_sql(
         ctx,
+        "deploy_ddl",
         ExecuteArgs {
             sql: ddl,
             binds: Vec::new(),
@@ -5367,7 +5378,7 @@ impl OracleDispatcher {
                 audit,
                 quarantine: &self.quarantine,
             };
-            return execute_sql(tool_ctx, execute_args).await;
+            return execute_sql(tool_ctx, "oracle_execute", execute_args).await;
         }
         if tool == "deploy_ddl" {
             let a: DeployDdlArgs = parse_args(name, args)?;
@@ -5553,7 +5564,7 @@ impl OracleDispatcher {
                     audit,
                     quarantine: &self.quarantine,
                 };
-                return execute_sql(tool_ctx, a).await;
+                return execute_sql(tool_ctx, "oracle_execute", a).await;
             }
             "oracle_compile_object" => {
                 let a: CompileObjectArgs = parse_args(name, args)?;
