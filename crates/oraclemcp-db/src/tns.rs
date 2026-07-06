@@ -19,7 +19,7 @@
 //! This module deliberately depends on the underlying **`oracledb-protocol`**
 //! crate directly and imports via the `oracledb_protocol::` path, which does NOT
 //! match that seam pattern (the `_` breaks the adjacency the pattern requires).
-//! `oracledb-protocol` is pinned to `=0.5.1`, the exact version `oracledb 0.5.1`
+//! `oracledb-protocol` is pinned to `=0.7.2`, the exact version `oracledb 0.7.2`
 //! already resolves, and is pure encode/decode (no async runtime), so the driver
 //! seam stays confined to `connection.rs` and the engine-free boundary holds.
 //! The `seam_smoke` test below asserts this module names no driver-crate `::`
@@ -156,6 +156,68 @@ pub fn parse_tnsnames_dir(config_dir: &Path) -> Result<TnsParseResult, TnsParseE
         file_name: Some(reader.file_name().to_path_buf()),
         services,
         notes: Vec::new(),
+    })
+}
+
+/// A failure resolving a bare `tnsnames.ora` alias to its connect descriptor
+/// (B2.3 / OCI-2). Never a panic.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum TnsResolveError {
+    /// The `tnsnames.ora` was unreadable / malformed / had an `IFILE` cycle.
+    #[error(transparent)]
+    Parse(#[from] TnsParseError),
+    /// A `tnsnames.ora` was found and parsed, but has no entry for the alias.
+    /// Lists the available aliases (alias names are not secret) so the operator
+    /// can fix the profile without guessing.
+    #[error("TNS alias `{alias}` not found in {file}; available aliases: [{available}]")]
+    AliasNotFound {
+        /// The alias that was requested (as configured).
+        alias: String,
+        /// The `tnsnames.ora` that was consulted.
+        file: PathBuf,
+        /// Comma-separated available alias names (never descriptors).
+        available: String,
+    },
+}
+
+/// Resolve a bare `tnsnames.ora` alias in `config_dir` to its full connect
+/// descriptor (server-side descriptor resolution; B2.3 / round-2 OCI-2).
+///
+/// Oracle Net upper-cases aliases, so the lookup is case-insensitive.
+///
+/// - `Ok(Some(descriptor))` — the alias resolved to a descriptor.
+/// - `Ok(None)` — `config_dir` has no `tnsnames.ora` at all, so there is
+///   nothing to resolve against; the caller leaves the connect string
+///   unchanged (it may still be a valid EZConnect identifier).
+/// - `Err(AliasNotFound)` — a `tnsnames.ora` exists but has no matching alias.
+/// - `Err(Parse)` — the `tnsnames.ora` is unreadable / malformed / cyclic.
+///
+/// # Errors
+///
+/// See the variants of [`TnsResolveError`].
+pub(crate) fn resolve_alias(
+    config_dir: &Path,
+    alias: &str,
+) -> Result<Option<String>, TnsResolveError> {
+    let result = parse_tnsnames_dir(config_dir)?;
+    let Some(file) = result.file_name.clone() else {
+        // No tnsnames.ora present — nothing to resolve against.
+        return Ok(None);
+    };
+    let target = alias.trim().to_ascii_uppercase();
+    if let Some(service) = result.services.iter().find(|s| s.service_name == target) {
+        return Ok(Some(service.descriptor.clone()));
+    }
+    let available = result
+        .services
+        .iter()
+        .map(|s| s.service_name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(TnsResolveError::AliasNotFound {
+        alias: alias.trim().to_owned(),
+        file,
+        available,
     })
 }
 
@@ -441,6 +503,62 @@ mod tests {
                 from = start + driver.len();
             }
         }
+    }
+
+    #[test]
+    fn resolve_alias_is_case_insensitive_and_returns_descriptor() {
+        // Oracle Net upper-cases aliases, so a lower-case profile value resolves.
+        let descriptor = resolve_alias(&fixtures_root(), "primary_tcps")
+            .expect("resolve does not error")
+            .expect("alias resolves to a descriptor");
+        assert!(
+            descriptor.contains("tcps.example.com") && descriptor.contains("2484"),
+            "the resolved descriptor is the PRIMARY_TCPS entry, got: {descriptor}"
+        );
+    }
+
+    #[test]
+    fn resolve_missing_alias_lists_available_aliases() {
+        let err = resolve_alias(&fixtures_root(), "NOPE")
+            .expect_err("a missing alias is a structured error");
+        let TnsResolveError::AliasNotFound {
+            alias, available, ..
+        } = err
+        else {
+            panic!("expected AliasNotFound, got {err:?}");
+        };
+        assert_eq!(alias, "NOPE");
+        // The actionable error lists the real aliases so the operator can fix it.
+        assert!(available.contains("PRIMARY_TCPS"), "available: {available}");
+        assert!(available.contains("EZ_PLAIN"), "available: {available}");
+    }
+
+    #[test]
+    fn resolve_alias_without_tnsnames_is_ok_none() {
+        // No tnsnames.ora present -> nothing to resolve against (the caller keeps
+        // the connect string as-is; it may be a valid EZConnect identifier).
+        let tmp = std::env::temp_dir().join(format!(
+            "oraclemcp_tns_resolve_none_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).expect("mkdir");
+        let resolved = resolve_alias(&tmp, "ANY").expect("no tnsnames.ora is not an error");
+        assert!(resolved.is_none());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn resolve_alias_on_include_cycle_is_parse_error() {
+        let err = resolve_alias(&fixtures_root().join("cycle"), "ANY")
+            .expect_err("an IFILE cycle surfaces as a Parse error");
+        assert!(
+            matches!(err, TnsResolveError::Parse(_)),
+            "expected Parse, got {err:?}"
+        );
     }
 
     #[test]

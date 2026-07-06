@@ -537,6 +537,7 @@ mod driver {
     use serde_json::{Number, Value, json};
     use std::fmt::Display;
     use std::future::Future;
+    use std::path::PathBuf;
     use std::sync::Mutex as SyncMutex;
     use std::time::Duration;
 
@@ -592,9 +593,8 @@ mod driver {
     /// connect string is treated as TLS when it uses the `tcps://` scheme, a
     /// `PROTOCOL=TCPS` descriptor, or a wallet / explicit server-cert DN is
     /// configured (all of which imply mTLS/TLS for the Oracle Net transport).
-    fn transport_is_tcps(opts: &OracleConnectOptions) -> bool {
-        let compact: String = opts
-            .connect_string
+    fn transport_is_tcps(connect_string: &str, opts: &OracleConnectOptions) -> bool {
+        let compact: String = connect_string
             .chars()
             .filter(|c| !c.is_whitespace())
             .map(|c| c.to_ascii_lowercase())
@@ -603,6 +603,58 @@ mod driver {
             || compact.contains("protocol=tcps")
             || opts.wallet_location.is_some()
             || opts.ssl_server_cert_dn.is_some()
+    }
+
+    /// The directory whose `tnsnames.ora` resolves a bare connect alias: the
+    /// `TNS_ADMIN` environment variable when set, else the profile's wallet
+    /// directory (an OCI wallet ships its `tnsnames.ora` alongside `cwallet.sso`).
+    ///
+    /// Only the *value* of `TNS_ADMIN` is read; the library never mutates it
+    /// (that would require `unsafe` `std::env::set_var` under edition 2024, which
+    /// is forbidden workspace-wide — see [`OracleConnectOptions::wallet_location`]).
+    fn tns_admin_dir(opts: &OracleConnectOptions) -> Option<PathBuf> {
+        if let Some(value) = std::env::var_os("TNS_ADMIN") {
+            let dir = PathBuf::from(value);
+            if !dir.as_os_str().is_empty() {
+                return Some(dir);
+            }
+        }
+        opts.wallet_location.clone()
+    }
+
+    /// Resolve a bare `tnsnames.ora` alias in `connect_string` to its full
+    /// connect descriptor via `TNS_ADMIN` / the wallet directory (B2.3, round-2
+    /// OCI-2). A full descriptor, a `scheme://` URL, or any EZConnect form that
+    /// carries a `/` service or `:` port is used verbatim. A bare alias resolves
+    /// through the profile's TNS directory; a missing/malformed alias yields a
+    /// clear, actionable [`DbError::Connect`] rather than a late, opaque driver
+    /// failure.
+    fn resolve_tns_connect_string(opts: &OracleConnectOptions) -> Result<String, DbError> {
+        let raw = opts.connect_string.trim();
+        // Descriptors, scheme URLs, and EZConnect host:port/service forms are
+        // used as-is — only a bare single-token identifier is an alias candidate.
+        if raw.is_empty()
+            || raw.starts_with('(')
+            || raw.contains("://")
+            || raw.contains('/')
+            || raw.contains(':')
+            || !raw
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        {
+            return Ok(opts.connect_string.clone());
+        }
+        let Some(dir) = tns_admin_dir(opts) else {
+            // No TNS directory to resolve against — leave the identifier for the
+            // driver (it may still be a valid EZConnect host).
+            return Ok(opts.connect_string.clone());
+        };
+        match crate::tns::resolve_alias(&dir, raw) {
+            Ok(Some(descriptor)) => Ok(descriptor),
+            // A directory with no tnsnames.ora — nothing to resolve against.
+            Ok(None) => Ok(opts.connect_string.clone()),
+            Err(err) => Err(DbError::Connect(err.to_string())),
+        }
     }
 
     fn format_transport_connect_timeout(timeout: Duration) -> String {
@@ -684,6 +736,12 @@ mod driver {
                     .to_owned(),
             ));
         }
+        // Resolve a bare tnsnames.ora alias to its full descriptor up front
+        // (B2.3): the driver treats an unresolved alias as "resolve separately",
+        // so a bare alias would otherwise fail late. Doing it here also lets the
+        // TCPS transport check below see the resolved (possibly `PROTOCOL=TCPS`)
+        // descriptor.
+        let resolved_connect_string = resolve_tns_connect_string(opts)?;
         // OCI IAM database-token auth. The pinned driver DOES support it via
         // `ConnectOptions::with_access_token` (the token is sent as `AUTH_TOKEN`
         // with no password verifier). It is only wireable once a token has been
@@ -705,7 +763,7 @@ mod driver {
         // on a non-TCPS transport BEFORE we hand the token to the driver (the
         // driver also rejects this, but defense-in-depth keeps the token off a
         // plaintext socket and gives a precise typed error).
-        if iam_token.is_some() && !transport_is_tcps(opts) {
+        if iam_token.is_some() && !transport_is_tcps(&resolved_connect_string, opts) {
             return Err(DbError::UnsupportedAuth(
                 "OCI IAM database-token auth requires a TLS (TCPS) transport; use a tcps:// \
                  connect string or a wallet-backed TLS descriptor"
@@ -727,7 +785,7 @@ mod driver {
         };
         let identity = client_identity(opts.session_identity.as_ref())?;
         let connect_string =
-            connect_string_with_transport_timeout(&opts.connect_string, opts.connect_timeout)?;
+            connect_string_with_transport_timeout(&resolved_connect_string, opts.connect_timeout)?;
         let mut connect_options =
             oracledb::ConnectOptions::new(&connect_string, user, password, identity);
         if let Some(token) = iam_token {
@@ -4526,6 +4584,113 @@ mod tests {
 
         let connect = driver::to_connect_options(&opts).expect("wallet-backed token options");
         assert!(connect.access_token().is_some());
+    }
+
+    /// The committed `tnsnames.ora` fixture tree (design spec §F), used here to
+    /// exercise server-side alias resolution (B2.3).
+    fn tns_fixtures_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tests")
+            .join("fixtures")
+            .join("tns")
+    }
+
+    #[test]
+    fn bare_alias_resolves_to_descriptor_via_wallet_tnsnames() {
+        // Skip if the ambient environment sets TNS_ADMIN (it would take priority
+        // over the wallet dir and make the assertion env-dependent).
+        if std::env::var_os("TNS_ADMIN").is_some() {
+            return;
+        }
+        // A bare alias (round-2 OCI-2: this previously failed to resolve) is
+        // expanded to its full descriptor from the wallet directory's
+        // tnsnames.ora before the string reaches the driver.
+        let opts = OracleConnectOptions {
+            connect_string: "primary_tcps".to_owned(),
+            username: Some("APP_USER".to_owned()),
+            password: Some("pw".to_owned()),
+            wallet_location: Some(tns_fixtures_dir()),
+            ..Default::default()
+        };
+        let connect = driver::to_connect_options(&opts).expect("alias resolves");
+        let cs = connect.connect_string();
+        assert!(
+            cs.contains("tcps.example.com") && cs.contains("2484"),
+            "the bare alias resolved to the PRIMARY_TCPS descriptor, got: {cs}"
+        );
+    }
+
+    #[test]
+    fn full_descriptor_connect_string_is_used_verbatim() {
+        // A full descriptor must still work unchanged even with a wallet set.
+        let descriptor = "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db.example)(PORT=1521))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))";
+        let opts = OracleConnectOptions {
+            connect_string: descriptor.to_owned(),
+            username: Some("APP_USER".to_owned()),
+            password: Some("pw".to_owned()),
+            wallet_location: Some(tns_fixtures_dir()),
+            ..Default::default()
+        };
+        let connect = driver::to_connect_options(&opts).expect("descriptor options");
+        assert_eq!(connect.connect_string(), descriptor);
+    }
+
+    #[test]
+    fn missing_alias_fails_with_actionable_error() {
+        if std::env::var_os("TNS_ADMIN").is_some() {
+            return;
+        }
+        let opts = OracleConnectOptions {
+            connect_string: "does_not_exist".to_owned(),
+            username: Some("APP_USER".to_owned()),
+            password: Some("pw".to_owned()),
+            wallet_location: Some(tns_fixtures_dir()),
+            ..Default::default()
+        };
+        let err = driver::to_connect_options(&opts).expect_err("missing alias is refused");
+        assert!(matches!(err, DbError::Connect(_)), "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains("does_not_exist"), "names the alias: {msg}");
+        assert!(
+            msg.contains("available aliases") && msg.contains("PRIMARY_TCPS"),
+            "lists what IS available: {msg}"
+        );
+    }
+
+    #[test]
+    fn malformed_alias_source_fails_without_panic() {
+        if std::env::var_os("TNS_ADMIN").is_some() {
+            return;
+        }
+        // A bare alias against a directory whose tnsnames.ora has an IFILE cycle
+        // surfaces a clear connect error, never a panic.
+        let opts = OracleConnectOptions {
+            connect_string: "anything".to_owned(),
+            username: Some("APP_USER".to_owned()),
+            password: Some("pw".to_owned()),
+            wallet_location: Some(tns_fixtures_dir().join("cycle")),
+            ..Default::default()
+        };
+        let err = driver::to_connect_options(&opts).expect_err("malformed source is refused");
+        assert!(matches!(err, DbError::Connect(_)), "{err}");
+    }
+
+    #[test]
+    fn ez_connect_with_wallet_is_not_treated_as_alias() {
+        // A host:port/service EZConnect string carries a `/` and `:`, so it is
+        // never mistaken for a bare alias even when a wallet dir is present.
+        let opts = OracleConnectOptions {
+            connect_string: "db.example:1521/svc".to_owned(),
+            username: Some("APP_USER".to_owned()),
+            password: Some("pw".to_owned()),
+            wallet_location: Some(tns_fixtures_dir()),
+            ..Default::default()
+        };
+        let connect = driver::to_connect_options(&opts).expect("ezconnect options");
+        assert_eq!(connect.connect_string(), "db.example:1521/svc");
     }
 
     #[test]
