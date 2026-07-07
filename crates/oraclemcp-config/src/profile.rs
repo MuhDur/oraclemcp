@@ -109,6 +109,14 @@ pub struct OciConfig {
     /// every connect so a rotated token is picked up without a restart. The value
     /// is never persisted or logged.
     pub token_file: Option<String>,
+    /// A command (an **arg-array**: `argv[0]` is the program, the rest are literal
+    /// arguments) run at connect time to fetch a fresh IAM database token from its
+    /// stdout. This is a *reference* — the command to run, never the token itself.
+    /// It is executed directly (`Command::new(argv[0]).args(..)`) with **no shell**,
+    /// so no element is ever shell-interpreted. The token is resolved transiently
+    /// and is never persisted or logged. Mutually exclusive with `token_env` /
+    /// `token_file` (configuring more than one is a fail-closed config error).
+    pub token_exec: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for OciConfig {
@@ -122,6 +130,10 @@ impl std::fmt::Debug for OciConfig {
         // OCI reference fields, so a misconfigured ref can never widen a surface.
         let token_env = self.token_env.as_ref().map(|_| "<redacted>");
         let token_file = self.token_file.as_ref().map(|_| "<redacted>");
+        // token_exec is an argv (a command reference); render it presence-only so
+        // a program path or an inline argument can never widen a surface, matching
+        // the other OCI reference fields.
+        let token_exec = self.token_exec.as_ref().map(|_| "<redacted>");
         f.debug_struct("OciConfig")
             .field("wallet_location", &wallet_location)
             .field("wallet_password_ref", &wallet_password_ref)
@@ -132,6 +144,7 @@ impl std::fmt::Debug for OciConfig {
             .field("iam_config_profile", &iam_config_profile)
             .field("token_env", &token_env)
             .field("token_file", &token_file)
+            .field("token_exec", &token_exec)
             .finish()
     }
 }
@@ -1407,6 +1420,7 @@ mod tests {
             iam_config_profile: None,
             token_env: None,
             token_file: None,
+            token_exec: None,
         });
         prof.proxy_auth = Some(ProxyAuthConfig {
             proxy_user: Some("MCP_PROXY".to_owned()),
@@ -1504,6 +1518,11 @@ mod tests {
             iam_config_profile: Some("private-oci-profile".to_owned()),
             token_env: Some("PRIVATE_TOKEN_ENV_VAR".to_owned()),
             token_file: Some("/private/token/path".to_owned()),
+            token_exec: Some(vec![
+                "/private/fetch-token".to_owned(),
+                "--profile".to_owned(),
+                "prod".to_owned(),
+            ]),
         });
         prof.proxy_auth = Some(ProxyAuthConfig {
             proxy_user: Some("private-proxy-user".to_owned()),
@@ -1546,6 +1565,7 @@ mod tests {
             "private-oci-profile",
             "PRIVATE_TOKEN_ENV_VAR",
             "/private/token/path",
+            "/private/fetch-token",
             "private-proxy-user",
             "private-target-schema",
             "private-drcp-class",
@@ -1619,6 +1639,7 @@ mod tests {
             iam_config_profile: None,
             token_env: None,
             token_file: None,
+            token_exec: None,
         });
         let mut child = p("dev");
         child.base = Some("shared".to_owned());
@@ -1655,6 +1676,7 @@ mod tests {
             use_iam_token = true
             token_env = "MY_IAM_TOKEN_VAR"
             token_file = "/etc/oracle/iam-token.jwt"
+            token_exec = ["/opt/oci/fetch-db-token", "--profile", "adb"]
             "#,
         )
         .expect("config parses");
@@ -1662,6 +1684,11 @@ mod tests {
         assert!(oci.use_iam_token);
         assert_eq!(oci.token_env.as_deref(), Some("MY_IAM_TOKEN_VAR"));
         assert_eq!(oci.token_file.as_deref(), Some("/etc/oracle/iam-token.jwt"));
+        // B2.2b: token_exec parses as an arg-array (argv[0]=program, rest=args).
+        assert_eq!(
+            oci.token_exec.as_deref(),
+            Some(&["/opt/oci/fetch-db-token", "--profile", "adb"].map(str::to_owned)[..])
+        );
 
         let rendered = format!("{oci:?}");
         assert!(
@@ -1672,8 +1699,13 @@ mod tests {
             !rendered.contains("/etc/oracle/iam-token.jwt"),
             "token_file ref leaked: {rendered}"
         );
+        assert!(
+            !rendered.contains("/opt/oci/fetch-db-token"),
+            "token_exec ref leaked: {rendered}"
+        );
         assert!(rendered.contains("token_env"));
         assert!(rendered.contains("token_file"));
+        assert!(rendered.contains("token_exec"));
         assert!(rendered.contains("<redacted>"));
     }
 

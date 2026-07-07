@@ -1,17 +1,41 @@
-//! Server-side OCI IAM database-token resolution (bead B2.2a): the two SIMPLE
-//! token sources — an **environment variable** and a **token file** — that feed
-//! a pre-fetched JWT database token into
+//! Server-side OCI IAM database-token resolution (beads B2.2a / B2.2b): the three
+//! server token sources — an **environment variable**, a **token file**, and a
+//! **command** (`token_exec`) — that feed a pre-fetched JWT database token into
 //! [`OracleConnectOptions::iam_token`](oraclemcp_db::OracleConnectOptions), which
 //! the B2 adapter then hands to the driver via `with_access_token` (TCPS-enforced;
 //! a token on a plaintext transport is refused).
 //!
 //! Discipline (mirrors [`oraclemcp_auth::secrets`]): a token is an **external
-//! ref**. This module holds only the *reference* (an env-var NAME or a file PATH)
-//! on its types; the token **value** is resolved transiently at connect time and
-//! is never persisted, rendered, logged, or placed in an error message. Both
-//! sources **re-resolve on every [`ServerIamTokenSource::get_token`]** so a
-//! rotated env/file is picked up without a restart. An empty or missing token is
-//! a typed, fail-closed error — never a silent empty token.
+//! ref**. This module holds only the *reference* (an env-var NAME, a file PATH, or
+//! a command **arg-array**) on its types; the token **value** is resolved
+//! transiently at connect time and is never persisted, rendered, logged, or placed
+//! in an error message. Every source **re-resolves on every
+//! [`ServerIamTokenSource::get_token`]** — the env/file is re-read and the command
+//! is re-run — so a rotated token is picked up without a restart. An empty,
+//! missing, or malformed token is a typed, fail-closed error — never a silent
+//! empty token.
+//!
+//! Source selection is **mutually exclusive** (bead B2.2b): at most one of
+//! `token_exec`, `token_file`, `token_env` may be configured; configuring more
+//! than one is a fail-closed [`IamTokenError::AmbiguousSource`], and none falls
+//! back to the built-in [`IAM_TOKEN_ENV`].
+//!
+//! ## `token_exec` hardening (SECURITY-CRITICAL — it spawns a subprocess)
+//!
+//! The command is an **arg-array** run directly via
+//! [`std::process::Command`] — `Command::new(argv[0]).args(argv[1..])`. There is
+//! **NO shell**: shell metacharacters (`;`, `$(…)`, backticks, `|`) in any element
+//! are inert literal argv, never interpreted. Every fetch is bounded and
+//! fail-closed:
+//! - a **5-second wall-clock timeout** ([`EXEC_TIMEOUT`]) that always fires — a
+//!   hung child is killed and reaped (no zombie);
+//! - stdout is read behind a **64 KiB cap** ([`EXEC_OUTPUT_CAP`]) — larger output
+//!   fails closed and is never buffered unbounded;
+//! - the trimmed token must match the **base64url/JWT charset** (`[A-Za-z0-9_.=-]`)
+//!   — null bytes, spaces, control chars, or invalid UTF-8 fail closed;
+//! - a **non-zero exit** or **empty stdout** fails closed;
+//! - every refusal is logged with its *reason* — never the token or the stdout
+//!   bytes.
 //!
 //! The richer proactive-refresh seam (`oraclemcp_db::IamTokenSource` /
 //! `ensure_fresh_token`, for a future OCI-SDK source) is unchanged; these simple
@@ -20,11 +44,24 @@
 //!
 //! [`with_access_token`]: https://docs.rs/oracledb
 
+use std::io::Read;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use oraclemcp_config::{ConnectionProfile, OciConfig};
 use oraclemcp_db::OracleConnectOptions;
 use thiserror::Error;
+use wait_timeout::ChildExt;
+
+/// Wall-clock deadline for a single `token_exec` fetch. A command still running at
+/// this point is killed and reaped, and the fetch fails closed — a hanging token
+/// fetcher can never wedge the connect path.
+pub const EXEC_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Hard cap on the bytes read from a `token_exec` command's stdout. Output beyond
+/// this fails closed rather than being buffered unbounded (a flood defense).
+pub const EXEC_OUTPUT_CAP: usize = 64 * 1024;
 
 /// The built-in environment variable checked for an IAM database token when a
 /// profile enables `use_iam_token` without naming its own `token_env`.
@@ -57,11 +94,44 @@ pub enum IamTokenError {
          string, a PROTOCOL=TCPS descriptor, or a wallet-backed TLS profile"
     )]
     NonTcpsTransport,
+    /// More than one of `token_env` / `token_file` / `token_exec` is configured.
+    /// The sources are mutually exclusive so an operator's intent is never
+    /// silently disambiguated — a profile with two sources fails closed.
+    #[error(
+        "ambiguous IAM token source: configure at most one of token_env, token_file, or token_exec"
+    )]
+    AmbiguousSource,
+    /// `token_exec` is configured but its arg-array is empty (no `argv[0]`).
+    #[error("IAM token_exec command is empty (argv[0] program is required)")]
+    ExecEmptyCommand,
+    /// The `token_exec` program could not be spawned (or could not be waited on).
+    /// Carries the program name (`argv[0]`) only — a config reference, never the
+    /// token.
+    #[error("IAM token_exec program `{0}` could not be spawned")]
+    ExecSpawnFailed(String),
+    /// The `token_exec` command did not exit within [`EXEC_TIMEOUT`]. It was killed
+    /// and reaped; the fetch fails closed. Carries the deadline (seconds) only.
+    #[error("IAM token_exec command timed out after {0}s and was killed")]
+    ExecTimedOut(u64),
+    /// The `token_exec` command exited with a non-zero status (or was terminated by
+    /// a signal — `None` code). Carries the exit code only, never any output.
+    #[error("IAM token_exec command exited with a non-zero status ({0:?})")]
+    ExecNonZeroExit(Option<i32>),
+    /// The `token_exec` command wrote more than [`EXEC_OUTPUT_CAP`] bytes to stdout.
+    /// We fail closed rather than buffer unbounded. No output bytes are carried.
+    #[error("IAM token_exec produced more than {EXEC_OUTPUT_CAP} bytes of output")]
+    ExecOutputTooLarge,
+    /// The `token_exec` output (after trimming) is not a valid base64url/JWT token
+    /// (`[A-Za-z0-9_.=-]`): it held control chars, whitespace, null bytes, or was
+    /// not valid UTF-8. No output bytes are carried.
+    #[error("IAM token_exec output is not a valid base64url token")]
+    ExecBadCharset,
 }
 
-/// A simple server-side IAM database-token source: an environment variable or a
-/// token file. Each variant holds only the *reference* — never the token value —
-/// and re-resolves on every [`Self::get_token`].
+/// A simple server-side IAM database-token source: an environment variable, a
+/// token file, or a command (`token_exec`). Each variant holds only the
+/// *reference* — never the token value — and re-resolves on every
+/// [`Self::get_token`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerIamTokenSource {
     /// Read the token from an environment variable. `None` uses the built-in
@@ -75,35 +145,69 @@ pub enum ServerIamTokenSource {
         /// The token file path.
         path: PathBuf,
     },
+    /// Run a command to fetch the token from its stdout, re-run on every fetch.
+    /// `argv[0]` is the program and the rest are literal arguments — it is run
+    /// **directly, never through a shell**, so shell metacharacters in any element
+    /// are inert literal data. The fetch is bounded by [`EXEC_TIMEOUT`] and
+    /// [`EXEC_OUTPUT_CAP`] and fails closed on timeout / non-zero exit / oversized
+    /// or non-base64url output.
+    Exec {
+        /// The command arg-array: `argv[0]` is the program, the rest are args.
+        argv: Vec<String>,
+    },
 }
 
 impl ServerIamTokenSource {
     /// The source implied by a profile's `[profiles.oci]` config, when
-    /// `use_iam_token` is set. Precedence: an explicit `token_file` wins, else a
-    /// `token_env`-named variable, else the built-in [`IAM_TOKEN_ENV`]. Returns
-    /// `None` when the profile does not use IAM-token auth.
-    #[must_use]
-    pub fn from_oci(oci: &OciConfig) -> Option<Self> {
+    /// `use_iam_token` is set. The three explicit sources — `token_exec`,
+    /// `token_file`, `token_env` — are **mutually exclusive**: configuring more
+    /// than one is a fail-closed [`IamTokenError::AmbiguousSource`] so an
+    /// operator's intent is never silently disambiguated. With exactly one
+    /// configured, that source is used; with none, the built-in [`IAM_TOKEN_ENV`]
+    /// variable is read. An empty ref (empty string / empty arg-array) counts as
+    /// unset, mirroring the env/file handling. Returns `Ok(None)` when the profile
+    /// does not use IAM-token auth.
+    pub fn from_oci(oci: &OciConfig) -> Result<Option<Self>, IamTokenError> {
         if !oci.use_iam_token {
-            return None;
+            return Ok(None);
         }
-        if let Some(path) = oci
+        // Gather the explicitly-configured sources; an empty ref is treated as
+        // unset (mirrors B2.2a's empty-string handling).
+        let exec = oci
+            .token_exec
+            .as_ref()
+            .filter(|argv| !argv.is_empty())
+            .map(|argv| ServerIamTokenSource::Exec { argv: argv.clone() });
+        let file = oci
             .token_file
             .as_deref()
             .map(str::trim)
             .filter(|p| !p.is_empty())
-        {
-            return Some(ServerIamTokenSource::File {
-                path: PathBuf::from(path),
+            .map(|p| ServerIamTokenSource::File {
+                path: PathBuf::from(p),
             });
-        }
-        let var = oci
+        let env = oci
             .token_env
             .as_deref()
             .map(str::trim)
             .filter(|v| !v.is_empty())
-            .map(ToOwned::to_owned);
-        Some(ServerIamTokenSource::Env { var })
+            .map(|v| ServerIamTokenSource::Env {
+                var: Some(v.to_owned()),
+            });
+
+        let mut configured = [exec, file, env].into_iter().flatten();
+        let first = configured.next();
+        if configured.next().is_some() {
+            // Two or more explicit sources: refuse rather than pick one.
+            tracing::warn!(
+                reason = "ambiguous-source",
+                "IAM token source resolution failed closed"
+            );
+            return Err(IamTokenError::AmbiguousSource);
+        }
+        Ok(Some(
+            first.unwrap_or(ServerIamTokenSource::Env { var: None }),
+        ))
     }
 
     /// Resolve the token now, reading the env/file **fresh** on every call so a
@@ -135,6 +239,11 @@ impl ServerIamTokenSource {
                     .map_err(|_| IamTokenError::FileUnreadable(path.display().to_string()))?;
                 non_empty(raw.trim(), "file")
             }
+            ServerIamTokenSource::Exec { argv } => {
+                // Re-run on every call: a fresh token is fetched from the command's
+                // stdout with no caching across calls.
+                run_token_exec(argv)
+            }
         }
     }
 }
@@ -145,6 +254,177 @@ fn non_empty(trimmed: &str, source: &'static str) -> Result<String, IamTokenErro
     } else {
         Ok(trimmed.to_owned())
     }
+}
+
+/// Whether `s` is a non-empty base64url/JWT token: every byte is in
+/// `[A-Za-z0-9_.=-]`. This rejects null bytes, spaces, control characters, and
+/// (because the caller checks UTF-8 first) any non-ASCII byte.
+fn is_base64url_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'='))
+}
+
+/// Read a child pipe with a hard [`EXEC_OUTPUT_CAP`] byte cap. Returns the first
+/// (up to) `EXEC_OUTPUT_CAP` bytes plus a `truncated` flag set when the child
+/// produced more. The reader keeps draining past the cap (discarding) so a child
+/// with a *finite* oversized output can still exit — it is never wedged on a full
+/// pipe — while the retained buffer is bounded, so memory can never grow
+/// unbounded even for an infinite producer.
+fn read_capped(mut reader: impl Read) -> (Vec<u8>, bool) {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut truncated = false;
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                if buffer.len() < EXEC_OUTPUT_CAP {
+                    let room = EXEC_OUTPUT_CAP - buffer.len();
+                    let take = room.min(n);
+                    buffer.extend_from_slice(&chunk[..take]);
+                    if take < n {
+                        truncated = true;
+                    }
+                } else {
+                    truncated = true;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    (buffer, truncated)
+}
+
+/// Run a `token_exec` arg-array and return the fetched token, fully hardened.
+///
+/// The command is spawned **directly** — `Command::new(argv[0]).args(argv[1..])`,
+/// no shell — so metacharacters in any element are literal argv. stdin is closed
+/// ([`Stdio::null`]) so a fetcher never blocks reading input. stdout is drained on
+/// a dedicated thread behind [`EXEC_OUTPUT_CAP`]; stderr is drained+discarded on
+/// its own thread so a chatty child cannot deadlock on a full stderr pipe. A
+/// [`EXEC_TIMEOUT`] wall-clock deadline always fires: a child still alive at the
+/// deadline is killed and reaped (no zombie) and the fetch fails closed. Every
+/// fail-closed path logs its *reason* without the token or the stdout bytes.
+///
+/// This runs in the **synchronous** connect path (`inject_iam_token` →
+/// `resolve_profile_options_with`), so it uses `std::thread` + `wait_timeout` and
+/// introduces **no** `block_on`, `tokio::spawn`, or async-runtime dependency — the
+/// concurrency-audit contract stays green (same idiom as `plugin.rs`).
+fn run_token_exec(argv: &[String]) -> Result<String, IamTokenError> {
+    let (program, args) = argv.split_first().ok_or(IamTokenError::ExecEmptyCommand)?;
+
+    // Arg-array spawn: NO shell. `program` + `args` are passed as literal argv, so
+    // `;`, `$(…)`, backticks, and `|` in any element are inert data, never
+    // interpreted. stdin is closed so the fetcher cannot hang waiting for input.
+    let mut child = match Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            tracing::warn!(reason = "spawn-failed", "IAM token_exec failed closed");
+            return Err(IamTokenError::ExecSpawnFailed(program.clone()));
+        }
+    };
+
+    // Drain stdout on its own thread (capped) and stderr on its own thread
+    // (discarded, capped) so neither pipe can fill and wedge us while we wait.
+    let stdout = child.stdout.take();
+    let stdout_reader = std::thread::spawn(move || {
+        stdout
+            .map(read_capped)
+            .unwrap_or_else(|| (Vec::new(), false))
+    });
+    let stderr = child.stderr.take();
+    let stderr_reader = std::thread::spawn(move || {
+        if let Some(err) = stderr {
+            // Bounded discard: keep draining until the child closes the pipe.
+            let _ = read_capped(err);
+        }
+    });
+
+    // Bounded wall-clock wait: a child still alive at the deadline is killed and
+    // reaped so it can neither wedge the connect path nor leak a zombie.
+    let status = match child.wait_timeout(EXEC_TIMEOUT) {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            let _ = child.kill();
+            // Reap the direct child so it does not become a zombie.
+            let _ = child.wait();
+            // Do NOT join the reader threads: a misbehaving fetcher can spawn a
+            // grandchild that inherits the pipe write ends, so a read may stay
+            // blocked long after we kill the direct child. Detaching is the point
+            // — the connect path must not block past the deadline; the threads
+            // finish on their own once those ends finally close.
+            drop(stdout_reader);
+            drop(stderr_reader);
+            tracing::warn!(
+                reason = "timeout",
+                secs = EXEC_TIMEOUT.as_secs(),
+                "IAM token_exec failed closed"
+            );
+            return Err(IamTokenError::ExecTimedOut(EXEC_TIMEOUT.as_secs()));
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            drop(stdout_reader);
+            drop(stderr_reader);
+            tracing::warn!(reason = "wait-failed", "IAM token_exec failed closed");
+            return Err(IamTokenError::ExecSpawnFailed(program.clone()));
+        }
+    };
+
+    // The child exited within the deadline; the reader threads observe EOF as its
+    // pipe ends close, so the joins return promptly.
+    let _ = stderr_reader.join();
+    let (stdout_bytes, truncated) = stdout_reader
+        .join()
+        // A panicked reader thread is fail-closed (treated as oversized output),
+        // never a leak and never a host panic.
+        .unwrap_or((Vec::new(), true));
+
+    // A non-zero exit (or signal termination) fails closed BEFORE we look at
+    // stdout — a token from a command that reported failure is never trusted.
+    if !status.success() {
+        tracing::warn!(
+            reason = "non-zero-exit",
+            code = ?status.code(),
+            "IAM token_exec failed closed"
+        );
+        return Err(IamTokenError::ExecNonZeroExit(status.code()));
+    }
+    if truncated {
+        tracing::warn!(
+            reason = "output-too-large",
+            cap = EXEC_OUTPUT_CAP,
+            "IAM token_exec failed closed"
+        );
+        return Err(IamTokenError::ExecOutputTooLarge);
+    }
+    // Reject non-UTF-8 output (null-byte-free base64url is ASCII); then trim and
+    // enforce the base64url/JWT charset. The output bytes are never logged.
+    let text = match std::str::from_utf8(&stdout_bytes) {
+        Ok(text) => text,
+        Err(_) => {
+            tracing::warn!(reason = "bad-charset-utf8", "IAM token_exec failed closed");
+            return Err(IamTokenError::ExecBadCharset);
+        }
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        tracing::warn!(reason = "empty", "IAM token_exec failed closed");
+        return Err(IamTokenError::Empty("exec"));
+    }
+    if !is_base64url_token(trimmed) {
+        tracing::warn!(reason = "bad-charset", "IAM token_exec failed closed");
+        return Err(IamTokenError::ExecBadCharset);
+    }
+    Ok(trimmed.to_owned())
 }
 
 /// Whether a profile's transport is provably TLS/TCPS *before* opening the
@@ -193,12 +473,20 @@ pub fn inject_iam_token_with(
     let Some(oci) = profile.oci.as_ref() else {
         return Ok(());
     };
-    let Some(source) = ServerIamTokenSource::from_oci(oci) else {
+    // Source selection (mutually exclusive; ambiguity fails closed) happens before
+    // any I/O — but it spawns nothing, so the TCPS gate below still runs before a
+    // token_exec command is ever executed.
+    let Some(source) = ServerIamTokenSource::from_oci(oci)? else {
         return Ok(());
     };
-    // Refuse a token on a non-TCPS transport BEFORE reading it: a database access
-    // token must never be exposed on a plaintext socket.
+    // Refuse a token on a non-TCPS transport BEFORE resolving it: a database access
+    // token must never be exposed on a plaintext socket, and a `token_exec` command
+    // must never even run on a non-TCPS profile.
     if !profile_transport_is_tcps(profile) {
+        tracing::warn!(
+            reason = "non-tcps",
+            "IAM token source refused (fail-closed)"
+        );
         return Err(IamTokenError::NonTcpsTransport);
     }
     let token = source.get_token_with(env_lookup)?;
@@ -378,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn from_oci_precedence_file_over_env_over_builtin() {
+    fn from_oci_sources_are_mutually_exclusive() {
         let mut oci = OciConfig {
             use_iam_token: true,
             ..OciConfig::default()
@@ -386,27 +674,56 @@ mod tests {
         // No refs -> built-in env.
         assert_eq!(
             ServerIamTokenSource::from_oci(&oci),
-            Some(ServerIamTokenSource::Env { var: None })
+            Ok(Some(ServerIamTokenSource::Env { var: None }))
         );
-        // token_env named -> that var.
+        // token_env alone -> that var.
         oci.token_env = Some("NAMED".to_owned());
         assert_eq!(
             ServerIamTokenSource::from_oci(&oci),
-            Some(ServerIamTokenSource::Env {
+            Ok(Some(ServerIamTokenSource::Env {
                 var: Some("NAMED".to_owned())
-            })
+            }))
         );
-        // token_file present -> file wins over env.
+        // token_file alone -> file source.
+        oci.token_env = None;
         oci.token_file = Some("/etc/iam.jwt".to_owned());
         assert_eq!(
             ServerIamTokenSource::from_oci(&oci),
-            Some(ServerIamTokenSource::File {
+            Ok(Some(ServerIamTokenSource::File {
                 path: PathBuf::from("/etc/iam.jwt")
-            })
+            }))
         );
-        // use_iam_token off -> no source.
+        // token_exec alone -> exec source (the arg-array is preserved verbatim).
+        oci.token_file = None;
+        oci.token_exec = Some(vec!["/usr/bin/fetch".to_owned(), "--adb".to_owned()]);
+        assert_eq!(
+            ServerIamTokenSource::from_oci(&oci),
+            Ok(Some(ServerIamTokenSource::Exec {
+                argv: vec!["/usr/bin/fetch".to_owned(), "--adb".to_owned()]
+            }))
+        );
+        // Empty arg-array counts as unset (mirrors empty-string handling) -> builtin.
+        oci.token_exec = Some(vec![]);
+        assert_eq!(
+            ServerIamTokenSource::from_oci(&oci),
+            Ok(Some(ServerIamTokenSource::Env { var: None }))
+        );
+        // Two explicit sources -> fail closed, never silently pick one.
+        oci.token_exec = Some(vec!["/usr/bin/fetch".to_owned()]);
+        oci.token_file = Some("/etc/iam.jwt".to_owned());
+        assert_eq!(
+            ServerIamTokenSource::from_oci(&oci),
+            Err(IamTokenError::AmbiguousSource)
+        );
+        // All three configured -> still ambiguous.
+        oci.token_env = Some("NAMED".to_owned());
+        assert_eq!(
+            ServerIamTokenSource::from_oci(&oci),
+            Err(IamTokenError::AmbiguousSource)
+        );
+        // use_iam_token off -> no source (ambiguity is not even evaluated).
         oci.use_iam_token = false;
-        assert_eq!(ServerIamTokenSource::from_oci(&oci), None);
+        assert_eq!(ServerIamTokenSource::from_oci(&oci), Ok(None));
     }
 
     #[test]
@@ -505,14 +822,370 @@ mod tests {
         let rendered_after = format!("{env_src:?}");
         assert!(!rendered_after.contains(SENTINEL));
 
-        // Every IamTokenError Display is token-free.
+        // Every IamTokenError Display is token-free — including the exec variants.
         for err in [
             IamTokenError::EnvMissing("SENTINEL_VAR".to_owned()),
             IamTokenError::FileUnreadable("/etc/oracle/iam.jwt".to_owned()),
             IamTokenError::Empty("env"),
+            IamTokenError::Empty("exec"),
             IamTokenError::NonTcpsTransport,
+            IamTokenError::AmbiguousSource,
+            IamTokenError::ExecEmptyCommand,
+            IamTokenError::ExecSpawnFailed("/usr/bin/fetch".to_owned()),
+            IamTokenError::ExecTimedOut(5),
+            IamTokenError::ExecNonZeroExit(Some(3)),
+            IamTokenError::ExecOutputTooLarge,
+            IamTokenError::ExecBadCharset,
         ] {
             assert!(!err.to_string().contains(SENTINEL), "{err}");
+        }
+    }
+
+    // ---- B2.2b: token_exec (subprocess) hardening -------------------------------
+    //
+    // These tests drive small hermetic coreutils via an **arg-array** (never a
+    // shell string): the token fetcher's whole surface is exercised without any
+    // external state. Each fail-closed path is proven to return a typed error and
+    // never panic or leak.
+
+    /// Resolve a coreutil to an absolute path so it is invoked as a literal argv[0]
+    /// (no PATH ambiguity, no shell). Fails the test loudly if the tool is absent.
+    fn coreutil(name: &str) -> String {
+        for dir in ["/usr/bin", "/bin"] {
+            let candidate = format!("{dir}/{name}");
+            if std::path::Path::new(&candidate).exists() {
+                return candidate;
+            }
+        }
+        panic!("hermetic test requires `{name}` (looked in /usr/bin and /bin)");
+    }
+
+    fn exec_src(argv: &[&str]) -> ServerIamTokenSource {
+        ServerIamTokenSource::Exec {
+            argv: argv.iter().map(|a| (*a).to_owned()).collect(),
+        }
+    }
+
+    /// A TCPS profile whose `[profiles.oci]` body is `oci_body` (raw TOML lines).
+    fn tcps_profile_with_oci(oci_body: &str) -> ConnectionProfile {
+        OracleMcpConfig::from_toml_str(&format!(
+            r#"
+            [[profiles]]
+            name = "cloud"
+            connect_string = "tcps://adb.example/svc"
+            username = "app"
+            [profiles.oci]
+            {oci_body}
+            "#
+        ))
+        .expect("config")
+        .profiles
+        .into_iter()
+        .next()
+        .expect("profile")
+    }
+
+    #[test]
+    fn exec_happy_path_returns_the_token_from_stdout() {
+        // A JWT-shaped, base64url-charset token on stdout (with a trailing newline
+        // that must be trimmed) resolves cleanly.
+        let printf = coreutil("printf");
+        let src = exec_src(&[&printf, "header.payload-part_0.sig=\n"]);
+        assert_eq!(
+            src.get_token().unwrap(),
+            "header.payload-part_0.sig=",
+            "trailing newline must be trimmed; base64url charset accepted"
+        );
+    }
+
+    #[test]
+    fn exec_empty_command_is_fail_closed() {
+        assert_eq!(
+            exec_src(&[]).get_token(),
+            Err(IamTokenError::ExecEmptyCommand)
+        );
+    }
+
+    #[test]
+    fn exec_missing_program_is_fail_closed_not_a_panic() {
+        let src = exec_src(&["/nonexistent/oraclemcp-token-fetcher-xyz"]);
+        assert!(matches!(
+            src.get_token(),
+            Err(IamTokenError::ExecSpawnFailed(_))
+        ));
+    }
+
+    #[test]
+    fn exec_non_zero_exit_is_fail_closed() {
+        let src = exec_src(&[&coreutil("false")]);
+        assert!(matches!(
+            src.get_token(),
+            Err(IamTokenError::ExecNonZeroExit(_))
+        ));
+    }
+
+    #[test]
+    fn exec_empty_stdout_is_fail_closed_not_a_silent_token() {
+        // Exit 0 with no output must NOT become a silent empty token.
+        let src = exec_src(&[&coreutil("true")]);
+        assert_eq!(src.get_token(), Err(IamTokenError::Empty("exec")));
+    }
+
+    #[test]
+    fn exec_output_over_64k_cap_is_fail_closed() {
+        // 128 KiB of finite output: the child exits (we keep draining), and the
+        // cap fires -> ExecOutputTooLarge, never an unbounded buffer.
+        let src = exec_src(&[&coreutil("head"), "-c", "131072", "/dev/zero"]);
+        assert_eq!(src.get_token(), Err(IamTokenError::ExecOutputTooLarge));
+    }
+
+    #[test]
+    fn exec_null_bytes_are_fail_closed_bad_charset() {
+        // NUL bytes are valid UTF-8 but not base64url -> rejected.
+        let src = exec_src(&[&coreutil("head"), "-c", "8", "/dev/zero"]);
+        assert_eq!(src.get_token(), Err(IamTokenError::ExecBadCharset));
+    }
+
+    #[test]
+    fn exec_invalid_utf8_is_fail_closed_bad_charset() {
+        // printf octal \377 emits a raw 0xFF byte -> not valid UTF-8 -> rejected.
+        let src = exec_src(&[&coreutil("printf"), "\\377"]);
+        assert_eq!(src.get_token(), Err(IamTokenError::ExecBadCharset));
+    }
+
+    #[test]
+    fn exec_spaces_and_control_chars_are_fail_closed_bad_charset() {
+        // Internal whitespace / injection punctuation is outside base64url.
+        let src = exec_src(&[&coreutil("printf"), "%s", "tok tok"]);
+        assert_eq!(src.get_token(), Err(IamTokenError::ExecBadCharset));
+    }
+
+    #[test]
+    fn exec_hanging_child_hits_the_5s_timeout_and_is_killed() {
+        // The 5s wall-clock deadline ALWAYS fires: a `sleep 30` child is killed
+        // and reaped, and the fetch fails closed within ~5s (never blocks 30s).
+        // This test is expected to take ~5 seconds.
+        let src = exec_src(&[&coreutil("sleep"), "30"]);
+        let start = std::time::Instant::now();
+        let err = src.get_token().expect_err("must time out, not hang");
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(err, IamTokenError::ExecTimedOut(_)),
+            "expected a timeout error, got {err:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(4) && elapsed < Duration::from_secs(15),
+            "must return at the ~5s deadline, not block for the full sleep (elapsed {elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn exec_arg_array_never_invokes_a_shell_metachars_are_literal() {
+        // THE arg-array proof: shell metacharacters (`;`, `$(…)`, backticks, `|`,
+        // `&&`) live in a single argv element. If ANY shell interpreted them, the
+        // embedded `touch <marker>` would create the marker file. Because we spawn
+        // the program directly (no shell), the whole string is inert literal argv:
+        // printf echoes it, no file is ever created.
+        let marker = std::env::temp_dir().join(format!(
+            "oraclemcp-iam-exec-injection-canary-{}-{:?}.marker",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let marker_str = marker.display().to_string();
+        let injection = format!(
+            "x;touch {m}|touch {m}&&touch {m};$(touch {m});`touch {m}`",
+            m = marker_str
+        );
+        let printf = coreutil("printf");
+        let src = exec_src(&[&printf, "%s", &injection]);
+
+        // The output holds `;`, ` `, `$`, `(`, backticks, `|` -> not base64url, so
+        // the token fails closed on charset (which also confirms the metachars
+        // reached stdout as LITERAL data rather than being executed by a shell).
+        assert_eq!(src.get_token(), Err(IamTokenError::ExecBadCharset));
+        // The decisive proof: NO shell ran, so the injected `touch` never happened.
+        assert!(
+            !marker.exists(),
+            "shell metacharacters were interpreted — marker file was created (injection!)"
+        );
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn exec_never_leaks_the_token_or_stdout_bytes() {
+        // Adversarial non-leak for the exec path: a sentinel token is produced on
+        // the command's STDOUT (as a real fetcher would — the token is the output,
+        // never in the argv). The successful resolution returns it (caller holds it
+        // transiently), but the source Debug and every error Display stay
+        // token-free, and nothing is cached on the source.
+        const SENTINEL: &str = "SECRETJWTSENTINEL"; // base64url-clean so it resolves
+        let token = format!("{SENTINEL}.payload.sig");
+        let token_file = std::env::temp_dir().join(format!(
+            "oraclemcp-iam-exec-leak-{}-{:?}.jwt",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&token_file, &token).expect("write token file");
+        // argv holds only the program + the file PATH — never the token value.
+        let cat = coreutil("cat");
+        let src = exec_src(&[&cat, &token_file.display().to_string()]);
+
+        // Source Debug renders the command + path (config refs), never the token.
+        assert!(
+            !format!("{src:?}").contains(SENTINEL),
+            "source Debug leaked the token"
+        );
+
+        let resolved = src.get_token().expect("resolve");
+        assert!(resolved.contains(SENTINEL)); // transient, held only by the caller
+        assert!(
+            !format!("{src:?}").contains(SENTINEL),
+            "source still holds no token after resolution"
+        );
+        let _ = std::fs::remove_file(&token_file);
+    }
+
+    #[test]
+    fn inject_exec_over_tcps_sets_the_token() {
+        let printf = coreutil("printf");
+        let profile = tcps_profile_with_oci(&format!(
+            r#"
+            use_iam_token = true
+            token_exec = ["{printf}", "resolved.exec.jwt"]
+            "#
+        ));
+        let mut opts = OracleConnectOptions::default();
+        inject_iam_token_with(&profile, &mut opts, env_map(&[])).expect("inject over tcps");
+        assert_eq!(opts.iam_token.as_deref(), Some("resolved.exec.jwt"));
+    }
+
+    #[test]
+    fn inject_exec_on_non_tcps_refuses_and_never_spawns() {
+        // A token_exec on a plaintext transport must be refused BEFORE the command
+        // runs. The canary command would create a marker file if it were ever
+        // spawned; it must not be.
+        let marker = std::env::temp_dir().join(format!(
+            "oraclemcp-iam-exec-nontcps-canary-{}.marker",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let touch = coreutil("touch");
+        let profile = OracleMcpConfig::from_toml_str(&format!(
+            r#"
+            [[profiles]]
+            name = "plain"
+            connect_string = "localhost:1521/FREEPDB1"
+            username = "app"
+            [profiles.oci]
+            use_iam_token = true
+            token_exec = ["{touch}", "{marker}"]
+            "#,
+            touch = touch,
+            marker = marker.display()
+        ))
+        .expect("config")
+        .profiles
+        .into_iter()
+        .next()
+        .expect("profile");
+        let mut opts = OracleConnectOptions::default();
+        let err =
+            inject_iam_token_with(&profile, &mut opts, env_map(&[])).expect_err("non-tcps refused");
+        assert_eq!(err, IamTokenError::NonTcpsTransport);
+        assert!(opts.iam_token.is_none());
+        // Give any (erroneously) spawned child a beat, then prove it never ran.
+        assert!(
+            !marker.exists(),
+            "token_exec must NOT run on a non-TCPS transport, but it did"
+        );
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn inject_ambiguous_source_is_fail_closed() {
+        let profile = tcps_profile_with_oci(
+            r#"
+            use_iam_token = true
+            token_file = "/etc/iam.jwt"
+            token_exec = ["/usr/bin/fetch"]
+            "#,
+        );
+        let mut opts = OracleConnectOptions::default();
+        let err = inject_iam_token_with(&profile, &mut opts, env_map(&[]))
+            .expect_err("ambiguous source refused");
+        assert_eq!(err, IamTokenError::AmbiguousSource);
+        assert!(opts.iam_token.is_none());
+    }
+
+    /// EXEC-FUZZ corpus: every adversarial `token_exec` case MUST fail closed —
+    /// never panic, never leak, never yield a token. Live cases use hermetic
+    /// coreutils driven purely as arg-arrays.
+    #[test]
+    fn exec_fuzz_corpus_all_fail_closed() {
+        let printf = coreutil("printf");
+        let head = coreutil("head");
+        let false_ = coreutil("false");
+        let true_ = coreutil("true");
+
+        // (argv, human label). Every one must return Err from get_token.
+        let corpus: Vec<(Vec<String>, &str)> = vec![
+            (vec![], "empty command"),
+            (
+                vec!["/nonexistent/fetcher-xyz".to_owned()],
+                "unspawnable program",
+            ),
+            (vec![false_.clone()], "non-zero exit"),
+            (vec![true_.clone()], "empty stdout"),
+            (vec![printf.clone(), "".to_owned()], "explicit empty output"),
+            (
+                vec![
+                    head.clone(),
+                    "-c".to_owned(),
+                    "8".to_owned(),
+                    "/dev/zero".to_owned(),
+                ],
+                "null bytes",
+            ),
+            (
+                vec![
+                    head.clone(),
+                    "-c".to_owned(),
+                    "131072".to_owned(),
+                    "/dev/zero".to_owned(),
+                ],
+                "over 64k output",
+            ),
+            (
+                vec![printf.clone(), "\\377".to_owned()],
+                "invalid utf-8 (0xFF)",
+            ),
+            (
+                vec![printf.clone(), "%s".to_owned(), "bad base64 !!!".to_owned()],
+                "bad base64 / spaces",
+            ),
+            (
+                vec![printf.clone(), "%s".to_owned(), "tok; rm -rf /".to_owned()],
+                "injection string in output",
+            ),
+            (
+                vec![printf.clone(), "%s".to_owned(), "$(whoami)".to_owned()],
+                "command-substitution literal",
+            ),
+            (
+                vec![printf.clone(), "%s".to_owned(), "a|b`c`".to_owned()],
+                "pipe + backticks literal",
+            ),
+        ];
+
+        for (argv, label) in corpus {
+            let src = ServerIamTokenSource::Exec { argv };
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| src.get_token()));
+            let result = result.unwrap_or_else(|_| panic!("get_token PANICKED for case: {label}"));
+            assert!(
+                result.is_err(),
+                "corpus case must fail closed but yielded a token: {label}"
+            );
         }
     }
 }
