@@ -963,26 +963,29 @@ function SessionLevelControlPanel({
   onAction: (action: SessionLevelControlAction) => void;
 }): React.ReactElement {
   const summary = result?.state === "ok" ? sessionLevelSummary(result.response) : null;
+  const inputClass =
+    "h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 text-sm text-[var(--om-text)] outline-none focus:border-[var(--om-gold)] focus:ring-2 focus:ring-[color-mix(in_srgb,var(--om-gold)_35%,transparent)]";
+  const labelClass = "mb-2 block text-sm font-semibold text-[var(--om-text)]";
   return (
-    <Surface className="overflow-hidden">
-      <PanelHeader
+    <ConsolePanel>
+      <ConsolePanelHeader
         icon={ShieldCheck}
-        title="Operating Level"
+        title="Guarded Action"
         meta={selectedLane?.lane_id ?? "no lane"}
         tone={pending ? "info" : selectedLane ? sessionTone : "off"}
       />
       <div className="space-y-4 p-4">
         <div className="grid gap-3 sm:grid-cols-2">
-          <CapacityFact label="Lane" value={selectedLane?.lane_id ?? "none"} mono />
-          <CapacityFact label="Generation" value={selectedLane?.generation ?? 0} />
-          <CapacityFact label="Current" value={summary?.currentLevel ?? "unknown"} mono />
-          <CapacityFact label="Ceiling" value={summary?.profileCeiling ?? "unknown"} mono />
+          <ConsoleFact label="Lane" value={selectedLane?.lane_id ?? "none"} mono />
+          <ConsoleFact label="Generation" value={selectedLane?.generation ?? 0} />
+          <ConsoleFact label="Current" value={summary?.currentLevel ?? "unknown"} mono />
+          <ConsoleFact label="Ceiling" value={summary?.profileCeiling ?? "unknown"} mono />
         </div>
         <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_140px]">
           <label className="block">
-            <span className="mb-2 block text-sm font-bold text-zinc-700">Target</span>
+            <span className={labelClass}>Target</span>
             <select
-              className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+              className={inputClass}
               value={targetLevel}
               onChange={(event) => onLevelChange(event.target.value as OperatingLevel)}
             >
@@ -994,9 +997,9 @@ function SessionLevelControlPanel({
             </select>
           </label>
           <label className="block">
-            <span className="mb-2 block text-sm font-bold text-zinc-700">TTL</span>
+            <span className={labelClass}>TTL</span>
             <input
-              className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+              className={inputClass}
               type="number"
               min={1}
               max={3600}
@@ -1006,9 +1009,9 @@ function SessionLevelControlPanel({
           </label>
         </div>
         <label className="block">
-          <span className="mb-2 block text-sm font-bold text-zinc-700">Confirm</span>
+          <span className={labelClass}>Confirm</span>
           <input
-            className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+            className={cn(inputClass, "font-mono")}
             value={confirm}
             onChange={(event) => onConfirmChange(event.target.value)}
             placeholder="preview grant"
@@ -1033,14 +1036,72 @@ function SessionLevelControlPanel({
             Drop
           </Button>
         </div>
+        {summary ? <ElevationCountdown summary={summary} /> : null}
         {summary ? <SessionLevelSummaryPanel summary={summary} /> : null}
         {result?.state === "error" ? (
-          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+          <div className="rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_12%,transparent)] p-3 text-sm font-semibold text-[var(--om-copper)]">
             {result.message}
           </div>
         ) : null}
       </div>
-    </Surface>
+    </ConsolePanel>
+  );
+}
+
+// Client-side elevation countdown: a successful non-preview grant with a TTL
+// opens a bounded window; we anchor its expiry at the moment the applied result
+// lands and tick it down once a second. When it lapses the panel reads HOLD FOR
+// GO — the grant is single-use/TTL-bounded and the server re-classifies at
+// apply (SEC-1), so a lapsed client clock never implies retained authority.
+function ElevationCountdown({ summary }: { summary: SessionLevelSummary }): React.ReactElement | null {
+  const ttl = Number.parseInt(summary.ttlSeconds, 10);
+  const applied =
+    summary.preview === "false" && summary.action !== "drop" && Number.isFinite(ttl) && ttl > 0;
+  const signature = `${summary.action}:${summary.confirm}:${summary.ttlSeconds}:${summary.targetLevel}`;
+  const [expiryMs, setExpiryMs] = React.useState<number | null>(null);
+  const [now, setNow] = React.useState<number>(() => Date.now());
+  React.useEffect(() => {
+    setExpiryMs(applied ? Date.now() + ttl * 1_000 : null);
+  }, [signature, applied, ttl]);
+  React.useEffect(() => {
+    if (expiryMs === null) {
+      return;
+    }
+    const id = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(id);
+  }, [expiryMs]);
+  if (!applied || expiryMs === null) {
+    return null;
+  }
+  const remainingSec = Math.max(0, Math.ceil((expiryMs - now) / 1_000));
+  const live = remainingSec > 0;
+  const minutes = Math.floor(remainingSec / 60);
+  const seconds = remainingSec % 60;
+  return (
+    <div
+      className={cn(
+        "flex items-center justify-between gap-3 rounded-md border px-3 py-2",
+        live
+          ? "border-[color-mix(in_srgb,var(--om-gold)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-gold)_12%,transparent)]"
+          : "border-[color-mix(in_srgb,var(--om-rust)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-rust)_12%,transparent)]"
+      )}
+      data-elevation-live={live}
+    >
+      <div className="flex items-center gap-2">
+        <Timer className="size-4 text-[var(--om-text-muted)]" aria-hidden="true" />
+        <span className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+          {live ? "Elevation window" : "Window closed"}
+        </span>
+      </div>
+      <span
+        className={cn(
+          "font-mono text-sm font-bold tabular-nums",
+          live ? "text-[var(--om-gold)]" : "text-[var(--om-rust)]"
+        )}
+      >
+        {live ? `${minutes}:${String(seconds).padStart(2, "0")}` : "HOLD FOR GO"}
+      </span>
+    </div>
   );
 }
 
@@ -1062,12 +1123,12 @@ function SessionLevelSummaryPanel({
 }): React.ReactElement {
   return (
     <div className="grid gap-2 sm:grid-cols-2">
-      <CapacityFact label="Action" value={summary.action} mono />
-      <CapacityFact label="Preview" value={summary.preview} mono />
-      <CapacityFact label="Target" value={summary.targetLevel} mono />
-      <CapacityFact label="TTL" value={summary.ttlSeconds} mono />
-      <CapacityFact label="Gate" value={summary.gateDecision} mono />
-      <CapacityFact label="Confirm" value={summary.confirm} mono />
+      <ConsoleFact label="Action" value={summary.action} mono />
+      <ConsoleFact label="Preview" value={summary.preview} mono />
+      <ConsoleFact label="Target" value={summary.targetLevel} mono />
+      <ConsoleFact label="TTL" value={summary.ttlSeconds} mono />
+      <ConsoleFact label="Gate" value={summary.gateDecision} mono />
+      <ConsoleFact label="Confirm" value={summary.confirm} mono />
     </div>
   );
 }
