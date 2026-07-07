@@ -4119,12 +4119,12 @@ function ExplorerPage(): React.ReactElement {
       description="Schema and object metadata through the guarded dictionary tools and bounded browser metadata cache."
     >
       <div className="space-y-4">
-        <Surface className="p-4">
+        <ConsolePanel className="p-4">
           <div className="grid gap-3 xl:grid-cols-[minmax(180px,0.9fr)_minmax(140px,0.7fr)_minmax(140px,0.7fr)_minmax(140px,0.7fr)_minmax(140px,0.7fr)_110px_auto] xl:items-end">
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Lane</span>
+              <span className={OM_LABEL}>Lane</span>
               <input
-                className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className={cn(OM_INPUT, "font-mono")}
                 value={laneId}
                 onChange={(event) => setLaneId(event.target.value)}
                 list="explorer-lanes"
@@ -4137,18 +4137,18 @@ function ExplorerPage(): React.ReactElement {
               </datalist>
             </label>
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Schema Filter</span>
+              <span className={OM_LABEL}>Schema Filter</span>
               <input
-                className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className={cn(OM_INPUT, "font-mono")}
                 value={schemaFilter}
                 onChange={(event) => setSchemaFilter(event.target.value)}
                 placeholder="APP%"
               />
             </label>
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Schema</span>
+              <span className={OM_LABEL}>Schema</span>
               <select
-                className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className={OM_INPUT}
                 value={owner}
                 onChange={(event) => setOwner(event.target.value)}
               >
@@ -4162,9 +4162,9 @@ function ExplorerPage(): React.ReactElement {
               </select>
             </label>
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Type</span>
+              <span className={OM_LABEL}>Type</span>
               <select
-                className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className={OM_INPUT}
                 value={objectType}
                 onChange={(event) => setObjectType(event.target.value)}
               >
@@ -4176,18 +4176,18 @@ function ExplorerPage(): React.ReactElement {
               </select>
             </label>
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Name Like</span>
+              <span className={OM_LABEL}>Name Like</span>
               <input
-                className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className={cn(OM_INPUT, "font-mono")}
                 value={nameLike}
                 onChange={(event) => setNameLike(event.target.value)}
                 placeholder="CUSTOMER%"
               />
             </label>
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Rows</span>
+              <span className={OM_LABEL}>Rows</span>
               <input
-                className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className={OM_INPUT}
                 min={1}
                 max={5000}
                 type="number"
@@ -4220,16 +4220,16 @@ function ExplorerPage(): React.ReactElement {
             <Badge tone={cacheStatusTone(objectsQuery.data?.status ?? schemasQuery.data?.status)}>
               {objectsQuery.data?.status ?? schemasQuery.data?.status ?? "cold"}
             </Badge>
-            <span className="font-mono text-xs font-semibold text-zinc-500">
+            <span className="font-mono text-xs font-semibold text-[var(--om-text-muted)]">
               {cacheSummary.entries} entries · {formatBytes(cacheSummary.bytes)}
             </span>
           </div>
           {connection.error instanceof Error ? (
-            <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+            <p className="mt-3 rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_12%,transparent)] p-3 text-sm font-semibold text-[var(--om-copper)]">
               {connection.error.message}
             </p>
           ) : null}
-        </Surface>
+        </ConsolePanel>
 
         <ExplorerGlobalSearchPanel
           searchText={globalSearchText}
@@ -4353,8 +4353,8 @@ function ExplorerGlobalSearchPanel({
   const sourceCache = sourceCacheStatus ?? "cold";
 
   return (
-    <Surface className="overflow-hidden">
-      <PanelHeader
+    <ConsolePanel>
+      <ConsolePanelHeader
         icon={Search}
         title="Global Search"
         meta={pending ? "sync" : request ? `${totalHits} hits` : "idle"}
@@ -4363,9 +4363,9 @@ function ExplorerGlobalSearchPanel({
       <div className="space-y-4 p-4">
         <div className="grid gap-3 xl:grid-cols-[minmax(260px,1fr)_180px_auto] xl:items-end">
           <label className="block">
-            <span className="mb-2 block text-sm font-bold text-zinc-700">Needle</span>
+            <span className={OM_LABEL}>Needle</span>
             <input
-              className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+              className={cn(OM_INPUT, "font-mono")}
               value={searchText}
               onChange={(event) => onSearchTextChange(event.target.value)}
               onKeyDown={(event) => {
@@ -4377,9 +4377,9 @@ function ExplorerGlobalSearchPanel({
             />
           </label>
           <label className="block">
-            <span className="mb-2 block text-sm font-bold text-zinc-700">Source Type</span>
+            <span className={OM_LABEL}>Source Type</span>
             <select
-              className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200 disabled:bg-zinc-100 disabled:text-zinc-500"
+              className={cn(OM_INPUT, "disabled:opacity-50")}
               value={sourceType}
               disabled={!includeSource}
               onChange={(event) => onSourceTypeChange(event.target.value)}
@@ -4397,27 +4397,27 @@ function ExplorerGlobalSearchPanel({
           </Button>
         </div>
         <div className="flex flex-wrap items-center gap-4">
-          <label className="flex min-h-9 items-center gap-2 text-sm font-semibold text-zinc-700">
+          <label className={OM_CHECK_LABEL}>
             <input
-              className="size-4 rounded border-zinc-300 text-emerald-700 focus:ring-emerald-600"
+              className={OM_CHECKBOX}
               type="checkbox"
               checked={includeObjects}
               onChange={(event) => onIncludeObjectsChange(event.target.checked)}
             />
             Objects
           </label>
-          <label className="flex min-h-9 items-center gap-2 text-sm font-semibold text-zinc-700">
+          <label className={OM_CHECK_LABEL}>
             <input
-              className="size-4 rounded border-zinc-300 text-emerald-700 focus:ring-emerald-600"
+              className={OM_CHECKBOX}
               type="checkbox"
               checked={includeSource}
               onChange={(event) => onIncludeSourceChange(event.target.checked)}
             />
             Source
           </label>
-          <label className="flex min-h-9 items-center gap-2 text-sm font-semibold text-zinc-700">
+          <label className={OM_CHECK_LABEL}>
             <input
-              className="size-4 rounded border-zinc-300 text-emerald-700 focus:ring-emerald-600"
+              className={OM_CHECKBOX}
               type="checkbox"
               checked={allSchemas}
               onChange={(event) => onAllSchemasChange(event.target.checked)}
@@ -4430,60 +4430,68 @@ function ExplorerGlobalSearchPanel({
         {objectError ? <ErrorNotice message={objectError} /> : null}
         {sourceError ? <ErrorNotice message={sourceError} /> : null}
         <div className="grid gap-4 xl:grid-cols-2">
-          <div className="overflow-hidden rounded-md border border-zinc-200">
-            <div className="flex items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-50 px-3 py-2">
-              <span className="text-xs font-bold uppercase text-zinc-500">Object Matches</span>
+          <div className="overflow-hidden rounded-md border border-[var(--om-border)]">
+            <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 py-2">
+              <span className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+                Object Matches
+              </span>
               <Badge tone={includeObjects ? "ok" : "off"}>{objectRows.length}</Badge>
             </div>
             <div className="max-h-[360px] overflow-auto">
               {objectRows.length === 0 ? (
-                <p className="px-3 py-6 text-sm font-semibold text-zinc-500">No objects</p>
+                <p className="px-3 py-6 text-sm font-semibold text-[var(--om-text-muted)]">
+                  No objects
+                </p>
               ) : (
                 objectRows.map((row) => (
                   <button
                     key={objectRefKey(rowRef(row))}
                     type="button"
-                    className="block w-full border-b border-zinc-100 px-3 py-3 text-left hover:bg-zinc-50"
+                    className="block w-full border-b border-[var(--om-border)] px-3 py-3 text-left hover:bg-[var(--om-surface-muted)]"
                     onClick={() => onSelectObject(row)}
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="min-w-0 truncate font-mono text-sm font-semibold text-zinc-950">
+                      <span className="min-w-0 truncate font-mono text-sm font-semibold text-[var(--om-text-bright)]">
                         {row.objectName}
                       </span>
                       <Badge tone="neutral">{row.objectType}</Badge>
                     </div>
-                    <p className="mt-1 font-mono text-xs text-zinc-500">{row.owner}</p>
+                    <p className="mt-1 font-mono text-xs text-[var(--om-text-muted)]">{row.owner}</p>
                   </button>
                 ))
               )}
             </div>
           </div>
-          <div className="overflow-hidden rounded-md border border-zinc-200">
-            <div className="flex items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-50 px-3 py-2">
-              <span className="text-xs font-bold uppercase text-zinc-500">Source Matches</span>
+          <div className="overflow-hidden rounded-md border border-[var(--om-border)]">
+            <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 py-2">
+              <span className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+                Source Matches
+              </span>
               <Badge tone={includeSource ? "ok" : "off"}>{sourceRows.length}</Badge>
             </div>
             <div className="max-h-[360px] overflow-auto">
               {sourceRows.length === 0 ? (
-                <p className="px-3 py-6 text-sm font-semibold text-zinc-500">No source hits</p>
+                <p className="px-3 py-6 text-sm font-semibold text-[var(--om-text-muted)]">
+                  No source hits
+                </p>
               ) : (
                 sourceRows.map((row) => (
                   <button
                     key={`${row.owner}.${row.name}:${row.objectType}:${row.line}`}
                     type="button"
-                    className="block w-full border-b border-zinc-100 px-3 py-3 text-left hover:bg-zinc-50"
+                    className="block w-full border-b border-[var(--om-border)] px-3 py-3 text-left hover:bg-[var(--om-surface-muted)]"
                     onClick={() => onSelectSource(row)}
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="min-w-0 truncate font-mono text-sm font-semibold text-zinc-950">
+                      <span className="min-w-0 truncate font-mono text-sm font-semibold text-[var(--om-text-bright)]">
                         {row.name}
                       </span>
-                      <span className="font-mono text-xs font-semibold text-zinc-500">
+                      <span className="font-mono text-xs font-semibold text-[var(--om-text-muted)]">
                         {row.objectType}:{row.line}
                       </span>
                     </div>
-                    <p className="mt-1 font-mono text-xs text-zinc-500">{row.owner}</p>
-                    <p className="mt-2 line-clamp-2 text-sm text-zinc-700">{row.text}</p>
+                    <p className="mt-1 font-mono text-xs text-[var(--om-text-muted)]">{row.owner}</p>
+                    <p className="mt-2 line-clamp-2 text-sm text-[var(--om-text)]">{row.text}</p>
                   </button>
                 ))
               )}
@@ -4491,7 +4499,7 @@ function ExplorerGlobalSearchPanel({
           </div>
         </div>
       </div>
-    </Surface>
+    </ConsolePanel>
   );
 }
 
@@ -4509,17 +4517,19 @@ function ExplorerSchemasPanel({
   onSelect: (owner: string) => void;
 }): React.ReactElement {
   return (
-    <Surface className="overflow-hidden">
-      <PanelHeader
+    <ConsolePanel>
+      <ConsolePanelHeader
         icon={Database}
         title="Schemas"
         meta={pending ? "sync" : `${rows.length} visible`}
         tone={pending ? "info" : rows.length > 0 ? "ok" : "off"}
       />
       {error ? <ErrorNotice message={error} /> : null}
-      <div className="max-h-[520px] divide-y divide-zinc-100 overflow-auto">
+      <div className="max-h-[520px] divide-y divide-[var(--om-border)] overflow-auto">
         {rows.length === 0 ? (
-          <p className="px-4 py-8 text-center text-sm font-semibold text-zinc-500">No schemas</p>
+          <p className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]">
+            No schemas
+          </p>
         ) : (
           rows.map((row) => {
             const selected = selectedOwner === row.schemaName;
@@ -4528,15 +4538,17 @@ function ExplorerSchemasPanel({
                 key={row.schemaName}
                 type="button"
                 className={cn(
-                  "grid w-full grid-cols-[minmax(0,1fr)_80px] gap-3 px-4 py-3 text-left hover:bg-zinc-50",
-                  selected ? "bg-emerald-50" : "bg-white"
+                  "grid w-full grid-cols-[minmax(0,1fr)_80px] gap-3 px-4 py-3 text-left hover:bg-[var(--om-surface-muted)]",
+                  selected
+                    ? "bg-[color-mix(in_srgb,var(--om-gold)_12%,transparent)]"
+                    : "bg-transparent"
                 )}
                 onClick={() => onSelect(row.schemaName)}
               >
-                <span className="truncate font-mono text-sm font-semibold text-zinc-950">
+                <span className="truncate font-mono text-sm font-semibold text-[var(--om-text-bright)]">
                   {row.schemaName}
                 </span>
-                <span className="text-right font-mono text-sm text-zinc-700">
+                <span className="text-right font-mono text-sm text-[var(--om-text)]">
                   {row.objectCount}
                 </span>
               </button>
@@ -4544,7 +4556,7 @@ function ExplorerSchemasPanel({
           })
         )}
       </div>
-    </Surface>
+    </ConsolePanel>
   );
 }
 
@@ -4562,8 +4574,8 @@ function ExplorerObjectsPanel({
   onSelect: (row: ExplorerObjectRow) => void;
 }): React.ReactElement {
   return (
-    <Surface className="overflow-hidden">
-      <PanelHeader
+    <ConsolePanel>
+      <ConsolePanelHeader
         icon={Search}
         title="Objects"
         meta={pending ? "sync" : `${rows.length} objects`}
@@ -4572,21 +4584,24 @@ function ExplorerObjectsPanel({
       {error ? <ErrorNotice message={error} /> : null}
       <div className="overflow-x-auto">
         <table className="w-full min-w-[980px] border-collapse text-left">
-          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+          <thead className="bg-[var(--om-surface-muted)] text-2xs uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
             <tr>
-              <th className="px-4 py-3 font-bold">Object</th>
-              <th className="px-4 py-3 font-bold">Type</th>
-              <th className="px-4 py-3 font-bold">Status</th>
-              <th className="px-4 py-3 font-bold">Rows</th>
-              <th className="px-4 py-3 font-bold">Columns</th>
-              <th className="px-4 py-3 font-bold">Analyzed</th>
-              <th className="px-4 py-3 font-bold">Comment</th>
+              <th className="px-4 py-3 font-semibold">Object</th>
+              <th className="px-4 py-3 font-semibold">Type</th>
+              <th className="px-4 py-3 font-semibold">Status</th>
+              <th className="px-4 py-3 font-semibold">Rows</th>
+              <th className="px-4 py-3 font-semibold">Columns</th>
+              <th className="px-4 py-3 font-semibold">Analyzed</th>
+              <th className="px-4 py-3 font-semibold">Comment</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-zinc-100">
+          <tbody className="divide-y divide-[var(--om-border)]">
             {rows.length === 0 ? (
               <tr>
-                <td className="px-4 py-8 text-center text-sm font-semibold text-zinc-500" colSpan={7}>
+                <td
+                  className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]"
+                  colSpan={7}
+                >
                   No objects
                 </td>
               </tr>
@@ -4597,14 +4612,21 @@ function ExplorerObjectsPanel({
                 return (
                   <tr
                     key={objectRefKey(ref)}
-                    className={cn("cursor-pointer", selected ? "bg-emerald-50" : "bg-white")}
+                    className={cn(
+                      "cursor-pointer",
+                      selected
+                        ? "bg-[color-mix(in_srgb,var(--om-gold)_12%,transparent)]"
+                        : "bg-transparent"
+                    )}
                     onClick={() => onSelect(row)}
                   >
                     <td className="px-4 py-4 align-top">
-                      <p className="font-mono text-sm font-semibold text-zinc-950">{row.objectName}</p>
-                      <p className="mt-1 font-mono text-xs text-zinc-500">{row.owner}</p>
+                      <p className="font-mono text-sm font-semibold text-[var(--om-text-bright)]">
+                        {row.objectName}
+                      </p>
+                      <p className="mt-1 font-mono text-xs text-[var(--om-text-muted)]">{row.owner}</p>
                     </td>
-                    <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
+                    <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
                       {row.objectType}
                     </td>
                     <td className="px-4 py-4 align-top">
@@ -4612,16 +4634,16 @@ function ExplorerObjectsPanel({
                         {row.status || "..."}
                       </Badge>
                     </td>
-                    <td className="px-4 py-4 align-top font-mono text-sm text-zinc-700">
+                    <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
                       {row.numRows}
                     </td>
-                    <td className="px-4 py-4 align-top font-mono text-sm text-zinc-700">
+                    <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
                       {row.columnCount}
                     </td>
-                    <td className="px-4 py-4 align-top font-mono text-xs text-zinc-700">
+                    <td className="px-4 py-4 align-top font-mono text-xs text-[var(--om-text)]">
                       {row.lastAnalyzed}
                     </td>
-                    <td className="max-w-[280px] px-4 py-4 align-top text-sm text-zinc-700">
+                    <td className="max-w-[280px] px-4 py-4 align-top text-sm text-[var(--om-text)]">
                       <p className="line-clamp-2">{row.comment}</p>
                     </td>
                   </tr>
@@ -4631,7 +4653,7 @@ function ExplorerObjectsPanel({
           </tbody>
         </table>
       </div>
-    </Surface>
+    </ConsolePanel>
   );
 }
 
@@ -4657,22 +4679,24 @@ function ExplorerObjectDetailPanel({
   const sourceAllowed = selectedRef ? canReadSource(selectedRef.objectType) : false;
   const detail = result?.state === "ok" ? mcpResult(result.response.data.mcp_response) : null;
   return (
-    <Surface className="overflow-hidden">
-      <div className="flex flex-col gap-3 border-b border-zinc-200 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+    <ConsolePanel>
+      <div className="flex flex-col gap-3 border-b border-[var(--om-border)] px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0">
-          <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
+          <h3 className="flex items-center gap-2 text-base font-semibold text-[var(--om-text-bright)]">
             <Code2 className="size-4" aria-hidden="true" />
             Object Detail
           </h3>
-          <p className="mt-1 break-all font-mono text-sm text-zinc-500">
+          <p className="mt-1 break-all font-mono text-sm text-[var(--om-text-muted)]">
             {selectedRef ? objectRefKey(selectedRef) : "idle"}
           </p>
         </div>
         <div className="flex flex-wrap items-end gap-2">
           <label className="block">
-            <span className="mb-1 block text-xs font-bold uppercase text-zinc-500">Chars</span>
+            <span className="mb-1 block text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+              Chars
+            </span>
             <input
-              className="h-9 w-28 rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+              className={cn(OM_INPUT, "h-9 w-28")}
               min={1000}
               max={1000000}
               type="number"
@@ -4721,18 +4745,16 @@ function ExplorerObjectDetailPanel({
         {result?.state === "error" ? (
           <ErrorNotice message={result.message} />
         ) : (
-          <pre className="max-h-[620px] overflow-auto rounded-md bg-zinc-950 p-3 text-xs leading-5 text-zinc-50">
-            {detail ? prettyJson(detail) : "{}"}
-          </pre>
+          <pre className={cn(OM_CODE, "max-h-[620px]")}>{detail ? prettyJson(detail) : "{}"}</pre>
         )}
       </div>
-    </Surface>
+    </ConsolePanel>
   );
 }
 
 function ErrorNotice({ message }: { message: string }): React.ReactElement {
   return (
-    <p className="m-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+    <p className="m-4 rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_12%,transparent)] p-3 text-sm font-semibold text-[var(--om-copper)]">
       {message}
     </p>
   );
@@ -4740,9 +4762,11 @@ function ErrorNotice({ message }: { message: string }): React.ReactElement {
 
 function ExplorerFact({ label, value }: { label: string; value: string }): React.ReactElement {
   return (
-    <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
-      <p className="text-xs font-bold uppercase text-zinc-500">{label}</p>
-      <p className="mt-1 break-all font-mono text-xs text-zinc-900">{value}</p>
+    <div className="rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] p-3">
+      <p className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+        {label}
+      </p>
+      <p className="mt-1 break-all font-mono text-xs text-[var(--om-text-bright)]">{value}</p>
     </div>
   );
 }
