@@ -75,35 +75,35 @@ export type DashboardSkin = {
 
 const orreryRenderer = React.lazy(() => import("./orrery-renderer"));
 
-export const GROUND_CONTROL_THEME: DashboardTheme = {
-  name: "ground-control",
+export const CARVED_LIGHT_THEME: DashboardTheme = {
+  name: "carved-light",
   modes: REQUIRED_THEME_MODES,
   cssVars: {
-    "--om-bg": "#f6f7f3",
-    "--om-text": "#17211f",
-    "--om-surface": "#ffffff",
-    "--om-surface-muted": "#f4f6f5",
-    "--om-border": "#d8dfdc",
-    "--om-focus": "#047857",
-    "--om-clearance-read-only": "#047857",
-    "--om-clearance-read-write": "#0369a1",
-    "--om-clearance-ddl": "#b45309",
-    "--om-clearance-admin": "#be123c",
-    "--om-activity": "#2563eb",
-    "--om-grid": "#dbe4e0"
+    "--om-bg": "#0c0b09",
+    "--om-text": "#e9e2d0",
+    "--om-surface": "#1e1913",
+    "--om-surface-muted": "#282119",
+    "--om-border": "#4a4230",
+    "--om-focus": "#c7a34a",
+    "--om-clearance-read-only": "#8ea98c",
+    "--om-clearance-read-write": "#c7a34a",
+    "--om-clearance-ddl": "#d97748",
+    "--om-clearance-admin": "#c25048",
+    "--om-activity": "#d97748",
+    "--om-grid": "#2b261b"
   },
   webglUniforms: {
-    READ_ONLY: [0.02, 0.47, 0.34],
-    READ_WRITE: [0.02, 0.41, 0.63],
-    DDL: [0.71, 0.33, 0.04],
-    ADMIN: [0.75, 0.07, 0.24]
+    READ_ONLY: [0.557, 0.663, 0.549],
+    READ_WRITE: [0.78, 0.639, 0.29],
+    DDL: [0.851, 0.467, 0.282],
+    ADMIN: [0.761, 0.314, 0.282]
   }
 };
 
 export const GROUND_CONTROL_SKIN: DashboardSkin = {
   name: "ground-control-2d",
   grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
-  theme: GROUND_CONTROL_THEME,
+  theme: CARVED_LIGHT_THEME,
   defaultBigBoard: "board2d",
   bigBoardRenderers: {
     board2d: {

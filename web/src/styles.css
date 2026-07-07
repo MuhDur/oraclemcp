@@ -1,50 +1,100 @@
 @import "tailwindcss";
 
+/*
+ * OMCP — Carved Light design tokens (Appendix G.3 / G.2).
+ * The single theme shipped in 0.7.3: a near-black "carved light" palette with
+ * a warm gold/copper accent set, classical serif + monospace type. Every color
+ * and type value lives here; surfaces read the tokens, never raw hex.
+ */
+@theme {
+  /* Palette — Carved Light (Appendix G.3) */
+  --color-base: #0c0b09;
+  --color-surface: #1e1913;
+  --color-surface-2: #282119;
+  --color-surface-3: #2b261b;
+  --color-hairline: #4a4230;
+  --color-text-bright: #f2ecdc;
+  --color-text: #e9e2d0;
+  --color-text-2: #c9c0ac;
+  --color-text-3: #b3a992;
+  --color-muted: #9c927b;
+  --color-muted-2: #918770;
+  --color-gold: #c7a34a;
+  --color-copper: #d97748;
+  --color-rust: #c25048;
+  --color-sage: #8ea98c;
+
+  /* Type — self-hosted faces (Appendix G.2); @font-face lives in styles.css */
+  --font-serif: "EB Garamond", ui-serif, Georgia, "Times New Roman", serif;
+  --font-mono:
+    "IBM Plex Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* Type scale */
+  --text-2xs: 0.6875rem;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+  --text-3xl: 2.25rem;
+  --text-4xl: 3rem;
+
+  /* Letter-spacing for small-caps section labels */
+  --tracking-label: 0.14em;
+}
+
 * {
   box-sizing: border-box;
 }
 
+/*
+ * Semantic --om-* variables consumed by the skin/layout seam and the view-model
+ * renderers. Mapped onto the Carved Light palette above; the clearance ramp
+ * follows the grammar: sage = read-only nominal, gold = read-write, copper =
+ * DDL, rust = ADMIN / destructive.
+ */
 :root {
-  color-scheme: light;
+  color-scheme: dark;
   color: var(--om-text);
   background: var(--om-bg);
-  --om-bg: #f6f7f3;
-  --om-text: #17211f;
-  --om-surface: #ffffff;
-  --om-surface-muted: #f4f6f5;
-  --om-border: #d8dfdc;
-  --om-focus: #047857;
-  --om-clearance-read-only: #047857;
-  --om-clearance-read-write: #0369a1;
-  --om-clearance-ddl: #b45309;
-  --om-clearance-admin: #be123c;
-  --om-activity: #2563eb;
-  --om-grid: #dbe4e0;
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
+  --om-bg: var(--color-base);
+  --om-text: var(--color-text);
+  --om-text-bright: var(--color-text-bright);
+  --om-text-muted: var(--color-muted);
+  --om-surface: var(--color-surface);
+  --om-surface-muted: var(--color-surface-2);
+  --om-surface-elevated: var(--color-surface-3);
+  --om-border: var(--color-hairline);
+  --om-focus: var(--color-gold);
+  --om-gold: var(--color-gold);
+  --om-copper: var(--color-copper);
+  --om-rust: var(--color-rust);
+  --om-sage: var(--color-sage);
+  --om-clearance-read-only: var(--color-sage);
+  --om-clearance-read-write: var(--color-gold);
+  --om-clearance-ddl: var(--color-copper);
+  --om-clearance-admin: var(--color-rust);
+  --om-activity: var(--color-copper);
+  --om-grid: var(--color-surface-3);
+  --om-font-serif: var(--font-serif);
+  --om-font-mono: var(--font-mono);
+  font-family: var(--om-font-serif);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
-    --om-bg: #111817;
-    --om-text: #e8efec;
-    --om-surface: #17211f;
-    --om-surface-muted: #1f2b29;
-    --om-border: #31413d;
-    --om-grid: #2a3835;
-  }
+  -webkit-font-smoothing: antialiased;
 }
 
 @media (prefers-contrast: more), (forced-colors: active) {
   :root {
     --om-bg: Canvas;
     --om-text: CanvasText;
+    --om-text-bright: CanvasText;
+    --om-text-muted: CanvasText;
     --om-surface: Canvas;
     --om-surface-muted: Canvas;
+    --om-surface-elevated: Canvas;
     --om-border: CanvasText;
     --om-focus: Highlight;
     --om-clearance-read-only: CanvasText;
