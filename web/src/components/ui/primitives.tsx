@@ -9,11 +9,11 @@ const buttonVariants = cva(
     variants: {
       variant: {
         primary:
-          "border-emerald-700 bg-emerald-700 text-white hover:bg-emerald-800 focus-visible:outline-emerald-700",
+          "border-[var(--om-gold)] bg-[var(--om-gold)] text-[var(--om-bg)] hover:bg-[color-mix(in_srgb,var(--om-gold)_85%,black)] focus-visible:outline-[var(--om-focus)]",
         secondary:
-          "border-zinc-300 bg-white text-zinc-900 hover:bg-zinc-100 focus-visible:outline-zinc-500",
+          "border-[var(--om-border)] bg-[var(--om-surface)] text-[var(--om-text-bright)] hover:bg-[var(--om-surface-elevated)] focus-visible:outline-[var(--om-focus)]",
         ghost:
-          "border-transparent bg-transparent text-zinc-700 hover:bg-zinc-100 focus-visible:outline-zinc-500"
+          "border-transparent bg-transparent text-[var(--om-text)] hover:bg-[var(--om-surface-elevated)] focus-visible:outline-[var(--om-focus)]"
       }
     },
     defaultVariants: {
@@ -63,7 +63,7 @@ export function Surface({
 }: React.HTMLAttributes<HTMLElement>): React.ReactElement {
   return (
     <section
-      className={cn("rounded-lg border border-zinc-200 bg-white shadow-sm", className)}
+      className={cn("rounded-lg border border-[var(--om-border)] bg-[var(--om-surface)] shadow-sm", className)}
       {...props}
     />
   );
