@@ -61,6 +61,7 @@ import {
   DASHBOARD_GRAMMAR,
   clampActivity,
   type FleetViewModel,
+  type DashboardTone,
   type GoNoGoVerdict,
   type GroundControlChain,
   type GroundControlViewModel,
@@ -129,6 +130,7 @@ import {
   type ConfigDraftPreview,
   type ConfigFieldChange,
   type ConfigOpsStatusData,
+  type ConfigProfileMetadata,
   sessionsProbes,
   cachedExplorerMetadata,
   clearExplorerMetadataCache,
@@ -1377,6 +1379,197 @@ function CapacityPage(): React.ReactElement {
   );
 }
 
+// The I·II·III·IV clearance spine as roman rank + matching --om clearance token,
+// used by the Profile ceiling badge (color IS clearance, Appendix G).
+const CEILING_ROMAN = ["I", "II", "III", "IV"] as const;
+const CEILING_VARS = [
+  "--om-clearance-read-only",
+  "--om-clearance-read-write",
+  "--om-clearance-ddl",
+  "--om-clearance-admin"
+] as const;
+
+function ceilingOrdinal(level?: string): number {
+  switch ((level ?? "").toUpperCase()) {
+    case "ADMIN":
+      return 3;
+    case "DDL":
+      return 2;
+    case "READ_WRITE":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+// Four squares filled up to the profile's max_level; each filled square wears
+// its own level's clearance color so the ceiling reads as a ramp.
+function CeilingBadge({ maxLevel }: { maxLevel?: string }): React.ReactElement {
+  const ceiling = ceilingOrdinal(maxLevel);
+  return (
+    <div
+      className="flex items-center gap-1"
+      role="img"
+      aria-label={`ceiling ${maxLevel ?? "READ_ONLY"}`}
+    >
+      {CEILING_ROMAN.map((roman, index) => {
+        const filled = index <= ceiling;
+        const token = CEILING_VARS[index];
+        return (
+          <span
+            key={roman}
+            className="inline-flex size-5 items-center justify-center rounded-sm border font-mono text-2xs font-bold"
+            style={{
+              borderColor: filled ? `var(${token})` : "var(--om-border)",
+              backgroundColor: filled
+                ? `color-mix(in srgb, var(${token}) 22%, transparent)`
+                : "transparent",
+              color: filled ? `var(${token})` : "var(--om-text-muted)"
+            }}
+          >
+            {roman}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function profilePosture(profile: ConfigProfileMetadata): { label: string; tone: DashboardTone } {
+  if (profile.protected) {
+    return { label: "PROTECTED", tone: "ok" };
+  }
+  if (profile.read_only_standby) {
+    return { label: "STANDBY", tone: "info" };
+  }
+  return { label: "ACTIVE", tone: "neutral" };
+}
+
+// Per-profile reachability: only the active/default profile's connection is
+// probed by /operator/v1/health (db_reachable). Non-default profiles are shown
+// as "unprobed" rather than inferring a status we cannot assert.
+function profileReachability(
+  profile: ConfigProfileMetadata,
+  dbReachable: boolean | undefined
+): { label: string; tone: DashboardTone } {
+  if (profile.is_default) {
+    if (dbReachable === true) {
+      return { label: "reachable", tone: "ok" };
+    }
+    if (dbReachable === false) {
+      return { label: "unreachable", tone: "warn" };
+    }
+  }
+  return { label: "unprobed", tone: "off" };
+}
+
+function ProfileCard({
+  profile,
+  dbReachable
+}: {
+  profile: ConfigProfileMetadata;
+  dbReachable: boolean | undefined;
+}): React.ReactElement {
+  const posture = profilePosture(profile);
+  const reach = profileReachability(profile, dbReachable);
+  return (
+    <div
+      className="flex flex-col gap-3 rounded-lg border border-[var(--om-border)] bg-[var(--om-surface)] p-4 shadow-sm"
+      data-profile-posture={posture.label.toLowerCase()}
+      data-profile-ceiling={profile.max_level ?? "READ_ONLY"}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p
+            className="truncate font-mono text-sm font-bold text-[var(--om-text-bright)]"
+            title={profile.name}
+          >
+            {profile.name}
+          </p>
+          {profile.description ? (
+            <p className="mt-0.5 truncate font-serif text-xs text-[var(--om-text-muted)]">
+              {profile.description}
+            </p>
+          ) : null}
+        </div>
+        {profile.is_default ? <Badge tone="info">default</Badge> : null}
+      </div>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+          Ceiling
+        </span>
+        <CeilingBadge maxLevel={profile.max_level} />
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone={posture.tone}>{posture.label}</Badge>
+        {profile.read_only_standby ? <Badge tone="info">read-only standby</Badge> : null}
+        {profile.require_signed_tools ? <Badge tone="neutral">signed tools</Badge> : null}
+      </div>
+      <div className="mt-auto flex items-center justify-between gap-2 border-t border-[var(--om-border)] pt-2">
+        <Badge tone={reach.tone}>{reach.label}</Badge>
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+            default
+          </span>
+          <span className="font-mono text-xs text-[var(--om-text)]">
+            {profile.default_level ?? "READ_ONLY"}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Profile cards (Appendix G, net-new surface): one Carved Light card per
+// connection profile — reachability, ceiling ramp, posture, read-only-standby —
+// fed from the live /operator/v1/config profile metadata plus /operator/v1/health
+// for the active connection's reachability. No browser-supplied identity; the
+// server derives everything from the transport principal.
+function ProfileCards(): React.ReactElement {
+  const config = useQuery({
+    queryKey: ["operator-config"],
+    queryFn: fetchOperatorConfig,
+    refetchInterval: 10_000
+  });
+  const health = useQuery({
+    queryKey: ["operator-health"],
+    queryFn: fetchOperatorHealth,
+    refetchInterval: 5_000
+  });
+  const profiles = config.data?.data.status.profiles ?? [];
+  const dbReachable = health.data?.data.readiness?.db_reachable;
+  const source = config.data?.data.source ?? "unavailable";
+  return (
+    <section aria-label="connection profiles" className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Database className="size-4 text-[var(--om-text-muted)]" aria-hidden="true" />
+          <h2 className="font-serif text-lg font-semibold text-[var(--om-text-bright)]">
+            Connection Profiles
+          </h2>
+        </div>
+        <Badge tone={config.isError ? "warn" : config.data ? "ok" : "info"}>
+          {config.isError ? "blocked" : config.data ? source : "sync"}
+        </Badge>
+      </div>
+      {profiles.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-[var(--om-border)] bg-[var(--om-surface)] p-6 text-center">
+          <p className="font-mono text-sm font-semibold text-[var(--om-text-bright)]">NO PROFILES</p>
+          <p className="mt-1 text-sm text-[var(--om-text-muted)]">
+            {config.isFetching ? "syncing" : "none configured"}
+          </p>
+        </div>
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {profiles.map((profile) => (
+            <ProfileCard key={profile.name} profile={profile} dbReachable={dbReachable} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function ConfigPage(): React.ReactElement {
   const [draftToml, setDraftToml] = React.useState("");
   const [preview, setPreview] = React.useState<ConfigDraftPreview | null>(null);
@@ -1459,6 +1652,7 @@ function ConfigPage(): React.ReactElement {
       description="Redacted draft/apply workflow for the service profile file."
     >
       <div className="space-y-4">
+        <ProfileCards />
         <ConfigStatusPanel data={status} pending={config.isFetching} />
         <Surface className="overflow-hidden">
           <PanelHeader
