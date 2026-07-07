@@ -110,7 +110,10 @@ export const OMCP_SKIN: DashboardSkin = {
   name: "omcp-carved-light",
   grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
   theme: CARVED_LIGHT_THEME,
-  defaultBigBoard: "board2d",
+  // The Orrery is the hero when WebGL is present and motion is allowed;
+  // normalizeRendererChoice drops to the 2D board otherwise, so a reduced-motion
+  // or low-power client still boots instantly on the mandatory fallback.
+  defaultBigBoard: "orrery3d",
   bigBoardRenderers: {
     board2d: {
       kind: "board2d",
@@ -132,7 +135,7 @@ export const OMCP_SKIN: DashboardSkin = {
       kind: "orrery3d",
       label: "Orrery 3D",
       requiresWebGl: true,
-      available: false,
+      available: true,
       lazy: true,
       component: orreryRenderer
     }
