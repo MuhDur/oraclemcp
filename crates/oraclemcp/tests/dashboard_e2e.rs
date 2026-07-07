@@ -222,6 +222,20 @@ fn read_only_dashboard_surface_contracts_are_registered() {
         skin.contains("defaultBigBoard: \"orrery3d\""),
         "dashboard hero defaults to the orrery renderer (mandatory 2D board/table fallback asserted below)"
     );
+    // WD-RULE: the Orrery is only the hero when it can be; the 2D board must stay
+    // resolvable and be auto-selected on reduced-motion / no-WebGL clients, and
+    // the table on forced-colors / high-contrast. Assert the selection SEMANTICS,
+    // not just that a 2D renderer exists.
+    assert!(
+        presentation.contains("capabilities.webgl && !capabilities.reducedMotion")
+            && presentation.contains("rendererAvailable(\"orrery3d\")")
+            && presentation.contains(": \"board2d\""),
+        "orrery hero must auto-resolve to the 2D board on reduced-motion / no-WebGL clients"
+    );
+    assert!(
+        presentation.contains("capabilities.preferTable || capabilities.forcedColors"),
+        "forced-colors / high-contrast clients must auto-resolve to the table fallback"
+    );
     assert!(
         skin.contains("board2d:") && skin.contains("requiresWebGl: false"),
         "dashboard skin must include a no-WebGL 2D renderer"
