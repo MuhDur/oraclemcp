@@ -140,9 +140,17 @@ fi
 # least-privilege, never "safe-by-default" / a "read-only binary".
 bash "$ROOT/scripts/oraclemcp_honesty_grep.sh"
 
-# D10 — driver-first release ordering: the pinned `oracledb` crate must already be on
-# crates.io at the exact workspace version before this server release can tag/publish.
-driver_api="https://crates.io/api/v1/crates/oracledb/${version}"
+# D10 — driver-first release ordering: the pinned `oracledb` crate must already
+# be on crates.io at its exact pinned version before this server release can
+# tag/publish. The oracledb driver versions INDEPENDENTLY of the server (e.g.
+# driver 0.7.4 while the server is 0.8.0), so this validates the pinned driver
+# version parsed from Cargo.toml — NOT the server's own $version.
+driver_version="$(
+  grep -E '^oracledb = \{ version = "=[0-9]' "$ROOT/Cargo.toml" |
+    head -1 | sed -E 's/.*version = "=([0-9][0-9.]*)".*/\1/'
+)"
+[ -n "$driver_version" ] || fail "Cargo.toml must pin oracledb at an exact =X.Y.Z version"
+driver_api="https://crates.io/api/v1/crates/oracledb/${driver_version}"
 driver_json="$(mktemp)"
 trap 'rm -f "$driver_json"' EXIT
 crates_ua="oraclemcp-release-preflight (https://github.com/MuhDur/oraclemcp; release@oraclemcp.local)"
@@ -150,12 +158,12 @@ if ! curl -fsS \
   -H "User-Agent: $crates_ua" \
   -H "Accept: application/json" \
   "$driver_api" -o "$driver_json"; then
-  fail "oracledb =${version} is not published on crates.io; publish rust-oracledb first (GET $driver_api failed)"
+  fail "oracledb =${driver_version} is not published on crates.io; publish rust-oracledb first (GET $driver_api failed)"
 fi
 published_oracledb="$(jq -r '.version.num // empty' <"$driver_json")"
 [ -n "$published_oracledb" ] || fail "crates.io response for oracledb missing version.num"
-[ "$published_oracledb" = "$version" ] ||
-  fail "crates.io oracledb version '$published_oracledb' does not match workspace pin =$version"
+[ "$published_oracledb" = "$driver_version" ] ||
+  fail "crates.io oracledb version '$published_oracledb' does not match pinned driver =$driver_version"
 
 if [ "${RELEASE_REQUIRE_MAIN:-false}" = "true" ]; then
   need git
