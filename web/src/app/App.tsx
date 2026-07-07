@@ -6056,7 +6056,7 @@ function WorkbenchPage(): React.ReactElement {
       description="Human-in-the-loop SQL through the same classifier, lane gate, confirmation, and audit path as MCP tools."
     >
       <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.6fr)_minmax(360px,0.75fr)]">
-        <Surface className="p-4">
+        <ConsolePanel className="p-4">
           <div className="flex flex-col gap-4">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div className="flex flex-wrap gap-2" role="tablist" aria-label="workbench mode">
@@ -6077,10 +6077,10 @@ function WorkbenchPage(): React.ReactElement {
             </div>
 
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">SQL</span>
+              <span className={OM_LABEL}>SQL</span>
               <textarea
                 ref={sqlEditorRef}
-                className="min-h-[320px] w-full resize-y rounded-md border border-zinc-300 bg-zinc-950 p-3 font-mono text-sm leading-6 text-zinc-50 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className={cn(OM_TEXTAREA, "min-h-[320px]")}
                 spellCheck={false}
                 value={sql}
                 onChange={(event) => setSql(event.target.value)}
@@ -6089,18 +6089,18 @@ function WorkbenchPage(): React.ReactElement {
 
             <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_160px_180px]">
               <label className="block">
-                <span className="mb-2 block text-sm font-bold text-zinc-700">Lane</span>
+                <span className={OM_LABEL}>Lane</span>
                 <input
-                  className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                  className={OM_INPUT}
                   value={laneId}
                   onChange={(event) => setLaneId(event.target.value)}
                   placeholder="operator"
                 />
               </label>
               <label className="block">
-                <span className="mb-2 block text-sm font-bold text-zinc-700">Rows</span>
+                <span className={OM_LABEL}>Rows</span>
                 <input
-                  className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                  className={OM_INPUT}
                   min={1}
                   max={5000}
                   type="number"
@@ -6108,9 +6108,9 @@ function WorkbenchPage(): React.ReactElement {
                   onChange={(event) => setMaxRows(clampRows(event.target.valueAsNumber))}
                 />
               </label>
-              <label className="flex min-h-10 items-end gap-2 pb-2 text-sm font-semibold text-zinc-700">
+              <label className="flex min-h-10 items-end gap-2 pb-2 text-sm font-semibold text-[var(--om-text)]">
                 <input
-                  className="size-4 rounded border-zinc-300 text-emerald-700 focus:ring-emerald-600"
+                  className={OM_CHECKBOX}
                   type="checkbox"
                   checked={captureDbmsOutput}
                   onChange={(event) => setCaptureDbmsOutput(event.target.checked)}
@@ -6120,9 +6120,9 @@ function WorkbenchPage(): React.ReactElement {
             </div>
 
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Confirm</span>
+              <span className={OM_LABEL}>Confirm</span>
               <input
-                className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className={cn(OM_INPUT, "font-mono")}
                 value={confirm}
                 onChange={(event) => setConfirm(event.target.value)}
                 placeholder="preview grant"
@@ -6168,7 +6168,7 @@ function WorkbenchPage(): React.ReactElement {
               </Button>
             </div>
           </div>
-        </Surface>
+        </ConsolePanel>
 
         <WorkbenchIdePanel
           canRun={canRunIde}
@@ -6256,14 +6256,14 @@ function WorkbenchIdePanel({
   const projectReady = canRun && projectRoot.trim().length > 0;
   const lineageReady = projectReady && target.trim().length > 0;
   return (
-    <Surface className="min-h-[520px] overflow-hidden">
-      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+    <ConsolePanel className="min-h-[520px]">
+      <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
         <div className="min-w-0">
-          <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
+          <h3 className="flex items-center gap-2 text-base font-semibold text-[var(--om-text-bright)]">
             <Code2 className="size-4" aria-hidden="true" />
             PL/SQL IDE
           </h3>
-          <p className="mt-1 truncate text-sm text-zinc-500">
+          <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">
             {pending ? "analysis in flight" : result ? result.label : "idle"}
           </p>
         </div>
@@ -6275,9 +6275,9 @@ function WorkbenchIdePanel({
       <div className="space-y-4 p-4">
         <div className="grid gap-3">
           <label className="block">
-            <span className="mb-2 block text-sm font-bold text-zinc-700">Project Root</span>
+            <span className={OM_LABEL}>Project Root</span>
             <input
-              className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+              className={cn(OM_INPUT, "font-mono")}
               value={projectRoot}
               onChange={(event) => setProjectRoot(event.target.value)}
               placeholder="/path/to/plsql/project"
@@ -6285,18 +6285,18 @@ function WorkbenchIdePanel({
           </label>
           <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_150px_110px]">
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Target</span>
+              <span className={OM_LABEL}>Target</span>
               <input
-                className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className={cn(OM_INPUT, "font-mono")}
                 value={target}
                 onChange={(event) => setTarget(event.target.value)}
                 placeholder="APP.PACKAGE"
               />
             </label>
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Direction</span>
+              <span className={OM_LABEL}>Direction</span>
               <select
-                className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className={OM_INPUT}
                 value={lineageDirection}
                 onChange={(event) =>
                   setLineageDirection(
@@ -6310,9 +6310,9 @@ function WorkbenchIdePanel({
               </select>
             </label>
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Depth</span>
+              <span className={OM_LABEL}>Depth</span>
               <input
-                className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className={OM_INPUT}
                 min={0}
                 max={20}
                 type="number"
@@ -6366,28 +6366,30 @@ function WorkbenchIdePanel({
         </div>
 
         <label className="block">
-          <span className="mb-2 block text-sm font-bold text-zinc-700">ChangeSet</span>
+          <span className={OM_LABEL}>ChangeSet</span>
           <textarea
-            className="min-h-24 w-full resize-y rounded-md border border-zinc-300 bg-zinc-50 p-3 font-mono text-xs leading-5 text-zinc-900 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+            className={cn(OM_TEXTAREA, "min-h-24 text-xs leading-5")}
             spellCheck={false}
             value={changesetJson}
             onChange={(event) => setChangesetJson(event.target.value)}
           />
         </label>
 
-        <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
+        <div className="rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] p-3">
           <div className="flex items-center justify-between gap-3">
-            <h4 className="text-sm font-bold text-zinc-950">Definitions</h4>
+            <h4 className="text-sm font-semibold text-[var(--om-text-bright)]">Definitions</h4>
             <Badge tone={definitions.length > 0 ? "ok" : "off"}>{definitions.length}</Badge>
           </div>
           <div className="mt-3 max-h-44 space-y-2 overflow-auto">
             {definitions.length === 0 ? (
-              <p className="text-sm font-semibold text-zinc-500">No parsed definitions</p>
+              <p className="text-sm font-semibold text-[var(--om-text-muted)]">
+                No parsed definitions
+              </p>
             ) : (
               definitions.map((definition, index) => (
                 <button
                   key={`${definition.name}-${definition.kind}-${index}`}
-                  className="flex w-full items-center justify-between gap-3 rounded-md border border-zinc-200 bg-white px-3 py-2 text-left text-sm hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="flex w-full items-center justify-between gap-3 rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 py-2 text-left text-sm hover:bg-[var(--om-surface-elevated)] disabled:cursor-not-allowed disabled:opacity-60"
                   type="button"
                   disabled={!definition.span}
                   onClick={() =>
@@ -6397,10 +6399,10 @@ function WorkbenchIdePanel({
                   }
                 >
                   <span className="min-w-0">
-                    <span className="block truncate font-mono font-semibold text-zinc-950">
+                    <span className="block truncate font-mono font-semibold text-[var(--om-text-bright)]">
                       {definition.name || "anonymous"}
                     </span>
-                    <span className="block text-xs font-semibold text-zinc-500">
+                    <span className="block text-xs font-semibold text-[var(--om-text-muted)]">
                       {definition.span
                         ? `${definition.span.start.line}:${definition.span.start.column}`
                         : "span unavailable"}
@@ -6413,21 +6415,21 @@ function WorkbenchIdePanel({
           </div>
         </div>
 
-        <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
+        <div className="rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] p-3">
           <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Identifier</span>
+              <span className={OM_LABEL}>Identifier</span>
               <input
-                className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className={cn(OM_INPUT, "font-mono")}
                 value={identifier}
                 onChange={(event) => setIdentifier(event.target.value)}
                 placeholder="PKG_NAME"
               />
             </label>
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Rename To</span>
+              <span className={OM_LABEL}>Rename To</span>
               <input
-                className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className={cn(OM_INPUT, "font-mono")}
                 value={replacement}
                 onChange={(event) => setReplacement(event.target.value)}
                 placeholder="PKG_NAME_V2"
@@ -6448,35 +6450,33 @@ function WorkbenchIdePanel({
             {usageRows.slice(0, 20).map((occurrence) => (
               <button
                 key={`${occurrence.offset}-${occurrence.endOffset}`}
-                className="block w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-left hover:bg-zinc-100"
+                className="block w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 py-2 text-left hover:bg-[var(--om-surface-elevated)]"
                 type="button"
                 onClick={() => onJump(occurrence.offset, occurrence.endOffset)}
               >
-                <span className="font-mono text-xs font-semibold text-zinc-500">
+                <span className="font-mono text-xs font-semibold text-[var(--om-text-muted)]">
                   {occurrence.line}:{occurrence.column}
                 </span>
-                <span className="mt-1 block truncate font-mono text-xs text-zinc-900">
+                <span className="mt-1 block truncate font-mono text-xs text-[var(--om-text-bright)]">
                   {occurrence.preview}
                 </span>
               </button>
             ))}
           </div>
-          <pre className="mt-3 max-h-40 overflow-auto rounded-md bg-zinc-950 p-3 text-xs leading-5 text-zinc-50">
-            {refactorPreview.preview}
-          </pre>
+          <pre className={cn(OM_CODE, "mt-3 max-h-40")}>{refactorPreview.preview}</pre>
         </div>
 
         {result?.state === "error" ? (
-          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+          <div className="rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_12%,transparent)] p-3 text-sm font-semibold text-[var(--om-copper)]">
             {result.message}
           </div>
         ) : (
-          <pre className="max-h-[360px] overflow-auto rounded-md bg-zinc-950 p-3 text-xs leading-5 text-zinc-50">
+          <pre className={cn(OM_CODE, "max-h-[360px]")}>
             {result?.state === "ok" ? prettyJson(result.response) : "{}"}
           </pre>
         )}
       </div>
-    </Surface>
+    </ConsolePanel>
   );
 }
 
@@ -6955,15 +6955,16 @@ function WorkbenchResultPanel({
 }): React.ReactElement {
   const confirm = result?.state === "ok" ? confirmationFromResponse(result.response) : null;
   const facts = result?.state === "ok" ? factsFromResponse(result.response) : [];
+  const verdict = result?.state === "ok" ? workbenchVerdictFromResponse(result.response) : null;
   return (
-    <Surface className="min-h-[520px] overflow-hidden">
-      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+    <ConsolePanel className="min-h-[520px]">
+      <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
         <div className="min-w-0">
-          <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
+          <h3 className="flex items-center gap-2 text-base font-semibold text-[var(--om-text-bright)]">
             <Code2 className="size-4" aria-hidden="true" />
             Result
           </h3>
-          <p className="mt-1 truncate text-sm text-zinc-500">
+          <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">
             {pending ? "request in flight" : result ? result.label : "idle"}
           </p>
         </div>
@@ -6972,33 +6973,142 @@ function WorkbenchResultPanel({
         </Badge>
       </div>
       <div className="space-y-4 p-4">
+        {verdict ? <WorkbenchVerdictBlock verdict={verdict} /> : null}
         {facts.length > 0 ? (
           <div className="grid gap-2 sm:grid-cols-2">
             {facts.map((fact) => (
-              <div key={fact.label} className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
-                <p className="text-xs font-bold uppercase text-zinc-500">{fact.label}</p>
-                <p className="mt-1 break-all font-mono text-xs text-zinc-900">{fact.value}</p>
+              <div
+                key={fact.label}
+                className="rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] p-3"
+              >
+                <p className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+                  {fact.label}
+                </p>
+                <p className="mt-1 break-all font-mono text-xs text-[var(--om-text-bright)]">
+                  {fact.value}
+                </p>
               </div>
             ))}
           </div>
         ) : null}
         {confirm ? (
-          <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3">
-            <p className="text-sm font-bold text-emerald-900">Execution Grant</p>
-            <p className="mt-2 break-all font-mono text-xs text-emerald-900">{confirm}</p>
+          <div className="rounded-md border border-[color-mix(in_srgb,var(--om-sage)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-sage)_12%,transparent)] p-3">
+            <p className="text-sm font-semibold text-[var(--om-sage)]">Execution Grant</p>
+            <p className="mt-2 break-all font-mono text-xs text-[var(--om-sage)]">{confirm}</p>
           </div>
         ) : null}
         {result?.state === "error" ? (
-          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+          <div className="rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_12%,transparent)] p-3 text-sm font-semibold text-[var(--om-copper)]">
             {result.message}
           </div>
         ) : (
-          <pre className="max-h-[620px] overflow-auto rounded-md bg-zinc-950 p-3 text-xs leading-5 text-zinc-50">
+          <pre className={cn(OM_CODE, "max-h-[620px]")}>
             {result?.state === "ok" ? prettyJson(result.response) : "{}"}
           </pre>
         )}
       </div>
-    </Surface>
+    </ConsolePanel>
+  );
+}
+
+type WorkbenchVerdict = {
+  refused: boolean;
+  decision: string;
+  danger: string;
+  requiredLevel: string;
+  reason: string | null;
+  rewrite: string | null;
+};
+
+// The classifier verdict for a workbench statement, straight from the guarded
+// response. A refused statement shows WHY (K8 structured reason) and, when the
+// guard can name one, the minimal safe rewrite (K7 suggest_parameterized_form).
+// Purely additive: fields absent from the response simply do not render.
+function workbenchVerdictFromResponse(
+  response: OperatorResponse<WorkbenchActionData>
+): WorkbenchVerdict | null {
+  const result = mcpResult(response.data.mcp_response);
+  if (!isRecord(result)) {
+    return null;
+  }
+  const danger = result["danger"];
+  const requiredLevel = result["required_level"];
+  const decision = result["decision"] ?? result["outcome"];
+  if (danger === undefined && requiredLevel === undefined && decision === undefined) {
+    return null;
+  }
+  const decisionText = stringValue(decision, "").toLowerCase();
+  const dangerText = stringValue(danger, "").toLowerCase();
+  const refused =
+    decisionText.includes("refus") ||
+    decisionText.includes("block") ||
+    decisionText.includes("deny") ||
+    dangerText === "refused" ||
+    dangerText === "blocked";
+  const reason = firstString(
+    result["reason"],
+    nestedString(result, ["reason", "message"]),
+    nestedString(result, ["reason", "category"]),
+    result["reason_category"],
+    result["why_blocked"]
+  );
+  const rewrite = firstString(
+    result["suggested_parameterized_form"],
+    result["suggested_rewrite"],
+    result["parameterized_form"]
+  );
+  return {
+    refused,
+    decision: stringValue(decision, refused ? "REFUSED" : "n/a"),
+    danger: stringValue(danger, "n/a"),
+    requiredLevel: stringValue(requiredLevel, "n/a"),
+    reason,
+    rewrite
+  };
+}
+
+function firstString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function WorkbenchVerdictBlock({ verdict }: { verdict: WorkbenchVerdict }): React.ReactElement {
+  const tone: DashboardTone = verdict.refused ? "warn" : "ok";
+  return (
+    <div
+      className={cn(
+        "grid gap-2 rounded-md border p-3",
+        verdict.refused
+          ? "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_10%,transparent)]"
+          : "border-[color-mix(in_srgb,var(--om-sage)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-sage)_10%,transparent)]"
+      )}
+      data-classifier-refused={verdict.refused}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+          Classifier Verdict
+        </span>
+        <Badge tone={tone}>{verdict.refused ? "REFUSED" : "PASS"}</Badge>
+        <span className="font-mono text-xs text-[var(--om-text-muted)]">
+          danger {verdict.danger} · needs {verdict.requiredLevel}
+        </span>
+      </div>
+      {verdict.reason ? (
+        <p className="text-sm font-semibold text-[var(--om-text-bright)]">{verdict.reason}</p>
+      ) : null}
+      {verdict.rewrite ? (
+        <div>
+          <p className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+            Minimal safe rewrite
+          </p>
+          <pre className={cn(OM_CODE, "mt-1 max-h-40 whitespace-pre-wrap")}>{verdict.rewrite}</pre>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
