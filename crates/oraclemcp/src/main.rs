@@ -3068,7 +3068,10 @@ fn run_dashboard_cmd(
     no_open: bool,
 ) -> ExitCode {
     let ticket_dir = default_dashboard_ticket_dir();
-    if let Err(e) = probe_dashboard_http_service(base_url) {
+    // Single sanctioned sync->async boundary for the CLI path (same helper used by
+    // connect/doctor); the library probe itself is a pure `async fn(&Cx, ...)`.
+    if let Err(e) = block_on_connect(|cx| async move { probe_dashboard_http_service(&cx, base_url).await })
+    {
         let code = if matches!(e, DashboardAuthError::ServiceUnreachable { .. }) {
             "ORACLEMCP_DASHBOARD_SERVICE_UNREACHABLE"
         } else {

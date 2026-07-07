@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use asupersync::Cx;
 use asupersync::http::h1::http_client::HttpClient;
 use asupersync::http::h1::types::Method;
+#[cfg(test)]
 use asupersync::runtime::RuntimeBuilder;
 
 #[cfg(unix)]
@@ -289,7 +290,10 @@ pub fn default_dashboard_ticket_dir() -> PathBuf {
 
 /// Probe `base_url` for a running oraclemcp HTTP listener before minting a pairing
 /// ticket. Uses `/healthz` (liveness — OK even when the DB is down).
-pub fn probe_dashboard_http_service(base_url: &str) -> Result<(), DashboardAuthError> {
+pub async fn probe_dashboard_http_service(
+    cx: &Cx,
+    base_url: &str,
+) -> Result<(), DashboardAuthError> {
     let base = base_url.trim();
     if base.is_empty() {
         return Err(DashboardAuthError::ServiceUnreachable {
@@ -302,46 +306,35 @@ pub fn probe_dashboard_http_service(base_url: &str) -> Result<(), DashboardAuthE
         base.trim_end_matches('/'),
         DASHBOARD_HTTP_PROBE_PATH
     );
-    let reactor =
-        asupersync::runtime::reactor::create_reactor().map_err(|e| DashboardAuthError::Io {
-            operation: "create dashboard probe reactor",
-            message: e.to_string(),
-        })?;
-    let runtime = RuntimeBuilder::current_thread()
-        .with_reactor(reactor)
-        .build()
-        .map_err(|e| DashboardAuthError::Io {
-            operation: "build dashboard probe runtime",
-            message: e.to_string(),
-        })?;
     let timeout = DASHBOARD_HTTP_PROBE_TIMEOUT;
     let base_owned = base.to_owned();
-    runtime.block_on(async move {
-        let cx = Cx::current().expect("asupersync block_on installs a current Cx");
-        let client = HttpClient::new();
-        let response = asupersync::time::timeout(cx.now(), timeout, async {
-            client
-                .request(&cx, Method::Get, &probe_url, Vec::new(), Vec::new())
-                .await
-        })
-        .await
-        .map_err(|_| DashboardAuthError::ServiceUnreachable {
-            base_url: base_owned.clone(),
-            detail: "probe timed out".to_owned(),
-        })?
-        .map_err(|e| DashboardAuthError::ServiceUnreachable {
-            base_url: base_owned.clone(),
-            detail: e.to_string(),
-        })?;
-        if (200..300).contains(&response.status) {
-            Ok(())
-        } else {
-            Err(DashboardAuthError::ServiceUnreachable {
-                base_url: base_owned,
-                detail: format!("HTTP {}", response.status),
-            })
-        }
+    // Pure async: the caller owns the runtime/reactor. The single sync->async
+    // boundary for this CLI path lives in `main::block_on_connect` (a library
+    // must not build its own runtime — asupersync idiom: `&Cx` first, block_on
+    // only at the outermost process edge).
+    let client = HttpClient::new();
+    let response = asupersync::time::timeout(cx.now(), timeout, async {
+        client
+            .request(cx, Method::Get, &probe_url, Vec::new(), Vec::new())
+            .await
     })
+    .await
+    .map_err(|_| DashboardAuthError::ServiceUnreachable {
+        base_url: base_owned.clone(),
+        detail: "probe timed out".to_owned(),
+    })?
+    .map_err(|e| DashboardAuthError::ServiceUnreachable {
+        base_url: base_owned.clone(),
+        detail: e.to_string(),
+    })?;
+    if (200..300).contains(&response.status) {
+        Ok(())
+    } else {
+        Err(DashboardAuthError::ServiceUnreachable {
+            base_url: base_owned,
+            detail: format!("HTTP {}", response.status),
+        })
+    }
 }
 
 /// Create a 0600, short-lived local pairing ticket and return the browser URL.
@@ -628,9 +621,25 @@ mod tests {
         (port, handle, shutdown)
     }
 
+    // Drives the async probe on a dedicated test runtime. `block_on` is allowed
+    // here because the concurrency-lint scans production code only (#[cfg(test)]
+    // is skipped) — this mirrors the real CLI boundary (`main::block_on_connect`).
+    fn probe_blocking(base_url: &str) -> Result<(), DashboardAuthError> {
+        let reactor =
+            asupersync::runtime::reactor::create_reactor().expect("test probe reactor builds");
+        let runtime = RuntimeBuilder::current_thread()
+            .with_reactor(reactor)
+            .build()
+            .expect("test probe runtime builds");
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            probe_dashboard_http_service(&cx, base_url).await
+        })
+    }
+
     #[test]
     fn probe_dashboard_http_service_refuses_unreachable_base_url() {
-        let err = probe_dashboard_http_service("http://127.0.0.1:1").expect_err("closed port");
+        let err = probe_blocking("http://127.0.0.1:1").expect_err("closed port");
         assert!(matches!(err, DashboardAuthError::ServiceUnreachable { .. }));
         assert!(err.to_string().contains("no oraclemcp HTTP service at"));
     }
@@ -639,7 +648,7 @@ mod tests {
     fn probe_dashboard_http_service_accepts_healthz_liveness() {
         let (port, handle, shutdown) = spawn_healthz_stub();
         let base = format!("http://127.0.0.1:{port}");
-        probe_dashboard_http_service(&base).expect("healthz stub answers");
+        probe_blocking(&base).expect("healthz stub answers");
         shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = handle.join();
     }
