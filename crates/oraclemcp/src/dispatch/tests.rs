@@ -5664,3 +5664,436 @@ mod read_only_backstop_wiring {
         );
     }
 }
+
+/// SEC-1 (plan §4-RS security-audit): a *stored* execute-grant is NEVER an
+/// authorization input at apply. Once the session ceiling is lowered by ANY
+/// path, a grant minted before the change must not run — the guard re-derives
+/// authority from the LIVE lane state (the monotonic `grant_generation` + a
+/// classifier re-gate against the current level), never from the stored verdict.
+///
+/// Bead `oraclemcp-release-073-iec3.2.10` (sec1). These are adversarial,
+/// two-lane PROOFS: Lane A mints a grant, a lowering happens, and Lane A's
+/// redemption is refused fail-closed. There are exactly three dispatch sites
+/// that `grant_generation.saturating_add(1)` + `execute_grants.clear()`, namely
+/// `close_with_cx` (lifecycle drop_elevation, already proven by
+/// `lifecycle_close_rolls_back_and_revokes_execution_grants`), the profile-switch
+/// commit block, and the `changed==true` `oracle_set_session_level` arm (which
+/// covers both the explicit `action=drop` de-escalation AND a
+/// `set_session_level` to a lower level).
+///
+/// AC2 exercises the switch plus both `set_session_level` lowerings here. The
+/// TTL-expiry test documents the one lowering that does NOT invalidate the
+/// grant (and why the served path is still safe).
+#[cfg(test)]
+mod sec1_stored_verdict_never_authorizes {
+    use super::*;
+
+    // A synthetic READ_WRITE write and a synthetic DDL statement (no live
+    // identifiers). The UPDATE is used where we want the *lowered* ceiling to
+    // still permit the statement (so grant-invalidation is the only thing that
+    // can refuse it); the DDL is used for the AC1 "formerly-permitted DDL no
+    // longer runs" narrative.
+    const UPDATE_SQL: &str = "UPDATE hr.employees SET salary = salary WHERE employee_id = 1";
+    const DDL_SQL: &str = "CREATE TABLE sec1_probe (id NUMBER)";
+
+    /// A single-connection dispatcher whose mock RECORDS every executed
+    /// statement (so we can prove nothing ran) and never panics.
+    fn recording_dispatcher(level: SessionLevelState) -> (OracleDispatcher, Arc<ExecState>) {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            level,
+        );
+        (dispatcher, state)
+    }
+
+    /// A switchable dispatcher whose connector hands back a recording mock that
+    /// shares the SAME `ExecState`, so an execute on either the pre- or
+    /// post-switch session is observable through one handle.
+    fn switchable_recording_dispatcher(
+        level: SessionLevelState,
+    ) -> (OracleDispatcher, Arc<ExecState>) {
+        let state = Arc::new(ExecState::default());
+        let connector_state = state.clone();
+        let dispatcher = OracleDispatcher::new_switchable(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            level,
+            Arc::new(move |_cx, _profile| {
+                let state = connector_state.clone();
+                Box::pin(async move {
+                    Ok(Box::new(ExecRecordingMock::new(state)) as Box<dyn OracleConnection>)
+                })
+            }),
+        );
+        (dispatcher, state)
+    }
+
+    /// The statements the mock actually executed against the database.
+    fn executed(state: &Arc<ExecState>) -> Vec<String> {
+        state
+            .executed
+            .lock()
+            .expect("exec mutex")
+            .iter()
+            .map(|(sql, _)| sql.clone())
+            .collect()
+    }
+
+    /// Read/mutate the private dispatcher state directly (legal from this child
+    /// module) so we can assert the generation counter and simulate a passive
+    /// TTL expiry deterministically.
+    fn with_state<R>(
+        dispatcher: &OracleDispatcher,
+        f: impl FnOnce(&mut DispatcherState) -> R,
+    ) -> R {
+        RuntimeBuilder::current_thread()
+            .build()
+            .expect("asupersync test runtime builds")
+            .block_on(async {
+                let cx = Cx::current().expect("block_on installs a current Cx");
+                let mut guard = match dispatcher.state.lock(&cx).await {
+                    Ok(guard) => guard,
+                    Err(_) => panic!("state mutex lock failed"),
+                };
+                f(&mut guard)
+            })
+    }
+
+    /// AC1 — the two-lane proof, DDL flavor. Lane A mints an execute-grant for a
+    /// DDL while the session permits DDL; Lane B (same shared state) drops the
+    /// elevation to READ_ONLY; Lane A's redemption is REFUSED and the DDL never
+    /// runs. The signed-reference redemption is refused by the live re-gate
+    /// (OperatingLevelTooLow), and the remembered-token redemption is refused as
+    /// UNKNOWN (the store was cleared) — proving the stored grant is dead, not
+    /// merely gated.
+    #[test]
+    fn ac1_two_lane_pre_minted_ddl_grant_never_runs_after_elevation_dropped() {
+        let (dispatcher, state) = recording_dispatcher(ddl_level());
+
+        // Lane A: mint a DDL execute-grant.
+        let lane_a = DispatchContext::default()
+            .with_http_session_id("sess-a")
+            .with_principal_key("oauth:subj-a")
+            .with_lane_identity("lane-a", 1);
+        let confirm = dispatcher
+            .dispatch_with_context("oracle_preview_sql", json!({ "sql": DDL_SQL }), lane_a)
+            .expect("preview")
+            .pointer("/execute_confirmation/confirm")
+            .and_then(Value::as_str)
+            .expect("preview minted a DDL execute grant")
+            .to_owned();
+
+        // Lane B: lower the shared ceiling (drop the elevation to READ_ONLY).
+        let lane_b = DispatchContext::default()
+            .with_http_session_id("sess-b")
+            .with_principal_key("oauth:subj-b")
+            .with_lane_identity("lane-b", 1);
+        dispatcher
+            .dispatch_with_context(
+                "oracle_set_session_level",
+                json!({ "action": "drop" }),
+                lane_b,
+            )
+            .expect("lane B drops the elevation");
+
+        // Lane A: the stored DDL grant must not authorize anything now.
+        let exec_err = dispatcher
+            .dispatch_with_context(
+                "oracle_execute",
+                json!({ "sql": DDL_SQL, "confirm": confirm.clone(), "commit": true }),
+                lane_a,
+            )
+            .expect_err("a DDL grant minted before the drop must be refused");
+        assert!(
+            matches!(
+                exec_err.error_class,
+                ErrorClass::OperatingLevelTooLow | ErrorClass::ChallengeRequired
+            ),
+            "fail-closed refusal, got {:?}: {}",
+            exec_err.error_class,
+            exec_err.message
+        );
+        assert!(
+            executed(&state).is_empty(),
+            "the DDL must NOT have reached the database"
+        );
+
+        // The grant is genuinely invalidated (the store was cleared), not just
+        // gated: the remembered-token redemption is UNKNOWN — a grant-
+        // invalidation refusal, independent of the current level.
+        let token_err = dispatcher
+            .dispatch_with_context("execute_approved", json!({ "token": confirm }), lane_a)
+            .expect_err("the cleared grant is unknown");
+        assert_eq!(token_err.error_class, ErrorClass::ChallengeRequired);
+        assert!(
+            token_err.message.contains("unknown or expired"),
+            "grant-invalidation refusal expected: {}",
+            token_err.message
+        );
+        assert!(executed(&state).is_empty(), "still nothing ran");
+    }
+
+    /// AC2 — EACH distinct level-lowering dispatch path invalidates a
+    /// pre-minted grant. Table-driven over the three sites that clear+bump.
+    /// For every path we assert, uniformly:
+    ///   1. `grant_generation` advanced (the monotonic invalidation stamp), and
+    ///   2. the signed-reference redemption is refused fail-closed and never
+    ///      touches the database, and
+    ///   3. the remembered-token redemption is refused as UNKNOWN (the store was
+    ///      cleared) — a level-INDEPENDENT proof that the grant itself is dead,
+    ///      isolating grant-invalidation from the belt-and-suspenders re-gate.
+    #[test]
+    fn ac2_every_lowering_path_refuses_and_never_executes() {
+        struct LoweringPath {
+            name: &'static str,
+            build: fn() -> (OracleDispatcher, Arc<ExecState>),
+            lower: fn(&OracleDispatcher),
+        }
+
+        let paths = [
+            LoweringPath {
+                name: "set_session_level action=drop (explicit drop_elevation)",
+                build: || recording_dispatcher(ddl_level()),
+                lower: |dispatcher| {
+                    dispatcher
+                        .dispatch("oracle_set_session_level", json!({ "action": "drop" }))
+                        .expect("drop elevation");
+                },
+            },
+            LoweringPath {
+                name: "set_session_level to a lower level (DDL -> READ_WRITE)",
+                build: || recording_dispatcher(ddl_level()),
+                lower: |dispatcher| {
+                    dispatcher
+                        .dispatch(
+                            "oracle_set_session_level",
+                            json!({ "level": "READ_WRITE", "action": "apply" }),
+                        )
+                        .expect("lower to READ_WRITE");
+                },
+            },
+            LoweringPath {
+                name: "profile switch",
+                build: || switchable_recording_dispatcher(ddl_level()),
+                lower: |dispatcher| {
+                    dispatcher
+                        .dispatch("oracle_switch_profile", json!({ "profile": "other" }))
+                        .expect("switch profile");
+                },
+            },
+        ];
+
+        for path in paths {
+            let (dispatcher, state) = (path.build)();
+            let confirm = preview_confirm(&dispatcher, UPDATE_SQL);
+            let gen_before = with_state(&dispatcher, |s| s.grant_generation);
+
+            (path.lower)(&dispatcher);
+
+            // sec1/AC3: a mutant that DELETED `grant_generation.saturating_add(1)`
+            // at this path's dispatch site would leave `gen_after == gen_before`
+            // and fail this assert. A mutant that deleted `execute_grants.clear()`
+            // / `execute_approved_tokens.clear()` would leave the token redeemable
+            // and fail the "unknown or expired" assert below. (Mutation coverage
+            // itself is bead D6.4; these asserts name the invariant it must kill.)
+            let gen_after = with_state(&dispatcher, |s| s.grant_generation);
+            assert!(
+                gen_after > gen_before,
+                "{}: grant_generation must advance ({gen_before} -> {gen_after})",
+                path.name
+            );
+
+            // Signed-reference redemption is refused fail-closed and never runs.
+            let exec_err = dispatcher
+                .dispatch(
+                    "oracle_execute",
+                    json!({ "sql": UPDATE_SQL, "confirm": confirm.clone(), "commit": true }),
+                )
+                .expect_err(&format!(
+                    "{}: a grant minted before the lowering must be refused",
+                    path.name
+                ));
+            assert!(
+                matches!(
+                    exec_err.error_class,
+                    ErrorClass::ChallengeRequired | ErrorClass::OperatingLevelTooLow
+                ),
+                "{}: fail-closed refusal, got {:?}: {}",
+                path.name,
+                exec_err.error_class,
+                exec_err.message
+            );
+            assert!(
+                executed(&state).is_empty(),
+                "{}: the write must NOT reach the database",
+                path.name
+            );
+
+            // Remembered-token redemption proves the store was CLEARED. This
+            // refusal fires before any level re-gate, so it isolates
+            // grant-invalidation from the classifier re-gate.
+            let token_err = dispatcher
+                .dispatch("execute_approved", json!({ "token": confirm }))
+                .expect_err(&format!("{}: the cleared grant is unknown", path.name));
+            assert_eq!(
+                token_err.error_class,
+                ErrorClass::ChallengeRequired,
+                "{}",
+                path.name
+            );
+            assert!(
+                token_err.message.contains("unknown or expired"),
+                "{}: grant-invalidation refusal expected: {}",
+                path.name,
+                token_err.message
+            );
+            assert!(
+                executed(&state).is_empty(),
+                "{}: still nothing ran",
+                path.name
+            );
+        }
+    }
+
+    /// The precise SEC-1 statement: the stored verdict is never an authorization
+    /// input EVEN WHEN the live gate would still allow the statement. Mint a
+    /// READ_WRITE grant at DDL, then lower to READ_WRITE — the UPDATE is still
+    /// within the (lowered) ceiling, so the classifier re-gate ALLOWS it; the
+    /// ONLY thing that can refuse the redeem is the stale lane generation. This
+    /// isolates grant-invalidation from the belt-and-suspenders re-gate.
+    #[test]
+    fn set_session_level_lower_refuses_stale_grant_even_when_live_gate_allows() {
+        let (dispatcher, state) = recording_dispatcher(ddl_level());
+        let confirm = preview_confirm(&dispatcher, UPDATE_SQL);
+
+        dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({ "level": "READ_WRITE", "action": "apply" }),
+            )
+            .expect("lower DDL -> READ_WRITE");
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": UPDATE_SQL, "confirm": confirm, "commit": true }),
+            )
+            .expect_err("stale grant refused although the live gate permits READ_WRITE");
+        // Not a level gate (READ_WRITE is permitted) — a grant-invalidation
+        // refusal that cites the lane generation.
+        assert_eq!(
+            err.error_class,
+            ErrorClass::ChallengeRequired,
+            "grant-invalidation (not a level gate) must refuse: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("generation"),
+            "the refusal cites the lane generation: {}",
+            err.message
+        );
+        assert!(executed(&state).is_empty(), "the UPDATE must NOT run");
+    }
+
+    /// Positive control: with NO lowering, the very same mint→redeem flow runs
+    /// the statement exactly once. This proves the refusals above are caused by
+    /// the lowering, not by an inert harness that never executes anything.
+    #[test]
+    fn control_valid_grant_runs_once_when_ceiling_is_not_lowered() {
+        let (dispatcher, state) = recording_dispatcher(ddl_level());
+        let confirm = preview_confirm(&dispatcher, UPDATE_SQL);
+        let out = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": UPDATE_SQL, "confirm": confirm, "commit": true }),
+            )
+            .expect("a fresh, un-lowered grant runs");
+        assert_eq!(out["executed"], json!(true));
+        let ran = executed(&state);
+        assert_eq!(ran.len(), 1, "exactly one statement ran");
+        assert!(
+            ran[0].contains("UPDATE hr.employees"),
+            "the previewed UPDATE ran: {}",
+            ran[0]
+        );
+    }
+
+    /// FINDING (honest verdict): the ONE level-lowering path that does NOT go
+    /// through a clear+bump dispatch site is the PASSIVE elevation-window TTL
+    /// expiry. When an `escalate_window` deadline lapses, the effective level
+    /// drops back to the base with NO dispatch call, so `grant_generation` is
+    /// unchanged and `execute_grants` is not cleared — the grant is NOT
+    /// invalidated. This is safe on the SERVED path because the write apply path
+    /// (`execute_sql_inner`) RE-CLASSIFIES and RE-GATES against the live level
+    /// BEFORE consuming the grant, so a now-forbidden DDL is refused anyway.
+    /// (The standalone `oraclemcp-core::oracle_query_execute` helper, which does
+    /// NOT re-gate, is NOT wired into this served surface — see the REPORT.)
+    #[test]
+    fn ttl_elevation_expiry_is_caught_by_reclassify_not_by_grant_invalidation() {
+        // Ceiling DDL, base current READ_ONLY: a *temporary* elevation to DDL.
+        let (dispatcher, state) =
+            recording_dispatcher(SessionLevelState::new(OperatingLevel::Ddl, false));
+
+        // Real step-up elevation to DDL (this bumps the generation once).
+        let preview = dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({ "level": "DDL", "ttl_seconds": 3600 }),
+            )
+            .expect("preview elevation");
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("elevation grant")
+            .to_owned();
+        dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({ "level": "DDL", "ttl_seconds": 3600, "execute": true, "confirm": confirm }),
+            )
+            .expect("elevate to DDL");
+
+        // Mint a DDL grant while elevated.
+        let ddl_confirm = preview_confirm(&dispatcher, DDL_SQL);
+        let gen_at_mint = with_state(&dispatcher, |s| s.grant_generation);
+
+        // Simulate the elevation TTL lapsing: re-arm an ALREADY-expired window,
+        // exactly the post-expiry state (levels.rs auto-drops an expired window
+        // in `effective_level`). This is a passive state transition — it does
+        // NOT run through any dispatch site, so it neither bumps the generation
+        // nor clears the grant store.
+        with_state(&dispatcher, |s| {
+            s.level
+                .escalate_window(OperatingLevel::Ddl, std::time::Duration::from_secs(0))
+                .expect("re-arm an already-expired elevation window");
+        });
+        let gen_after_expiry = with_state(&dispatcher, |s| s.grant_generation);
+
+        // FINDING: TTL expiry does NOT invalidate the grant.
+        assert_eq!(
+            gen_after_expiry, gen_at_mint,
+            "TTL expiry must not bump grant_generation (it is a passive drop)"
+        );
+
+        // Yet the pre-minted DDL grant STILL does not run: the served apply path
+        // re-classifies + re-gates against the LIVE (post-expiry, READ_ONLY)
+        // level and refuses the now-forbidden DDL BEFORE the grant is consumed.
+        let err = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": DDL_SQL, "confirm": ddl_confirm, "commit": true }),
+            )
+            .expect_err("expired-elevation DDL grant must be refused");
+        assert_eq!(
+            err.error_class,
+            ErrorClass::OperatingLevelTooLow,
+            "the live re-gate (not invalidation) refuses the now-forbidden DDL: {}",
+            err.message
+        );
+        assert!(
+            executed(&state).is_empty(),
+            "the DDL must NOT run after the elevation window expired"
+        );
+    }
+}
