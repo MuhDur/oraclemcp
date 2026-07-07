@@ -794,8 +794,8 @@ function SessionLaneTable({
   onSelect: (laneId: string) => void;
 }): React.ReactElement {
   return (
-    <Surface className="overflow-hidden">
-      <PanelHeader
+    <ConsolePanel>
+      <ConsolePanelHeader
         icon={Database}
         title="Active Lanes"
         meta={pending ? "sync" : `${rows.length} lanes`}
@@ -803,21 +803,24 @@ function SessionLaneTable({
       />
       <div className="overflow-x-auto">
         <table className="w-full min-w-[980px] border-collapse text-left">
-          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+          <thead className="bg-[var(--om-surface-muted)] text-2xs uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
             <tr>
-              <th className="px-4 py-3 font-bold">Lane</th>
-              <th className="px-4 py-3 font-bold">Agent</th>
-              <th className="px-4 py-3 font-bold">Profile</th>
-              <th className="px-4 py-3 font-bold">Level</th>
-              <th className="px-4 py-3 font-bold">Activity</th>
-              <th className="px-4 py-3 font-bold">Generation</th>
-              <th className="px-4 py-3 font-bold">Detail</th>
+              <th className="px-4 py-3 font-semibold">Lane</th>
+              <th className="px-4 py-3 font-semibold">Agent</th>
+              <th className="px-4 py-3 font-semibold">Profile</th>
+              <th className="px-4 py-3 font-semibold">Level</th>
+              <th className="px-4 py-3 font-semibold">Activity</th>
+              <th className="px-4 py-3 font-semibold">Generation</th>
+              <th className="px-4 py-3 font-semibold">Detail</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-zinc-100">
+          <tbody className="divide-y divide-[var(--om-border)]">
             {rows.length === 0 ? (
               <tr>
-                <td className="px-4 py-8 text-center text-sm font-semibold text-zinc-500" colSpan={7}>
+                <td
+                  className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]"
+                  colSpan={7}
+                >
                   No active lanes
                 </td>
               </tr>
@@ -825,21 +828,31 @@ function SessionLaneTable({
               rows.map((row) => {
                 const selected = row.laneId === selectedLaneId;
                 return (
-                  <tr key={`${row.laneId}:${row.subjectIdHash}`} className={selected ? "bg-emerald-50" : "bg-white"}>
-                    <td className="px-4 py-4 align-top font-mono text-sm font-semibold text-zinc-950">
+                  <tr
+                    key={`${row.laneId}:${row.subjectIdHash}`}
+                    className={
+                      selected
+                        ? "bg-[color-mix(in_srgb,var(--om-gold)_12%,transparent)]"
+                        : "bg-transparent"
+                    }
+                    data-lane-selected={selected}
+                  >
+                    <td className="px-4 py-4 align-top font-mono text-sm font-semibold text-[var(--om-text-bright)]">
                       <div className="flex flex-col gap-2">
                         <span>{row.laneId}</span>
                         <Badge tone={row.active ? "ok" : "off"}>{row.statusLabel}</Badge>
                       </div>
                     </td>
                     <td className="px-4 py-4 align-top">
-                      <p className="max-w-[280px] break-all font-mono text-xs text-zinc-600">
+                      <p className="max-w-[280px] break-all font-mono text-xs text-[var(--om-text-muted)]">
                         {row.subjectIdHash}
                       </p>
                     </td>
-                    <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
+                    <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
                       <div className="max-w-[180px] break-all">{row.activeProfile}</div>
-                      <p className="mt-1 max-w-[180px] break-all text-xs text-zinc-500">{row.dbFingerprint}</p>
+                      <p className="mt-1 max-w-[180px] break-all text-xs text-[var(--om-text-muted)]">
+                        {row.dbFingerprint}
+                      </p>
                     </td>
                     <td className="px-4 py-4 align-top">
                       <span
@@ -850,15 +863,17 @@ function SessionLaneTable({
                       >
                         {row.currentLevel}
                       </span>
-                      <p className="mt-1 font-mono text-xs text-zinc-500">max {row.maxLevel}</p>
+                      <p className="mt-1 font-mono text-xs text-[var(--om-text-muted)]">
+                        max {row.maxLevel}
+                      </p>
                     </td>
-                    <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
+                    <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
                       <p>{formatNumber(row.requests)} req</p>
-                      <p className="mt-1 text-xs text-zinc-500">
+                      <p className="mt-1 text-xs text-[var(--om-text-muted)]">
                         {formatNumber(row.blocked)} blocked · {Math.round(row.meanLatencyMs)} ms
                       </p>
                     </td>
-                    <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
+                    <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
                       {formatNumber(row.generation)}
                     </td>
                     <td className="px-4 py-4 align-top">
@@ -878,7 +893,7 @@ function SessionLaneTable({
           </tbody>
         </table>
       </div>
-    </Surface>
+    </ConsolePanel>
   );
 }
 
@@ -888,35 +903,35 @@ function SessionLaneDetailPanel({
   detail: SessionLaneDetail | null;
 }): React.ReactElement {
   return (
-    <Surface className="overflow-hidden">
-      <PanelHeader
+    <ConsolePanel>
+      <ConsolePanelHeader
         icon={Activity}
         title="Lane Detail"
         meta={detail?.laneId ?? "no lane"}
         tone={detail ? "ok" : "off"}
       />
       <div className="grid gap-3 p-4 sm:grid-cols-2">
-        <CapacityFact label="Lane" value={detail?.laneId ?? "none"} mono />
-        <CapacityFact label="Agent" value={detail?.subjectIdHash ?? "none"} mono />
-        <CapacityFact label="Profile" value={detail?.activeProfile ?? "unknown"} mono />
-        <CapacityFact label="DB" value={detail?.dbFingerprint ?? "unknown"} mono />
-        <CapacityFact label="Level" value={detail?.currentLevel ?? "unknown"} mono />
-        <CapacityFact label="Ceiling" value={detail?.maxLevel ?? "unknown"} mono />
-        <CapacityFact label="Protected" value={detail?.protectedProfile ?? "unknown"} mono />
-        <CapacityFact label="Schema" value={detail?.visibleSchema ?? "unknown"} mono />
-        <CapacityFact label="Connected" value={detail?.connected ?? "unknown"} mono />
-        <CapacityFact label="Strategy" value={detail?.connectionStrategy ?? "unknown"} mono />
-        <CapacityFact label="Server" value={detail?.serverVersion ?? "unknown"} mono />
-        <CapacityFact label="Role" value={detail?.databaseRole ?? "unknown"} mono />
-        <CapacityFact label="Open Mode" value={detail?.openMode ?? "unknown"} mono />
-        <CapacityFact label="Requests" value={detail?.requests ?? 0} />
-        <CapacityFact label="Blocked" value={detail?.blocked ?? 0} />
-        <CapacityFact label="Mean Latency" value={`${Math.round(detail?.meanLatencyMs ?? 0)} ms`} mono />
-        <CapacityFact label="Max Latency" value={`${Math.round(detail?.maxLatencyMs ?? 0)} ms`} mono />
-        <CapacityFact label="Last Event" value={detail?.lastEvent ?? "none"} mono />
-        <CapacityFact label="Detail State" value={detail?.detailState ?? "unknown"} mono />
+        <ConsoleFact label="Lane" value={detail?.laneId ?? "none"} mono />
+        <ConsoleFact label="Agent" value={detail?.subjectIdHash ?? "none"} mono />
+        <ConsoleFact label="Profile" value={detail?.activeProfile ?? "unknown"} mono />
+        <ConsoleFact label="DB" value={detail?.dbFingerprint ?? "unknown"} mono />
+        <ConsoleFact label="Level" value={detail?.currentLevel ?? "unknown"} mono />
+        <ConsoleFact label="Ceiling" value={detail?.maxLevel ?? "unknown"} mono />
+        <ConsoleFact label="Protected" value={detail?.protectedProfile ?? "unknown"} mono />
+        <ConsoleFact label="Schema" value={detail?.visibleSchema ?? "unknown"} mono />
+        <ConsoleFact label="Connected" value={detail?.connected ?? "unknown"} mono />
+        <ConsoleFact label="Strategy" value={detail?.connectionStrategy ?? "unknown"} mono />
+        <ConsoleFact label="Server" value={detail?.serverVersion ?? "unknown"} mono />
+        <ConsoleFact label="Role" value={detail?.databaseRole ?? "unknown"} mono />
+        <ConsoleFact label="Open Mode" value={detail?.openMode ?? "unknown"} mono />
+        <ConsoleFact label="Requests" value={detail?.requests ?? 0} />
+        <ConsoleFact label="Blocked" value={detail?.blocked ?? 0} />
+        <ConsoleFact label="Mean Latency" value={`${Math.round(detail?.meanLatencyMs ?? 0)} ms`} mono />
+        <ConsoleFact label="Max Latency" value={`${Math.round(detail?.maxLatencyMs ?? 0)} ms`} mono />
+        <ConsoleFact label="Last Event" value={detail?.lastEvent ?? "none"} mono />
+        <ConsoleFact label="Detail State" value={detail?.detailState ?? "unknown"} mono />
       </div>
-    </Surface>
+    </ConsolePanel>
   );
 }
 
@@ -2812,6 +2827,83 @@ function PanelHeader({
   );
 }
 
+// Carved Light building blocks for the b4 operator surfaces. These mirror the
+// shared light Surface/PanelHeader/CapacityFact but read the --om tokens, so a
+// b4 surface renders as a self-contained near-black island without flipping the
+// still-light primitives the rest of the console uses.
+function ConsolePanel({
+  className,
+  children,
+  ...rest
+}: React.HTMLAttributes<HTMLElement>): React.ReactElement {
+  return (
+    <section
+      className={cn(
+        "overflow-hidden rounded-lg border border-[var(--om-border)] bg-[var(--om-surface)] shadow-sm",
+        className
+      )}
+      {...rest}
+    >
+      {children}
+    </section>
+  );
+}
+
+function ConsolePanelHeader({
+  icon: Icon,
+  title,
+  meta,
+  tone,
+  action
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  meta: string;
+  tone: DashboardTone;
+  action?: React.ReactNode;
+}): React.ReactElement {
+  return (
+    <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
+      <div className="flex min-w-0 items-center gap-3">
+        <div className="flex size-9 items-center justify-center rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] text-[var(--om-text-muted)]">
+          <Icon className="size-4" aria-hidden="true" />
+        </div>
+        <div className="min-w-0">
+          <h3 className="truncate text-base font-semibold text-[var(--om-text-bright)]">{title}</h3>
+          <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">{meta}</p>
+        </div>
+      </div>
+      {action ?? <Badge tone={tone}>{tone}</Badge>}
+    </div>
+  );
+}
+
+function ConsoleFact({
+  label,
+  value,
+  mono = false
+}: {
+  label: string;
+  value: string | number;
+  mono?: boolean;
+}): React.ReactElement {
+  return (
+    <div className="rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] p-3">
+      <p className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+        {label}
+      </p>
+      <p
+        className={cn(
+          "mt-2 break-all text-sm font-semibold text-[var(--om-text-bright)]",
+          mono ? "font-mono" : "font-sans"
+        )}
+      >
+        {typeof value === "number" ? formatNumber(value) : value}
+      </p>
+    </div>
+  );
+}
+
 function EventFact({ label, value }: { label: string; value: unknown }): React.ReactElement {
   return (
     <div className="rounded-md border border-zinc-200 bg-zinc-50 p-2">
@@ -3246,24 +3338,26 @@ function clearanceLevel(value: string): OperatingLevel {
   return value === "READ_WRITE" || value === "DDL" || value === "ADMIN" ? value : "READ_ONLY";
 }
 
+// Color IS clearance (Appendix G): every level reads its own --om clearance
+// token via color-mix, so the ramp holds on the near-black console and on any
+// lighter fallback surface alike.
+const SESSION_CLEARANCE_VAR: Record<OperatingLevel, string> = {
+  READ_ONLY: "--om-clearance-read-only",
+  READ_WRITE: "--om-clearance-read-write",
+  DDL: "--om-clearance-ddl",
+  ADMIN: "--om-clearance-admin"
+};
+
 function sessionClearanceClass(level: OperatingLevel): string {
-  switch (level) {
-    case "READ_ONLY":
-      return "border-emerald-200 bg-emerald-50 text-emerald-800";
-    case "READ_WRITE":
-      return "border-sky-200 bg-sky-50 text-sky-800";
-    case "DDL":
-      return "border-amber-200 bg-amber-50 text-amber-800";
-    case "ADMIN":
-      return "border-rose-200 bg-rose-50 text-rose-800";
-  }
+  const token = SESSION_CLEARANCE_VAR[level];
+  return `border-[color-mix(in_srgb,var(${token})_50%,transparent)] bg-[color-mix(in_srgb,var(${token})_14%,transparent)] text-[var(${token})]`;
 }
 
 function sessionLevelBadgeClass(value: string): string {
   if (value === "READ_ONLY" || value === "READ_WRITE" || value === "DDL" || value === "ADMIN") {
     return sessionClearanceClass(clearanceLevel(value));
   }
-  return "border-zinc-200 bg-zinc-50 text-zinc-600";
+  return "border-[var(--om-border)] bg-[var(--om-surface-muted)] text-[var(--om-text-muted)]";
 }
 
 function aggregateDurations(
