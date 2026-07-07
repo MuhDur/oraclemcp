@@ -1243,6 +1243,127 @@ fn classify_statement(
     }
 }
 
+/// Split a benign, balanced PL/SQL block's *outer* body (the tokens strictly
+/// between the `BEGIN` that drives block depth 0→1 and its matching `END`) into
+/// its top-level statement segments, reconstructed as SQL text. The single depth
+/// model mirrors [`analyze_batch`] exactly (`BEGIN`/`IF`/`CASE`/`LOOP` open a
+/// level, `END`/`END IF`/`END LOOP`/`END CASE` close one, whitespace never
+/// resets `expecting_close`), so `;` terminators buried inside nested control
+/// flow stay attached to their enclosing segment and only depth-1 `;` split the
+/// body. Used to re-apply the bare-statement classifier to a block's interior so
+/// wrapping a statement in `BEGIN … END` can never LOWER its classification
+/// (iec3.2.30). Extraction only — classification stays in [`classify_statement`].
+fn block_interior_segments(sql: &str) -> Vec<String> {
+    let Ok(tokens) = Tokenizer::new(&OracleDialect {}, sql).tokenize() else {
+        return Vec::new();
+    };
+    let mut depth: i64 = 0;
+    let mut expecting_close = false;
+    let mut in_body = false;
+    let mut segments: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for token in &tokens {
+        match token {
+            Token::Word(w) => {
+                let keyword = w
+                    .quote_style
+                    .is_none()
+                    .then(|| w.value.to_ascii_uppercase());
+                match keyword.as_deref() {
+                    Some("BEGIN") => {
+                        depth += 1;
+                        expecting_close = false;
+                        if depth == 1 && !in_body {
+                            // The opening BEGIN: the body starts AFTER it, so the
+                            // BEGIN keyword itself is never part of a segment.
+                            in_body = true;
+                            continue;
+                        }
+                    }
+                    Some("IF") | Some("CASE") | Some("LOOP") => {
+                        if !expecting_close {
+                            depth += 1;
+                        }
+                        expecting_close = false;
+                    }
+                    Some("END") => {
+                        depth -= 1;
+                        expecting_close = true;
+                        if depth == 0 && in_body {
+                            // The matching outer END: flush any trailing segment
+                            // and stop before appending the END itself.
+                            if !current.trim().is_empty() {
+                                segments.push(std::mem::take(&mut current));
+                            }
+                            break;
+                        }
+                    }
+                    // Any other word (incl. DECLARE) is ordinary content.
+                    _ => expecting_close = false,
+                }
+            }
+            Token::SemiColon => {
+                expecting_close = false;
+                if in_body && depth == 1 {
+                    // A body top-level statement boundary: flush and drop the `;`.
+                    if !current.trim().is_empty() {
+                        segments.push(std::mem::take(&mut current));
+                    }
+                    continue;
+                }
+            }
+            // Whitespace/comments must NOT reset `expecting_close` (`END <ws> IF`).
+            Token::Whitespace(_) => {}
+            _ => expecting_close = false,
+        }
+        if in_body {
+            current.push_str(&token.to_string());
+        }
+    }
+    segments
+}
+
+/// The classification floor contributed by a benign block's interior: the MAX
+/// `(danger, required level)` over every interior statement that parses cleanly
+/// as exactly one SQL statement, obtained by re-running the SAME bare-statement
+/// classifier ([`classify_statement`]) — the single source of truth, so a
+/// WHERE-less DML inside a block earns the same Destructive/ReadWrite tier it
+/// earns bare (iec3.2.30). Segments that do not parse cleanly (control flow,
+/// PL/SQL-only statements) contribute nothing, and a cleanly-parsed single
+/// statement never classifies Forbidden here (the [`classify_statement`] match
+/// arms only ever return Safe/Guarded/Destructive), so this can only ever RAISE
+/// the floor — never lower it and never introduce a level-less verdict.
+fn block_interior_floor(
+    sql: &str,
+    oracle: &dyn SideEffectOracle,
+    statement_unknown_guarded: bool,
+) -> Option<(DangerLevel, OperatingLevel)> {
+    let mut acc: Option<(DangerLevel, OperatingLevel)> = None;
+    for seg in block_interior_segments(sql) {
+        // Only fold in a segment that parses as exactly one SQL statement.
+        // Routing an unparseable/multi segment through `classify_statement`
+        // would hit its fail-closed admin/DDL/buried-verb scans and could
+        // OVER-raise a benign WHERE-qualified block (e.g. an `IF … UPDATE …
+        // WHERE …; END IF` control-flow segment) — the pre-check keeps the fold
+        // a faithful reuse of the bare-statement path, nothing more.
+        if Parser::parse_sql(&OracleDialect {}, &seg)
+            .map(|s| s.len())
+            .unwrap_or(0)
+            != 1
+        {
+            continue;
+        }
+        let class = classify_statement(&seg, oracle, statement_unknown_guarded);
+        if let Some(level) = class.required {
+            acc = Some(match acc {
+                Some((d, l)) => (d.max(class.danger), l.max(level)),
+                None => (class.danger, level),
+            });
+        }
+    }
+    acc
+}
+
 /// The fail-closed, engine-aware classifier.
 pub struct Classifier {
     config: ClassifierConfig,
@@ -1368,28 +1489,45 @@ impl Classifier {
                         Some("trailing top-level SQL after END".to_owned()),
                     );
                 }
-                // Body-derived floor for a benign, balanced block: ReadWrite (it
-                // may run DML we cannot prove side-effect-free). A PL/SQL-bearing
-                // `CREATE [OR REPLACE] <object>` additionally REPLACES a stored
-                // object — that is DDL — so it floors at Ddl. Written as a pure
-                // MAX (`max(Ddl, body_level)`), never a replacement, so the change
-                // can only ever RAISE the level: benign anonymous blocks stay
-                // ReadWrite, benign creates rise ReadWrite→Ddl, and nothing that
-                // already earned Ddl+ (or Forbidden, above) is lowered
-                // (oracle-p0d6 — the object-clobbering-replace fail-open-tier fix,
-                // mirroring oracle-y54x.1 for the pure-DDL create forms).
-                let body_level = OperatingLevel::ReadWrite;
+                // Body-derived floor for a benign, balanced block: at minimum
+                // Guarded / ReadWrite (it may run DML we cannot prove
+                // side-effect-free). We then re-apply the bare-statement
+                // classifier to the block's interior and fold it in as a pure MAX
+                // on BOTH danger and level, so wrapping a statement in `BEGIN …
+                // END` can never LOWER its classification below the same statement
+                // submitted bare: a WHERE-less DELETE/UPDATE stays
+                // Destructive/ReadWrite instead of collapsing to Guarded
+                // (iec3.2.30, the monotone-wrap TIGHTENING). Interior segments
+                // that do not parse cleanly contribute nothing, so the fold can
+                // only ever RAISE.
+                let mut body_danger = DangerLevel::Guarded;
+                let mut body_level = OperatingLevel::ReadWrite;
+                if let Some((interior_danger, interior_level)) =
+                    block_interior_floor(sql, self.oracle.as_ref(), self.statement_unknown_guarded)
+                {
+                    body_danger = body_danger.max(interior_danger);
+                    body_level = body_level.max(interior_level);
+                }
+                // A PL/SQL-bearing `CREATE [OR REPLACE] <object>` additionally
+                // REPLACES a stored object — that is DDL — so it floors at Ddl /
+                // Destructive. Both floors are pure MAXes (never replacements), so
+                // the change can only ever RAISE: benign anonymous blocks stay at
+                // their body-derived floor, benign creates rise to at least Ddl,
+                // and nothing that already earned Ddl+ (or Forbidden, above) is
+                // lowered (oracle-p0d6 — the object-clobbering-replace
+                // fail-open-tier fix, mirroring oracle-y54x.1 for the pure-DDL
+                // create forms).
                 let (required, danger, reason) = if plsql_create {
                     (
                         body_level.max(OperatingLevel::Ddl),
-                        DangerLevel::Destructive,
+                        body_danger.max(DangerLevel::Destructive),
                         "CREATE [OR REPLACE] of a PL/SQL stored object (DDL — replaces stored code)"
                             .to_owned(),
                     )
                 } else {
                     (
                         body_level,
-                        DangerLevel::Guarded,
+                        body_danger,
                         "PL/SQL block (cannot be proven side-effect-free here)".to_owned(),
                     )
                 };
@@ -1978,6 +2116,53 @@ mod tests {
             classify("INSERT INTO t (a) VALUES (1)").danger,
             DangerLevel::Guarded
         );
+    }
+
+    #[test]
+    fn block_wrap_is_monotone_for_where_less_dml() {
+        // iec3.2.30 — wrapping a statement in `BEGIN … END` must never LOWER its
+        // classification below the same statement bare. A WHERE-less DELETE/UPDATE
+        // is Destructive/ReadWrite bare; wrapped it used to collapse to the flat
+        // benign-block floor Guarded/ReadWrite (a fail-open under wrapping). The
+        // interior-tier fold now re-applies the bare classifier so the block earns
+        // AT LEAST the interior's tier.
+        for (bare, wrapped) in [
+            ("DELETE FROM orders", "BEGIN DELETE FROM orders; END;"),
+            (
+                "UPDATE orders SET status = 'X'",
+                "BEGIN UPDATE orders SET status = 'X'; END;",
+            ),
+        ] {
+            let b = classify(bare);
+            let w = classify(wrapped);
+            assert_eq!(
+                b.danger,
+                DangerLevel::Destructive,
+                "precondition: bare WHERE-less DML is Destructive: {bare:?}"
+            );
+            assert_eq!(
+                w.danger,
+                DangerLevel::Destructive,
+                "block-wrapped WHERE-less DML must be >= bare Destructive: {wrapped:?}"
+            );
+            assert!(
+                w.required_level >= b.required_level,
+                "block-wrapped required level must not drop below bare: {wrapped:?}"
+            );
+        }
+        // A WHERE-qualified DML inside a block stays exactly where it was — the
+        // fold only ever RAISES; it must not over-tighten a benign block.
+        let qualified = classify("BEGIN UPDATE orders SET status = 'X' WHERE id = 1; END;");
+        assert_eq!(
+            qualified.danger,
+            DangerLevel::Guarded,
+            "WHERE-qualified DML in a block stays Guarded (no over-tightening)"
+        );
+        assert_eq!(qualified.required_level, Some(OperatingLevel::ReadWrite));
+        // A benign no-op block is unaffected — its body carries no interior tier.
+        let noop = classify("BEGIN NULL; END;");
+        assert_eq!(noop.danger, DangerLevel::Guarded);
+        assert_eq!(noop.required_level, Some(OperatingLevel::ReadWrite));
     }
 
     #[test]

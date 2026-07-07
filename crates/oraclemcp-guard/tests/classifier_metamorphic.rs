@@ -32,6 +32,13 @@
 //! * **MR5 normalize-before-classify stability** — a semantics-preserving
 //!   whitespace/case normalization never changes the verdict.
 //!   [`mr_normalize_stability`]
+//! * **MR6 block-wrap monotonicity** — wrapping a statement in `BEGIN … END`
+//!   never LOWERS its severity below the same statement submitted bare (danger
+//!   and required-level both non-decreasing under the wrap). This is the
+//!   wrap-relation the original MR1 had to DROP because block-wrap floored a
+//!   WHERE-less DML at the flat benign-block Guarded/ReadWrite tier — a fail-open
+//!   under wrapping (iec3.2.30); the interior-tier fold makes it hold, so it is
+//!   now an active, mutation-validated relation. [`mr_block_wrap_monotone`]
 //!
 //! Distinct from `proptest_invariants.rs`, which owns the ALTER SESSION
 //! allowlist law and the comment-wedge relation; this file owns the five
@@ -296,6 +303,41 @@ fn mr_normalize_stability(
     }
 }
 
+/// MR6 — block-wrap monotonicity: `BEGIN <S>; END;` is never LESS strict than
+/// bare `<S>`. A statement's classification can only ever RISE when wrapped in a
+/// PL/SQL block (the block floor is at minimum Guarded/ReadWrite, and the
+/// interior-tier fold lifts it to at least what the interior earns bare), so a
+/// WHERE-less DELETE/UPDATE that is Destructive bare stays Destructive wrapped
+/// rather than collapsing to Guarded.
+fn mr_block_wrap_monotone(
+    classify: &dyn Fn(&str) -> GuardDecision,
+    base_sql: &str,
+    wrapped_sql: &str,
+) -> Result<(), String> {
+    let base = classify(base_sql);
+    let wrapped = classify(wrapped_sql);
+    let held = no_looser(&wrapped, &base);
+    log_case(
+        "MR6-block-wrap-monotone",
+        base_sql,
+        "wrap in BEGIN … END",
+        "severity(BEGIN S; END;) >= severity(S)",
+        &verdict_str(&base),
+        &verdict_str(&wrapped),
+        held,
+    );
+    if held {
+        Ok(())
+    } else {
+        Err(format!(
+            "MR6 block-wrap monotonicity VIOLATION: wrapping in BEGIN … END LOWERED the verdict\n  \
+             bare:    {base_sql:?} -> {}\n  wrapped: {wrapped_sql:?} -> {}",
+            verdict_str(&base),
+            verdict_str(&wrapped),
+        ))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Corpora + strategies
 // ---------------------------------------------------------------------------
@@ -356,8 +398,35 @@ const WRITE_TOKENS: &[&str] = &[
     "; GRANT DBA TO scott",
 ];
 
+/// Statements that are valid to submit inside an anonymous block body and whose
+/// interior parses as a single SQL statement, spanning Safe → Destructive. Each
+/// is exercised bare and wrapped in `BEGIN <S>; END;` for MR6. Static admin/DCL
+/// (`GRANT`/`ALTER USER`) is intentionally excluded: it is a compile error
+/// inside a static PL/SQL block (it only runs via `EXECUTE IMMEDIATE`, which the
+/// dangerous-marker path already forces Forbidden), so it is not a meaningful
+/// wrap subject here.
+const WRAPPABLE_STATEMENTS: &[&str] = &[
+    // WHERE-less DML — the bead's core case: Destructive/ReadWrite bare.
+    "DELETE FROM orders",
+    "UPDATE orders SET status = 'X'",
+    // WHERE-qualified DML — Guarded/ReadWrite bare; must NOT be over-raised.
+    "DELETE FROM orders WHERE id = 1",
+    "UPDATE orders SET status = 'X' WHERE id = 1",
+    "INSERT INTO audit_log (id, msg) VALUES (1, 'x')",
+    "MERGE INTO t USING s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.v = s.v",
+    // Read — Safe/READ_ONLY bare; the block floor legitimately RAISES it.
+    "SELECT id, name FROM employees WHERE dept = 10",
+    // Parseable object DDL — Destructive/Ddl bare.
+    "DROP TABLE staging_tmp",
+    "TRUNCATE TABLE staging_tmp",
+];
+
 fn base_stmt() -> impl Strategy<Value = &'static str> {
     (0..BASE_STATEMENTS.len()).prop_map(|i| BASE_STATEMENTS[i])
+}
+
+fn wrappable_stmt() -> impl Strategy<Value = &'static str> {
+    (0..WRAPPABLE_STATEMENTS.len()).prop_map(|i| WRAPPABLE_STATEMENTS[i])
 }
 
 fn danger_stmt() -> impl Strategy<Value = &'static str> {
@@ -521,6 +590,24 @@ fn mutant_flashback_blind(sql: &str) -> GuardDecision {
     }
 }
 
+/// MUT-BLOCKWRAP: the pre-fix flat benign-block floor — any PL/SQL block collapses
+/// to the Guarded/ReadWrite tier regardless of its interior, so a WHERE-less DML
+/// wrapped in `BEGIN … END` is scored Guarded even though bare it is Destructive.
+/// Non-uniform (only block inputs whose interior out-ranks Guarded are loosened);
+/// a Forbidden dangerous block is left untouched → breaks MR6 monotonicity.
+fn mutant_blockwrap_collapse(sql: &str) -> GuardDecision {
+    let upper = sql.trim_start().to_ascii_uppercase();
+    let real = real_classify(sql);
+    let is_block = upper.starts_with("BEGIN") || upper.starts_with("DECLARE");
+    let interior_outranks_guarded = danger_rank(real.danger) > danger_rank(DangerLevel::Guarded)
+        && danger_rank(real.danger) < danger_rank(DangerLevel::Forbidden);
+    if is_block && interior_outranks_guarded {
+        with_danger(real, DangerLevel::Guarded)
+    } else {
+        real
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Property tests against the REAL classifier — every relation must hold.
 // ---------------------------------------------------------------------------
@@ -560,6 +647,21 @@ proptest! {
             mr_monotonicity(&real_classify, base, "append FOR UPDATE", &combined).is_ok(),
             "{}",
             mr_monotonicity(&real_classify, base, "append FOR UPDATE", &combined).unwrap_err()
+        );
+    }
+
+    /// MR6 — wrapping a statement in `BEGIN … END` never lowers its verdict.
+    /// This is the wrap-relation MR1 had to drop before the interior-tier fold
+    /// (iec3.2.30); a WHERE-less DML must stay Destructive when block-wrapped.
+    #[test]
+    fn mr6_block_wrap_never_loosens(
+        base in wrappable_stmt(),
+    ) {
+        let wrapped = format!("BEGIN {base}; END;");
+        prop_assert!(
+            mr_block_wrap_monotone(&real_classify, base, &wrapped).is_ok(),
+            "{}",
+            mr_block_wrap_monotone(&real_classify, base, &wrapped).unwrap_err()
         );
     }
 
@@ -684,6 +786,26 @@ fn mr1_kills_marker_blind_mutant() {
 }
 
 #[test]
+fn mr6_kills_blockwrap_collapse_mutant() {
+    // A WHERE-less DML wrapped in `BEGIN … END`: the flat-floor mutant collapses
+    // the block to Guarded even though bare it is Destructive, so the wrapped
+    // form scores BELOW the bare form — a monotonicity inversion under wrapping.
+    assert_mr_kills(
+        "MR6-block-wrap-monotone",
+        "MUT-BLOCKWRAP(flat-floor)",
+        || {
+            for &base in WRAPPABLE_STATEMENTS {
+                let wrapped = format!("BEGIN {base}; END;");
+                if let Err(w) = mr_block_wrap_monotone(&mutant_blockwrap_collapse, base, &wrapped) {
+                    return Some(w);
+                }
+            }
+            None
+        },
+    );
+}
+
+#[test]
 fn mr2_kills_nonidempotent_mutant() {
     assert_mr_kills("MR2-idempotence", "MUT-STATE(nonidempotent)", || {
         for &base in BASE_STATEMENTS {
@@ -779,6 +901,7 @@ fn planted_mutants_are_genuine_loosenings() {
     let mut marker = false;
     let mut ws = false;
     let mut fb = false;
+    let mut blockwrap = false;
     for &base in BASE_STATEMENTS {
         for &danger in DANGER_STATEMENTS {
             let sql = format!("{base}; {danger}");
@@ -789,6 +912,12 @@ fn planted_mutants_are_genuine_loosenings() {
             if severity(&mutant_whitespace_sensitive(&raw)) < severity(&real_classify(&raw)) {
                 ws = true;
             }
+        }
+    }
+    for &base in WRAPPABLE_STATEMENTS {
+        let wrapped = format!("BEGIN {base}; END;");
+        if severity(&mutant_blockwrap_collapse(&wrapped)) < severity(&real_classify(&wrapped)) {
+            blockwrap = true;
         }
     }
     for &flashback in FLASHBACK_BASES {
@@ -810,5 +939,9 @@ fn planted_mutants_are_genuine_loosenings() {
     assert!(
         fb,
         "MUT-FB never loosened any corpus input — not a valid mutant"
+    );
+    assert!(
+        blockwrap,
+        "MUT-BLOCKWRAP never loosened any corpus input — not a valid mutant"
     );
 }
