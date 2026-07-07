@@ -77,6 +77,7 @@ import {
   executeWorkbenchSql,
   applyConfigDraft,
   cancelLane,
+  parseClassifierLadder,
   fetchActiveLanes,
   fetchClientCredentials,
   fetchDashboardSession,
@@ -127,6 +128,8 @@ import {
   type OperatorHealthData,
   type OperatorCapacityData,
   type OperatorEventEnvelope,
+  type ClassifierLadderData,
+  type ClassifierLadderVerdictKind,
   type ConfigApplyData,
   type ConfigDraftPreview,
   type ConfigFieldChange,
@@ -2881,6 +2884,29 @@ function ToolMetricsPanel({
   );
 }
 
+// The most recent classifier ladder snapshot carried on the events stream
+// (server-derived from the redacted audit tail; no SQL text or bind values).
+function latestClassifierLadder(events: OperatorEventEnvelope[]): ClassifierLadderData | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const ladder = parseClassifierLadder(events[i]);
+    if (ladder) {
+      return ladder;
+    }
+  }
+  return null;
+}
+
+function classifierVerdictTone(verdict: ClassifierLadderVerdictKind): DashboardTone {
+  switch (verdict) {
+    case "PASS":
+      return "ok";
+    case "HOLD":
+      return "info";
+    case "REFUSED":
+      return "warn";
+  }
+}
+
 function OperatorEventLogPanel({
   status,
   events
@@ -2888,12 +2914,14 @@ function OperatorEventLogPanel({
   status: EventStreamStatus;
   events: OperatorEventEnvelope[];
 }): React.ReactElement {
+  const ladder = latestClassifierLadder(events);
+  const verdicts = [...(ladder?.verdicts ?? [])].sort((a, b) => b.seq - a.seq);
   return (
     <ConsolePanel>
       <ConsolePanelHeader
         icon={Wifi}
         title="Classifier · Live"
-        meta={status}
+        meta={verdicts.length > 0 ? `${verdicts.length} verdicts · ${status}` : status}
         tone={eventStatusTone(status)}
       />
       <div className="border-b border-[var(--om-border)] px-4 py-3">
@@ -2923,9 +2951,40 @@ function OperatorEventLogPanel({
         </div>
       </div>
       <div className="max-h-[460px] divide-y divide-[var(--om-border)] overflow-auto">
-        {events.length === 0 ? (
+        {verdicts.length > 0 ? (
+          verdicts.map((verdict) => (
+            <div
+              key={`${verdict.seq}:${verdict.timestamp}`}
+              className="px-4 py-3"
+              data-verdict={verdict.verdict}
+              data-ladder={verdict.ladder}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge tone={classifierVerdictTone(verdict.verdict)}>{verdict.ladder}</Badge>
+                    <span className="truncate font-mono text-sm font-semibold text-[var(--om-text-bright)]">
+                      {verdict.tool}
+                    </span>
+                  </div>
+                  <p className="mt-1 break-all font-mono text-xs text-[var(--om-text-muted)]">
+                    {verdict.subject_id_hash}
+                  </p>
+                </div>
+                <span className="shrink-0 font-mono text-2xs text-[var(--om-text-muted)]">
+                  #{verdict.seq}
+                </span>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 font-mono text-2xs text-[var(--om-text-muted)]">
+                <span>danger {verdict.danger_level}</span>
+                <span>decision {verdict.decision}</span>
+                <span>outcome {verdict.outcome}</span>
+              </div>
+            </div>
+          ))
+        ) : events.length === 0 ? (
           <p className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]">
-            No events
+            No verdicts yet
           </p>
         ) : (
           events.map((event) => (
