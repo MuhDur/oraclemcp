@@ -100,8 +100,12 @@ export const CARVED_LIGHT_THEME: DashboardTheme = {
   }
 };
 
-export const GROUND_CONTROL_SKIN: DashboardSkin = {
-  name: "ground-control-2d",
+// The OMCP operator console ships exactly one theme (Carved Light) over the
+// view-model / skin / theme / renderer seam. The seam (DashboardSkin,
+// assertDashboardSkinConformance, the board2d/table/orrery3d renderer set,
+// REQUIRED_THEME_MODES) stays open for future skins; 0.7.3 wires just this one.
+export const OMCP_SKIN: DashboardSkin = {
+  name: "omcp-carved-light",
   grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
   theme: CARVED_LIGHT_THEME,
   defaultBigBoard: "board2d",
@@ -147,7 +151,7 @@ export const GROUND_CONTROL_SKIN: DashboardSkin = {
   }
 };
 
-assertDashboardSkinConformance(GROUND_CONTROL_SKIN);
+assertDashboardSkinConformance(OMCP_SKIN);
 
 export function useDashboardCapabilities(): SkinCapability {
   const [capabilities, setCapabilities] = React.useState<SkinCapability>(() =>

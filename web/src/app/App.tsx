@@ -52,7 +52,7 @@ import { Badge, Button, Surface } from "../components/ui/primitives";
 import { cn } from "../lib/utils";
 import {
   BigBoardSurface,
-  GROUND_CONTROL_SKIN,
+  OMCP_SKIN,
   useDashboardCapabilities
 } from "./skin";
 import {
@@ -278,7 +278,7 @@ export function bootstrapDashboard(element: HTMLElement): void {
 }
 
 function RootLayout(): React.ReactElement {
-  const skin = GROUND_CONTROL_SKIN;
+  const skin = OMCP_SKIN;
   return (
     <div
       className={skin.layout.appShell}
@@ -292,8 +292,10 @@ function RootLayout(): React.ReactElement {
               <ShieldCheck className="size-5" aria-hidden="true" />
             </div>
             <div>
-              <p className="text-xs font-semibold uppercase text-zinc-500">Ground Control</p>
-              <h1 className="text-xl font-bold tracking-normal">oraclemcp</h1>
+              <p className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+                ORACLEMCP · OPERATOR CONSOLE
+              </p>
+              <h1 className="font-serif text-xl font-semibold text-[var(--om-text-bright)]">◇ OMCP</h1>
             </div>
           </div>
           <nav className={skin.layout.nav} aria-label="dashboard">
@@ -316,7 +318,7 @@ function NavLink({
   skin
 }: {
   item: NavItem;
-  skin: typeof GROUND_CONTROL_SKIN;
+  skin: typeof OMCP_SKIN;
 }): React.ReactElement {
   const Icon = item.icon;
   return (
@@ -398,7 +400,7 @@ function GroundControlStrip(): React.ReactElement {
       }
     ] satisfies readonly SignatureViewModel[]
   };
-  const GroundControl = GROUND_CONTROL_SKIN.renderers.GroundControl;
+  const GroundControl = OMCP_SKIN.renderers.GroundControl;
   return <GroundControl model={model} />;
 }
 
@@ -434,7 +436,7 @@ function OverviewPage(): React.ReactElement {
       description="Runtime and operator protocol posture from the active service."
     >
       <div className="space-y-4">
-        <BigBoardSurface capabilities={capabilities} model={fleet} skin={GROUND_CONTROL_SKIN} />
+        <BigBoardSurface capabilities={capabilities} model={fleet} skin={OMCP_SKIN} />
         <OverviewMetricTiles
           snapshot={snapshot}
           lanes={lanes}
@@ -612,7 +614,7 @@ function SessionsPage(): React.ReactElement {
           source={activeLanes.data?.data.source ?? "unavailable"}
           pending={pending}
         />
-        <BigBoardSurface capabilities={capabilities} model={fleet} skin={GROUND_CONTROL_SKIN} />
+        <BigBoardSurface capabilities={capabilities} model={fleet} skin={OMCP_SKIN} />
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)]">
           <SessionLaneTable
             rows={laneRows}
@@ -719,7 +721,7 @@ function SessionMissionHeader({
   source: string;
   pending: boolean;
 }): React.ReactElement {
-  const GroundControl = GROUND_CONTROL_SKIN.renderers.GroundControl;
+  const GroundControl = OMCP_SKIN.renderers.GroundControl;
   return (
     <div className="grid gap-4 xl:grid-cols-[minmax(360px,0.9fr)_minmax(0,1.1fr)]">
       <GroundControl model={model} />
