@@ -76,6 +76,7 @@ import {
   draftChangeProposal,
   executeWorkbenchSql,
   applyConfigDraft,
+  cancelLane,
   fetchActiveLanes,
   fetchClientCredentials,
   fetchDashboardSession,
@@ -516,6 +517,7 @@ function SessionsPage(): React.ReactElement {
   const [ttlSeconds, setTtlSeconds] = React.useState(900);
   const [confirm, setConfirm] = React.useState("");
   const [lastResult, setLastResult] = React.useState<SessionLevelResult | null>(null);
+  const [cancelNotice, setCancelNotice] = React.useState<string | null>(null);
   const capabilities = useDashboardCapabilities();
   const session = useQuery({
     queryKey: ["dashboard-session"],
@@ -607,6 +609,37 @@ function SessionsPage(): React.ReactElement {
     }
   });
 
+  // Per-lane kill-switch. The cancel route is guarded server-side (the server
+  // derives the Subject from the transport principal — the browser never supplies
+  // it); the confirm here only guards against an accidental click.
+  const cancelMutation = useMutation({
+    mutationFn: async (laneId: string) => {
+      if (!session.data) {
+        throw new Error("dashboard session is not ready");
+      }
+      return cancelLane(session.data, laneId);
+    },
+    onSuccess: (_response, laneId) => {
+      setCancelNotice(`lane ${laneId} cancelled`);
+      queryClient.invalidateQueries({ queryKey: ["active-lanes"] });
+      queryClient.invalidateQueries({ queryKey: ["operator-metrics"] });
+    },
+    onError: (error) => {
+      setCancelNotice(error instanceof Error ? error.message : "lane cancel failed");
+    }
+  });
+
+  const requestCancelLane = (laneId: string): void => {
+    if (!laneId) {
+      return;
+    }
+    if (typeof window !== "undefined" && !window.confirm(`Cancel lane ${laneId}? This kills its Oracle session and grants.`)) {
+      return;
+    }
+    setCancelNotice(null);
+    cancelMutation.mutate(laneId);
+  };
+
   const sessionTone =
     session.status === "success" ? "ok" : session.status === "error" ? "warn" : "info";
   const canAct = session.status === "success" && Boolean(selectedLane) && !levelMutation.isPending;
@@ -659,6 +692,9 @@ function SessionsPage(): React.ReactElement {
             selectedLaneId={selectedLane?.lane_id ?? selectedLaneId}
             pending={pending}
             onSelect={(laneId) => setSelectedLaneId(laneId)}
+            onCancel={requestCancelLane}
+            cancelPendingLaneId={cancelMutation.isPending ? cancelMutation.variables ?? null : null}
+            cancelNotice={cancelNotice}
           />
           <div className="space-y-4">
             <SessionLaneDetailPanel detail={selectedDetail} />
@@ -786,12 +822,18 @@ function SessionLaneTable({
   rows,
   selectedLaneId,
   pending,
-  onSelect
+  onSelect,
+  onCancel,
+  cancelPendingLaneId,
+  cancelNotice
 }: {
   rows: SessionLaneRow[];
   selectedLaneId: string;
   pending: boolean;
   onSelect: (laneId: string) => void;
+  onCancel: (laneId: string) => void;
+  cancelPendingLaneId: string | null;
+  cancelNotice: string | null;
 }): React.ReactElement {
   return (
     <ConsolePanel>
@@ -801,8 +843,13 @@ function SessionLaneTable({
         meta={pending ? "sync" : `${rows.length} lanes`}
         tone={pending ? "info" : rows.length > 0 ? "ok" : "off"}
       />
+      {cancelNotice ? (
+        <p className="border-b border-[var(--om-border)] px-4 py-2 font-mono text-xs text-[var(--om-text-muted)]">
+          {cancelNotice}
+        </p>
+      ) : null}
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[980px] border-collapse text-left">
+        <table className="w-full min-w-[1040px] border-collapse text-left">
           <thead className="bg-[var(--om-surface-muted)] text-2xs uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
             <tr>
               <th className="px-4 py-3 font-semibold">Lane</th>
@@ -811,7 +858,7 @@ function SessionLaneTable({
               <th className="px-4 py-3 font-semibold">Level</th>
               <th className="px-4 py-3 font-semibold">Activity</th>
               <th className="px-4 py-3 font-semibold">Generation</th>
-              <th className="px-4 py-3 font-semibold">Detail</th>
+              <th className="px-4 py-3 font-semibold">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--om-border)]">
@@ -877,14 +924,27 @@ function SessionLaneTable({
                       {formatNumber(row.generation)}
                     </td>
                     <td className="px-4 py-4 align-top">
-                      <Button
-                        type="button"
-                        variant={selected ? "primary" : "secondary"}
-                        onClick={() => onSelect(row.laneId)}
-                      >
-                        <SlidersHorizontal className="size-4" aria-hidden="true" />
-                        Expand
-                      </Button>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          type="button"
+                          variant={selected ? "primary" : "secondary"}
+                          onClick={() => onSelect(row.laneId)}
+                        >
+                          <SlidersHorizontal className="size-4" aria-hidden="true" />
+                          Expand
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          className="border-[color-mix(in_srgb,var(--om-rust)_55%,transparent)] text-[var(--om-rust)] hover:bg-[color-mix(in_srgb,var(--om-rust)_14%,transparent)]"
+                          disabled={!row.active || cancelPendingLaneId === row.laneId}
+                          title="Kill this lane (guarded cancel)"
+                          onClick={() => onCancel(row.laneId)}
+                        >
+                          <Ban className="size-4" aria-hidden="true" />
+                          {cancelPendingLaneId === row.laneId ? "Killing…" : "Kill"}
+                        </Button>
+                      </div>
                     </td>
                   </tr>
                 );
