@@ -50,7 +50,9 @@ export type GroundControlChain = {
   status: "intact" | "broken" | "syncing" | "unavailable";
   label: string;
   height: number | null;
-  verifiedAgoSeconds: number | null;
+  // Epoch millis of the last successful verify fetch; the strip renders a live
+  // "verified Ns ago" from it. Null when the tail has never resolved.
+  verifiedAtMs: number | null;
 };
 
 export type GroundControlViewModel = {

@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   FileClock,
   Gauge,
+  Link2,
   ShieldCheck,
   Timer,
   Users
@@ -22,6 +23,7 @@ import {
   type FleetSessionViewModel,
   type FleetViewModel,
   type GoNoGoVerdict,
+  type GroundControlChain,
   type GroundControlViewModel,
   type HealthPosture,
   type SignatureId,
@@ -416,6 +418,85 @@ function GroundControl2DRenderer({
       ))}
     </section>
   );
+}
+
+// CHAIN — the audit hash-chain strip (Appendix G). A dedicated, always-visible
+// band below Ground Control: INTACT / height / verified Ns ago, straight from
+// the operator audit-tail verify. Tamper (broken) reads rust; a healthy chain
+// reads sage. The "verified ago" ticks live off the last successful fetch.
+export function ChainStrip({ chain }: { chain: GroundControlChain }): React.ReactElement {
+  const nowMs = useClockTick();
+  const tone: DashboardTone =
+    chain.status === "intact"
+      ? "ok"
+      : chain.status === "broken"
+        ? "warn"
+        : chain.status === "syncing"
+          ? "info"
+          : "off";
+  const headline =
+    chain.status === "intact"
+      ? "INTACT"
+      : chain.status === "broken"
+        ? "BROKEN"
+        : chain.status === "syncing"
+          ? "SYNCING"
+          : "UNAVAILABLE";
+  const verifiedAgo =
+    chain.verifiedAtMs === null ? "—" : formatAgo(Math.max(0, nowMs - chain.verifiedAtMs));
+  return (
+    <section
+      className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border border-[var(--om-border)] bg-[var(--om-surface)] px-4 py-2.5 shadow-sm"
+      aria-label="audit chain"
+      data-chain-status={chain.status}
+    >
+      <div className="flex items-center gap-2.5">
+        <Link2 className="size-4 text-[var(--om-text-muted)]" aria-hidden="true" />
+        <span className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+          Chain
+        </span>
+        <span className={cn("font-mono text-sm font-bold", toneTextClass(tone))}>{headline}</span>
+        <Badge tone={tone}>{chain.label}</Badge>
+      </div>
+      <div className="flex items-baseline gap-1.5">
+        <span className="font-mono text-sm font-bold tabular-nums text-[var(--om-text-bright)]">
+          {chain.height === null ? "—" : chain.height.toLocaleString()}
+        </span>
+        <span className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+          height
+        </span>
+      </div>
+      <div className="flex items-baseline gap-1.5">
+        <span className="font-mono text-sm tabular-nums text-[var(--om-text)]">{verifiedAgo}</span>
+        <span className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+          verified ago
+        </span>
+      </div>
+    </section>
+  );
+}
+
+// A once-a-second tick used by the strips that render live elapsed time.
+function useClockTick(): number {
+  const [now, setNow] = React.useState<number>(() => Date.now());
+  React.useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(id);
+  }, []);
+  return now;
+}
+
+function formatAgo(deltaMs: number): string {
+  const seconds = Math.floor(deltaMs / 1_000);
+  if (seconds < 60) {
+    return `${seconds}s ago`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ago`;
 }
 
 function SignatureCell({

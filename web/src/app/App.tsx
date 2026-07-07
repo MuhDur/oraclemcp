@@ -52,6 +52,7 @@ import { Badge, Button, Surface } from "../components/ui/primitives";
 import { cn } from "../lib/utils";
 import {
   BigBoardSurface,
+  ChainStrip,
   OMCP_SKIN,
   useDashboardCapabilities
 } from "./skin";
@@ -61,6 +62,7 @@ import {
   clampActivity,
   type FleetViewModel,
   type GoNoGoVerdict,
+  type GroundControlChain,
   type GroundControlViewModel,
   type HealthPosture,
   type SignatureViewModel
@@ -363,6 +365,28 @@ function GroundControlStrip(): React.ReactElement {
     nestedString(logbook.data?.data.proof, ["verification", "hash_chain", "status"]) ??
     logbook.data?.data.source ??
     "unavailable";
+  const chainHeight =
+    nestedNumber(logbook.data?.data.proof, ["verification", "hash_chain", "last_seq"]) ??
+    nestedNumber(logbook.data?.data.proof, ["verification", "hash_chain", "records"]);
+  const chainState: GroundControlChain["status"] =
+    chainStatus === "ok"
+      ? "intact"
+      : chainStatus === "broken"
+        ? "broken"
+        : logbook.isFetching && !logbook.data
+          ? "syncing"
+          : "unavailable";
+  const chain: GroundControlChain = {
+    status: chainState,
+    label:
+      chainState === "intact"
+        ? "verified"
+        : chainState === "broken"
+          ? "tamper"
+          : chainState,
+    height: chainHeight,
+    verifiedAtMs: logbook.data ? logbook.dataUpdatedAt : null
+  };
   const goValue: GoNoGoVerdict = health.isFetching && !health.data ? "SYNC" : go ? "GO" : "NO-GO";
   const model: GroundControlViewModel = {
     grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
@@ -404,10 +428,16 @@ function GroundControlStrip(): React.ReactElement {
         tone: chainStatus === "ok" ? "ok" : chainStatus === "broken" ? "warn" : "info",
         activity: logbook.isFetching ? 0.5 : 0
       }
-    ] satisfies readonly SignatureViewModel[]
+    ] satisfies readonly SignatureViewModel[],
+    chain
   };
   const GroundControl = OMCP_SKIN.renderers.GroundControl;
-  return <GroundControl model={model} />;
+  return (
+    <div className="space-y-3">
+      <GroundControl model={model} />
+      <ChainStrip chain={chain} />
+    </div>
+  );
 }
 
 function OverviewPage(): React.ReactElement {
@@ -6345,6 +6375,17 @@ function nestedString(value: unknown, path: string[]): string | null {
     current = current[segment];
   }
   return typeof current === "string" ? current : null;
+}
+
+function nestedNumber(value: unknown, path: string[]): number | null {
+  let current = value;
+  for (const segment of path) {
+    if (!isRecord(current)) {
+      return null;
+    }
+    current = current[segment];
+  }
+  return typeof current === "number" && Number.isFinite(current) ? current : null;
 }
 
 function shortHash(value: string | null): string {
