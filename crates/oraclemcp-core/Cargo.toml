@@ -21,6 +21,14 @@ oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.8.0" }
 oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.8.0" }
 oraclemcp-auth = { path = "../oraclemcp-auth", version = "0.8.0" }
 oraclemcp-telemetry = { path = "../oraclemcp-telemetry", version = "0.8.0" }
+# B2.1 doctor wallet-posture probe: the doctor statically probes wallet files and
+# infers "what the driver's wallet loader would do" via the pure, sans-I/O
+# `oracledb_protocol::tls::{wallet,sso}` parsers (parse_ewallet_pem/_p12,
+# parse_cwallet_sso, resolve_wallet_dir). This is SEAM-CLEAN: the driver-seam
+# lint matches the driver path `oracledb::` only — the `_` in `oracledb_protocol`
+# breaks the adjacency, exactly as oraclemcp-db's TNS adapter already relies on.
+# Pure encode/decode (no async runtime), so the engine-free boundary holds.
+oracledb-protocol = { workspace = true }
 asupersync.workspace = true
 async-trait.workspace = true
 getrandom = "0.2"

@@ -83,6 +83,11 @@ pub struct CheckResult {
     /// Precise wallet-file diagnostic for driver wallet setup failures (A4).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wallet_error: Option<DoctorWalletDiagnostic>,
+    /// Static wallet-posture verdict from the offline active probe (B2.1): the
+    /// diagnostic of "what the driver's wallet loader would do" for the resolved
+    /// wallet directory, inferred without opening a live DB connection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wallet_posture: Option<DoctorWalletPostureReport>,
     /// Parsed Oracle error code, when a check failed because Oracle returned ORA-NNNNN.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ora_code: Option<i32>,
@@ -99,6 +104,7 @@ impl CheckResult {
             failure_class: None,
             auth_mode: None,
             wallet_error: None,
+            wallet_posture: None,
             ora_code: None,
         }
     }
@@ -116,6 +122,10 @@ impl CheckResult {
     }
     fn with_wallet_error(mut self, wallet_error: Option<DoctorWalletDiagnostic>) -> Self {
         self.wallet_error = wallet_error;
+        self
+    }
+    fn with_wallet_posture(mut self, posture: DoctorWalletPostureReport) -> Self {
+        self.wallet_posture = Some(posture);
         self
     }
     fn with_oracle_error(mut self, message: &str) -> Self {
@@ -443,6 +453,13 @@ pub struct DoctorContext<'a> {
     pub tns_admin: Option<String>,
     /// A configured wallet location, if any.
     pub wallet_location: Option<String>,
+    /// The resolved wallet password (from `wallet_password_ref`), if any. Used
+    /// ONLY transiently by the offline wallet-posture probe (B2.1) to attempt a
+    /// static decrypt of an encrypted `ewallet.pem`/`.p12`; it is never rendered,
+    /// serialized, or included in any doctor output. `DoctorContext` is not
+    /// `Serialize`, and the probe returns only typed error classes — never the
+    /// password, the wallet path, or key material.
+    pub wallet_password: Option<String>,
     /// True if a `protected` profile has `max_level` above `READ_ONLY` — a
     /// misconfiguration the privilege check warns about (offline-detectable).
     pub protected_profile_writable: bool,
@@ -1034,12 +1051,55 @@ fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
                     _ => {}
                 }
             }
-            CheckResult::new(
+            let base = CheckResult::new(
                 2,
                 "TNS/wallet",
                 CheckStatus::Pass,
                 "configured directory resolves",
-            )
+            );
+            attach_wallet_posture(ctx, base)
+        }
+    }
+}
+
+/// Fold the offline wallet-posture probe (B2.1) into the TNS/wallet check when a
+/// wallet directory resolves and holds wallet material. When the resolved
+/// directory has no wallet files (e.g. a TNS_ADMIN dir with only `tnsnames.ora`),
+/// the base "configured directory resolves" result is kept unchanged — EZConnect
+/// / system-trust connections legitimately need no wallet.
+fn attach_wallet_posture(ctx: &DoctorContext, base: CheckResult) -> CheckResult {
+    let Some(dir) = oracledb_protocol::tls::wallet::resolve_wallet_dir(
+        ctx.wallet_location.as_deref(),
+        ctx.tns_admin.as_deref(),
+    ) else {
+        return base;
+    };
+    let report = probe_wallet_posture(&dir, ctx.wallet_password.as_deref());
+    match report.posture {
+        // Nothing wallet-shaped in the resolved directory: keep the base result.
+        DoctorWalletPosture::NoWalletFiles => base,
+        // A usable primary or auto-login wallet: report the posture as a Pass.
+        DoctorWalletPosture::PrimaryUsable | DoctorWalletPosture::AutoLoginUsable => {
+            CheckResult::new(2, "TNS/wallet", CheckStatus::Pass, report.summary.clone())
+                .with_wallet_posture(report)
+        }
+        // The primary ewallet is unusable but a parseable cwallet.sso carries the
+        // connection: a Warn — the broken ewallet should be fixed or removed.
+        DoctorWalletPosture::EwalletUndecryptableSsoFallthrough => {
+            CheckResult::new(2, "TNS/wallet", CheckStatus::Warn, report.summary.clone())
+                .with_fix(
+                    "fix or remove the unusable ewallet.pem/.p12 (wrong/missing wallet_password_ref, or an unsupported cipher); the auto-login cwallet.sso currently carries the connection",
+                )
+                .with_wallet_posture(report)
+        }
+        // The primary ewallet is unusable and there is no auto-login fallback:
+        // a Fail — the wallet load would fail.
+        DoctorWalletPosture::WalletLoadWouldFail => {
+            CheckResult::new(2, "TNS/wallet", CheckStatus::Fail, report.summary.clone())
+                .with_fix(
+                    "supply the correct wallet_password_ref for the ewallet, or add an auto-login cwallet.sso / unencrypted ewallet.pem to the wallet directory",
+                )
+                .with_wallet_posture(report)
         }
     }
 }
@@ -1094,6 +1154,17 @@ pub enum DoctorWalletErrorKind {
     SsoNotEnabled,
     /// A recognized wallet file exists, but this build does not support that file format.
     UnsupportedFormat,
+    /// An encrypted `ewallet.pem`/`.p12` private key could not be decrypted
+    /// (wrong/missing wallet password, or an unsupported encryption scheme).
+    /// Surfaced by the offline active probe (B2.1).
+    KeyDecrypt,
+    /// A PKCS#12 (`ewallet.p12`) container failed to parse or decrypt. Surfaced
+    /// by the offline active probe (B2.1).
+    Pkcs12,
+    /// The wallet (or its private key) is encrypted and requires a wallet
+    /// password, but none was supplied. Surfaced by the offline active probe
+    /// (B2.1).
+    PasswordRequired,
 }
 
 /// Secret-free wallet diagnostic attached to the connectivity check.
@@ -1105,6 +1176,265 @@ pub struct DoctorWalletDiagnostic {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
 }
+
+/// The static wallet posture the offline active probe infers for a resolved
+/// wallet directory (B2.1). This is a diagnostic of **what the driver's wallet
+/// loader would do** — it never opens a live DB connection, and it mirrors the
+/// driver's documented `load_wallet` precedence (`ewallet.pem` → password-bearing
+/// `ewallet.p12` → auto-login `cwallet.sso`) and its fallthrough-eligibility
+/// contract (a present-but-unusable primary wallet whose failure is
+/// `KeyDecrypt`/`Pkcs12`/`PasswordRequired`/`UnsupportedFormat` falls through to a
+/// **parseable** `cwallet.sso`). It never renders a wallet path, password, or key
+/// material.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorWalletPosture {
+    /// The resolved wallet directory holds no `ewallet.pem`/`.p12` and no usable
+    /// `cwallet.sso` (a TNS_ADMIN directory with only `tnsnames.ora` is fine —
+    /// EZConnect / system-trust connections need no wallet).
+    NoWalletFiles,
+    /// A primary `ewallet.pem`/`.p12` parses and is directly usable.
+    PrimaryUsable,
+    /// Only an auto-login `cwallet.sso` is present and it parses end to end →
+    /// "auto-login (cwallet.sso) usable".
+    AutoLoginUsable,
+    /// The higher-precedence `ewallet.pem`/`.p12` is present but fails to decrypt
+    /// in a fallthrough-eligible way (e.g. `KeyDecrypt`) AND a usable
+    /// `cwallet.sso` is present → the loader would fall through to auto-login.
+    EwalletUndecryptableSsoFallthrough,
+    /// The primary `ewallet.pem`/`.p12` is present-but-unusable and there is no
+    /// usable `cwallet.sso` fallback → the wallet load would fail with the
+    /// reported error class.
+    WalletLoadWouldFail,
+}
+
+/// Secret-free wallet-posture report produced by [`probe_wallet_posture`]
+/// (B2.1). Serialized into `CheckResult.wallet_posture`. Every field is either a
+/// static enum or a wallet-file-name constant (`"ewallet.pem"`, `"ewallet.p12"`,
+/// `"cwallet.sso"`) or a summary built from static phrasing — never a wallet
+/// path, password, or key material.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DoctorWalletPostureReport {
+    /// The inferred posture.
+    pub posture: DoctorWalletPosture,
+    /// The wallet file that is / would be used (e.g. `"cwallet.sso"`), when one
+    /// is usable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usable_file: Option<&'static str>,
+    /// The higher-precedence wallet file that failed, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_file: Option<&'static str>,
+    /// Whether the loader would fall through to auto-login `cwallet.sso`.
+    pub fallthrough: bool,
+    /// The exact `WalletError` class of the primary-wallet failure, when it
+    /// fails.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<DoctorWalletErrorKind>,
+    /// Human-readable, secret-free summary: states (a) which wallet file is / was
+    /// usable, (b) whether a fallthrough would occur, and (c) the exact
+    /// `WalletError` class on failure.
+    pub summary: String,
+}
+
+/// Map a typed driver [`oracledb_protocol::tls::wallet::WalletError`] into the
+/// secret-free [`DoctorWalletErrorKind`]. The driver enum is `#[non_exhaustive]`,
+/// so a wildcard arm is required; every variant the pinned `=0.7.4` driver can
+/// produce is mapped explicitly.
+fn wallet_error_kind(error: &oracledb_protocol::tls::wallet::WalletError) -> DoctorWalletErrorKind {
+    use oracledb_protocol::tls::wallet::WalletError;
+    match error {
+        WalletError::FileMissing(_) => DoctorWalletErrorKind::FileMissing,
+        WalletError::Io { .. } => DoctorWalletErrorKind::Io,
+        WalletError::Pem(_) => DoctorWalletErrorKind::Pem,
+        WalletError::NoCertificates => DoctorWalletErrorKind::NoCertificates,
+        WalletError::Sso(_) => DoctorWalletErrorKind::Sso,
+        WalletError::SsoNotEnabled => DoctorWalletErrorKind::SsoNotEnabled,
+        WalletError::Pkcs12(_) => DoctorWalletErrorKind::Pkcs12,
+        WalletError::KeyDecrypt(_) => DoctorWalletErrorKind::KeyDecrypt,
+        WalletError::PasswordRequired { .. } => DoctorWalletErrorKind::PasswordRequired,
+        WalletError::UnsupportedFormat { .. } => DoctorWalletErrorKind::UnsupportedFormat,
+        // Forward-compat: the pinned =0.7.4 driver produces no other variant.
+        _ => DoctorWalletErrorKind::Pem,
+    }
+}
+
+/// A present-but-unusable primary wallet is eligible to fall through to an
+/// auto-login `cwallet.sso` iff its failure class is one the driver's
+/// `load_wallet` treats as fallthrough-eligible. An I/O or malformed-container
+/// failure (`Io`/`Pem`/`NoCertificates`/`Sso`) is never masked by an auto-login
+/// wallet — it surfaces verbatim. This mirrors the driver's
+/// `falls_through_to_autologin` predicate exactly.
+fn wallet_error_falls_through(kind: DoctorWalletErrorKind) -> bool {
+    matches!(
+        kind,
+        DoctorWalletErrorKind::KeyDecrypt
+            | DoctorWalletErrorKind::Pkcs12
+            | DoctorWalletErrorKind::PasswordRequired
+            | DoctorWalletErrorKind::UnsupportedFormat
+    )
+}
+
+/// Stable, secret-free label for a wallet error class (used in posture summaries).
+fn wallet_error_label(kind: DoctorWalletErrorKind) -> &'static str {
+    match kind {
+        DoctorWalletErrorKind::FileMissing => "FileMissing",
+        DoctorWalletErrorKind::Io => "Io",
+        DoctorWalletErrorKind::Pem => "Pem",
+        DoctorWalletErrorKind::NoCertificates => "NoCertificates",
+        DoctorWalletErrorKind::Sso => "Sso",
+        DoctorWalletErrorKind::SsoNotEnabled => "SsoNotEnabled",
+        DoctorWalletErrorKind::UnsupportedFormat => "UnsupportedFormat",
+        DoctorWalletErrorKind::KeyDecrypt => "KeyDecrypt",
+        DoctorWalletErrorKind::Pkcs12 => "Pkcs12",
+        DoctorWalletErrorKind::PasswordRequired => "PasswordRequired",
+    }
+}
+
+/// Statically probe the resolved wallet directory and infer the driver's wallet
+/// posture (B2.1) — a diagnostic of "what would happen", WITHOUT opening a live
+/// DB connection.
+///
+/// Uses only the driver's public, sans-I/O parsers
+/// (`oracledb_protocol::tls::wallet::{parse_ewallet_pem, parse_ewallet_p12}` and
+/// `oracledb_protocol::tls::sso::parse_cwallet_sso`) plus the public path helpers
+/// (`pem_wallet_path`/`p12_wallet_path`/`sso_wallet_path`). It mirrors the
+/// driver's documented `load_wallet` precedence and fallthrough contract; it does
+/// NOT call the driver's (private) resolver, so it can only *infer* the verdict,
+/// never obtain it authoritatively. See the module-level note and the bead
+/// report for the resolution-seam caveat.
+///
+/// The returned report is secret-free: it carries only typed enums, wallet-file
+/// name constants, and a static-phrased summary — never a wallet path, the
+/// wallet password, or any key material (the driver's `WalletError` Debug/Display
+/// already redact paths; this probe never even surfaces the message string).
+#[must_use]
+pub fn probe_wallet_posture(
+    dir: &Path,
+    wallet_password: Option<&str>,
+) -> DoctorWalletPostureReport {
+    use oracledb_protocol::tls::sso::parse_cwallet_sso;
+    use oracledb_protocol::tls::wallet::{
+        p12_wallet_path, parse_ewallet_p12, parse_ewallet_pem, pem_wallet_path, sso_wallet_path,
+    };
+
+    // The auto-login cwallet.sso is "usable" iff it exists AND parses end to end
+    // — exactly the condition the driver's `load_wallet::read_sso` requires
+    // before it will fall through. The path is never rendered.
+    let sso_path = sso_wallet_path(dir);
+    let sso_usable = sso_path.exists()
+        && std::fs::read(&sso_path)
+            .ok()
+            .is_some_and(|bytes| parse_cwallet_sso(&bytes).is_ok());
+
+    // The primary wallet, in the driver's exact precedence order: ewallet.pem
+    // first, else a *password-bearing* ewallet.p12 (a password-less p12 is NOT
+    // selected as the primary — mirrors `load_wallet`'s `have_p12 &&
+    // password.is_some()`).
+    let pem_path = pem_wallet_path(dir);
+    let p12_path = p12_wallet_path(dir);
+    let probe_pem = |password: Option<&str>| match std::fs::read(&pem_path) {
+        Ok(bytes) => parse_ewallet_pem(&bytes, password)
+            .map(|_| ())
+            .map_err(|e| wallet_error_kind(&e)),
+        Err(_) => Err(DoctorWalletErrorKind::Io),
+    };
+    let probe_p12 = |password: Option<&str>| match std::fs::read(&p12_path) {
+        Ok(bytes) => parse_ewallet_p12(&bytes, password)
+            .map(|_| ())
+            .map_err(|e| wallet_error_kind(&e)),
+        Err(_) => Err(DoctorWalletErrorKind::Io),
+    };
+    let primary: Option<(&'static str, Result<(), DoctorWalletErrorKind>)> = if pem_path.exists() {
+        Some(("ewallet.pem", probe_pem(wallet_password)))
+    } else if p12_path.exists() && wallet_password.is_some() {
+        Some(("ewallet.p12", probe_p12(wallet_password)))
+    } else {
+        None
+    };
+
+    match primary {
+        Some((name, Ok(()))) => DoctorWalletPostureReport {
+            posture: DoctorWalletPosture::PrimaryUsable,
+            usable_file: Some(name),
+            failed_file: None,
+            fallthrough: false,
+            error_kind: None,
+            summary: format!("{name} usable"),
+        },
+        Some((name, Err(kind))) => {
+            if wallet_error_falls_through(kind) && sso_usable {
+                DoctorWalletPostureReport {
+                    posture: DoctorWalletPosture::EwalletUndecryptableSsoFallthrough,
+                    usable_file: Some(SSO_WALLET_FILE),
+                    failed_file: Some(name),
+                    fallthrough: true,
+                    error_kind: Some(kind),
+                    summary: format!(
+                        "ewallet undecryptable ({}) — would fall through to cwallet.sso",
+                        wallet_error_label(kind)
+                    ),
+                }
+            } else {
+                DoctorWalletPostureReport {
+                    posture: DoctorWalletPosture::WalletLoadWouldFail,
+                    usable_file: None,
+                    failed_file: Some(name),
+                    fallthrough: false,
+                    error_kind: Some(kind),
+                    summary: format!(
+                        "wallet load would fail: {}, no auto-login fallback",
+                        wallet_error_label(kind)
+                    ),
+                }
+            }
+        }
+        None => {
+            // No pem and no password-bearing p12. The driver prefers an
+            // auto-login wallet; otherwise a present-but-password-less p12
+            // surfaces PasswordRequired (a wallet load that would fail).
+            if sso_usable {
+                DoctorWalletPostureReport {
+                    posture: DoctorWalletPosture::AutoLoginUsable,
+                    usable_file: Some(SSO_WALLET_FILE),
+                    failed_file: None,
+                    fallthrough: false,
+                    error_kind: None,
+                    summary: "auto-login (cwallet.sso) usable".to_owned(),
+                }
+            } else if p12_path.exists() {
+                let kind = probe_p12(wallet_password)
+                    .err()
+                    .unwrap_or(DoctorWalletErrorKind::Io);
+                DoctorWalletPostureReport {
+                    posture: DoctorWalletPosture::WalletLoadWouldFail,
+                    usable_file: None,
+                    failed_file: Some("ewallet.p12"),
+                    fallthrough: false,
+                    error_kind: Some(kind),
+                    summary: format!(
+                        "wallet load would fail: {}, no auto-login fallback",
+                        wallet_error_label(kind)
+                    ),
+                }
+            } else {
+                DoctorWalletPostureReport {
+                    posture: DoctorWalletPosture::NoWalletFiles,
+                    usable_file: None,
+                    failed_file: None,
+                    fallthrough: false,
+                    error_kind: None,
+                    summary: "no ewallet.pem/.p12 or usable cwallet.sso in the wallet directory"
+                        .to_owned(),
+                }
+            }
+        }
+    }
+}
+
+/// Auto-login wallet file name, mirrored from
+/// `oracledb_protocol::tls::wallet::SSO_WALLET_FILE_NAME` (= `"cwallet.sso"`); a
+/// local constant keeps the secret-free summaries free of any borrowed path.
+const SSO_WALLET_FILE: &str = oracledb_protocol::tls::wallet::SSO_WALLET_FILE_NAME;
 
 /// Classify the authentication / transport posture of a connection failure into
 /// a precise [`AuthModeClass`] (A5). Driver-unsupported enterprise auth modes
@@ -1225,6 +1555,15 @@ fn wallet_connectivity_fix(wallet: &DoctorWalletDiagnostic) -> &'static str {
         DoctorWalletErrorKind::NoCertificates => {
             "regenerate ewallet.pem with at least one trust-anchor certificate"
         }
+        DoctorWalletErrorKind::KeyDecrypt => {
+            "supply the correct wallet_password_ref for the encrypted ewallet key, or re-export it as an unencrypted PKCS#8 ewallet.pem; a valid auto-login cwallet.sso would also let the loader fall through"
+        }
+        DoctorWalletErrorKind::Pkcs12 => {
+            "regenerate ewallet.p12 with a supported PBES2/PBKDF2/AES-CBC cipher, or convert the wallet to ewallet.pem"
+        }
+        DoctorWalletErrorKind::PasswordRequired => {
+            "set wallet_password_ref for the encrypted wallet, or use an auto-login cwallet.sso / unencrypted ewallet.pem wallet"
+        }
     }
 }
 
@@ -1338,9 +1677,13 @@ fn connectivity_failure_class(error: &str) -> ErrorClass {
         classify_ora_code(code)
     } else if let Some(wallet) = classify_wallet_error(error) {
         match wallet.kind {
-            DoctorWalletErrorKind::UnsupportedFormat | DoctorWalletErrorKind::SsoNotEnabled => {
-                ErrorClass::InvalidArguments
-            }
+            // Config classes where retrying the same connect cannot help — the
+            // operator must change the wallet, cipher, or password reference.
+            DoctorWalletErrorKind::UnsupportedFormat
+            | DoctorWalletErrorKind::SsoNotEnabled
+            | DoctorWalletErrorKind::KeyDecrypt
+            | DoctorWalletErrorKind::Pkcs12
+            | DoctorWalletErrorKind::PasswordRequired => ErrorClass::InvalidArguments,
             DoctorWalletErrorKind::FileMissing
             | DoctorWalletErrorKind::Io
             | DoctorWalletErrorKind::Pem

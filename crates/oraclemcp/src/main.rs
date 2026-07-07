@@ -4840,6 +4840,14 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
         connection_error: profile_ctx.connection_error,
         tns_admin: std::env::var("TNS_ADMIN").ok(),
         wallet_location: profile_ctx.wallet_location,
+        // Offline-by-default invariant: profile metadata inspection never
+        // resolves a secret. The B2.1 wallet-posture probe therefore runs
+        // WITHOUT a resolved wallet password here; an encrypted ewallet.pem
+        // surfaces the honest `PasswordRequired` posture (or a cwallet.sso
+        // fallthrough) rather than resolving `wallet_password_ref`. The finer
+        // `KeyDecrypt` distinction is available to callers that already hold a
+        // resolved password (the probe accepts one).
+        wallet_password: None,
         protected_profile_writable: profile_ctx.protected_profile_writable,
         connection_strategy: profile_ctx.connection_strategy,
         call_timeout_resolved: profile_ctx.call_timeout_resolved,

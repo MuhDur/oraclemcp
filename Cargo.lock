@@ -1821,6 +1821,7 @@ dependencies = [
  "asupersync",
  "async-trait",
  "getrandom 0.2.17",
+ "oracledb-protocol",
  "oraclemcp-audit",
  "oraclemcp-auth",
  "oraclemcp-config",
