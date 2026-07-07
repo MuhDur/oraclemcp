@@ -67,10 +67,21 @@ for manifest in crates/oraclemcp-*/Cargo.toml; do
 done
 
 workspace_toml="$ROOT/Cargo.toml"
-grep -Fq "oracledb = { version = \"=$version\", default-features = false }" "$workspace_toml" ||
-  fail "Cargo.toml must pin oracledb exactly at =$version"
-grep -Fq "oracledb-protocol = { version = \"=$version\", default-features = false }" "$workspace_toml" ||
-  fail "Cargo.toml must pin oracledb-protocol exactly at =$version"
+# The oracledb / oracledb-protocol driver crates version INDEPENDENTLY of the
+# server workspace version (a separate upstream release train — e.g. driver
+# 0.7.4 while the server is 0.8.0). Parse the pinned driver version from the
+# manifest and verify every driver-facing surface agrees on that SAME version
+# (internal consistency), decoupled from the server's own $version.
+driver_version="$(
+  grep -E '^oracledb = \{ version = "=[0-9]' "$workspace_toml" |
+    head -1 | sed -E 's/.*version = "=([0-9][0-9.]*)".*/\1/'
+)"
+[ -n "$driver_version" ] || fail "Cargo.toml must pin oracledb at an exact =X.Y.Z version"
+
+grep -Fq "oracledb = { version = \"=$driver_version\", default-features = false }" "$workspace_toml" ||
+  fail "Cargo.toml must pin oracledb exactly at =$driver_version"
+grep -Fq "oracledb-protocol = { version = \"=$driver_version\", default-features = false }" "$workspace_toml" ||
+  fail "Cargo.toml must pin oracledb-protocol exactly at =$driver_version (must match the oracledb pin)"
 
 lock="$ROOT/Cargo.lock"
 for pkg in oracledb oracledb-protocol; do
@@ -84,15 +95,16 @@ for pkg in oracledb oracledb-protocol; do
   )"
   [ "$(printf '%s\n' "$lock_versions" | sed '/^$/d' | wc -l | tr -d ' ')" = "1" ] ||
     fail "Cargo.lock must resolve exactly one $pkg version (got: $lock_versions)"
-  [ "$lock_versions" = "$version" ] ||
-    fail "Cargo.lock $pkg version '$lock_versions' != workspace '$version'"
+  [ "$lock_versions" = "$driver_version" ] ||
+    fail "Cargo.lock $pkg version '$lock_versions' != pinned driver '$driver_version'"
 done
 
 connection_rs="$ROOT/crates/oraclemcp-db/src/connection.rs"
-grep -Fq "oracledb = { version = \"=$version\", default-features = false }" "$connection_rs" ||
-  fail "connection.rs pin_is seam test must assert oracledb =$version pin"
-if ! grep -Eq 'fn pin_is_0_7_[0-9]+_and_seam_intact' "$connection_rs"; then
-  fail "connection.rs must define pin_is_0_7_*_and_seam_intact driver seam regression test"
+grep -Fq "oracledb = { version = \"=$driver_version\", default-features = false }" "$connection_rs" ||
+  fail "connection.rs pin_is seam test must assert oracledb =$driver_version pin"
+driver_seam_fn="pin_is_$(printf '%s' "$driver_version" | tr '.' '_')_and_seam_intact"
+if ! grep -Fq "fn $driver_seam_fn" "$connection_rs"; then
+  fail "connection.rs must define fn $driver_seam_fn driver seam regression test"
 fi
 
 server_version="$(jq -r '.version' server.json)"

@@ -3,10 +3,10 @@
 # oraclemcp installer
 #
 # Dry-run preview with a cache-busted script fetch:
-#   curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --dry-run --version 0.7.2
+#   curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --dry-run --version 0.8.0
 #
 # Normal install with SHA-256 required and cosign preferred:
-#   curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --version 0.7.2
+#   curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --version 0.8.0
 #
 # Install oraclemcp from a verified release archive, or from source when
 # explicitly requested. Service-manager mutation is opt-in only.
@@ -70,7 +70,7 @@ soft-skips cosign with an explicit notice when it is absent, and does not
 install a service.
 
 Options:
-  --version <version>       Release version, e.g. 0.7.2 or v0.7.2 (default: latest)
+  --version <version>       Release version, e.g. 0.8.0 or v0.8.0 (default: latest)
   --target <triple>         Override detected target triple; Linux gnu triples
                             (x86_64/aarch64-unknown-linux-gnu) are accepted here
                             even though auto-detection always picks musl

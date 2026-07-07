@@ -1,6 +1,6 @@
 [package]
 name = "oraclemcp-audit"
-version = "0.7.2"
+version = "0.8.0"
 description = "Out-of-band durable audit sink (fsync-before-execute, hash chain) for oraclemcp (Apache-2.0 OR MIT)"
 edition.workspace = true
 license.workspace = true
@@ -10,7 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-oraclemcp-error = { path = "../oraclemcp-error", version = "0.7.2" }
+oraclemcp-error = { path = "../oraclemcp-error", version = "0.8.0" }
 serde.workspace = true
 serde_json.workspace = true
 parking_lot.workspace = true

@@ -22,12 +22,12 @@ One line installs or updates `oraclemcp` on macOS and Linux. It works as pasted
 for a human terminal and for a non-interactive agent run:
 
 ```sh
-curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --version 0.7.2
+curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --version 0.8.0
 ```
 
 The hosted script fetch includes a cache buster so stale CDN/proxy copies do not
 hide installer updates. This command is literal and copy-pasteable for release
-`0.7.2`; change only the version number when installing another release. Later
+`0.8.0`; change only the version number when installing another release. Later
 examples that contain `...`, `<pw>`, `<profile>`, or placeholder env values are
 templates: replace those placeholders before running them.
 
@@ -79,22 +79,22 @@ the normal command above is the install/update command.
 Preview the Linux/macOS host plan without changing the machine:
 
 ```sh
-curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --dry-run --version 0.7.2
+curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --dry-run --version 0.8.0
 ```
 
 From an installed binary, preview or run the same update path:
 
 ```sh
-oraclemcp --json self-update --dry-run --version 0.7.2
-oraclemcp self-update --version 0.7.2 --no-service
+oraclemcp --json self-update --dry-run --version 0.8.0
+oraclemcp self-update --version 0.8.0 --no-service
 ```
 
 On Windows, download and run the PowerShell installer:
 
 ```powershell
 iwr -UseBasicParsing https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.ps1 -OutFile install.ps1
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -Version 0.7.2
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.7.2
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -DryRun -Version 0.8.0
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.8.0
 ```
 
 The Windows installer accepts the same release operations: `-Update` for the
@@ -104,7 +104,7 @@ verification posture. `prefer` installs after a hard SHA-256 check when cosign
 is missing; `require` fails without cosign.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Update -Version 0.7.2 -NoService
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Update -Version 0.8.0 -NoService
 ```
 
 For air-gapped hosts, download the release archive plus its `.sha256`, `.sig`,
@@ -112,12 +112,12 @@ For air-gapped hosts, download the release archive plus its `.sha256`, `.sig`,
 of the installer:
 
 ```sh
-bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz --version 0.7.2
+bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz --version 0.8.0
 ```
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 `
-  -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.7.2
+  -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.8.0
 ```
 
 The release installer does not silently fall back from a missing release archive
@@ -179,7 +179,7 @@ after it resolves the target version.
 
 ```sh
 cargo binstall oraclemcp
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.7.2
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.8.0
 ```
 
 Pending registry-backed channels:
@@ -215,7 +215,7 @@ channels once they resolve.
 This branch is pinned to **`nightly-2026-05-11`**. The thin-native line has no
 stable MSRV because **asupersync 0.3.4** uses nightly-only language features
 (`#![feature(try_trait_v2)]` and `try_trait_v2_residual`); the pinned `oracledb`
-0.7.2 driver itself is stable-clean. The repository's `rust-toolchain.toml`
+0.7.4 driver itself is stable-clean. The repository's `rust-toolchain.toml`
 selects the pin for local builds. Use the release installer above when you want
 the prebuilt binary; use `cargo install` only when you intentionally want a
 source build.
@@ -271,9 +271,9 @@ oraclemcp --json setup --write --profile db_ro
 docker run -i --rm \
   -v "$HOME/.config/oraclemcp:/root/.config/oraclemcp:ro" \
   -e ORACLE_APP_PASSWORD \
-  ghcr.io/muhdur/oraclemcp:0.7.2          # MCP over stdio, against the configured profile
+  ghcr.io/muhdur/oraclemcp:0.8.0          # MCP over stdio, against the configured profile
 
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.7.2   # tool surface only (no DB)
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.8.0   # tool surface only (no DB)
 ```
 
 An optional PL/SQL intelligence image is available from the manual Docker
@@ -282,8 +282,8 @@ it can start without a database connection and advertises the offline
 `oracle_plsql_*` tools immediately. Live PL/SQL tools still require a profile.
 
 ```sh
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.7.2-plsql-intelligence --json info
-docker run -i --rm ghcr.io/muhdur/oraclemcp:0.7.2-plsql-intelligence capabilities
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.8.0-plsql-intelligence --json info
+docker run -i --rm ghcr.io/muhdur/oraclemcp:0.8.0-plsql-intelligence capabilities
 ```
 
 Local feature-image builds resolve the PL/SQL engine crates from crates.io:
@@ -713,7 +713,7 @@ binary does not silently fall back to thick mode.
 
 The OCI cloud fields `use_iam_token` (bool) and `iam_config_profile`
 (`Option<String>`) under `[profiles.oci]` **parse** through strict config
-validation, but the pinned `oracledb` 0.7.2 thin adapter **fails closed** on an
+validation, but the pinned `oracledb` 0.7.4 thin adapter **fails closed** on an
 IAM-token connect today: `oraclemcp` wires no production OCI token source, so
 `use_iam_token = true` returns a structured unsupported-auth diagnostic
 (pointing at the as-yet-unwired IAM token-source seam) rather than connecting,
@@ -854,7 +854,7 @@ blocks; it does not print the HMAC key.
 `oraclemcp` builds on a single **pinned Rust nightly** (`nightly-2026-05-11`,
 recorded in `rust-toolchain.toml`). The pin exists because **asupersync 0.3.4**
 uses nightly-only language features (`try_trait_v2` + `try_trait_v2_residual`) —
-the `oracledb` 0.7.2 driver is stable-clean. The pin is **build-time only**: the
+the `oracledb` 0.7.4 driver is stable-clean. The pin is **build-time only**: the
 shipped binary has no runtime dependency on nightly. See
 [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) for the full rationale and the
 re-pin runbook.

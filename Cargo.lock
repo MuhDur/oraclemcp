@@ -839,6 +839,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "des"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffdd80ce8ce993de27e9f063a444a4d53ce8e8db4c1f00cc03af5ad5a9867a1e"
+dependencies = [
+ "cipher",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1689,9 +1698,9 @@ dependencies = [
 
 [[package]]
 name = "oracledb"
-version = "0.7.2"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b96f68b175f8716e44f47c2fdd6b26060ba1d9752ba2914ce6949f4c52680faa"
+checksum = "44508c0eefae76900956a71b21a7139057e2a8dc58ee5909063c4d5f4776edda"
 dependencies = [
  "asupersync",
  "oracledb-protocol",
@@ -1705,13 +1714,14 @@ dependencies = [
 
 [[package]]
 name = "oracledb-protocol"
-version = "0.7.2"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72d381ebb5c62cc39d49f9ef121a9e2639d0258cce1782bc6c94bdceac4472a9"
+checksum = "c338fee9e17db4027d093a6872d01f8d8e78b16ef164f9cec5f427acd2140d7d"
 dependencies = [
  "aes",
  "cbc",
  "der",
+ "des",
  "hex",
  "hmac 0.12.1",
  "md-5",
@@ -1726,7 +1736,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "asupersync",
  "async-trait",
@@ -1765,7 +1775,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-audit"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "oraclemcp-error",
  "parking_lot 0.12.5",
@@ -1779,7 +1789,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-auth"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "oraclemcp-audit",
  "oraclemcp-error",
@@ -1793,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-config"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "figment",
  "oraclemcp-error",
@@ -1806,7 +1816,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-core"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "asupersync",
  "async-trait",
@@ -1834,7 +1844,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-db"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "asupersync",
  "async-trait",
@@ -1852,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-error"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1861,7 +1871,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-guard"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "oraclemcp-audit",
  "oraclemcp-error",
@@ -1876,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-telemetry"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "asupersync",
  "oraclemcp-error",
