@@ -2768,18 +2768,53 @@ function OperatorEventLogPanel({
   events: OperatorEventEnvelope[];
 }): React.ReactElement {
   return (
-    <Surface className="overflow-hidden">
-      <PanelHeader icon={Wifi} title="Event Log" meta={status} tone={eventStatusTone(status)} />
-      <div className="max-h-[460px] divide-y divide-zinc-100 overflow-auto">
+    <ConsolePanel>
+      <ConsolePanelHeader
+        icon={Wifi}
+        title="Classifier · Live"
+        meta={status}
+        tone={eventStatusTone(status)}
+      />
+      <div className="border-b border-[var(--om-border)] px-4 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+            Operating-level spine
+          </p>
+          <span className="text-2xs font-semibold text-[var(--om-text-muted)]">
+            every statement gated
+          </span>
+        </div>
+        <div className="mt-2 flex items-stretch gap-1" role="img" aria-label="clearance spine">
+          {CLEARANCE_LADDER.map((step, index) => (
+            <div
+              key={step.level}
+              className={cn(
+                "flex flex-1 items-center justify-center gap-2 rounded-md border px-2 py-1.5",
+                sessionClearanceClass(step.level)
+              )}
+              data-clearance-level={step.level}
+              data-clearance-ordinal={index}
+            >
+              <span className="font-mono text-xs font-bold">{CEILING_ROMAN[index]}</span>
+              <span className="hidden font-mono text-2xs sm:inline">{step.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="max-h-[460px] divide-y divide-[var(--om-border)] overflow-auto">
         {events.length === 0 ? (
-          <p className="px-4 py-8 text-center text-sm font-semibold text-zinc-500">No events</p>
+          <p className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]">
+            No events
+          </p>
         ) : (
           events.map((event) => (
             <div key={event.event_id} className="px-4 py-3">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="font-mono text-sm font-semibold text-zinc-950">{event.event_id}</p>
-                  <p className="mt-1 break-all font-mono text-xs text-zinc-500">
+                  <p className="font-mono text-sm font-semibold text-[var(--om-text-bright)]">
+                    {event.event_id}
+                  </p>
+                  <p className="mt-1 break-all font-mono text-xs text-[var(--om-text-muted)]">
                     {event.subject_id_hash}
                   </p>
                 </div>
@@ -2796,7 +2831,7 @@ function OperatorEventLogPanel({
           ))
         )}
       </div>
-    </Surface>
+    </ConsolePanel>
   );
 }
 
@@ -2906,9 +2941,13 @@ function ConsoleFact({
 
 function EventFact({ label, value }: { label: string; value: unknown }): React.ReactElement {
   return (
-    <div className="rounded-md border border-zinc-200 bg-zinc-50 p-2">
-      <p className="text-xs font-bold uppercase text-zinc-500">{label}</p>
-      <p className="mt-1 break-all font-mono text-xs text-zinc-900">{String(value ?? "...")}</p>
+    <div className="rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] p-2">
+      <p className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+        {label}
+      </p>
+      <p className="mt-1 break-all font-mono text-xs text-[var(--om-text)]">
+        {String(value ?? "...")}
+      </p>
     </div>
   );
 }
