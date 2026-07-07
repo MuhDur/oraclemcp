@@ -29,16 +29,19 @@ export function Button({ className, variant, ...props }: ButtonProps): React.Rea
   return <button className={cn(buttonVariants({ variant }), className)} {...props} />;
 }
 
+// Tones map onto the Carved Light accent tokens rather than raw Tailwind
+// colors. The accents are mid-tone with a translucent fill, so a badge reads on
+// both the near-black operator surfaces and any lighter fallback surface.
 const badgeVariants = cva(
   "inline-flex items-center rounded-md border px-2 py-1 text-xs font-semibold",
   {
     variants: {
       tone: {
-        neutral: "border-zinc-300 bg-white text-zinc-700",
-        ok: "border-emerald-200 bg-emerald-50 text-emerald-800",
-        warn: "border-amber-200 bg-amber-50 text-amber-800",
-        off: "border-zinc-300 bg-zinc-100 text-zinc-700",
-        info: "border-sky-200 bg-sky-50 text-sky-800"
+        neutral: "border-[var(--om-border)] bg-[var(--om-surface-muted)] text-[var(--om-text)]",
+        ok: "border-[color-mix(in_srgb,var(--om-sage)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-sage)_14%,transparent)] text-[var(--om-sage)]",
+        warn: "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_14%,transparent)] text-[var(--om-copper)]",
+        off: "border-[var(--om-border)] bg-transparent text-[var(--om-text-muted)]",
+        info: "border-[color-mix(in_srgb,var(--om-gold)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-gold)_14%,transparent)] text-[var(--om-gold)]"
       }
     },
     defaultVariants: {

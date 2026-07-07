@@ -255,45 +255,164 @@ export function assertDashboardSkinConformance(skin: DashboardSkin): void {
   }
 }
 
+// A live UTC wall-clock for the status strip. Client-derived (never a server
+// round-trip); ticks once a second, cleaned up on unmount.
+function useUtcClock(): string {
+  const [now, setNow] = React.useState<Date>(() => new Date());
+  React.useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 1_000);
+    return () => window.clearInterval(id);
+  }, []);
+  return `${now.toISOString().slice(11, 19)} UTC`;
+}
+
+function defaultStatusHeadline(model: GroundControlViewModel): string {
+  const posture = model.clearanceStatus.blocked > 0 ? "HOLD FOR GO" : "ALL LANES NOMINAL";
+  switch (model.verdict) {
+    case "GO":
+      return `FAIL-CLOSED · ${posture}`;
+    case "SYNC":
+      return "FAIL-CLOSED · SYNCING";
+    case "NO-GO":
+      return "FAIL-CLOSED · NO-GO";
+  }
+}
+
+function toneTextClass(tone: DashboardTone): string {
+  switch (tone) {
+    case "ok":
+      return "text-[var(--om-sage)]";
+    case "warn":
+      return "text-[var(--om-copper)]";
+    case "info":
+      return "text-[var(--om-gold)]";
+    case "off":
+      return "text-[var(--om-text-muted)]";
+    case "neutral":
+      return "text-[var(--om-text-bright)]";
+  }
+}
+
+// One divider-aware column of the status strip: stacked (top hairline) on
+// narrow viewports, a row of left-hairline cells on wide ones.
+function StripCell({
+  children,
+  className
+}: {
+  children: React.ReactNode;
+  className?: string;
+}): React.ReactElement {
+  return (
+    <div
+      className={cn(
+        "min-w-0 border-t border-[var(--om-border)] pt-3 first:border-t-0 first:pt-0 xl:flex-1 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0 xl:first:border-l-0 xl:first:pl-0",
+        className
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+function StatusCount({
+  label,
+  value,
+  tone = "neutral"
+}: {
+  label: string;
+  value: number;
+  tone?: DashboardTone;
+}): React.ReactElement {
+  return (
+    <div className="inline-flex items-baseline gap-1.5">
+      <span className={cn("font-mono text-sm font-bold tabular-nums", toneTextClass(tone))}>{value}</span>
+      <span className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+        {label}
+      </span>
+    </div>
+  );
+}
+
 function GroundControl2DRenderer({
   model
 }: {
   model: GroundControlViewModel;
 }): React.ReactElement {
+  const clock = useUtcClock();
   const goNoGo = model.signatures.find((signature) => signature.id === "go_no_go");
   const otherSignatures = model.signatures.filter((signature) => signature.id !== "go_no_go");
+  const statusHeadline = model.statusLine?.headline ?? defaultStatusHeadline(model);
+  const statusTone =
+    model.statusLine?.tone ??
+    (model.verdict === "GO" ? "ok" : model.verdict === "SYNC" ? "info" : "warn");
   return (
     <section
-      className="grid gap-3 rounded-lg border border-[var(--om-border)] bg-[var(--om-surface)] px-4 py-3 shadow-sm xl:grid-cols-[minmax(150px,0.65fr)_minmax(360px,1.4fr)_minmax(140px,0.55fr)_minmax(170px,0.7fr)]"
+      className="flex flex-col rounded-lg border border-[var(--om-border)] bg-[var(--om-surface)] px-4 py-3 shadow-sm xl:flex-row xl:items-stretch"
       aria-label="ground control"
       data-grammar-version={model.grammarVersion}
       data-health={model.health}
       data-verdict={model.verdict}
     >
-      {goNoGo ? <SignatureCell signature={goNoGo} /> : null}
-      <div className="min-w-0 border-t border-zinc-100 pt-3 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0">
+      {goNoGo ? (
+        <StripCell className="xl:max-w-52">
+          <SignatureCell signature={goNoGo} />
+        </StripCell>
+      ) : null}
+      <StripCell className="xl:flex-[1.4]">
         <div className="flex items-center justify-between gap-3">
-          <p className="text-xs font-bold uppercase text-zinc-500">Clearance Ladder</p>
+          <p className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+            Fail-Closed Guard
+          </p>
+          <span
+            className="font-mono text-2xs tabular-nums text-[var(--om-text-muted)]"
+            aria-label="coordinated universal time"
+          >
+            {clock}
+          </span>
+        </div>
+        <p className={cn("mt-1 truncate font-serif text-lg font-semibold", toneTextClass(statusTone))}>
+          {statusHeadline}
+        </p>
+        {model.counts ? (
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+            <StatusCount label="Lanes" value={model.counts.lanes} />
+            <StatusCount label="Prod" value={model.counts.prod} />
+            <StatusCount
+              label="Held"
+              value={model.counts.held}
+              tone={model.counts.held > 0 ? "warn" : "neutral"}
+            />
+          </div>
+        ) : null}
+      </StripCell>
+      <StripCell>
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+            Clearance Ladder
+          </p>
           <Badge tone={model.clearanceStatus.tone}>{model.clearanceStatus.label}</Badge>
         </div>
-        <div className="mt-3 flex flex-wrap gap-2">
+        <div className="mt-3 flex flex-wrap gap-1.5">
           {model.clearanceLadder.map((step) => (
             <span
               key={step.level}
               className={cn(
-                "inline-flex h-7 items-center rounded-md border px-2 font-mono text-xs font-bold",
+                "inline-flex h-7 min-w-8 items-center justify-center rounded-md border px-2 font-mono text-xs font-bold",
                 clearanceClass(step.level)
               )}
               data-clearance-level={step.level}
               data-clearance-ordinal={step.ordinal}
+              title={step.label}
             >
-              {step.label}
+              {CLEARANCE_ROMAN[step.ordinal] ?? step.label}
             </span>
           ))}
         </div>
-      </div>
+      </StripCell>
       {otherSignatures.map((signature) => (
-        <SignatureCell key={signature.id} signature={signature} />
+        <StripCell key={signature.id}>
+          <SignatureCell signature={signature} />
+        </StripCell>
       ))}
     </section>
   );
@@ -312,17 +431,23 @@ function SignatureCell({
 }): React.ReactElement {
   const Icon = signatureIcon(signature.id);
   return (
-    <div className="flex min-w-0 items-center gap-3 border-t border-zinc-100 pt-3 first:border-t-0 first:pt-0 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0 xl:first:border-l-0 xl:first:pl-0">
-      <div className="flex size-10 shrink-0 items-center justify-center rounded-md border border-zinc-200 bg-zinc-50 text-zinc-700">
+    <div className="flex min-w-0 items-center gap-3">
+      <div className="flex size-10 shrink-0 items-center justify-center rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] text-[var(--om-text-muted)]">
         <Icon className="size-5" aria-hidden="true" />
       </div>
       <div className="min-w-0">
-        <p className="text-xs font-bold uppercase text-zinc-500">{signature.label}</p>
+        <p className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
+          {signature.label}
+        </p>
         <div className="mt-1 flex min-w-0 items-center gap-2">
-          <p className="truncate font-mono text-sm font-bold text-zinc-950">{signature.value}</p>
+          <p className="truncate font-mono text-sm font-bold text-[var(--om-text-bright)]">
+            {signature.value}
+          </p>
           <Badge tone={signature.tone}>{signature.tone}</Badge>
         </div>
-        <p className="mt-1 truncate text-xs font-semibold text-zinc-500">{signature.detail}</p>
+        <p className="mt-1 truncate text-xs font-semibold text-[var(--om-text-muted)]">
+          {signature.detail}
+        </p>
       </div>
     </div>
   );
@@ -518,18 +643,23 @@ function BoardFact({
   );
 }
 
+// Color IS clearance (Appendix G grammar): every level reads its own --om
+// clearance token — sage READ_ONLY, gold READ_WRITE, copper DDL, rust ADMIN —
+// so the ramp is identical in Carved Light and the forced-colors fallback.
 function clearanceClass(level: ClearanceLevel): string {
-  switch (level) {
-    case "READ_ONLY":
-      return "border-emerald-200 bg-emerald-50 text-emerald-900";
-    case "READ_WRITE":
-      return "border-sky-200 bg-sky-50 text-sky-900";
-    case "DDL":
-      return "border-amber-200 bg-amber-50 text-amber-900";
-    case "ADMIN":
-      return "border-rose-200 bg-rose-50 text-rose-900";
-  }
+  const token = CLEARANCE_TOKEN[level];
+  return `border-[color-mix(in_srgb,var(${token})_50%,transparent)] bg-[color-mix(in_srgb,var(${token})_14%,transparent)] text-[var(${token})]`;
 }
+
+const CLEARANCE_TOKEN: Record<ClearanceLevel, `--om-clearance-${string}`> = {
+  READ_ONLY: "--om-clearance-read-only",
+  READ_WRITE: "--om-clearance-read-write",
+  DDL: "--om-clearance-ddl",
+  ADMIN: "--om-clearance-admin"
+};
+
+// Roman-numeral rank for the I·II·III·IV clearance spine.
+const CLEARANCE_ROMAN = ["I", "II", "III", "IV"] as const;
 
 function signatureIcon(id: SignatureId): React.ComponentType<{ className?: string }> {
   switch (id) {

@@ -40,6 +40,19 @@ export type SignatureViewModel = {
   activity: number;
 };
 
+export type GroundControlCounts = {
+  lanes: number;
+  prod: number;
+  held: number;
+};
+
+export type GroundControlChain = {
+  status: "intact" | "broken" | "syncing" | "unavailable";
+  label: string;
+  height: number | null;
+  verifiedAgoSeconds: number | null;
+};
+
 export type GroundControlViewModel = {
   grammarVersion: 1;
   verdict: GoNoGoVerdict;
@@ -51,6 +64,16 @@ export type GroundControlViewModel = {
     blocked: number;
   };
   signatures: readonly SignatureViewModel[];
+  // Optional status-strip extensions (Appendix G): the headline the operator
+  // reads first, the lane/prod/held counts, and the audit hash-chain summary.
+  // Optional so the session mission header and skin fixture stay valid without
+  // synthesizing them.
+  statusLine?: {
+    headline: string;
+    tone: DashboardTone;
+  };
+  counts?: GroundControlCounts;
+  chain?: GroundControlChain;
 };
 
 export type FleetSessionViewModel = {

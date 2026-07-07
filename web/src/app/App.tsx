@@ -357,6 +357,7 @@ function GroundControlStrip(): React.ReactElement {
   const go = readiness?.ready === true && readiness.db_reachable !== false;
   const snapshot = metrics.data?.data.snapshot ?? null;
   const activeLanes = snapshot?.active_lanes ?? 0;
+  const prodConnections = snapshot?.pool_active_connections ?? 0;
   const blocked = sumCounts(snapshot?.lane_blocked ?? []);
   const chainStatus =
     nestedString(logbook.data?.data.proof, ["verification", "hash_chain", "status"]) ??
@@ -372,6 +373,11 @@ function GroundControlStrip(): React.ReactElement {
       blocked,
       label: blocked > 0 ? "blocked" : "clear",
       tone: blocked > 0 ? "warn" : "ok"
+    },
+    counts: {
+      lanes: activeLanes,
+      prod: prodConnections,
+      held: blocked
     },
     signatures: [
       {
