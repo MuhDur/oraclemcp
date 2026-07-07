@@ -735,6 +735,14 @@ pub struct OracleConnectOptions {
     /// Optional Oracle Net transport connect timeout. `None` keeps the
     /// driver's descriptor/default timeout.
     pub connect_timeout: Option<Duration>,
+    /// Optional per-read inactivity deadline on an established session. `None`
+    /// keeps the driver's unbounded-read behavior. Wired to the driver via
+    /// `ConnectOptions::with_inactivity_timeout`.
+    pub inactivity_timeout: Option<Duration>,
+    /// Optional Oracle EXPIRE_TIME dead-connection-detection probe interval, in
+    /// MINUTES. `None` disables DCD probes. Injected into the connect string as
+    /// `expire_time=N` (the thin driver has no `ConnectOptions` setter for it).
+    pub keepalive_minutes: Option<u64>,
     /// Oracle per-round-trip call timeout. Defaults to
     /// [`DEFAULT_ORACLE_CALL_TIMEOUT`]; set `None` only for an explicit
     /// operator-controlled opt-out.
@@ -763,6 +771,8 @@ impl Default for OracleConnectOptions {
             sdu: None,
             statement_cache_size: None,
             connect_timeout: None,
+            inactivity_timeout: None,
+            keepalive_minutes: None,
             call_timeout: Some(DEFAULT_ORACLE_CALL_TIMEOUT),
             session_statements: Vec::new(),
         }
@@ -800,6 +810,8 @@ impl std::fmt::Debug for OracleConnectOptions {
             .field("sdu", &self.sdu)
             .field("statement_cache_size", &self.statement_cache_size)
             .field("connect_timeout", &self.connect_timeout)
+            .field("inactivity_timeout", &self.inactivity_timeout)
+            .field("keepalive_minutes", &self.keepalive_minutes)
             .field("call_timeout", &self.call_timeout)
             .field("session_statement_count", &session_statement_count)
             .finish()

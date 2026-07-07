@@ -238,6 +238,8 @@ pub fn synthesize_profiles(
             trusted_session_statements: None,
             call_timeout_seconds: None,
             connect_timeout_seconds: None,
+            inactivity_timeout_seconds: None,
+            keepalive_minutes: None,
             sdu: None,
             protected: None,
             require_signed_tools: None,

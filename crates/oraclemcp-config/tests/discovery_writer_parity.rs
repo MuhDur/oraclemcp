@@ -58,6 +58,8 @@ fn fully_populated_profile() -> ConnectionProfile {
         trusted_session_statements: Some(vec!["BEGIN NULL; END;".to_owned()]),
         call_timeout_seconds: Some(30),
         connect_timeout_seconds: Some(20),
+        inactivity_timeout_seconds: Some(300),
+        keepalive_minutes: Some(10),
         sdu: Some(8192),
         max_level: Some(OperatingLevel::ReadOnly),
         default_level: Some(OperatingLevel::ReadOnly),

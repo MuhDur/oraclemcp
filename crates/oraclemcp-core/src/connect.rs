@@ -261,6 +261,8 @@ fn profile_to_options_for_level(
         sdu: profile.sdu,
         statement_cache_size: profile.pool.as_ref().map(|pool| pool.statement_cache_size),
         connect_timeout: resolve_connect_timeout(profile.connect_timeout_seconds),
+        inactivity_timeout: resolve_connect_timeout(profile.inactivity_timeout_seconds),
+        keepalive_minutes: profile.keepalive_minutes.filter(|&m| m > 0),
         call_timeout: resolve_call_timeout(profile.call_timeout_seconds),
         session_statements: profile_session_statements(profile, level_state)?,
     })

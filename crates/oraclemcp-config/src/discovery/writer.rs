@@ -210,6 +210,8 @@ fn render_profile_block(synth_profile: &SynthesizedProfile) -> String {
             ),
             "call_timeout_seconds" => push_commented_scalar(&mut scalars, fd, "30"),
             "connect_timeout_seconds" => push_commented_scalar(&mut scalars, fd, "20"),
+            "inactivity_timeout_seconds" => push_commented_scalar(&mut scalars, fd, "300"),
+            "keepalive_minutes" => push_commented_scalar(&mut scalars, fd, "10"),
             "sdu" => push_commented_scalar(&mut scalars, fd, "32768"),
             // protected = true is the safe, instructive value: it pins the
             // ceiling immutable and requires max_level = READ_ONLY (which we set).

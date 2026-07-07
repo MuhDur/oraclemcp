@@ -98,7 +98,7 @@ pub const TOP_LEVEL_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
 /// Per-profile [`crate::ConnectionProfile`] field dispositions (design spec §C.2).
 ///
 /// Enumerates every serde field of `ConnectionProfile`
-/// (`crates/oraclemcp-config/src/profile.rs:457`–`profile.rs:550`, 25 fields).
+/// (`crates/oraclemcp-config/src/profile.rs:457`–`profile.rs:550`, 27 fields).
 /// The schema-drift test asserts this list matches the struct's serde surface
 /// exactly.
 pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
@@ -151,6 +151,16 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
         field: "connect_timeout_seconds",
         disposition: Disposition::Commented,
         help: "Oracle Net transport connect timeout, in seconds (default: the thin driver's 20s).",
+    },
+    FieldDisposition {
+        field: "inactivity_timeout_seconds",
+        disposition: Disposition::Commented,
+        help: "Per-read inactivity deadline on an established session, in seconds (unset = unbounded reads).",
+    },
+    FieldDisposition {
+        field: "keepalive_minutes",
+        disposition: Disposition::Commented,
+        help: "Oracle EXPIRE_TIME dead-connection-detection probe interval, in MINUTES (injected as expire_time=N; unset = no DCD probes).",
     },
     FieldDisposition {
         field: "sdu",
@@ -285,6 +295,8 @@ mod tests {
             trusted_session_statements: Some(vec!["BEGIN NULL; END;".to_owned()]),
             call_timeout_seconds: Some(30),
             connect_timeout_seconds: Some(20),
+            inactivity_timeout_seconds: Some(300),
+            keepalive_minutes: Some(10),
             sdu: Some(8192),
             max_level: Some(OperatingLevel::ReadOnly),
             default_level: Some(OperatingLevel::ReadOnly),
@@ -332,11 +344,11 @@ mod tests {
             actual.difference(&documented).collect::<Vec<_>>(),
             documented.difference(&actual).collect::<Vec<_>>(),
         );
-        // The spec fixes the count at 25.
+        // The spec fixes the count at 27.
         assert_eq!(
             CONNECTION_PROFILE_FIELD_DISPOSITIONS.len(),
-            25,
-            "the design spec fixes ConnectionProfile at 25 serde fields"
+            27,
+            "the design spec fixes ConnectionProfile at 27 serde fields"
         );
     }
 

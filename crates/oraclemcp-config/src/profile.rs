@@ -489,6 +489,17 @@ pub struct ConnectionProfile {
     /// TCP/TLS/TNS connect and authentication reads before a session exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connect_timeout_seconds: Option<u64>,
+    /// Optional per-read inactivity deadline, in seconds, bounding idle time on
+    /// an already-established session (a silent or half-open server). `None`
+    /// keeps the driver's unbounded-read behavior; `0` is treated as unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inactivity_timeout_seconds: Option<u64>,
+    /// Optional Oracle EXPIRE_TIME dead-connection-detection probe interval, in
+    /// MINUTES (Oracle's EXPIRE_TIME granularity). Injected into the connect
+    /// string as `expire_time=N`. `None` disables DCD probes; `0` is treated as
+    /// unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive_minutes: Option<u64>,
     /// Optional Session Data Unit request size for the thin driver.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sdu: Option<u32>,
@@ -567,6 +578,11 @@ impl std::fmt::Debug for ConnectionProfile {
             .field("trusted_statement_count", &trusted_statement_count)
             .field("call_timeout_seconds", &self.call_timeout_seconds)
             .field("connect_timeout_seconds", &self.connect_timeout_seconds)
+            .field(
+                "inactivity_timeout_seconds",
+                &self.inactivity_timeout_seconds,
+            )
+            .field("keepalive_minutes", &self.keepalive_minutes)
             .field("sdu", &self.sdu)
             .field("max_level", &self.max_level)
             .field("default_level", &self.default_level)
@@ -657,6 +673,8 @@ impl ConnectionProfile {
             trusted_session_statements,
             call_timeout_seconds,
             connect_timeout_seconds,
+            inactivity_timeout_seconds,
+            keepalive_minutes,
             sdu,
             max_level,
             default_level,
@@ -686,6 +704,8 @@ impl ConnectionProfile {
             is_default: false,
             call_timeout_seconds: self.call_timeout_seconds,
             connect_timeout_seconds: self.connect_timeout_seconds,
+            inactivity_timeout_seconds: self.inactivity_timeout_seconds,
+            keepalive_minutes: self.keepalive_minutes,
             pool: self.pool.clone().map(Into::into),
             max_level: self.max_level(),
             default_level: self.default_level(),
@@ -759,6 +779,10 @@ pub struct ProfileMetadata {
     pub call_timeout_seconds: Option<u64>,
     /// Optional Oracle Net transport connect timeout, in seconds.
     pub connect_timeout_seconds: Option<u64>,
+    /// Optional per-read inactivity deadline on an established session, in seconds.
+    pub inactivity_timeout_seconds: Option<u64>,
+    /// Optional Oracle EXPIRE_TIME dead-connection-detection interval, in minutes.
+    pub keepalive_minutes: Option<u64>,
     /// Safe local pool metadata when `[profiles.pool]` is configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool: Option<PoolMetadata>,
@@ -844,6 +868,8 @@ mod tests {
             trusted_session_statements: None,
             call_timeout_seconds: None,
             connect_timeout_seconds: None,
+            inactivity_timeout_seconds: None,
+            keepalive_minutes: None,
             sdu: None,
             max_level: None,
             default_level: None,
@@ -908,6 +934,43 @@ mod tests {
         )
         .expect_err("misspelled tls field must be rejected");
         assert!(err.to_string().contains("ssl_server_dn_matc"));
+    }
+
+    #[test]
+    fn connection_timeout_fields_round_trip_through_toml() {
+        let cfg = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "timeouts"
+            connect_string = "localhost:1521/FREEPDB1"
+            connect_timeout_seconds = 20
+            inactivity_timeout_seconds = 300
+            keepalive_minutes = 10
+            "#,
+        )
+        .expect("valid timeout profile");
+
+        let profile = &cfg.profiles[0];
+        assert_eq!(profile.connect_timeout_seconds, Some(20));
+        assert_eq!(profile.inactivity_timeout_seconds, Some(300));
+        assert_eq!(profile.keepalive_minutes, Some(10));
+
+        // Both new fields survive metadata projection for list_profiles.
+        let meta = profile.metadata();
+        assert_eq!(meta.inactivity_timeout_seconds, Some(300));
+        assert_eq!(meta.keepalive_minutes, Some(10));
+
+        // A misspelled sibling is rejected by the strict loader.
+        let err = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "timeouts"
+            connect_string = "localhost:1521/FREEPDB1"
+            keepalive_minute = 10
+            "#,
+        )
+        .expect_err("misspelled keepalive field must be rejected");
+        assert!(err.to_string().contains("keepalive_minute"));
     }
 
     #[test]

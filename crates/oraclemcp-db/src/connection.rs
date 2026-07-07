@@ -700,6 +700,43 @@ mod driver {
         ))
     }
 
+    /// Inject Oracle's `EXPIRE_TIME` dead-connection-detection probe interval
+    /// (MINUTES) into an EZConnect-style connect string as `expire_time=N`. The
+    /// thin driver has no `ConnectOptions` setter for EXPIRE_TIME, so — exactly
+    /// like `connect_string_with_transport_timeout` — we splice it into the
+    /// connect-string query. Refuses a full Oracle-Net descriptor (set
+    /// `EXPIRE_TIME` inside it instead) and refuses to shadow an `expire_time`
+    /// already present in the string.
+    fn connect_string_with_expire_time(
+        connect_string: &str,
+        keepalive_minutes: Option<u64>,
+    ) -> Result<String, DbError> {
+        let Some(minutes) = keepalive_minutes.filter(|&minutes| minutes > 0) else {
+            return Ok(connect_string.to_owned());
+        };
+        if connect_string.trim_start().starts_with('(') {
+            return Err(DbError::UnsupportedAuth(
+                "keepalive_minutes cannot be injected into a full Oracle Net descriptor; \
+                 set EXPIRE_TIME inside the descriptor instead"
+                    .to_owned(),
+            ));
+        }
+        let lower = connect_string.to_ascii_lowercase();
+        if lower.contains("expire_time=") {
+            return Err(DbError::UnsupportedAuth(
+                "keepalive_minutes conflicts with an existing expire_time value in \
+                 connect_string; configure it in only one place"
+                    .to_owned(),
+            ));
+        }
+        let separator = if connect_string.contains('?') {
+            '&'
+        } else {
+            '?'
+        };
+        Ok(format!("{connect_string}{separator}expire_time={minutes}"))
+    }
+
     pub(super) fn to_connect_options(
         opts: &OracleConnectOptions,
     ) -> Result<oracledb::ConnectOptions, DbError> {
@@ -784,8 +821,14 @@ mod driver {
             })?,
         };
         let identity = client_identity(opts.session_identity.as_ref())?;
+        // Both the Oracle Net transport-connect timeout and the EXPIRE_TIME
+        // dead-connection-detection interval are connect-string knobs (the thin
+        // driver has no ConnectOptions setter for either), so chain both
+        // injections onto the resolved string before building the options.
         let connect_string =
             connect_string_with_transport_timeout(&resolved_connect_string, opts.connect_timeout)?;
+        let connect_string =
+            connect_string_with_expire_time(&connect_string, opts.keepalive_minutes)?;
         let mut connect_options =
             oracledb::ConnectOptions::new(&connect_string, user, password, identity);
         if let Some(token) = iam_token {
@@ -809,6 +852,12 @@ mod driver {
         if let Some(statement_cache_size) = opts.statement_cache_size {
             connect_options =
                 connect_options.with_statement_cache_size(statement_cache_size as usize);
+        }
+        // Per-read inactivity deadline on an established session. Unlike the
+        // connect-string timeouts above, the thin driver exposes a builder
+        // setter (a consuming `-> Self`), so chain it like the other options.
+        if let Some(inactivity_timeout) = opts.inactivity_timeout {
+            connect_options = connect_options.with_inactivity_timeout(inactivity_timeout);
         }
         if let Some(proxy_user) = opts.auth_adapter.proxy_connect_user() {
             connect_options = connect_options.with_proxy_user(Some(proxy_user));
@@ -4486,6 +4535,92 @@ mod tests {
             username: Some("APP".to_owned()),
             password: Some("secret".to_owned()),
             connect_timeout: Some(Duration::from_secs(9)),
+            ..Default::default()
+        };
+
+        let err = driver::to_connect_options(&opts).expect_err("descriptor injection refused");
+        assert!(matches!(err, DbError::UnsupportedAuth(_)));
+        assert!(err.to_string().contains("descriptor"), "{err}");
+    }
+
+    #[test]
+    fn thin_connect_options_apply_expire_time() {
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1".to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            keepalive_minutes: Some(10),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("connect options");
+
+        assert_eq!(
+            connect.connect_string(),
+            "localhost:1521/FREEPDB1?expire_time=10"
+        );
+    }
+
+    #[test]
+    fn thin_connect_options_apply_expire_time_and_transport_timeout_together() {
+        // Both connect-string knobs chain: transport_connect_timeout first, then
+        // expire_time appended with `&` onto the now-present query.
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1".to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            connect_timeout: Some(Duration::from_secs(7)),
+            keepalive_minutes: Some(10),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("connect options");
+
+        assert_eq!(
+            connect.connect_string(),
+            "localhost:1521/FREEPDB1?transport_connect_timeout=7&expire_time=10"
+        );
+    }
+
+    #[test]
+    fn thin_connect_options_apply_inactivity_timeout() {
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1".to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            inactivity_timeout: Some(Duration::from_secs(300)),
+            ..Default::default()
+        };
+
+        let connect = driver::to_connect_options(&opts).expect("connect options");
+
+        // The inactivity deadline reaches the driver's ConnectOptions verbatim.
+        assert_eq!(connect.inactivity_timeout(), Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn thin_connect_options_reject_conflicting_expire_time() {
+        let opts = OracleConnectOptions {
+            connect_string: "localhost:1521/FREEPDB1?expire_time=5".to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            keepalive_minutes: Some(10),
+            ..Default::default()
+        };
+
+        let err = driver::to_connect_options(&opts).expect_err("conflicting expire_time sources");
+        assert!(matches!(err, DbError::UnsupportedAuth(_)));
+        assert!(err.to_string().contains("conflicts"), "{err}");
+    }
+
+    #[test]
+    fn thin_connect_options_reject_descriptor_expire_time_injection() {
+        let opts = OracleConnectOptions {
+            connect_string: "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=svc)))"
+                .to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            keepalive_minutes: Some(10),
             ..Default::default()
         };
 

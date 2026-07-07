@@ -52,6 +52,10 @@ credential_ref = "env:ORACLE_SALES_RO_PASSWORD"
 # call_timeout_seconds = 30
 # Oracle Net transport connect timeout, in seconds (default: the thin driver's 20s).
 # connect_timeout_seconds = 20
+# Per-read inactivity deadline on an established session, in seconds (unset = unbounded reads).
+# inactivity_timeout_seconds = 300
+# Oracle EXPIRE_TIME dead-connection-detection probe interval, in MINUTES (injected as expire_time=N; unset = no DCD probes).
+# keepalive_minutes = 10
 # Session Data Unit request size for the thin driver (512..=65535 bytes; negotiated when unset).
 # sdu = 32768
 max_level = "READ_ONLY"
@@ -116,6 +120,10 @@ credential_ref = "env:ORACLE_PRIMARY_TCPS_PASSWORD"
 # call_timeout_seconds = 30
 # Oracle Net transport connect timeout, in seconds (default: the thin driver's 20s).
 # connect_timeout_seconds = 20
+# Per-read inactivity deadline on an established session, in seconds (unset = unbounded reads).
+# inactivity_timeout_seconds = 300
+# Oracle EXPIRE_TIME dead-connection-detection probe interval, in MINUTES (injected as expire_time=N; unset = no DCD probes).
+# keepalive_minutes = 10
 # Session Data Unit request size for the thin driver (512..=65535 bytes; negotiated when unset).
 # sdu = 32768
 max_level = "READ_ONLY"
