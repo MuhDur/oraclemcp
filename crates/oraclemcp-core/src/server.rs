@@ -116,6 +116,10 @@ pub enum DispatchCloseReason {
     ServerShutdown,
     /// Last-handle drop without an explicit transport lifecycle call.
     RuntimeDrop,
+    /// An authorized operator terminated the lane through the operator API
+    /// (`POST /operator/v1/lanes/cancel`). The lane's connection, elevation
+    /// window, and single-use grants are dropped fail-closed.
+    OperatorCancel,
 }
 
 impl DispatchCloseReason {
@@ -127,6 +131,7 @@ impl DispatchCloseReason {
             Self::Timeout => "idle_timeout",
             Self::ServerShutdown => "server_shutdown",
             Self::RuntimeDrop => "runtime_drop",
+            Self::OperatorCancel => "operator_cancel",
         }
     }
 }

@@ -295,6 +295,14 @@ export type ActiveLanesData = {
   lanes: ActiveLane[];
 };
 
+export type LaneCancelData = {
+  status: "terminated" | "already_closed";
+  lane_id: string;
+  lane_generation: number;
+  reason: string;
+  terminated: boolean;
+};
+
 export type OperatorEventEnvelope = {
   protocol_version: "operator.v1";
   schema_version: number;
@@ -809,6 +817,15 @@ export async function fetchOperatorConfig(): Promise<OperatorResponse<ConfigOpsS
 
 export async function fetchActiveLanes(): Promise<OperatorResponse<ActiveLanesData>> {
   return operatorGet("/operator/v1/active-lanes");
+}
+
+export async function cancelLane(
+  session: DashboardSession,
+  laneId: string
+): Promise<OperatorResponse<LaneCancelData>> {
+  return operatorPost("/operator/v1/lanes/cancel", session, {
+    lane_id: laneId
+  });
 }
 
 export async function fetchChangeProposals(): Promise<OperatorResponse<ChangeProposalListData>> {

@@ -42,6 +42,9 @@
     "healthResponse": {
       "$ref": "#/$defs/versionedResponse"
     },
+    "laneCancelResponse": {
+      "$ref": "#/$defs/versionedResponse"
+    },
     "metricsResponse": {
       "$ref": "#/$defs/versionedResponse"
     },
@@ -245,6 +248,13 @@
       "method": "GET",
       "path": "/operator/v1/active-lanes",
       "schema": "activeLanesResponse",
+      "sse": false
+    },
+    {
+      "mcp_tool": null,
+      "method": "POST",
+      "path": "/operator/v1/lanes/cancel",
+      "schema": "laneCancelResponse",
       "sse": false
     },
     {

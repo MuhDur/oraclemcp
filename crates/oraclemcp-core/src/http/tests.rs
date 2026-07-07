@@ -887,6 +887,137 @@ impl HttpSessionLifecycle for StaticLaneLifecycle {
     }
 }
 
+/// Lane registry that records every close call so a test can prove the operator
+/// cancel route terminated the right lane with the right reason.
+#[derive(Debug, Default)]
+struct CancelRecordingLifecycle {
+    closed: std::sync::Mutex<Vec<(String, String, DispatchCloseReason)>>,
+}
+
+impl HttpSessionLifecycle for CancelRecordingLifecycle {
+    fn close_session(&self, session_id: &str, principal_key: &str) -> bool {
+        self.close_session_with_reason(
+            session_id,
+            principal_key,
+            DispatchCloseReason::SessionDelete,
+        )
+    }
+
+    fn close_session_with_reason(
+        &self,
+        session_id: &str,
+        principal_key: &str,
+        reason: DispatchCloseReason,
+    ) -> bool {
+        self.closed.lock().expect("cancel lock").push((
+            session_id.to_owned(),
+            principal_key.to_owned(),
+            reason,
+        ));
+        true
+    }
+
+    fn active_lanes(&self) -> Vec<HttpLaneSnapshot> {
+        vec![HttpLaneSnapshot {
+            lane_id: "lane-a".to_owned(),
+            generation: 7,
+            status: "active",
+            subject_id_hash: "subject-sha256:abc".to_owned(),
+        }]
+    }
+
+    fn lane_binding(&self, lane_id: &str) -> Option<HttpLaneBinding> {
+        (lane_id == "lane-a").then(|| HttpLaneBinding {
+            lane_id: "lane-a".to_owned(),
+            mcp_session_id: "mcp-session:lane-a".to_owned(),
+            principal_key: "principal:subject-sha256:abc".to_owned(),
+            generation: 7,
+        })
+    }
+}
+
+#[test]
+fn operator_lane_cancel_is_operator_gated_and_audited() {
+    let (auditor, sink) = operator_auditor();
+    let lifecycle = Arc::new(CancelRecordingLifecycle::default());
+    let cfg = HttpTransportConfig {
+        stateful: true,
+        operator_auditor: Some(auditor),
+        session_lifecycle: Some(Arc::clone(&lifecycle) as Arc<dyn HttpSessionLifecycle>),
+        ..Default::default()
+    };
+    let cancel_request = |peer_loopback: bool, lane_id: &str| {
+        HttpRequest::new(
+            "POST",
+            "/operator/v1/lanes/cancel",
+            [
+                ("host", "127.0.0.1"),
+                ("content-type", "application/json"),
+                ("accept", "application/json"),
+            ],
+            serde_json::json!({ "lane_id": lane_id })
+                .to_string()
+                .into_bytes(),
+        )
+        .with_peer_loopback(peer_loopback)
+    };
+
+    // Unauthorized: not the loopback owner and no operator principal. The
+    // request is refused by OperatorAuthorityPolicy::authorize before dispatch,
+    // so no lane is terminated and nothing is audited as an allowed action.
+    let refused = handle_http_request(&test_server(), &cfg, cancel_request(false, "lane-a"));
+    assert_eq!(refused.status, 403);
+    assert_eq!(
+        response_json(&refused)["error"],
+        serde_json::json!("operator_authority_required")
+    );
+    assert!(
+        lifecycle.closed.lock().expect("cancel lock").is_empty(),
+        "unauthorized cancel must not terminate any lane"
+    );
+    assert!(
+        sink.records().is_empty(),
+        "unauthorized cancel must not append an allowed operator audit entry"
+    );
+
+    // Authorized loopback operator: terminates the resolved lane, fail-closed,
+    // recorded in the operator audit hash-chain.
+    let ok = handle_http_request(&test_server(), &cfg, cancel_request(true, "lane-a"));
+    assert_eq!(ok.status, 200);
+    let body = response_json(&ok);
+    assert_eq!(body["data"]["status"], serde_json::json!("terminated"));
+    assert_eq!(body["data"]["terminated"], serde_json::json!(true));
+    assert_eq!(body["data"]["lane_id"], serde_json::json!("lane-a"));
+    assert_eq!(body["data"]["lane_generation"], serde_json::json!(7));
+    assert_eq!(body["data"]["reason"], serde_json::json!("operator_cancel"));
+
+    {
+        let closed = lifecycle.closed.lock().expect("cancel lock");
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].0, "mcp-session:lane-a");
+        assert_eq!(closed[0].1, "principal:subject-sha256:abc");
+        assert_eq!(closed[0].2, DispatchCloseReason::OperatorCancel);
+    }
+
+    let records = sink.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].tool, "operator_api");
+    assert_eq!(records[0].sql_preview, "POST /operator/v1/lanes/cancel");
+
+    // Unknown lane id: 404, no termination.
+    let unknown = handle_http_request(&test_server(), &cfg, cancel_request(true, "lane-z"));
+    assert_eq!(unknown.status, 404);
+    assert_eq!(
+        response_json(&unknown)["data"]["error"],
+        serde_json::json!("operator_lane_not_found")
+    );
+    assert_eq!(
+        lifecycle.closed.lock().expect("cancel lock").len(),
+        1,
+        "unknown lane must not terminate anything"
+    );
+}
+
 #[test]
 fn operator_v1_serves_schema_health_events_and_action_mapping() {
     let (auditor, sink) = operator_auditor();

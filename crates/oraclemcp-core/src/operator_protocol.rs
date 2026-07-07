@@ -82,6 +82,13 @@ pub const OPERATOR_ROUTE_SPECS: &[OperatorRouteSpec] = &[
         mcp_tool: None,
     },
     OperatorRouteSpec {
+        method: "POST",
+        path: "/operator/v1/lanes/cancel",
+        schema: "laneCancelResponse",
+        sse: false,
+        mcp_tool: None,
+    },
+    OperatorRouteSpec {
         method: "GET",
         path: "/operator/v1/vsession",
         schema: "vsessionResponse",
@@ -361,6 +368,7 @@ pub fn operator_schema_bundle() -> Value {
             "metricsResponse": { "$ref": "#/$defs/versionedResponse" },
             "auditTailResponse": { "$ref": "#/$defs/versionedResponse" },
             "activeLanesResponse": { "$ref": "#/$defs/versionedResponse" },
+            "laneCancelResponse": { "$ref": "#/$defs/versionedResponse" },
             "vsessionResponse": { "$ref": "#/$defs/versionedResponse" },
             "configStatusResponse": { "$ref": "#/$defs/versionedResponse" },
             "configDraftResponse": { "$ref": "#/$defs/versionedResponse" },

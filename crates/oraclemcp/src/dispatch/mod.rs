@@ -2908,7 +2908,7 @@ impl OracleConnection for GuardedGeneratedReadConn<'_> {
 
 fn close_reason_cancel(reason: DispatchCloseReason) -> AuditCancel {
     let kind = match reason {
-        DispatchCloseReason::SessionDelete => "User",
+        DispatchCloseReason::SessionDelete | DispatchCloseReason::OperatorCancel => "User",
         DispatchCloseReason::Timeout => "Timeout",
         DispatchCloseReason::ServerShutdown | DispatchCloseReason::RuntimeDrop => "Shutdown",
     };

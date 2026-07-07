@@ -45,6 +45,13 @@
       },
       {
         "mcp_tool": null,
+        "method": "POST",
+        "path": "/operator/v1/lanes/cancel",
+        "schema": "laneCancelResponse",
+        "sse": false
+      },
+      {
+        "mcp_tool": null,
         "method": "GET",
         "path": "/operator/v1/vsession",
         "schema": "vsessionResponse",

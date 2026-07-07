@@ -2168,6 +2168,7 @@ enum OperatorRouteKind {
     Metrics,
     AuditTail,
     ActiveLanes,
+    LaneCancel,
     Vsession,
     Events,
     ConfigStatus,
@@ -2199,6 +2200,7 @@ fn operator_route_kind(path: &str) -> OperatorRouteKind {
         "/operator/v1/metrics" => OperatorRouteKind::Metrics,
         "/operator/v1/audit-tail" => OperatorRouteKind::AuditTail,
         "/operator/v1/active-lanes" => OperatorRouteKind::ActiveLanes,
+        "/operator/v1/lanes/cancel" => OperatorRouteKind::LaneCancel,
         "/operator/v1/vsession" => OperatorRouteKind::Vsession,
         "/operator/v1/events" => OperatorRouteKind::Events,
         "/operator/v1/config" => OperatorRouteKind::ConfigStatus,
@@ -2239,7 +2241,8 @@ impl OperatorRouteKind {
             | Self::ClientCredentialRotate
             | Self::ClientCredentialRevoke
             | Self::SetLevel
-            | Self::SwitchProfile => "POST",
+            | Self::SwitchProfile
+            | Self::LaneCancel => "POST",
             _ => "GET",
         }
     }
@@ -2280,6 +2283,7 @@ fn handle_operator_api_route(
         OperatorRouteKind::ActiveLanes => {
             operator_json_response(200, &request.path, operator_active_lanes_data(config))
         }
+        OperatorRouteKind::LaneCancel => handle_operator_lane_cancel_route(config, request),
         OperatorRouteKind::Vsession => {
             operator_json_response(200, &request.path, operator_vsession_data())
         }
@@ -2623,6 +2627,91 @@ fn operator_active_lanes_data(config: &HttpTransportConfig) -> Value {
         "source": if config.session_lifecycle.is_some() { "self_lane" } else { "unavailable" },
         "lanes": lanes,
     })
+}
+
+/// Terminate one principal's stateful lane on an authorized operator request.
+///
+/// Fail-closed control action, not a data path: the caller has already cleared
+/// [`OperatorAuthorityPolicy::authorize`] (Subject is server-derived from the
+/// transport, never browser-supplied) and the request is already recorded in
+/// the operator audit hash-chain by [`append_operator_audit`] before dispatch.
+/// This route only resolves the lane id to its server-internal binding and
+/// drops the lane through the lifecycle hook — the lane's connection, elevation
+/// window, and single-use grants go away. It never runs SQL, so it cannot
+/// bypass the classifier; the closed lane's own lifecycle audit entry records
+/// the `operator_cancel` reason.
+fn handle_operator_lane_cancel_route(
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+) -> HttpResponse {
+    if !content_type_is_json(request) {
+        return empty_response(415);
+    }
+    let payload = match serde_json::from_slice::<Value>(&request.body) {
+        Ok(Value::Object(payload)) => payload,
+        Ok(_) | Err(_) => {
+            return operator_json_response(
+                400,
+                &request.path,
+                json!({
+                    "error": "invalid_operator_lane_cancel",
+                    "message": "lane cancel body must be a JSON object",
+                }),
+            );
+        }
+    };
+    let Some(lane_id) = payload
+        .get("lane_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|lane_id| !lane_id.is_empty())
+    else {
+        return operator_json_response(
+            400,
+            &request.path,
+            json!({
+                "error": "operator_lane_required",
+                "message": "lane cancel requires a non-empty lane_id",
+            }),
+        );
+    };
+    let Some(lifecycle) = config.session_lifecycle.as_ref() else {
+        return operator_json_response(
+            409,
+            &request.path,
+            json!({
+                "error": "operator_lane_registry_unavailable",
+                "message": "lane cancel requires a stateful lane registry provider",
+            }),
+        );
+    };
+    let Some(binding) = lifecycle.lane_binding(lane_id) else {
+        return operator_json_response(
+            404,
+            &request.path,
+            json!({
+                "error": "operator_lane_not_found",
+                "message": "requested lane_id is not active",
+                "lane_id": lane_id,
+            }),
+        );
+    };
+    let terminated = lifecycle.close_session_with_reason(
+        &binding.mcp_session_id,
+        &binding.principal_key,
+        DispatchCloseReason::OperatorCancel,
+    );
+    operator_json_response(
+        200,
+        &request.path,
+        json!({
+            "status": if terminated { "terminated" } else { "already_closed" },
+            "lane_id": binding.lane_id,
+            "lane_generation": binding.generation,
+            "reason": DispatchCloseReason::OperatorCancel.as_str(),
+            "terminated": terminated,
+        }),
+    )
 }
 
 fn operator_vsession_data() -> Value {
