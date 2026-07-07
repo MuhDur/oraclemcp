@@ -689,6 +689,8 @@ struct ResolvedProfile {
     pool_settings: Option<PoolSettings>,
     doctor_caps: DoctorProfileCaps,
     connect_timeout_seconds: Option<u64>,
+    inactivity_timeout_seconds: Option<u64>,
+    keepalive_minutes: Option<u64>,
 }
 
 fn selected_config_profile<'a>(
@@ -785,6 +787,8 @@ fn resolve_profile_options_with(
         pool_settings: ctx.pool_settings,
         doctor_caps,
         connect_timeout_seconds: chosen.connect_timeout_seconds,
+        inactivity_timeout_seconds: chosen.inactivity_timeout_seconds,
+        keepalive_minutes: chosen.keepalive_minutes,
     }))
 }
 
@@ -4528,6 +4532,8 @@ struct DoctorProfileContext {
     call_timeout_resolved: bool,
     call_timeout: Option<std::time::Duration>,
     connect_timeout_seconds: Option<u64>,
+    inactivity_timeout_seconds: Option<u64>,
+    keepalive_minutes: Option<u64>,
     proxy_user: bool,
     profile_caps: Option<DoctorProfileCaps>,
     auth_capabilities: Option<DoctorAuthCapabilities>,
@@ -4550,6 +4556,8 @@ impl DoctorProfileContext {
             call_timeout_resolved: false,
             call_timeout: None,
             connect_timeout_seconds: None,
+            inactivity_timeout_seconds: None,
+            keepalive_minutes: None,
             proxy_user: false,
             profile_caps: None,
             auth_capabilities: None,
@@ -4673,6 +4681,8 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
         call_timeout_resolved: true,
         call_timeout: doctor_call_timeout(chosen.call_timeout_seconds),
         connect_timeout_seconds: chosen.connect_timeout_seconds,
+        inactivity_timeout_seconds: chosen.inactivity_timeout_seconds,
+        keepalive_minutes: chosen.keepalive_minutes,
         proxy_user: chosen
             .proxy_auth
             .as_ref()
@@ -4749,6 +4759,8 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
             call_timeout_resolved: false,
             call_timeout: None,
             connect_timeout_seconds: None,
+            inactivity_timeout_seconds: None,
+            keepalive_minutes: None,
             proxy_user: false,
             profile_caps: None,
             auth_capabilities: None,
@@ -4765,6 +4777,8 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
             call_timeout_resolved: false,
             call_timeout: None,
             connect_timeout_seconds: None,
+            inactivity_timeout_seconds: None,
+            keepalive_minutes: None,
             proxy_user: false,
             profile_caps: None,
             auth_capabilities: None,
@@ -4793,6 +4807,8 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
     let sensitive_values = doctor_sensitive_values(&resolved.opts);
     let call_timeout = resolved.opts.call_timeout;
     let connect_timeout_seconds = resolved.connect_timeout_seconds;
+    let inactivity_timeout_seconds = resolved.inactivity_timeout_seconds;
+    let keepalive_minutes = resolved.keepalive_minutes;
     let connection_strategy = Some(
         if resolved.pool_settings.is_some() {
             "hybrid_pool"
@@ -4816,6 +4832,8 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
             call_timeout_resolved: true,
             call_timeout,
             connect_timeout_seconds,
+            inactivity_timeout_seconds,
+            keepalive_minutes,
             proxy_user,
             profile_caps,
             auth_capabilities,
@@ -4834,6 +4852,8 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
             call_timeout_resolved: true,
             call_timeout,
             connect_timeout_seconds,
+            inactivity_timeout_seconds,
+            keepalive_minutes,
             proxy_user,
             profile_caps,
             auth_capabilities,
@@ -4878,6 +4898,11 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
         call_timeout_resolved: profile_ctx.call_timeout_resolved,
         call_timeout: profile_ctx.call_timeout,
         connect_timeout_seconds: profile_ctx.connect_timeout_seconds,
+        inactivity_timeout_seconds: profile_ctx.inactivity_timeout_seconds,
+        keepalive_minutes: profile_ctx.keepalive_minutes,
+        // B5: honest trio-stack provenance — whether the optional
+        // plsql-intelligence engine is compiled into this server build.
+        plsql_intelligence_detected: cfg!(feature = "plsql-intelligence"),
         proxy_user: profile_ctx.proxy_user,
         online,
         profile_caps: profile_ctx.profile_caps,

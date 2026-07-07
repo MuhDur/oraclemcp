@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use asupersync::Cx;
 use oraclemcp_db::{
-    AuthAdapter, DiagnosticsSource, OracleConnectOptions, OracleConnection,
+    AuthAdapter, DRIVER_VERSION, DiagnosticsSource, OracleConnectOptions, OracleConnection,
     canonical_nls_statements, detect_oracle_driver, detect_standby, preflight, probe_privileges,
     probe_write_posture, supported_wallet_modes,
 };
@@ -480,6 +480,20 @@ pub struct DoctorContext<'a> {
     /// Authored Oracle Net transport connect timeout in seconds. `None` keeps
     /// the thin driver's 20s descriptor/default timeout.
     pub connect_timeout_seconds: Option<u64>,
+    /// Authored per-read inactivity deadline in seconds (B1). `None` keeps the
+    /// driver's unbounded idle-read behavior; an authored `0` is a misconfig the
+    /// call-timeout check advises removing (mirrors `connect_timeout_seconds`).
+    pub inactivity_timeout_seconds: Option<u64>,
+    /// Authored Oracle EXPIRE_TIME dead-connection-detection interval in MINUTES
+    /// (B1). `None` disables DCD probes; an authored `0` is a misconfig the
+    /// call-timeout check advises removing.
+    pub keepalive_minutes: Option<u64>,
+    /// Whether the optional plsql-intelligence engine is available to this
+    /// server build (B5). Reported by the trio-stack provenance check. The full
+    /// detection contract is B5.1; this is the honest present/absent signal the
+    /// binary knows (its `plsql-intelligence` feature). Defaults to `false`
+    /// (`not detected`) for library callers and offline runs.
+    pub plsql_intelligence_detected: bool,
     /// Whether a proxy / least-privilege connect user is configured (A2).
     pub proxy_user: bool,
     /// Whether this run was explicitly allowed to open a live connection.
@@ -1002,6 +1016,7 @@ pub async fn run_doctor(cx: &Cx, ctx: &DoctorContext<'_>) -> DoctorReport {
         check_call_timeout(ctx),
         check_state_layout(ctx),
         check_iam_token(ctx),
+        check_trio_stack(ctx),
     ];
     DoctorReport {
         checks,
@@ -2306,57 +2321,148 @@ fn check_call_timeout(ctx: &DoctorContext<'_>) -> CheckResult {
         );
     }
 
-    let (call_warns, call_detail, call_fix) = match ctx.call_timeout {
-        Some(timeout) if !timeout.is_zero() => (
-            false,
-            format!(
-                "Oracle call timeout is {}s; request budget uses the same profile ceiling",
-                timeout.as_secs()
-            ),
-            None,
-        ),
-        Some(_) | None => (
-            true,
-            "Oracle call timeout is disabled; a driver round trip can wait indefinitely".to_owned(),
-            Some("remove call_timeout_seconds = 0 or set it to a positive value such as 30"),
-        ),
-    };
-    let (connect_warns, connect_detail, connect_fix) = match ctx.connect_timeout_seconds {
-        Some(0) => (
-            true,
-            "Oracle connect timeout is configured as 0; the thin driver uses its 20s default instead"
+    // Each timeout aspect contributes one detail segment and, when misconfigured,
+    // one advisory (non-fatal) fix. Collecting them keeps the connect / call
+    // posture (original) and the B1 inactivity / keepalive posture uniform.
+    let mut details: Vec<String> = Vec::new();
+    let mut fixes: Vec<&'static str> = Vec::new();
+
+    match ctx.call_timeout {
+        Some(timeout) if !timeout.is_zero() => details.push(format!(
+            "Oracle call timeout is {}s; request budget uses the same profile ceiling",
+            timeout.as_secs()
+        )),
+        Some(_) | None => {
+            details.push(
+                "Oracle call timeout is disabled; a driver round trip can wait indefinitely"
+                    .to_owned(),
+            );
+            fixes.push("remove call_timeout_seconds = 0 or set it to a positive value such as 30");
+        }
+    }
+    match ctx.connect_timeout_seconds {
+        Some(0) => {
+            details.push(
+                "Oracle connect timeout is configured as 0; the thin driver uses its 20s default \
+                 instead"
+                    .to_owned(),
+            );
+            fixes.push(
+                "remove connect_timeout_seconds = 0 or set it to a positive value such as 20",
+            );
+        }
+        Some(seconds) => details.push(format!("Oracle connect timeout is {seconds}s")),
+        None => {
+            details.push("Oracle connect timeout uses the thin driver default (20s)".to_owned())
+        }
+    }
+    // B1: an authored `0` for either field is meaningless (both treat 0 as unset);
+    // advise removing it. `None` is the honest driver default and passes.
+    match ctx.inactivity_timeout_seconds {
+        Some(0) => {
+            details.push(
+                "Oracle inactivity timeout is configured as 0; idle reads on an established \
+                 session stay unbounded"
+                    .to_owned(),
+            );
+            fixes.push(
+                "remove inactivity_timeout_seconds = 0 or set it to a positive value such as 300",
+            );
+        }
+        Some(seconds) => details.push(format!("Oracle inactivity timeout is {seconds}s")),
+        None => details.push(
+            "Oracle inactivity timeout uses the thin driver default (unbounded idle reads)"
                 .to_owned(),
-            Some("remove connect_timeout_seconds = 0 or set it to a positive value such as 20"),
         ),
-        Some(seconds) => (
-            false,
-            format!("Oracle connect timeout is {seconds}s"),
-            None,
-        ),
-        None => (
-            false,
-            "Oracle connect timeout uses the thin driver default (20s)".to_owned(),
-            None,
-        ),
-    };
+    }
+    match ctx.keepalive_minutes {
+        Some(0) => {
+            details.push(
+                "Oracle keepalive (EXPIRE_TIME) is configured as 0; dead-connection-detection \
+                 probes are disabled"
+                    .to_owned(),
+            );
+            fixes.push("remove keepalive_minutes = 0 or set it to a positive value such as 10");
+        }
+        Some(minutes) => details.push(format!(
+            "Oracle keepalive (EXPIRE_TIME) probes every {minutes}m"
+        )),
+        None => details.push("Oracle keepalive (EXPIRE_TIME) probes are disabled".to_owned()),
+    }
+
     let mut result = CheckResult::new(
         ID,
         NAME,
-        if call_warns || connect_warns {
-            CheckStatus::Warn
-        } else {
+        if fixes.is_empty() {
             CheckStatus::Pass
+        } else {
+            CheckStatus::Warn
         },
-        format!("{call_detail}; {connect_detail}"),
+        details.join("; "),
     );
-    result = match (call_fix, connect_fix) {
-        (Some(_), Some(_)) => result.with_fix(
-            "set call_timeout_seconds and connect_timeout_seconds to positive values, or omit connect_timeout_seconds to keep the 20s driver default",
-        ),
-        (Some(fix), None) | (None, Some(fix)) => result.with_fix(fix),
-        (None, None) => result,
-    };
+    if !fixes.is_empty() {
+        result = result.with_fix(fixes.join("; "));
+    }
     result
+}
+
+/// Upstream repository of the pinned thin `oracledb` driver (behavior-inventory).
+const DRIVER_UPSTREAM_REPO: &str = "https://github.com/MuhDur/rust-oracledb";
+
+/// Known-open upstream `oracledb` issues surfaced in trio-stack provenance so an
+/// operator can correlate observed runtime behavior with tracked upstream work.
+/// Keep an entry while its issue is open; drop it once upstream closes it.
+/// `rust-oracledb#14`: `expire_time` / keepalive + transport timeout is parsed
+/// but not yet wired into the runtime (see `oraclemcp-db` connection.rs).
+const DRIVER_UPSTREAM_ISSUES: &[(&str, &str)] = &[(
+    "rust-oracledb#14",
+    "https://github.com/MuhDur/rust-oracledb/issues/14",
+)];
+
+/// Check 15 (B5): thin trio-stack provenance — the server, the pinned thin
+/// `oracledb` driver, and the optional plsql-intelligence engine. This is an
+/// **informational** `Pass` (a provenance surface for operators and agents), not
+/// a health gate.
+///
+/// The driver version is [`oraclemcp_db::DRIVER_VERSION`] — a re-export of the
+/// driver crate's own `VERSION` const (its `CARGO_PKG_VERSION`, resolved at the
+/// driver's compile and surfaced through the one adapter seam, so it is never
+/// named as a driver path outside the adapter) — and NOT this crate's
+/// `env!("CARGO_PKG_VERSION")` (which would report `oraclemcp-core`, the wrong
+/// crate). That is the whole point of the check: the reported driver line is
+/// guaranteed to be the *pinned driver's* version.
+fn check_trio_stack(ctx: &DoctorContext<'_>) -> CheckResult {
+    const ID: u8 = 15;
+    const NAME: &str = "Trio-stack provenance";
+
+    // Every `oraclemcp-*` crate shares one workspace version, so this crate's
+    // `CARGO_PKG_VERSION` is also the `oraclemcp-db` / server version.
+    let server_version = env!("CARGO_PKG_VERSION");
+    // Read from the DRIVER crate (via the db seam re-export), never this one —
+    // the provenance guarantee that `reported == pinned` driver version (=0.8.0).
+    let driver_line = format!("thin oracledb {DRIVER_VERSION}");
+
+    let plsql_status = if ctx.plsql_intelligence_detected {
+        "detected"
+    } else {
+        "not detected"
+    };
+
+    let issues = DRIVER_UPSTREAM_ISSUES
+        .iter()
+        .map(|(name, url)| format!("{name} {url}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    CheckResult::new(
+        ID,
+        NAME,
+        CheckStatus::Pass,
+        format!(
+            "server db {server_version}; driver {driver_line} ({DRIVER_UPSTREAM_REPO}); \
+             plsql-intelligence {plsql_status}; open upstream driver issues: {issues}"
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -2476,14 +2582,17 @@ mod tests {
     }
 
     #[test]
-    fn report_has_fourteen_checks_and_classifier_self_test_passes() {
+    fn report_has_fifteen_checks_and_classifier_self_test_passes() {
         let report = doctor(&DoctorContext::default());
-        assert_eq!(report.checks.len(), 14);
+        assert_eq!(report.checks.len(), 15);
         let selftest = report.checks.iter().find(|c| c.id == 8).unwrap();
         assert_eq!(selftest.status, CheckStatus::Pass, "{}", selftest.detail);
         // The IAM-token near-expiry check (14) skips cleanly when no token is set.
         let iam = report.checks.iter().find(|c| c.id == 14).unwrap();
         assert_eq!(iam.status, CheckStatus::Skip, "{}", iam.detail);
+        // The trio-stack provenance check (15) is informational and always passes.
+        let trio = report.checks.iter().find(|c| c.id == 15).unwrap();
+        assert_eq!(trio.status, CheckStatus::Pass, "{}", trio.detail);
     }
 
     /// Field-test regression: checks print in numeric id order (13 used to
@@ -2576,6 +2685,136 @@ mod tests {
                 .unwrap_or_default()
                 .contains("connect_timeout_seconds")
         );
+    }
+
+    #[test]
+    fn zero_inactivity_timeout_warns() {
+        let ctx = DoctorContext {
+            call_timeout_resolved: true,
+            call_timeout: Some(Duration::from_secs(30)),
+            inactivity_timeout_seconds: Some(0),
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let timeout = report.checks.iter().find(|c| c.id == 12).unwrap();
+        assert_eq!(timeout.status, CheckStatus::Warn, "{}", timeout.detail);
+        assert!(
+            timeout
+                .detail
+                .contains("inactivity timeout is configured as 0")
+        );
+        assert!(
+            timeout
+                .fix
+                .as_deref()
+                .unwrap_or_default()
+                .contains("inactivity_timeout_seconds")
+        );
+    }
+
+    #[test]
+    fn positive_inactivity_timeout_passes() {
+        let ctx = DoctorContext {
+            call_timeout_resolved: true,
+            call_timeout: Some(Duration::from_secs(30)),
+            inactivity_timeout_seconds: Some(300),
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let timeout = report.checks.iter().find(|c| c.id == 12).unwrap();
+        assert_eq!(timeout.status, CheckStatus::Pass, "{}", timeout.detail);
+        assert!(timeout.detail.contains("inactivity timeout is 300s"));
+    }
+
+    #[test]
+    fn zero_keepalive_minutes_warns() {
+        let ctx = DoctorContext {
+            call_timeout_resolved: true,
+            call_timeout: Some(Duration::from_secs(30)),
+            keepalive_minutes: Some(0),
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let timeout = report.checks.iter().find(|c| c.id == 12).unwrap();
+        assert_eq!(timeout.status, CheckStatus::Warn, "{}", timeout.detail);
+        assert!(
+            timeout
+                .detail
+                .contains("keepalive (EXPIRE_TIME) is configured as 0")
+        );
+        assert!(
+            timeout
+                .fix
+                .as_deref()
+                .unwrap_or_default()
+                .contains("keepalive_minutes")
+        );
+    }
+
+    #[test]
+    fn positive_keepalive_minutes_passes() {
+        let ctx = DoctorContext {
+            call_timeout_resolved: true,
+            call_timeout: Some(Duration::from_secs(30)),
+            keepalive_minutes: Some(10),
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let timeout = report.checks.iter().find(|c| c.id == 12).unwrap();
+        assert_eq!(timeout.status, CheckStatus::Pass, "{}", timeout.detail);
+        assert!(
+            timeout
+                .detail
+                .contains("keepalive (EXPIRE_TIME) probes every 10m")
+        );
+    }
+
+    #[test]
+    fn trio_stack_reports_pinned_driver_version_and_provenance() {
+        let report = doctor(&DoctorContext::default());
+        let trio = report.checks.iter().find(|c| c.id == 15).unwrap();
+        assert_eq!(trio.status, CheckStatus::Pass, "{}", trio.detail);
+
+        // The DoD: the reported driver version equals the DRIVER crate's own
+        // `VERSION` const (re-exported at the db seam as `DRIVER_VERSION`),
+        // never this crate's CARGO_PKG_VERSION.
+        assert!(!DRIVER_VERSION.is_empty(), "driver VERSION must be set");
+        assert!(
+            trio.detail
+                .contains(&format!("thin oracledb {DRIVER_VERSION}")),
+            "trio-stack must report the pinned driver line: {}",
+            trio.detail
+        );
+        // reported == pinned driver (=0.8.0).
+        assert_eq!(DRIVER_VERSION, "0.8.0");
+
+        // Server / db (workspace) version is present.
+        assert!(
+            trio.detail
+                .contains(&format!("server db {}", env!("CARGO_PKG_VERSION"))),
+            "trio-stack must report the server db version: {}",
+            trio.detail
+        );
+        // Upstream issue URL(s) for the known-open driver issues.
+        assert!(trio.detail.contains("rust-oracledb#14"));
+        assert!(
+            trio.detail
+                .contains("https://github.com/MuhDur/rust-oracledb/issues/14")
+        );
+        // plsql-intelligence status line (default build / library caller: absent).
+        assert!(trio.detail.contains("plsql-intelligence not detected"));
+    }
+
+    #[test]
+    fn trio_stack_reports_plsql_intelligence_when_detected() {
+        let ctx = DoctorContext {
+            plsql_intelligence_detected: true,
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let trio = report.checks.iter().find(|c| c.id == 15).unwrap();
+        assert_eq!(trio.status, CheckStatus::Pass, "{}", trio.detail);
+        assert!(trio.detail.contains("plsql-intelligence detected"));
     }
 
     #[test]
@@ -3000,7 +3239,7 @@ mod tests {
         assert!(text.contains("oraclemcp doctor"));
         assert!(text.contains("Classifier self-test"));
         let j = report.to_json();
-        assert_eq!(j["checks"].as_array().unwrap().len(), 14);
+        assert_eq!(j["checks"].as_array().unwrap().len(), 15);
         assert_eq!(j["exit_code"], json!(0));
     }
 

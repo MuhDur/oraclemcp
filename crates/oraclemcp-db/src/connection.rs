@@ -53,6 +53,15 @@ use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use std::time::Duration;
 
+/// The pinned thin `oracledb` driver's own version string, read from the driver
+/// crate's [`oracledb::VERSION`] const (its `CARGO_PKG_VERSION`, resolved at the
+/// driver's compile). Re-exported from this adapter — the ONE seam allowed to
+/// name an `oracledb::` path — so consumers (e.g. `oraclemcp doctor`'s trio-stack
+/// provenance) can report the *driver's* version without reaching for
+/// `env!("CARGO_PKG_VERSION")`, which would resolve to the wrong crate. Because
+/// the whole workspace pins `oracledb = "=0.8.0"`, this is `"0.8.0"`.
+pub const DRIVER_VERSION: &str = oracledb::VERSION;
+
 /// Map an asupersync cancellation/budget checkpoint failure to the
 /// timeout-class [`DbError::Cancelled`]. Used as the explicit before/after
 /// cancellation boundary around every native-async driver round trip; the

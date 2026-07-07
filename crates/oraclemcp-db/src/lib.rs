@@ -89,7 +89,8 @@ pub use catalog_extract::{
     CatalogRowSetName, CatalogSchemaFilter, catalog_extract_rowsets, extract_catalog_rowsets,
 };
 pub use connection::{
-    DbmsOutput, ExecuteOutcome, OracleConnection, OracleRoutineArg, RustOracleConnection,
+    DRIVER_VERSION, DbmsOutput, ExecuteOutcome, OracleConnection, OracleRoutineArg,
+    RustOracleConnection,
 };
 pub use doctor::{OracleDriverPosture, detect_oracle_driver, oracle_driver_compiled};
 pub use drcp::{DrcpConfig, SessionPurity};

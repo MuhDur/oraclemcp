@@ -5957,6 +5957,7 @@ impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::WritePosture where V: pp
 pub fn oraclemcp_db::WritePosture::vzip(self) -> V
 pub const oraclemcp_db::CONNECT_TRACE_NEXT_STEP: &str
 pub const oraclemcp_db::DEFAULT_ORACLE_CALL_TIMEOUT: core::time::Duration
+pub const oraclemcp_db::DRIVER_VERSION: &str
 pub const oraclemcp_db::ORACLE_CELL_STRUCTURED_CONTRACT_VERSION: u16
 pub trait oraclemcp_db::IamTokenSource
 pub fn oraclemcp_db::IamTokenSource::fetch(&self) -> core::result::Result<oraclemcp_db::IamToken, oraclemcp_db::OciError>
