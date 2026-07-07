@@ -353,8 +353,9 @@ fn release_sbom_workflow_merges_dashboard_and_rust_sboms() {
         "release preflight must check merged SBOM source wiring"
     );
     assert!(
-        preflight.contains("crates.io/api/v1/crates/oracledb/${version}"),
-        "release preflight must gate on oracledb published on crates.io (D10)"
+        preflight.contains("crates.io/api/v1/crates/oracledb/${driver_version}"),
+        "release preflight must gate on oracledb published on crates.io (D10); the \
+         driver versions independently of the server so the pin is parsed, not $version"
     );
     assert!(
         preflight.contains("publish rust-oracledb first"),
