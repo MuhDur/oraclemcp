@@ -3000,6 +3000,18 @@ function ConsoleFact({
   );
 }
 
+// Shared Carved Light form/label classes for the b4 operator surfaces, so the
+// inputs, textareas, and checkboxes read the --om tokens instead of the light
+// zinc/emerald defaults the rest of the console still uses.
+const OM_LABEL = "mb-2 block text-sm font-semibold text-[var(--om-text)]";
+const OM_INPUT =
+  "h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 text-sm text-[var(--om-text)] outline-none focus:border-[var(--om-gold)] focus:ring-2 focus:ring-[color-mix(in_srgb,var(--om-gold)_35%,transparent)]";
+const OM_TEXTAREA =
+  "w-full resize-y rounded-md border border-[var(--om-border)] bg-[var(--om-bg)] p-3 font-mono text-sm leading-6 text-[var(--om-text)] outline-none focus:border-[var(--om-gold)] focus:ring-2 focus:ring-[color-mix(in_srgb,var(--om-gold)_35%,transparent)]";
+const OM_CHECKBOX = "size-4 rounded border-[var(--om-border)] accent-[var(--om-gold)]";
+const OM_CHECK_LABEL = "flex min-h-9 items-center gap-2 text-sm font-semibold text-[var(--om-text)]";
+const OM_CODE = "overflow-auto rounded-md bg-[var(--om-bg)] p-3 text-xs leading-5 text-[var(--om-text)]";
+
 function EventFact({ label, value }: { label: string; value: unknown }): React.ReactElement {
   return (
     <div className="rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] p-2">
@@ -5121,15 +5133,15 @@ function ReviewsPage(): React.ReactElement {
     >
       <div className="grid gap-4 xl:grid-cols-[minmax(320px,0.8fr)_minmax(0,1.2fr)]">
         <div className="space-y-4">
-          <Surface className="overflow-hidden">
-            <div className="border-b border-zinc-200 p-4">
+          <ConsolePanel>
+            <div className="border-b border-[var(--om-border)] p-4">
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
+                  <h3 className="flex items-center gap-2 text-base font-semibold text-[var(--om-text-bright)]">
                     <GitPullRequest className="size-4" aria-hidden="true" />
                     Proposals
                   </h3>
-                  <p className="mt-1 truncate text-sm text-zinc-500">
+                  <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">
                     {proposalsQuery.isFetching ? "sync" : `${formatNumber(filtered.length)} visible`}
                   </p>
                 </div>
@@ -5138,9 +5150,9 @@ function ReviewsPage(): React.ReactElement {
                 </Badge>
               </div>
               <label className="mt-4 block">
-                <span className="mb-2 block text-sm font-bold text-zinc-700">Filter</span>
+                <span className={OM_LABEL}>Filter</span>
                 <input
-                  className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                  className={OM_INPUT}
                   value={filter}
                   onChange={(event) => setFilter(event.target.value)}
                   placeholder="profile, title, SQL"
@@ -5149,25 +5161,29 @@ function ReviewsPage(): React.ReactElement {
             </div>
             <div className="max-h-[560px] overflow-auto">
               {filtered.length === 0 ? (
-                <div className="px-4 py-8 text-sm font-semibold text-zinc-500">No proposals</div>
+                <div className="px-4 py-8 text-sm font-semibold text-[var(--om-text-muted)]">
+                  No proposals
+                </div>
               ) : (
                 filtered.map((proposal) => (
                   <button
                     key={proposal.id}
                     type="button"
                     className={cn(
-                      "block w-full border-b border-zinc-200 px-4 py-3 text-left transition-colors hover:bg-zinc-50",
-                      selected?.id === proposal.id ? "bg-emerald-50" : "bg-white"
+                      "block w-full border-b border-[var(--om-border)] px-4 py-3 text-left transition-colors hover:bg-[var(--om-surface-muted)]",
+                      selected?.id === proposal.id
+                        ? "bg-[color-mix(in_srgb,var(--om-gold)_12%,transparent)]"
+                        : "bg-transparent"
                     )}
                     onClick={() => setSelectedId(proposal.id)}
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="min-w-0 truncate text-sm font-bold text-zinc-950">
+                      <span className="min-w-0 truncate text-sm font-semibold text-[var(--om-text-bright)]">
                         {proposal.title}
                       </span>
                       <Badge tone={proposalLevelTone(proposal)}>{proposal.profile}</Badge>
                     </div>
-                    <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold text-zinc-500">
+                    <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold text-[var(--om-text-muted)]">
                       <span>{proposal.author}</span>
                       <span>{formatNumber(proposal.statement_count)} stmt</span>
                       <span>{proposal.updated_at}</span>
@@ -5176,7 +5192,7 @@ function ReviewsPage(): React.ReactElement {
                 ))
               )}
             </div>
-          </Surface>
+          </ConsolePanel>
           <SourceHistoryPanel
             snapshots={snapshots}
             pending={sourceHistoryQuery.isFetching || revertMutation.isPending}
@@ -5195,20 +5211,20 @@ function ReviewsPage(): React.ReactElement {
         </div>
 
         <div className="space-y-4">
-          <Surface className="p-4">
+          <ConsolePanel className="p-4">
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_180px]">
               <label className="block">
-                <span className="mb-2 block text-sm font-bold text-zinc-700">Title</span>
+                <span className={OM_LABEL}>Title</span>
                 <input
-                  className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                  className={OM_INPUT}
                   value={title}
                   onChange={(event) => setTitle(event.target.value)}
                 />
               </label>
               <label className="block">
-                <span className="mb-2 block text-sm font-bold text-zinc-700">Profile</span>
+                <span className={OM_LABEL}>Profile</span>
                 <input
-                  className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                  className={OM_INPUT}
                   value={profile}
                   onChange={(event) => setProfile(event.target.value)}
                 />
@@ -5227,18 +5243,18 @@ function ReviewsPage(): React.ReactElement {
               ))}
             </div>
             <label className="mt-4 block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">SQL Template</span>
+              <span className={OM_LABEL}>SQL Template</span>
               <textarea
-                className="min-h-[220px] w-full resize-y rounded-md border border-zinc-300 bg-zinc-950 p-3 font-mono text-sm leading-6 text-zinc-50 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className={cn(OM_TEXTAREA, "min-h-[220px]")}
                 spellCheck={false}
                 value={sqlTemplate}
                 onChange={(event) => setSqlTemplate(event.target.value)}
               />
             </label>
             <label className="mt-4 block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Binds</span>
+              <span className={OM_LABEL}>Binds</span>
               <textarea
-                className="min-h-[92px] w-full resize-y rounded-md border border-zinc-300 p-3 font-mono text-sm leading-5 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className={cn(OM_TEXTAREA, "min-h-[92px] leading-5")}
                 spellCheck={false}
                 value={bindsJson}
                 onChange={(event) => setBindsJson(event.target.value)}
@@ -5257,18 +5273,18 @@ function ReviewsPage(): React.ReactElement {
                   </Button>
                 ))}
               </div>
-              <label className="flex min-h-9 items-center gap-2 text-sm font-semibold text-zinc-700">
+              <label className={OM_CHECK_LABEL}>
                 <input
-                  className="size-4 rounded border-zinc-300 text-emerald-700 focus:ring-emerald-600"
+                  className={OM_CHECKBOX}
                   type="checkbox"
                   checked={draftCommit}
                   onChange={(event) => setDraftCommit(event.target.checked)}
                 />
                 Commit
               </label>
-              <label className="flex min-h-9 items-center gap-2 text-sm font-semibold text-zinc-700">
+              <label className={OM_CHECK_LABEL}>
                 <input
-                  className="size-4 rounded border-zinc-300 text-emerald-700 focus:ring-emerald-600"
+                  className={OM_CHECKBOX}
                   type="checkbox"
                   checked={captureDbmsOutput}
                   onChange={(event) => setCaptureDbmsOutput(event.target.checked)}
@@ -5285,23 +5301,23 @@ function ReviewsPage(): React.ReactElement {
                 Draft
               </Button>
             </div>
-          </Surface>
+          </ConsolePanel>
 
-          <Surface className="p-4">
+          <ConsolePanel className="p-4">
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
               <label className="block">
-                <span className="mb-2 block text-sm font-bold text-zinc-700">Lane</span>
+                <span className={OM_LABEL}>Lane</span>
                 <input
-                  className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                  className={OM_INPUT}
                   value={laneId}
                   onChange={(event) => setLaneId(event.target.value)}
                   placeholder="operator"
                 />
               </label>
               <label className="block">
-                <span className="mb-2 block text-sm font-bold text-zinc-700">Confirm</span>
+                <span className={OM_LABEL}>Confirm</span>
                 <input
-                  className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                  className={cn(OM_INPUT, "font-mono")}
                   value={confirm}
                   onChange={(event) => setConfirm(event.target.value)}
                   placeholder="preview grant"
@@ -5310,9 +5326,9 @@ function ReviewsPage(): React.ReactElement {
             </div>
             {selected ? <ProposalStatementTable proposal={selected} /> : null}
             <div className="mt-4 flex flex-wrap items-center gap-3">
-              <label className="flex min-h-9 items-center gap-2 text-sm font-semibold text-zinc-700">
+              <label className={OM_CHECK_LABEL}>
                 <input
-                  className="size-4 rounded border-zinc-300 text-emerald-700 focus:ring-emerald-600"
+                  className={OM_CHECKBOX}
                   type="checkbox"
                   checked={applyCommit}
                   onChange={(event) => setApplyCommit(event.target.checked)}
@@ -5332,7 +5348,7 @@ function ReviewsPage(): React.ReactElement {
                 {session.status === "success" ? "paired" : session.status === "error" ? "blocked" : "pairing"}
               </Badge>
             </div>
-          </Surface>
+          </ConsolePanel>
 
           <ReviewResultPanel result={lastResult} pending={draftMutation.isPending || applyMutation.isPending} />
         </div>
@@ -5343,17 +5359,17 @@ function ReviewsPage(): React.ReactElement {
 
 function ProposalStatementTable({ proposal }: { proposal: ChangeProposalView }): React.ReactElement {
   return (
-    <div className="mt-4 overflow-hidden rounded-md border border-zinc-200">
+    <div className="mt-4 overflow-hidden rounded-md border border-[var(--om-border)]">
       <table className="w-full border-collapse text-sm">
-        <thead className="bg-zinc-50 text-left text-xs uppercase text-zinc-500">
+        <thead className="bg-[var(--om-surface-muted)] text-left text-2xs uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
           <tr>
-            <th className="px-3 py-2 font-bold">Unit</th>
-            <th className="px-3 py-2 font-bold">Template</th>
-            <th className="px-3 py-2 font-bold">Level</th>
-            <th className="px-3 py-2 font-bold">Binds</th>
+            <th className="px-3 py-2 font-semibold">Unit</th>
+            <th className="px-3 py-2 font-semibold">Template</th>
+            <th className="px-3 py-2 font-semibold">Level</th>
+            <th className="px-3 py-2 font-semibold">Binds</th>
           </tr>
         </thead>
-        <tbody className="divide-y divide-zinc-200">
+        <tbody className="divide-y divide-[var(--om-border)]">
           {proposal.statements.map((statement) => (
             <tr key={statement.id}>
               <td className="px-3 py-2">
@@ -5361,13 +5377,13 @@ function ProposalStatementTable({ proposal }: { proposal: ChangeProposalView }):
                   {statement.unit}
                 </Badge>
               </td>
-              <td className="max-w-[360px] truncate px-3 py-2 font-mono text-xs text-zinc-900">
+              <td className="max-w-[360px] truncate px-3 py-2 font-mono text-xs text-[var(--om-text-bright)]">
                 {statement.sql_template}
               </td>
-              <td className="px-3 py-2 font-semibold text-zinc-700">
+              <td className="px-3 py-2 font-semibold text-[var(--om-text)]">
                 {statement.draft_verdict.required_level ?? "none"}
               </td>
-              <td className="px-3 py-2 font-semibold text-zinc-700">
+              <td className="px-3 py-2 font-semibold text-[var(--om-text)]">
                 {formatNumber(statement.bind_count)}
               </td>
             </tr>
@@ -5390,14 +5406,14 @@ function SourceHistoryPanel({
   onDraftRevert: (snapshot: SourceSnapshotView) => void;
 }): React.ReactElement {
   return (
-    <Surface className="overflow-hidden">
-      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+    <ConsolePanel>
+      <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
         <div className="min-w-0">
-          <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
+          <h3 className="flex items-center gap-2 text-base font-semibold text-[var(--om-text-bright)]">
             <FileClock className="size-4" aria-hidden="true" />
             Source History
           </h3>
-          <p className="mt-1 truncate text-sm text-zinc-500">
+          <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">
             {pending ? "sync" : `${formatNumber(snapshots.length)} snapshots`}
           </p>
         </div>
@@ -5407,19 +5423,21 @@ function SourceHistoryPanel({
       </div>
       <div className="max-h-[320px] overflow-auto">
         {snapshots.length === 0 ? (
-          <div className="px-4 py-6 text-sm font-semibold text-zinc-500">No source snapshots</div>
+          <div className="px-4 py-6 text-sm font-semibold text-[var(--om-text-muted)]">
+            No source snapshots
+          </div>
         ) : (
           snapshots.map((snapshot) => (
             <div
               key={`${snapshot.id}-${snapshot.statement_id}`}
-              className="grid gap-3 border-b border-zinc-200 px-4 py-3"
+              className="grid gap-3 border-b border-[var(--om-border)] px-4 py-3"
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-bold text-zinc-950">
+                  <p className="truncate text-sm font-semibold text-[var(--om-text-bright)]">
                     {snapshot.owner}.{snapshot.name}
                   </p>
-                  <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold text-zinc-500">
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold text-[var(--om-text-muted)]">
                     <span>{snapshot.object_type}</span>
                     <span>{snapshot.profile}</span>
                     <span>{formatNumber(snapshot.source_lines)} lines</span>
@@ -5436,12 +5454,14 @@ function SourceHistoryPanel({
                   Revert
                 </Button>
               </div>
-              <p className="truncate font-mono text-xs text-zinc-500">{snapshot.source_sha256}</p>
+              <p className="truncate font-mono text-xs text-[var(--om-text-muted)]">
+                {snapshot.source_sha256}
+              </p>
             </div>
           ))
         )}
       </div>
-    </Surface>
+    </ConsolePanel>
   );
 }
 
@@ -5510,14 +5530,14 @@ function SchemaDiffPanel({
   const canDraft = Boolean(session && preview && preview.proposal_statements.length > 0) && !busy;
 
   return (
-    <Surface className="overflow-hidden">
-      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+    <ConsolePanel>
+      <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
         <div className="min-w-0">
-          <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
+          <h3 className="flex items-center gap-2 text-base font-semibold text-[var(--om-text-bright)]">
             <SquarePen className="size-4" aria-hidden="true" />
             Schema Diff
           </h3>
-          <p className="mt-1 truncate text-sm text-zinc-500">
+          <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">
             {preview ? `${formatNumber(preview.summary.migration_steps)} steps` : "snapshot compare"}
           </p>
         </div>
@@ -5527,18 +5547,18 @@ function SchemaDiffPanel({
       </div>
       <div className="grid gap-3 p-4">
         <label className="block">
-          <span className="mb-2 block text-sm font-bold text-zinc-700">Title</span>
+          <span className={OM_LABEL}>Title</span>
           <input
-            className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+            className={OM_INPUT}
             value={title}
             onChange={(event) => setTitle(event.target.value)}
           />
         </label>
         <div className="grid gap-3 lg:grid-cols-2">
           <label className="block">
-            <span className="mb-2 block text-sm font-bold text-zinc-700">Before</span>
+            <span className={OM_LABEL}>Before</span>
             <textarea
-              className="min-h-[180px] w-full resize-y rounded-md border border-zinc-300 bg-zinc-950 p-3 font-mono text-xs leading-5 text-zinc-50 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+              className={cn(OM_TEXTAREA, "min-h-[180px] text-xs leading-5")}
               aria-label="schema diff before snapshot"
               spellCheck={false}
               value={beforeJson}
@@ -5546,9 +5566,9 @@ function SchemaDiffPanel({
             />
           </label>
           <label className="block">
-            <span className="mb-2 block text-sm font-bold text-zinc-700">After</span>
+            <span className={OM_LABEL}>After</span>
             <textarea
-              className="min-h-[180px] w-full resize-y rounded-md border border-zinc-300 bg-zinc-950 p-3 font-mono text-xs leading-5 text-zinc-50 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+              className={cn(OM_TEXTAREA, "min-h-[180px] text-xs leading-5")}
               aria-label="schema diff after snapshot"
               spellCheck={false}
               value={afterJson}
@@ -5586,7 +5606,7 @@ function SchemaDiffPanel({
         </div>
         {preview ? <SchemaDiffSummaryPanel preview={preview} /> : null}
       </div>
-    </Surface>
+    </ConsolePanel>
   );
 }
 
@@ -5594,22 +5614,20 @@ function SchemaDiffSummaryPanel({ preview }: { preview: SchemaDiffExportData }):
   return (
     <div className="grid gap-3">
       <div className="grid gap-2 sm:grid-cols-3">
-        <CapacityFact label="Added" value={preview.summary.added} />
-        <CapacityFact label="Changed" value={preview.summary.changed} />
-        <CapacityFact label="Dropped" value={preview.summary.dropped} />
+        <ConsoleFact label="Added" value={preview.summary.added} />
+        <ConsoleFact label="Changed" value={preview.summary.changed} />
+        <ConsoleFact label="Dropped" value={preview.summary.dropped} />
       </div>
       <div className="grid gap-3 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
         <SchemaDiffObjectList title="Objects" objects={schemaDiffObjects(preview)} />
         <SchemaDiffStepTable steps={preview.migration_steps} />
       </div>
-      <div className="grid gap-2 rounded-md border border-zinc-200 bg-zinc-50 p-3">
+      <div className="grid gap-2 rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] p-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="text-sm font-bold text-zinc-700">Migration Script</span>
+          <span className="text-sm font-semibold text-[var(--om-text)]">Migration Script</span>
           <Badge tone="info">{shortHash(preview.migration_script_sha256)}</Badge>
         </div>
-        <pre className="max-h-[240px] overflow-auto rounded-md bg-zinc-950 p-3 text-xs leading-5 text-zinc-50">
-          {preview.migration_script}
-        </pre>
+        <pre className={cn(OM_CODE, "max-h-[240px]")}>{preview.migration_script}</pre>
       </div>
     </div>
   );
@@ -5623,13 +5641,15 @@ function SchemaDiffObjectList({
   objects: SchemaDiffObjectView[];
 }): React.ReactElement {
   return (
-    <div className="overflow-hidden rounded-md border border-zinc-200">
-      <div className="border-b border-zinc-200 bg-zinc-50 px-3 py-2 text-sm font-bold text-zinc-700">
+    <div className="overflow-hidden rounded-md border border-[var(--om-border)]">
+      <div className="border-b border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 py-2 text-sm font-semibold text-[var(--om-text)]">
         {title}
       </div>
-      <div className="max-h-[260px] overflow-auto divide-y divide-zinc-100">
+      <div className="max-h-[260px] divide-y divide-[var(--om-border)] overflow-auto">
         {objects.length === 0 ? (
-          <div className="px-3 py-4 text-sm font-semibold text-zinc-500">No object changes</div>
+          <div className="px-3 py-4 text-sm font-semibold text-[var(--om-text-muted)]">
+            No object changes
+          </div>
         ) : (
           objects.map((object) => (
             <div key={`${object.kind}:${object.object_type}:${object.name}`} className="grid gap-1 px-3 py-2">
@@ -5637,11 +5657,11 @@ function SchemaDiffObjectList({
                 <Badge tone={object.kind === "dropped" ? "warn" : object.kind === "added" ? "ok" : "info"}>
                   {object.kind}
                 </Badge>
-                <span className="min-w-0 truncate font-mono text-sm font-semibold text-zinc-950">
+                <span className="min-w-0 truncate font-mono text-sm font-semibold text-[var(--om-text-bright)]">
                   {object.object_type} {object.name}
                 </span>
               </div>
-              <p className="truncate font-mono text-xs text-zinc-500">
+              <p className="truncate font-mono text-xs text-[var(--om-text-muted)]">
                 {shortHash(object.ddl_sha256)} · {formatNumber(object.ddl_chars)} chars
               </p>
             </div>
@@ -5654,28 +5674,30 @@ function SchemaDiffObjectList({
 
 function SchemaDiffStepTable({ steps }: { steps: SchemaDiffStepView[] }): React.ReactElement {
   return (
-    <div className="overflow-hidden rounded-md border border-zinc-200">
-      <div className="border-b border-zinc-200 bg-zinc-50 px-3 py-2 text-sm font-bold text-zinc-700">
+    <div className="overflow-hidden rounded-md border border-[var(--om-border)]">
+      <div className="border-b border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 py-2 text-sm font-semibold text-[var(--om-text)]">
         Migration Steps
       </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[560px] border-collapse text-left text-sm">
-          <thead className="bg-white text-xs uppercase text-zinc-500">
+          <thead className="bg-[var(--om-surface)] text-2xs uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
             <tr>
-              <th className="px-3 py-2 font-bold">#</th>
-              <th className="px-3 py-2 font-bold">Kind</th>
-              <th className="px-3 py-2 font-bold">Object</th>
-              <th className="px-3 py-2 font-bold">Gate</th>
+              <th className="px-3 py-2 font-semibold">#</th>
+              <th className="px-3 py-2 font-semibold">Kind</th>
+              <th className="px-3 py-2 font-semibold">Object</th>
+              <th className="px-3 py-2 font-semibold">Gate</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-zinc-100">
+          <tbody className="divide-y divide-[var(--om-border)]">
             {steps.map((step) => (
               <tr key={`${step.order}:${step.object_type}:${step.name}`}>
-                <td className="px-3 py-2 font-mono text-xs text-zinc-600">{step.order + 1}</td>
+                <td className="px-3 py-2 font-mono text-xs text-[var(--om-text-muted)]">
+                  {step.order + 1}
+                </td>
                 <td className="px-3 py-2">
                   <Badge tone={step.kind === "manual_review" ? "warn" : "info"}>{step.kind}</Badge>
                 </td>
-                <td className="px-3 py-2 font-mono text-xs font-semibold text-zinc-900">
+                <td className="px-3 py-2 font-mono text-xs font-semibold text-[var(--om-text-bright)]">
                   {step.object_type} {step.name}
                 </td>
                 <td className="px-3 py-2">
@@ -5700,14 +5722,14 @@ function ReviewResultPanel({
   pending: boolean;
 }): React.ReactElement {
   return (
-    <Surface className="overflow-hidden">
-      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+    <ConsolePanel>
+      <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
         <div className="min-w-0">
-          <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
+          <h3 className="flex items-center gap-2 text-base font-semibold text-[var(--om-text-bright)]">
             <Code2 className="size-4" aria-hidden="true" />
             Result
           </h3>
-          <p className="mt-1 truncate text-sm text-zinc-500">
+          <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">
             {pending ? "request in flight" : result ? result.label : "idle"}
           </p>
         </div>
@@ -5717,16 +5739,16 @@ function ReviewResultPanel({
       </div>
       <div className="p-4">
         {result?.state === "error" ? (
-          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+          <div className="rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_12%,transparent)] p-3 text-sm font-semibold text-[var(--om-copper)]">
             {result.message}
           </div>
         ) : (
-          <pre className="max-h-[560px] overflow-auto rounded-md bg-zinc-950 p-3 text-xs leading-5 text-zinc-50">
+          <pre className={cn(OM_CODE, "max-h-[560px]")}>
             {result?.state === "ok" ? prettyJson(result.response) : "{}"}
           </pre>
         )}
       </div>
-    </Surface>
+    </ConsolePanel>
   );
 }
 
