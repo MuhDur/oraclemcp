@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.8.0] — 2026-07-07
 
-- Adopted oracledb 0.7.4 (independent driver release train; server and driver now version separately).
+- Adopted oracledb 0.8.0 (independent driver release train; server and driver now version separately).
 - Breaking: ErrorEnvelope and GuardDecision gained structured-reason fields (structured_reason / reason_category / offending_construct) — additive diagnostics that require a minor bump under 0.x SemVer.
 
 ## [0.7.2] — 2026-07-06

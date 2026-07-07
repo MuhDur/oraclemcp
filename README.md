@@ -215,7 +215,7 @@ channels once they resolve.
 This branch is pinned to **`nightly-2026-05-11`**. The thin-native line has no
 stable MSRV because **asupersync 0.3.4** uses nightly-only language features
 (`#![feature(try_trait_v2)]` and `try_trait_v2_residual`); the pinned `oracledb`
-0.7.4 driver itself is stable-clean. The repository's `rust-toolchain.toml`
+0.8.0 driver itself is stable-clean. The repository's `rust-toolchain.toml`
 selects the pin for local builds. Use the release installer above when you want
 the prebuilt binary; use `cargo install` only when you intentionally want a
 source build.
@@ -713,7 +713,7 @@ binary does not silently fall back to thick mode.
 
 The OCI cloud fields `use_iam_token` (bool) and `iam_config_profile`
 (`Option<String>`) under `[profiles.oci]` **parse** through strict config
-validation, but the pinned `oracledb` 0.7.4 thin adapter **fails closed** on an
+validation, but the pinned `oracledb` 0.8.0 thin adapter **fails closed** on an
 IAM-token connect today: `oraclemcp` wires no production OCI token source, so
 `use_iam_token = true` returns a structured unsupported-auth diagnostic
 (pointing at the as-yet-unwired IAM token-source seam) rather than connecting,
@@ -854,7 +854,7 @@ blocks; it does not print the HMAC key.
 `oraclemcp` builds on a single **pinned Rust nightly** (`nightly-2026-05-11`,
 recorded in `rust-toolchain.toml`). The pin exists because **asupersync 0.3.4**
 uses nightly-only language features (`try_trait_v2` + `try_trait_v2_residual`) —
-the `oracledb` 0.7.4 driver is stable-clean. The pin is **build-time only**: the
+the `oracledb` 0.8.0 driver is stable-clean. The pin is **build-time only**: the
 shipped binary has no runtime dependency on nightly. See
 [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) for the full rationale and the
 re-pin runbook.
