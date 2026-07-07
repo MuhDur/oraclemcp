@@ -207,12 +207,21 @@ ssl_server_cert_dn = "CN=dbhost.example.com"
 # Override TCPS SNI behavior (use_sni). Default: none (driver default).
 use_sni = true
 # Authenticate with an OCI IAM database token instead of a password. Default: false.
-# NOTE: this PARSES but the 0.5.1 thin adapter FAILS CLOSED on an IAM-token connect
-# today (structured unsupported-auth diagnostic; refused over non-TCPS). See
-# docs/configuration.md and the README OCI section. Deferred bead k6q.9.
+# When true, the server resolves a pre-fetched database token (a JWT) at connect
+# time from ONE of the SIMPLE sources below and injects it over TCPS (a token on a
+# non-TCPS transport is refused). The token is a reference — the server reads the
+# env var / file each connect and never persists, renders, or logs the value.
 # use_iam_token = false
-# `~/.oci/config` profile name for the IAM token. Default: none. (Parses; inert today.)
+# `~/.oci/config` profile name for the IAM token. Default: none. (Parses; inert today —
+# reserved for a future OCI-SDK token source.)
 # iam_config_profile = "DEFAULT"
+# Name of an environment variable holding the pre-fetched IAM token. When unset,
+# the built-in ORACLEMCP_IAM_TOKEN variable is read. Default: none.
+# token_env = "MY_IAM_TOKEN"
+# Path to a file holding the pre-fetched IAM token, re-read on every connect so a
+# rotated token is picked up without a restart (takes precedence over token_env).
+# Default: none.
+# token_file = "/etc/oracle/iam-token.jwt"
 
 # [profiles.drcp] — Database Resident Connection Pooling server routing. Optional.
 # Separate from [profiles.pool] (which is local client-side reuse).

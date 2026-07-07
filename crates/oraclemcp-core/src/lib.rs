@@ -33,6 +33,7 @@ pub mod export;
 pub mod fence;
 pub mod file_store;
 pub mod http;
+pub mod iam_token;
 pub mod init_token;
 pub mod lane;
 pub mod notifications;
@@ -140,6 +141,10 @@ pub use http::{
     PROTECTED_RESOURCE_METADATA_PATH, READYZ_PATH, ReadinessProbe, ScopeGrant,
     close_http_principal_sessions, handle_http_request, serve_http, serve_http_until, serve_https,
     serve_https_until,
+};
+pub use iam_token::{
+    IAM_TOKEN_ENV, IamTokenError, ServerIamTokenSource, inject_iam_token, jwt_exp_unix,
+    profile_transport_is_tcps,
 };
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
 pub use lane::{

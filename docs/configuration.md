@@ -178,8 +178,10 @@ field is unset after inheritance.
 | `ssl_server_dn_match` | bool | none (driver default) | Override server-certificate DN matching. |
 | `ssl_server_cert_dn` | string | none | Exact expected server-certificate DN. |
 | `use_sni` | bool | none (driver default) | Override TCPS SNI behavior. |
-| `use_iam_token` | bool | `false` | Authenticate with an OCI IAM database token. **Parses but fails closed today** — see [Auth modes](#auth-modes). |
-| `iam_config_profile` | string | none | `~/.oci/config` profile name for the IAM token. Parses; inert today. |
+| `use_iam_token` | bool | `false` | Authenticate with an OCI IAM database token. When set, a pre-fetched token (a JWT) is resolved at connect time from `token_env`/`token_file` (or the built-in `ORACLEMCP_IAM_TOKEN`) and injected over TCPS — see [Auth modes](#auth-modes). |
+| `iam_config_profile` | string | none | `~/.oci/config` profile name for the IAM token. Parses; inert today (reserved for a future OCI-SDK token source). |
+| `token_env` | string | none | Name of an environment variable holding the pre-fetched IAM token (a *reference*, not the token). When unset, the built-in `ORACLEMCP_IAM_TOKEN` is read. Resolved fresh on every connect; never persisted or logged. |
+| `token_file` | string | none | Path to a file holding the pre-fetched IAM token, **re-read on every connect** so a rotated token is picked up without a restart. Takes precedence over `token_env`. A *reference* (path), never the token value. |
 
 #### `[profiles.drcp]`
 
@@ -334,30 +336,40 @@ hatch only and is rejected when `protected = true`. Supported forms:
 |---|---|---|
 | **Password** | `username` + `credential_ref` (for example `env:`, `file:`, `keyring:`; `literal:` dev-only). | Supported. |
 | **Wallet / TCPS (TLS/mTLS)** | `[profiles.oci]` `wallet_location`, `ssl_server_dn_match`, `ssl_server_cert_dn`, `use_sni`; or a `tcps://…` / TLS-descriptor `connect_string`. The default build loads `ewallet.pem`; `cwallet.sso` and standalone `ewallet.p12` are recognized and reported with structured wallet diagnostics instead of a silent fallback. | `ewallet.pem` supported; other recognized wallet formats are diagnostic-only in the default build. |
-| **OCI IAM database token** | `[profiles.oci]` `use_iam_token = true` (+ optional `iam_config_profile`). | **Parses, fails closed today** — see below. |
+| **OCI IAM database token** | `[profiles.oci]` `use_iam_token = true` + a token source (`token_env` / `token_file`, or the built-in `ORACLEMCP_IAM_TOKEN`). | Simple env/file token sources supported over TCPS (beta); an autonomous OCI-SDK token source is not yet wired — see below. |
 | **Proxy** | `[profiles.proxy_auth]` `proxy_user` + `target_schema`; `credential_ref` belongs to `proxy_user`. Needs `ALTER USER <target_schema> GRANT CONNECT THROUGH <proxy_user>`. | Supported. |
 | **DRCP routing** | `[profiles.drcp]` `pooled` / `connection_class` / `purity`. | Supported (server routing; orthogonal to auth). |
 | **External/wallet-only (no user/pass), Kerberos, RADIUS** | — | Unsupported; reported with a structured unsupported-auth diagnostic (never a silent fallback). |
 
 ### OCI IAM database-token status
 
-The fields `use_iam_token` (bool) and `iam_config_profile` (`Option<String>`)
-under `[profiles.oci]` **parse** through strict config validation, but the pinned
-`oracledb` 0.7.2 thin adapter **fails closed on an IAM-token connect today**:
+With `use_iam_token = true` under `[profiles.oci]`, the server resolves a
+**pre-fetched** database token (a JWT) at connect time from ONE of two SIMPLE
+sources and injects it via the driver's `ConnectOptions::with_access_token`
+(sent as `AUTH_TOKEN`, TCPS-enforced):
 
-- The driver exposes the lower-level primitive
-  (`ConnectOptions::with_access_token`, sent as `AUTH_TOKEN`), but `oraclemcp`
-  wires **no production OCI token source**. A `use_iam_token = true` profile
-  therefore returns a structured **unsupported-auth diagnostic** pointing at the
-  as-yet-unwired IAM token-source seam, rather than connecting.
-- Any database access token is **refused over a non-TCPS transport** before it
-  can reach the driver — a token must never travel in clear text (defense in
-  depth; the driver also rejects it).
+- **`token_file`** — a file holding the token; **re-read on every connect** so a
+  rotated token is picked up without a restart (takes precedence).
+- **`token_env`** — an environment variable holding the token; when unset, the
+  built-in **`ORACLEMCP_IAM_TOKEN`** variable is read.
 
-This parse-but-fail-closed behavior is covered by the
-`iam_token_over_non_tcps_is_refused_fail_closed` test in
-`crates/oraclemcp-db/src/connection.rs`. End-to-end IAM-token support
-(production OCI SDK token source + refresh) is **deferred (bead k6q.9)**.
+The token is a **reference**: only the env-var name / file path lives in config,
+and the token value is resolved transiently, never persisted, rendered, or
+logged. An empty or missing token is a typed, fail-closed error. Any token is
+**refused over a non-TCPS transport** before it reaches the driver — a token must
+never travel in clear text (defense in depth; the driver also rejects it). The
+`doctor` `IAM token` check reads the JWT `exp` claim (diagnostic only, no
+signature validation) and **warns when the token is expired or within 5 minutes
+of expiry** — never printing the token.
+
+`iam_config_profile` still only **parses** (inert), reserved for a future
+autonomous OCI-SDK token source that mints/refreshes tokens from an instance
+principal or `~/.oci/config` (the richer `IamTokenSource` / `ensure_fresh_token`
+refresh seam). Non-TCPS refusal is covered by
+`iam_token_over_non_tcps_is_refused_fail_closed` in
+`crates/oraclemcp-db/src/connection.rs`, and env/file resolution + rotation +
+non-leak by the `oraclemcp-core` `iam_token` tests. Full autonomous
+token-minting over a live cloud lane remains a real-cloud (C5) smoke item.
 
 ---
 

@@ -99,6 +99,16 @@ pub struct OciConfig {
     pub use_iam_token: bool,
     /// The `~/.oci/config` profile name to use for the IAM token.
     pub iam_config_profile: Option<String>,
+    /// Name of an environment variable holding a pre-fetched IAM database token
+    /// (a JWT). This is a *reference* — the NAME of the variable, never the token
+    /// itself. When unset, the built-in `ORACLEMCP_IAM_TOKEN` variable is read.
+    /// The value is resolved at connect time and is never persisted or logged.
+    pub token_env: Option<String>,
+    /// Path to a file holding a pre-fetched IAM database token (a JWT). This is a
+    /// *reference* — the PATH, never the token itself. The file is re-read on
+    /// every connect so a rotated token is picked up without a restart. The value
+    /// is never persisted or logged.
+    pub token_file: Option<String>,
 }
 
 impl std::fmt::Debug for OciConfig {
@@ -107,6 +117,11 @@ impl std::fmt::Debug for OciConfig {
         let wallet_password_ref = self.wallet_password_ref.as_ref().map(|_| "<redacted>");
         let ssl_server_cert_dn = self.ssl_server_cert_dn.as_ref().map(|_| "<redacted>");
         let iam_config_profile = self.iam_config_profile.as_ref().map(|_| "<redacted>");
+        // token_env / token_file are *references* (a var name / a path), not the
+        // token value — but they are rendered presence-only, matching the other
+        // OCI reference fields, so a misconfigured ref can never widen a surface.
+        let token_env = self.token_env.as_ref().map(|_| "<redacted>");
+        let token_file = self.token_file.as_ref().map(|_| "<redacted>");
         f.debug_struct("OciConfig")
             .field("wallet_location", &wallet_location)
             .field("wallet_password_ref", &wallet_password_ref)
@@ -115,6 +130,8 @@ impl std::fmt::Debug for OciConfig {
             .field("use_sni", &self.use_sni)
             .field("use_iam_token", &self.use_iam_token)
             .field("iam_config_profile", &iam_config_profile)
+            .field("token_env", &token_env)
+            .field("token_file", &token_file)
             .finish()
     }
 }
@@ -1388,6 +1405,8 @@ mod tests {
             use_sni: Some(true),
             use_iam_token: false,
             iam_config_profile: None,
+            token_env: None,
+            token_file: None,
         });
         prof.proxy_auth = Some(ProxyAuthConfig {
             proxy_user: Some("MCP_PROXY".to_owned()),
@@ -1483,6 +1502,8 @@ mod tests {
             use_sni: Some(true),
             use_iam_token: false,
             iam_config_profile: Some("private-oci-profile".to_owned()),
+            token_env: Some("PRIVATE_TOKEN_ENV_VAR".to_owned()),
+            token_file: Some("/private/token/path".to_owned()),
         });
         prof.proxy_auth = Some(ProxyAuthConfig {
             proxy_user: Some("private-proxy-user".to_owned()),
@@ -1523,6 +1544,8 @@ mod tests {
             "WALLET_PASSWORD",
             "CN=private-db",
             "private-oci-profile",
+            "PRIVATE_TOKEN_ENV_VAR",
+            "/private/token/path",
             "private-proxy-user",
             "private-target-schema",
             "private-drcp-class",
@@ -1594,6 +1617,8 @@ mod tests {
             use_sni: Some(false),
             use_iam_token: false,
             iam_config_profile: None,
+            token_env: None,
+            token_file: None,
         });
         let mut child = p("dev");
         child.base = Some("shared".to_owned());
@@ -1611,6 +1636,45 @@ mod tests {
         assert_eq!(oci.ssl_server_dn_match, Some(false));
         assert_eq!(oci.ssl_server_cert_dn.as_deref(), Some("CN=shared-db"));
         assert_eq!(oci.use_sni, Some(false));
+    }
+
+    #[test]
+    fn oci_iam_token_refs_parse_and_debug_redacts_them() {
+        // B2.2a: token_env / token_file are references (a var name / a path). They
+        // parse into OciConfig and inherit like the other OCI fields, but Debug
+        // renders them presence-only so a misconfigured ref never widens a surface
+        // (and the token VALUE, which lives elsewhere entirely, cannot leak here).
+        let cfg = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "cloud"
+            connect_string = "tcps://adb.example/svc"
+            username = "app"
+
+            [profiles.oci]
+            use_iam_token = true
+            token_env = "MY_IAM_TOKEN_VAR"
+            token_file = "/etc/oracle/iam-token.jwt"
+            "#,
+        )
+        .expect("config parses");
+        let oci = cfg.profiles[0].oci.as_ref().expect("oci");
+        assert!(oci.use_iam_token);
+        assert_eq!(oci.token_env.as_deref(), Some("MY_IAM_TOKEN_VAR"));
+        assert_eq!(oci.token_file.as_deref(), Some("/etc/oracle/iam-token.jwt"));
+
+        let rendered = format!("{oci:?}");
+        assert!(
+            !rendered.contains("MY_IAM_TOKEN_VAR"),
+            "token_env ref leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("/etc/oracle/iam-token.jwt"),
+            "token_file ref leaked: {rendered}"
+        );
+        assert!(rendered.contains("token_env"));
+        assert!(rendered.contains("token_file"));
+        assert!(rendered.contains("<redacted>"));
     }
 
     #[test]

@@ -769,7 +769,14 @@ fn resolve_profile_options_with(
         secret_resolver,
     )?;
 
-    let ctx = oraclemcp_core::build_session_context(chosen, password, wallet_password, false)?;
+    let mut ctx = oraclemcp_core::build_session_context(chosen, password, wallet_password, false)?;
+    // B2.2a: resolve the server-side OCI IAM database token (env/file source) at
+    // connect time and inject it into `options.iam_token`, so the B2 adapter
+    // wires it through `with_access_token` (TCPS-enforced). A no-op unless the
+    // profile enables `use_iam_token`; fail-closed on a non-TCPS transport or an
+    // empty/missing token. The token is never persisted, rendered, or logged.
+    oraclemcp_core::inject_iam_token(chosen, &mut ctx.options)
+        .map_err(|e| DbError::UnsupportedAuth(e.to_string()))?;
     let doctor_caps = doctor_profile_caps(chosen, &ctx.level_state);
     Ok(Some(ResolvedProfile {
         name: chosen.name.clone(),
@@ -4526,6 +4533,10 @@ struct DoctorProfileContext {
     auth_capabilities: Option<DoctorAuthCapabilities>,
     sensitive_values: Vec<String>,
     credential_env_hint: Option<String>,
+    /// Resolved OCI IAM database token (transient; used only for the doctor
+    /// near-expiry diagnostic and never rendered). `None` unless the profile uses
+    /// IAM-token auth and a token was resolved from its env/file source.
+    iam_token: Option<String>,
 }
 
 impl DoctorProfileContext {
@@ -4544,6 +4555,7 @@ impl DoctorProfileContext {
             auth_capabilities: None,
             sensitive_values: Vec::new(),
             credential_env_hint: None,
+            iam_token: None,
         }
     }
 }
@@ -4670,6 +4682,9 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
         auth_capabilities: Some(doctor_auth_capabilities_for_profile(chosen)),
         sensitive_values: Vec::new(),
         credential_env_hint: doctor_credential_env_hint(chosen),
+        // Offline metadata inspection never resolves a token (offline-no-secrets
+        // invariant); the IAM near-expiry check runs on the --online path.
+        iam_token: None,
     }
 }
 
@@ -4739,6 +4754,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
             auth_capabilities: None,
             sensitive_values: Vec::new(),
             credential_env_hint: None,
+            iam_token: None,
         },
         Err(e) => DoctorProfileContext {
             conn: None,
@@ -4754,6 +4770,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
             auth_capabilities: None,
             sensitive_values: Vec::new(),
             credential_env_hint: None,
+            iam_token: None,
         },
     }
 }
@@ -4786,6 +4803,9 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
     );
     let profile_caps = Some(resolved.doctor_caps.clone());
     let auth_capabilities = Some(DoctorAuthCapabilities::from_connect_options(&resolved.opts));
+    // Capture the resolved IAM token BEFORE `resolved` is moved into the connect
+    // attempt, so the near-expiry diagnostic works even when the connect fails.
+    let iam_token = resolved.opts.iam_token.clone();
     match block_on_connect(|cx| async move { try_open_runtime_connections(&cx, resolved).await }) {
         Ok(connections) => DoctorProfileContext {
             conn: Some(connections.session),
@@ -4803,6 +4823,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
             // Online: a live connection is attempted; the offline credential
             // hint does not apply.
             credential_env_hint: None,
+            iam_token,
         },
         Err(e) => DoctorProfileContext {
             conn: None,
@@ -4818,6 +4839,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
             auth_capabilities,
             sensitive_values,
             credential_env_hint: None,
+            iam_token,
         },
     }
 }
@@ -4848,6 +4870,9 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
         // `KeyDecrypt` distinction is available to callers that already hold a
         // resolved password (the probe accepts one).
         wallet_password: None,
+        // Transient: only the JWT `exp` is read for the near-expiry diagnostic;
+        // the token value is never rendered or serialized.
+        iam_token: profile_ctx.iam_token,
         protected_profile_writable: profile_ctx.protected_profile_writable,
         connection_strategy: profile_ctx.connection_strategy,
         call_timeout_resolved: profile_ctx.call_timeout_resolved,

@@ -460,6 +460,12 @@ pub struct DoctorContext<'a> {
     /// `Serialize`, and the probe returns only typed error classes — never the
     /// password, the wallet path, or key material.
     pub wallet_password: Option<String>,
+    /// The resolved OCI IAM database token (a JWT), if one is configured for this
+    /// profile. Used ONLY transiently by the IAM-token near-expiry check to read
+    /// the JWT `exp` claim (a diagnostic, no signature validation); it is never
+    /// rendered, serialized, or included in any doctor output. `DoctorContext` is
+    /// not `Serialize`, and the check reports only the seconds-to-expiry.
+    pub iam_token: Option<String>,
     /// True if a `protected` profile has `max_level` above `READ_ONLY` — a
     /// misconfiguration the privilege check warns about (offline-detectable).
     pub protected_profile_writable: bool,
@@ -995,6 +1001,7 @@ pub async fn run_doctor(cx: &Cx, ctx: &DoctorContext<'_>) -> DoctorReport {
         check_write_posture(cx, ctx).await,
         check_call_timeout(ctx),
         check_state_layout(ctx),
+        check_iam_token(ctx),
     ];
     DoctorReport {
         checks,
@@ -2198,6 +2205,94 @@ fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
     }
 }
 
+/// IAM database-token near-expiry check (B2.2a). Reads the JWT `exp` claim from
+/// the resolved token WITHOUT validating the signature (diagnostic only) and
+/// warns when the token is already expired or expires within
+/// [`crate::iam_token::IAM_TOKEN_EXPIRY_WARN_SECS`]. The token value is never rendered — only the
+/// seconds-to-expiry — and the check skips cleanly when no IAM token is
+/// configured (the common case).
+fn check_iam_token(ctx: &DoctorContext<'_>) -> CheckResult {
+    iam_token_expiry_check(ctx.iam_token.as_deref(), now_unix_seconds())
+}
+
+/// Pure core of [`check_iam_token`]: classify an IAM token against `now_unix`.
+/// Separated so the near-expiry logic is deterministic and unit-testable with a
+/// synthetic JWT and a fixed clock.
+fn iam_token_expiry_check(token: Option<&str>, now_unix: i64) -> CheckResult {
+    const ID: u8 = 14;
+    const NAME: &str = "IAM token";
+
+    let Some(token) = token else {
+        return CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Skip,
+            "no OCI IAM database token is configured for this profile",
+        );
+    };
+    let Some(exp) = crate::iam_token::jwt_exp_unix(token) else {
+        // A diagnostic-only parse could not read a numeric `exp` claim. Warn so
+        // the operator knows expiry cannot be checked ahead of a connect; the
+        // driver still validates the token at connect time.
+        return CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Warn,
+            "an OCI IAM database token is configured but its JWT `exp` claim could not be read \
+             (diagnostic only; the driver still validates the token at connect)",
+        )
+        .with_fix(
+            "verify the configured token is a well-formed JWT; the server still injects it over \
+             TCPS at connect",
+        );
+    };
+    let remaining = exp - now_unix;
+    if remaining <= 0 {
+        CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Warn,
+            format!(
+                "the configured OCI IAM database token has expired ({}s ago); the next connect \
+                 will be rejected",
+                -remaining
+            ),
+        )
+        .with_fix(
+            "refresh the token (rotate ORACLEMCP_IAM_TOKEN / the token_env variable, or overwrite \
+             token_file); it is re-read on every connect",
+        )
+    } else if remaining < crate::iam_token::IAM_TOKEN_EXPIRY_WARN_SECS {
+        CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Warn,
+            format!(
+                "the configured OCI IAM database token expires in {remaining}s (under 5 minutes)"
+            ),
+        )
+        .with_fix(
+            "refresh the token soon; it is re-read on every connect, so a rotated env var / file \
+             is picked up without a restart",
+        )
+    } else {
+        CheckResult::new(
+            ID,
+            NAME,
+            CheckStatus::Pass,
+            format!("the configured OCI IAM database token is valid for another {remaining}s"),
+        )
+    }
+}
+
+/// Wall-clock Unix seconds for the IAM token near-expiry diagnostic.
+fn now_unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
 fn check_call_timeout(ctx: &DoctorContext<'_>) -> CheckResult {
     const ID: u8 = 12;
     const NAME: &str = "Call timeout";
@@ -2381,11 +2476,14 @@ mod tests {
     }
 
     #[test]
-    fn report_has_thirteen_checks_and_classifier_self_test_passes() {
+    fn report_has_fourteen_checks_and_classifier_self_test_passes() {
         let report = doctor(&DoctorContext::default());
-        assert_eq!(report.checks.len(), 13);
+        assert_eq!(report.checks.len(), 14);
         let selftest = report.checks.iter().find(|c| c.id == 8).unwrap();
         assert_eq!(selftest.status, CheckStatus::Pass, "{}", selftest.detail);
+        // The IAM-token near-expiry check (14) skips cleanly when no token is set.
+        let iam = report.checks.iter().find(|c| c.id == 14).unwrap();
+        assert_eq!(iam.status, CheckStatus::Skip, "{}", iam.detail);
     }
 
     /// Field-test regression: checks print in numeric id order (13 used to
@@ -2660,6 +2758,143 @@ mod tests {
         assert!(connectivity.detail.contains(crate::redacted::REDACTED));
     }
 
+    /// A synthetic, unsigned JWT-shaped token `header.payload.` whose payload is a
+    /// base64url `{"exp":<exp>}`. NOT a real token; the CN/claims are synthetic
+    /// and there is no signature.
+    fn synthetic_jwt_with_exp(exp: i64) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        fn b64url(bytes: &[u8]) -> String {
+            let mut out = String::new();
+            let (mut buffer, mut bits) = (0u32, 0u32);
+            for &b in bytes {
+                buffer = (buffer << 8) | u32::from(b);
+                bits += 8;
+                while bits >= 6 {
+                    bits -= 6;
+                    out.push(ALPHABET[((buffer >> bits) & 0x3F) as usize] as char);
+                }
+            }
+            if bits > 0 {
+                out.push(ALPHABET[((buffer << (6 - bits)) & 0x3F) as usize] as char);
+            }
+            out
+        }
+        format!(
+            "{}.{}.",
+            b64url(br#"{"alg":"none"}"#),
+            b64url(format!(r#"{{"exp":{exp},"sub":"synthetic-subject"}}"#).as_bytes())
+        )
+    }
+
+    #[test]
+    fn iam_token_check_skips_when_no_token_configured() {
+        let ctx = DoctorContext::default();
+        let report = doctor(&ctx);
+        let iam = report
+            .checks
+            .iter()
+            .find(|c| c.id == 14)
+            .expect("iam check");
+        assert_eq!(iam.status, CheckStatus::Skip);
+    }
+
+    #[test]
+    fn iam_token_check_passes_when_far_from_expiry() {
+        // exp comfortably beyond the 5-minute warning window.
+        let token = synthetic_jwt_with_exp(now_unix_seconds() + 3_600);
+        let ctx = DoctorContext {
+            iam_token: Some(token),
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let iam = report
+            .checks
+            .iter()
+            .find(|c| c.id == 14)
+            .expect("iam check");
+        assert_eq!(iam.status, CheckStatus::Pass, "{}", iam.detail);
+    }
+
+    #[test]
+    fn iam_token_check_warns_when_within_five_minutes() {
+        // Directly exercise the pure check with a fixed clock: exp is 60s away.
+        let now = 1_000_000_000;
+        let token = synthetic_jwt_with_exp(now + 60);
+        let result = iam_token_expiry_check(Some(&token), now);
+        assert_eq!(result.status, CheckStatus::Warn, "{}", result.detail);
+        assert!(result.detail.contains("60s"));
+        assert!(result.detail.contains("under 5 minutes"));
+        assert!(result.fix.is_some());
+    }
+
+    #[test]
+    fn iam_token_check_warns_when_already_expired() {
+        let now = 1_000_000_000;
+        let token = synthetic_jwt_with_exp(now - 120);
+        let result = iam_token_expiry_check(Some(&token), now);
+        assert_eq!(result.status, CheckStatus::Warn, "{}", result.detail);
+        assert!(result.detail.contains("expired"));
+    }
+
+    #[test]
+    fn iam_token_check_warns_when_exp_unreadable() {
+        let result = iam_token_expiry_check(Some("not-a-jwt-without-exp"), 1_000_000_000);
+        assert_eq!(result.status, CheckStatus::Warn, "{}", result.detail);
+        assert!(result.detail.contains("could not be read"));
+    }
+
+    #[test]
+    fn iam_token_check_never_renders_the_token() {
+        // Adversarial non-leak: a sentinel embedded in the JWT header must not
+        // reach any rendered doctor surface (detail, fix, or serialized report).
+        const SENTINEL: &str = "SECRET_JWT_SENTINEL";
+        // Put the sentinel in the header segment so the token is a distinct,
+        // greppable string while its payload still carries a readable exp.
+        let payload = {
+            const ALPHABET: &[u8; 64] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            let bytes = format!(r#"{{"exp":{}}}"#, now_unix_seconds() + 30).into_bytes();
+            let mut out = String::new();
+            let (mut buffer, mut bits) = (0u32, 0u32);
+            for b in bytes {
+                buffer = (buffer << 8) | u32::from(b);
+                bits += 8;
+                while bits >= 6 {
+                    bits -= 6;
+                    out.push(ALPHABET[((buffer >> bits) & 0x3F) as usize] as char);
+                }
+            }
+            if bits > 0 {
+                out.push(ALPHABET[((buffer << (6 - bits)) & 0x3F) as usize] as char);
+            }
+            out
+        };
+        let token = format!("{SENTINEL}.{payload}.sig");
+        let ctx = DoctorContext {
+            iam_token: Some(token.clone()),
+            sensitive_values: vec![token],
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let iam = report
+            .checks
+            .iter()
+            .find(|c| c.id == 14)
+            .expect("iam check");
+        assert_eq!(iam.status, CheckStatus::Warn, "{}", iam.detail);
+        assert!(
+            !iam.detail.contains(SENTINEL),
+            "detail leaked: {}",
+            iam.detail
+        );
+        let serialized = serde_json::to_string(&report.to_json()).expect("json");
+        assert!(
+            !serialized.contains(SENTINEL),
+            "report leaked: {serialized}"
+        );
+    }
+
     #[test]
     fn wallet_error_classifier_covers_driver_wallet_variants() {
         let cases = [
@@ -2765,7 +3000,7 @@ mod tests {
         assert!(text.contains("oraclemcp doctor"));
         assert!(text.contains("Classifier self-test"));
         let j = report.to_json();
-        assert_eq!(j["checks"].as_array().unwrap().len(), 13);
+        assert_eq!(j["checks"].as_array().unwrap().len(), 14);
         assert_eq!(j["exit_code"], json!(0));
     }
 
