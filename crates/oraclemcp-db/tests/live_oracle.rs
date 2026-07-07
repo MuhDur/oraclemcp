@@ -29,7 +29,8 @@ use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
     AuthAdapter, CatalogExtractRequest, CatalogRowSetName, DbError, DrcpConfig, OracleBind,
     OracleConnectOptions, OracleConnection, OracleSessionIdentity, QueryCaps, RustOracleConnection,
-    SearchDetailLevel, SessionPurity, extract_catalog_rowsets, search_objects,
+    SearchDetailLevel, SessionPurity, explain_plan, extract_catalog_rowsets, plan_cost_estimate,
+    search_objects,
 };
 use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use serde_json::json;
@@ -1648,6 +1649,123 @@ fn live_search_objects_summary_uses_optimizer_num_rows_not_count_star() {
             "[live-xe] E4 stale-stats: num_rows={:?} (estimate) vs live COUNT(*)=100, stats_stale={:?}",
             row.num_rows, row.stats_stale
         );
+
+        conn.execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
+            .await
+            .ok();
+        conn.commit(&cx).await.ok();
+    });
+}
+
+/// K3: `explain_plan` + `plan_cost_estimate` surface the optimizer's relative
+/// cost/cardinality. DoD: an expensive full-table scan reports a HIGH estimate
+/// and a primary-key unique lookup a LOW one. Creates a throwaway table with a
+/// PK index, EXPLAINs both a full scan and a PK lookup, and asserts the cost
+/// estimate summary orders as expected. Cleans up the table.
+#[test]
+fn live_explain_plan_cost_estimate_orders_full_scan_above_pk_lookup() {
+    let name = "live_explain_plan_cost_estimate_orders_full_scan_above_pk_lookup";
+    run_with_cx(|cx| async move {
+        let Some(conn) = connect_or_skip(&cx, name, test_opts()).await else {
+            return;
+        };
+        let table = "ORACLEMCP_COST_EST_T";
+
+        // Fresh throwaway table with a PRIMARY KEY (→ a unique index).
+        let _ = conn
+            .execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
+            .await;
+        conn.execute(
+            &cx,
+            &format!("CREATE TABLE {table} (id NUMBER PRIMARY KEY, filler VARCHAR2(80))"),
+            &[],
+        )
+        .await
+        .expect("create cost-estimate table");
+        conn.execute(
+            &cx,
+            &format!(
+                "INSERT INTO {table} SELECT LEVEL, RPAD('x', 80, 'x') \
+                 FROM dual CONNECT BY LEVEL <= 5000"
+            ),
+            &[],
+        )
+        .await
+        .expect("seed rows");
+        conn.commit(&cx).await.expect("commit seed rows");
+        // Give the optimizer real statistics so the estimates are non-null and
+        // reflect the 5000-row full scan vs the unique-index lookup.
+        conn.execute(
+            &cx,
+            &format!(
+                "BEGIN DBMS_STATS.GATHER_TABLE_STATS(USER, '{table}', \
+                 cascade => TRUE); END;"
+            ),
+            &[],
+        )
+        .await
+        .expect("gather stats");
+
+        // Expensive: a full-table scan returning every row (high cost + card).
+        explain_plan(&cx, &conn, &format!("SELECT * FROM {table}"), false)
+            .await
+            .expect("explain full scan");
+        let full = plan_cost_estimate(&cx, &conn)
+            .await
+            .expect("full-scan cost query")
+            .expect("full-scan cost estimate present");
+
+        // Cheap: a primary-key unique lookup (low cost + cardinality of 1).
+        explain_plan(
+            &cx,
+            &conn,
+            &format!("SELECT * FROM {table} WHERE id = 42"),
+            false,
+        )
+        .await
+        .expect("explain PK lookup");
+        let pk = plan_cost_estimate(&cx, &conn)
+            .await
+            .expect("pk-lookup cost query")
+            .expect("pk-lookup cost estimate present");
+
+        eprintln!(
+            "[live-xe] K3 cost estimate: full_scan(cost={:?}, card={:?}) vs \
+             pk_lookup(cost={:?}, card={:?})",
+            full.summary.total_cost,
+            full.summary.total_cardinality,
+            pk.summary.total_cost,
+            pk.summary.total_cardinality,
+        );
+
+        // Both summaries are grounded on the plan root (id = 0).
+        assert_eq!(full.rows.first().map(|row| row.id), Some(0));
+        assert_eq!(pk.rows.first().map(|row| row.id), Some(0));
+
+        // Cardinality ordering is unambiguous: a full scan returns the whole
+        // table (~5000 rows), a unique PK lookup returns exactly one.
+        let full_card = full
+            .summary
+            .total_cardinality
+            .expect("full-scan cardinality is estimated after gather_stats");
+        let pk_card = pk
+            .summary
+            .total_cardinality
+            .expect("pk-lookup cardinality is estimated after gather_stats");
+        assert!(
+            full_card > pk_card,
+            "full-scan cardinality ({full_card}) must exceed PK-lookup cardinality ({pk_card})"
+        );
+        assert_eq!(pk_card, 1, "a unique PK lookup estimates exactly one row");
+
+        // When the optimizer reports cost (it does under CBO with stats), the
+        // full scan must cost more than the single-block unique index lookup.
+        if let (Some(full_cost), Some(pk_cost)) = (full.summary.total_cost, pk.summary.total_cost) {
+            assert!(
+                full_cost > pk_cost,
+                "full-scan cost ({full_cost}) must exceed PK-lookup cost ({pk_cost})"
+            );
+        }
 
         conn.execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
             .await

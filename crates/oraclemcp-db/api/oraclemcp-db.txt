@@ -3667,6 +3667,214 @@ pub type oraclemcp_db::ParsedHealthRequest::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ParsedHealthRequest where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ParsedHealthRequest where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::ParsedHealthRequest::vzip(self) -> V
+pub struct oraclemcp_db::PlanCostEstimate
+pub oraclemcp_db::PlanCostEstimate::note: alloc::string::String
+pub oraclemcp_db::PlanCostEstimate::rows: alloc::vec::Vec<oraclemcp_db::PlanCostRow>
+pub oraclemcp_db::PlanCostEstimate::summary: oraclemcp_db::PlanCostSummary
+impl core::clone::Clone for oraclemcp_db::PlanCostEstimate
+pub fn oraclemcp_db::PlanCostEstimate::clone(&self) -> oraclemcp_db::PlanCostEstimate
+impl core::cmp::Eq for oraclemcp_db::PlanCostEstimate
+impl core::cmp::PartialEq for oraclemcp_db::PlanCostEstimate
+pub fn oraclemcp_db::PlanCostEstimate::eq(&self, &oraclemcp_db::PlanCostEstimate) -> bool
+impl core::fmt::Debug for oraclemcp_db::PlanCostEstimate
+pub fn oraclemcp_db::PlanCostEstimate::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::PlanCostEstimate
+impl serde_core::ser::Serialize for oraclemcp_db::PlanCostEstimate
+pub fn oraclemcp_db::PlanCostEstimate::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::PlanCostEstimate
+pub fn oraclemcp_db::PlanCostEstimate::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::PlanCostEstimate
+impl core::marker::Send for oraclemcp_db::PlanCostEstimate
+impl core::marker::Sync for oraclemcp_db::PlanCostEstimate
+impl core::marker::Unpin for oraclemcp_db::PlanCostEstimate
+impl core::marker::UnsafeUnpin for oraclemcp_db::PlanCostEstimate
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::PlanCostEstimate
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::PlanCostEstimate
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::PlanCostEstimate where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::PlanCostEstimate where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::PlanCostEstimate where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostEstimate::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::PlanCostEstimate where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::PlanCostEstimate where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::PlanCostEstimate where U: core::convert::From<T>
+pub fn oraclemcp_db::PlanCostEstimate::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::PlanCostEstimate where U: core::convert::Into<T>
+pub type oraclemcp_db::PlanCostEstimate::Error = core::convert::Infallible
+pub fn oraclemcp_db::PlanCostEstimate::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::PlanCostEstimate where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::PlanCostEstimate::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::PlanCostEstimate::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::PlanCostEstimate where T: core::clone::Clone
+pub type oraclemcp_db::PlanCostEstimate::Owned = T
+pub fn oraclemcp_db::PlanCostEstimate::clone_into(&self, &mut T)
+pub fn oraclemcp_db::PlanCostEstimate::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::PlanCostEstimate
+impl<T> core::any::Any for oraclemcp_db::PlanCostEstimate where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostEstimate::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::PlanCostEstimate where T: ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostEstimate::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::PlanCostEstimate where T: ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostEstimate::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::PlanCostEstimate where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::PlanCostEstimate::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::PlanCostEstimate
+pub fn oraclemcp_db::PlanCostEstimate::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::PlanCostEstimate
+pub type oraclemcp_db::PlanCostEstimate::Init = T
+pub const oraclemcp_db::PlanCostEstimate::ALIGN: usize
+pub unsafe fn oraclemcp_db::PlanCostEstimate::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::PlanCostEstimate::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::PlanCostEstimate::drop(usize)
+pub unsafe fn oraclemcp_db::PlanCostEstimate::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::PlanCostEstimate
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::PlanCostEstimate
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::PlanCostEstimate where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::PlanCostEstimate
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::PlanCostEstimate
+impl<T> typenum::type_operators::Same for oraclemcp_db::PlanCostEstimate
+pub type oraclemcp_db::PlanCostEstimate::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PlanCostEstimate where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::PlanCostEstimate where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::PlanCostEstimate::vzip(self) -> V
+pub struct oraclemcp_db::PlanCostRow
+pub oraclemcp_db::PlanCostRow::bytes: core::option::Option<i64>
+pub oraclemcp_db::PlanCostRow::cardinality: core::option::Option<i64>
+pub oraclemcp_db::PlanCostRow::cost: core::option::Option<i64>
+pub oraclemcp_db::PlanCostRow::id: i64
+impl core::clone::Clone for oraclemcp_db::PlanCostRow
+pub fn oraclemcp_db::PlanCostRow::clone(&self) -> oraclemcp_db::PlanCostRow
+impl core::cmp::Eq for oraclemcp_db::PlanCostRow
+impl core::cmp::PartialEq for oraclemcp_db::PlanCostRow
+pub fn oraclemcp_db::PlanCostRow::eq(&self, &oraclemcp_db::PlanCostRow) -> bool
+impl core::fmt::Debug for oraclemcp_db::PlanCostRow
+pub fn oraclemcp_db::PlanCostRow::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::PlanCostRow
+impl serde_core::ser::Serialize for oraclemcp_db::PlanCostRow
+pub fn oraclemcp_db::PlanCostRow::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::PlanCostRow
+pub fn oraclemcp_db::PlanCostRow::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::PlanCostRow
+impl core::marker::Send for oraclemcp_db::PlanCostRow
+impl core::marker::Sync for oraclemcp_db::PlanCostRow
+impl core::marker::Unpin for oraclemcp_db::PlanCostRow
+impl core::marker::UnsafeUnpin for oraclemcp_db::PlanCostRow
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::PlanCostRow
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::PlanCostRow
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::PlanCostRow where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::PlanCostRow where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::PlanCostRow where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostRow::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::PlanCostRow where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::PlanCostRow where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::PlanCostRow where U: core::convert::From<T>
+pub fn oraclemcp_db::PlanCostRow::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::PlanCostRow where U: core::convert::Into<T>
+pub type oraclemcp_db::PlanCostRow::Error = core::convert::Infallible
+pub fn oraclemcp_db::PlanCostRow::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::PlanCostRow where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::PlanCostRow::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::PlanCostRow::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::PlanCostRow where T: core::clone::Clone
+pub type oraclemcp_db::PlanCostRow::Owned = T
+pub fn oraclemcp_db::PlanCostRow::clone_into(&self, &mut T)
+pub fn oraclemcp_db::PlanCostRow::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::PlanCostRow
+impl<T> core::any::Any for oraclemcp_db::PlanCostRow where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostRow::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::PlanCostRow where T: ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostRow::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::PlanCostRow where T: ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostRow::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::PlanCostRow where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::PlanCostRow::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::PlanCostRow
+pub fn oraclemcp_db::PlanCostRow::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::PlanCostRow
+pub type oraclemcp_db::PlanCostRow::Init = T
+pub const oraclemcp_db::PlanCostRow::ALIGN: usize
+pub unsafe fn oraclemcp_db::PlanCostRow::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::PlanCostRow::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::PlanCostRow::drop(usize)
+pub unsafe fn oraclemcp_db::PlanCostRow::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::PlanCostRow
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::PlanCostRow
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::PlanCostRow where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::PlanCostRow
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::PlanCostRow
+impl<T> typenum::type_operators::Same for oraclemcp_db::PlanCostRow
+pub type oraclemcp_db::PlanCostRow::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PlanCostRow where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::PlanCostRow where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::PlanCostRow::vzip(self) -> V
+pub struct oraclemcp_db::PlanCostSummary
+pub oraclemcp_db::PlanCostSummary::total_bytes: core::option::Option<i64>
+pub oraclemcp_db::PlanCostSummary::total_cardinality: core::option::Option<i64>
+pub oraclemcp_db::PlanCostSummary::total_cost: core::option::Option<i64>
+impl core::clone::Clone for oraclemcp_db::PlanCostSummary
+pub fn oraclemcp_db::PlanCostSummary::clone(&self) -> oraclemcp_db::PlanCostSummary
+impl core::cmp::Eq for oraclemcp_db::PlanCostSummary
+impl core::cmp::PartialEq for oraclemcp_db::PlanCostSummary
+pub fn oraclemcp_db::PlanCostSummary::eq(&self, &oraclemcp_db::PlanCostSummary) -> bool
+impl core::fmt::Debug for oraclemcp_db::PlanCostSummary
+pub fn oraclemcp_db::PlanCostSummary::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::PlanCostSummary
+impl serde_core::ser::Serialize for oraclemcp_db::PlanCostSummary
+pub fn oraclemcp_db::PlanCostSummary::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::PlanCostSummary
+pub fn oraclemcp_db::PlanCostSummary::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::PlanCostSummary
+impl core::marker::Send for oraclemcp_db::PlanCostSummary
+impl core::marker::Sync for oraclemcp_db::PlanCostSummary
+impl core::marker::Unpin for oraclemcp_db::PlanCostSummary
+impl core::marker::UnsafeUnpin for oraclemcp_db::PlanCostSummary
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::PlanCostSummary
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::PlanCostSummary
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::PlanCostSummary where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::PlanCostSummary where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::PlanCostSummary where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostSummary::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::PlanCostSummary where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::PlanCostSummary where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::PlanCostSummary where U: core::convert::From<T>
+pub fn oraclemcp_db::PlanCostSummary::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::PlanCostSummary where U: core::convert::Into<T>
+pub type oraclemcp_db::PlanCostSummary::Error = core::convert::Infallible
+pub fn oraclemcp_db::PlanCostSummary::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::PlanCostSummary where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::PlanCostSummary::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::PlanCostSummary::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::PlanCostSummary where T: core::clone::Clone
+pub type oraclemcp_db::PlanCostSummary::Owned = T
+pub fn oraclemcp_db::PlanCostSummary::clone_into(&self, &mut T)
+pub fn oraclemcp_db::PlanCostSummary::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::PlanCostSummary
+impl<T> core::any::Any for oraclemcp_db::PlanCostSummary where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostSummary::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::PlanCostSummary where T: ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostSummary::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::PlanCostSummary where T: ?core::marker::Sized
+pub fn oraclemcp_db::PlanCostSummary::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::PlanCostSummary where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::PlanCostSummary::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::PlanCostSummary
+pub fn oraclemcp_db::PlanCostSummary::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::PlanCostSummary
+pub type oraclemcp_db::PlanCostSummary::Init = T
+pub const oraclemcp_db::PlanCostSummary::ALIGN: usize
+pub unsafe fn oraclemcp_db::PlanCostSummary::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::PlanCostSummary::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::PlanCostSummary::drop(usize)
+pub unsafe fn oraclemcp_db::PlanCostSummary::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::PlanCostSummary
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::PlanCostSummary
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::PlanCostSummary where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::PlanCostSummary
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::PlanCostSummary
+impl<T> typenum::type_operators::Same for oraclemcp_db::PlanCostSummary
+pub type oraclemcp_db::PlanCostSummary::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PlanCostSummary where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::PlanCostSummary where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::PlanCostSummary::vzip(self) -> V
 pub struct oraclemcp_db::PlscopeIdentifier
 pub oraclemcp_db::PlscopeIdentifier::col: i64
 pub oraclemcp_db::PlscopeIdentifier::line: i64
@@ -5959,6 +6167,7 @@ pub const oraclemcp_db::CONNECT_TRACE_NEXT_STEP: &str
 pub const oraclemcp_db::DEFAULT_ORACLE_CALL_TIMEOUT: core::time::Duration
 pub const oraclemcp_db::DRIVER_VERSION: &str
 pub const oraclemcp_db::ORACLE_CELL_STRUCTURED_CONTRACT_VERSION: u16
+pub const oraclemcp_db::PLAN_COST_ESTIMATE_NOTE: &str
 pub trait oraclemcp_db::IamTokenSource
 pub fn oraclemcp_db::IamTokenSource::fetch(&self) -> core::result::Result<oraclemcp_db::IamToken, oraclemcp_db::OciError>
 pub trait oraclemcp_db::OracleConnection: core::marker::Send + core::marker::Sync
@@ -6012,6 +6221,7 @@ pub fn oraclemcp_db::RustOracleConnection::query_rows_with_serialize_options<'li
 pub fn oraclemcp_db::RustOracleConnection::read_dbms_output<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, usize, usize) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::DbmsOutput, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::rollback<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 pub fn oraclemcp_db::RustOracleConnection::set_call_timeout(&self, core::option::Option<core::time::Duration>) -> core::result::Result<(), oraclemcp_db::DbError>
+pub fn oraclemcp_db::assemble_cost_estimate(&[oraclemcp_db::OracleRow]) -> core::option::Option<oraclemcp_db::PlanCostEstimate>
 pub fn oraclemcp_db::base64_encode(&[u8]) -> alloc::string::String
 pub fn oraclemcp_db::buffer_cache_hit_ratio_sql() -> (&'static str, alloc::string::String)
 pub fn oraclemcp_db::canonical_nls_statements() -> alloc::vec::Vec<&'static str>
@@ -6055,6 +6265,7 @@ pub fn oraclemcp_db::oracle_driver_compiled() -> bool
 pub fn oraclemcp_db::paginated_sql(&str, usize, usize) -> alloc::string::String
 pub fn oraclemcp_db::parse_health_request(&str) -> oraclemcp_db::ParsedHealthRequest
 pub fn oraclemcp_db::parse_tnsnames_dir(&std::path::Path) -> core::result::Result<oraclemcp_db::TnsParseResult, oraclemcp_db::TnsParseError>
+pub async fn oraclemcp_db::plan_cost_estimate(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<core::option::Option<oraclemcp_db::PlanCostEstimate>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::plscope_identifiers(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::PlscopeIdentifier>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::plscope_statements(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::PlscopeStatement>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::preflight(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> oraclemcp_db::PreflightReport

@@ -37,8 +37,8 @@ use oraclemcp_db::{
     compile_errors, compile_object_statements, describe_columns, describe_constraints,
     describe_index, describe_trigger, describe_view, execute_immediate_audit, explain_plan,
     find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects, list_schemas,
-    plscope_identifiers, plscope_statements, read_lob, read_query, read_query_named, sample_rows,
-    search_objects, search_source, serialize_row,
+    plan_cost_estimate, plscope_identifiers, plscope_statements, read_lob, read_query,
+    read_query_named, sample_rows, search_objects, search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope, ReasonCategory, StructuredReason};
 use oraclemcp_guard::{
@@ -6219,7 +6219,7 @@ impl OracleDispatcher {
                     .await
                     .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.after")?;
-                Ok(json!({
+                let mut response = json!({
                     "plan": rows_to_json(&rows),
                     "diagnostic_write": {
                         "statement": "EXPLAIN PLAN",
@@ -6227,7 +6227,28 @@ impl OracleDispatcher {
                         "required_level": OperatingLevel::ReadWrite,
                         "explicitly_allowed": a.allow_plan_table_write,
                     },
-                }))
+                });
+                // ADDITIVE / observational: surface the optimizer's relative
+                // cost/cardinality for the plan we just wrote. A missing cost
+                // column, table, or plan (ancient/RULE-mode DBs) degrades to an
+                // omitted block with a note — it must never fail the EXPLAIN.
+                match plan_cost_estimate(cx, conn).await {
+                    Ok(Some(estimate)) => {
+                        if let Ok(value) = serde_json::to_value(&estimate) {
+                            response["cost_estimate"] = value;
+                        }
+                    }
+                    Ok(None) => {
+                        response["cost_estimate_unavailable"] = json!(
+                            "PLAN_TABLE returned no scoped plan-root (id=0) row for a cost estimate"
+                        );
+                    }
+                    Err(err) => {
+                        response["cost_estimate_unavailable"] =
+                            json!(format!("cost estimate unavailable: {err}"));
+                    }
+                }
+                Ok(response)
             }
             other => {
                 if let Some(loaded) = state.custom_catalog.get(other) {

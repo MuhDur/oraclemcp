@@ -14,7 +14,7 @@ use asupersync::Cx;
 
 use crate::connection::OracleConnection;
 use crate::error::DbError;
-use crate::types::{OracleBind, OracleRow};
+use crate::types::{OracleBind, OracleCell, OracleRow};
 use serde::{Deserialize, Serialize};
 
 /// A simple unquoted Oracle identifier (≤ 30 chars). Rejects injection.
@@ -1096,6 +1096,139 @@ pub async fn explain_plan(
     .await
 }
 
+/// Reminder folded into every [`PlanCostEstimate`]: these numbers are the
+/// Oracle optimizer's **relative** estimates used to rank candidate plans, not
+/// wall-clock timings and not a runtime guarantee.
+pub const PLAN_COST_ESTIMATE_NOTE: &str = "cost and cardinality are the Oracle \
+optimizer's RELATIVE estimates for ranking candidate plans (derived from the \
+current statistics), not wall-clock time and not a guarantee of runtime; any of \
+cost/cardinality/bytes may be null when statistics are absent or under RULE-mode \
+optimization";
+
+/// The optimizer's estimates for a single `PLAN_TABLE` line.
+///
+/// `cost`, `cardinality`, and `bytes` are `NUMBER` columns that are `NULL` when
+/// the optimizer produced no estimate (missing statistics, or a RULE-mode plan
+/// on an ancient database). They are surfaced as `None` — never an error.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanCostRow {
+    /// The `PLAN_TABLE.ID` plan-line number (`0` is the plan root).
+    pub id: i64,
+    /// Relative optimizer cost for this operation, or `None` when unavailable.
+    pub cost: Option<i64>,
+    /// Estimated rows this operation produces, or `None` when unavailable.
+    pub cardinality: Option<i64>,
+    /// Estimated bytes this operation produces, or `None` when unavailable.
+    pub bytes: Option<i64>,
+}
+
+/// The plan root (`ID = 0`) totals: the optimizer's estimate for the whole plan.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanCostSummary {
+    /// Total relative optimizer cost of the whole plan (root line; nullable).
+    pub total_cost: Option<i64>,
+    /// Estimated total rows the plan returns (root line; nullable).
+    pub total_cardinality: Option<i64>,
+    /// Estimated total bytes the plan returns (root line; nullable).
+    pub total_bytes: Option<i64>,
+}
+
+/// A structured optimizer cost/cardinality block that accompanies an
+/// `EXPLAIN PLAN`, additive to the human-readable `DBMS_XPLAN.DISPLAY` output.
+///
+/// See [`PLAN_COST_ESTIMATE_NOTE`]: the figures are relative optimizer
+/// estimates, not measured runtime.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanCostEstimate {
+    /// Per-line estimates, ordered by `PLAN_TABLE.ID`.
+    pub rows: Vec<PlanCostRow>,
+    /// The plan-root (`ID = 0`) totals.
+    pub summary: PlanCostSummary,
+    /// Reminder that these are relative optimizer estimates (see
+    /// [`PLAN_COST_ESTIMATE_NOTE`]).
+    pub note: String,
+}
+
+/// The scoped `PLAN_TABLE` read that surfaces per-line optimizer estimates for
+/// the plan the most recent `EXPLAIN PLAN` wrote. It is scoped to the latest
+/// `plan_id`, mirroring how `DBMS_XPLAN.DISPLAY` (with no explicit
+/// `statement_id`) selects the most recently explained statement — so the cost
+/// block describes exactly the plan the `DISPLAY` output above shows.
+const PLAN_COST_SQL: &str = "SELECT id, cost, cardinality, bytes \
+FROM plan_table \
+WHERE plan_id = (SELECT MAX(plan_id) FROM plan_table) \
+ORDER BY id";
+
+/// Parse an optional `PLAN_TABLE` numeric cell into `Option<i64>`. A SQL `NULL`
+/// (or an empty/blank rendering) becomes `None`; a non-integer `NUMBER` is
+/// truncated toward zero. Never panics, never errors.
+fn plan_cell_i64(cell: Option<&OracleCell>) -> Option<i64> {
+    let text = cell.and_then(OracleCell::text)?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed
+        .parse::<i64>()
+        .ok()
+        .or_else(|| trimmed.parse::<f64>().ok().map(|value| value as i64))
+}
+
+/// Assemble a [`PlanCostEstimate`] from `PLAN_TABLE` rows shaped as
+/// `id, cost, cardinality, bytes` (case-insensitive column lookup).
+///
+/// Pure: no I/O, no classifier interaction. `NULL` estimate columns become
+/// `None`. Rows whose `ID` cannot be parsed are skipped (defensive; `ID` is
+/// `NOT NULL` in a real `PLAN_TABLE`). Returns `None` when no plan-root line
+/// (`ID = 0`) is present, so the caller omits the block rather than emitting a
+/// summary it cannot ground on the root.
+#[must_use]
+pub fn assemble_cost_estimate(rows: &[OracleRow]) -> Option<PlanCostEstimate> {
+    let mut cost_rows: Vec<PlanCostRow> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let Some(id) = plan_cell_i64(row.cell("ID")) else {
+            continue;
+        };
+        cost_rows.push(PlanCostRow {
+            id,
+            cost: plan_cell_i64(row.cell("COST")),
+            cardinality: plan_cell_i64(row.cell("CARDINALITY")),
+            bytes: plan_cell_i64(row.cell("BYTES")),
+        });
+    }
+    let root = cost_rows.iter().find(|row| row.id == 0)?;
+    let summary = PlanCostSummary {
+        total_cost: root.cost,
+        total_cardinality: root.cardinality,
+        total_bytes: root.bytes,
+    };
+    Some(PlanCostEstimate {
+        rows: cost_rows,
+        summary,
+        note: PLAN_COST_ESTIMATE_NOTE.to_owned(),
+    })
+}
+
+/// Read the optimizer cost/cardinality estimates for the plan the most recent
+/// [`explain_plan`] just wrote (scoped to the latest `plan_id`, matching
+/// `DBMS_XPLAN.DISPLAY`). This is additive/observational — a plain read of
+/// `PLAN_TABLE`, gated by the same diagnostic-write permission as the
+/// `EXPLAIN PLAN` that produced the rows; it never re-runs the statement and
+/// never touches the classifier.
+///
+/// 11g-safe / graceful degradation: on databases whose `PLAN_TABLE` lacks a
+/// cost column (or the table/`plan_id` entirely) the `SELECT` fails; that error
+/// is returned so the caller can *omit* the block and note why — the surrounding
+/// `EXPLAIN PLAN` output must never be failed by a missing cost estimate.
+/// `Ok(None)` means the query ran but produced no scoped plan-root line.
+pub async fn plan_cost_estimate(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+) -> Result<Option<PlanCostEstimate>, DbError> {
+    let rows = conn.query_rows(cx, PLAN_COST_SQL, &[]).await?;
+    Ok(assemble_cost_estimate(&rows))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1913,5 +2046,94 @@ mod tests {
         assert_eq!(indexes[0].name, "EMP_PK");
         assert_eq!(indexes[0].uniqueness.as_deref(), Some("UNIQUE"));
         assert_eq!(indexes[0].columns, vec!["ID".to_owned()]);
+    }
+
+    /// Build a `PLAN_TABLE` row with the four cost columns; a `None` value
+    /// models a SQL `NULL` (no-stats / RULE-mode) for that column.
+    fn plan_row(
+        id: Option<&str>,
+        cost: Option<&str>,
+        cardinality: Option<&str>,
+        bytes: Option<&str>,
+    ) -> OracleRow {
+        OracleRow {
+            columns: vec![
+                (
+                    "ID".to_owned(),
+                    OracleCell::new("NUMBER", id.map(str::to_owned)),
+                ),
+                (
+                    "COST".to_owned(),
+                    OracleCell::new("NUMBER", cost.map(str::to_owned)),
+                ),
+                (
+                    "CARDINALITY".to_owned(),
+                    OracleCell::new("NUMBER", cardinality.map(str::to_owned)),
+                ),
+                (
+                    "BYTES".to_owned(),
+                    OracleCell::new("NUMBER", bytes.map(str::to_owned)),
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn cost_estimate_assembles_rows_and_root_summary() {
+        // A tiny two-line plan: root (id=0) then a full-scan child (id=1).
+        let rows = vec![
+            plan_row(Some("0"), Some("842"), Some("100000"), Some("2400000")),
+            plan_row(Some("1"), Some("842"), Some("100000"), Some("2400000")),
+        ];
+        let estimate = assemble_cost_estimate(&rows).expect("root line present");
+        assert_eq!(estimate.rows.len(), 2);
+        assert_eq!(estimate.rows[0].id, 0);
+        assert_eq!(estimate.rows[0].cost, Some(842));
+        assert_eq!(estimate.rows[0].cardinality, Some(100_000));
+        assert_eq!(estimate.rows[0].bytes, Some(2_400_000));
+        // Summary mirrors the id=0 root line.
+        assert_eq!(estimate.summary.total_cost, Some(842));
+        assert_eq!(estimate.summary.total_cardinality, Some(100_000));
+        assert_eq!(estimate.summary.total_bytes, Some(2_400_000));
+        assert_eq!(estimate.note, PLAN_COST_ESTIMATE_NOTE);
+    }
+
+    #[test]
+    fn cost_estimate_emits_null_for_missing_estimates() {
+        // 11g / RULE-mode / no-stats: cost, cardinality, bytes come back NULL.
+        // They must surface as None (never an error), and the summary stays
+        // grounded on the id=0 root even when its estimates are null.
+        let rows = vec![
+            plan_row(Some("0"), None, None, None),
+            plan_row(Some("1"), None, Some("14"), None),
+        ];
+        let estimate = assemble_cost_estimate(&rows).expect("root line present");
+        assert_eq!(estimate.rows[0].cost, None);
+        assert_eq!(estimate.rows[0].cardinality, None);
+        assert_eq!(estimate.rows[0].bytes, None);
+        assert_eq!(estimate.rows[1].cardinality, Some(14));
+        assert_eq!(estimate.summary.total_cost, None);
+        assert_eq!(estimate.summary.total_cardinality, None);
+        assert_eq!(estimate.summary.total_bytes, None);
+    }
+
+    #[test]
+    fn cost_estimate_handles_blank_and_non_integer_cells() {
+        // A blank rendering is treated as NULL; a non-integer NUMBER truncates.
+        let rows = vec![plan_row(Some("0"), Some("   "), Some("12.9"), Some("500"))];
+        let estimate = assemble_cost_estimate(&rows).expect("root line present");
+        assert_eq!(estimate.rows[0].cost, None);
+        assert_eq!(estimate.rows[0].cardinality, Some(12));
+        assert_eq!(estimate.rows[0].bytes, Some(500));
+    }
+
+    #[test]
+    fn cost_estimate_omitted_when_no_root_line() {
+        // Rows without an id=0 root (degenerate) yield no block, so the caller
+        // omits cost_estimate rather than fabricate a summary.
+        let rows = vec![plan_row(Some("2"), Some("5"), Some("1"), Some("10"))];
+        assert!(assemble_cost_estimate(&rows).is_none());
+        // Empty PLAN_TABLE read → no block.
+        assert!(assemble_cost_estimate(&[]).is_none());
     }
 }

@@ -225,6 +225,45 @@ fn explain_plan_output_schema() -> Value {
                 },
                 "required": ["statement", "writes", "required_level", "explicitly_allowed"],
                 "additionalProperties": false
+            },
+            "cost_estimate": {
+                "type": "object",
+                "description": "Additive, observational optimizer estimates for the plan just written, scoped to the same plan DBMS_XPLAN.DISPLAY shows. Present only when PLAN_TABLE exposes the cost columns. These are RELATIVE optimizer estimates for ranking plans, not wall-clock time and not a guarantee; cost/cardinality/bytes may be null (no statistics or RULE mode).",
+                "properties": {
+                    "rows": {
+                        "type": "array",
+                        "description": "Per plan-line estimates, ordered by PLAN_TABLE.ID.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "integer", "description": "PLAN_TABLE.ID (0 is the plan root)." },
+                                "cost": { "type": ["integer", "null"], "description": "Relative optimizer cost for this line, or null." },
+                                "cardinality": { "type": ["integer", "null"], "description": "Estimated rows for this line, or null." },
+                                "bytes": { "type": ["integer", "null"], "description": "Estimated bytes for this line, or null." }
+                            },
+                            "required": ["id", "cost", "cardinality", "bytes"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "summary": {
+                        "type": "object",
+                        "description": "The plan root (id=0) totals for the whole plan.",
+                        "properties": {
+                            "total_cost": { "type": ["integer", "null"] },
+                            "total_cardinality": { "type": ["integer", "null"] },
+                            "total_bytes": { "type": ["integer", "null"] }
+                        },
+                        "required": ["total_cost", "total_cardinality", "total_bytes"],
+                        "additionalProperties": false
+                    },
+                    "note": { "type": "string", "description": "Reminder that the figures are relative optimizer estimates, not measured runtime." }
+                },
+                "required": ["rows", "summary", "note"],
+                "additionalProperties": false
+            },
+            "cost_estimate_unavailable": {
+                "type": "string",
+                "description": "Present instead of cost_estimate when the PLAN_TABLE cost read could not be produced (e.g. an ancient/RULE-mode database missing a cost column); explains why, and the EXPLAIN plan itself is still returned."
             }
         },
         "required": ["plan", "diagnostic_write"],
