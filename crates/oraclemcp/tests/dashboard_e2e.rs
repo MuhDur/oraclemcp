@@ -219,8 +219,8 @@ fn read_only_dashboard_surface_contracts_are_registered() {
     );
 
     assert!(
-        skin.contains("defaultBigBoard: \"board2d\""),
-        "dashboard must default to the 2D board renderer"
+        skin.contains("defaultBigBoard: \"orrery3d\""),
+        "dashboard hero defaults to the orrery renderer (mandatory 2D board/table fallback asserted below)"
     );
     assert!(
         skin.contains("board2d:") && skin.contains("requiresWebGl: false"),
@@ -882,7 +882,7 @@ fn skin_conformance_2d_fallback_a11y() {
         "dashboard skin",
         &skin,
         &[
-            "defaultBigBoard: \"board2d\"",
+            "defaultBigBoard: \"orrery3d\"",
             "board2d:",
             "requiresWebGl: false",
             "table:",
@@ -890,7 +890,7 @@ fn skin_conformance_2d_fallback_a11y() {
             "requiresWebGl: true",
             "lazy: true",
             "React.lazy(() => import(\"./orrery-renderer\"))",
-            "assertDashboardSkinConformance(GROUND_CONTROL_SKIN)",
+            "assertDashboardSkinConformance(OMCP_SKIN)",
         ],
     );
     assert_contains_all(
