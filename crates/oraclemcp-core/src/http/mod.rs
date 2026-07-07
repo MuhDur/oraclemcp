@@ -4269,6 +4269,90 @@ fn audit_tail_proof_bundle(path: &Path, query: &AuditTailQuery, view: &AuditTail
     })
 }
 
+/// How many recent audit-tail records the CLASSIFIER-LIVE ladder streams.
+const OPERATOR_CLASSIFIER_LADDER_LIMIT: usize = 24;
+
+/// Surface recent classifier verdicts for the CLASSIFIER-LIVE ladder.
+///
+/// The verdicts are derived from the redacted self-lane audit tail (the same
+/// hash-chained source `/operator/v1/audit-tail` reads), so the stream never
+/// carries anything the audit tail would not already expose: no SQL text, no
+/// bind values, only the redaction-safe `danger_level`/`decision`/`outcome`
+/// plus the derived ladder verdict. When no audit tail is configured the field
+/// is present but empty, so the UI can distinguish "no verdicts yet" from
+/// "provider unavailable".
+fn operator_classifier_verdicts(config: &HttpTransportConfig) -> Value {
+    let Some(path) = config.operator_audit_tail_path.as_ref() else {
+        return json!({
+            "source": "unavailable",
+            "reason": "audit tail provider is not configured",
+            "verdicts": [],
+        });
+    };
+    let query = AuditTailQuery {
+        limit: OPERATOR_CLASSIFIER_LADDER_LIMIT,
+        subject_id_hash: None,
+        danger_level: None,
+        tool: None,
+        decision: None,
+        outcome: None,
+        export_proof_bundle: false,
+    };
+    match read_redacted_audit_tail(path, &query) {
+        Ok(view) => {
+            let verdicts = view
+                .records
+                .iter()
+                .filter_map(classifier_verdict_from_record)
+                .collect::<Vec<_>>();
+            json!({ "source": "self_lane", "verdicts": verdicts })
+        }
+        Err(reason) => json!({
+            "source": "unavailable",
+            "reason": reason,
+            "verdicts": [],
+        }),
+    }
+}
+
+/// Map one redacted audit record onto the CLASSIFIER-LIVE ladder verdict.
+///
+/// `PASS` = allowed at the active level, `HOLD-FOR-GO` = a step-up confirmation
+/// is required before it can run, `REFUSED-exceeds-ceiling` = the guard blocked
+/// the statement. Operator API meta-entries (`operator_api`) are HTTP calls, not
+/// classified SQL, so they are skipped rather than shown as spurious passes.
+fn classifier_verdict_from_record(record: &Value) -> Option<Value> {
+    let tool = record
+        .get("tool")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if tool == "operator_api" {
+        return None;
+    }
+    let decision = record
+        .get("decision")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let (verdict, ladder) = match decision {
+        "BLOCKED" => ("REFUSED", "REFUSED-exceeds-ceiling"),
+        "STEP_UP_REQUIRED" => ("HOLD", "HOLD-FOR-GO"),
+        "ALLOWED" => ("PASS", "PASS"),
+        _ => return None,
+    };
+    Some(json!({
+        "seq": record.get("seq"),
+        "timestamp": record.get("timestamp"),
+        "subject_id_hash": record.get("subject_id_hash"),
+        "tool": tool,
+        "danger_level": record.get("danger_level"),
+        "decision": decision,
+        "outcome": record.get("outcome"),
+        "verdict": verdict,
+        "ladder": ladder,
+        "sql_sha256": record.get("sql_sha256"),
+    }))
+}
+
 fn operator_events_response(
     config: &HttpTransportConfig,
     request: &HttpRequest,
@@ -4301,6 +4385,7 @@ fn operator_events_response(
             "active_lanes": lane_count,
             "health": operator_health_data(&config.observability),
             "metrics": operator_metrics_data(config),
+            "classifier": operator_classifier_verdicts(config),
         }),
     ) {
         Ok(events) => events,

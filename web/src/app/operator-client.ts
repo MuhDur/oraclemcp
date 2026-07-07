@@ -315,6 +315,45 @@ export type OperatorEventEnvelope = {
   data: Record<string, unknown>;
 };
 
+// CLASSIFIER-LIVE ladder verdict, derived server-side from the redacted audit
+// tail and streamed under the events snapshot `data.classifier`. Never carries
+// SQL text or bind values — only the fingerprint and the derived verdict.
+export type ClassifierLadderVerdictKind = "PASS" | "HOLD" | "REFUSED";
+
+export type ClassifierLadderRung =
+  | "PASS"
+  | "HOLD-FOR-GO"
+  | "REFUSED-exceeds-ceiling";
+
+export type ClassifierVerdict = {
+  seq: number;
+  timestamp: string;
+  subject_id_hash: string;
+  tool: string;
+  danger_level: string;
+  decision: string;
+  outcome: string;
+  verdict: ClassifierLadderVerdictKind;
+  ladder: ClassifierLadderRung;
+  sql_sha256: string | null;
+};
+
+export type ClassifierLadderData = {
+  source: "self_lane" | "unavailable";
+  reason?: string;
+  verdicts: ClassifierVerdict[];
+};
+
+export function parseClassifierLadder(
+  event: OperatorEventEnvelope
+): ClassifierLadderData | null {
+  const classifier = event.data["classifier"];
+  if (!classifier || typeof classifier !== "object") {
+    return null;
+  }
+  return classifier as ClassifierLadderData;
+}
+
 export type ChangeProposalAuthorKind = "agent" | "human";
 
 export type ChangeProposalApplyUnit = "read" | "dml" | "ddl";

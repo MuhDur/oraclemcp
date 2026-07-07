@@ -1018,6 +1018,162 @@ fn operator_lane_cancel_is_operator_gated_and_audited() {
     );
 }
 
+fn classifier_ladder_draft(
+    tool: &str,
+    sql: &str,
+    danger: &str,
+    decision: AuditDecision,
+    outcome: AuditOutcome,
+) -> AuditEntryDraft {
+    AuditEntryDraft {
+        subject: AuditSubject::new("operator", "human@example.test").with_authn_method("loopback"),
+        db_evidence: None,
+        cancel: None,
+        tool: tool.to_owned(),
+        sql: sql.to_owned(),
+        danger_level: danger.to_owned(),
+        decision,
+        rows_affected: None,
+        outcome,
+    }
+}
+
+/// Write a self-lane audit fixture that carries one statement per ladder verdict
+/// plus an `operator_api` meta entry (which the ladder must skip).
+fn write_classifier_ladder_fixture(name: &str) -> PathBuf {
+    let key = oraclemcp_audit::SigningKey::new("ladder-test", b"ladder-test-key".to_vec());
+    let drafts = [
+        classifier_ladder_draft(
+            "oracle_query",
+            "SELECT * FROM dual",
+            "READ_ONLY",
+            AuditDecision::Allowed,
+            AuditOutcome::Succeeded,
+        ),
+        classifier_ladder_draft(
+            "oracle_execute",
+            "UPDATE accounts SET flag=:1 WHERE id=:2",
+            "READ_WRITE",
+            AuditDecision::StepUpRequired,
+            AuditOutcome::Pending,
+        ),
+        classifier_ladder_draft(
+            "oracle_execute",
+            "DROP TABLE accounts",
+            "DDL",
+            AuditDecision::Blocked,
+            AuditOutcome::Failed,
+        ),
+        classifier_ladder_draft(
+            "operator_api",
+            "GET /operator/v1/health",
+            "OPERATOR",
+            AuditDecision::Allowed,
+            AuditOutcome::Succeeded,
+        ),
+    ];
+    let mut previous_hash = GENESIS_HASH.to_owned();
+    let records: Vec<AuditRecord> = drafts
+        .iter()
+        .enumerate()
+        .map(|(index, draft)| {
+            let record = AuditRecord::chained_signed(
+                draft,
+                u64::try_from(index + 1).expect("fixture index fits u64"),
+                &previous_hash,
+                format!("2026-06-30T12:00:0{index}Z"),
+                &key,
+            );
+            previous_hash = record.entry_hash.clone();
+            record
+        })
+        .collect();
+    let path = audit_tail_fixture_path(name);
+    let mut file = std::fs::File::create(&path).expect("create classifier ladder fixture");
+    for record in &records {
+        let value = serde_json::to_value(record).expect("serialize ladder fixture");
+        writeln!(file, "{value}").expect("write ladder fixture line");
+    }
+    path
+}
+
+#[test]
+fn operator_events_stream_classifier_verdicts_for_ladder() {
+    let path = write_classifier_ladder_fixture("verdicts");
+    let (auditor, _sink) = operator_auditor();
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        operator_audit_tail_path: Some(path),
+        session_lifecycle: Some(Arc::new(StaticLaneLifecycle::one_lane())),
+        ..Default::default()
+    };
+
+    let events = handle_http_request(
+        &test_server(),
+        &cfg,
+        HttpRequest::new(
+            "GET",
+            "/operator/v1/events",
+            [("host", "127.0.0.1"), ("accept", "text/event-stream")],
+            Vec::new(),
+        )
+        .with_peer_loopback(true),
+    );
+    assert_eq!(events.status, 200);
+
+    let snapshot = sse_json_events(&events)[0].clone();
+    let classifier = &snapshot["data"]["classifier"];
+    assert_eq!(classifier["source"], serde_json::json!("self_lane"));
+    let verdicts = classifier["verdicts"]
+        .as_array()
+        .expect("classifier verdicts array");
+    // Three classified statements are surfaced; the operator_api meta entry is
+    // not a classified statement, so the ladder skips it.
+    assert_eq!(verdicts.len(), 3);
+
+    let mapped: Vec<(String, String, String)> = verdicts
+        .iter()
+        .map(|verdict| {
+            (
+                verdict["decision"].as_str().expect("decision").to_owned(),
+                verdict["verdict"].as_str().expect("verdict").to_owned(),
+                verdict["ladder"].as_str().expect("ladder").to_owned(),
+            )
+        })
+        .collect();
+    assert!(mapped.contains(&("ALLOWED".to_owned(), "PASS".to_owned(), "PASS".to_owned())));
+    assert!(mapped.contains(&(
+        "STEP_UP_REQUIRED".to_owned(),
+        "HOLD".to_owned(),
+        "HOLD-FOR-GO".to_owned()
+    )));
+    assert!(mapped.contains(&(
+        "BLOCKED".to_owned(),
+        "REFUSED".to_owned(),
+        "REFUSED-exceeds-ceiling".to_owned()
+    )));
+    assert!(
+        verdicts
+            .iter()
+            .all(|verdict| verdict["tool"] != serde_json::json!("operator_api")),
+        "operator_api meta entries must not appear on the classifier ladder"
+    );
+
+    // The ladder is derived from the redacted tail: no SQL text leaks onto the
+    // stream, only the sha256 fingerprint.
+    let rendered = classifier.to_string();
+    assert!(
+        !rendered.contains("DROP TABLE") && !rendered.contains("SELECT"),
+        "classifier verdict stream must not carry SQL text"
+    );
+    assert!(
+        verdicts[0]["sql_sha256"]
+            .as_str()
+            .expect("sql fingerprint")
+            .starts_with("sha256:")
+    );
+}
+
 #[test]
 fn operator_v1_serves_schema_health_events_and_action_mapping() {
     let (auditor, sink) = operator_auditor();
