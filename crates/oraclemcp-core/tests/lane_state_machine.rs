@@ -9,7 +9,10 @@ use asupersync::cx::NoCaps;
 use oraclemcp_audit::{AuditRecord, AuditSink, Auditor, MemoryAuditSink, SigningKey};
 use oraclemcp_core::error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_core::{AdmissionController, AdmissionPermit, ExecuteParams, StatementExecutor};
-use oraclemcp_guard::{ExecGrantBinding, ExecGrantStore, OperatingLevel};
+use oraclemcp_guard::{
+    Classifier, ClassifierConfig, ExecGrantBinding, ExecGrantStore, OperatingLevel,
+    SessionLevelState,
+};
 
 #[derive(Clone, Copy, Debug)]
 enum TerminalPath {
@@ -186,9 +189,20 @@ fn switch_generation_invalidates_stale_grants_and_subject_mix() {
     let subject =
         oraclemcp_audit::AuditSubject::new("oauth", "subject-a").with_authn_method("oauth");
 
+    // SEC-1 re-gate inputs: the default fail-closed classifier and a live session
+    // at READ_WRITE, so the re-gate `Allow`s this UPDATE and the test exercises the
+    // grant generation/subject rejection paths (not the level gate).
+    let classifier = Classifier::new(ClassifierConfig::new());
+    let mut session = SessionLevelState::new(OperatingLevel::ReadWrite, false);
+    session
+        .set_current_level(OperatingLevel::ReadWrite)
+        .expect("READ_WRITE is within the ceiling");
+
     let stale = params(&token, sql, "sid-a", "lane-a", "subject-a", 2);
     let err = oraclemcp_core::oracle_query_execute(
         &grants,
+        &classifier,
+        &session,
         &auditor,
         &executor,
         &subject,
@@ -206,6 +220,8 @@ fn switch_generation_invalidates_stale_grants_and_subject_mix() {
     let wrong_subject = params(&token, sql, "sid-a", "lane-a", "subject-b", 1);
     let err = oraclemcp_core::oracle_query_execute(
         &grants,
+        &classifier,
+        &session,
         &auditor,
         &executor,
         &subject,
@@ -223,6 +239,8 @@ fn switch_generation_invalidates_stale_grants_and_subject_mix() {
     let accepted = params(&token, sql, "sid-a", "lane-a", "subject-a", 1);
     let out = oraclemcp_core::oracle_query_execute(
         &grants,
+        &classifier,
+        &session,
         &auditor,
         &executor,
         &subject,

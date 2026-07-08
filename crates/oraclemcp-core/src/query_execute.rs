@@ -10,12 +10,25 @@
 //! outcome. The executor is injected so this handler (and the one-way boundary)
 //! stays engine-free and unit-testable.
 //!
+//! **SEC-1 (bead iec3.2.34): the stored grant is never the sole authority.**
+//! Before the grant is even consulted, this handler re-classifies the statement
+//! and re-gates it against the *live* [`SessionLevelState`] — exactly mirroring
+//! the served write-apply path `execute_sql_inner` (crates/oraclemcp
+//! `dispatch/mod.rs`). A grant minted at an elevated level, or whose elevation
+//! window has since lapsed, must not run once the session no longer permits the
+//! statement. Re-proving at apply-time (never trusting the stored verdict) is the
+//! SEC-1 property; a refusal here returns the same typed [`ErrorEnvelope`] the
+//! served surface's gate would.
+//!
 //! In P1 this executes the approved statement *without* the execute-in-savepoint
 //! ground-truth preview — that is P2-3.
 
 use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
-use oraclemcp_guard::{ExecGrantBinding, ExecGrantError, ExecGrantStore, OperatingLevel};
+use oraclemcp_guard::{
+    BlockReason, Classifier, ExecGrantBinding, ExecGrantError, ExecGrantStore, GuardDecision,
+    LevelDecision, OperatingLevel, SessionLevelState,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -115,11 +128,75 @@ fn audit_error_to_envelope(e: oraclemcp_audit::AuditError) -> ErrorEnvelope {
     ErrorEnvelope::new(ErrorClass::Internal, format!("audit append failed: {e}"))
 }
 
+/// Build the typed refusal for a re-gate whose decision was not [`LevelDecision::Allow`],
+/// mirroring the served write-apply path's `execute_gate_error`/`gate_error`
+/// (crates/oraclemcp `dispatch/mod.rs`) so a grant-authorized statement the *live*
+/// session no longer permits returns the SAME [`ErrorEnvelope`] the served surface
+/// would. Never called for `Allow` (the caller handles that); any unexpected variant
+/// fails closed.
+fn gate_refusal(
+    decision: &GuardDecision,
+    gate: LevelDecision,
+    session: &SessionLevelState,
+) -> ErrorEnvelope {
+    match gate {
+        LevelDecision::RequireStepUp { target } => ErrorEnvelope::new(
+            ErrorClass::OperatingLevelTooLow,
+            format!(
+                "statement requires {} but the active session level is {}",
+                target.as_str(),
+                session.effective_level().as_str()
+            ),
+        )
+        .with_suggested_tool("oracle_preview_sql")
+        .with_next_step("call oracle_preview_sql to inspect the required level and profile ceiling")
+        .with_next_step(
+            "call oracle_set_session_level to preview a temporary elevation, or keep the profile read-only",
+        ),
+        LevelDecision::Blocked { reason } => match reason {
+            BlockReason::Forbidden => ErrorEnvelope::new(
+                ErrorClass::ForbiddenStatement,
+                format!(
+                    "statement is forbidden by the SQL classifier: {}",
+                    decision.reason
+                ),
+            )
+            .with_next_step(decision.safe_alternative.clone().unwrap_or_else(|| {
+                "rewrite the statement as a simpler, single SQL statement".to_owned()
+            })),
+            BlockReason::ExceedsCeiling { required, ceiling } => ErrorEnvelope::new(
+                ErrorClass::OperatingLevelTooLow,
+                format!(
+                    "statement requires {} but the active profile ceiling is {}",
+                    required.as_str(),
+                    ceiling.as_str()
+                ),
+            )
+            .with_suggested_tool("oracle_list_profiles")
+            .with_next_step("choose a profile whose max_level permits the statement"),
+            // `BlockReason` is #[non_exhaustive]; fail closed on any future variant.
+            _ => ErrorEnvelope::new(ErrorClass::PolicyDenied, "statement is blocked by policy"),
+        },
+        // `Allow` is handled by the caller; `LevelDecision` is #[non_exhaustive].
+        _ => ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "re-gate produced an unexpected decision",
+        ),
+    }
+}
+
 /// Run `oracle_query_execute`. `now` supplies audit timestamps (injected so the
 /// handler is pure/testable). Returns the structured execution result, or an
 /// [`ErrorEnvelope`] for grant/audit/execution failure.
+// A pure, fully-injected handler: the SEC-1 re-gate authority (`classifier`,
+// `session`), the grant store, auditor, executor, subject, params, and clock are
+// all dependencies passed in for testability — the same shape the audit/dispatch
+// handlers already allow this on.
+#[allow(clippy::too_many_arguments)]
 pub fn oracle_query_execute(
     grants: &ExecGrantStore,
+    classifier: &Classifier,
+    session: &SessionLevelState,
     auditor: &Auditor,
     executor: &dyn StatementExecutor,
     server_subject: &AuditSubject,
@@ -127,6 +204,19 @@ pub fn oracle_query_execute(
     mut now: impl FnMut() -> String,
 ) -> Result<Value, ErrorEnvelope> {
     let requested = parse_level(params.requested_level.as_deref())?;
+
+    // 0) SEC-1 (bead iec3.2.34): re-classify + re-gate BEFORE touching the grant
+    //    store or the database — the stored grant is never the sole authority.
+    //    This mirrors `execute_sql_inner` (crates/oraclemcp `dispatch/mod.rs`):
+    //    classify the exact statement and gate it against the LIVE session level,
+    //    and only proceed on `Allow`. A grant minted at an elevated level (or whose
+    //    elevation window has since lapsed) is refused here — with the same typed
+    //    envelope the served gate returns — before it can run.
+    let decision = classifier.classify(&params.sql);
+    let gate = decision.gate(session);
+    if !matches!(gate, LevelDecision::Allow) {
+        return Err(gate_refusal(&decision, gate, session));
+    }
 
     // 1) Consume the grant: single-use, digest, session, level, expiry.
     let binding = ExecGrantBinding::new(
@@ -282,6 +372,22 @@ mod tests {
         AuditSubject::new("oauth", "subject-1").with_authn_method("oauth")
     }
 
+    /// The default fail-closed classifier (no engine oracle), matching the served
+    /// surface's `DEFAULT_CLASSIFIER`.
+    fn classifier() -> Classifier {
+        Classifier::new(oraclemcp_guard::ClassifierConfig::new())
+    }
+
+    /// A session whose live level clears any classified statement, so the SEC-1
+    /// re-gate is a no-op `Allow` and these tests exercise the grant-consumption
+    /// paths exactly as before the re-gate was added.
+    fn session_admin() -> SessionLevelState {
+        let mut s = SessionLevelState::new(OperatingLevel::Admin, false);
+        s.set_current_level(OperatingLevel::Admin)
+            .expect("ADMIN is within an ADMIN ceiling");
+        s
+    }
+
     #[test]
     fn valid_grant_executes_once_and_audits_pre_and_post() {
         let grants = ExecGrantStore::new();
@@ -296,6 +402,8 @@ mod tests {
 
         let out = oracle_query_execute(
             &grants,
+            &classifier(),
+            &session_admin(),
             &aud,
             &exec,
             &subject(),
@@ -320,6 +428,8 @@ mod tests {
         // Replay is rejected (single-use) and never reaches the executor.
         let err = oracle_query_execute(
             &grants,
+            &classifier(),
+            &session_admin(),
             &aud,
             &exec,
             &subject(),
@@ -344,6 +454,8 @@ mod tests {
         let exec = MockExecutor::ok(1);
         let err = oracle_query_execute(
             &grants,
+            &classifier(),
+            &session_admin(),
             &aud,
             &exec,
             &subject(),
@@ -373,8 +485,17 @@ mod tests {
         let mut stale = params(&tok, SQL, Some("READ_WRITE"));
         stale.generation = 2;
 
-        let err = oracle_query_execute(&grants, &aud, &exec, &subject(), &stale, clock())
-            .expect_err("stale generation rejected");
+        let err = oracle_query_execute(
+            &grants,
+            &classifier(),
+            &session_admin(),
+            &aud,
+            &exec,
+            &subject(),
+            &stale,
+            clock(),
+        )
+        .expect_err("stale generation rejected");
         assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
         assert_eq!(exec.call_count(), 0);
         assert!(
@@ -384,6 +505,8 @@ mod tests {
 
         let out = oracle_query_execute(
             &grants,
+            &classifier(),
+            &session_admin(),
             &aud,
             &exec,
             &subject(),
@@ -408,6 +531,8 @@ mod tests {
         let exec = MockExecutor::ok(0);
         let err = oracle_query_execute(
             &grants,
+            &classifier(),
+            &session_admin(),
             &aud,
             &exec,
             &subject(),
@@ -432,6 +557,8 @@ mod tests {
         let exec = MockExecutor::fail();
         let err = oracle_query_execute(
             &grants,
+            &classifier(),
+            &session_admin(),
             &aud,
             &exec,
             &subject(),
@@ -444,5 +571,79 @@ mod tests {
         assert_eq!(recs.len(), 2);
         assert_eq!(recs[0].outcome, AuditOutcome::Pending);
         assert_eq!(recs[1].outcome, AuditOutcome::Failed);
+    }
+
+    /// SEC-1 (bead iec3.2.34): the stored grant is not the sole authority. A grant
+    /// that is genuinely valid (correct digest, binding, generation, not expired,
+    /// level ≤ granted) is STILL refused at apply-time when the *live* session no
+    /// longer permits the statement — the re-classify + re-gate fires before the
+    /// grant is consumed or the executor is reached, exactly like `execute_sql_inner`.
+    /// The very same grant runs once the session is at a sufficient level, proving
+    /// the refusal was the current-level gate, not a defect in the grant.
+    #[test]
+    fn reclassify_refuses_grant_when_current_level_too_low() {
+        let grants = ExecGrantStore::new();
+        // A perfectly valid grant for the UPDATE at READ_WRITE.
+        let tok = grants.issue(
+            SQL,
+            binding(),
+            OperatingLevel::ReadWrite,
+            Duration::from_secs(60),
+        );
+        let (aud, sink) = auditor();
+        let exec = MockExecutor::ok(3);
+
+        // Live session sits at READ_ONLY (e.g. an elevation window has lapsed):
+        // ceiling READ_WRITE, but the current effective level is READ_ONLY.
+        let session_ro = SessionLevelState::new(OperatingLevel::ReadWrite, false);
+        assert_eq!(session_ro.effective_level(), OperatingLevel::ReadOnly);
+
+        let err = oracle_query_execute(
+            &grants,
+            &classifier(),
+            &session_ro,
+            &aud,
+            &exec,
+            &subject(),
+            &params(&tok, SQL, Some("READ_WRITE")),
+            clock(),
+        )
+        .expect_err("re-gate must refuse a write the live session no longer permits");
+        // Same typed refusal the served gate returns for an under-levelled statement.
+        assert_eq!(err.error_class, ErrorClass::OperatingLevelTooLow);
+        // The re-gate fires BEFORE the grant is consumed, the executor is reached,
+        // or any audit record is written.
+        assert_eq!(exec.call_count(), 0, "refused statement must not execute");
+        assert!(
+            sink.records().is_empty(),
+            "no audit before an apply-time re-gate refusal"
+        );
+
+        // The SAME grant is honoured once the session is genuinely at READ_WRITE:
+        // the re-gate now returns `Allow`, and the still-unconsumed grant executes.
+        let mut session_rw = SessionLevelState::new(OperatingLevel::ReadWrite, false);
+        session_rw
+            .set_current_level(OperatingLevel::ReadWrite)
+            .expect("READ_WRITE is within the ceiling");
+        let out = oracle_query_execute(
+            &grants,
+            &classifier(),
+            &session_rw,
+            &aud,
+            &exec,
+            &subject(),
+            &params(&tok, SQL, Some("READ_WRITE")),
+            clock(),
+        )
+        .expect("a genuinely-safe statement at a sufficient level still passes");
+        assert_eq!(out["executed"], json!(true));
+        assert_eq!(out["rows_affected"], json!(3));
+        assert_eq!(
+            exec.call_count(),
+            1,
+            "the re-provable statement runs exactly once"
+        );
+        // Now the audit chain has the pre/post pair for the one execution.
+        assert_eq!(sink.records().len(), 2);
     }
 }

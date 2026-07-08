@@ -6380,8 +6380,9 @@ mod sec1_stored_verdict_never_authorizes {
     /// invalidated. This is safe on the SERVED path because the write apply path
     /// (`execute_sql_inner`) RE-CLASSIFIES and RE-GATES against the live level
     /// BEFORE consuming the grant, so a now-forbidden DDL is refused anyway.
-    /// (The standalone `oraclemcp-core::oracle_query_execute` helper, which does
-    /// NOT re-gate, is NOT wired into this served surface — see the REPORT.)
+    /// (The standalone `oraclemcp-core::oracle_query_execute` helper now performs
+    /// the same re-classify + re-gate at apply-time — SEC-1, bead iec3.2.34 — so it
+    /// is safe-by-construction if ever wired; it remains unwired on this surface.)
     #[test]
     fn ttl_elevation_expiry_is_caught_by_reclassify_not_by_grant_invalidation() {
         // Ceiling DDL, base current READ_ONLY: a *temporary* elevation to DDL.
