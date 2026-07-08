@@ -59,8 +59,220 @@ use std::time::Duration;
 /// name an `oracledb::` path — so consumers (e.g. `oraclemcp doctor`'s trio-stack
 /// provenance) can report the *driver's* version without reaching for
 /// `env!("CARGO_PKG_VERSION")`, which would resolve to the wrong crate. Because
-/// the whole workspace pins `oracledb = "=0.8.0"`, this is `"0.8.0"`.
+/// the whole workspace pins `oracledb = "=0.8.1"`, this is `"0.8.1"`.
 pub const DRIVER_VERSION: &str = oracledb::VERSION;
+
+/// The X.509 validity window of a single wallet certificate, in Unix-epoch
+/// seconds (K1; iec3.6.6). Server-owned mirror of the driver's
+/// [`oracledb_protocol::tls::wallet::CertMetadata`] so no driver type crosses
+/// the adapter seam. Both fields are seconds since 1970-01-01T00:00:00Z (UTC),
+/// the form the certificate's `notBefore`/`notAfter` decode to — plain seconds
+/// keep this trivially comparable against the current time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletCertValidity {
+    /// `notBefore`: Unix-epoch seconds at/after which the certificate is valid.
+    pub not_before: i64,
+    /// `notAfter`: Unix-epoch seconds after which the certificate is expired.
+    pub not_after: i64,
+}
+
+/// Offline cert-expiry probe (K1; iec3.6.6): parse the certificates in the
+/// wallet directory `dir` and return each certificate's validity window.
+///
+/// This is the adapter seam for the driver's
+/// [`WalletContents::certificate_metadata()`](oracledb_protocol::tls::wallet::WalletContents::certificate_metadata):
+/// it maps every driver [`CertMetadata`](oracledb_protocol::tls::wallet::CertMetadata)
+/// onto the server-owned [`WalletCertValidity`], so no driver type leaks past
+/// this file. The wallet's own auto-login/primary precedence is honoured — the
+/// first wallet file that parses end to end (`ewallet.pem` → password-bearing
+/// `ewallet.p12` → `cwallet.sso`) supplies the certificates; a non-certificate
+/// or unparseable DER entry is silently skipped by the driver's
+/// `certificate_metadata()`.
+///
+/// Purely offline — it reads and parses the wallet files' bytes; it never opens
+/// a DB connection or touches the network. Returns an empty vector when no
+/// wallet file parses (there are then no certificates to age-check). Never
+/// surfaces a wallet path, password, or key material.
+#[must_use]
+pub fn wallet_certificate_validity(
+    dir: &std::path::Path,
+    password: Option<&str>,
+) -> Vec<WalletCertValidity> {
+    use oracledb_protocol::tls::sso::parse_cwallet_sso;
+    use oracledb_protocol::tls::wallet::{
+        p12_wallet_path, parse_ewallet_p12, parse_ewallet_pem, pem_wallet_path, sso_wallet_path,
+    };
+
+    // Precedence: the first wallet file that parses to usable contents supplies
+    // the certificates (mirrors the driver's wallet precedence). A
+    // password-less `ewallet.p12` is never selected as primary — matching
+    // `load_wallet`'s `have_p12 && password.is_some()`.
+    let contents = std::fs::read(pem_wallet_path(dir))
+        .ok()
+        .and_then(|bytes| parse_ewallet_pem(&bytes, password).ok())
+        .or_else(|| {
+            if password.is_some() {
+                std::fs::read(p12_wallet_path(dir))
+                    .ok()
+                    .and_then(|bytes| parse_ewallet_p12(&bytes, password).ok())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            std::fs::read(sso_wallet_path(dir))
+                .ok()
+                .and_then(|bytes| parse_cwallet_sso(&bytes).ok())
+        });
+
+    match contents {
+        Some(contents) => contents
+            .certificate_metadata()
+            .into_iter()
+            .map(|m| WalletCertValidity {
+                not_before: m.not_before,
+                not_after: m.not_after,
+            })
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Which wallet file in a wallet directory won the precedence chain. Server-owned
+/// mirror of the driver's [`oracledb::WalletFile`] so no driver type crosses the
+/// adapter seam (iec3.2.35).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WalletFileChoice {
+    /// `ewallet.pem` (PEM trust anchors + optional client identity).
+    Pem,
+    /// `ewallet.p12` (password-bearing PKCS#12 wallet).
+    P12,
+    /// `cwallet.sso` (SSO auto-login wallet).
+    Sso,
+}
+
+impl WalletFileChoice {
+    /// The on-disk file name of this wallet file.
+    #[must_use]
+    pub fn file_name(self) -> &'static str {
+        use oracledb_protocol::tls::wallet::{
+            P12_WALLET_FILE_NAME, PEM_WALLET_FILE_NAME, SSO_WALLET_FILE_NAME,
+        };
+        match self {
+            WalletFileChoice::Pem => PEM_WALLET_FILE_NAME,
+            WalletFileChoice::P12 => P12_WALLET_FILE_NAME,
+            WalletFileChoice::Sso => SSO_WALLET_FILE_NAME,
+        }
+    }
+}
+
+/// The authoritative wallet-precedence outcome the driver's resolver returns
+/// (iec3.2.35). Server-owned mirror of the driver's [`oracledb::WalletResolution`]
+/// — the drift-free source of truth the doctor's own posture inference is
+/// cross-checked against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletResolutionReport {
+    /// The wallet file that supplied the resolved identity.
+    pub chosen: WalletFileChoice,
+    /// The primary wallet the driver attempted before any fallthrough, or `None`
+    /// when the auto-login `cwallet.sso` was chosen directly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempted_primary: Option<WalletFileChoice>,
+    /// `true` when the primary was present-but-unusable and resolution fell
+    /// through to the auto-login `cwallet.sso`.
+    pub fell_through: bool,
+    /// Whether the attempted primary's failure was fallthrough-eligible.
+    pub fallthrough_eligible: bool,
+}
+
+/// Secret-free class of a wallet-resolution failure (iec3.2.35). Mirrors the
+/// driver's [`oracledb_protocol::tls::wallet::WalletError`] variant that
+/// [`resolve_wallet_choice`] surfaced on the error path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WalletResolveError {
+    /// No wallet file was present in the directory.
+    FileMissing,
+    /// A wallet file could not be read.
+    Io,
+    /// `ewallet.pem` was malformed.
+    Pem,
+    /// The wallet held no usable trust-anchor certificate.
+    NoCertificates,
+    /// `cwallet.sso` parsing failed.
+    Sso,
+    /// `cwallet.sso` parsing is not enabled in this build.
+    SsoNotEnabled,
+    /// A PKCS#12 (`ewallet.p12`) container failed to parse or decrypt.
+    Pkcs12,
+    /// An encrypted private key could not be decrypted (wrong/missing password
+    /// or unsupported scheme).
+    KeyDecrypt,
+    /// The wallet requires a password that was not supplied.
+    PasswordRequired,
+    /// A recognized wallet file used an unsupported format.
+    UnsupportedFormat,
+    /// A forward-compatible wallet error class not otherwise mapped.
+    Other,
+}
+
+/// Resolve which wallet file in `dir` wins the driver's precedence chain, via
+/// the driver's public [`oracledb::resolve_wallet`] (iec3.2.35).
+///
+/// This is the adapter seam over the driver's own resolver — the same decision a
+/// live connection makes, without the parsed key material. The doctor's offline
+/// posture probe re-derives this precedence with the driver's sans-I/O parsers
+/// (it needs the specific `WalletError` class the resolver discards on a
+/// successful fallthrough, and it must distinguish "no wallet files" from a
+/// hard failure); this seam lets a cross-check test pin that inference against
+/// the driver's authoritative outcome so the two can never drift.
+///
+/// Purely offline — the driver's resolver reads and parses the wallet files but
+/// opens no connection. The `Err` path maps the typed driver
+/// [`WalletError`](oracledb_protocol::tls::wallet::WalletError) onto the
+/// secret-free [`WalletResolveError`]; no wallet path, password, or key material
+/// is ever surfaced.
+pub fn resolve_wallet_choice(
+    dir: &std::path::Path,
+    password: Option<&str>,
+) -> Result<WalletResolutionReport, WalletResolveError> {
+    fn map_file(file: oracledb::WalletFile) -> WalletFileChoice {
+        match file {
+            oracledb::WalletFile::Pem => WalletFileChoice::Pem,
+            oracledb::WalletFile::P12 => WalletFileChoice::P12,
+            oracledb::WalletFile::Sso => WalletFileChoice::Sso,
+        }
+    }
+    fn map_err(err: &oracledb_protocol::tls::wallet::WalletError) -> WalletResolveError {
+        use oracledb_protocol::tls::wallet::WalletError;
+        match err {
+            WalletError::FileMissing(_) => WalletResolveError::FileMissing,
+            WalletError::Io { .. } => WalletResolveError::Io,
+            WalletError::Pem(_) => WalletResolveError::Pem,
+            WalletError::NoCertificates => WalletResolveError::NoCertificates,
+            WalletError::Sso(_) => WalletResolveError::Sso,
+            WalletError::SsoNotEnabled => WalletResolveError::SsoNotEnabled,
+            WalletError::Pkcs12(_) => WalletResolveError::Pkcs12,
+            WalletError::KeyDecrypt(_) => WalletResolveError::KeyDecrypt,
+            WalletError::PasswordRequired { .. } => WalletResolveError::PasswordRequired,
+            WalletError::UnsupportedFormat { .. } => WalletResolveError::UnsupportedFormat,
+            // The driver's `WalletError` is `#[non_exhaustive]`.
+            _ => WalletResolveError::Other,
+        }
+    }
+
+    match oracledb::resolve_wallet(dir, password) {
+        Ok(res) => Ok(WalletResolutionReport {
+            chosen: map_file(res.chosen),
+            attempted_primary: res.attempted_primary.map(map_file),
+            fell_through: res.fell_through,
+            fallthrough_eligible: res.fallthrough_eligible,
+        }),
+        Err(oracledb::Error::Wallet(w)) => Err(map_err(&w)),
+        Err(_) => Err(WalletResolveError::Other),
+    }
+}
 
 /// Map an asupersync cancellation/budget checkpoint failure to the
 /// timeout-class [`DbError::Cancelled`]. Used as the explicit before/after
@@ -3797,10 +4009,20 @@ mod driver {
                     inner.sdu(),
                     inner.supports_pipelining(),
                     inner.supports_oob(),
+                    inner.protocol_version(),
+                    inner.supports_fast_auth(),
                 )),
                 Err(_) => None,
             };
-            if let Some((version_tuple, sdu, supports_pipelining, supports_oob)) = driver_facts {
+            if let Some((
+                version_tuple,
+                sdu,
+                supports_pipelining,
+                supports_oob,
+                protocol_version,
+                supports_fast_auth,
+            )) = driver_facts
+            {
                 // ONE privilege-degradable dictionary query for edition +
                 // partitioning. `product_component_version` is broadly readable;
                 // `v$option` needs a catalog grant, so a low-privilege account
@@ -3836,6 +4058,8 @@ mod driver {
                     supports_oob,
                     edition,
                     partitioning,
+                    Some(protocol_version),
+                    Some(supports_fast_auth),
                 ));
             }
             super::db_checkpoint(cx, "oracle_db.describe.after")?;
@@ -5385,25 +5609,25 @@ mod driver_seam {
     }
 
     #[test]
-    fn pin_is_0_8_0_and_seam_intact() {
+    fn pin_is_0_8_1_and_seam_intact() {
         let root = workspace_root();
         let manifest =
             std::fs::read_to_string(root.join("Cargo.toml")).expect("read workspace Cargo.toml");
         assert!(
-            manifest.contains(r#"oracledb = { version = "=0.8.0", default-features = false }"#),
-            "workspace Cargo.toml must keep the oracledb dependency exactly pinned at =0.8.0"
+            manifest.contains(r#"oracledb = { version = "=0.8.1", default-features = false }"#),
+            "workspace Cargo.toml must keep the oracledb dependency exactly pinned at =0.8.1"
         );
 
         let lock = std::fs::read_to_string(root.join("Cargo.lock")).expect("read Cargo.lock");
         assert_eq!(
             lock_package_versions(&lock, "oracledb"),
-            vec!["0.8.0".to_owned()],
-            "Cargo.lock must resolve exactly one oracledb package at 0.8.0"
+            vec!["0.8.1".to_owned()],
+            "Cargo.lock must resolve exactly one oracledb package at 0.8.1"
         );
         assert_eq!(
             lock_package_versions(&lock, "oracledb-protocol"),
-            vec!["0.8.0".to_owned()],
-            "Cargo.lock must resolve the matching oracledb-protocol 0.8.0 package"
+            vec!["0.8.1".to_owned()],
+            "Cargo.lock must resolve the matching oracledb-protocol 0.8.1 package"
         );
 
         assert_eq!(

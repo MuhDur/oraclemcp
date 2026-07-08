@@ -19,10 +19,29 @@ it never regenerates them.
 | `good_sso/`                  | `cwallet.sso`                  | `auto_login_usable` — "auto-login (cwallet.sso) usable" |
 | `undecryptable_with_sso/`    | `ewallet.pem` + `cwallet.sso`  | `ewallet_undecryptable_sso_fallthrough` — "ewallet undecryptable (KeyDecrypt) — would fall through to cwallet.sso" |
 | `undecryptable_without_sso/` | `ewallet.pem`                  | `wallet_load_would_fail` — "wallet load would fail: KeyDecrypt, no auto-login fallback" |
+| `expired_cert/`              | `ewallet.pem` (cert only)      | `primary_usable`, but the K1 cert-expiry probe escalates the TNS/wallet check to a WARN — the certificate has expired |
 
 The `undecryptable_*` postures arise because the test probes the encrypted
 `ewallet.pem` with the **wrong** wallet password, so the driver's
 `parse_ewallet_pem` returns `WalletError::KeyDecrypt`.
+
+The `expired_cert/` fixture (K1; iec3.6.6) is a **cert-only** `ewallet.pem`
+(no private key, so no secret material) whose self-signed certificate was minted
+with an explicitly EXPIRED validity window (`notBefore=2020-01-01`,
+`notAfter=2020-02-01` UTC → `notAfter` epoch `1580515200`). The wallet parses as
+usable (`primary_usable`), but `doctor`'s offline cert-expiry probe — reading the
+cert through the `oraclemcp-db` seam over the driver's
+`WalletContents::certificate_metadata()` — reports a negative `days_until_expiry`
+and escalates the check to a WARN. An explicitly-past window keeps the test
+deterministic (never flakes on the run date):
+
+```bash
+SUBJ="/CN=oracle-test.invalid/O=Oracle Synthetic Test/C=US"
+openssl genrsa -out tmp.key 2048
+# Cert only (no key) with an EXPIRED validity window.
+openssl req -new -x509 -key tmp.key -out ewallet.pem -subj "$SUBJ" \
+  -not_before 20200101000000Z -not_after 20200201000000Z
+```
 
 ## Passwords
 

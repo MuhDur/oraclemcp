@@ -88,6 +88,13 @@ pub struct CheckResult {
     /// wallet directory, inferred without opening a live DB connection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wallet_posture: Option<DoctorWalletPostureReport>,
+    /// Offline cert-expiry diagnostic for the resolved wallet (K1; iec3.6.6):
+    /// the earliest `notAfter` across the wallet's certificates and the whole
+    /// days until it. Present only when the resolved wallet holds a parseable
+    /// certificate; drives a WARN when a cert is within the expiry threshold or
+    /// already expired.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wallet_cert_expiry: Option<DoctorWalletCertExpiry>,
     /// Parsed Oracle error code, when a check failed because Oracle returned ORA-NNNNN.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ora_code: Option<i32>,
@@ -105,6 +112,7 @@ impl CheckResult {
             auth_mode: None,
             wallet_error: None,
             wallet_posture: None,
+            wallet_cert_expiry: None,
             ora_code: None,
         }
     }
@@ -126,6 +134,10 @@ impl CheckResult {
     }
     fn with_wallet_posture(mut self, posture: DoctorWalletPostureReport) -> Self {
         self.wallet_posture = Some(posture);
+        self
+    }
+    fn with_wallet_cert_expiry(mut self, expiry: Option<DoctorWalletCertExpiry>) -> Self {
+        self.wallet_cert_expiry = expiry;
         self
     }
     fn with_oracle_error(mut self, message: &str) -> Self {
@@ -1084,11 +1096,97 @@ fn check_tns_admin(ctx: &DoctorContext) -> CheckResult {
     }
 }
 
+/// Offline cert-expiry diagnostic for a resolved wallet (K1; iec3.6.6). Both
+/// fields are Unix-epoch seconds / whole days; secret-free (never a path,
+/// password, or key material).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct DoctorWalletCertExpiry {
+    /// Earliest `notAfter` across the wallet's certificates (Unix-epoch seconds).
+    pub expires_at: i64,
+    /// Whole days from now until [`Self::expires_at`]; negative when the cert has
+    /// already expired.
+    pub days_until_expiry: i64,
+}
+
+/// A wallet certificate at or within this many days of expiry (or already
+/// expired) escalates the TNS/wallet check to a WARN (K1; iec3.6.6).
+const WALLET_CERT_EXPIRY_WARN_DAYS: i64 = 30;
+
+/// Current wall-clock time as Unix-epoch seconds (saturating; a pre-epoch clock
+/// reads as `0`).
+fn now_unix_secs() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+        .unwrap_or(0)
+}
+
+/// Read the resolved wallet's certificate validity windows through the
+/// `oraclemcp-db` adapter seam (K1; iec3.6.6) and reduce them to the *earliest*
+/// expiry. Purely offline (parses the wallet files' certs, no DB). Returns
+/// `None` when the wallet holds no parseable certificate.
+fn wallet_cert_expiry(dir: &Path, password: Option<&str>) -> Option<DoctorWalletCertExpiry> {
+    let earliest = oraclemcp_db::wallet_certificate_validity(dir, password)
+        .into_iter()
+        .map(|c| c.not_after)
+        .min()?;
+    let days_until_expiry = (earliest - now_unix_secs()).div_euclid(86_400);
+    Some(DoctorWalletCertExpiry {
+        expires_at: earliest,
+        days_until_expiry,
+    })
+}
+
+/// Fold the wallet's cert-expiry window into an assembled TNS/wallet result
+/// (K1; iec3.6.6): always attach the diagnostic, and escalate a `Pass` to `Warn`
+/// when a certificate is within [`WALLET_CERT_EXPIRY_WARN_DAYS`] of expiry (or
+/// already expired). A posture that is already `Warn`/`Fail` keeps its status
+/// and fix; the cert window is still recorded.
+fn fold_cert_expiry(
+    result: CheckResult,
+    cert_expiry: Option<DoctorWalletCertExpiry>,
+) -> CheckResult {
+    let Some(expiry) = cert_expiry else {
+        return result;
+    };
+    let mut result = result.with_wallet_cert_expiry(Some(expiry));
+    if expiry.days_until_expiry < WALLET_CERT_EXPIRY_WARN_DAYS && result.status == CheckStatus::Pass
+    {
+        let (phrase, fix) = if expiry.days_until_expiry < 0 {
+            (
+                format!(
+                    "wallet certificate expired {} day(s) ago",
+                    -expiry.days_until_expiry
+                ),
+                "renew/replace the expired wallet certificate before it blocks TLS connections",
+            )
+        } else {
+            (
+                format!(
+                    "wallet certificate expires in {} day(s)",
+                    expiry.days_until_expiry
+                ),
+                "renew/replace the wallet certificate before it expires and blocks TLS connections",
+            )
+        };
+        result.status = CheckStatus::Warn;
+        result.detail = format!("{} — {phrase}", result.detail);
+        result = result.with_fix(fix);
+    }
+    result
+}
+
 /// Fold the offline wallet-posture probe (B2.1) into the TNS/wallet check when a
 /// wallet directory resolves and holds wallet material. When the resolved
 /// directory has no wallet files (e.g. a TNS_ADMIN dir with only `tnsnames.ora`),
 /// the base "configured directory resolves" result is kept unchanged — EZConnect
 /// / system-trust connections legitimately need no wallet.
+///
+/// K1 (iec3.6.6): when the resolved wallet holds a parseable certificate, its
+/// earliest expiry is read offline through the `oraclemcp-db` seam and folded in
+/// — a near-/already-expired cert escalates an otherwise-usable wallet to WARN.
 fn attach_wallet_posture(ctx: &DoctorContext, base: CheckResult) -> CheckResult {
     let Some(dir) = oracledb_protocol::tls::wallet::resolve_wallet_dir(
         ctx.wallet_location.as_deref(),
@@ -1097,9 +1195,10 @@ fn attach_wallet_posture(ctx: &DoctorContext, base: CheckResult) -> CheckResult 
         return base;
     };
     let report = probe_wallet_posture(&dir, ctx.wallet_password.as_deref());
-    match report.posture {
+    let cert_expiry = wallet_cert_expiry(&dir, ctx.wallet_password.as_deref());
+    let result = match report.posture {
         // Nothing wallet-shaped in the resolved directory: keep the base result.
-        DoctorWalletPosture::NoWalletFiles => base,
+        DoctorWalletPosture::NoWalletFiles => return base,
         // A usable primary or auto-login wallet: report the posture as a Pass.
         DoctorWalletPosture::PrimaryUsable | DoctorWalletPosture::AutoLoginUsable => {
             CheckResult::new(2, "TNS/wallet", CheckStatus::Pass, report.summary.clone())
@@ -1123,7 +1222,8 @@ fn attach_wallet_posture(ctx: &DoctorContext, base: CheckResult) -> CheckResult 
                 )
                 .with_wallet_posture(report)
         }
-    }
+    };
+    fold_cert_expiry(result, cert_expiry)
 }
 
 /// Why a connection attempt's *authentication / transport* step failed, as a

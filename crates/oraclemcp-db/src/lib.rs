@@ -91,7 +91,8 @@ pub use catalog_extract::{
 };
 pub use connection::{
     DRIVER_VERSION, DbmsOutput, ExecuteOutcome, OracleConnection, OracleRoutineArg,
-    RustOracleConnection,
+    RustOracleConnection, WalletCertValidity, WalletFileChoice, WalletResolutionReport,
+    WalletResolveError, resolve_wallet_choice, wallet_certificate_validity,
 };
 pub use doctor::{OracleDriverPosture, detect_oracle_driver, oracle_driver_compiled};
 pub use drcp::{DrcpConfig, SessionPurity};

@@ -168,6 +168,18 @@ pub struct ServerFeatures {
     /// the account cannot read the view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partitioning: Option<bool>,
+    /// The negotiated TTC protocol version from the server's ACCEPT packet (the
+    /// `TNS_VERSION_*` level the client and server agreed on, e.g. `319` for a
+    /// 19c+/23ai-era server). Driver-reported (K2; iec3.6.1); omitted when
+    /// unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<u16>,
+    /// Whether the session authenticated over the combined fast-auth bundle (the
+    /// single-round-trip 23ai-era path); `false` means the classic
+    /// protocol-negotiation handshake was used. Driver-reported (K2; iec3.6.1);
+    /// omitted when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_fast_auth: Option<bool>,
 }
 
 impl ServerFeatures {
@@ -179,7 +191,10 @@ impl ServerFeatures {
     ///   facts.
     /// - `edition` / `partitioning`: the dictionary-probed values, already
     ///   `None` when the privilege-degradable query returned nothing.
+    /// - `protocol_version` / `supports_fast_auth`: the driver's negotiated TTC
+    ///   protocol version and fast-auth facts (K2), `None` when unknown.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn from_probe(
         version_tuple: Option<(u8, u8, u8, u8, u8)>,
         sdu: usize,
@@ -187,6 +202,8 @@ impl ServerFeatures {
         supports_oob: bool,
         edition: Option<String>,
         partitioning: Option<bool>,
+        protocol_version: Option<u16>,
+        supports_fast_auth: Option<bool>,
     ) -> Self {
         let version = version_tuple.map(ServerVersion::from_tuple);
         let derived = version.map(|v| derive_version_capabilities(v.major));
@@ -201,6 +218,8 @@ impl ServerFeatures {
             supports_soda: derived.map(|d| d.supports_soda),
             edition,
             partitioning,
+            protocol_version,
+            supports_fast_auth,
         }
     }
 }
@@ -277,6 +296,8 @@ mod tests {
             false,
             Some("Oracle Database 23ai Free".to_owned()),
             Some(false),
+            Some(319),
+            Some(true),
         );
         assert_eq!(f.version, Some(ServerVersion::from_tuple((23, 0, 0, 0, 0))));
         assert_eq!(f.sdu, Some(8192));
@@ -288,11 +309,22 @@ mod tests {
         assert_eq!(f.supports_soda, Some(true));
         assert_eq!(f.edition.as_deref(), Some("Oracle Database 23ai Free"));
         assert_eq!(f.partitioning, Some(false));
+        assert_eq!(f.protocol_version, Some(319));
+        assert_eq!(f.supports_fast_auth, Some(true));
     }
 
     #[test]
     fn from_probe_with_21c_tuple_infers_json_not_vector() {
-        let f = ServerFeatures::from_probe(Some((21, 3, 0, 0, 0)), 8192, true, true, None, None);
+        let f = ServerFeatures::from_probe(
+            Some((21, 3, 0, 0, 0)),
+            8192,
+            true,
+            true,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(f.supports_json, Some(true));
         assert_eq!(f.supports_vector, Some(false));
         assert_eq!(f.supports_boolean, Some(false));
@@ -304,6 +336,15 @@ mod tests {
             json.get("partitioning").is_none(),
             "partitioning omitted when None"
         );
+        // K2 accessors unknown here → omitted from JSON.
+        assert!(
+            json.get("protocol_version").is_none(),
+            "protocol_version omitted when None"
+        );
+        assert!(
+            json.get("supports_fast_auth").is_none(),
+            "supports_fast_auth omitted when None"
+        );
         // Driver + derived facts still present.
         assert_eq!(json["supports_json"], serde_json::json!(true));
         assert_eq!(json["version"]["major"], serde_json::json!(21));
@@ -311,7 +352,16 @@ mod tests {
 
     #[test]
     fn from_probe_with_18c_tuple_infers_soda_only() {
-        let f = ServerFeatures::from_probe(Some((18, 0, 0, 0, 0)), 8192, false, false, None, None);
+        let f = ServerFeatures::from_probe(
+            Some((18, 0, 0, 0, 0)),
+            8192,
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(f.supports_soda, Some(true));
         assert_eq!(f.supports_json, Some(false));
         assert_eq!(f.supports_vector, Some(false));
@@ -322,7 +372,8 @@ mod tests {
     fn none_version_tuple_degrades_derived_helpers() {
         // No version negotiated: every version-derived field is None (omitted),
         // but the driver-negotiated facts still report.
-        let f = ServerFeatures::from_probe(None, 8192, true, false, None, None);
+        let f =
+            ServerFeatures::from_probe(None, 8192, true, false, None, None, Some(319), Some(false));
         assert!(f.version.is_none());
         assert!(f.supports_vector.is_none());
         assert!(f.supports_json.is_none());
@@ -330,6 +381,9 @@ mod tests {
         assert!(f.supports_soda.is_none());
         assert_eq!(f.sdu, Some(8192));
         assert_eq!(f.supports_pipelining, Some(true));
+        // K2 driver-negotiated accessors are independent of the version tuple.
+        assert_eq!(f.protocol_version, Some(319));
+        assert_eq!(f.supports_fast_auth, Some(false));
 
         let json = serde_json::to_value(&f).expect("serialize");
         assert!(json.get("version").is_none(), "version omitted when None");
@@ -357,6 +411,8 @@ mod tests {
             true,
             false,
             Some("Oracle Database 23ai Free".to_owned()),
+            Some(true),
+            Some(319),
             Some(true),
         );
         let s = serde_json::to_string(&f).expect("serialize");

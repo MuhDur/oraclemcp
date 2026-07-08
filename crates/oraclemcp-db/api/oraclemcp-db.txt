@@ -1788,6 +1788,156 @@ pub type oraclemcp_db::ViewTier::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ViewTier where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ViewTier where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::ViewTier::vzip(self) -> V
+pub enum oraclemcp_db::WalletFileChoice
+pub oraclemcp_db::WalletFileChoice::P12
+pub oraclemcp_db::WalletFileChoice::Pem
+pub oraclemcp_db::WalletFileChoice::Sso
+impl oraclemcp_db::WalletFileChoice
+pub fn oraclemcp_db::WalletFileChoice::file_name(self) -> &'static str
+impl core::clone::Clone for oraclemcp_db::WalletFileChoice
+pub fn oraclemcp_db::WalletFileChoice::clone(&self) -> oraclemcp_db::WalletFileChoice
+impl core::cmp::Eq for oraclemcp_db::WalletFileChoice
+impl core::cmp::PartialEq for oraclemcp_db::WalletFileChoice
+pub fn oraclemcp_db::WalletFileChoice::eq(&self, &oraclemcp_db::WalletFileChoice) -> bool
+impl core::fmt::Debug for oraclemcp_db::WalletFileChoice
+pub fn oraclemcp_db::WalletFileChoice::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::WalletFileChoice
+impl core::marker::StructuralPartialEq for oraclemcp_db::WalletFileChoice
+impl serde_core::ser::Serialize for oraclemcp_db::WalletFileChoice
+pub fn oraclemcp_db::WalletFileChoice::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::WalletFileChoice
+pub fn oraclemcp_db::WalletFileChoice::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::WalletFileChoice
+impl core::marker::Send for oraclemcp_db::WalletFileChoice
+impl core::marker::Sync for oraclemcp_db::WalletFileChoice
+impl core::marker::Unpin for oraclemcp_db::WalletFileChoice
+impl core::marker::UnsafeUnpin for oraclemcp_db::WalletFileChoice
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::WalletFileChoice
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::WalletFileChoice
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::WalletFileChoice where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::WalletFileChoice where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::WalletFileChoice where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::WalletFileChoice::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::WalletFileChoice where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::WalletFileChoice where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::WalletFileChoice where U: core::convert::From<T>
+pub fn oraclemcp_db::WalletFileChoice::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::WalletFileChoice where U: core::convert::Into<T>
+pub type oraclemcp_db::WalletFileChoice::Error = core::convert::Infallible
+pub fn oraclemcp_db::WalletFileChoice::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::WalletFileChoice where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::WalletFileChoice::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::WalletFileChoice::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::WalletFileChoice where T: core::clone::Clone
+pub type oraclemcp_db::WalletFileChoice::Owned = T
+pub fn oraclemcp_db::WalletFileChoice::clone_into(&self, &mut T)
+pub fn oraclemcp_db::WalletFileChoice::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::WalletFileChoice
+impl<T> core::any::Any for oraclemcp_db::WalletFileChoice where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::WalletFileChoice::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::WalletFileChoice where T: ?core::marker::Sized
+pub fn oraclemcp_db::WalletFileChoice::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::WalletFileChoice where T: ?core::marker::Sized
+pub fn oraclemcp_db::WalletFileChoice::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::WalletFileChoice where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::WalletFileChoice::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::WalletFileChoice
+pub fn oraclemcp_db::WalletFileChoice::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::WalletFileChoice
+pub type oraclemcp_db::WalletFileChoice::Init = T
+pub const oraclemcp_db::WalletFileChoice::ALIGN: usize
+pub unsafe fn oraclemcp_db::WalletFileChoice::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::WalletFileChoice::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::WalletFileChoice::drop(usize)
+pub unsafe fn oraclemcp_db::WalletFileChoice::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::WalletFileChoice
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::WalletFileChoice
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::WalletFileChoice where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::WalletFileChoice
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::WalletFileChoice
+impl<T> typenum::type_operators::Same for oraclemcp_db::WalletFileChoice
+pub type oraclemcp_db::WalletFileChoice::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::WalletFileChoice where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::WalletFileChoice where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::WalletFileChoice::vzip(self) -> V
+pub enum oraclemcp_db::WalletResolveError
+pub oraclemcp_db::WalletResolveError::FileMissing
+pub oraclemcp_db::WalletResolveError::Io
+pub oraclemcp_db::WalletResolveError::KeyDecrypt
+pub oraclemcp_db::WalletResolveError::NoCertificates
+pub oraclemcp_db::WalletResolveError::Other
+pub oraclemcp_db::WalletResolveError::PasswordRequired
+pub oraclemcp_db::WalletResolveError::Pem
+pub oraclemcp_db::WalletResolveError::Pkcs12
+pub oraclemcp_db::WalletResolveError::Sso
+pub oraclemcp_db::WalletResolveError::SsoNotEnabled
+pub oraclemcp_db::WalletResolveError::UnsupportedFormat
+impl core::clone::Clone for oraclemcp_db::WalletResolveError
+pub fn oraclemcp_db::WalletResolveError::clone(&self) -> oraclemcp_db::WalletResolveError
+impl core::cmp::Eq for oraclemcp_db::WalletResolveError
+impl core::cmp::PartialEq for oraclemcp_db::WalletResolveError
+pub fn oraclemcp_db::WalletResolveError::eq(&self, &oraclemcp_db::WalletResolveError) -> bool
+impl core::fmt::Debug for oraclemcp_db::WalletResolveError
+pub fn oraclemcp_db::WalletResolveError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::WalletResolveError
+impl core::marker::StructuralPartialEq for oraclemcp_db::WalletResolveError
+impl serde_core::ser::Serialize for oraclemcp_db::WalletResolveError
+pub fn oraclemcp_db::WalletResolveError::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::WalletResolveError
+pub fn oraclemcp_db::WalletResolveError::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::WalletResolveError
+impl core::marker::Send for oraclemcp_db::WalletResolveError
+impl core::marker::Sync for oraclemcp_db::WalletResolveError
+impl core::marker::Unpin for oraclemcp_db::WalletResolveError
+impl core::marker::UnsafeUnpin for oraclemcp_db::WalletResolveError
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::WalletResolveError
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::WalletResolveError
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::WalletResolveError where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::WalletResolveError where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::WalletResolveError where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::WalletResolveError::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::WalletResolveError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::WalletResolveError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::WalletResolveError where U: core::convert::From<T>
+pub fn oraclemcp_db::WalletResolveError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::WalletResolveError where U: core::convert::Into<T>
+pub type oraclemcp_db::WalletResolveError::Error = core::convert::Infallible
+pub fn oraclemcp_db::WalletResolveError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::WalletResolveError where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::WalletResolveError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::WalletResolveError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::WalletResolveError where T: core::clone::Clone
+pub type oraclemcp_db::WalletResolveError::Owned = T
+pub fn oraclemcp_db::WalletResolveError::clone_into(&self, &mut T)
+pub fn oraclemcp_db::WalletResolveError::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::WalletResolveError
+impl<T> core::any::Any for oraclemcp_db::WalletResolveError where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::WalletResolveError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::WalletResolveError where T: ?core::marker::Sized
+pub fn oraclemcp_db::WalletResolveError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::WalletResolveError where T: ?core::marker::Sized
+pub fn oraclemcp_db::WalletResolveError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::WalletResolveError where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::WalletResolveError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::WalletResolveError
+pub fn oraclemcp_db::WalletResolveError::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::WalletResolveError
+pub type oraclemcp_db::WalletResolveError::Init = T
+pub const oraclemcp_db::WalletResolveError::ALIGN: usize
+pub unsafe fn oraclemcp_db::WalletResolveError::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::WalletResolveError::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::WalletResolveError::drop(usize)
+pub unsafe fn oraclemcp_db::WalletResolveError::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::WalletResolveError
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::WalletResolveError
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::WalletResolveError where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::WalletResolveError
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::WalletResolveError
+impl<T> typenum::type_operators::Same for oraclemcp_db::WalletResolveError
+pub type oraclemcp_db::WalletResolveError::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::WalletResolveError where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::WalletResolveError where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::WalletResolveError::vzip(self) -> V
 pub struct oraclemcp_db::AdbConnectInfo
 pub oraclemcp_db::AdbConnectInfo::alias: core::option::Option<alloc::string::String>
 pub oraclemcp_db::AdbConnectInfo::descriptor: bool
@@ -5567,8 +5717,10 @@ pub fn oraclemcp_db::SerializeOptions::vzip(self) -> V
 pub struct oraclemcp_db::ServerFeatures
 pub oraclemcp_db::ServerFeatures::edition: core::option::Option<alloc::string::String>
 pub oraclemcp_db::ServerFeatures::partitioning: core::option::Option<bool>
+pub oraclemcp_db::ServerFeatures::protocol_version: core::option::Option<u16>
 pub oraclemcp_db::ServerFeatures::sdu: core::option::Option<usize>
 pub oraclemcp_db::ServerFeatures::supports_boolean: core::option::Option<bool>
+pub oraclemcp_db::ServerFeatures::supports_fast_auth: core::option::Option<bool>
 pub oraclemcp_db::ServerFeatures::supports_json: core::option::Option<bool>
 pub oraclemcp_db::ServerFeatures::supports_oob: core::option::Option<bool>
 pub oraclemcp_db::ServerFeatures::supports_pipelining: core::option::Option<bool>
@@ -5576,7 +5728,7 @@ pub oraclemcp_db::ServerFeatures::supports_soda: core::option::Option<bool>
 pub oraclemcp_db::ServerFeatures::supports_vector: core::option::Option<bool>
 pub oraclemcp_db::ServerFeatures::version: core::option::Option<oraclemcp_db::ServerVersion>
 impl oraclemcp_db::ServerFeatures
-pub fn oraclemcp_db::ServerFeatures::from_probe(core::option::Option<(u8, u8, u8, u8, u8)>, usize, bool, bool, core::option::Option<alloc::string::String>, core::option::Option<bool>) -> Self
+pub fn oraclemcp_db::ServerFeatures::from_probe(core::option::Option<(u8, u8, u8, u8, u8)>, usize, bool, bool, core::option::Option<alloc::string::String>, core::option::Option<bool>, core::option::Option<u16>, core::option::Option<bool>) -> Self
 impl core::clone::Clone for oraclemcp_db::ServerFeatures
 pub fn oraclemcp_db::ServerFeatures::clone(&self) -> oraclemcp_db::ServerFeatures
 impl core::cmp::Eq for oraclemcp_db::ServerFeatures
@@ -6394,6 +6546,75 @@ pub type oraclemcp_db::ViewDescription::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ViewDescription where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ViewDescription where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::ViewDescription::vzip(self) -> V
+pub struct oraclemcp_db::WalletCertValidity
+pub oraclemcp_db::WalletCertValidity::not_after: i64
+pub oraclemcp_db::WalletCertValidity::not_before: i64
+impl core::clone::Clone for oraclemcp_db::WalletCertValidity
+pub fn oraclemcp_db::WalletCertValidity::clone(&self) -> oraclemcp_db::WalletCertValidity
+impl core::cmp::Eq for oraclemcp_db::WalletCertValidity
+impl core::cmp::PartialEq for oraclemcp_db::WalletCertValidity
+pub fn oraclemcp_db::WalletCertValidity::eq(&self, &oraclemcp_db::WalletCertValidity) -> bool
+impl core::fmt::Debug for oraclemcp_db::WalletCertValidity
+pub fn oraclemcp_db::WalletCertValidity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::WalletCertValidity
+impl core::marker::StructuralPartialEq for oraclemcp_db::WalletCertValidity
+impl serde_core::ser::Serialize for oraclemcp_db::WalletCertValidity
+pub fn oraclemcp_db::WalletCertValidity::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::WalletCertValidity
+pub fn oraclemcp_db::WalletCertValidity::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::WalletCertValidity
+impl core::marker::Send for oraclemcp_db::WalletCertValidity
+impl core::marker::Sync for oraclemcp_db::WalletCertValidity
+impl core::marker::Unpin for oraclemcp_db::WalletCertValidity
+impl core::marker::UnsafeUnpin for oraclemcp_db::WalletCertValidity
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::WalletCertValidity
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::WalletCertValidity
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::WalletCertValidity where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::WalletCertValidity where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::WalletCertValidity where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::WalletCertValidity::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::WalletCertValidity where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::WalletCertValidity where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::WalletCertValidity where U: core::convert::From<T>
+pub fn oraclemcp_db::WalletCertValidity::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::WalletCertValidity where U: core::convert::Into<T>
+pub type oraclemcp_db::WalletCertValidity::Error = core::convert::Infallible
+pub fn oraclemcp_db::WalletCertValidity::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::WalletCertValidity where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::WalletCertValidity::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::WalletCertValidity::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::WalletCertValidity where T: core::clone::Clone
+pub type oraclemcp_db::WalletCertValidity::Owned = T
+pub fn oraclemcp_db::WalletCertValidity::clone_into(&self, &mut T)
+pub fn oraclemcp_db::WalletCertValidity::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::WalletCertValidity
+impl<T> core::any::Any for oraclemcp_db::WalletCertValidity where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::WalletCertValidity::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::WalletCertValidity where T: ?core::marker::Sized
+pub fn oraclemcp_db::WalletCertValidity::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::WalletCertValidity where T: ?core::marker::Sized
+pub fn oraclemcp_db::WalletCertValidity::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::WalletCertValidity where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::WalletCertValidity::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::WalletCertValidity
+pub fn oraclemcp_db::WalletCertValidity::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::WalletCertValidity
+pub type oraclemcp_db::WalletCertValidity::Init = T
+pub const oraclemcp_db::WalletCertValidity::ALIGN: usize
+pub unsafe fn oraclemcp_db::WalletCertValidity::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::WalletCertValidity::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::WalletCertValidity::drop(usize)
+pub unsafe fn oraclemcp_db::WalletCertValidity::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::WalletCertValidity
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::WalletCertValidity
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::WalletCertValidity where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::WalletCertValidity
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::WalletCertValidity
+impl<T> typenum::type_operators::Same for oraclemcp_db::WalletCertValidity
+pub type oraclemcp_db::WalletCertValidity::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::WalletCertValidity where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::WalletCertValidity where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::WalletCertValidity::vzip(self) -> V
 pub struct oraclemcp_db::WalletContents
 pub oraclemcp_db::WalletContents::aliases: alloc::vec::Vec<alloc::string::String>
 pub oraclemcp_db::WalletContents::dir: std::path::PathBuf
@@ -6530,6 +6751,77 @@ pub type oraclemcp_db::WalletMode::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::WalletMode where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::WalletMode where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::WalletMode::vzip(self) -> V
+pub struct oraclemcp_db::WalletResolutionReport
+pub oraclemcp_db::WalletResolutionReport::attempted_primary: core::option::Option<oraclemcp_db::WalletFileChoice>
+pub oraclemcp_db::WalletResolutionReport::chosen: oraclemcp_db::WalletFileChoice
+pub oraclemcp_db::WalletResolutionReport::fallthrough_eligible: bool
+pub oraclemcp_db::WalletResolutionReport::fell_through: bool
+impl core::clone::Clone for oraclemcp_db::WalletResolutionReport
+pub fn oraclemcp_db::WalletResolutionReport::clone(&self) -> oraclemcp_db::WalletResolutionReport
+impl core::cmp::Eq for oraclemcp_db::WalletResolutionReport
+impl core::cmp::PartialEq for oraclemcp_db::WalletResolutionReport
+pub fn oraclemcp_db::WalletResolutionReport::eq(&self, &oraclemcp_db::WalletResolutionReport) -> bool
+impl core::fmt::Debug for oraclemcp_db::WalletResolutionReport
+pub fn oraclemcp_db::WalletResolutionReport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::WalletResolutionReport
+impl core::marker::StructuralPartialEq for oraclemcp_db::WalletResolutionReport
+impl serde_core::ser::Serialize for oraclemcp_db::WalletResolutionReport
+pub fn oraclemcp_db::WalletResolutionReport::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::WalletResolutionReport
+pub fn oraclemcp_db::WalletResolutionReport::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::WalletResolutionReport
+impl core::marker::Send for oraclemcp_db::WalletResolutionReport
+impl core::marker::Sync for oraclemcp_db::WalletResolutionReport
+impl core::marker::Unpin for oraclemcp_db::WalletResolutionReport
+impl core::marker::UnsafeUnpin for oraclemcp_db::WalletResolutionReport
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::WalletResolutionReport
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::WalletResolutionReport
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::WalletResolutionReport where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::WalletResolutionReport where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::WalletResolutionReport where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::WalletResolutionReport::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::WalletResolutionReport where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::WalletResolutionReport where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::WalletResolutionReport where U: core::convert::From<T>
+pub fn oraclemcp_db::WalletResolutionReport::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::WalletResolutionReport where U: core::convert::Into<T>
+pub type oraclemcp_db::WalletResolutionReport::Error = core::convert::Infallible
+pub fn oraclemcp_db::WalletResolutionReport::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::WalletResolutionReport where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::WalletResolutionReport::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::WalletResolutionReport::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::WalletResolutionReport where T: core::clone::Clone
+pub type oraclemcp_db::WalletResolutionReport::Owned = T
+pub fn oraclemcp_db::WalletResolutionReport::clone_into(&self, &mut T)
+pub fn oraclemcp_db::WalletResolutionReport::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::WalletResolutionReport
+impl<T> core::any::Any for oraclemcp_db::WalletResolutionReport where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::WalletResolutionReport::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::WalletResolutionReport where T: ?core::marker::Sized
+pub fn oraclemcp_db::WalletResolutionReport::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::WalletResolutionReport where T: ?core::marker::Sized
+pub fn oraclemcp_db::WalletResolutionReport::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::WalletResolutionReport where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::WalletResolutionReport::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::WalletResolutionReport
+pub fn oraclemcp_db::WalletResolutionReport::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::WalletResolutionReport
+pub type oraclemcp_db::WalletResolutionReport::Init = T
+pub const oraclemcp_db::WalletResolutionReport::ALIGN: usize
+pub unsafe fn oraclemcp_db::WalletResolutionReport::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::WalletResolutionReport::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::WalletResolutionReport::drop(usize)
+pub unsafe fn oraclemcp_db::WalletResolutionReport::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::WalletResolutionReport
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::WalletResolutionReport
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::WalletResolutionReport where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::WalletResolutionReport
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::WalletResolutionReport
+impl<T> typenum::type_operators::Same for oraclemcp_db::WalletResolutionReport
+pub type oraclemcp_db::WalletResolutionReport::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::WalletResolutionReport where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::WalletResolutionReport where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::WalletResolutionReport::vzip(self) -> V
 pub struct oraclemcp_db::WritePosture
 pub oraclemcp_db::WritePosture::can_write: core::option::Option<bool>
 pub oraclemcp_db::WritePosture::proxy_user: bool
@@ -6727,6 +7019,7 @@ pub const fn oraclemcp_db::redacted_oracle_binds(&[oraclemcp_db::OracleBind]) ->
 pub fn oraclemcp_db::require_lease_id(core::option::Option<&str>) -> core::result::Result<&str, oraclemcp_db::DbError>
 pub fn oraclemcp_db::requirement_matrix() -> &'static [oraclemcp_db::ToolRequirement]
 pub async fn oraclemcp_db::resolve_top_sql_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, bool) -> oraclemcp_db::DiagnosticsSource
+pub fn oraclemcp_db::resolve_wallet_choice(&std::path::Path, core::option::Option<&str>) -> core::result::Result<oraclemcp_db::WalletResolutionReport, oraclemcp_db::WalletResolveError>
 pub async fn oraclemcp_db::run_health(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_db::HealthSubcheck]) -> alloc::vec::Vec<oraclemcp_db::Finding>
 pub async fn oraclemcp_db::sample_rows(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::search_objects(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, core::option::Option<&str>, core::option::Option<&str>, oraclemcp_db::SearchDetailLevel, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::SearchObject>, oraclemcp_db::DbError>
@@ -6740,3 +7033,4 @@ pub fn oraclemcp_db::tablespace_usage_sql() -> (&'static str, alloc::string::Str
 pub fn oraclemcp_db::top_sql_query(oraclemcp_db::DiagnosticsSource, oraclemcp_db::TopSqlMetric, u32, core::option::Option<u8>) -> core::result::Result<alloc::string::String, oraclemcp_error::ErrorEnvelope>
 pub fn oraclemcp_db::unusable_indexes_sql(oraclemcp_db::ViewTier) -> (&'static str, alloc::string::String)
 pub fn oraclemcp_db::validate_adb_connect_string(&str) -> core::result::Result<oraclemcp_db::AdbConnectInfo, oraclemcp_db::OciError>
+pub fn oraclemcp_db::wallet_certificate_validity(&std::path::Path, core::option::Option<&str>) -> alloc::vec::Vec<oraclemcp_db::WalletCertValidity>

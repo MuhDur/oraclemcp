@@ -672,6 +672,7 @@ fn doctor_process_exit_code_matches_cli_contract() {
             auth_mode: None,
             wallet_error: None,
             wallet_posture: None,
+            wallet_cert_expiry: None,
             ora_code: None,
         }],
         profile_caps: None,
