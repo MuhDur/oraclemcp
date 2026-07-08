@@ -140,6 +140,17 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # The B.12 suite builds the full oraclemcp binary + its --all-targets test
+      # binaries into one target/ dir, which exceeded the ubuntu-latest ~14GB disk
+      # once the K10 streaming surface landed — `ld` died with SIGBUS (bus error,
+      # core dumped) faulting on its output mmap when the disk filled. Free the
+      # ~25GB of preinstalled toolchains we don't use before the heavy build/link.
+      - name: Free disk space for the release-acceptance build
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo docker image prune --all --force 2>/dev/null || true
+          df -h /
       - uses: actions/download-artifact@v8
         with:
           name: oraclemcp-dashboard-dist
