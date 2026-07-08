@@ -1700,6 +1700,46 @@ mod tests {
         drop(sink2);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn fsync_parent_dir_fails_closed_when_parent_cannot_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing_parent = dir.path().join("missing").join("audit.jsonl");
+        let err = fsync_parent_dir(&missing_parent).expect_err("missing parent must fail closed");
+        let msg = err.to_string();
+        assert!(msg.contains("cannot open audit directory"), "{msg}");
+        assert!(msg.contains("missing"), "{msg}");
+    }
+
+    #[test]
+    fn resume_from_missing_log_starts_at_genesis() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("audit.jsonl");
+        let sink = Arc::new(MemoryAuditSink::new());
+        let auditor = Auditor::new(Box::new(SharedSink(sink.clone())), test_key())
+            .resume_from(&missing)
+            .expect("missing log is first-run genesis state");
+        let record = auditor
+            .append(&draft("SELECT 1 FROM dual", "SAFE"), "t0".to_owned(), false)
+            .expect("append after missing-log resume");
+        assert_eq!(record.seq, 1);
+        assert_eq!(record.prev_hash, GENESIS_HASH);
+    }
+
+    #[test]
+    fn flush_before_any_record_does_not_write_head_anchor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let anchor_path = dir.path().join("audit.jsonl.anchor");
+        let auditor = Auditor::new(Box::new(MemoryAuditSink::new()), test_key())
+            .with_head_anchor(&anchor_path);
+        auditor.flush().expect("empty flush succeeds");
+        assert_eq!(
+            crate::load_anchor(&anchor_path).expect("load"),
+            None,
+            "an empty chain must not create a seq=0 head anchor"
+        );
+    }
+
     // A sink that forwards to a shared Arc<MemoryAuditSink> (so the test keeps a
     // handle while the Auditor owns its Box<dyn AuditSink>).
     struct SharedSink(Arc<MemoryAuditSink>);

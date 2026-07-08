@@ -415,4 +415,45 @@ mod tests {
             VerifyOutcome::Ok { records: 3 }
         );
     }
+
+    #[test]
+    fn broken_reason_display_names_each_integrity_failure() {
+        let cases = [
+            (BrokenReason::HashMismatch.to_string(), "entry_hash"),
+            (BrokenReason::PrevHashMismatch.to_string(), "prev_hash"),
+            (
+                BrokenReason::SeqNotMonotonic {
+                    expected: 2,
+                    found: 4,
+                }
+                .to_string(),
+                "expected 2, found 4",
+            ),
+            (BrokenReason::Unsigned.to_string(), "no keyed MAC"),
+            (
+                BrokenReason::UnknownKeyId("k9".to_owned()).to_string(),
+                "unknown key_id",
+            ),
+            (
+                BrokenReason::SignatureMismatch.to_string(),
+                "keyed MAC does not verify",
+            ),
+        ];
+        for (msg, needle) in cases {
+            assert!(msg.contains(needle), "{msg}");
+        }
+    }
+
+    #[test]
+    fn parse_jsonl_reports_one_based_line_numbers_and_message() {
+        let records = signed_chain(1);
+        let good = serde_json::to_string(&records[0]).expect("serialize");
+        let body = format!("\n{good}\n{{bad json}}\n");
+        let err = parse_jsonl(&body).expect_err("third physical line is malformed");
+        assert_eq!(err.line, 3);
+        assert!(err.message.contains("key must be a string"), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("line 3"), "{msg}");
+        assert!(msg.contains(&err.message), "{msg}");
+    }
 }

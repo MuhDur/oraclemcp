@@ -34,6 +34,7 @@ bash "$ROOT/scripts/release_sbom_check.sh" --source
 bash "$ROOT/scripts/dashboard_skin_lint.sh"
 bash "$ROOT/scripts/installer_lint_and_offline_smoke.sh"
 bash "$ROOT/scripts/secret_scan.sh"
+bash "$ROOT/scripts/mutation_safety_gate.sh" check-report
 
 metadata="$(cargo metadata --no-deps --format-version 1)"
 

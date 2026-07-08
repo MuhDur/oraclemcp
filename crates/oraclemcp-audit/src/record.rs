@@ -1115,6 +1115,206 @@ mod tests {
     }
 
     #[test]
+    fn missing_schema_version_defaults_to_legacy_v1() {
+        let json = r#"{
+            "seq": 1,
+            "timestamp": "2026-06-01T00:00:00Z",
+            "agent_identity": "agent",
+            "subject": {"kind": "unknown", "stable_id": "unknown"},
+            "tool": "oracle_query",
+            "sql_sha256": "sha256:deadbeef",
+            "sql_preview": "SELECT 1",
+            "danger_level": "SAFE",
+            "decision": "ALLOWED",
+            "outcome": "SUCCEEDED",
+            "prev_hash": "genesis",
+            "entry_hash": "sha256:abc"
+        }"#;
+        let r: AuditRecord = serde_json::from_str(json).expect("legacy record deserializes");
+        assert_eq!(
+            r.schema_version, 1,
+            "absent schema_version must deserialize as legacy v1"
+        );
+    }
+
+    #[test]
+    fn subject_builders_preserve_identity_and_optional_auth_fields() {
+        let subject = AuditSubject::new("oauth", "sub-123")
+            .with_authn_method("mtls")
+            .with_client_id("client-a")
+            .with_thumbprint("sha256:thumb");
+        assert_eq!(subject.kind, "oauth");
+        assert_eq!(subject.stable_id, "sub-123");
+        assert_eq!(subject.authn_method.as_deref(), Some("mtls"));
+        assert_eq!(subject.client_id.as_deref(), Some("client-a"));
+        assert_eq!(subject.thumbprint.as_deref(), Some("sha256:thumb"));
+        assert_eq!(subject.legacy_agent_identity(), "oauth:sub-123");
+    }
+
+    #[test]
+    fn unavailable_db_evidence_sets_stable_marker() {
+        let evidence = DbEvidence::unavailable("privilege_denied");
+        assert_eq!(
+            evidence.availability.as_deref(),
+            Some("db_evidence_unavailable:privilege_denied")
+        );
+        assert_eq!(evidence.session_user, None);
+    }
+
+    #[test]
+    fn signing_key_debug_redacts_secret_material() {
+        let dbg = format!("{:?}", SigningKey::new("kid", b"do-not-print-me".to_vec()));
+        assert!(dbg.contains("kid"), "{dbg}");
+        assert!(dbg.contains("***redacted***"), "{dbg}");
+        assert!(!dbg.contains("do-not-print-me"), "{dbg}");
+    }
+
+    #[test]
+    fn versioned_hashes_cover_subject_and_db_evidence() {
+        let mut d = draft();
+        d.subject = AuditSubject::new("profile", "p1")
+            .with_authn_method("password")
+            .with_client_id("client-a")
+            .with_thumbprint("sha256:a");
+        d.db_evidence = Some(DbEvidence {
+            availability: Some("captured".to_owned()),
+            db_unique_name: Some("ORCL".to_owned()),
+            service_name: Some("svc".to_owned()),
+            instance_name: Some("inst".to_owned()),
+            session_user: Some("APP".to_owned()),
+            current_user: Some("APP".to_owned()),
+            proxy_user: Some("PROXY".to_owned()),
+            current_schema: Some("APP".to_owned()),
+            sid: Some("1".to_owned()),
+            serial_number: Some("2".to_owned()),
+            client_identifier: Some("cid".to_owned()),
+            module: Some("oraclemcp".to_owned()),
+            action: Some("execute".to_owned()),
+            database_role: Some("PRIMARY".to_owned()),
+            open_mode: Some("READ WRITE".to_owned()),
+        });
+        let sql_sha256 = sha256_hex(d.sql.as_bytes());
+        let sql_normalized_sha256 = normalized_sql_sha256(&d.sql);
+        let sql_preview = d.sql.chars().take(PREVIEW_LEN).collect::<String>();
+        let agent_identity = d.subject.legacy_agent_identity();
+
+        let v1 = compute_entry_hash_v1(
+            1,
+            "t",
+            &agent_identity,
+            &d.tool,
+            &sql_sha256,
+            &sql_preview,
+            &d.danger_level,
+            d.decision,
+            d.rows_affected,
+            d.outcome,
+            GENESIS_HASH,
+        );
+        let v2 = compute_entry_hash_v2(
+            1,
+            "t",
+            &agent_identity,
+            &d.subject,
+            d.db_evidence.as_ref(),
+            d.cancel.as_ref(),
+            &d.tool,
+            &sql_sha256,
+            &sql_preview,
+            &d.danger_level,
+            d.decision,
+            d.rows_affected,
+            d.outcome,
+            GENESIS_HASH,
+        );
+        let v3 = compute_entry_hash_v3(
+            1,
+            "t",
+            &agent_identity,
+            &d.subject,
+            d.db_evidence.as_ref(),
+            d.cancel.as_ref(),
+            &d.tool,
+            &sql_sha256,
+            &sql_preview,
+            &d.danger_level,
+            d.decision,
+            d.rows_affected,
+            d.outcome,
+            GENESIS_HASH,
+        );
+        let v4 = compute_entry_hash_v4(
+            1,
+            "t",
+            &agent_identity,
+            &d.subject,
+            d.db_evidence.as_ref(),
+            d.cancel.as_ref(),
+            &d.tool,
+            &sql_sha256,
+            &sql_normalized_sha256,
+            &sql_preview,
+            &d.danger_level,
+            d.decision,
+            d.rows_affected,
+            d.outcome,
+            GENESIS_HASH,
+        );
+        for hash in [&v1, &v2, &v3, &v4] {
+            assert!(hash.starts_with("sha256:"), "{hash}");
+            assert_eq!(hash.len(), "sha256:".len() + 64, "{hash}");
+        }
+        assert_ne!(v1, v2, "schema v2 must add subject/evidence coverage");
+        assert_ne!(v2, v3, "schema v3 must add expanded DB evidence coverage");
+        assert_ne!(v3, v4, "schema v4 must add normalized-SQL coverage");
+
+        let mut changed_subject = d.subject.clone();
+        changed_subject.client_id = Some("client-b".to_owned());
+        let changed_v4 = compute_entry_hash_v4(
+            1,
+            "t",
+            &changed_subject.legacy_agent_identity(),
+            &changed_subject,
+            d.db_evidence.as_ref(),
+            d.cancel.as_ref(),
+            &d.tool,
+            &sql_sha256,
+            &sql_normalized_sha256,
+            &sql_preview,
+            &d.danger_level,
+            d.decision,
+            d.rows_affected,
+            d.outcome,
+            GENESIS_HASH,
+        );
+        assert_ne!(v4, changed_v4, "structured subject fields are hash-covered");
+
+        let mut changed_evidence = d.db_evidence.clone().expect("evidence");
+        changed_evidence.proxy_user = Some("OTHER_PROXY".to_owned());
+        let changed_evidence_v4 = compute_entry_hash_v4(
+            1,
+            "t",
+            &agent_identity,
+            &d.subject,
+            Some(&changed_evidence),
+            d.cancel.as_ref(),
+            &d.tool,
+            &sql_sha256,
+            &sql_normalized_sha256,
+            &sql_preview,
+            &d.danger_level,
+            d.decision,
+            d.rows_affected,
+            d.outcome,
+            GENESIS_HASH,
+        );
+        assert_ne!(
+            v4, changed_evidence_v4,
+            "expanded DB evidence fields are hash-covered"
+        );
+    }
+
+    #[test]
     fn signed_record_verifies_under_its_key() {
         let r = AuditRecord::chained_signed(
             &draft(),

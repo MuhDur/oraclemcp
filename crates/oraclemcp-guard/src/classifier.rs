@@ -2091,6 +2091,42 @@ mod tests {
     }
 
     #[test]
+    fn query_dml_walkers_detect_nested_write_bodies_directly() {
+        use sqlparser::ast::Statement;
+        let carries_dml = |sql: &str| -> bool {
+            let stmts = Parser::parse_sql(&OracleDialect {}, sql).expect(sql);
+            match stmts.into_iter().next().expect("one stmt") {
+                Statement::Query(q) => query_carries_dml(&q),
+                other => panic!("expected query, got {other:?}"),
+            }
+        };
+
+        for sql in [
+            "WITH a AS (SELECT 1 x FROM dual) UPDATE t SET x = 1",
+            "WITH a AS (SELECT 1 x FROM dual) DELETE FROM t",
+            "WITH a AS (SELECT 1 x FROM dual) INSERT INTO t SELECT * FROM a",
+            "WITH a AS (SELECT 1 x FROM dual) MERGE INTO t USING a ON (1=1) \
+             WHEN MATCHED THEN UPDATE SET x = 1",
+            "SELECT * FROM (UPDATE t SET x=1)",
+            "SELECT * FROM (SELECT * FROM (DELETE FROM t))",
+            "SELECT 1 FROM dual UNION SELECT * FROM (DELETE FROM t)",
+            "SELECT * FROM a JOIN (UPDATE t SET x=1) b ON a.id=b.id",
+        ] {
+            assert!(
+                carries_dml(sql),
+                "query_carries_dml must detect nested DML body: {sql:?}"
+            );
+        }
+
+        assert!(
+            !carries_dml(
+                "WITH a AS (SELECT 1 x FROM dual) SELECT * FROM a UNION ALL SELECT 2 FROM dual"
+            ),
+            "genuine read-only CTE/set-op queries must not be marked as DML"
+        );
+    }
+
+    #[test]
     fn delete_without_where_is_destructive() {
         let d = classify("DELETE FROM orders");
         assert_eq!(d.danger, DangerLevel::Destructive);
@@ -2116,6 +2152,25 @@ mod tests {
             classify("INSERT INTO t (a) VALUES (1)").danger,
             DangerLevel::Guarded
         );
+    }
+
+    #[test]
+    fn merge_explain_and_transaction_control_have_explicit_floors() {
+        let merge = classify(
+            "MERGE INTO t USING s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.v = s.v",
+        );
+        assert_eq!(merge.danger, DangerLevel::Guarded);
+        assert_eq!(merge.required_level, Some(OperatingLevel::ReadWrite));
+
+        let explain = classify("EXPLAIN PLAN FOR SELECT * FROM employees");
+        assert_eq!(explain.danger, DangerLevel::Guarded);
+        assert_eq!(explain.required_level, Some(OperatingLevel::ReadWrite));
+
+        for sql in ["COMMIT", "ROLLBACK", "SAVEPOINT before_patch"] {
+            let d = classify(sql);
+            assert_eq!(d.danger, DangerLevel::Guarded, "{sql:?}");
+            assert_eq!(d.required_level, Some(OperatingLevel::ReadWrite), "{sql:?}");
+        }
     }
 
     #[test]
@@ -2680,6 +2735,17 @@ mod tests {
     }
 
     #[test]
+    fn canonical_marker_scan_ignores_quoted_keyword_identifiers() {
+        let scan = canonical_marker_scan(r#"BEGIN "EXECUTE" IMMEDIATE 'x'; END;"#);
+        assert!(
+            !scan.contains(" EXECUTE IMMEDIATE "),
+            "quoted EXECUTE is data, not the EXECUTE IMMEDIATE marker: {scan:?}"
+        );
+        let dynamic = canonical_marker_scan("BEGIN EXECUTE IMMEDIATE 'x'; END;");
+        assert!(dynamic.contains(" EXECUTE IMMEDIATE "), "{dynamic:?}");
+    }
+
+    #[test]
     fn literal_embedded_semicolon_is_not_a_boundary() {
         // 'a;b' contains a ; that is NOT a statement boundary; one SELECT.
         let shape = analyze_batch("SELECT 'a;b;c' FROM dual");
@@ -2914,6 +2980,19 @@ mod tests {
     }
 
     #[test]
+    fn analyze_batch_reports_declare_and_stray_end_directly() {
+        let declare = analyze_batch("DECLARE x NUMBER; BEGIN x := 1; END;");
+        assert!(declare.has_plsql_block, "{declare:?}");
+        assert!(declare.balanced, "{declare:?}");
+
+        let stray = analyze_batch("END;");
+        assert!(
+            !stray.balanced,
+            "a top-level END must make the batch unbalanced: {stray:?}"
+        );
+    }
+
+    #[test]
     fn block_list_regex_forbids() {
         let cfg = ClassifierConfig::new().with_block_pattern("(?i)drop\\s+table");
         let d = Classifier::new(cfg).classify("DROP TABLE orders");
@@ -2927,6 +3006,28 @@ mod tests {
         // Same statement, different whitespace/case → still allow-listed.
         let d = Classifier::new(cfg).classify("select   billing.weird_udf()  from dual");
         assert_eq!(d.danger, DangerLevel::Safe);
+    }
+
+    #[test]
+    fn allow_list_hash_is_stable_and_specific() {
+        let a = normalized_sha256(" SELECT   * FROM dual ");
+        let b = normalized_sha256("select * from DUAL");
+        let c = normalized_sha256("select 2 from dual");
+        assert_eq!(a, b, "allow-list hash normalizes whitespace and case");
+        assert_ne!(a, c, "different normalized SQL must not share the digest");
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn populated_allow_list_does_not_clear_other_statements() {
+        let cfg = ClassifierConfig::new().with_allow("SELECT 1 FROM dual");
+        let d = Classifier::new(cfg).classify("SELECT billing.side_effect() FROM dual");
+        assert_eq!(
+            d.danger,
+            DangerLevel::Guarded,
+            "a nonmatching statement must not be allowed merely because the allow-list is nonempty"
+        );
     }
 
     #[test]
@@ -2957,6 +3058,40 @@ mod tests {
         // The bare-name builtin filter still applies when NOT qualified.
         let safe = classify("SELECT ROUND(x) FROM dual");
         assert_eq!(safe.danger, DangerLevel::Safe);
+    }
+
+    #[test]
+    fn user_defined_calls_preserves_schema_on_qualified_calls() {
+        let calls = user_defined_calls("SELECT billing.purge_old_rows(x), ROUND(x) FROM dual");
+        assert!(
+            calls.iter().any(|call| {
+                call.schema.as_deref() == Some("billing")
+                    && call.name.eq_ignore_ascii_case("purge_old_rows")
+            }),
+            "schema-qualified UDF should preserve schema and routine name: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call.name.eq_ignore_ascii_case("round")),
+            "bare builtins must not be reported as user-defined calls: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn block_interior_segments_split_only_outer_body_statements() {
+        let segments = block_interior_segments(
+            "BEGIN IF x = 1 THEN UPDATE t SET x = 1 WHERE id = 1; END IF; DELETE FROM t; END;",
+        );
+        assert_eq!(segments.len(), 2, "{segments:?}");
+        assert!(
+            segments[0].contains("IF") && segments[0].contains("END IF"),
+            "nested control-flow segment stays intact: {segments:?}"
+        );
+        assert!(
+            segments[1].to_ascii_uppercase().contains("DELETE FROM T"),
+            "outer body DELETE is split as its own segment: {segments:?}"
+        );
     }
 
     #[test]

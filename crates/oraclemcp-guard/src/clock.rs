@@ -126,4 +126,15 @@ mod tests {
         let d = MonotonicDeadline::after(Duration::ZERO);
         assert!(d.is_expired());
     }
+
+    #[test]
+    fn process_generation_is_stable_and_nontrivial() {
+        let first = process_generation();
+        let second = process_generation();
+        assert_eq!(first, second, "generation is process-stable");
+        assert!(
+            first > 1,
+            "generation must not collapse to a trivial sentinel value: {first}"
+        );
+    }
 }

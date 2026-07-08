@@ -580,6 +580,11 @@ mod tests {
         );
         // Keep a raw pointer to read the failure count after the auditor owns it.
         // Instead, exercise the sink directly so we can read its counter.
+        assert_eq!(
+            sink.forward_failure_count(),
+            0,
+            "new shipping sinks start with no forward failures"
+        );
         let rec = AuditRecord::chained_signed(
             &draft("DELETE FROM t WHERE id=1", "DESTRUCTIVE"),
             1,
@@ -731,5 +736,95 @@ mod tests {
         assert_eq!(local.records().len(), 1);
         // No forwarder type is involved; the test compiles + passes purely on
         // the un-decorated path.
+    }
+
+    #[test]
+    fn shipping_error_display_names_transport_failures() {
+        let msg = ShippingError::Transport("siem down".to_owned()).to_string();
+        assert!(msg.contains("audit shipping transport error"), "{msg}");
+        assert!(msg.contains("siem down"), "{msg}");
+    }
+
+    #[test]
+    fn severity_mappings_cover_decision_outcome_and_danger() {
+        let mut rec = AuditRecord::chained_signed(
+            &draft("SELECT 1 FROM dual", "SAFE"),
+            1,
+            crate::record::GENESIS_HASH,
+            "2026-06-20T00:00:00Z".to_owned(),
+            &key(),
+        );
+        assert_eq!(cef_severity(&rec), 2);
+        assert_eq!(syslog_severity(&rec), 6);
+
+        rec.danger_level = "GUARDED".to_owned();
+        assert_eq!(cef_severity(&rec), 4);
+        rec.danger_level = "DESTRUCTIVE".to_owned();
+        assert_eq!(cef_severity(&rec), 7);
+
+        rec.decision = AuditDecision::StepUpRequired;
+        assert_eq!(cef_severity(&rec), 5);
+        assert_eq!(syslog_severity(&rec), 5);
+
+        rec.decision = AuditDecision::Allowed;
+        for outcome in [
+            AuditOutcome::Failed,
+            AuditOutcome::DiscardedUncommitted,
+            AuditOutcome::CommitInDoubt,
+            AuditOutcome::UnknownDiscarded,
+        ] {
+            rec.outcome = outcome;
+            assert_eq!(cef_severity(&rec), 6, "{outcome:?}");
+            assert_eq!(syslog_severity(&rec), 3, "{outcome:?}");
+        }
+
+        rec.decision = AuditDecision::Blocked;
+        rec.outcome = AuditOutcome::Succeeded;
+        assert_eq!(cef_severity(&rec), 8);
+        assert_eq!(syslog_severity(&rec), 4);
+    }
+
+    #[test]
+    fn syslog_pri_uses_local0_facility_and_mapped_severity() {
+        let rec = AuditRecord::chained_signed(
+            &draft("SELECT 1 FROM dual", "SAFE"),
+            1,
+            crate::record::GENESIS_HASH,
+            "2026-06-20T00:00:00Z".to_owned(),
+            &key(),
+        );
+        let line = syslog_line(&rec);
+        assert!(
+            line.starts_with("<134>1 "),
+            "local0 facility 16 * 8 + informational severity 6: {line}"
+        );
+
+        let mut failed = rec.clone();
+        failed.outcome = AuditOutcome::Failed;
+        let line = syslog_line(&failed);
+        assert!(
+            line.starts_with("<131>1 "),
+            "local0 facility 16 * 8 + error severity 3: {line}"
+        );
+    }
+
+    #[test]
+    fn cef_and_syslog_escaping_is_spec_specific() {
+        assert_eq!(
+            cef_escape_header(
+                r#"tool\name|x
+y"#
+            ),
+            r#"tool\\name\|x y"#
+        );
+
+        let mut ext = String::new();
+        push_cef_kv(&mut ext, "msg", "a\\b=c\nr\rd");
+        assert_eq!(ext, r#"msg=a\\b\=c\nr\rd "#);
+
+        let mut sd = String::from("[oraclemcp@0");
+        push_sd_param(&mut sd, "msg", "a\\b\"c]d\nx\ry");
+        sd.push(']');
+        assert_eq!(sd, r#"[oraclemcp@0 msg="a\\b\"c\]d x y"]"#);
     }
 }

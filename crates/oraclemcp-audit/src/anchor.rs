@@ -474,6 +474,22 @@ mod tests {
     }
 
     #[test]
+    fn anchor_mac_preimage_binds_domain_seq_and_hash() {
+        let k = key();
+        let anchor = ChainAnchor::signed(42, "sha256:head-42", &k);
+        assert_eq!(
+            anchor.mac,
+            k.sign("oraclemcp-audit-anchor-v1\n42\nsha256:head-42"),
+            "anchor MAC must bind the domain, sequence, and entry hash"
+        );
+        assert_ne!(
+            anchor.mac,
+            k.sign("42\nsha256:head-42"),
+            "anchor MAC must stay domain-separated from record signatures"
+        );
+    }
+
+    #[test]
     fn absent_anchor_loads_as_none_and_corrupt_anchor_fails_closed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let anchor_path = dir.path().join("audit.jsonl.anchor");
@@ -483,5 +499,43 @@ mod tests {
             load_anchor(&anchor_path).is_err(),
             "corrupt anchor fails closed"
         );
+    }
+
+    #[test]
+    fn present_but_unreadable_anchor_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = load_anchor(dir.path()).expect_err("directory is present but unreadable as JSON");
+        let msg = err.to_string();
+        assert!(msg.contains("audit head anchor unreadable"), "{msg}");
+        assert!(msg.contains(dir.path().to_string_lossy().as_ref()), "{msg}");
+    }
+
+    #[test]
+    fn anchor_violation_messages_name_the_failure_mode() {
+        let cases = [
+            (
+                AnchorViolation::UnknownKeyId("k2".to_owned()).to_string(),
+                "unknown key_id",
+            ),
+            (
+                AnchorViolation::MacMismatch.to_string(),
+                "MAC does not verify",
+            ),
+            (
+                AnchorViolation::Truncated {
+                    anchor_seq: 9,
+                    chain_records: 7,
+                }
+                .to_string(),
+                "trailing records were removed",
+            ),
+            (
+                AnchorViolation::HeadHashMismatch { anchor_seq: 3 }.to_string(),
+                "does not match the anchored entry_hash",
+            ),
+        ];
+        for (msg, needle) in cases {
+            assert!(msg.contains(needle), "{msg}");
+        }
     }
 }

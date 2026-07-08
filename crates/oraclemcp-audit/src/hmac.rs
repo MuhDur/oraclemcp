@@ -125,6 +125,22 @@ mod tests {
     }
 
     #[test]
+    fn exact_block_sized_key_is_not_condensed() {
+        // RFC 2104 condenses only keys longer than the block. A 64-byte key is
+        // used directly; hashing it first produces a different MAC.
+        let key = [0xabu8; BLOCK_LEN];
+        let msg = b"exact block length key";
+        let actual = hmac_sha256(&key, msg);
+
+        let hashed_key = Sha256::digest(key);
+        let condensed = hmac_sha256(&hashed_key, msg);
+        assert_ne!(
+            actual, condensed,
+            "a key exactly one SHA-256 block long must not be pre-hashed"
+        );
+    }
+
+    #[test]
     fn hex_render_has_algorithm_prefix() {
         let s = hmac_sha256_hex(b"k", b"m");
         assert!(s.starts_with("hmac-sha256:"));
