@@ -6,9 +6,8 @@ use std::thread;
 use std::time::Instant;
 
 use asupersync::channel::{mpsc, oneshot};
-use asupersync::runtime::{RuntimeBuilder, RuntimeState, SpawnError};
-use asupersync::types::Budget;
-use asupersync::{Cx, Scope};
+use asupersync::runtime::RuntimeBuilder;
+use asupersync::Cx;
 use serde_json::json;
 
 const DEDICATED_OPS: u64 = 64;
@@ -213,47 +212,12 @@ fn dedicated_thread_block_on_lane_keeps_non_send_connection_thread_local() {
     );
 }
 
-#[test]
-fn spawn_local_bridge_requires_private_scheduler_context_from_consumer_code() {
-    let started = Instant::now();
-    let baseline_local_tasks = asupersync::runtime::local::local_task_count();
-    let mut state = RuntimeState::new();
-    let cx = Cx::for_testing();
-    let region = state.create_root_region(Budget::INFINITE);
-    let scope: Scope<'static> = Scope::new(region, Budget::INFINITE);
-    let non_send_value = Rc::new(RefCell::new(0_u64));
-    let captured = Rc::clone(&non_send_value);
-
-    let result = scope.spawn_local(&mut state, &cx, move |_| async move {
-        *captured.borrow_mut() += 1;
-        1_u64
-    });
-
-    assert!(
-        matches!(result, Err(SpawnError::LocalSchedulerUnavailable)),
-        "consumer code cannot install asupersync's private local scheduler TLS"
-    );
-    assert_eq!(
-        *non_send_value.borrow(),
-        0,
-        "failed spawn_local prototype must not poll the non-Send future"
-    );
-    assert_eq!(
-        asupersync::runtime::local::local_task_count(),
-        baseline_local_tasks,
-        "failed spawn_local prototype must roll back its local task storage"
-    );
-
-    println!(
-        "{}",
-        json!({
-            "event": "dl1_lane_bridge_measurement",
-            "candidate": "spawn_local_local_scheduler",
-            "elapsed_ns": started.elapsed().as_nanos(),
-            "observed_error": "LocalSchedulerUnavailable",
-            "consumer_can_install_scheduler_tls": false,
-            "non_send_future_polled": false,
-            "verdict": "rejected_for_n0a"
-        })
-    );
-}
+// (Removed) `spawn_local_bridge_requires_private_scheduler_context_from_consumer_code`:
+// this WP-N phase-0 probe called `Scope::spawn_local(...)` and asserted consumer
+// code gets `Err(SpawnError::LocalSchedulerUnavailable)` — i.e. cannot install
+// asupersync's private local-scheduler TLS. As of asupersync 0.3.5 `Scope::spawn_local`
+// is REMOVED entirely, so that invariant is now a COMPILE-TIME guarantee (there is no
+// method to call) — strictly stronger than the old runtime-error check. The runtime
+// probe is therefore obsolete; the dedicated-OS-thread current-thread-runtime lane
+// (validated by `spawn_dedicated_lane` / the N0a candidate above) remains the WP-N
+// bridge. `SpawnError` is no longer imported.
