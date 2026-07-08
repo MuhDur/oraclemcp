@@ -35,6 +35,7 @@ bash "$ROOT/scripts/dashboard_skin_lint.sh"
 bash "$ROOT/scripts/installer_lint_and_offline_smoke.sh"
 bash "$ROOT/scripts/secret_scan.sh"
 bash "$ROOT/scripts/mutation_safety_gate.sh" check-report
+bash "$ROOT/scripts/local_release_gate_check.sh"
 
 metadata="$(cargo metadata --no-deps --format-version 1)"
 

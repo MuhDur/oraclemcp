@@ -89,16 +89,22 @@ investigate, not a blocker:
 
 ## Release-day procedure
 
-1. **Freeze the RC.** Pick the commit you intend to tag. Everything below runs
-   against that exact SHA — do not amend or rebase after this point.
+1. **Freeze the source RC.** Pick the source commit you intend to qualify. Do
+   not amend or rebase that source commit after this point. The D3.2 proof step
+   may add one evidence-only commit containing only
+   `tests/artifacts/local_gate/results-*.json`; tag that evidence commit.
 2. **Run the metadata preflight locally** as a fast pre-check
    (it is also the `release-metadata` CI job):
    ```sh
+   bash scripts/local_release_gate.sh --log --commit-proof
+   git add tests/artifacts/local_gate/results-*.json
+   git commit -m "test(release): add local gate proof for frozen RC"
    RELEASE_TAG=vX.Y.Z bash scripts/release_preflight.sh
    ```
    It verifies the workspace shares one version, `server.json`/README/CHANGELOG
    agree on it, the OCI image reference matches, no stale image-version strings
-   linger, the boundary lint holds, and the honesty gate passes. With
+   linger, the local D3.2 synthetic TCPS proof is present and sanitized, the
+   boundary lint holds, and the honesty gate passes. With
    `RELEASE_TAG` set it also checks the tag is `vX.Y.Z` and matches the
    workspace version.
    Also run the confidentiality gate self-test before tagging:
@@ -192,6 +198,10 @@ Required gates green on the RC commit:
 - [ ] release-acceptance (B.12: DL-9 + ERG-10 + DOC-10 + E0 + feature-powerset + arch-fitness)
 - [ ] release-metadata (release_preflight.sh)
 - [ ] rollback dry-run (scripts/e2e/release_rollback_dry_run.sh --log --dry-run)
+- [ ] local-release-gate (scripts/local_release_gate.sh --log --commit-proof,
+      committed sanitized synthetic proof under tests/artifacts/local_gate/)
+- [ ] real-adb-tcps-signoff (operator-run when real ADB/OCI-IAM creds are available:
+      scripts/e2e/real_adb_tcps_signoff.sh --log; evidence stays out-of-band)
 - [ ] oracle-version-matrix (operator-run: scripts/e2e/oracle_version_matrix.sh --log,
       all three lanes xe18/xe21/free23 green)
 ```

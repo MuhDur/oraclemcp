@@ -173,6 +173,25 @@ e2e_run_command() {
   return "$status"
 }
 
+e2e_run_cargo_capped() {
+  local phase="$1"
+  shift
+  local target_dir="${CARGO_TARGET_DIR:-/home/durakovic/.cache/cargo-target-server}"
+  local build_jobs="${CARGO_BUILD_JOBS:-16}"
+  local memory_max="${ORACLEMCP_CARGO_MEMORY_MAX:-24G}"
+  mkdir -p "$target_dir"
+
+  if ! command -v systemd-run >/dev/null 2>&1 && [ "$E2E_DRY_RUN" != "1" ]; then
+    e2e_finish_fail "systemd-run is required for capped cargo runs; set E2E_DRY_RUN=1 only for wiring checks"
+  fi
+
+  e2e_run_command "$phase" \
+    systemd-run --user --scope -q \
+    -p "MemoryMax=$memory_max" \
+    -p MemorySwapMax=0 \
+    -- env "CARGO_TARGET_DIR=$target_dir" "CARGO_BUILD_JOBS=$build_jobs" cargo "$@"
+}
+
 e2e_finish_pass() {
   e2e_log_event "scenario_complete" "teardown" "pass" 0 "$E2E_SCENARIO passed"
 }

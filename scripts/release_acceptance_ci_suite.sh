@@ -71,7 +71,11 @@ required=(
   scripts/merge_release_sbom.sh
   scripts/release_sbom_check.sh
   scripts/release_surface_sync_check.sh
+  scripts/local_release_gate_check.sh
+  scripts/local_release_gate.sh
+  scripts/e2e/real_adb_tcps_signoff.sh
   docs/release-surfaces.md
+  docs/operator/real-adb-tcps-signoff.md
   scripts/e2e/COVERAGE.md
   scripts/e2e/PROVENANCE.md
 )
@@ -113,8 +117,17 @@ fi
 if ! grep -F "H5 clean-machine e2e" scripts/e2e/COVERAGE.md >/dev/null; then
   e2e_finish_fail "COVERAGE.md must account for the H5 clean-machine e2e harness"
 fi
+if ! grep -F "Local pre-tag release gate (D3.2)" scripts/e2e/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "COVERAGE.md must account for the D3.2 local release gate"
+fi
+if ! grep -F "Real ADB TCPS + OCI IAM signoff (C5)" scripts/e2e/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "COVERAGE.md must account for the C5 real-cloud signoff harness"
+fi
 if ! grep -F "scripts/release_acceptance_ci_suite.sh" scripts/e2e/PROVENANCE.md >/dev/null; then
   e2e_finish_fail "PROVENANCE.md must document the HCI release acceptance suite command"
+fi
+if ! grep -F "docs/operator/real-adb-tcps-signoff.md" scripts/e2e/PROVENANCE.md >/dev/null; then
+  e2e_finish_fail "PROVENANCE.md must document the D3.2/C5 signoff runbook"
 fi
 
 if ! e2e_run_command "assert" bash scripts/oraclemcp_concurrency_lint.sh; then
@@ -134,6 +147,9 @@ if ! e2e_run_command "assert" bash scripts/release_sbom_check.sh --source; then
 fi
 if ! e2e_run_command "assert" bash scripts/release_surface_sync_check.sh; then
   e2e_finish_fail "D3.1 release version-surface sync check failed"
+fi
+if ! e2e_run_command "assert" bash scripts/local_release_gate_check.sh; then
+  e2e_finish_fail "D3.2 local release gate proof check failed"
 fi
 if ! e2e_run_command "assert" bash scripts/installer_lint_and_offline_smoke.sh --log; then
   e2e_finish_fail "E7 installer lint/smoke failed"
@@ -155,5 +171,5 @@ if ! e2e_run_command "assert" bash scripts/oraclemcp_arch_fitness_lint.sh; then
   e2e_finish_fail "architecture fitness lint failed"
 fi
 
-e2e_log_event "suite_summary" "assert" "pass" 0 "DL-9 ERG-10 DOC-10 E0 S-sbom D3.1 installer-jsonl rollback clean-machine feature-powerset arch-fitness accounted"
+e2e_log_event "suite_summary" "assert" "pass" 0 "DL-9 ERG-10 DOC-10 E0 S-sbom D3.1 D3.2 installer-jsonl rollback clean-machine feature-powerset arch-fitness accounted"
 e2e_finish_pass

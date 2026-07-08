@@ -211,6 +211,7 @@ fn release_acceptance_suite_schedules_hci_component_gates() {
         "scripts/e2e/doctor_fixtures.sh --log",
         "scripts/dashboard_bundle_check.sh",
         "scripts/release_sbom_check.sh --source",
+        "scripts/local_release_gate_check.sh",
         "scripts/installer_lint_and_offline_smoke.sh --log",
         "scripts/e2e/release_rollback_dry_run.sh --log --dry-run",
         "scripts/e2e/clean_machine_e2e.sh --log --dry-run",
@@ -239,6 +240,126 @@ fn release_acceptance_suite_schedules_hci_component_gates() {
                 .is_some_and(|message| message.contains("installer-jsonl")
                     && message.contains("clean-machine"))),
         "release acceptance summary must account for installer JSON-line logs: {events:?}"
+    );
+}
+
+#[test]
+fn local_release_gate_dry_run_schedules_synthetic_tcps_proof() {
+    let output = run_script(
+        "scripts/local_release_gate.sh",
+        &["--log", "--dry-run", "--real-adb"],
+    );
+    assert!(
+        output.status.success(),
+        "local_release_gate dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = json_lines(&output.stderr);
+    let command_messages = events
+        .iter()
+        .filter(|event| event["event"] == "command_start")
+        .filter_map(|event| event["message"].as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "systemd-run --user --scope",
+        "cargo test -p oraclemcp-core --test oci_tcps_e2e profile_wallet_and_iam_token_reach_local_tcps_terminator -- --nocapture",
+        "bash scripts/e2e/real_adb_tcps_signoff.sh --log",
+    ] {
+        assert!(
+            command_messages
+                .iter()
+                .any(|message| message.contains(expected)),
+            "local release gate did not schedule {expected}: {command_messages:?}"
+        );
+    }
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "proof_dry_run" && event["outcome"] == "skipped"),
+        "missing dry-run proof event: {events:?}"
+    );
+}
+
+#[test]
+fn real_adb_signoff_dry_run_schedules_wallet_and_iam_doctor_paths() {
+    let output = run_script(
+        "scripts/e2e/real_adb_tcps_signoff.sh",
+        &["--log", "--dry-run"],
+    );
+    assert!(
+        output.status.success(),
+        "real_adb_tcps_signoff dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = json_lines(&output.stderr);
+    let command_messages = events
+        .iter()
+        .filter(|event| event["event"] == "command_start")
+        .filter_map(|event| event["message"].as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "cargo build -p oraclemcp --bin oraclemcp",
+        "--json doctor --online --profile real_adb_wallet_smoke",
+        "--json doctor --online --profile real_adb_iam_smoke",
+        "bash scripts/secret_scan.sh",
+    ] {
+        assert!(
+            command_messages
+                .iter()
+                .any(|message| message.contains(expected)),
+            "real ADB signoff did not schedule {expected}: {command_messages:?}"
+        );
+    }
+    assert!(
+        events.iter().any(|event| event["event"] == "env_contract"
+            && event["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("values are never logged or committed"))),
+        "missing env contract event: {events:?}"
+    );
+}
+
+#[test]
+fn local_release_gate_check_validates_synthetic_proof() {
+    let root = repo_root();
+    let proof_dir =
+        std::env::temp_dir().join(format!("oraclemcp-local-gate-proof-{}", std::process::id()));
+    std::fs::create_dir_all(&proof_dir).expect("create proof dir");
+    let proof = proof_dir.join("results-fixturesha.json");
+    std::fs::write(
+        &proof,
+        r#"{
+  "schema_version": 1,
+  "source_sha": "fixturesha",
+  "confidentiality": {
+    "server_certificate_subject": "CN=oracle-test.invalid",
+    "real_adb_evidence": "out-of-band; never committed"
+  },
+  "checks": [
+    {"name": "synthetic_oci_tcps_wallet_iam_token", "status": "pass"}
+  ]
+}
+"#,
+    )
+    .expect("write proof");
+
+    let output = Command::new("bash")
+        .arg(root.join("scripts/local_release_gate_check.sh"))
+        .args(["--proof", proof.to_str().expect("proof path is utf8")])
+        .args(["--source-sha", "fixturesha", "--require"])
+        .current_dir(&root)
+        .output()
+        .expect("run local release gate check");
+    let _ = std::fs::remove_file(&proof);
+    let _ = std::fs::remove_dir(&proof_dir);
+
+    assert!(
+        output.status.success(),
+        "synthetic proof check failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
