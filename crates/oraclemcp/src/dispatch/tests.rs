@@ -6097,3 +6097,87 @@ mod sec1_stored_verdict_never_authorizes {
         );
     }
 }
+
+/// Offline unit tests for the additive DDL blast-radius (dependents) block
+/// assembled into the create_or_replace / patch_source previews (bead K11).
+mod dependents_preview {
+    use super::*;
+
+    fn dep(owner: &str, name: &str, ty: &str) -> DependentObject {
+        DependentObject {
+            owner: owner.to_owned(),
+            name: name.to_owned(),
+            object_type: ty.to_owned(),
+        }
+    }
+
+    #[test]
+    fn available_block_lists_objects_and_flags_invalidatable_subset() {
+        let probe = DependentsProbe::Available {
+            direct: vec![
+                dep("APP", "V_ORDERS", "VIEW"),
+                dep("APP", "P_REPORT", "PROCEDURE"),
+                dep("APP", "T_AUDIT", "TABLE"),
+            ],
+        };
+        let (key, block) = dependents_preview_entry(&probe);
+        assert_eq!(key, "dependents");
+        assert_eq!(block["count"], json!(3));
+        assert_eq!(block["objects"].as_array().unwrap().len(), 3);
+        // TABLE is not invalidatable; the view + proc are.
+        let at_risk = block["at_risk_of_invalid"].as_array().unwrap();
+        assert_eq!(at_risk.len(), 2);
+        let names: Vec<&str> = at_risk
+            .iter()
+            .map(|o| o["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"V_ORDERS") && names.contains(&"P_REPORT"));
+        assert!(!names.contains(&"T_AUDIT"));
+        // Object shape uses the "type" key.
+        assert_eq!(block["objects"][0]["type"], json!("VIEW"));
+        assert!(
+            block["note"]
+                .as_str()
+                .unwrap()
+                .contains("direct dependents only")
+        );
+    }
+
+    #[test]
+    fn unavailable_block_carries_reason_and_omits_dependents() {
+        let probe = DependentsProbe::Unavailable {
+            reason: "ALL_DEPENDENCIES not accessible: ORA-00942".to_owned(),
+        };
+        let (key, block) = dependents_preview_entry(&probe);
+        assert_eq!(key, "dependents_unavailable");
+        assert!(block["reason"].as_str().unwrap().contains("ORA-00942"));
+    }
+
+    #[test]
+    fn merge_splices_block_into_preview_without_disturbing_existing_keys() {
+        let mut preview = json!({ "applied": false, "preview": true });
+        let probe = DependentsProbe::Available {
+            direct: vec![dep("APP", "PKG_BODY", "PACKAGE BODY")],
+        };
+        merge_dependents_preview(&mut preview, &probe);
+        assert_eq!(preview["applied"], json!(false));
+        assert_eq!(preview["preview"], json!(true));
+        assert_eq!(preview["dependents"]["count"], json!(1));
+        assert_eq!(
+            preview["dependents"]["at_risk_of_invalid"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn empty_available_block_has_zero_count() {
+        let probe = DependentsProbe::Available { direct: vec![] };
+        let (_key, block) = dependents_preview_entry(&probe);
+        assert_eq!(block["count"], json!(0));
+        assert_eq!(block["objects"].as_array().unwrap().len(), 0);
+        assert_eq!(block["at_risk_of_invalid"].as_array().unwrap().len(), 0);
+    }
+}

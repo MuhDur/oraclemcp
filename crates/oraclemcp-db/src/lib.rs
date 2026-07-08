@@ -102,12 +102,13 @@ pub use health::{
     tablespace_usage_sql, unusable_indexes_sql,
 };
 pub use intelligence::{
-    IndexDescription, LobText, PLAN_COST_ESTIMATE_NOTE, PlanCostEstimate, PlanCostRow,
-    PlanCostSummary, SearchColumn, SearchDetailLevel, SearchIndex, SearchObject, SourceText,
-    TriggerDescription, ViewDescription, assemble_cost_estimate, compile_errors, describe_columns,
-    describe_constraints, describe_index, describe_trigger, describe_view, explain_plan, get_ddl,
-    get_source, get_sources_by_name, is_ddl_object_type, list_objects, list_schemas,
-    list_source_types, normalize_source_object_type, plan_cost_estimate, read_lob, sample_rows,
+    DependentObject, DependentsProbe, IndexDescription, LobText, PLAN_COST_ESTIMATE_NOTE,
+    PlanCostEstimate, PlanCostRow, PlanCostSummary, SearchColumn, SearchDetailLevel, SearchIndex,
+    SearchObject, SourceText, TriggerDescription, ViewDescription, assemble_cost_estimate,
+    compile_errors, dependent_from_row, describe_columns, describe_constraints, describe_index,
+    describe_trigger, describe_view, explain_plan, get_ddl, get_source, get_sources_by_name,
+    is_ddl_object_type, list_objects, list_schemas, list_source_types,
+    normalize_source_object_type, plan_cost_estimate, probe_dependents, read_lob, sample_rows,
     search_objects, search_source,
 };
 pub use lease::{LeaseId, LeaseInfo, LeaseManager, PreviewImpact, require_lease_id};

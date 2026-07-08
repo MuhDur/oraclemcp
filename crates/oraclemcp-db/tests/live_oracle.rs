@@ -27,10 +27,10 @@
 use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
-    AuthAdapter, CatalogExtractRequest, CatalogRowSetName, DbError, DrcpConfig, OracleBind,
-    OracleConnectOptions, OracleConnection, OracleSessionIdentity, QueryCaps, RustOracleConnection,
-    SearchDetailLevel, SessionPurity, explain_plan, extract_catalog_rowsets, plan_cost_estimate,
-    search_objects,
+    AuthAdapter, CatalogExtractRequest, CatalogRowSetName, DbError, DependentsProbe, DrcpConfig,
+    OracleBind, OracleConnectOptions, OracleConnection, OracleSessionIdentity, QueryCaps,
+    RustOracleConnection, SearchDetailLevel, SessionPurity, explain_plan, extract_catalog_rowsets,
+    plan_cost_estimate, probe_dependents, search_objects,
 };
 use oraclemcp_db::{LeaseManager, OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use serde_json::json;
@@ -1771,5 +1771,116 @@ fn live_explain_plan_cost_estimate_orders_full_scan_above_pk_lookup() {
             .await
             .ok();
         conn.commit(&cx).await.ok();
+    });
+}
+
+/// K11 blast-radius probe: a package with a dependent view + procedure. The
+/// direct-dependents probe (which backs the DDL preview `dependents` block)
+/// must surface both dependents and flag them invalidatable. Self-skips without
+/// a reachable Oracle; cleans up its throwaway objects on every path.
+#[test]
+fn live_probe_dependents_flags_dependent_view_and_proc_at_risk() {
+    run_with_cx(|cx| async move {
+        let Some(conn) = connect_or_skip(
+            &cx,
+            "live_probe_dependents_flags_dependent_view_and_proc_at_risk",
+            test_opts(),
+        )
+        .await
+        else {
+            return;
+        };
+
+        // Resolve the owner from the live session (current schema / session user).
+        let info = conn.describe(&cx).await.expect("describe");
+        let Some(owner) = info.current_schema.or(info.session_user) else {
+            eprintln!("[live-xe] SKIP live_probe_dependents: session has no current schema / user");
+            return;
+        };
+
+        let pkg = "K11_DEP_PKG";
+        let view = "K11_DEP_VIEW";
+        let proc = "K11_DEP_PROC";
+
+        // Best-effort pre-clean of any leftovers, then build the fixture.
+        for stmt in [
+            format!("DROP VIEW {view}"),
+            format!("DROP PROCEDURE {proc}"),
+            format!("DROP PACKAGE {pkg}"),
+        ] {
+            conn.execute(&cx, &stmt, &[]).await.ok();
+        }
+
+        let build = [
+            format!("CREATE OR REPLACE PACKAGE {pkg} AS FUNCTION f RETURN NUMBER; END;"),
+            format!(
+                "CREATE OR REPLACE PACKAGE BODY {pkg} AS \
+                 FUNCTION f RETURN NUMBER IS BEGIN RETURN 1; END; END;"
+            ),
+            format!("CREATE OR REPLACE VIEW {view} AS SELECT {pkg}.f AS n FROM dual"),
+            format!(
+                "CREATE OR REPLACE PROCEDURE {proc} AS x NUMBER; \
+                 BEGIN x := {pkg}.f; END;"
+            ),
+        ];
+        let mut build_ok = true;
+        for stmt in &build {
+            if let Err(e) = conn.execute(&cx, stmt, &[]).await {
+                eprintln!("[live-xe] SKIP live_probe_dependents: fixture build failed: {e}");
+                build_ok = false;
+                break;
+            }
+        }
+        conn.commit(&cx).await.ok();
+
+        // Probe the package's direct dependents (this is what the DDL preview's
+        // `dependents` block runs when previewing a create_or_replace / patch of
+        // the package body).
+        let probe = if build_ok {
+            Some(probe_dependents(&cx, &conn, &owner, pkg, 200).await)
+        } else {
+            None
+        };
+
+        // Always tear down the throwaway objects before asserting.
+        for stmt in [
+            format!("DROP VIEW {view}"),
+            format!("DROP PROCEDURE {proc}"),
+            format!("DROP PACKAGE {pkg}"),
+        ] {
+            conn.execute(&cx, &stmt, &[]).await.ok();
+        }
+        conn.commit(&cx).await.ok();
+
+        if !build_ok {
+            return;
+        }
+
+        match probe.expect("probe ran") {
+            DependentsProbe::Available { direct } => {
+                let view_dep = direct
+                    .iter()
+                    .find(|d| d.name.eq_ignore_ascii_case(view))
+                    .unwrap_or_else(|| panic!("dependent view {view} not surfaced: {direct:?}"));
+                assert_eq!(view_dep.object_type.to_ascii_uppercase(), "VIEW");
+                assert!(
+                    view_dep.is_invalidatable(),
+                    "dependent view must be flagged at_risk_of_invalid"
+                );
+
+                let proc_dep = direct
+                    .iter()
+                    .find(|d| d.name.eq_ignore_ascii_case(proc))
+                    .unwrap_or_else(|| panic!("dependent proc {proc} not surfaced: {direct:?}"));
+                assert_eq!(proc_dep.object_type.to_ascii_uppercase(), "PROCEDURE");
+                assert!(
+                    proc_dep.is_invalidatable(),
+                    "dependent procedure must be flagged at_risk_of_invalid"
+                );
+            }
+            DependentsProbe::Unavailable { reason } => {
+                panic!("ALL_DEPENDENCIES probe should be available for the test user: {reason}");
+            }
+        }
     });
 }

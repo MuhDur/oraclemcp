@@ -596,6 +596,133 @@ pub async fn list_schemas(
     .await
 }
 
+/// One direct dependent of a target object, read from `ALL_DEPENDENCIES`.
+///
+/// A dependent is an object that *references* the target (the target is its
+/// `REFERENCED_*`). This is the "blast radius" shape used by the DDL previews:
+/// who a CREATE OR REPLACE of the target might touch.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DependentObject {
+    /// Owner (schema) of the dependent object.
+    pub owner: String,
+    /// Name of the dependent object.
+    pub name: String,
+    /// `ALL_DEPENDENCIES.TYPE` of the dependent (e.g. `VIEW`, `PROCEDURE`).
+    pub object_type: String,
+}
+
+impl DependentObject {
+    /// Whether replacing the referenced object typically marks this dependent
+    /// `INVALID`. Best-effort static heuristic: PL/SQL stored code (procedures,
+    /// functions, packages and their bodies, types and their bodies, triggers),
+    /// views, and materialized views are recompilation-dependent on their
+    /// referenced objects; tables, sequences, and synonyms are not invalidated
+    /// by a source replace. This is a preview estimate, not a guarantee — Oracle
+    /// may fine-grain-invalidate differently at apply time.
+    #[must_use]
+    pub fn is_invalidatable(&self) -> bool {
+        matches!(
+            self.object_type.to_ascii_uppercase().as_str(),
+            "VIEW"
+                | "PROCEDURE"
+                | "FUNCTION"
+                | "PACKAGE"
+                | "PACKAGE BODY"
+                | "TYPE"
+                | "TYPE BODY"
+                | "TRIGGER"
+                | "MATERIALIZED VIEW"
+        )
+    }
+}
+
+/// Outcome of a direct-dependents (blast-radius) probe over `ALL_DEPENDENCIES`.
+///
+/// The probe never surfaces an error to its caller: the dependents block is a
+/// purely additive, observational enrichment of a DDL preview, so a privilege
+/// gap or dictionary error degrades to [`DependentsProbe::Unavailable`] rather
+/// than failing the preview.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum DependentsProbe {
+    /// The dictionary query ran. `direct` holds the one-hop dependents visible
+    /// to this session (possibly empty).
+    Available {
+        /// Direct (one-hop) dependents referencing the target object.
+        direct: Vec<DependentObject>,
+    },
+    /// `ALL_DEPENDENCIES` was not accessible (privilege gap or dictionary
+    /// error); the preview proceeds without the dependents block.
+    Unavailable {
+        /// Sanitized reason the probe degraded.
+        reason: String,
+    },
+}
+
+/// Build a [`DependentObject`] from one `ALL_DEPENDENCIES` row, skipping rows
+/// missing the owner/name/type triple. Pure — factored out for offline tests.
+#[must_use]
+pub fn dependent_from_row(row: &OracleRow) -> Option<DependentObject> {
+    let owner = row.text("OWNER")?.trim();
+    let name = row.text("NAME")?.trim();
+    let object_type = row.text("TYPE")?.trim();
+    if owner.is_empty() || name.is_empty() || object_type.is_empty() {
+        return None;
+    }
+    Some(DependentObject {
+        owner: owner.to_owned(),
+        name: name.to_owned(),
+        object_type: object_type.to_owned(),
+    })
+}
+
+/// Probe the *direct* (one-hop) dependents of a target object via
+/// `ALL_DEPENDENCIES` — the objects that reference `owner.name` and would be
+/// candidates for invalidation if it were replaced.
+///
+/// This is a **read-only** dictionary query, gated by nothing new: it never
+/// touches the SQL classifier, the DDL gate, or the operating-level ladder. It
+/// binds owner/name (never interpolates) and self-excludes the target. Only
+/// direct dependents are returned; the transitive closure and dynamic-SQL
+/// (`EXECUTE IMMEDIATE`) references are intentionally out of scope, and objects
+/// outside this session's dictionary visibility are not shown. On any driver /
+/// privilege error the probe degrades to [`DependentsProbe::Unavailable`] so a
+/// preview is never failed by a missing-privilege dependents lookup.
+pub async fn probe_dependents(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: &str,
+    name: &str,
+    max_rows: usize,
+) -> DependentsProbe {
+    // Mirror the `list_objects` idiom: bind each value once through a `WITH
+    // args` CTE and reference it by alias, so a repeated predicate does not
+    // depend on repeating a positional placeholder.
+    let sql = "SELECT * FROM ( \
+                   WITH args AS ( \
+                       SELECT :1 owner_filter, :2 name_filter FROM dual \
+                   ) \
+                   SELECT DISTINCT d.owner, d.name, d.type \
+                   FROM all_dependencies d CROSS JOIN args \
+                   WHERE d.referenced_owner = args.owner_filter \
+                     AND d.referenced_name = args.name_filter \
+                     AND NOT (d.owner = args.owner_filter AND d.name = args.name_filter) \
+                   ORDER BY d.owner, d.type, d.name \
+               ) WHERE ROWNUM <= :3";
+    let binds = [
+        OracleBind::from(owner.to_ascii_uppercase()),
+        OracleBind::from(name.to_ascii_uppercase()),
+        OracleBind::from(max_rows as i64),
+    ];
+    match conn.query_rows(cx, sql, &binds).await {
+        Ok(rows) => DependentsProbe::Available {
+            direct: rows.iter().filter_map(dependent_from_row).collect(),
+        },
+        Err(err) => DependentsProbe::Unavailable {
+            reason: format!("ALL_DEPENDENCIES not accessible: {err}"),
+        },
+    }
+}
+
 /// Describe one index's metadata, indexed columns, and function-based
 /// expressions. Owner + index name are bound.
 pub async fn describe_index(
@@ -2135,5 +2262,215 @@ mod tests {
         assert!(assemble_cost_estimate(&rows).is_none());
         // Empty PLAN_TABLE read → no block.
         assert!(assemble_cost_estimate(&[]).is_none());
+    }
+
+    fn dependency_row(owner: &str, name: &str, object_type: &str) -> OracleRow {
+        OracleRow {
+            columns: vec![
+                (
+                    "OWNER".to_owned(),
+                    OracleCell::new("VARCHAR2", Some(owner.to_owned())),
+                ),
+                (
+                    "NAME".to_owned(),
+                    OracleCell::new("VARCHAR2", Some(name.to_owned())),
+                ),
+                (
+                    "TYPE".to_owned(),
+                    OracleCell::new("VARCHAR2", Some(object_type.to_owned())),
+                ),
+            ],
+        }
+    }
+
+    struct DependentsMock {
+        rows: Vec<OracleRow>,
+        fail: bool,
+        calls: std::sync::Mutex<Vec<(String, Vec<OracleBind>)>>,
+    }
+
+    impl DependentsMock {
+        fn returning(rows: Vec<OracleRow>) -> Self {
+            Self {
+                rows,
+                fail: false,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                rows: Vec::new(),
+                fail: true,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for DependentsMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.calls
+                .lock()
+                .expect("call log")
+                .push((sql.to_owned(), binds.to_vec()));
+            if self.fail {
+                return Err(DbError::Query(
+                    "ORA-00942: table or view does not exist".to_owned(),
+                ));
+            }
+            Ok(self.rows.clone())
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn dependent_object_invalidatable_classification() {
+        for kind in [
+            "VIEW",
+            "PROCEDURE",
+            "FUNCTION",
+            "PACKAGE",
+            "PACKAGE BODY",
+            "TYPE",
+            "TYPE BODY",
+            "TRIGGER",
+            "MATERIALIZED VIEW",
+            // case-insensitive
+            "view",
+        ] {
+            let dep = DependentObject {
+                owner: "APP".to_owned(),
+                name: "X".to_owned(),
+                object_type: kind.to_owned(),
+            };
+            assert!(dep.is_invalidatable(), "{kind} should be invalidatable");
+        }
+        for kind in ["TABLE", "SEQUENCE", "SYNONYM", "INDEX"] {
+            let dep = DependentObject {
+                owner: "APP".to_owned(),
+                name: "X".to_owned(),
+                object_type: kind.to_owned(),
+            };
+            assert!(
+                !dep.is_invalidatable(),
+                "{kind} should not be invalidatable"
+            );
+        }
+    }
+
+    #[test]
+    fn dependent_from_row_skips_incomplete_rows() {
+        assert_eq!(
+            dependent_from_row(&dependency_row("APP", "V_ORDERS", "VIEW")),
+            Some(DependentObject {
+                owner: "APP".to_owned(),
+                name: "V_ORDERS".to_owned(),
+                object_type: "VIEW".to_owned(),
+            })
+        );
+        // Missing NAME column → skipped.
+        let partial = OracleRow {
+            columns: vec![(
+                "OWNER".to_owned(),
+                OracleCell::new("VARCHAR2", Some("APP".to_owned())),
+            )],
+        };
+        assert_eq!(dependent_from_row(&partial), None);
+        // Blank TYPE → skipped.
+        assert_eq!(dependent_from_row(&dependency_row("APP", "X", "  ")), None);
+    }
+
+    #[test]
+    fn probe_dependents_binds_uppercased_and_self_excludes() {
+        let conn = DependentsMock::returning(vec![
+            dependency_row("APP", "V_DEP", "VIEW"),
+            dependency_row("APP", "P_DEP", "PROCEDURE"),
+        ]);
+        let conn_ref = &conn;
+        let probe = run_with_cx(|cx| async move {
+            probe_dependents(&cx, conn_ref, "app", "pkg_target", 100).await
+        });
+        let (sql, binds) = conn
+            .calls
+            .lock()
+            .expect("calls")
+            .first()
+            .cloned()
+            .expect("one call");
+        // Owner/name are bound (never interpolated) and normalized to uppercase.
+        assert_eq!(
+            binds,
+            vec![
+                OracleBind::String("APP".to_owned()),
+                OracleBind::String("PKG_TARGET".to_owned()),
+                OracleBind::I64(100),
+            ]
+        );
+        assert!(sql.contains("all_dependencies"), "queries ALL_DEPENDENCIES");
+        assert!(
+            sql.contains("referenced_owner") && sql.contains("referenced_name"),
+            "filters on the referenced object"
+        );
+        assert!(sql.contains("NOT (d.owner"), "self-excludes the target");
+        match probe {
+            DependentsProbe::Available { direct } => {
+                assert_eq!(direct.len(), 2);
+                assert_eq!(direct[0].name, "V_DEP");
+                assert!(direct.iter().all(DependentObject::is_invalidatable));
+            }
+            DependentsProbe::Unavailable { reason } => panic!("expected Available, got {reason}"),
+        }
+    }
+
+    #[test]
+    fn probe_dependents_degrades_on_dictionary_error() {
+        let conn = DependentsMock::failing();
+        let conn_ref = &conn;
+        let probe = run_with_cx(|cx| async move {
+            probe_dependents(&cx, conn_ref, "APP", "PKG_TARGET", 100).await
+        });
+        match probe {
+            DependentsProbe::Unavailable { reason } => {
+                assert!(
+                    reason.contains("ALL_DEPENDENCIES not accessible"),
+                    "reason: {reason}"
+                );
+            }
+            DependentsProbe::Available { .. } => panic!("expected Unavailable on error"),
+        }
     }
 }

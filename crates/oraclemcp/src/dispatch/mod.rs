@@ -32,13 +32,14 @@ use oraclemcp_core::{
 };
 use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
-    DbError, DbmsOutput, OracleBackend, OracleBind, OracleConnection, OracleConnectionInfo,
-    OracleRow, QuarantineOutcome, QueryCaps, SerializeOptions, StructuredDecodeCaps,
-    compile_errors, compile_object_statements, describe_columns, describe_constraints,
-    describe_index, describe_trigger, describe_view, execute_immediate_audit, explain_plan,
-    find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects, list_schemas,
-    plan_cost_estimate, plscope_identifiers, plscope_statements, read_lob, read_query,
-    read_query_named, sample_rows, search_objects, search_source, serialize_row,
+    DbError, DbmsOutput, DependentObject, DependentsProbe, OracleBackend, OracleBind,
+    OracleConnection, OracleConnectionInfo, OracleRow, QuarantineOutcome, QueryCaps,
+    SerializeOptions, StructuredDecodeCaps, compile_errors, compile_object_statements,
+    describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
+    execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl, get_source,
+    get_sources_by_name, list_objects, list_schemas, plan_cost_estimate, plscope_identifiers,
+    plscope_statements, probe_dependents, read_lob, read_query, read_query_named, sample_rows,
+    search_objects, search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope, ReasonCategory, StructuredReason};
 use oraclemcp_guard::{
@@ -57,6 +58,9 @@ const MAX_SEARCH_MAX_ROWS: usize = 5_000;
 const DEFAULT_SOURCE_MAX_CHARS: usize = 1_000_000;
 /// Cap on before/after snippets in `oracle_patch_source` previews.
 const DEFAULT_PATCH_PREVIEW_CHARS: usize = 1_000;
+/// Cap on direct dependents listed in a DDL preview's blast-radius block. The
+/// probe is observational enrichment, so it is bounded rather than paginated.
+const DEFAULT_DEPENDENTS_PREVIEW_MAX: usize = 200;
 /// Default cap on `oracle_schema_inspect` result rows when the caller omits it.
 const DEFAULT_SCHEMA_INSPECT_MAX_ROWS: usize = 500;
 /// Hard cap on `oracle_schema_inspect` for a single call.
@@ -3797,6 +3801,58 @@ fn detected_object_json(hint: Option<&SourceObjectHint>) -> Value {
     .unwrap_or(Value::Null)
 }
 
+fn dependent_object_json(dep: &DependentObject) -> Value {
+    json!({
+        "owner": dep.owner,
+        "name": dep.name,
+        "type": dep.object_type,
+    })
+}
+
+/// The blast-radius block for a DDL preview: the direct (one-hop) dependents of
+/// the target object plus the invalidatable subset. Pure over a
+/// [`DependentsProbe`] so it is unit-testable offline. Returns the `(key,
+/// value)` pair to splice into the preview object — either the `dependents`
+/// block, or a `dependents_unavailable` reason when the dictionary probe
+/// degraded. Additive: never touches the classifier, gate, or ladder.
+fn dependents_preview_entry(probe: &DependentsProbe) -> (&'static str, Value) {
+    match probe {
+        DependentsProbe::Available { direct } => {
+            let objects: Vec<Value> = direct.iter().map(dependent_object_json).collect();
+            let at_risk: Vec<Value> = direct
+                .iter()
+                .filter(|dep| dep.is_invalidatable())
+                .map(dependent_object_json)
+                .collect();
+            (
+                "dependents",
+                json!({
+                    "count": direct.len(),
+                    "objects": objects,
+                    "at_risk_of_invalid": at_risk,
+                    "note": "direct dependents only (one hop from ALL_DEPENDENCIES); \
+                             transitive closure and dynamic-SQL (EXECUTE IMMEDIATE) references \
+                             are not shown, and objects outside this session's dictionary \
+                             visibility are omitted. at_risk_of_invalid is a best-effort static \
+                             estimate of which dependents a replace would mark INVALID.",
+                }),
+            )
+        }
+        DependentsProbe::Unavailable { reason } => {
+            ("dependents_unavailable", json!({ "reason": reason }))
+        }
+    }
+}
+
+/// Splice the dependents blast-radius block into a preview object in place.
+/// No-op if `preview` is not a JSON object (previews always are).
+fn merge_dependents_preview(preview: &mut Value, probe: &DependentsProbe) {
+    if let Value::Object(map) = preview {
+        let (key, value) = dependents_preview_entry(probe);
+        map.insert(key.to_owned(), value);
+    }
+}
+
 fn create_or_replace_next_actions(
     gate: &LevelDecision,
     source: &str,
@@ -4313,45 +4369,55 @@ async fn patch_source_inner(
             tool_name: tool_name.to_owned(),
             created_at: Instant::now(),
         });
-        return Ok((
-            json!({
-                "applied": false,
-                "preview": true,
-                "owner": owner,
-                "name": object_name,
-                "object_type": object_type,
-                "source_kind": document.source_kind,
-                "line_count": document.line_count,
-                "char_count": document.char_count,
-                "match_count": 1,
-                "diff": patch_diff_json(&document.text, match_idx, &old_text, &new_text),
-                "patched_source_preview": source_preview_json(&patched_source, DEFAULT_PATCH_PREVIEW_CHARS),
-                "patched_ddl_preview": source_preview_json(&patched_ddl, DEFAULT_PATCH_PREVIEW_CHARS),
-                "danger": decision.danger,
-                "required_level": patch_required_level,
-                "session_level": session.effective_level(),
-                "profile_ceiling": session.effective_ceiling(),
-                "gate_decision": gate_decision,
-                "blocked_reason": blocked_reason,
-                "step_up_target": step_up_target,
-                "reason": decision.reason,
-                "patch_guard_note": patch_guard_note,
-                "confirmation": confirmation_block(
-                    tool_name,
-                    confirm.as_deref(),
-                    Some("Pass confirm only when you intend to apply this exact source patch on this active profile."),
-                ),
-                "next_actions": patch_next_actions(
-                    tool_name,
-                    &gate,
-                    (&owner, &object_name, &object_type),
-                    (&old_text, &new_text),
-                    max_chars,
-                    confirm.as_deref(),
-                ),
-            }),
-            preview_entry,
-        ));
+        let mut preview = json!({
+            "applied": false,
+            "preview": true,
+            "owner": owner,
+            "name": object_name,
+            "object_type": object_type,
+            "source_kind": document.source_kind,
+            "line_count": document.line_count,
+            "char_count": document.char_count,
+            "match_count": 1,
+            "diff": patch_diff_json(&document.text, match_idx, &old_text, &new_text),
+            "patched_source_preview": source_preview_json(&patched_source, DEFAULT_PATCH_PREVIEW_CHARS),
+            "patched_ddl_preview": source_preview_json(&patched_ddl, DEFAULT_PATCH_PREVIEW_CHARS),
+            "danger": decision.danger,
+            "required_level": patch_required_level,
+            "session_level": session.effective_level(),
+            "profile_ceiling": session.effective_ceiling(),
+            "gate_decision": gate_decision,
+            "blocked_reason": blocked_reason,
+            "step_up_target": step_up_target,
+            "reason": decision.reason,
+            "patch_guard_note": patch_guard_note,
+            "confirmation": confirmation_block(
+                tool_name,
+                confirm.as_deref(),
+                Some("Pass confirm only when you intend to apply this exact source patch on this active profile."),
+            ),
+            "next_actions": patch_next_actions(
+                tool_name,
+                &gate,
+                (&owner, &object_name, &object_type),
+                (&old_text, &new_text),
+                max_chars,
+                confirm.as_deref(),
+            ),
+        });
+        // Additive blast-radius enrichment: a read-only ALL_DEPENDENCIES probe of
+        // the object being patched. Observational only — never affects the gate,
+        // classifier, or ladder. Degrades in place if the probe cannot run.
+        let probe = probe_dependents(
+            cx,
+            conn,
+            &owner,
+            &object_name,
+            DEFAULT_DEPENDENTS_PREVIEW_MAX,
+        )
+        .await;
+        merge_dependents_preview(&mut preview, &probe);
+        return Ok((preview, preview_entry));
     }
 
     if !matches!(gate, LevelDecision::Allow) {
@@ -4564,7 +4630,7 @@ async fn create_or_replace_inner(
     };
 
     if !args.execute {
-        return Ok(json!({
+        let mut preview = json!({
             "applied": false,
             "preview": true,
             "source_preview": source_preview_json(&source, 500),
@@ -4588,7 +4654,22 @@ async fn create_or_replace_inner(
                 decision.required_level,
                 confirm.as_deref(),
             ),
-        }));
+        });
+        // Additive blast-radius enrichment: a read-only ALL_DEPENDENCIES probe of
+        // the detected target. Observational only — it never affects the gate,
+        // classifier, or ladder above. Degrades in place if the probe cannot run.
+        if let Some(hint) = detected.as_ref() {
+            let probe = probe_dependents(
+                cx,
+                conn,
+                &hint.owner,
+                &hint.name,
+                DEFAULT_DEPENDENTS_PREVIEW_MAX,
+            )
+            .await;
+            merge_dependents_preview(&mut preview, &probe);
+        }
+        return Ok(preview);
     }
 
     if !matches!(gate, LevelDecision::Allow) {
