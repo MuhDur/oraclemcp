@@ -107,7 +107,10 @@ jobs:
     name: feature powerset (cargo hack)
     needs: web-build
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 3-pass cargo-hack (check+clippy+test) over the feature powerset is heavy
+    # and grows with the codebase; it hit the old 30min cap as the IAM/doctor/
+    # explain surfaces landed. Raised for headroom.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v6
         with:
