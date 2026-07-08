@@ -866,7 +866,7 @@ fn dashboard_per_view_acceptance_suite_is_accounted() {
         &conformance,
         &[
             "| Dashboard B.8 | 10 | 0 | 10 | 10 | 0 | 100% |",
-            "Total tracked requirements: 76 MUST, 2 SHOULD, 78 tested.",
+            "Total tracked requirements: 79 MUST, 2 SHOULD, 81 tested.",
         ],
     );
 }
