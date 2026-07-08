@@ -186,10 +186,10 @@ Semver, ownership, and security-fix flow:
 Remaining upstream thin-driver gaps tracked in `/home/durakovic/projects/rust-oracledb`:
 
 - `rust-oracledb-o0b`: external wallet auth without username/password.
-- `rust-oracledb-5bh`: end-to-end OCI IAM database-token retrieval/refresh for
-  `oraclemcp` profiles remains unwired even though `oracledb` 0.5.1 exposes the
-  lower-level access-token connect option (`ConnectOptions::with_access_token`).
-  Tracked downstream as deferred bead k6q.9.
+- `rust-oracledb-5bh` / k6q.9: autonomous OCI IAM token minting/refresh and
+  resource-principal request-signing remain unwired. The server now supplies
+  pre-fetched env/file/exec JWT token sources into the driver's access-token
+  connect path; real-cloud acceptance is still an operator smoke gate.
 
 ## Proxy Auth, DRCP, and Enterprise Auth
 
@@ -209,7 +209,7 @@ Remaining upstream thin-driver gaps tracked in `/home/durakovic/projects/rust-or
 | Wallet discovery | Requires `cwallet.sso` and `tnsnames.ora`; parses aliases. | Preserve diagnostics; doctor/log output must not print local wallet paths. |
 | ADB validation | Accepts `tcps://`, TLS descriptor, or bare wallet alias; rejects plaintext `tcp://`. | Preserve fail-closed TLS/ADB validation before connection. |
 | TCPS/SNI/wallet | Thin mode routes TCPS/wallet setup through the published `oracledb` driver where available and otherwise fails explicitly. | Preserve fail-closed diagnostics; unsupported auth/features must not silently fall back to thick mode. |
-| IAM refresh | OCI token settings and refresh seams exist, but the thin adapter rejects profile-level `use_iam_token` with structured unsupported-auth diagnostics. | Keep token material redacted until profile-driven token retrieval/refresh is wired and live-tested. |
+| IAM refresh | Pre-fetched env/file/exec token sources are wired for profile-level `use_iam_token`; `token_file` is re-read on every connect and `token_exec` runs per connect. Autonomous OCI SDK/resource-principal minting via `iam_config_profile` remains unwired. | Keep token material redacted; do not claim autonomous IAM refresh until the OCI SDK/resource-principal source is implemented and live-tested. |
 | Read-only standby | Standby detection caps write behavior and disables `EXPLAIN PLAN` into `PLAN_TABLE`. | Preserve standby cap and diagnostic clarity. |
 
 ## Explain-Plan Behavior

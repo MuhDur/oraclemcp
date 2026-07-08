@@ -709,25 +709,23 @@ local development only and is rejected when `protected = true`.
 
 The current `oraclemcp` thin adapter fails explicitly for auth/features it
 cannot serve end-to-end safely, such as external wallet auth without
-username/password, OCI IAM database-token connect, and Kerberos/RADIUS auth.
-These appear as structured unsupported diagnostics in
+username/password, autonomous OCI SDK/resource-principal token minting, and
+Kerberos/RADIUS auth. These appear as structured unsupported diagnostics in
 `oraclemcp doctor --online --profile <profile>` and MCP error envelopes; the
 binary does not silently fall back to thick mode.
 
 #### OCI IAM database-token auth
 
-The OCI cloud fields `use_iam_token` (bool) and `iam_config_profile`
-(`Option<String>`) under `[profiles.oci]` **parse** through strict config
-validation, but the pinned `oracledb` 0.8.0 thin adapter **fails closed** on an
-IAM-token connect today: `oraclemcp` wires no production OCI token source, so
-`use_iam_token = true` returns a structured unsupported-auth diagnostic
-(pointing at the as-yet-unwired IAM token-source seam) rather than connecting,
-and any database access token is **refused over a non-TCPS transport** before it
-can reach the driver (defense in depth — a token must never travel in clear
-text). This parse-but-fail-closed behavior is covered by the
-`iam_token_over_non_tcps_is_refused_fail_closed` test in
-`crates/oraclemcp-db/src/connection.rs`. End-to-end IAM-token support is
-deferred (bead k6q.9), pending a production OCI SDK token source/refresh path.
+`use_iam_token = true` under `[profiles.oci]` resolves a pre-fetched database
+token (a JWT) from exactly one source: `token_env`, `token_file`, `token_exec`,
+or the built-in `ORACLEMCP_IAM_TOKEN` when no explicit source is set. The token
+is injected through the thin driver's access-token connect path and is **refused
+over a non-TCPS transport** before it can reach the driver; `token_exec` is also
+refused before spawn on non-TCPS. Token values are never persisted, rendered, or
+logged. `iam_config_profile` still only parses and is reserved for a future
+autonomous OCI SDK/resource-principal token source. Real-ADB acceptance remains
+an operator smoke gate; autonomous OCI SDK minting/refresh remains deferred
+(bead k6q.9).
 
 Thin result conversion materializes driver-side locators and cursors before
 serializing tool output: CLOB/BLOB/BFILE locators are read with the query LOB
@@ -918,7 +916,7 @@ documented in [`docs/configuration.md`](docs/configuration.md).
 | **Database version** | Tested against **Oracle Database 23ai**, including the free **Oracle FREE 23ai** image (`gvenzl/oracle-free:23-slim`, `FREEPDB1`). The pure-Rust thin `oracledb` driver speaks the Oracle Net protocol directly — no Instant Client or ODPI-C. |
 | **EZConnect** | Supported (`host:port/service`, plus EZConnect-Plus `tcps://…?wallet_location=…`) and `tnsnames.ora` aliases. |
 | **TCPS / wallet (TLS, mTLS)** | Supported with unencrypted `ewallet.pem`, plus `ssl_server_dn_match` / `ssl_server_cert_dn` / `use_sni` controls. `cwallet.sso` and standalone `ewallet.p12` are recognized and reported with structured wallet diagnostics in the default build rather than silently falling back. |
-| **OCI IAM database token** | Fields parse but **fail closed today** (structured unsupported-auth diagnostic; refused over non-TCPS). End-to-end support is deferred — see the [OCI section](#oci-iam-database-token-auth) and [`docs/configuration.md`](docs/configuration.md). |
+| **OCI IAM database token** | Supported for pre-fetched JWT sources over TCPS (`token_env`, `token_file`, `token_exec`, or `ORACLEMCP_IAM_TOKEN`). Non-TCPS is refused before token use. Autonomous OCI SDK/resource-principal minting and real-ADB acceptance remain separate gated work — see the [OCI section](#oci-iam-database-token-auth) and [`docs/configuration.md`](docs/configuration.md). |
 | **Proxy auth** | Supported (`proxy_user` + `target_schema` with `CONNECT THROUGH`). |
 | **DRCP** | Supported (server routing: `pooled` / `connection_class` / `purity`). |
 | **Read-only standby (Active Data Guard)** | Supported — mark the profile `read_only_standby = true` to force `READ_ONLY` regardless of `max_level`; `oracle_explain_plan` (which writes `PLAN_TABLE`) refuses on a standby. |
