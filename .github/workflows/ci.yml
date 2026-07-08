@@ -339,7 +339,7 @@ jobs:
   # completed 0.2.2 -> 0.5.x bump) touches exactly one file. Mirrored by the
   # `driver_seam` test in crates/oraclemcp-db so `cargo test` catches a leak too.
   boundary:
-    name: engine-free boundary + surface + driver-seam + honesty lint
+    name: engine-free boundary + surface + driver-seam + honesty + conformance accounting
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -354,6 +354,14 @@ jobs:
       - run: bash scripts/oraclemcp_driver_seam_lint.sh
       - run: bash scripts/oraclemcp_concurrency_lint.sh
       - run: bash scripts/oraclemcp_honesty_grep.sh
+      # D6.3a: regenerate tests/conformance/COVERAGE.md from the clause manifest
+      # and fail if it is stale (git-tracked doc would change) or if MUST-clause
+      # coverage falls below 0.95.
+      - name: conformance coverage-accounting (staleness + MUST >= 0.95 gate)
+        run: bash scripts/gen_coverage_report.sh --check
+      # D6.3b: every committed generated artifact must have a provenance entry.
+      - name: generated-artifact provenance register gate
+        run: bash scripts/provenance_check.sh
 
   # Public-API lock (B5; ADR-0002 mirror). oraclemcp-db is the canonical shared
   # foundation (ADR-0006) and oraclemcp-error / oraclemcp-guard are the

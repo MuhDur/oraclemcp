@@ -77,8 +77,8 @@ fi
 if ! grep -F "| WP-G hardening/docs | 1 | 0 | 1 | 1 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "WP-G hardening/docs coverage must include audit verify DB evidence"
 fi
-if ! grep -F "Total tracked requirements: 76 MUST, 2 SHOULD, 78 tested." tests/conformance/COVERAGE.md >/dev/null; then
-  e2e_finish_fail "B.6 coverage totals are stale"
+if ! grep -F "Total tracked requirements: 79 MUST, 2 SHOULD, 81 tested." tests/conformance/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "B.6 coverage totals are stale (regenerate: bash scripts/gen_coverage_report.sh --write)"
 fi
 if grep -RInE '(^|[^A-Z])SKIP([^A-Z]|$)' tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "B.6 conformance docs must use XFAIL terminology, not SKIP"

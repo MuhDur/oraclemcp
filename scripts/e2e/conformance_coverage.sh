@@ -97,8 +97,8 @@ fi
 if ! grep -F "| WP-G hardening/docs | 1 | 0 | 1 | 1 | 0 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "tests/conformance/COVERAGE.md must record 1.00 MUST coverage for WP-G G9"
 fi
-if ! grep -F "Total tracked requirements: 76 MUST, 2 SHOULD, 78 tested." tests/conformance/COVERAGE.md >/dev/null; then
-  e2e_finish_fail "tests/conformance/COVERAGE.md totals are stale"
+if ! grep -F "Total tracked requirements: 79 MUST, 2 SHOULD, 81 tested." tests/conformance/COVERAGE.md >/dev/null; then
+  e2e_finish_fail "tests/conformance/COVERAGE.md totals are stale (regenerate: bash scripts/gen_coverage_report.sh --write)"
 fi
 if ! grep -F "| JSON-RPC errors | 3 | 2 | 5 | 5 | 1 | 100% |" tests/conformance/COVERAGE.md >/dev/null; then
   e2e_finish_fail "accepted JSON-RPC divergences must be XFAIL-accounted while preserving 100% coverage"
@@ -166,5 +166,5 @@ if grep -F "| B13-" tests/conformance/COVERAGE.md | grep -F "owned by follow-up"
   e2e_finish_fail "B.13 catalog must not retain owned-by-follow-up rows after hardening closeout"
 fi
 
-e2e_log_event "coverage_summary" "assert" "pass" 0 "MUST coverage 76/76 score=1.00 xfail=0"
+e2e_log_event "coverage_summary" "assert" "pass" 0 "MUST coverage 79/79 score=1.00 xfail=2"
 e2e_finish_pass

@@ -545,6 +545,53 @@ fn conformance_requirement_matrix_is_accounted_for() {
     }
 }
 
+/// D6.3a: the conformance clause manifest (`tests/conformance/clauses.tsv`, the
+/// source of truth for `tests/conformance/COVERAGE.md`) must account for every
+/// requirement this harness enumerates, at the same level. This keeps the
+/// generated coverage matrix from silently going stale relative to the harness
+/// (exactly how MCP-STDIO-020/021 had drifted out of the doc).
+#[test]
+fn conformance_manifest_accounts_for_every_harness_requirement() {
+    let manifest_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/conformance/clauses.tsv"
+    );
+    let manifest = std::fs::read_to_string(manifest_path)
+        .unwrap_or_else(|e| panic!("read clause manifest {manifest_path}: {e}"));
+    let mut levels = std::collections::HashMap::new();
+    for line in manifest.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let mut cols = line.split('\t');
+        let id = cols.next().unwrap_or_default();
+        let level = cols.next().unwrap_or_default();
+        assert!(
+            !id.is_empty() && !level.is_empty(),
+            "manifest row is malformed: {line}"
+        );
+        levels.insert(id.to_owned(), level.to_owned());
+    }
+    for requirement in REQUIREMENTS {
+        let level = levels.get(requirement.id).unwrap_or_else(|| {
+            panic!(
+                "clause manifest is missing harness requirement {} — add it to \
+                 tests/conformance/clauses.tsv and run scripts/gen_coverage_report.sh --write",
+                requirement.id
+            )
+        });
+        let expected = match requirement.level {
+            RequirementLevel::Must => "MUST",
+            RequirementLevel::Should => "SHOULD",
+        };
+        assert_eq!(
+            level, expected,
+            "clause manifest level for {} disagrees with the harness",
+            requirement.id
+        );
+    }
+}
+
 #[test]
 fn initialize_returns_mcp_2025_11_25_server_info_and_tools_capability() {
     let replies = run_script(vec![]);

@@ -1,0 +1,85 @@
+# oraclemcp conformance clause manifest — the machine-readable source of truth for
+# tests/conformance/COVERAGE.md. Regenerate the doc with scripts/gen_coverage_report.sh.
+# Columns (TAB-separated): id  level(MUST|SHOULD)  section  tested(y|n)  verdict(pass|fail|xfail)  disc(DISC-nnn|-)  description
+# An xfail verdict MUST reference a DISCREPANCIES.md id; a fail verdict drops MUST coverage below 1.00.
+MCP-STDIO-001	MUST	Initialize	y	pass	-	`initialize` returns protocol version, server info, and tool capability.
+MCP-STDIO-002	MUST	Notifications	y	pass	-	`notifications/initialized` produces no response.
+MCP-STDIO-003	MUST	Tools	y	pass	-	`tools/list` returns MCP `inputSchema` objects.
+MCP-STDIO-009	MUST	Tools	y	pass	-	`tools/list` returns non-empty titles and explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint` annotations.
+MCP-STDIO-010	MUST	Tools	y	pass	-	`tools/list` preserves declared `outputSchema`, and `tools/call` `structuredContent` validates against the advertised schema.
+MCP-STDIO-004	MUST	Tools	y	pass	-	`tools/call` returns `content`, `structuredContent`, and `isError`.
+MCP-STDIO-005	MUST	Tools	y	xfail	DISC-002	Unknown tools are MCP tool errors, not transport crashes.
+MCP-STDIO-006	MUST	Initialize	y	pass	-	Initialize capabilities advertise resources only after resource handlers are served.
+MCP-STDIO-020	MUST	Initialize	y	pass	-	Served capabilities degrade to the negotiated revision: `completions` (added 2025-03-26) is not advertised to a 2024-11-05 client; refusal fields (`isError` + content text) are revision-independent.
+MCP-STDIO-021	MUST	Initialize	y	pass	-	A session initializes exactly once: a second `initialize` is rejected with a JSON-RPC error and keeps the originally negotiated version.
+MCP-STDIO-007	MUST	Resources	y	pass	-	`resources/list`, `resources/templates/list`, and `resources/read` are served with MCP resource content objects.
+MCP-STDIO-008	MUST	Prompts	y	pass	-	`prompts/list` and `prompts/get` are served only after prompt capability negotiation.
+JSONRPC-STDIO-001	MUST	JSON-RPC errors	y	pass	-	Malformed JSON returns parse error with null id.
+JSONRPC-STDIO-002	MUST	JSON-RPC errors	y	pass	-	Unknown methods return method-not-found and echo id.
+JSONRPC-STDIO-003	MUST	JSON-RPC errors	y	pass	-	Invalid params return invalid-params and echo id.
+JSONRPC-STDIO-004	SHOULD	JSON-RPC errors	y	pass	-	Oversized frames fail closed before parsing.
+JSONRPC-STDIO-005	SHOULD	JSON-RPC errors	y	xfail	DISC-001	Batch arrays are explicitly rejected for stdio.
+SEC-STDIO-001	MUST	Security	y	pass	-	Token mismatch errors do not echo the presented token.
+MCP-STDIO-011	MUST	Pagination	y	pass	-	`tools/list`, `resources/list`, and `resources/templates/list` emit an opaque, tamper-evident `nextCursor` that round-trips to cover every item exactly once within a bounded page size.
+MCP-STDIO-012	MUST	Pagination	y	pass	-	A forged, edited, or cross-endpoint pagination cursor (and a tampered `oracle_query` page cursor) is rejected with invalid-params / a structured error envelope, never silently followed.
+MCP-STDIO-013	MUST	Resources	y	pass	-	A large `oracle_query` result is materialized as an `oracle-export://{id}` resource (E3) and returned as a `resource_link` (E3b); `resources/read` serves it with its MIME type and proper CSV escaping; a forged or expired export id fails closed (`OBJECT_NOT_FOUND`).
+MCP-STDIO-014	MUST	Resources	y	pass	-	An export is access-controlled identically to the originating query: the export id is bound (HMAC) to the request's OAuth scope-grant fingerprint, so a `resources/read` under a different scope grant is refused.
+MCP-STDIO-015	MUST	Subscriptions	y	pass	-	`resources.subscribe` is advertised, and `resources/subscribe` accepted, ONLY when a change source is confirmed (the `SubscriptionHub` polling fallback). With no source the capability stays `false` and `resources/subscribe` is refused (method-not-found). The thin-line binary ships with no source, so it does not advertise subscribe.
+MCP-STDIO-016	MUST	Subscriptions	y	pass	-	A subscribed resource whose polled fingerprint changes (the DBMS_CHANGE_NOTIFICATION-vs-polling fallback path) emits a `notifications/resources/updated` for that uri on the next transport flush; the first observation only seeds the baseline.
+MCP-STDIO-017	MUST	Completion	y	pass	-	`completion/complete` is advertised (`capabilities.completions`) and served as owner→type→object autocomplete for the dictionary tools' arguments and the `oracle://object/{owner}/{type}/{name}` template, scoped by `context.arguments`, routed through the read path, capped at 100 values with `{values,total,hasMore}`. A `profile`/`db` argument completes only the E5 `mcp_exposed` profiles (a non-exposed profile is never offered).
+MCP-STDIO-018	MUST	Notifications	y	pass	-	A `tools/call` carrying `params._meta.progressToken` is bracketed by `notifications/progress` (a started 0/1 and a completed 1/1) that ride the transport after the response and are true notifications (no id); without a token no progress is emitted.
+MCP-STDIO-019	MUST	Notifications	y	pass	-	`notifications/tools/list_changed` is advertised (`tools.listChanged: true`) and emitted when the served tool set changes (e.g. an `oracle_switch_profile` that alters the profile-scoped custom-tool catalog); it is a paramless, id-less notification.
+HTTP-AUTH-001	MUST	HTTP OAuth	y	pass	-	OAuth-protected `/mcp` refuses anonymous requests with `WWW-Authenticate`.
+HTTP-AUTH-002	MUST	HTTP OAuth	y	pass	-	A valid bearer token admits a served HTTP request and forwards the validated OAuth scope grant to tool dispatch.
+HTTP-AUTH-003	MUST	HTTP OAuth	y	pass	-	A valid bearer token without the configured required scope returns `403` with `error="insufficient_scope"`.
+HTTP-AUTH-004	MUST	HTTP OAuth	y	pass	-	Narrow, broad, and profile-protected OAuth scope ceilings are enforced at dispatch through the binary HTTP transport.
+HTTP-AUTH-005	MUST	HTTP client credentials	y	pass	-	Service-owned per-client MCP bearer credentials are hashed at rest, authenticate as scoped isolated principals, and rotate/revoke one client without affecting another.
+HTTP-GUARD-001	MUST	HTTP guards	y	pass	-	A disallowed browser `Origin` is rejected with `403` before MCP dispatch.
+HTTP-SESSION-001	MUST	HTTP sessions	y	pass	-	Stateful HTTP rejects forged or unknown `mcp-session-id` values before MCP dispatch.
+HTTP-SESSION-002	MUST	HTTP sessions	y	pass	-	Stateful GET replays buffered SSE responses after `cursor` / `Last-Event-ID`; stateless DELETE returns 405 instead of a false session-close acceptance.
+HTTP-ROUTE-001	MUST	HTTP routing	y	pass	-	`/operator/v1` API routes return typed JSON 404 responses and preserve parsed query filters; they never fall through to a SPA/history HTML response.
+HTTP-NEG-001	MUST	HTTP negotiation	y	pass	-	`/mcp` POST rejects unacceptable `Accept` and unsupported `Content-Type` values before JSON-RPC dispatch.
+HTTP-MCP-VER-001	MUST	HTTP negotiation	y	pass	-	`/mcp` honors `MCP-Protocol-Version`; unsupported versions return typed JSON `400 unsupported_protocol_version` before dispatch.
+OPERATOR-V1-001	MUST	Operator v1	y	pass	-	`/operator/v1/schema` serves the generated machine-readable schema bundle with route and event schemas.
+OPERATOR-V1-002	MUST	Operator v1	y	pass	-	`/operator/v1/health`, `/metrics`, `/audit-tail`, `/active-lanes`, and `/vsession` return versioned, redacted REST envelopes with unavailable-source degradation where providers are absent.
+OPERATOR-V1-003	MUST	Operator v1	y	pass	-	`/operator/v1/events` emits SSE `operatorEvent` envelopes carrying `event_seq`, `event_id`, `lane_id`, `subject_id_hash`, `redaction_level`, and `schema_version`.
+OPERATOR-V1-004	MUST	Operator v1	y	pass	-	Gated-action operator routes forward to existing MCP `tools/call` dispatch mappings rather than bypassing the guarded dispatcher.
+OPERATOR-V1-005	MUST	Operator v1	y	pass	-	Generated operator TypeScript types and UI fixtures are checked against the Rust schema source of truth.
+OPERATOR-V1-006	MUST	Operator v1	y	pass	-	B.6 `mcp_and_operator_v1_conformance_matrix` records 1.00 MUST coverage and runs the UI fixture schema validator.
+OPERATOR-V1-007	MUST	Operator v1	y	pass	-	Gated-action operator routes accept or derive idempotency keys, return typed in-progress/conflict responses, and replay the original redacted response for same-key retries without re-entering guarded dispatch.
+OPERATOR-V1-008	MUST	Operator v1	y	pass	-	`/operator/v1/events` resumes by `cursor` / `Last-Event-ID` from a bounded subject+lane ring, emits gap markers or typed expiry for stale cursors, and rejects cross-lane cursors before replay.
+OPERATOR-V1-009	MUST	Operator v1	y	pass	-	B.8 change proposal apply re-classifies stored SQL templates and re-checks level/grants/subject at apply time instead of trusting stored proposal verdicts.
+DASHBOARD-B8-001	MUST	Dashboard B.8	y	pass	-	The embedded dashboard bundle serves the SPA when enabled, never falls back from API routes to HTML, and the bundle gate checks npm audit, lockfile provenance, SBOM shape, and content hashes.
+DASHBOARD-B8-002	MUST	Dashboard B.8	y	pass	-	A malicious page cannot trigger dashboard gated actions: browser POSTs require same-origin, HttpOnly/SameSite cookie, CSRF, route action ticket, CSP frame controls, and no browser-storage token persistence.
+DASHBOARD-B8-003	MUST	Dashboard B.8	y	pass	-	Config draft/apply is staged, strictly validated, redacted, atomic, audited, reload-aware, and rollback restores the prior config without serializing secret references.
+DASHBOARD-B8-004	MUST	Dashboard B.8	y	pass	-	Workbench execution has no alternate SQL path: preview/read/write route through the same classifier, ceilings, preview/confirm, idempotency, audit, and dispatcher path used by MCP agents.
+DASHBOARD-B8-005	MUST	Dashboard B.8	y	pass	-	Change proposal apply re-classifies every current SQL template, re-checks level/grants/subject at apply time, forwards through gated actions, and treats stored verdicts as review metadata only.
+DASHBOARD-B8-006	MUST	Dashboard B.8	y	pass	-	Dashboard skin grammar is a contract: 2D and table no-WebGL fallbacks stay available, Orrery remains lazy/quarantined, a11y anchors stay present, and credential secrets are never rendered.
+DASHBOARD-B8-007	MUST	Dashboard B.8	y	pass	-	Explorer global search spans all visible schemas and object types for object-name matches and source text matches through the existing guarded `oracle_search_objects` and `oracle_search_source` action routes.
+DASHBOARD-B8-008	MUST	Dashboard B.8	y	pass	-	Audit proof-bundle export is allow-list-first: dashboard requests `export=proof-bundle`, the operator response includes subject hashes, SQL hashes, DB evidence, chain/signature metadata, and no raw SQL, bind values, raw subject ids, or secrets.
+DASHBOARD-B8-009	MUST	Dashboard B.8	y	pass	-	Client-credential screen lists only redacted per-client metadata, shows a rotated bearer once, and revoke/rotate closes only the affected principal's sessions/grants.
+DASHBOARD-B8-010	MUST	Dashboard B.8	y	pass	-	Source-replaceable governed DDL captures prior source into content-addressed service snapshots when visible, source-history lists omit source text, and revert drafts a reviewed DDL Change Proposal instead of directly applying DDL.
+HTTP-SURFACE-001	MUST	HTTP auth/no-leak	y	pass	-	The surface inventory asserts per-surface authn/gating for `/mcp`, stateful SSE GET, `/operator/v1`, dashboard pairing/POSTs, config apply, `/readyz`, and `/metrics`; unauthenticated infra probes expose no DB identity, SQL text, bind values, wallet, credential, or password markers.
+HTTPS-001	MUST	HTTPS / mTLS	y	pass	-	Server-only native TLS accepts a valid HTTPS handshake.
+HTTPS-002	MUST	HTTPS / mTLS	y	pass	-	Native mTLS rejects clients without a certificate and accepts a client certificate signed by the configured CA.
+DB-SER-001	MUST	Oracle structured cells	y	pass	-	A published JSON Schema exists for `OracleCell::structured` and declares ARRAY, JSON/OSON, VECTOR, TSTZ, object marker, and generic unsupported variants.
+DB-SER-002	MUST	Oracle structured cells	y	pass	-	Golden fixtures for ARRAY/JSON/VECTOR/TSTZ, OSON scalars, object/UDT unsupported, and generic unsupported parse and match the serializer output.
+DB-SER-003	MUST	Oracle structured cells	y	pass	-	Structured payloads serialize verbatim rather than flattening through text.
+DB-SER-004	MUST	Oracle structured cells	y	pass	-	Legacy silent-flattening shapes are rejected by the schema contract test.
+DB-SER-005	MUST	Oracle structured cells	y	pass	-	`OracleCell::structured` carries the structured contract version, the published schema declares it, and metadata cache keys include it.
+DB-SER-006	MUST	Oracle structured cells	y	pass	-	Structured ARRAY/JSON/VECTOR decode is capped by row, cell, byte, and depth budgets; larger query budgets require `deep_decode=true`.
+WRITE-INTENT-001	MUST	Durable SQL idempotency	y	pass	-	Committing tools write a durable pre-execute intent, unresolved in-doubt intents fail writable startup closed, and recovered terminal history rejects exact confirmation-grant plus SQL replay after restart.
+WPS-BACKUP-001	MUST	WP-S persistent service	y	pass	-	Service backup snapshots the XDG state directory plus config under the service lock, restore verifies the backed-up audit hash-chain before recovering files, and audit data remains non-prunable.
+WPS-S4-001	MUST	WP-S persistent service	y	pass	-	Mimalloc is wired as an explicit opt-in allocator feature, background worker creation is gated by service/runtime admission, and the DL-4 lock hierarchy is documented and debug-asserted.
+WPG-G9-001	MUST	WP-G hardening/docs	y	pass	-	`audit verify --with-db-evidence` verifies the signed chain, correlates audit sequence numbers with signed Oracle session evidence when present, and reports degraded evidence without exposing SQL, bind values, or secrets.
+WPN-A-001	MUST	WP-N concurrency/session	y	pass	-	Per-session and per-subject lanes keep operating level, profile, connection, and session state isolated.
+WPN-A-002	MUST	WP-N concurrency/session	y	pass	-	Confirmation and execution grants are single-use and bound to lane, subject, session, profile, and generation.
+WPN-B-001	MUST	WP-N concurrency/session	y	pass	-	Different configured databases stay isolated under concurrent live lanes.
+WPN-C-001	MUST	WP-N concurrency/session	y	pass	-	Blocked or contended database work cannot head-of-line-block unrelated lanes and must finish or return a typed timeout/deadlock/busy result.
+WPN-D-001	MUST	WP-N concurrency/session	y	pass	-	Capacity is bounded, redacted, reserve-aware, and fair across subjects.
+WPN-E-001	MUST	WP-N concurrency/session	y	pass	-	DELETE, timeout, cancel, shutdown, and reaper terminal paths release permits and roll back dirty work exactly once.
+WPN-F-001	MUST	WP-N concurrency/session	y	pass	-	Streamable HTTP lanes coexist with the frozen stdio contract without changing stdio golden behavior.
+WPN-G-001	MUST	WP-N concurrency/session	y	pass	-	Concurrent actions keep per-subject audit identity, valid hash chains, and idempotency replay semantics.
+WPN-H-001	MUST	WP-N concurrency/session	y	pass	-	Mixed lane live/load evidence captures latency percentiles and zero leak/starvation verdicts.
+WPN-J-001	MUST	WP-N concurrency/session	y	pass	-	SSE ids, Last-Event-ID/cursor replay, typed expiry/gaps, and DELETE are scoped to the target session/stream.
+WPN-K-001	MUST	WP-N concurrency/session	y	pass	-	The lane model forbids permit leaks, stale grants, ceiling races, and subject/connection/audit mixing.
