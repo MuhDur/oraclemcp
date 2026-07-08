@@ -131,6 +131,17 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      # The 22-combo x (check+clippy+test) x --all-targets build accretes a large
+      # shared target/ dir that exceeded the ubuntu-latest ~14GB disk once the K10
+      # streaming surface landed (job failed with "No space left on device"). Free
+      # the preinstalled toolchains we don't use (~25GB) before the heavy build.
+      # Coverage is unchanged — every feature combo still runs.
+      - name: Free disk space for the feature powerset
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo docker image prune --all --force 2>/dev/null || true
+          df -h /
       - uses: actions/download-artifact@v8
         with:
           name: oraclemcp-dashboard-dist
