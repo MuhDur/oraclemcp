@@ -499,12 +499,12 @@ function OverviewPage(): React.ReactElement {
           <ProbeDashboard probes={overviewProbes} compact />
           <Surface className="min-h-32 p-4">
             <div className="flex items-start justify-between gap-3">
-              <p className="text-sm font-semibold text-zinc-600">Review Source</p>
+              <p className="text-sm font-semibold text-[var(--om-text-muted)]">Review Source</p>
               <Badge tone={reviews.isError ? "warn" : reviews.data ? "ok" : "info"}>
                 {reviews.isError ? "blocked" : reviews.data ? "ready" : "sync"}
               </Badge>
             </div>
-            <strong className="mt-5 block break-all font-mono text-sm leading-5 text-zinc-950">
+            <strong className="mt-5 block break-all font-mono text-sm leading-5 text-[var(--om-text-bright)]">
               /operator/v1/change-proposals
             </strong>
           </Surface>
@@ -1424,23 +1424,23 @@ function HealthSourcePanel({
       />
       <div className="overflow-x-auto">
         <table className="w-full min-w-[680px] border-collapse text-left">
-          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+          <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
             <tr>
               <th className="px-4 py-3 font-bold">Source</th>
               <th className="px-4 py-3 font-bold">Status</th>
               <th className="px-4 py-3 font-bold">Detail</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-zinc-100">
+          <tbody className="divide-y divide-[var(--om-border)]">
             {rows.map((row) => (
-              <tr key={row.key} className="bg-white">
-                <td className="px-4 py-4 align-top font-mono text-sm font-semibold text-zinc-950">
+              <tr key={row.key} className="bg-[var(--om-surface)]">
+                <td className="px-4 py-4 align-top font-mono text-sm font-semibold text-[var(--om-text-bright)]">
                   {row.source}
                 </td>
                 <td className="px-4 py-4 align-top">
                   <Badge tone={limitStatusTone(row.status)}>{row.status}</Badge>
                 </td>
-                <td className="px-4 py-4 align-top text-sm text-zinc-600">{row.detail}</td>
+                <td className="px-4 py-4 align-top text-sm text-[var(--om-text-muted)]">{row.detail}</td>
               </tr>
             ))}
           </tbody>
@@ -1468,14 +1468,14 @@ function HealthStatusTile({
   return (
     <Surface className="min-h-32 p-4">
       <div className="flex items-start justify-between gap-3">
-        <div className="flex size-9 items-center justify-center rounded-md border border-zinc-200 bg-zinc-50 text-zinc-700">
+        <div className="flex size-9 items-center justify-center rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] text-[var(--om-text)]">
           <Icon className="size-4" aria-hidden="true" />
         </div>
         <Badge tone={pending ? "info" : tone}>{pending ? "sync" : tone}</Badge>
       </div>
-      <p className="mt-4 text-sm font-semibold text-zinc-600">{label}</p>
-      <strong className="mt-2 block truncate text-2xl leading-tight text-zinc-950">{value}</strong>
-      <p className="mt-2 truncate font-mono text-xs text-zinc-500">{meta}</p>
+      <p className="mt-4 text-sm font-semibold text-[var(--om-text-muted)]">{label}</p>
+      <strong className="mt-2 block truncate text-2xl leading-tight text-[var(--om-text-bright)]">{value}</strong>
+      <p className="mt-2 truncate font-mono text-xs text-[var(--om-text-muted)]">{meta}</p>
     </Surface>
   );
 }
@@ -1805,7 +1805,7 @@ function ConfigPage(): React.ReactElement {
               value={draftToml}
               onChange={(event) => setDraftToml(event.target.value)}
               spellCheck={false}
-              className="min-h-72 w-full resize-y rounded-md border border-zinc-300 bg-white p-3 font-mono text-sm leading-6 text-zinc-950 outline-none focus:border-zinc-500 focus:ring-2 focus:ring-zinc-200"
+              className="min-h-72 w-full resize-y rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] p-3 font-mono text-sm leading-6 text-[var(--om-text-bright)] outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
               aria-label="Config draft TOML"
             />
             <div className="flex flex-wrap items-center gap-2">
@@ -1897,17 +1897,17 @@ function ConfigDiffPanel({
       />
       <div className="overflow-x-auto">
         <table className="w-full min-w-[720px] border-collapse text-left">
-          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+          <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
             <tr>
               <th className="px-4 py-3 font-bold">Path</th>
               <th className="px-4 py-3 font-bold">Before</th>
               <th className="px-4 py-3 font-bold">After</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-zinc-100">
+          <tbody className="divide-y divide-[var(--om-border)]">
             {changes.length === 0 ? (
               <tr>
-                <td className="px-4 py-4 text-sm text-zinc-500" colSpan={3}>
+                <td className="px-4 py-4 text-sm text-[var(--om-text-muted)]" colSpan={3}>
                   No preview
                 </td>
               </tr>
@@ -1923,14 +1923,14 @@ function ConfigDiffPanel({
 
 function ConfigDiffRow({ change }: { change: ConfigFieldChange }): React.ReactElement {
   return (
-    <tr className="bg-white">
-      <td className="px-4 py-4 align-top font-mono text-sm font-semibold text-zinc-950">
+    <tr className="bg-[var(--om-surface)]">
+      <td className="px-4 py-4 align-top font-mono text-sm font-semibold text-[var(--om-text-bright)]">
         {change.path}
       </td>
-      <td className="px-4 py-4 align-top font-mono text-xs text-zinc-600">
+      <td className="px-4 py-4 align-top font-mono text-xs text-[var(--om-text-muted)]">
         {compactJson(change.before)}
       </td>
-      <td className="px-4 py-4 align-top font-mono text-xs text-zinc-600">
+      <td className="px-4 py-4 align-top font-mono text-xs text-[var(--om-text-muted)]">
         {compactJson(change.after)}
       </td>
     </tr>
@@ -1971,17 +1971,17 @@ function ConfigApplyPanel({
             )}
             <div className="overflow-x-auto">
               <table className="w-full min-w-[420px] border-collapse text-left">
-                <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+                <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
                   <tr>
                     <th className="px-3 py-2 font-bold">Profile</th>
                     <th className="px-3 py-2 font-bold">Action</th>
                     <th className="px-3 py-2 font-bold">Reason</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-zinc-100">
+                <tbody className="divide-y divide-[var(--om-border)]">
                   {plan.profiles.map((decision) => (
                     <tr key={decision.profile}>
-                      <td className="px-3 py-3 font-mono text-sm font-semibold text-zinc-950">
+                      <td className="px-3 py-3 font-mono text-sm font-semibold text-[var(--om-text-bright)]">
                         {decision.profile}
                       </td>
                       <td className="px-3 py-3">
@@ -1989,7 +1989,7 @@ function ConfigApplyPanel({
                           {decision.action}
                         </Badge>
                       </td>
-                      <td className="px-3 py-3 font-mono text-xs text-zinc-600">
+                      <td className="px-3 py-3 font-mono text-xs text-[var(--om-text-muted)]">
                         {decision.reason}
                       </td>
                     </tr>
@@ -1999,7 +1999,7 @@ function ConfigApplyPanel({
             </div>
           </div>
         ) : (
-          <p className="text-sm text-zinc-500">No preview</p>
+          <p className="text-sm text-[var(--om-text-muted)]">No preview</p>
         )}
       </div>
     </Surface>
@@ -2133,7 +2133,7 @@ function ClientCredentialBearerPanel({
           <CapacityFact label="Closed" value={rotated.closed_sessions} />
           <CapacityFact label="Subject" value={shortHash(rotated.closed_principal.subject_id_hash)} mono />
         </div>
-        <pre className="max-h-32 overflow-auto rounded-md bg-zinc-950 p-3 font-mono text-xs leading-5 text-zinc-50">
+        <pre className="max-h-32 overflow-auto rounded-md bg-[var(--om-surface-elevated)] p-3 font-mono text-xs leading-5 text-[var(--om-text-bright)]">
           {rotated.bearer}
         </pre>
         <Button type="button" variant="secondary" onClick={onDismiss}>
@@ -2174,7 +2174,7 @@ function ClientCredentialTable({
       />
       <div className="overflow-x-auto">
         <table className="w-full min-w-[940px] border-collapse text-left">
-          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+          <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
             <tr>
               <th className="px-4 py-3 font-bold">Client</th>
               <th className="px-4 py-3 font-bold">Status</th>
@@ -2185,10 +2185,10 @@ function ClientCredentialTable({
               <th className="px-4 py-3 font-bold">Actions</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-zinc-100">
+          <tbody className="divide-y divide-[var(--om-border)]">
             {rows.length === 0 ? (
               <tr>
-                <td className="px-4 py-4 text-sm text-zinc-500" colSpan={7}>
+                <td className="px-4 py-4 text-sm text-[var(--om-text-muted)]" colSpan={7}>
                   No registered clients
                 </td>
               </tr>
@@ -2232,14 +2232,14 @@ function ClientCredentialRow({
 }): React.ReactElement {
   const disabled = busy || !sessionReady || client.status !== "active";
   return (
-    <tr className="bg-white">
+    <tr className="bg-[var(--om-surface)]">
       <td className="px-4 py-4 align-top">
-        <p className="font-mono text-sm font-semibold text-zinc-950">{client.client_id}</p>
-        <p className="mt-1 truncate text-xs text-zinc-500">{client.label}</p>
+        <p className="font-mono text-sm font-semibold text-[var(--om-text-bright)]">{client.client_id}</p>
+        <p className="mt-1 truncate text-xs text-[var(--om-text-muted)]">{client.label}</p>
       </td>
       <td className="px-4 py-4 align-top">
         <Badge tone={clientCredentialStatusTone(client.status)}>{client.status}</Badge>
-        <p className="mt-2 font-mono text-xs text-zinc-500">gen {client.generation}</p>
+        <p className="mt-2 font-mono text-xs text-[var(--om-text-muted)]">gen {client.generation}</p>
       </td>
       <td className="px-4 py-4 align-top">
         <div className="flex flex-wrap gap-1">
@@ -2248,13 +2248,13 @@ function ClientCredentialRow({
           ))}
         </div>
       </td>
-      <td className="px-4 py-4 align-top font-mono text-xs text-zinc-600">
+      <td className="px-4 py-4 align-top font-mono text-xs text-[var(--om-text-muted)]">
         {shortHash(client.subject_id_hash)}
       </td>
-      <td className="px-4 py-4 align-top font-mono text-xs text-zinc-600">
+      <td className="px-4 py-4 align-top font-mono text-xs text-[var(--om-text-muted)]">
         {client.last_used_at ?? "never"}
       </td>
-      <td className="px-4 py-4 align-top font-mono text-xs text-zinc-600">
+      <td className="px-4 py-4 align-top font-mono text-xs text-[var(--om-text-muted)]">
         {client.last_source_addr ?? "unseen"}
       </td>
       <td className="px-4 py-4 align-top">
@@ -2475,7 +2475,7 @@ function CapacityLimitSourcesPanel({
       />
       <div className="overflow-x-auto">
         <table className="w-full min-w-[760px] border-collapse text-left">
-          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+          <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
             <tr>
               <th className="px-4 py-3 font-bold">Surface</th>
               <th className="px-4 py-3 font-bold">Limit</th>
@@ -2485,32 +2485,32 @@ function CapacityLimitSourcesPanel({
               <th className="px-4 py-3 font-bold">Reason</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-zinc-100">
+          <tbody className="divide-y divide-[var(--om-border)]">
             {rows.length === 0 ? (
               <tr>
-                <td className="px-4 py-8 text-center text-sm font-semibold text-zinc-500" colSpan={6}>
+                <td className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]" colSpan={6}>
                   No capacity sources
                 </td>
               </tr>
             ) : (
               rows.map((row) => (
-                <tr key={row.key} className="bg-white">
-                  <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
+                <tr key={row.key} className="bg-[var(--om-surface)]">
+                  <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
                     {row.scope}
                   </td>
-                  <td className="px-4 py-4 align-top font-mono text-sm font-semibold text-zinc-950">
+                  <td className="px-4 py-4 align-top font-mono text-sm font-semibold text-[var(--om-text-bright)]">
                     {row.source.name}
                   </td>
                   <td className="px-4 py-4 align-top">
                     <Badge tone={limitStatusTone(row.source.status)}>{row.source.status}</Badge>
                   </td>
-                  <td className="px-4 py-4 align-top font-mono text-sm text-zinc-700">
+                  <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
                     {formatOptionalNumber(row.source.configured)}
                   </td>
-                  <td className="px-4 py-4 align-top font-mono text-sm text-zinc-700">
+                  <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
                     {formatOptionalNumber(row.source.effective)}
                   </td>
-                  <td className="px-4 py-4 align-top text-sm text-zinc-600">
+                  <td className="px-4 py-4 align-top text-sm text-[var(--om-text-muted)]">
                     {row.source.reason ?? ""}
                   </td>
                 </tr>
@@ -2537,12 +2537,12 @@ function CapacityBar({
   return (
     <div>
       <div className="mb-2 flex items-center justify-between gap-3">
-        <p className="text-sm font-bold text-zinc-700">{label}</p>
-        <p className="font-mono text-sm font-semibold text-zinc-900">
+        <p className="text-sm font-bold text-[var(--om-text)]">{label}</p>
+        <p className="font-mono text-sm font-semibold text-[var(--om-text-bright)]">
           {formatNumber(value)} / {formatNumber(max)}
         </p>
       </div>
-      <div className="h-3 rounded-full bg-zinc-100">
+      <div className="h-3 rounded-full bg-[var(--om-surface-elevated)]">
         <div
           className={cn("h-3 rounded-full", capacityFillClass(tone))}
           style={{ width: `${capacityBarWidth(value, max)}%` }}
@@ -2562,11 +2562,11 @@ function CapacityFact({
   mono?: boolean;
 }): React.ReactElement {
   return (
-    <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
-      <p className="text-xs font-bold uppercase text-zinc-500">{label}</p>
+    <div className="rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] p-3">
+      <p className="text-xs font-bold uppercase text-[var(--om-text-muted)]">{label}</p>
       <p
         className={cn(
-          "mt-2 break-all text-sm font-semibold text-zinc-950",
+          "mt-2 break-all text-sm font-semibold text-[var(--om-text-bright)]",
           mono ? "font-mono" : "font-sans"
         )}
       >
@@ -2695,37 +2695,37 @@ function OverviewReviewsPanel({
   const visible = proposals.slice(0, 3);
   return (
     <Surface className="overflow-hidden">
-      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+      <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
         <div className="min-w-0">
-          <h3 className="flex items-center gap-2 text-base font-bold text-zinc-950">
+          <h3 className="flex items-center gap-2 text-base font-bold text-[var(--om-text-bright)]">
             <GitPullRequest className="size-4" aria-hidden="true" />
             Reviews
           </h3>
-          <p className="mt-1 truncate text-sm text-zinc-500">
+          <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">
             {pending ? "sync" : `${formatNumber(proposals.length)} open`}
           </p>
         </div>
         <Link
           to="/reviews"
-          className="inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-zinc-300 bg-white px-3 text-sm font-semibold text-zinc-900 transition-colors hover:bg-zinc-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-500"
+          className="inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 text-sm font-semibold text-[var(--om-text-bright)] transition-colors hover:bg-[var(--om-surface-elevated)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--om-focus)]"
         >
           <Search className="size-4" aria-hidden="true" />
           Open
         </Link>
       </div>
-      <div className="divide-y divide-zinc-200">
+      <div className="divide-y divide-[var(--om-border)]">
         {visible.length === 0 ? (
-          <div className="px-4 py-6 text-sm font-semibold text-zinc-500">No proposals</div>
+          <div className="px-4 py-6 text-sm font-semibold text-[var(--om-text-muted)]">No proposals</div>
         ) : (
           visible.map((proposal) => (
             <div key={proposal.id} className="grid gap-2 px-4 py-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="min-w-0 truncate text-sm font-bold text-zinc-950">{proposal.title}</p>
+                <p className="min-w-0 truncate text-sm font-bold text-[var(--om-text-bright)]">{proposal.title}</p>
                 <Badge tone={proposal.stored_verdict_present ? "warn" : "ok"}>
                   {proposal.stored_verdict_present ? "stale verdict" : "fresh"}
                 </Badge>
               </div>
-              <div className="flex flex-wrap gap-2 text-xs font-semibold text-zinc-500">
+              <div className="flex flex-wrap gap-2 text-xs font-semibold text-[var(--om-text-muted)]">
                 <span>{proposal.profile}</span>
                 <span>{proposal.author}</span>
                 <span>{formatNumber(proposal.statement_count)} stmt</span>
@@ -2756,15 +2756,15 @@ function MetricTile({
   return (
     <Surface className="min-h-32 p-4">
       <div className="flex items-start justify-between gap-3">
-        <div className="flex size-9 items-center justify-center rounded-md border border-zinc-200 bg-zinc-50 text-zinc-700">
+        <div className="flex size-9 items-center justify-center rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] text-[var(--om-text)]">
           <Icon className="size-4" aria-hidden="true" />
         </div>
         <Badge tone={pending ? "info" : tone}>{pending ? "sync" : tone}</Badge>
       </div>
-      <p className="mt-4 text-sm font-semibold text-zinc-600">{label}</p>
-      <strong className="mt-2 block text-3xl leading-none text-zinc-950">
+      <p className="mt-4 text-sm font-semibold text-[var(--om-text-muted)]">{label}</p>
+      <strong className="mt-2 block text-3xl leading-none text-[var(--om-text-bright)]">
         {formatNumber(value)}
-        {suffix ? <span className="ml-1 text-base text-zinc-500">{suffix}</span> : null}
+        {suffix ? <span className="ml-1 text-base text-[var(--om-text-muted)]">{suffix}</span> : null}
       </strong>
     </Surface>
   );
@@ -2788,7 +2788,7 @@ function LaneMetricsPanel({
       />
       <div className="overflow-x-auto">
         <table className="w-full min-w-[780px] border-collapse text-left">
-          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+          <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
             <tr>
               <th className="px-4 py-3 font-bold">Lane</th>
               <th className="px-4 py-3 font-bold">Requests</th>
@@ -2797,23 +2797,23 @@ function LaneMetricsPanel({
               <th className="px-4 py-3 font-bold">State</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-zinc-100">
+          <tbody className="divide-y divide-[var(--om-border)]">
             {rows.length === 0 ? (
               <tr>
-                <td className="px-4 py-8 text-center text-sm font-semibold text-zinc-500" colSpan={5}>
+                <td className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]" colSpan={5}>
                   No lane metrics
                 </td>
               </tr>
             ) : (
               rows.map((row) => (
-                <tr key={`${row.laneId}:${row.subjectIdHash}`} className="bg-white">
+                <tr key={`${row.laneId}:${row.subjectIdHash}`} className="bg-[var(--om-surface)]">
                   <td className="px-4 py-4 align-top">
-                    <p className="font-mono text-sm font-semibold text-zinc-950">{row.laneId}</p>
-                    <p className="mt-1 break-all font-mono text-xs text-zinc-500">
+                    <p className="font-mono text-sm font-semibold text-[var(--om-text-bright)]">{row.laneId}</p>
+                    <p className="mt-1 break-all font-mono text-xs text-[var(--om-text-muted)]">
                       {row.subjectIdHash}
                     </p>
                   </td>
-                  <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
+                  <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
                     {formatNumber(row.requests)}
                   </td>
                   <td className="px-4 py-4 align-top">
@@ -2821,13 +2821,13 @@ function LaneMetricsPanel({
                   </td>
                   <td className="px-4 py-4 align-top">
                     <div className="w-full max-w-[180px]">
-                      <div className="h-2 rounded-full bg-zinc-100">
+                      <div className="h-2 rounded-full bg-[var(--om-surface-elevated)]">
                         <div
                           className="h-2 rounded-full bg-sky-600"
                           style={{ width: `${latencyBarWidth(row.meanLatencyMs)}%` }}
                         />
                       </div>
-                      <p className="mt-2 font-mono text-xs text-zinc-700">
+                      <p className="mt-2 font-mono text-xs text-[var(--om-text)]">
                         {formatMs(row.meanLatencyMs)} avg · {formatMs(row.maxLatencyMs)} max
                       </p>
                     </div>
@@ -2859,23 +2859,23 @@ function ToolMetricsPanel({
         meta={`${rows.length} series`}
         tone={rows.length > 0 ? "info" : "off"}
       />
-      <div className="divide-y divide-zinc-100">
+      <div className="divide-y divide-[var(--om-border)]">
         {rows.length === 0 ? (
-          <p className="px-4 py-8 text-center text-sm font-semibold text-zinc-500">No tool metrics</p>
+          <p className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]">No tool metrics</p>
         ) : (
           rows.map((row) => (
             <div key={`${row.tool}:${row.status}`} className="grid gap-3 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_92px_72px] sm:items-center">
               <div className="min-w-0">
-                <p className="truncate font-mono text-sm font-semibold text-zinc-950">{row.tool}</p>
-                <p className="mt-1 text-xs text-zinc-500">{row.status}</p>
+                <p className="truncate font-mono text-sm font-semibold text-[var(--om-text-bright)]">{row.tool}</p>
+                <p className="mt-1 text-xs text-[var(--om-text-muted)]">{row.status}</p>
               </div>
-              <div className="h-2 rounded-full bg-zinc-100">
+              <div className="h-2 rounded-full bg-[var(--om-surface-elevated)]">
                 <div
-                  className={cn("h-2 rounded-full", row.status === "ok" ? "bg-emerald-600" : "bg-amber-500")}
+                  className={cn("h-2 rounded-full", row.status === "ok" ? "bg-[var(--om-gold)]" : "bg-[var(--om-copper)]")}
                   style={{ width: `${requestBarWidth(row.count, rows[0]?.count ?? 1)}%` }}
                 />
               </div>
-              <p className="font-mono text-sm font-semibold text-zinc-800">{formatNumber(row.count)}</p>
+              <p className="font-mono text-sm font-semibold text-[var(--om-text)]">{formatNumber(row.count)}</p>
             </div>
           ))
         )}
@@ -3027,14 +3027,14 @@ function PanelHeader({
   tone: "neutral" | "ok" | "warn" | "off" | "info";
 }): React.ReactElement {
   return (
-    <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+    <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
       <div className="flex min-w-0 items-center gap-3">
-        <div className="flex size-9 items-center justify-center rounded-md border border-zinc-200 bg-zinc-50 text-zinc-700">
+        <div className="flex size-9 items-center justify-center rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] text-[var(--om-text)]">
           <Icon className="size-4" aria-hidden="true" />
         </div>
         <div className="min-w-0">
-          <h3 className="truncate text-base font-bold text-zinc-950">{title}</h3>
-          <p className="mt-1 truncate text-sm text-zinc-500">{meta}</p>
+          <h3 className="truncate text-base font-bold text-[var(--om-text-bright)]">{title}</h3>
+          <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">{meta}</p>
         </div>
       </div>
       <Badge tone={tone}>{tone}</Badge>
@@ -3756,15 +3756,15 @@ function capacityUsageTone(
 function capacityFillClass(tone: "neutral" | "ok" | "warn" | "off" | "info"): string {
   switch (tone) {
     case "warn":
-      return "bg-amber-500";
+      return "bg-[var(--om-copper)]";
     case "info":
       return "bg-sky-600";
     case "ok":
-      return "bg-emerald-600";
+      return "bg-[var(--om-gold)]";
     case "off":
-      return "bg-zinc-300";
+      return "bg-[var(--om-border)]";
     case "neutral":
-      return "bg-zinc-500";
+      return "bg-[var(--om-text-muted)]";
   }
 }
 
@@ -6631,18 +6631,18 @@ function AuditPage(): React.ReactElement {
         <Surface className="p-4">
           <div className="grid gap-3 lg:grid-cols-[minmax(220px,1fr)_180px_160px_120px_auto_auto] lg:items-end">
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Subject Hash</span>
+              <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Subject Hash</span>
               <input
-                className="h-10 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className="h-10 w-full rounded-md border border-[var(--om-border)] px-3 font-mono text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
                 value={subjectIdHash}
                 onChange={(event) => setSubjectIdHash(event.target.value)}
                 placeholder="subject-sha256:"
               />
             </label>
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Tool</span>
+              <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Tool</span>
               <select
-                className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className="h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
                 value={tool}
                 onChange={(event) => setTool(event.target.value)}
               >
@@ -6656,9 +6656,9 @@ function AuditPage(): React.ReactElement {
               </select>
             </label>
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Level</span>
+              <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Level</span>
               <select
-                className="h-10 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className="h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] px-3 text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
                 value={dangerLevel}
                 onChange={(event) => setDangerLevel(event.target.value)}
               >
@@ -6670,9 +6670,9 @@ function AuditPage(): React.ReactElement {
               </select>
             </label>
             <label className="block">
-              <span className="mb-2 block text-sm font-bold text-zinc-700">Limit</span>
+              <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Limit</span>
               <input
-                className="h-10 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-200"
+                className="h-10 w-full rounded-md border border-[var(--om-border)] px-3 text-sm outline-none focus:border-[var(--om-focus)] focus:ring-2 focus:ring-[var(--om-focus)]"
                 min={1}
                 max={200}
                 type="number"
@@ -6745,7 +6745,7 @@ function AuditProofSummary({
         />
       </div>
       {error ? (
-        <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+        <p className="mt-3 rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_14%,transparent)] p-3 text-sm font-semibold text-[var(--om-copper)]">
           {error}
         </p>
       ) : null}
@@ -6763,12 +6763,12 @@ function AuditFactTile({
   tone: "neutral" | "ok" | "warn" | "off" | "info";
 }): React.ReactElement {
   return (
-    <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
+    <div className="rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] p-3">
       <div className="flex items-start justify-between gap-2">
-        <p className="text-xs font-bold uppercase text-zinc-500">{label}</p>
+        <p className="text-xs font-bold uppercase text-[var(--om-text-muted)]">{label}</p>
         <Badge tone={tone}>{tone}</Badge>
       </div>
-      <p className="mt-3 break-all font-mono text-sm font-semibold text-zinc-950">{value}</p>
+      <p className="mt-3 break-all font-mono text-sm font-semibold text-[var(--om-text-bright)]">{value}</p>
     </div>
   );
 }
@@ -6776,16 +6776,16 @@ function AuditFactTile({
 function AuditTimelineTable({ records }: { records: AuditTailRecord[] }): React.ReactElement {
   return (
     <Surface className="overflow-hidden">
-      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+      <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
         <div>
-          <h3 className="text-base font-bold text-zinc-950">Timeline</h3>
-          <p className="mt-1 text-sm text-zinc-500">{records.length} records</p>
+          <h3 className="text-base font-bold text-[var(--om-text-bright)]">Timeline</h3>
+          <p className="mt-1 text-sm text-[var(--om-text-muted)]">{records.length} records</p>
         </div>
         <Badge tone={records.length > 0 ? "ok" : "off"}>{records.length > 0 ? "ready" : "empty"}</Badge>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[1080px] border-collapse text-left">
-          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+          <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
             <tr>
               <th className="px-4 py-3 font-bold">Seq</th>
               <th className="px-4 py-3 font-bold">Time</th>
@@ -6795,37 +6795,37 @@ function AuditTimelineTable({ records }: { records: AuditTailRecord[] }): React.
               <th className="px-4 py-3 font-bold">Proof</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-zinc-100">
+          <tbody className="divide-y divide-[var(--om-border)]">
             {records.length === 0 ? (
               <tr>
-                <td className="px-4 py-8 text-center text-sm font-semibold text-zinc-500" colSpan={6}>
+                <td className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]" colSpan={6}>
                   No audit records
                 </td>
               </tr>
             ) : (
               records.map((record) => (
-                <tr key={`${record.seq}-${record.sql_sha256}`} className="bg-white">
-                  <td className="px-4 py-4 align-top font-mono text-sm text-zinc-900">{record.seq}</td>
-                  <td className="px-4 py-4 align-top text-sm text-zinc-700">
-                    <p className="font-semibold text-zinc-900">{record.timestamp}</p>
-                    <p className="mt-1 break-all font-mono text-xs text-zinc-500">
+                <tr key={`${record.seq}-${record.sql_sha256}`} className="bg-[var(--om-surface)]">
+                  <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text-bright)]">{record.seq}</td>
+                  <td className="px-4 py-4 align-top text-sm text-[var(--om-text)]">
+                    <p className="font-semibold text-[var(--om-text-bright)]">{record.timestamp}</p>
+                    <p className="mt-1 break-all font-mono text-xs text-[var(--om-text-muted)]">
                       {record.subject_id_hash}
                     </p>
                   </td>
                   <td className="px-4 py-4 align-top text-sm">
-                    <p className="font-semibold text-zinc-950">{record.tool}</p>
+                    <p className="font-semibold text-[var(--om-text-bright)]">{record.tool}</p>
                     <div className="mt-2 flex flex-wrap gap-2">
                       <Badge tone="info">{record.danger_level}</Badge>
                       <Badge tone={record.outcome === "SUCCEEDED" ? "ok" : "warn"}>{record.outcome}</Badge>
                     </div>
                   </td>
                   <td className="px-4 py-4 align-top text-sm">
-                    <p className="max-w-[360px] break-words font-mono text-xs leading-5 text-zinc-900">
+                    <p className="max-w-[360px] break-words font-mono text-xs leading-5 text-[var(--om-text-bright)]">
                       {record.sql_sha256}
                     </p>
-                    <p className="mt-2 text-xs font-semibold text-zinc-500">binds redacted</p>
+                    <p className="mt-2 text-xs font-semibold text-[var(--om-text-muted)]">binds redacted</p>
                   </td>
-                  <td className="px-4 py-4 align-top text-sm text-zinc-700">
+                  <td className="px-4 py-4 align-top text-sm text-[var(--om-text)]">
                     <AuditEvidenceList evidence={record.db_evidence} />
                   </td>
                   <td className="px-4 py-4 align-top text-sm">
@@ -6848,14 +6848,14 @@ function AuditEvidenceList({
 }): React.ReactElement {
   const entries = compactEvidence(evidence);
   if (entries.length === 0) {
-    return <span className="text-zinc-500">unavailable</span>;
+    return <span className="text-[var(--om-text-muted)]">unavailable</span>;
   }
   return (
     <dl className="grid gap-1">
       {entries.map(([key, value]) => (
         <div key={key} className="grid grid-cols-[96px_minmax(0,1fr)] gap-2">
-          <dt className="text-xs font-bold uppercase text-zinc-500">{key}</dt>
-          <dd className="break-all font-mono text-xs text-zinc-900">{String(value)}</dd>
+          <dt className="text-xs font-bold uppercase text-[var(--om-text-muted)]">{key}</dt>
+          <dd className="break-all font-mono text-xs text-[var(--om-text-bright)]">{String(value)}</dd>
         </div>
       ))}
     </dl>
@@ -6867,10 +6867,10 @@ function AuditRecordProof({ proof }: { proof: AuditTailRecord["proof"] }): React
   return (
     <div className="space-y-2">
       <Badge tone={hashValid ? "ok" : "warn"}>{hashValid ? "hash ok" : "hash fail"}</Badge>
-      <p className="break-all font-mono text-xs text-zinc-500">
+      <p className="break-all font-mono text-xs text-[var(--om-text-muted)]">
         {shortHash(typeof proof?.["entry_hash"] === "string" ? proof["entry_hash"] : null)}
       </p>
-      <p className="break-all font-mono text-xs text-zinc-500">
+      <p className="break-all font-mono text-xs text-[var(--om-text-muted)]">
         {typeof proof?.["key_id"] === "string" ? proof["key_id"] : "unsigned"}
       </p>
     </div>
@@ -6884,16 +6884,16 @@ function AuditProofBundlePanel({
 }): React.ReactElement {
   return (
     <Surface className="overflow-hidden">
-      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+      <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
         <div>
-          <h3 className="text-base font-bold text-zinc-950">Proof Bundle</h3>
-          <p className="mt-1 text-sm text-zinc-500">
+          <h3 className="text-base font-bold text-[var(--om-text-bright)]">Proof Bundle</h3>
+          <p className="mt-1 text-sm text-[var(--om-text-muted)]">
             {bundle ? String(bundle["format"] ?? "bundle") : "unavailable"}
           </p>
         </div>
         <Badge tone={bundle ? "ok" : "off"}>{bundle ? "export" : "empty"}</Badge>
       </div>
-      <pre className="max-h-[460px] overflow-auto bg-zinc-950 p-4 text-xs leading-5 text-zinc-50">
+      <pre className="max-h-[460px] overflow-auto bg-[var(--om-surface-elevated)] p-4 text-xs leading-5 text-[var(--om-text-bright)]">
         {bundle ? prettyJson(bundle) : "{}"}
       </pre>
     </Surface>
@@ -6983,11 +6983,11 @@ function PageFrame({
 }): React.ReactElement {
   return (
     <div className="space-y-4">
-      <header className="flex flex-col gap-3 border-b border-zinc-200 pb-4 md:flex-row md:items-end md:justify-between">
+      <header className="flex flex-col gap-3 border-b border-[var(--om-border)] pb-4 md:flex-row md:items-end md:justify-between">
         <div className="min-w-0">
-          <p className="text-xs font-bold uppercase text-emerald-800">{eyebrow}</p>
-          <h2 className="mt-1 text-3xl font-bold tracking-normal text-zinc-950">{title}</h2>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-600">{description}</p>
+          <p className="text-xs font-bold uppercase text-[var(--om-gold)]">{eyebrow}</p>
+          <h2 className="mt-1 text-3xl font-bold tracking-normal text-[var(--om-text-bright)]">{title}</h2>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--om-text-muted)]">{description}</p>
         </div>
         <Badge tone="info">operator.v1</Badge>
       </header>
@@ -7057,10 +7057,10 @@ function SummaryTile({
   return (
     <Surface className="min-h-28 p-4">
       <div className="flex items-start justify-between gap-3">
-        <p className="text-sm font-semibold text-zinc-600">{label}</p>
+        <p className="text-sm font-semibold text-[var(--om-text-muted)]">{label}</p>
         <Badge tone={tone}>{tone}</Badge>
       </div>
-      <strong className="mt-5 block text-3xl leading-none text-zinc-950">{value}</strong>
+      <strong className="mt-5 block text-3xl leading-none text-[var(--om-text-bright)]">{value}</strong>
     </Surface>
   );
 }
@@ -7609,15 +7609,15 @@ const columns: ColumnDef<ProbeResult>[] = [
     accessorKey: "label",
     cell: ({ row }) => (
       <div>
-        <p className="font-semibold text-zinc-950">{row.original.label}</p>
-        <p className="mt-1 break-all text-xs text-zinc-500">{row.original.path}</p>
+        <p className="font-semibold text-[var(--om-text-bright)]">{row.original.label}</p>
+        <p className="mt-1 break-all text-xs text-[var(--om-text-muted)]">{row.original.path}</p>
       </div>
     )
   },
   {
     header: "Group",
     accessorKey: "group",
-    cell: ({ row }) => <span className="text-zinc-700">{row.original.group}</span>
+    cell: ({ row }) => <span className="text-[var(--om-text)]">{row.original.group}</span>
   },
   {
     header: "State",
@@ -7629,8 +7629,8 @@ const columns: ColumnDef<ProbeResult>[] = [
     accessorKey: "summary",
     cell: ({ row }) => (
       <div>
-        <p className="font-semibold text-zinc-900">{row.original.summary}</p>
-        <p className="mt-1 line-clamp-2 text-xs text-zinc-500">{row.original.detail}</p>
+        <p className="font-semibold text-[var(--om-text-bright)]">{row.original.summary}</p>
+        <p className="mt-1 line-clamp-2 text-xs text-[var(--om-text-muted)]">{row.original.detail}</p>
       </div>
     )
   },
@@ -7638,7 +7638,7 @@ const columns: ColumnDef<ProbeResult>[] = [
     header: "Latency",
     accessorKey: "latencyMs",
     cell: ({ row }) => (
-      <span className="font-mono text-sm text-zinc-700">
+      <span className="font-mono text-sm text-[var(--om-text)]">
         {row.original.latencyMs === null ? "..." : `${row.original.latencyMs}ms`}
       </span>
     )
@@ -7654,10 +7654,10 @@ function EndpointTable({ rows }: { rows: ProbeResult[] }): React.ReactElement {
 
   return (
     <Surface className="overflow-hidden">
-      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+      <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
         <div>
-          <h3 className="text-base font-bold text-zinc-950">Endpoint Matrix</h3>
-          <p className="mt-1 text-sm text-zinc-500">Public and operator routes</p>
+          <h3 className="text-base font-bold text-[var(--om-text-bright)]">Endpoint Matrix</h3>
+          <p className="mt-1 text-sm text-[var(--om-text-muted)]">Public and operator routes</p>
         </div>
         <Button variant="ghost" onClick={() => queryClient.invalidateQueries()}>
           <RefreshCcw className="size-4" aria-hidden="true" />
@@ -7666,7 +7666,7 @@ function EndpointTable({ rows }: { rows: ProbeResult[] }): React.ReactElement {
       </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[760px] border-collapse text-left">
-          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+          <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
             {table.getHeaderGroups().map((headerGroup) => (
               <tr key={headerGroup.id}>
                 {headerGroup.headers.map((header) => (
@@ -7677,9 +7677,9 @@ function EndpointTable({ rows }: { rows: ProbeResult[] }): React.ReactElement {
               </tr>
             ))}
           </thead>
-          <tbody className="divide-y divide-zinc-100">
+          <tbody className="divide-y divide-[var(--om-border)]">
             {table.getRowModel().rows.map((row) => (
-              <tr key={row.id} className="bg-white">
+              <tr key={row.id} className="bg-[var(--om-surface)]">
                 {row.getVisibleCells().map((cell) => (
                   <td key={cell.id} className="px-4 py-4 align-top text-sm">
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}

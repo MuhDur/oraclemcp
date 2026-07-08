@@ -149,10 +149,10 @@ export const OMCP_SKIN: DashboardSkin = {
     sidebar:
       "flex shrink-0 flex-col gap-4 border-b border-[var(--om-border)] pb-4 lg:w-64 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-4",
     logoMark:
-      "flex size-10 items-center justify-center rounded-lg bg-[var(--om-clearance-read-only)] text-white",
+      "flex size-10 items-center justify-center rounded-lg bg-[var(--om-clearance-read-only)] text-[var(--om-bg)]",
     nav: "flex gap-2 overflow-x-auto lg:flex-col",
     navLink:
-      "inline-flex min-h-10 items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold text-zinc-700 hover:bg-white hover:text-zinc-950 [&.active]:bg-white [&.active]:text-emerald-800 [&.active]:shadow-sm"
+      "inline-flex min-h-10 items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold text-[var(--om-text)] hover:bg-[var(--om-surface)] hover:text-[var(--om-text-bright)] [&.active]:bg-[var(--om-surface)] [&.active]:text-[var(--om-gold)] [&.active]:shadow-sm"
   }
 };
 
@@ -549,11 +549,11 @@ function Board2DBigBoardRenderer({
       data-grammar-version={model.grammarVersion}
     >
       <div className="grid gap-4 p-4 xl:grid-cols-[minmax(260px,0.45fr)_minmax(0,1.55fr)]">
-        <div className="min-w-0 rounded-md border border-zinc-200 bg-zinc-50 p-4">
+        <div className="min-w-0 rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] p-4">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <p className="text-xs font-bold uppercase text-zinc-500">Big Board</p>
-              <h2 className="mt-2 font-mono text-3xl font-bold leading-none text-zinc-950">
+              <p className="text-xs font-bold uppercase text-[var(--om-text-muted)]">Big Board</p>
+              <h2 className="mt-2 font-mono text-3xl font-bold leading-none text-[var(--om-text-bright)]">
                 {model.verdict}
               </h2>
             </div>
@@ -568,9 +568,9 @@ function Board2DBigBoardRenderer({
         </div>
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {model.sessions.length === 0 ? (
-            <div className="rounded-md border border-dashed border-zinc-300 bg-white p-4">
-              <p className="font-mono text-sm font-bold text-zinc-950">NO ACTIVE LANES</p>
-              <p className="mt-2 text-sm font-semibold text-zinc-500">idle</p>
+            <div className="rounded-md border border-dashed border-[var(--om-border)] bg-[var(--om-surface)] p-4">
+              <p className="font-mono text-sm font-bold text-[var(--om-text-bright)]">NO ACTIVE LANES</p>
+              <p className="mt-2 text-sm font-semibold text-[var(--om-text-muted)]">idle</p>
             </div>
           ) : (
             model.sessions.map((session) => (
@@ -594,16 +594,16 @@ function TableBigBoardRenderer({
       data-renderer={renderer.kind}
       data-grammar-version={model.grammarVersion}
     >
-      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+      <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
         <div>
-          <h2 className="text-base font-bold text-zinc-950">Big Board</h2>
-          <p className="mt-1 text-sm text-zinc-500">{renderer.label}</p>
+          <h2 className="text-base font-bold text-[var(--om-text-bright)]">Big Board</h2>
+          <p className="mt-1 text-sm text-[var(--om-text-muted)]">{renderer.label}</p>
         </div>
         <Badge tone={verdictTone(model.verdict)}>{model.verdict}</Badge>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[760px] border-collapse text-left">
-          <thead className="bg-zinc-50 text-xs uppercase text-zinc-500">
+          <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
             <tr>
               <th className="px-4 py-3 font-bold">Lane</th>
               <th className="px-4 py-3 font-bold">State</th>
@@ -614,19 +614,19 @@ function TableBigBoardRenderer({
               <th className="px-4 py-3 font-bold">Latency</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-zinc-100">
+          <tbody className="divide-y divide-[var(--om-border)]">
             {model.sessions.length === 0 ? (
               <tr>
-                <td className="px-4 py-8 text-center text-sm font-semibold text-zinc-500" colSpan={7}>
+                <td className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]" colSpan={7}>
                   No active lanes
                 </td>
               </tr>
             ) : (
               model.sessions.map((session) => (
-                <tr key={`${session.laneId}:${session.subjectIdHash}`} className="bg-white">
+                <tr key={`${session.laneId}:${session.subjectIdHash}`} className="bg-[var(--om-surface)]">
                   <td className="px-4 py-4 align-top">
-                    <p className="font-mono text-sm font-semibold text-zinc-950">{session.laneId}</p>
-                    <p className="mt-1 break-all font-mono text-xs text-zinc-500">
+                    <p className="font-mono text-sm font-semibold text-[var(--om-text-bright)]">{session.laneId}</p>
+                    <p className="mt-1 break-all font-mono text-xs text-[var(--om-text-muted)]">
                       {session.subjectIdHash}
                     </p>
                   </td>
@@ -643,16 +643,16 @@ function TableBigBoardRenderer({
                       {session.clearance}
                     </span>
                   </td>
-                  <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
+                  <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
                     {Math.round(session.activity * 100)}%
                   </td>
-                  <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
+                  <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
                     {session.requests}
                   </td>
-                  <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
+                  <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
                     {session.blocked}
                   </td>
-                  <td className="px-4 py-4 align-top font-mono text-sm text-zinc-800">
+                  <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text)]">
                     {session.latencyMs} ms
                   </td>
                 </tr>
@@ -672,18 +672,18 @@ function BigBoardFallback({ model, renderer }: BigBoardRendererProps): React.Rea
 function SessionBoardTile({ session }: { session: FleetSessionViewModel }): React.ReactElement {
   return (
     <div
-      className="min-w-0 rounded-md border border-zinc-200 bg-white p-4"
+      className="min-w-0 rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] p-4"
       data-clearance-level={session.clearance}
       data-health={session.status}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate font-mono text-sm font-bold text-zinc-950">{session.laneId}</p>
-          <p className="mt-1 break-all font-mono text-xs text-zinc-500">{session.subjectIdHash}</p>
+          <p className="truncate font-mono text-sm font-bold text-[var(--om-text-bright)]">{session.laneId}</p>
+          <p className="mt-1 break-all font-mono text-xs text-[var(--om-text-muted)]">{session.subjectIdHash}</p>
         </div>
         <Badge tone={healthTone(session.status)}>{session.status}</Badge>
       </div>
-      <div className="mt-4 h-2 rounded-full bg-zinc-100" aria-hidden="true">
+      <div className="mt-4 h-2 rounded-full bg-[var(--om-surface-elevated)]" aria-hidden="true">
         <div
           className="h-2 rounded-full bg-[var(--om-activity)]"
           style={{ width: `${Math.round(session.activity * 100)}%` }}
@@ -716,12 +716,12 @@ function BoardFact({
 }): React.ReactElement {
   return (
     <div className="flex items-center gap-3">
-      <div className="flex size-9 shrink-0 items-center justify-center rounded-md border border-zinc-200 bg-white text-zinc-700">
+      <div className="flex size-9 shrink-0 items-center justify-center rounded-md border border-[var(--om-border)] bg-[var(--om-surface)] text-[var(--om-text)]">
         <Icon className="size-4" aria-hidden="true" />
       </div>
       <div>
-        <p className="text-xs font-bold uppercase text-zinc-500">{label}</p>
-        <p className="mt-1 font-mono text-sm font-bold text-zinc-950">{value}</p>
+        <p className="text-xs font-bold uppercase text-[var(--om-text-muted)]">{label}</p>
+        <p className="mt-1 font-mono text-sm font-bold text-[var(--om-text-bright)]">{value}</p>
       </div>
     </div>
   );
