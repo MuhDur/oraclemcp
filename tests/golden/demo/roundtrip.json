@@ -1,0 +1,11 @@
+{
+  "bind_addr": "[ADDR]",
+  "elapsed": "[DURATION]",
+  "flashback": "SCN [SCN]",
+  "generated_at": "[TIMESTAMP]",
+  "heap": "[ADDR]",
+  "log_path": "[PATH]",
+  "note": "deterministic synthetic payload",
+  "operating_level": "READ_ONLY",
+  "request_id": "[UUID]"
+}

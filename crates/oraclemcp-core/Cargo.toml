@@ -46,6 +46,10 @@ wait-timeout = "0.2"
 [dev-dependencies]
 async-trait.workspace = true
 rcgen = "0.13"
+# Golden-artifact discipline (D6.3d): the shared `Scrubber` in
+# tests/golden/support.rs (included here via `#[path]`) uses `regex`. Already in
+# the dependency graph; MIT OR Apache-2.0 (deny.toml allow-list).
+regex = "1"
 # Compile-fail fixtures for the A9 capability-narrowing release gate. trybuild
 # is MIT OR Apache-2.0 (both already on the deny.toml allowlist). asupersync's
 # test-only `for_testing` constructor (gated behind `test-internals`) lets the

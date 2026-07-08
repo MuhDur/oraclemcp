@@ -37,6 +37,10 @@ oracledb-protocol = { workspace = true }
 [dev-dependencies]
 async-trait.workspace = true
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# Golden-artifact discipline (D6.3d): the shared `Scrubber` in
+# tests/golden/support.rs (included here via `#[path]`) uses `regex`. Already in
+# the dependency graph; MIT OR Apache-2.0 (deny.toml allow-list).
+regex = "1"
 # Compile-fail fixture for the R1 routine-argument gate: OracleRoutineArg must
 # never become deserializable as an agent-facing tool argument.
 trybuild = "1.0"

@@ -60,3 +60,10 @@ venv/
 
 # Agent scratch (never commit)
 /.claude-tmp/
+
+# Golden-artifact discipline: `<name>.actual` sidecars are written next to a
+# golden on mismatch for offline diffing. Never commit them; regenerate the
+# golden with `UPDATE_GOLDENS=1` after reviewing the diff.
+*.actual
+# insta pending snapshots (accept with `cargo insta accept`, then commit .snap).
+*.snap.new

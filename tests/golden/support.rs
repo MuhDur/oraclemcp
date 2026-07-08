@@ -2,32 +2,206 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
+use regex::Regex;
 use serde_json::Value;
 
+/// A reusable canonicalizer that masks non-deterministic or potentially-secret
+/// dynamic values in golden output *before* comparison.
+///
+/// This is the shared golden-artifact discipline every surface adopts: a golden
+/// can never itself become a secret leak or a flake, because dynamic values are
+/// normalized to stable placeholders (`[TIMESTAMP]`, `[UUID]`, `[ADDR]`,
+/// `[PATH]`, `[DURATION]`, `[SCN]`, …). Rules are applied in registration order,
+/// each a `(regex, replacement)` pair, so a broad rule never eats a token a more
+/// precise rule owns.
+pub struct Scrubber {
+    rules: Vec<ScrubRule>,
+}
+
+struct ScrubRule {
+    regex: Regex,
+    replacement: String,
+}
+
+impl Scrubber {
+    /// An empty registry; add rules with [`Scrubber::with_custom`].
+    #[must_use]
+    pub fn empty() -> Self {
+        Scrubber { rules: Vec::new() }
+    }
+
+    /// The canonical registry of dynamic-value maskers. Ordered most-specific
+    /// first. Intended for *clean* surfaces (e.g. a capabilities/serverInfo
+    /// snapshot); the large protocol transcripts deliberately keep their precise
+    /// value-aware scrubbing instead (see the module docs on `scrub_value`).
+    #[must_use]
+    pub fn standard() -> Self {
+        Scrubber::empty()
+            // RFC3339 / ISO-8601 instants (optional fractional seconds + zone),
+            // masked before durations so a trailing `:00` is never mistaken for
+            // a bare-second duration.
+            .with_custom(
+                r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?",
+                "[TIMESTAMP]",
+            )
+            // RFC4122 UUIDs (any version).
+            .with_custom(
+                r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+                "[UUID]",
+            )
+            // The redaction subset (paths / host:port / memory addresses).
+            .extend_redactions()
+            // Durations with an explicit sub-second time unit (never a bare
+            // integer, which would collide with counts and JSON schema bounds).
+            .with_custom(r"\d+(?:\.\d+)?(?:ns|µs|us|ms)\b", "[DURATION]")
+            // Oracle SCN in value position (`"scn": 12345` / `SCN 12345`), never
+            // the bare word "scn" in prose.
+            .with_custom(r#"("scn"\s*:\s*)\d+"#, "${1}[SCN]")
+            .with_custom(r"\bSCN\s+\d+\b", "SCN [SCN]")
+    }
+
+    /// The redaction-only subset that can never over-scrub deterministic fixture
+    /// data: absolute filesystem paths, host:port pairs, and memory addresses.
+    /// Safe to wire into every golden surface — it only masks secret-shaped
+    /// leaks, never a semantic constant.
+    #[must_use]
+    pub fn redactions() -> Self {
+        Scrubber::empty().extend_redactions()
+    }
+
+    fn extend_redactions(self) -> Self {
+        self
+            // Memory addresses / opaque hex handles.
+            .with_custom(r"\b0x[0-9a-fA-F]{6,}\b", "[ADDR]")
+            // host:port (IPv4 and IPv6 loopback). A BARE `:port` is deliberately
+            // NOT matched — it would collide with JSON numbers like
+            // `"maximum":5000` or `"num_rows":1234`.
+            .with_custom(r"\b(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}\b", "[ADDR]")
+            .with_custom(r"\[::1\]:\d{1,5}", "[ADDR]")
+            // Absolute filesystem paths (real OS roots only, so URL/SQL paths are
+            // left intact).
+            .with_custom(
+                r#"/(?:home|Users|root|tmp|var|opt|private)/[^\s"',;:)\]}\\]*"#,
+                "[PATH]",
+            )
+            .with_custom(r#"[A-Za-z]:\\[^\s"';,]*"#, "[PATH]")
+    }
+
+    /// Register an extra rule. Panics if `pattern` is not a valid regex.
+    #[must_use]
+    pub fn with_custom(mut self, pattern: &str, replacement: &str) -> Self {
+        let regex = Regex::new(pattern)
+            .unwrap_or_else(|err| panic!("golden scrubber rule /{pattern}/ is not valid: {err}"));
+        self.rules.push(ScrubRule {
+            regex,
+            replacement: replacement.to_owned(),
+        });
+        self
+    }
+
+    /// Apply every rule, in order, to a single string.
+    #[must_use]
+    pub fn scrub(&self, input: &str) -> String {
+        let mut out = input.to_owned();
+        for rule in &self.rules {
+            out = rule
+                .regex
+                .replace_all(&out, rule.replacement.as_str())
+                .into_owned();
+        }
+        out
+    }
+
+    /// Apply the rules to every string leaf of a JSON value. Keys are structural
+    /// and are left untouched.
+    #[must_use]
+    pub fn scrub_value(&self, value: &Value) -> Value {
+        match value {
+            Value::String(text) => Value::String(self.scrub(text)),
+            Value::Array(items) => {
+                Value::Array(items.iter().map(|v| self.scrub_value(v)).collect())
+            }
+            Value::Object(map) => Value::Object(
+                map.iter()
+                    .map(|(k, v)| (k.clone(), self.scrub_value(v)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
+    /// The `(pattern, replacement)` pairs — e.g. to wire the same rules into
+    /// `insta` as snapshot filters, so an `insta` surface follows the exact same
+    /// discipline as the JSON-golden surfaces.
+    pub fn rules(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.rules
+            .iter()
+            .map(|r| (r.regex.as_str(), r.replacement.as_str()))
+    }
+}
+
+/// The shared redaction pass wired into every `assert_golden` surface. Building
+/// the regexes is not free, so it is compiled once. Kept to the redaction-only
+/// subset so it can never over-scrub the deterministic fixture values (server
+/// versions, schema bounds, synthetic timestamps) the transcripts intentionally
+/// freeze.
+fn redaction_scrubber() -> &'static Scrubber {
+    static REDACTION: LazyLock<Scrubber> = LazyLock::new(Scrubber::redactions);
+    &REDACTION
+}
+
+/// Assert `actual` matches the committed golden `name`, panicking with a unified
+/// diff (and a `<name>.actual` sidecar) on mismatch. `UPDATE_GOLDENS=1`
+/// regenerates it instead. NEVER set `UPDATE_GOLDENS` in CI.
 pub fn assert_golden(name: &str, actual: &Value) {
+    if let Err(report) = check_golden(name, actual) {
+        panic!("{report}");
+    }
+}
+
+/// Non-panicking form of [`assert_golden`]: `Ok(())` on a match (or under
+/// `UPDATE_GOLDENS`), otherwise `Err` with a unified diff plus the re-approval
+/// hint. Lets a test exercise the *failure* path without unwinding.
+pub fn check_golden(name: &str, actual: &Value) -> Result<(), String> {
     let actual = render(actual);
     let path = golden_path(name);
     if std::env::var_os("UPDATE_GOLDENS").is_some() {
         fs::create_dir_all(path.parent().expect("golden path has parent"))
             .expect("create golden directory");
         fs::write(&path, &actual).expect("write golden file");
-        return;
+        return Ok(());
     }
 
-    let expected = fs::read_to_string(&path).unwrap_or_else(|err| {
-        panic!(
-            "missing golden {}: {err}\nrun with UPDATE_GOLDENS=1 to create it, then review the diff",
-            path.display()
-        )
-    });
-    if expected != actual {
-        panic!(
-            "golden mismatch for {}\n{}\nupdate only after reviewing the protocol change",
-            path.display(),
-            compact_diff(&expected, &actual)
-        );
+    let expected = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) => {
+            return Err(format!(
+                "missing golden {}: {err}\nrun with UPDATE_GOLDENS=1 to create it, then review the diff",
+                path.display()
+            ));
+        }
+    };
+    if expected == actual {
+        return Ok(());
     }
+
+    // Persist the produced output next to the golden for offline diffing. The
+    // `.actual` sidecar is gitignored (see .gitignore `*.actual`).
+    let actual_path = path.with_extension("actual");
+    if let Some(parent) = actual_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    fs::write(&actual_path, &actual).expect("write .actual sidecar");
+
+    Err(format!(
+        "golden mismatch for {name}\n{}\nwrote produced output to {}\n\
+         review the diff; if the change is intended, re-approve with:\n    \
+         UPDATE_GOLDENS=1 cargo test -- {name}\n(never set UPDATE_GOLDENS in CI)",
+        compact_diff(&expected, &actual),
+        actual_path.display(),
+    ))
 }
 
 fn render(value: &Value) -> String {
@@ -85,7 +259,14 @@ fn scrub_value(value: &Value) -> Value {
             Value::Object(out)
         }
         Value::Array(values) => Value::Array(values.iter().map(scrub_value).collect()),
-        Value::String(text) => Value::String(scrub_export_uri(&scrub_text(text))),
+        Value::String(text) => {
+            // Value-aware domain scrubbing first (session ids, cursor/export MAC
+            // tags, fence tags, UUID-like tokens), then the shared redaction pass
+            // so no absolute path, host:port, or memory address can ever leak
+            // into a committed golden.
+            let domain = scrub_export_uri(&scrub_text(text));
+            Value::String(redaction_scrubber().scrub(&domain))
+        }
         other => other.clone(),
     }
 }

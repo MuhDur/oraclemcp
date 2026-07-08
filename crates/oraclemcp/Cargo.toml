@@ -91,6 +91,12 @@ plsql-output = { workspace = true, optional = true }
 [dev-dependencies]
 rcgen = "0.13"
 toml = "0.8"
+# Golden-artifact discipline (D6.3d). `regex` powers the shared `Scrubber` in
+# tests/golden/support.rs; `insta` snapshots the capabilities/serverInfo surface
+# with that same Scrubber wired in as filters. Both MIT OR Apache-2.0 (already on
+# deny.toml's allow-list). `regex` is already in the graph; `insta` is test-only.
+regex = "1"
+insta = { version = "1", features = ["filters"] }
 
 [lints]
 workspace = true

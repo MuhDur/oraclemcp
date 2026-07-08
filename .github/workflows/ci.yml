@@ -102,6 +102,22 @@ jobs:
       - run: bash scripts/oraclemcp_concurrency_lint.sh --test-output target/ci-logs/cargo-test.log
       - run: cargo test --workspace --doc
       - run: cargo test -p oraclemcp-core --features dashboard-bundle dashboard
+      # Golden-artifact discipline (D6.3d): CI VERIFIES goldens and never
+      # regenerates them. A drift is a real regression, so UPDATE_GOLDENS must
+      # never be set here and the golden suites must match the committed
+      # fixtures. The shared `Scrubber` (tests/golden/support.rs) keeps them
+      # deterministic and secret-free; the insta surface refuses to update in CI.
+      - name: golden-artifact discipline (fail on any un-approved golden diff)
+        run: |
+          set -euo pipefail
+          if [ -n "${UPDATE_GOLDENS:-}" ]; then
+            echo "::error::UPDATE_GOLDENS must never be set in CI" >&2
+            exit 1
+          fi
+          cargo test -p oraclemcp      --test golden_behavior
+          cargo test -p oraclemcp      --test golden_scrubber_framework
+          cargo test -p oraclemcp-core --test golden_behavior --test doctor_secret_golden
+          cargo test -p oraclemcp-db   --test structured_schema_golden
 
   feature-powerset:
     name: feature powerset (cargo hack)
