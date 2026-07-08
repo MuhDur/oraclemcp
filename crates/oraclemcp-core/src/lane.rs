@@ -38,8 +38,9 @@ use crate::capability::narrow_to_lane;
 use crate::http::{HttpLaneBinding, HttpLaneSnapshot, HttpSessionLifecycle};
 use crate::operator_protocol::operator_subject_id_hash;
 use crate::server::{
-    DispatchCloseReason, DispatchContext, DispatchFuture, DispatchOutcome, McpSurfaceDetail,
-    McpSurfaceFuture, McpSurfaceOutcome, OwnedDispatchContext, ToolDispatch,
+    DispatchCloseReason, DispatchContext, DispatchFuture, DispatchOutcome, DispatchReplyReceiver,
+    DispatchStreamStartFuture, McpSurfaceDetail, McpSurfaceFuture, McpSurfaceOutcome,
+    OwnedDispatchContext, ToolDispatch, ToolStreamSender,
 };
 
 /// Default number of queued dispatch commands accepted by one lane.
@@ -213,6 +214,13 @@ enum LaneCommand {
         context: OwnedDispatchContext,
         name: String,
         args: Value,
+        reply: oneshot::Sender<DispatchOutcome>,
+    },
+    DispatchStream {
+        context: OwnedDispatchContext,
+        name: String,
+        args: Value,
+        frames: ToolStreamSender,
         reply: oneshot::Sender<DispatchOutcome>,
     },
     SurfaceState {
@@ -554,6 +562,50 @@ impl ToolDispatch for LaneRuntime {
                     format!("dispatch lane {} stopped before replying", self.name()),
                 )),
             }
+        })
+    }
+
+    fn dispatch_stream_start<'a>(
+        &'a self,
+        cx: &'a Cx,
+        context: DispatchContext<'a>,
+        name: &'a str,
+        args: Value,
+        frames: ToolStreamSender,
+    ) -> DispatchStreamStartFuture<'a> {
+        Box::pin(async move {
+            assert_no_lane_registry_lock("sending a streaming dispatch command to a lane");
+            if cx.checkpoint().is_err() {
+                return Outcome::Cancelled(cancel_reason_from_cx(
+                    cx,
+                    "streaming dispatch lane send cancelled before admission",
+                ));
+            }
+            let sender = match self.sender() {
+                Ok(sender) => sender,
+                Err(_) if self.status() == LaneRuntimeStatus::Quarantined => {
+                    return Outcome::Panicked(lane_panic_payload(self.name()));
+                }
+                Err(err) => return Outcome::Err(err),
+            };
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let lane_generation = self.generation();
+            let context = context.with_lane_identity(self.name(), lane_generation);
+            let command = LaneCommand::DispatchStream {
+                context: context.to_owned_context(),
+                name: name.to_owned(),
+                args,
+                frames,
+                reply: reply_tx,
+            };
+            let permit = match sender.try_reserve() {
+                Ok(permit) => permit,
+                Err(error) => return lane_stream_start_error_outcome(self.name(), error, cx),
+            };
+            if let Err(error) = permit.try_send(command) {
+                return lane_stream_start_error_outcome(self.name(), error, cx);
+            }
+            Outcome::Ok(reply_rx)
         })
     }
 
@@ -900,6 +952,21 @@ impl ToolDispatch for StatefulLaneDispatch {
         })
     }
 
+    fn dispatch_stream_start<'a>(
+        &'a self,
+        cx: &'a Cx,
+        context: DispatchContext<'a>,
+        name: &'a str,
+        args: Value,
+        frames: ToolStreamSender,
+    ) -> DispatchStreamStartFuture<'a> {
+        Box::pin(async move {
+            let lane = self.resolve_lane(cx, context)?;
+            lane.dispatch_stream_start(cx, context, name, args, frames)
+                .await
+        })
+    }
+
     fn mcp_surface_state<'a>(
         &'a self,
         cx: &'a Cx,
@@ -945,6 +1012,20 @@ fn lane_send_error_outcome<T>(name: &str, error: SendError<T>, cx: &Cx) -> Dispa
         SendError::Cancelled(_) => Outcome::Cancelled(cancel_reason_from_cx(
             cx,
             "dispatch lane send cancelled before admission",
+        )),
+        other => Outcome::Err(lane_send_error(name, other)),
+    }
+}
+
+fn lane_stream_start_error_outcome<T>(
+    name: &str,
+    error: SendError<T>,
+    cx: &Cx,
+) -> Outcome<DispatchReplyReceiver, ErrorEnvelope> {
+    match error {
+        SendError::Cancelled(_) => Outcome::Cancelled(cancel_reason_from_cx(
+            cx,
+            "streaming dispatch lane send cancelled before admission",
         )),
         other => Outcome::Err(lane_send_error(name, other)),
     }
@@ -1117,6 +1198,30 @@ async fn run_lane_loop_with_factory(
                     .as_ref()
                     .expect("dispatcher initialized above")
                     .dispatch(&cx, borrowed_context, name.as_str(), args)
+                    .await;
+                let _ = reply.send_blocking(result);
+            }
+            LaneCommand::DispatchStream {
+                context,
+                name,
+                args,
+                frames,
+                reply,
+            } => {
+                if dispatcher.is_none() {
+                    match factory(&cx, &lane_context).await {
+                        Ok(created) => dispatcher = Some(created),
+                        Err(err) => {
+                            let _ = reply.send_blocking(Outcome::Err(err));
+                            continue;
+                        }
+                    }
+                }
+                let borrowed_context = context.as_dispatch_context();
+                let result = dispatcher
+                    .as_ref()
+                    .expect("dispatcher initialized above")
+                    .dispatch_stream(&cx, borrowed_context, name.as_str(), args, frames)
                     .await;
                 let _ = reply.send_blocking(result);
             }

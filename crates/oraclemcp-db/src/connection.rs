@@ -50,7 +50,11 @@ use asupersync::Cx;
 use asupersync::sync::Mutex as AsyncMutex;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+#[cfg(feature = "test-utils")]
+use std::collections::VecDeque;
+#[cfg(feature = "test-utils")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The pinned thin `oracledb` driver's own version string, read from the driver
@@ -502,6 +506,112 @@ impl ExecuteOutcome {
     }
 }
 
+/// Result of starting an owned row stream for `oracle_query`.
+///
+/// `Stream` means the DB seam can serialize rows byte-identically without
+/// connection-owned side reads. `Fallback` means the statement is proven read
+/// and the connection has already been recovered, but the caller must use the
+/// existing cursor-chunked path to preserve complex value behavior.
+pub enum QueryRowStreamStart {
+    /// The statement can be delivered row-by-row through the owned stream.
+    Stream(QueryRowStream),
+    /// The statement is proven read-only but needs cursor-chunked delivery to
+    /// preserve complex value materialization.
+    Fallback {
+        /// Plain operator-facing reason for choosing the chunked fallback.
+        reason: String,
+    },
+}
+
+/// Server-owned row stream facade over the driver-owned stream.
+///
+/// This type deliberately hides `oracledb::OwnedRowStream` outside this file:
+/// callers get serialized `OracleRow`s and an explicit recovery method, never
+/// the driver stream itself.
+pub struct QueryRowStream {
+    inner: QueryRowStreamInner,
+}
+
+enum QueryRowStreamInner {
+    Driver(Box<driver::RustOracleRowStream>),
+    #[cfg(feature = "test-utils")]
+    StaticRows(StaticQueryRowStream),
+}
+
+#[cfg(feature = "test-utils")]
+struct StaticQueryRowStream {
+    columns: Vec<String>,
+    rows: VecDeque<OracleRow>,
+    recovered: Option<Arc<AtomicUsize>>,
+}
+
+impl QueryRowStream {
+    fn new(inner: driver::RustOracleRowStream) -> Self {
+        Self {
+            inner: QueryRowStreamInner::Driver(Box::new(inner)),
+        }
+    }
+
+    /// Construct an in-memory stream for higher-level dispatcher tests.
+    ///
+    /// Production callers should never use this; it exists so crates above the
+    /// DB seam can prove row-frame delivery and cancellation without naming the
+    /// driver-owned stream type.
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_static_rows_for_testing(
+        columns: Vec<String>,
+        rows: Vec<OracleRow>,
+        recovered: Option<Arc<AtomicUsize>>,
+    ) -> Self {
+        Self {
+            inner: QueryRowStreamInner::StaticRows(StaticQueryRowStream {
+                columns,
+                rows: rows.into(),
+                recovered,
+            }),
+        }
+    }
+
+    /// Column names in select-list order.
+    #[must_use]
+    pub fn columns(&self) -> &[String] {
+        match &self.inner {
+            QueryRowStreamInner::Driver(inner) => inner.columns(),
+            #[cfg(feature = "test-utils")]
+            QueryRowStreamInner::StaticRows(inner) => &inner.columns,
+        }
+    }
+
+    /// Fetch and serialize the next row, or `None` when the stream is drained.
+    pub async fn next_row(&mut self, cx: &Cx) -> Result<Option<OracleRow>, DbError> {
+        match &mut self.inner {
+            QueryRowStreamInner::Driver(inner) => inner.next_row(cx).await,
+            #[cfg(feature = "test-utils")]
+            QueryRowStreamInner::StaticRows(inner) => {
+                db_checkpoint(cx, "oracle_db.query_row_stream.static.next")?;
+                Ok(inner.rows.pop_front())
+            }
+        }
+    }
+
+    /// Recover the owned connection back into the connection slot.
+    pub async fn recover(self, cx: &Cx) -> Result<(), DbError> {
+        match self.inner {
+            QueryRowStreamInner::Driver(inner) => inner.recover(cx).await,
+            #[cfg(feature = "test-utils")]
+            QueryRowStreamInner::StaticRows(inner) => {
+                if let Some(recovered) = inner.recovered {
+                    recovered.fetch_add(1, Ordering::SeqCst);
+                }
+                db_checkpoint(cx, "oracle_db.query_row_stream.static.recovered")?;
+                Ok(())
+            }
+        }
+    }
+}
+
 /// An async, `Cx`-first Oracle connection (B1).
 ///
 /// Every method is `async` and takes an explicit `&Cx` so cancellation and the
@@ -545,6 +655,22 @@ pub trait OracleConnection: Send + Sync {
     ) -> Result<Vec<OracleRow>, DbError> {
         let _ = serialize_opts;
         self.query_rows(cx, sql, binds).await
+    }
+    /// Start a row-by-row stream for a proven read. Backends that cannot return
+    /// an owned stream should fail explicitly so callers can retain the existing
+    /// chunked streaming path.
+    async fn query_row_stream(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+        arraysize: usize,
+        serialize_opts: &SerializeOptions,
+    ) -> Result<QueryRowStreamStart, DbError> {
+        let _ = (cx, sql, binds, arraysize, serialize_opts);
+        Err(DbError::UnsupportedFeature(
+            "owned row streaming is not supported by this Oracle backend".to_owned(),
+        ))
     }
     /// Run a query, binding `binds` by name (`:name`). Values are always bound,
     /// never interpolated. Backends that cannot bind by name should fail
@@ -698,11 +824,39 @@ const DBMS_FLASHBACK_DISABLE: &str = "BEGIN DBMS_FLASHBACK.DISABLE; END;";
 /// runtime.
 pub struct RustOracleConnection {
     opts: OracleConnectOptions,
-    inner: AsyncMutex<oracledb::Connection>,
+    inner: Arc<AsyncMutex<RustOracleConnectionSlot>>,
     /// Per-round-trip call timeout. A plain `std::sync::Mutex` is fine here: it
     /// is only ever locked-and-dropped synchronously (never held across an
     /// `.await`), so it cannot deadlock the cooperative scheduler.
     call_timeout: Mutex<Option<Duration>>,
+}
+
+struct RustOracleConnectionSlot {
+    connection: Option<oracledb::Connection>,
+}
+
+struct RustOracleConnectionGuard<'a> {
+    guard: asupersync::sync::MutexGuard<'a, RustOracleConnectionSlot>,
+}
+
+impl std::ops::Deref for RustOracleConnectionGuard<'_> {
+    type Target = oracledb::Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.guard
+            .connection
+            .as_ref()
+            .expect("thin connection slot must be occupied while borrowed")
+    }
+}
+
+impl std::ops::DerefMut for RustOracleConnectionGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.guard
+            .connection
+            .as_mut()
+            .expect("thin connection slot must be occupied while mutably borrowed")
+    }
 }
 
 impl RustOracleConnection {
@@ -711,14 +865,19 @@ impl RustOracleConnection {
         driver::connect(cx, opts).await
     }
 
-    async fn lock_inner(
-        &self,
-        cx: &Cx,
-    ) -> Result<asupersync::sync::MutexGuard<'_, oracledb::Connection>, DbError> {
-        self.inner
+    async fn lock_inner(&self, cx: &Cx) -> Result<RustOracleConnectionGuard<'_>, DbError> {
+        let guard = self
+            .inner
             .lock(cx)
             .await
-            .map_err(|err| DbError::Internal(format!("thin connection lock failed: {err}")))
+            .map_err(|err| DbError::Internal(format!("thin connection lock failed: {err}")))?;
+        if guard.connection.is_none() {
+            return Err(DbError::Internal(
+                "thin connection is temporarily unavailable while an owned row stream is active"
+                    .to_owned(),
+            ));
+        }
+        Ok(RustOracleConnectionGuard { guard })
     }
 
     fn timeout_ms(&self) -> Result<Option<u32>, DbError> {
@@ -732,6 +891,36 @@ impl RustOracleConnection {
     #[must_use]
     pub fn options(&self) -> &OracleConnectOptions {
         &self.opts
+    }
+
+    async fn take_connection(&self, cx: &Cx) -> Result<oracledb::Connection, DbError> {
+        let mut guard = self
+            .inner
+            .lock(cx)
+            .await
+            .map_err(|err| DbError::Internal(format!("thin connection lock failed: {err}")))?;
+        guard.connection.take().ok_or_else(|| {
+            DbError::Internal("thin connection is already owned by an active row stream".to_owned())
+        })
+    }
+
+    async fn replace_connection(
+        &self,
+        cx: &Cx,
+        connection: oracledb::Connection,
+    ) -> Result<(), DbError> {
+        let mut guard = self
+            .inner
+            .lock(cx)
+            .await
+            .map_err(|err| DbError::Internal(format!("thin connection lock failed: {err}")))?;
+        if guard.connection.replace(connection).is_some() {
+            return Err(DbError::Internal(
+                "thin connection slot was unexpectedly occupied during row-stream recovery"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     async fn query_first_row(&self, cx: &Cx, sql: &str) -> Option<OracleRow> {
@@ -749,7 +938,8 @@ fn duration_to_millis(duration: Duration) -> u32 {
 
 mod driver {
     use super::{
-        DbmsOutput, ExecuteOutcome, OracleRoutineArg, RustOracleConnection, oracle_bind_to_driver,
+        DbmsOutput, ExecuteOutcome, OracleRoutineArg, QueryRowStream, QueryRowStreamStart,
+        RustOracleConnection, oracle_bind_to_driver,
     };
     use crate::auth_adapter::AuthAdapter;
     use crate::error::{ConnectFailureKind, DbError};
@@ -760,6 +950,7 @@ mod driver {
     };
     use asupersync::Cx;
     use asupersync::sync::Mutex as AsyncMutex;
+    use futures_core::Stream;
     use oracledb::protocol::thin::{CursorValue, LobValue, ObjectValue};
     use oracledb::protocol::{
         ClientIdentity,
@@ -779,9 +970,11 @@ mod driver {
     };
     use serde_json::{Number, Value, json};
     use std::fmt::Display;
-    use std::future::Future;
+    use std::future::{Future, poll_fn};
+    use std::num::NonZeroU32;
     use std::path::PathBuf;
-    use std::sync::Mutex as SyncMutex;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex as SyncMutex};
     use std::time::Duration;
 
     const FETCH_BATCH_ROWS: u32 = 512;
@@ -823,7 +1016,9 @@ mod driver {
         let call_timeout = opts.call_timeout;
         Ok(RustOracleConnection {
             opts,
-            inner: AsyncMutex::new(inner),
+            inner: Arc::new(AsyncMutex::new(super::RustOracleConnectionSlot {
+                connection: Some(inner),
+            })),
             call_timeout: SyncMutex::new(call_timeout),
         })
     }
@@ -1661,6 +1856,208 @@ mod driver {
                 ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR | ORA_TYPE_NUM_JSON
             )
         })
+    }
+
+    fn row_stream_chunked_fallback_reason(columns: &[ColumnMetadata]) -> Option<String> {
+        let column = columns.iter().find(|column| {
+            matches!(
+                column.ora_type_num(),
+                ORA_TYPE_NUM_CURSOR | ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_BFILE
+            )
+        })?;
+        Some(format!(
+            "column {} has Oracle type {}; cursor-chunked streaming preserves connection-owned materialization",
+            column.name(),
+            oracle_type_name(column)
+        ))
+    }
+
+    async fn replace_connection_slot(
+        inner: &Arc<AsyncMutex<super::RustOracleConnectionSlot>>,
+        cx: &Cx,
+        connection: oracledb::Connection,
+    ) -> Result<(), DbError> {
+        let mut guard = inner
+            .lock(cx)
+            .await
+            .map_err(|err| DbError::Internal(format!("thin connection lock failed: {err}")))?;
+        if guard.connection.replace(connection).is_some() {
+            return Err(DbError::Internal(
+                "thin connection slot was unexpectedly occupied during row-stream recovery"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) struct RustOracleRowStream {
+        inner: Arc<AsyncMutex<super::RustOracleConnectionSlot>>,
+        opts: OracleConnectOptions,
+        stream: Option<oracledb::OwnedRowStream>,
+        metadata: Vec<ColumnMetadata>,
+        columns: Vec<String>,
+        serialize_opts: SerializeOptions,
+    }
+
+    impl RustOracleRowStream {
+        #[must_use]
+        pub(super) fn columns(&self) -> &[String] {
+            &self.columns
+        }
+
+        pub(super) async fn next_row(&mut self, cx: &Cx) -> Result<Option<OracleRow>, DbError> {
+            super::db_checkpoint(cx, "oracle_db.query_row_stream.next.before")?;
+            let stream = self.stream.as_mut().ok_or_else(|| {
+                DbError::Internal("owned row stream has already been recovered".to_owned())
+            })?;
+            let next = poll_fn(|task_cx| Stream::poll_next(Pin::new(&mut *stream), task_cx)).await;
+            let Some(row) = next else {
+                super::db_checkpoint(cx, "oracle_db.query_row_stream.next.eof")?;
+                return Ok(None);
+            };
+            let row = row.map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?;
+            let row = owned_row_to_oracle_row(&self.metadata, row, &self.serialize_opts)?;
+            super::db_checkpoint(cx, "oracle_db.query_row_stream.next.after")?;
+            Ok(Some(row))
+        }
+
+        pub(super) async fn recover(mut self, cx: &Cx) -> Result<(), DbError> {
+            let stream = self.stream.take().ok_or_else(|| {
+                DbError::Internal("owned row stream has already been recovered".to_owned())
+            })?;
+            let connection = stream
+                .into_connection()
+                .map_err(|err| DbError::Quarantined {
+                    outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                    message: format!(
+                        "owned row stream could not recover its connection: {}",
+                        sanitize_driver_error(err, &self.opts)
+                    ),
+                })?;
+            replace_connection_slot(&self.inner, cx, connection).await?;
+            super::db_checkpoint(cx, "oracle_db.query_row_stream.recovered")?;
+            Ok(())
+        }
+    }
+
+    fn owned_row_to_oracle_row(
+        columns: &[ColumnMetadata],
+        row: Vec<Option<QueryValue>>,
+        serialize_opts: &SerializeOptions,
+    ) -> Result<OracleRow, DbError> {
+        let mut cells = Vec::with_capacity(columns.len());
+        for (idx, meta) in columns.iter().enumerate() {
+            let value = row.get(idx).cloned().flatten();
+            cells.push((
+                meta.name().to_owned(),
+                owned_value_to_cell(meta, value, serialize_opts)?,
+            ));
+        }
+        Ok(OracleRow { columns: cells })
+    }
+
+    fn owned_value_to_cell(
+        meta: &ColumnMetadata,
+        value: Option<QueryValue>,
+        serialize_opts: &SerializeOptions,
+    ) -> Result<OracleCell, DbError> {
+        let oracle_type = oracle_type_name(meta);
+        let cell = match value {
+            None => OracleCell::new(oracle_type, None),
+            Some(
+                QueryValue::Text(value)
+                | QueryValue::Rowid(value)
+                | QueryValue::BinaryDouble(value),
+            ) => OracleCell::new(oracle_type, Some(value)),
+            Some(QueryValue::TextRaw { bytes, .. } | QueryValue::Raw(bytes)) => {
+                OracleCell::binary(oracle_type, bytes)
+            }
+            Some(QueryValue::Number(value)) => {
+                OracleCell::new(oracle_type, Some(value.to_canonical_string()))
+            }
+            Some(QueryValue::Boolean(value)) => OracleCell::new(
+                oracle_type,
+                Some(if value { "true" } else { "false" }.to_owned()),
+            ),
+            Some(QueryValue::DateTime {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+            }) => OracleCell::new(
+                oracle_type,
+                Some(format_datetime(
+                    year, month, day, hour, minute, second, nanosecond,
+                )),
+            ),
+            Some(QueryValue::TimestampTz {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+                offset_minutes,
+            }) => OracleCell::new(
+                oracle_type,
+                Some(format_timestamp_tz(
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    nanosecond,
+                    offset_minutes,
+                )),
+            ),
+            Some(QueryValue::IntervalDS {
+                days,
+                hours,
+                minutes,
+                seconds,
+                fseconds,
+            }) => OracleCell::new(
+                oracle_type,
+                Some(format!(
+                    "{days} {hours:02}:{minutes:02}:{seconds:02}.{fseconds:09}"
+                )),
+            ),
+            Some(QueryValue::IntervalYM { years, months }) => {
+                OracleCell::new(oracle_type, Some(format!("{years}-{months}")))
+            }
+            Some(QueryValue::Object(value)) => {
+                OracleCell::structured(oracle_type, structured_object_marker(&value))
+            }
+            Some(QueryValue::Vector(value)) => OracleCell::structured(
+                oracle_type,
+                structured_vector_with_caps(&value, serialize_opts.structured_decode_caps),
+            ),
+            Some(QueryValue::Json(value)) => OracleCell::structured(
+                oracle_type,
+                structured_json_value(&value, serialize_opts.structured_decode_caps),
+            ),
+            Some(QueryValue::Array(values)) => OracleCell::structured(
+                oracle_type,
+                structured_array_with_caps(&values, serialize_opts.structured_decode_caps),
+            ),
+            Some(QueryValue::Cursor(_) | QueryValue::Lob(_)) => {
+                return Err(DbError::UnsupportedFeature(format!(
+                    "owned row streaming cannot materialize {} without the driver connection; \
+                     use cursor-chunked streaming fallback",
+                    oracle_type
+                )));
+            }
+            Some(value) => OracleCell::structured(
+                oracle_type,
+                structured_query_value_with_caps(&value, serialize_opts.structured_decode_caps),
+            ),
+        };
+        Ok(cell)
     }
 
     // Async recursion (cursor cells nest result sets) is boxed to keep the
@@ -4118,6 +4515,71 @@ mod driver {
             drop(inner);
             super::db_checkpoint(cx, "oracle_db.query_rows.after")?;
             Ok(rows)
+        }
+
+        async fn query_row_stream(
+            &self,
+            cx: &Cx,
+            sql: &str,
+            binds: &[OracleBind],
+            arraysize: usize,
+            serialize_opts: &SerializeOptions,
+        ) -> Result<QueryRowStreamStart, DbError> {
+            super::db_checkpoint(cx, "oracle_db.query_row_stream.before")?;
+            let driver_binds: Vec<BindValue> = binds.iter().map(to_bind).collect();
+            let arraysize = arraysize.clamp(1, u32::MAX as usize) as u32;
+            let arraysize = NonZeroU32::new(arraysize).expect("arraysize clamped to non-zero");
+            let timeout = self
+                .call_timeout
+                .lock()
+                .map(|timeout| *timeout)
+                .map_err(|err| DbError::Internal(format!("call-timeout lock poisoned: {err}")))?;
+            let connection = self.take_connection(cx).await?;
+            let mut query = oracledb::Query::new(sql)
+                .bind(&driver_binds)
+                .arraysize(arraysize)
+                .prefetch(arraysize.get());
+            if let Some(timeout) = timeout {
+                query = query.timeout(timeout);
+            }
+            let stream = connection.into_row_stream(cx, query).await.map_err(|err| {
+                DbError::Quarantined {
+                    outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                    message: format!(
+                        "owned row stream failed before the connection could be recovered: {}",
+                        sanitize_driver_error(err, &self.opts)
+                    ),
+                }
+            })?;
+            let metadata = stream.columns().to_vec();
+            if let Some(reason) = row_stream_chunked_fallback_reason(&metadata) {
+                let connection = stream
+                    .into_connection()
+                    .map_err(|err| DbError::Quarantined {
+                        outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                        message: format!(
+                            "owned row stream could not recover for chunked fallback: {}",
+                            sanitize_driver_error(err, &self.opts)
+                        ),
+                    })?;
+                self.replace_connection(cx, connection).await?;
+                super::db_checkpoint(cx, "oracle_db.query_row_stream.fallback")?;
+                return Ok(QueryRowStreamStart::Fallback { reason });
+            }
+            let columns = metadata
+                .iter()
+                .map(|column| column.name().to_owned())
+                .collect();
+            Ok(QueryRowStreamStart::Stream(QueryRowStream::new(
+                RustOracleRowStream {
+                    inner: Arc::clone(&self.inner),
+                    opts: self.opts.clone(),
+                    stream: Some(stream),
+                    metadata,
+                    columns,
+                    serialize_opts: *serialize_opts,
+                },
+            )))
         }
 
         async fn query_rows_named(

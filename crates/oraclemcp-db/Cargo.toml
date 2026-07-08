@@ -14,6 +14,9 @@ categories.workspace = true
 default = []
 # Live Oracle integration tests (gated; require a reachable DB).
 live-xe = []
+# Test-only seam for higher-level crates that need deterministic row streams
+# without naming the driver-owned stream type.
+test-utils = []
 
 [dependencies]
 asupersync.workspace = true
@@ -24,6 +27,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+futures-core.workspace = true
 # D1-traces (bead oraclemcp-040-epic-wp-d-1il.3): enable oracledb's `tracing`
 # feature so DB-call spans flow into the OTLP trace layer. It only adds the
 # `tracing` dep (no async runtime), so the engine-free boundary holds.

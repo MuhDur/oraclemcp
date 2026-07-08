@@ -1956,6 +1956,7 @@ dependencies = [
  "asupersync",
  "async-trait",
  "criterion",
+ "futures-core",
  "oracledb",
  "oracledb-protocol",
  "oraclemcp-error",

@@ -89,6 +89,7 @@ plsql-sast = { workspace = true, optional = true }
 plsql-output = { workspace = true, optional = true }
 
 [dev-dependencies]
+oraclemcp-db = { path = "../oraclemcp-db", version = "0.8.0", features = ["test-utils"] }
 rcgen = "0.13"
 toml = "0.8"
 # Golden-artifact discipline (D6.3d). `regex` powers the shared `Scrubber` in

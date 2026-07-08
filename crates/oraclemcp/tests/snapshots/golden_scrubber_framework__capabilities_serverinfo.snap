@@ -232,7 +232,7 @@ expression: rendered
             "type": "string"
           },
           "streaming": {
-            "description": "Deliver the result as an ordered, resumable page `chunks` array instead of one inline page (incremental fetch, made first-class). Over the HTTP/SSE transport each chunk is emitted as its own SSE `event: chunk` frame. Mutually exclusive with export and as_of. Never affects the read-only classifier.",
+            "description": "Deliver the result incrementally instead of one inline page. Over HTTP/SSE, scalar/self-contained rowsets emit one `event: row` frame per row; LOB, BFILE, and REF CURSOR values fall back to ordered cursor `event: chunk` frames. Mutually exclusive with export and as_of. Never affects the read-only classifier.",
             "type": "boolean"
           },
           "timeout_seconds": {
@@ -1742,7 +1742,7 @@ expression: rendered
             "type": "string"
           },
           "streaming": {
-            "description": "Deliver the result as an ordered, resumable page `chunks` array instead of one inline page. Over HTTP/SSE each chunk is an SSE `event: chunk` frame. Mutually exclusive with export and as_of. Never affects the read-only classifier.",
+            "description": "Deliver the result incrementally instead of one inline page. Over HTTP/SSE, scalar/self-contained rowsets emit one `event: row` frame per row; LOB, BFILE, and REF CURSOR values fall back to ordered cursor `event: chunk` frames. Mutually exclusive with export and as_of. Never affects the read-only classifier.",
             "type": "boolean"
           },
           "timeout_seconds": {

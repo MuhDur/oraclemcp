@@ -2539,7 +2539,7 @@ fn check_trio_stack(ctx: &DoctorContext<'_>) -> CheckResult {
     // `CARGO_PKG_VERSION` is also the `oraclemcp-db` / server version.
     let server_version = env!("CARGO_PKG_VERSION");
     // Read from the DRIVER crate (via the db seam re-export), never this one —
-    // the provenance guarantee that `reported == pinned` driver version (=0.8.1).
+    // the provenance guarantee that `reported == pinned` driver version (=0.8.2).
     let driver_line = format!("thin oracledb {DRIVER_VERSION}");
 
     let plsql_status = if ctx.plsql_intelligence_detected {
@@ -2885,8 +2885,8 @@ mod tests {
             "trio-stack must report the pinned driver line: {}",
             trio.detail
         );
-        // reported == pinned driver (=0.8.1).
-        assert_eq!(DRIVER_VERSION, "0.8.1");
+        // reported == pinned driver (=0.8.2).
+        assert_eq!(DRIVER_VERSION, "0.8.2");
 
         // Server / db (workspace) version is present.
         assert!(

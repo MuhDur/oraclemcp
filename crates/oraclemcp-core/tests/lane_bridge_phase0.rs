@@ -5,9 +5,9 @@ use std::rc::Rc;
 use std::thread;
 use std::time::Instant;
 
+use asupersync::Cx;
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::runtime::RuntimeBuilder;
-use asupersync::Cx;
 use serde_json::json;
 
 const DEDICATED_OPS: u64 = 64;

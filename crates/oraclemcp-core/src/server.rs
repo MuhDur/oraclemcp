@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
+use asupersync::channel::{mpsc, oneshot};
 use asupersync::{CancelReason, Cx, Outcome, PanicPayload};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use serde_json::{Map, Value, json};
@@ -49,6 +50,22 @@ const SERVER_INSTRUCTIONS: &str = "Call oracle_capabilities first to discover to
 pub type DispatchOutcome = Outcome<Value, ErrorEnvelope>;
 
 pub type DispatchFuture<'a> = Pin<Box<dyn Future<Output = DispatchOutcome> + 'a>>;
+
+/// Incremental frames emitted by a streaming tool before its final MCP result.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ToolStreamFrame {
+    /// A true row-by-row `oracle_query` frame.
+    Row { seq: u64, row: Value },
+    /// Fallback frame for complex values that require the existing chunked path.
+    Chunk { seq: u64, chunk: Value },
+}
+
+pub type ToolStreamSender = mpsc::Sender<ToolStreamFrame>;
+
+pub type DispatchReplyReceiver = oneshot::Receiver<DispatchOutcome>;
+
+pub type DispatchStreamStartFuture<'a> =
+    Pin<Box<dyn Future<Output = Outcome<DispatchReplyReceiver, ErrorEnvelope>> + 'a>>;
 
 /// How much dynamic MCP surface state the caller needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -259,6 +276,40 @@ pub trait ToolDispatch: Send + Sync + 'static {
         name: &'a str,
         args: Value,
     ) -> DispatchFuture<'a>;
+
+    /// Start a streaming dispatch and return a receiver for its final outcome
+    /// without waiting for completion. Stateful HTTP uses this to drain the
+    /// bounded row channel while the lane continues producing frames.
+    fn dispatch_stream_start<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        _context: DispatchContext<'a>,
+        _name: &'a str,
+        _args: Value,
+        _frames: ToolStreamSender,
+    ) -> DispatchStreamStartFuture<'a> {
+        Box::pin(async {
+            Outcome::Err(ErrorEnvelope::new(
+                ErrorClass::RuntimeStateRequired,
+                "streaming dispatch is not available for this dispatcher",
+            ))
+        })
+    }
+
+    /// Run a streaming tool call on the owning dispatcher. The default keeps
+    /// non-stream-aware dispatchers behavior-compatible: no incremental frames,
+    /// just the normal final outcome.
+    fn dispatch_stream<'a>(
+        &'a self,
+        cx: &'a Cx,
+        context: DispatchContext<'a>,
+        name: &'a str,
+        args: Value,
+        frames: ToolStreamSender,
+    ) -> DispatchFuture<'a> {
+        let _ = frames;
+        self.dispatch(cx, context, name, args)
+    }
 
     /// Lifecycle cleanup before a stateful dispatch lane exits.
     ///
@@ -779,6 +830,41 @@ impl OracleMcpServer {
             self.run_tool_json_outcome_with_context(&cx, context, name, args)
                 .await
         })
+    }
+
+    pub(crate) fn start_tool_stream_blocking_with_context(
+        &self,
+        context: DispatchContext<'_>,
+        name: String,
+        args: Value,
+        frames: ToolStreamSender,
+    ) -> Outcome<DispatchReplyReceiver, ErrorEnvelope> {
+        crate::lane::block_on_lane_bridge(async {
+            let Some(cx) = Cx::current() else {
+                return Outcome::Err(ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    "Asupersync context was not installed for streaming tool dispatch",
+                ));
+            };
+            if name == CAPABILITIES_TOOL {
+                return Outcome::Err(ErrorEnvelope::new(
+                    ErrorClass::InvalidArguments,
+                    "oracle_capabilities does not support incremental streaming",
+                ));
+            }
+            self.dispatcher
+                .dispatch_stream_start(&cx, context, &name, args, frames)
+                .await
+                .map_err(|envelope| self.sanitize_error_envelope(envelope))
+        })
+    }
+
+    pub(crate) fn jsonrpc_tool_response_from_outcome(
+        &self,
+        id: Value,
+        outcome: DispatchOutcome,
+    ) -> Value {
+        jsonrpc_result(id, self.tool_result_from_outcome(outcome))
     }
 
     fn handle_stdio_frame(&self, frame: &[u8], auth: &StdioAuthPolicy) -> Option<Value> {

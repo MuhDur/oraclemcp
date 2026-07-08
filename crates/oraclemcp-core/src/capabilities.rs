@@ -107,12 +107,13 @@ pub struct ToolSurfaceFeatures {
     /// every transport.
     pub incremental_fetch: bool,
     /// `oracle_query` supports **streaming delivery** (`streaming=true`): the
-    /// result is delivered as an ordered, resumable page `chunks` array. Over
-    /// the HTTP/SSE transport each chunk is additionally emitted as its own SSE
-    /// `event: chunk` frame — that SSE chunk-frame delivery is what this flag
-    /// reflects, so it is `true` only when the HTTP transport is available. (The
-    /// `chunks` array itself still returns inline over stdio; see
-    /// `incremental_fetch` for the transport-independent contract.)
+    /// result is delivered incrementally after the existing read-only guard.
+    /// Over HTTP/SSE, scalar/self-contained rowsets emit one `event: row` frame
+    /// per row; values that require connection-owned materialization (LOBs,
+    /// BFILEs, REF CURSORs) retain the cursor-chunked `event: chunk` fallback.
+    /// This flag reflects that SSE transport, so it is `true` only when HTTP is
+    /// available. Over stdio, `streaming=true` still returns the ordered chunks
+    /// inline; see `incremental_fetch` for the transport-independent contract.
     pub streaming: bool,
 }
 
@@ -194,7 +195,8 @@ impl CapabilitiesReport {
             tool_features: ToolSurfaceFeatures {
                 // Incremental fetch (cursor pagination) is transport-independent.
                 incremental_fetch: true,
-                // SSE chunk-frame streaming rides the HTTP transport.
+                // Row-by-row SSE streaming rides the HTTP transport; complex
+                // values fall back to chunk frames over the same transport.
                 streaming: features.http_transport,
             },
             features,
@@ -268,8 +270,8 @@ mod tests {
     #[test]
     fn tool_surface_features_advertise_incremental_fetch_and_transport_gated_streaming() {
         // K10: the TOOL-SURFACE block advertises incremental fetch (always) and
-        // SSE chunk-frame streaming (HTTP transport only), distinct from the
-        // build `features` tiers and the K2 connection `server_features` probe.
+        // SSE streaming (HTTP transport only), distinct from the build
+        // `features` tiers and the K2 connection `server_features` probe.
         let stdio = CapabilitiesReport::new(
             "0.1.0",
             sample_tools(),
@@ -283,7 +285,7 @@ mod tests {
         assert!(stdio.tool_features.incremental_fetch);
         assert!(
             !stdio.tool_features.streaming,
-            "SSE chunk-frame streaming needs the HTTP transport"
+            "SSE row/chunk streaming needs the HTTP transport"
         );
         let json = serde_json::to_value(&stdio).expect("serialize");
         assert_eq!(

@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use asupersync::channel::mpsc;
 use asupersync::combinator::{
     RateLimitAlgorithm, RateLimitPolicy, RateLimiter, RateLimiterRegistry, WaitStrategy,
 };
@@ -68,7 +69,9 @@ use crate::operator_protocol::{
 use crate::schema_diff_export::{
     SchemaDiffExportRequest, schema_diff_error_data, schema_diff_export_data,
 };
-use crate::server::{DispatchCloseReason, DispatchContext, OracleMcpServer};
+use crate::server::{
+    DispatchCloseReason, DispatchContext, DispatchReplyReceiver, OracleMcpServer, ToolStreamFrame,
+};
 use crate::source_history::{
     SourceHistoryError, SourceHistoryFilter, SourceHistoryRevertRequest, SourceHistoryStore,
     SourceObjectTarget, SourceSnapshotDraft, normalize_source_object_type,
@@ -93,6 +96,7 @@ pub const DEFAULT_STATEFUL_IDLE_TTL_SECONDS: u64 = 900;
 
 const STATEFUL_IDLE_REAP_INTERVAL: Duration = Duration::from_secs(1);
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const QUERY_ROW_STREAM_CHANNEL_CAPACITY: usize = 16;
 const STATEFUL_SESSION_COOKIE: &str = "oraclemcp_mcp_session";
 const CONFIG_DRAFT_MAX_BYTES: usize = 256 * 1024;
 const HTTP_TRANSPORT_CAPACITY_SCOPE: &str = "http_transport_connection";
@@ -1666,6 +1670,7 @@ fn guard_http_request(config: &HttpTransportConfig, request: &HttpRequest) -> Op
 enum HttpExchange {
     Buffered(HttpResponse),
     SseStream(HttpSseStream),
+    ToolStream(HttpToolStream),
 }
 
 impl HttpExchange {
@@ -1673,6 +1678,7 @@ impl HttpExchange {
         match self {
             Self::Buffered(response) => response,
             Self::SseStream(stream) => stream.into_buffered_response(),
+            Self::ToolStream(stream) => stream.into_buffered_response(),
         }
     }
 }
@@ -1827,13 +1833,7 @@ fn handle_http_exchange(
             &request,
             stateful_principal_key(principal_key),
         )),
-        "POST" => HttpExchange::Buffered(handle_mcp_post(
-            server,
-            config,
-            &request,
-            scope_grant,
-            principal_key,
-        )),
+        "POST" => handle_mcp_post_exchange(server, config, &request, scope_grant, principal_key),
         _ => HttpExchange::Buffered(empty_response(405).with_header(
             "allow",
             if config.stateful {
@@ -5131,15 +5131,39 @@ fn handle_mcp_delete(
     empty_response(405).with_header("allow", "POST")
 }
 
-fn handle_mcp_post(
+fn streaming_oracle_query_call(parsed: &Value) -> Option<(Value, String, Value)> {
+    let object = parsed.as_object()?;
+    if object.get("method").and_then(Value::as_str) != Some("tools/call") {
+        return None;
+    }
+    let id = object.get("id")?.clone();
+    let params = object.get("params")?.as_object()?;
+    let name = params.get("name")?.as_str()?;
+    if name != "oracle_query" {
+        return None;
+    }
+    let args = match params.get("arguments") {
+        Some(Value::Object(arguments)) => Value::Object(arguments.clone()),
+        Some(Value::Null) | None => Value::Null,
+        Some(_) => return None,
+    };
+    let streaming = args
+        .get("streaming")
+        .or_else(|| args.get("stream"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    streaming.then(|| (id, name.to_owned(), args))
+}
+
+fn handle_mcp_post_exchange(
     server: &OracleMcpServer,
     config: &HttpTransportConfig,
     request: &HttpRequest,
     scope_grant: Option<&ScopeGrant>,
     principal_key: Option<&str>,
-) -> HttpResponse {
+) -> HttpExchange {
     if !content_type_is_json(request) {
-        return empty_response(415);
+        return HttpExchange::Buffered(empty_response(415));
     }
     if !accepts_media(
         request.header("accept"),
@@ -5149,13 +5173,16 @@ fn handle_mcp_post(
             "application/json"
         },
     ) {
-        return empty_response(406);
+        return HttpExchange::Buffered(empty_response(406));
     }
     let session_principal_key = stateful_principal_key(principal_key);
     let parsed = match serde_json::from_slice::<Value>(&request.body) {
         Ok(value) => value,
         Err(_) => {
-            return json_response(200, &jsonrpc_error(Value::Null, -32700, "Parse error"));
+            return HttpExchange::Buffered(json_response(
+                200,
+                &jsonrpc_error(Value::Null, -32700, "Parse error"),
+            ));
         }
     };
     let method = parsed
@@ -5174,7 +5201,7 @@ fn handle_mcp_post(
                     .as_ref()
                     .is_some_and(|store| store.principal_for(presented).is_some())
             {
-                return json_response(
+                return HttpExchange::Buffered(json_response(
                     400,
                     &json!({
                         "error": "session_already_initialized",
@@ -5185,7 +5212,7 @@ fn handle_mcp_post(
                                       session, or keep using the existing session without \
                                       re-initializing",
                     }),
-                );
+                ));
             }
             Some(new_session_id())
         } else {
@@ -5194,11 +5221,11 @@ fn handle_mcp_post(
                     if let Some(response) =
                         require_negotiated_protocol_version_header(config, request, &session)
                     {
-                        return response;
+                        return HttpExchange::Buffered(response);
                     }
                     Some(session.session_id.to_owned())
                 }
-                Err(response) => return response,
+                Err(response) => return HttpExchange::Buffered(response),
             }
         }
     } else {
@@ -5215,7 +5242,7 @@ fn handle_mcp_post(
         rate_limit_principal_key,
         "retry after retry_after_ms, or reduce MCP request rate for this principal",
     ) {
-        return response;
+        return HttpExchange::Buffered(response);
     }
     let mut context = scope_grant
         .map(DispatchContext::with_scope_grant)
@@ -5231,17 +5258,64 @@ fn handle_mcp_post(
     if let Some(principal_key) = dispatch_principal_key {
         context = context.with_principal_key(principal_key);
     }
+    if config.stateful
+        && let Some((request_id, name, args)) = streaming_oracle_query_call(&parsed)
+        && let Some(session_id) = http_session_id.clone()
+    {
+        let (frames_tx, frames_rx) = mpsc::channel(QUERY_ROW_STREAM_CHANNEL_CAPACITY);
+        match server.start_tool_stream_blocking_with_context(context, name, args, frames_tx) {
+            Outcome::Ok(reply_rx) => {
+                return HttpExchange::ToolStream(HttpToolStream::new(
+                    server.clone(),
+                    config.result_store.clone(),
+                    session_id,
+                    session_principal_key.to_owned(),
+                    request_id,
+                    frames_rx,
+                    reply_rx,
+                ));
+            }
+            Outcome::Err(envelope) => {
+                let response =
+                    server.jsonrpc_tool_response_from_outcome(request_id, Outcome::Err(envelope));
+                let response_event_id = config
+                    .result_store
+                    .as_ref()
+                    .map(|store| store.append_response(&session_id, response.clone()));
+                return HttpExchange::Buffered(sse_response(
+                    config,
+                    method.as_deref(),
+                    response,
+                    http_session_id,
+                    session_principal_key,
+                    response_event_id.as_deref(),
+                ));
+            }
+            Outcome::Cancelled(reason) => {
+                return HttpExchange::Buffered(dispatch_cancelled_response(&reason));
+            }
+            Outcome::Panicked(payload) => {
+                return HttpExchange::Buffered(dispatch_panicked_response(&payload));
+            }
+        }
+    }
     let outcome = server.handle_jsonrpc_request_with_context_outcome(parsed, None, context);
     let response = match outcome {
         Outcome::Ok(Some(response)) => response,
-        Outcome::Ok(None) => return empty_response(202),
+        Outcome::Ok(None) => return HttpExchange::Buffered(empty_response(202)),
         Outcome::Err(error) => error.into_response(),
-        Outcome::Cancelled(reason) => return dispatch_cancelled_response(&reason),
-        Outcome::Panicked(payload) => return dispatch_panicked_response(&payload),
+        Outcome::Cancelled(reason) => {
+            return HttpExchange::Buffered(dispatch_cancelled_response(&reason));
+        }
+        Outcome::Panicked(payload) => {
+            return HttpExchange::Buffered(dispatch_panicked_response(&payload));
+        }
     };
     if let Some(retry_after_ms) = jsonrpc_busy_retry_after_ms(&response) {
         let retry_after = retry_after_header_seconds(retry_after_ms);
-        return json_response(429, &response).with_header("retry-after", &retry_after);
+        return HttpExchange::Buffered(
+            json_response(429, &response).with_header("retry-after", &retry_after),
+        );
     }
     if config.stateful {
         let response_event_id = if method.as_deref() == Some("initialize") {
@@ -5254,16 +5328,28 @@ fn handle_mcp_post(
                     .map(|store| store.append_response(session_id, response.clone()))
             })
         };
-        return sse_response(
+        return HttpExchange::Buffered(sse_response(
             config,
             method.as_deref(),
             response,
             http_session_id,
             session_principal_key,
             response_event_id.as_deref(),
-        );
+        ));
     }
-    json_response(200, &response)
+    HttpExchange::Buffered(json_response(200, &response))
+}
+
+#[cfg(test)]
+fn handle_mcp_post(
+    server: &OracleMcpServer,
+    config: &HttpTransportConfig,
+    request: &HttpRequest,
+    scope_grant: Option<&ScopeGrant>,
+    principal_key: Option<&str>,
+) -> HttpResponse {
+    handle_mcp_post_exchange(server, config, request, scope_grant, principal_key)
+        .into_buffered_response()
 }
 
 fn dispatch_cancelled_response(reason: &asupersync::CancelReason) -> HttpResponse {
@@ -5623,6 +5709,159 @@ impl HttpSseStream {
             self.after_seq = self.after_seq.max(seq);
         }
         Ok(())
+    }
+}
+
+struct HttpToolStream {
+    server: OracleMcpServer,
+    result_store: Option<Arc<HttpResultStore>>,
+    session_id: String,
+    _principal_key: String,
+    request_id: Value,
+    frames_rx: mpsc::Receiver<ToolStreamFrame>,
+    reply_rx: DispatchReplyReceiver,
+}
+
+impl HttpToolStream {
+    fn new(
+        server: OracleMcpServer,
+        result_store: Option<Arc<HttpResultStore>>,
+        session_id: String,
+        principal_key: String,
+        request_id: Value,
+        frames_rx: mpsc::Receiver<ToolStreamFrame>,
+        reply_rx: DispatchReplyReceiver,
+    ) -> Self {
+        Self {
+            server,
+            result_store,
+            session_id,
+            _principal_key: principal_key,
+            request_id,
+            frames_rx,
+            reply_rx,
+        }
+    }
+
+    fn into_buffered_response(mut self) -> HttpResponse {
+        let mut body = Vec::new();
+        write_sse_event(&mut body, None, Some("0/0"), Some(3000), Some(&Value::Null));
+        let response = crate::lane::block_on_lane_bridge(async {
+            let cx = Cx::current().expect("block_on installs a request Cx");
+            while let Ok(frame) = self.frames_rx.recv(&cx).await {
+                write_tool_stream_frame_buffered(&mut body, frame);
+            }
+            self.final_response(&cx).await
+        });
+        let response_event_id = self.append_final_response(&response);
+        write_sse_event(
+            &mut body,
+            None,
+            Some(response_event_id.as_deref().unwrap_or("1/0")),
+            None,
+            Some(&response),
+        );
+        HttpResponse {
+            status: 200,
+            headers: vec![
+                ("content-type".to_owned(), "text/event-stream".to_owned()),
+                ("cache-control".to_owned(), "no-cache".to_owned()),
+            ],
+            body,
+        }
+    }
+
+    fn write_to(mut self, stream: &mut impl Write) -> std::io::Result<()> {
+        write_streaming_sse_headers(stream)?;
+        write_chunked_sse_event(stream, None, Some("0/0"), Some(3000), Some(&Value::Null))?;
+        let response = crate::lane::block_on_lane_bridge(async {
+            let cx = Cx::current().expect("block_on installs a request Cx");
+            loop {
+                match self.frames_rx.recv(&cx).await {
+                    Ok(frame) => write_tool_stream_frame_chunked(stream, frame)?,
+                    Err(mpsc::RecvError::Disconnected) => break,
+                    Err(mpsc::RecvError::Cancelled) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "stream frame receive cancelled",
+                        ));
+                    }
+                    Err(mpsc::RecvError::Empty) => continue,
+                }
+            }
+            Ok::<Value, std::io::Error>(self.final_response(&cx).await)
+        })?;
+        let response_event_id = self.append_final_response(&response);
+        write_chunked_sse_event(
+            stream,
+            None,
+            Some(response_event_id.as_deref().unwrap_or("1/0")),
+            None,
+            Some(&response),
+        )?;
+        write_final_chunk(stream)
+    }
+
+    async fn final_response(&mut self, cx: &Cx) -> Value {
+        match self.reply_rx.recv(cx).await {
+            Ok(outcome) => self
+                .server
+                .jsonrpc_tool_response_from_outcome(self.request_id.clone(), outcome),
+            Err(_) => self.server.jsonrpc_tool_response_from_outcome(
+                self.request_id.clone(),
+                Outcome::Err(ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    "streaming dispatch lane stopped before final reply",
+                )),
+            ),
+        }
+    }
+
+    fn append_final_response(&self, response: &Value) -> Option<String> {
+        self.result_store
+            .as_ref()
+            .map(|store| store.append_response(&self.session_id, response.clone()))
+    }
+}
+
+fn write_tool_stream_frame_buffered(body: &mut Vec<u8>, frame: ToolStreamFrame) {
+    match frame {
+        ToolStreamFrame::Row { seq, row } => {
+            let id = format!("row/{seq}");
+            write_sse_event(
+                body,
+                Some("row"),
+                Some(&id),
+                None,
+                Some(&json!({ "seq": seq, "row": row })),
+            );
+        }
+        ToolStreamFrame::Chunk { seq, chunk } => {
+            let id = format!("chunk/{seq}");
+            write_sse_event(body, Some("chunk"), Some(&id), None, Some(&chunk));
+        }
+    }
+}
+
+fn write_tool_stream_frame_chunked(
+    stream: &mut impl Write,
+    frame: ToolStreamFrame,
+) -> std::io::Result<()> {
+    match frame {
+        ToolStreamFrame::Row { seq, row } => {
+            let id = format!("row/{seq}");
+            write_chunked_sse_event(
+                stream,
+                Some("row"),
+                Some(&id),
+                None,
+                Some(&json!({ "seq": seq, "row": row })),
+            )
+        }
+        ToolStreamFrame::Chunk { seq, chunk } => {
+            let id = format!("chunk/{seq}");
+            write_chunked_sse_event(stream, Some("chunk"), Some(&id), None, Some(&chunk))
+        }
     }
 }
 
@@ -6088,6 +6327,7 @@ fn handle_stream(
     match exchange {
         HttpExchange::Buffered(response) => write_http_response(stream, &response),
         HttpExchange::SseStream(response) => response.write_to(stream),
+        HttpExchange::ToolStream(response) => response.write_to(stream),
     }
 }
 

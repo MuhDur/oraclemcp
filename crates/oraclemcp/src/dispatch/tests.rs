@@ -5,14 +5,16 @@
 use super::*;
 use crate::registry::tool_names;
 use asupersync::Cx;
+use asupersync::channel::mpsc;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_core::{DispatchCloseReason, DispatchContext, ScopeGrant};
-use oraclemcp_db::{OracleBackend, OracleCell, OracleRow};
+use oraclemcp_db::{OracleBackend, OracleCell, OracleRow, QueryRowStream, QueryRowStreamStart};
 use std::path::{Path, PathBuf};
 use std::sync::Barrier;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc as std_mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn run_with_current_cx(f: impl FnOnce(&Cx)) {
     let runtime = RuntimeBuilder::current_thread()
@@ -5824,6 +5826,86 @@ impl StreamOffsetMock {
     }
 }
 
+fn stream_offset_row(i: usize) -> OracleRow {
+    OracleRow {
+        columns: vec![
+            (
+                "ID".to_owned(),
+                OracleCell::new("NUMBER", Some(format!("{}", i * 11 + 3))),
+            ),
+            (
+                "NAME".to_owned(),
+                OracleCell::new("VARCHAR2", Some(format!("row-{i}"))),
+            ),
+        ],
+    }
+}
+
+struct RowStreamMock {
+    total: usize,
+    stream_opens: Arc<AtomicUsize>,
+    stream_recovers: Arc<AtomicUsize>,
+}
+
+impl RowStreamMock {
+    fn rows(&self, sql: &str) -> Vec<OracleRow> {
+        let (offset, fetch) = StreamOffsetMock::window(sql);
+        let end = offset.saturating_add(fetch).min(self.total);
+        let start = offset.min(self.total);
+        (start..end).map(stream_offset_row).collect()
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for RowStreamMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        Ok(self.rows(sql))
+    }
+    async fn query_row_stream(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _binds: &[OracleBind],
+        _arraysize: usize,
+        _serialize_opts: &SerializeOptions,
+    ) -> Result<QueryRowStreamStart, DbError> {
+        self.stream_opens.fetch_add(1, Ordering::SeqCst);
+        Ok(QueryRowStreamStart::Stream(
+            QueryRowStream::from_static_rows_for_testing(
+                vec!["ID".to_owned(), "NAME".to_owned()],
+                self.rows(sql),
+                Some(Arc::clone(&self.stream_recovers)),
+            ),
+        ))
+    }
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        Ok(0)
+    }
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait(?Send)]
 impl OracleConnection for StreamOffsetMock {
     fn backend(&self) -> OracleBackend {
@@ -5847,20 +5929,7 @@ impl OracleConnection for StreamOffsetMock {
         let (offset, fetch) = Self::window(sql);
         let end = offset.saturating_add(fetch).min(self.total);
         let start = offset.min(self.total);
-        Ok((start..end)
-            .map(|i| OracleRow {
-                columns: vec![
-                    (
-                        "ID".to_owned(),
-                        OracleCell::new("NUMBER", Some(format!("{}", i * 11 + 3))),
-                    ),
-                    (
-                        "NAME".to_owned(),
-                        OracleCell::new("VARCHAR2", Some(format!("row-{i}"))),
-                    ),
-                ],
-            })
-            .collect())
+        Ok((start..end).map(stream_offset_row).collect())
     }
     async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         Ok(0)
@@ -5871,6 +5940,170 @@ impl OracleConnection for StreamOffsetMock {
     async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
+}
+
+#[test]
+fn row_streaming_dispatch_emits_one_sse_frame_per_row_byte_identically() {
+    let stream_opens = Arc::new(AtomicUsize::new(0));
+    let stream_recovers = Arc::new(AtomicUsize::new(0));
+    let dispatcher = OracleDispatcher::new_with_profile(
+        Box::new(RowStreamMock {
+            total: 4,
+            stream_opens: Arc::clone(&stream_opens),
+            stream_recovers: Arc::clone(&stream_recovers),
+        }),
+        Some("dev".to_owned()),
+    );
+    let full = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({ "sql": "SELECT id, name FROM t", "max_rows": 1000 }),
+        )
+        .expect("full read");
+    let full_rows = full["rows"].as_array().expect("rows").clone();
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds");
+    let (outcome, frames) = runtime.block_on(async {
+        let cx = Cx::current().expect("block_on installs a current Cx");
+        let (frames_tx, mut frames_rx) = mpsc::channel(8);
+        let outcome = dispatcher
+            .dispatch_stream(
+                &cx,
+                DispatchContext::default(),
+                "oracle_query",
+                json!({ "sql": "SELECT id, name FROM t", "streaming": true, "max_rows": 2 }),
+                frames_tx,
+            )
+            .await;
+        let mut frames = Vec::new();
+        while let Ok(frame) = frames_rx.recv(&cx).await {
+            frames.push(frame);
+        }
+        (outcome, frames)
+    });
+    let final_value = match outcome {
+        Outcome::Ok(value) => value,
+        other => panic!("streaming dispatch should succeed, got {other:?}"),
+    };
+    assert_eq!(final_value["streaming"], json!(true));
+    assert_eq!(final_value["streaming_mode"], json!("rows"));
+    assert_eq!(final_value["row_count"], json!(4));
+    assert_eq!(stream_opens.load(Ordering::SeqCst), 1);
+    assert_eq!(stream_recovers.load(Ordering::SeqCst), 1);
+
+    let mut streamed_rows = Vec::new();
+    for (idx, frame) in frames.into_iter().enumerate() {
+        match frame {
+            ToolStreamFrame::Row { seq, row } => {
+                assert_eq!(seq, idx as u64);
+                streamed_rows.push(row);
+            }
+            other => panic!("row streaming emitted unexpected frame: {other:?}"),
+        }
+    }
+    assert_eq!(
+        streamed_rows, full_rows,
+        "row frames concatenate byte-identically to a full eager read"
+    );
+}
+
+#[test]
+fn streaming_write_refusal_opens_zero_row_streams() {
+    let stream_opens = Arc::new(AtomicUsize::new(0));
+    let dispatcher = OracleDispatcher::new_with_profile(
+        Box::new(RowStreamMock {
+            total: 4,
+            stream_opens: Arc::clone(&stream_opens),
+            stream_recovers: Arc::new(AtomicUsize::new(0)),
+        }),
+        Some("dev".to_owned()),
+    );
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds");
+    let outcome = runtime.block_on(async {
+        let cx = Cx::current().expect("block_on installs a current Cx");
+        let (frames_tx, _frames_rx) = mpsc::channel(4);
+        dispatcher
+            .dispatch_stream(
+                &cx,
+                DispatchContext::default(),
+                "oracle_query",
+                json!({ "sql": "DELETE FROM t", "streaming": true }),
+                frames_tx,
+            )
+            .await
+    });
+    match outcome {
+        Outcome::Err(err) => assert_eq!(err.error_class, ErrorClass::OperatingLevelTooLow),
+        other => panic!("streaming write should be refused, got {other:?}"),
+    }
+    assert_eq!(
+        stream_opens.load(Ordering::SeqCst),
+        0,
+        "the read-only guard must refuse DELETE before opening a row stream"
+    );
+}
+
+#[test]
+fn row_streaming_recovers_when_receiver_disconnects_under_backpressure() {
+    let stream_opens = Arc::new(AtomicUsize::new(0));
+    let stream_recovers = Arc::new(AtomicUsize::new(0));
+    let dispatcher = OracleDispatcher::new_with_profile(
+        Box::new(RowStreamMock {
+            total: 3,
+            stream_opens: Arc::clone(&stream_opens),
+            stream_recovers: Arc::clone(&stream_recovers),
+        }),
+        Some("dev".to_owned()),
+    );
+    let (frames_tx, mut frames_rx) = mpsc::channel(1);
+    let (done_tx, done_rx) = std_mpsc::channel();
+    let join = std::thread::spawn(move || {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("asupersync test runtime builds");
+        let outcome = runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            dispatcher
+                .dispatch_stream(
+                    &cx,
+                    DispatchContext::default(),
+                    "oracle_query",
+                    json!({ "sql": "SELECT id, name FROM t", "streaming": true, "max_rows": 2 }),
+                    frames_tx,
+                )
+                .await
+        });
+        let _ = done_tx.send(outcome);
+    });
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("block_on installs a current Cx");
+        let first = frames_rx.recv(&cx).await.expect("first row frame");
+        assert!(matches!(first, ToolStreamFrame::Row { seq: 0, .. }));
+    });
+    drop(frames_rx);
+
+    let outcome = done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("bounded sender should unblock when receiver disconnects");
+    join.join().expect("streaming dispatch thread joined");
+    match outcome {
+        Outcome::Err(err) => assert_eq!(err.error_class, ErrorClass::Timeout),
+        other => panic!("disconnect should end with a timeout-class tool error, got {other:?}"),
+    }
+    assert_eq!(stream_opens.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        stream_recovers.load(Ordering::SeqCst),
+        1,
+        "disconnect must recover the owned row stream before returning"
+    );
 }
 
 #[test]

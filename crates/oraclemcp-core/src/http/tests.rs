@@ -1,8 +1,9 @@
 use super::*;
 use crate::capabilities::{CapabilitiesReport, FeatureTiers};
-use crate::server::{DispatchContext, DispatchFuture, ToolDispatch};
+use crate::server::{DispatchContext, DispatchFuture, ToolDispatch, ToolStreamFrame};
 use crate::tools::ToolRegistry;
-use asupersync::{CancelReason, Cx, PanicPayload};
+use asupersync::channel::{mpsc, oneshot};
+use asupersync::{CancelReason, Cx, Outcome, PanicPayload};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{Classifier, OperatingLevel};
 use rustls::pki_types::pem::PemObject;
@@ -5983,6 +5984,67 @@ fn write_query_stream_chunks_frames_each_chunk_as_an_sse_event() {
     assert!(text.contains("\"NAME\":\"c\""));
     // The re-sealed cursor of a non-final chunk is carried for resume.
     assert!(text.contains("sealed-cursor-0"));
+}
+
+#[test]
+fn tool_stream_response_frames_each_row_before_final_result() {
+    let (frames_tx, frames_rx) = mpsc::channel(4);
+    let permit = frames_tx.try_reserve().expect("reserve first row frame");
+    permit
+        .try_send(ToolStreamFrame::Row {
+            seq: 0,
+            row: json!({ "ID": "1", "NAME": "a" }),
+        })
+        .expect("send first row frame");
+    let permit = frames_tx.try_reserve().expect("reserve second row frame");
+    permit
+        .try_send(ToolStreamFrame::Row {
+            seq: 1,
+            row: json!({ "ID": "2", "NAME": "b" }),
+        })
+        .expect("send second row frame");
+    drop(frames_tx);
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    reply_tx
+        .send_blocking(Outcome::Ok(json!({
+            "streaming": true,
+            "streaming_mode": "rows",
+            "columns": ["ID", "NAME"],
+            "row_count": 2,
+            "truncated": false,
+            "next_cursor": Value::Null
+        })))
+        .expect("send final streaming outcome");
+    let response = HttpToolStream::new(
+        test_server(),
+        None,
+        "session-test".to_owned(),
+        "principal-test".to_owned(),
+        json!(7),
+        frames_rx,
+        reply_rx,
+    )
+    .into_buffered_response();
+    assert_eq!(response.status, 200);
+    let text = String::from_utf8(response.body).expect("utf8 SSE body");
+    assert_eq!(
+        text.matches("event: row\n").count(),
+        2,
+        "one row SSE frame per produced row"
+    );
+    assert!(text.contains("id: row/0\n"));
+    assert!(text.contains("id: row/1\n"));
+    assert!(text.contains("\"streaming_mode\":\"rows\""));
+
+    let first_row = text.find("event: row\n").expect("row frame present");
+    let final_response = text
+        .find("\"jsonrpc\":\"2.0\"")
+        .expect("final JSON-RPC response present");
+    assert!(
+        first_row < final_response,
+        "row frames stream before the final authoritative response"
+    );
 }
 
 #[test]

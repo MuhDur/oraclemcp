@@ -26,20 +26,21 @@ use oraclemcp_config::{ConfigReloadPlan, OracleMcpConfig};
 use oraclemcp_core::{
     ConnectionStatus, CustomToolCatalog, CustomToolExecutor, DEFAULT_REQUEST_TIMEOUT,
     DispatchCloseFuture, DispatchCloseReason, DispatchContext, DispatchFuture, McpSurfaceDetail,
-    McpSurfaceFuture, McpSurfaceState, RequestBudget, ToolBody, ToolDispatch, WriteIntent,
-    WriteIntentDetails, WriteIntentError, WriteIntentLog, WriteIntentOutcome, execute_custom_tool,
-    narrow_to_read_path, sign_token, verify_token,
+    McpSurfaceFuture, McpSurfaceState, RequestBudget, ToolBody, ToolDispatch, ToolStreamFrame,
+    ToolStreamSender, WriteIntent, WriteIntentDetails, WriteIntentError, WriteIntentLog,
+    WriteIntentOutcome, execute_custom_tool, narrow_to_read_path, sign_token, verify_token,
 };
 use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
     AsOf, DbError, DbmsOutput, DependentObject, DependentsProbe, OracleBackend, OracleBind,
     OracleConnection, OracleConnectionInfo, OracleRow, QuarantineOutcome, QueryCaps,
-    SerializeOptions, StructuredDecodeCaps, compile_errors, compile_object_statements,
-    describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
-    execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl, get_source,
-    get_sources_by_name, list_objects, list_schemas, plan_cost_estimate, plscope_identifiers,
-    plscope_statements, probe_dependents, read_lob, read_query, read_query_as_of, read_query_named,
-    sample_rows, search_objects, search_source, serialize_row,
+    QueryRowStream, QueryRowStreamStart, SerializeOptions, StructuredDecodeCaps, compile_errors,
+    compile_object_statements, describe_columns, describe_constraints, describe_index,
+    describe_trigger, describe_view, execute_immediate_audit, explain_plan,
+    find_unused_declarations, get_ddl, get_source, get_sources_by_name, list_objects, list_schemas,
+    paginated_sql, plan_cost_estimate, plscope_identifiers, plscope_statements, probe_dependents,
+    read_lob, read_query, read_query_as_of, read_query_named, sample_rows, search_objects,
+    search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope, ReasonCategory, StructuredReason};
 use oraclemcp_guard::{
@@ -613,6 +614,10 @@ impl SideEffectOracle for GeneratedReadPurityOracle {
 fn rows_to_json(rows: &[oraclemcp_db::OracleRow]) -> Value {
     let opts = SerializeOptions::default();
     Value::Array(rows.iter().map(|r| serialize_row(r, &opts)).collect())
+}
+
+async fn send_stream_frame(cx: &Cx, frames: &ToolStreamSender, frame: ToolStreamFrame) -> bool {
+    frames.send(cx, frame).await.is_ok()
 }
 
 /// The agent-facing `oracle_list_profiles` response (E5). Only profiles the
@@ -5129,6 +5134,34 @@ impl ToolDispatch for OracleDispatcher {
         })
     }
 
+    fn dispatch_stream<'a>(
+        &'a self,
+        cx: &'a Cx,
+        context: DispatchContext<'a>,
+        name: &'a str,
+        args: Value,
+        frames: ToolStreamSender,
+    ) -> DispatchFuture<'a> {
+        Box::pin(async move {
+            if cx.checkpoint().is_err() {
+                return Outcome::Cancelled(
+                    cx.cancel_reason().unwrap_or_else(CancelReason::timeout),
+                );
+            }
+            let result = if canonical_tool_name(name) == "oracle_query" {
+                self.dispatch_query_stream_with_cx(cx, context, name, args, frames)
+                    .await
+            } else {
+                self.dispatch_with_cx_inner(cx, context, name, args).await
+            };
+            if cx.is_cancel_requested() {
+                Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(CancelReason::timeout))
+            } else {
+                result.into()
+            }
+        })
+    }
+
     fn close<'a>(&'a self, cx: &'a Cx, reason: DispatchCloseReason) -> DispatchCloseFuture<'a> {
         Box::pin(async move { self.close_with_cx(reason, cx).await })
     }
@@ -5173,7 +5206,37 @@ struct QueryPrepared {
     as_of: Option<AsOf>,
 }
 
+struct QueryRowStreamPlan {
+    stream: QueryRowStream,
+    columns: Vec<String>,
+    cursor_sql: String,
+    active_profile: Option<String>,
+    start_offset: usize,
+    serialize_opts: SerializeOptions,
+    request_budget: RequestBudget,
+}
+
+enum QueryStreamDelivery {
+    Rows(Box<QueryRowStreamPlan>),
+    Chunked(Value),
+}
+
 impl OracleDispatcher {
+    fn stream_db_error_envelope(&self, err: DbError) -> ErrorEnvelope {
+        let uncertain = err.is_uncertain_session_state();
+        let message = err.to_string();
+        if uncertain
+            && let Err(envelope) = mark_connection_quarantined(
+                &self.quarantine,
+                AuditOutcome::UnknownDiscarded,
+                message,
+            )
+        {
+            return envelope;
+        }
+        DbError::into_envelope(err)
+    }
+
     /// Synchronous concrete dispatch used by focused dispatcher tests and the
     /// non-Cx convenience callers. Builds a one-shot current-thread Asupersync
     /// runtime to drive the now-async dispatch and obtain a request `Cx`.
@@ -6560,6 +6623,317 @@ impl OracleDispatcher {
                 .map_err(DbError::into_envelope)
         })
         .await
+    }
+
+    async fn dispatch_query_stream_with_cx(
+        &self,
+        cx: &Cx,
+        context: DispatchContext<'_>,
+        name: &str,
+        args: Value,
+        frames: ToolStreamSender,
+    ) -> Result<Value, ErrorEnvelope> {
+        let request_budget = self.dispatch_request_budget(cx)?;
+        if let Some(quarantine) = self.connection_quarantine()? {
+            return Err(ErrorEnvelope::new(
+                ErrorClass::RuntimeStateRequired,
+                format!(
+                    "database session is quarantined after an uncertain outcome ({outcome}): {message}",
+                    outcome = audit_outcome_label(quarantine.outcome),
+                    message = quarantine.message
+                ),
+            )
+            .with_next_step("switch to a fresh profile connection or restart the server")
+            .with_next_step(
+                "do not retry non-idempotent work until the database outcome is verified",
+            ));
+        }
+
+        let delivery = {
+            let mut state = self.state.lock(cx).await.map_err(|_| {
+                ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
+            })?;
+            let scoped_level = scoped_session_level(&state.level, context);
+            if let Some(active_profile) = state.active_profile.as_deref()
+                && self.profile_drain.is_draining(active_profile)
+            {
+                return Err(profile_draining_error(active_profile));
+            }
+            let prepared = {
+                let parsed = parse_args::<QueryArgs>(name, args)?;
+                if !parsed.streaming {
+                    return Err(invalid_args(
+                        "streaming dispatch requires oracle_query streaming=true",
+                    ));
+                }
+                let as_of = query_as_of_from_args(parsed.as_of.as_ref())?;
+                let executed_sql =
+                    with_audit_marker(&parsed.sql, state.active_profile.as_deref(), "oracle_query");
+                let gate = ensure_read_only(&executed_sql);
+                QueryPrepared {
+                    args: parsed,
+                    executed_sql,
+                    gate,
+                    as_of,
+                }
+            };
+
+            if prepared.gate.is_ok() {
+                if prepared.as_of.is_some() {
+                    state.read_only_backstop.disarm();
+                } else {
+                    let DispatcherState {
+                        conn,
+                        read_only_backstop,
+                        ..
+                    } = &mut *state;
+                    read_only_backstop
+                        .ensure_armed(cx, conn.as_ref(), &scoped_level)
+                        .await?;
+                }
+            }
+
+            let active_profile = state.active_profile.clone();
+            let conn: &dyn OracleConnection = state.conn.as_ref();
+            self.prepare_query_stream_delivery(cx, conn, request_budget, active_profile, prepared)
+                .await?
+        };
+
+        match delivery {
+            QueryStreamDelivery::Rows(plan) => self.drive_query_row_stream(cx, *plan, frames).await,
+            QueryStreamDelivery::Chunked(response) => {
+                Self::emit_chunked_stream_frames(cx, response, frames).await
+            }
+        }
+    }
+
+    async fn prepare_query_stream_delivery(
+        &self,
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+        request_budget: RequestBudget,
+        active_profile: Option<String>,
+        prepared: QueryPrepared,
+    ) -> Result<QueryStreamDelivery, ErrorEnvelope> {
+        let QueryPrepared {
+            args: a,
+            executed_sql,
+            gate,
+            as_of,
+        } = prepared;
+        dispatch_checkpoint(cx, "oraclemcp.dispatch.query.row_stream.before")?;
+        gate?;
+        let binds = a
+            .binds
+            .iter()
+            .map(json_to_bind)
+            .collect::<Result<Vec<_>, _>>()?;
+        let offset = decode_query_cursor(a.cursor.as_deref(), &a.sql, active_profile.as_deref())?;
+        if a.export {
+            return Err(invalid_args(
+                "streaming and export are mutually exclusive: choose incremental \
+                 delivery (streaming=true) OR a single export resource (export=true)",
+            )
+            .with_next_step("re-run with exactly one of streaming / export"));
+        }
+        if as_of.is_some() {
+            return Err(invalid_args(
+                "streaming and as_of are mutually exclusive: a flashback read is \
+                 delivered as a single page — resume it with the returned cursor",
+            )
+            .with_next_step("drop streaming, or page the as_of read with cursor"));
+        }
+        let caps = query_caps_from_args(&a);
+        let serialize_opts = query_serialize_options_from_args(&a);
+        let timeout = call_timeout_duration(a.timeout_seconds)?;
+        let stream_budget = match timeout {
+            Some(timeout) => request_budget.meet(Budget::new().with_timeout(cx.now(), timeout)),
+            None => request_budget,
+        };
+        stream_budget.enforce(cx).map_err(DbError::into_envelope)?;
+        let previous_timeout = conn.call_timeout().map_err(DbError::into_envelope)?;
+        let effective_timeout =
+            timeout.map(|timeout| previous_timeout.map_or(timeout, |current| current.min(timeout)));
+        if let Some(timeout) = effective_timeout {
+            conn.set_call_timeout(Some(timeout))
+                .map_err(DbError::into_envelope)?;
+        }
+        let fetch_rows = MAX_QUERY_STREAM_ROWS.saturating_add(1);
+        let wrapped_sql = paginated_sql(&executed_sql, offset, fetch_rows);
+        let stream_start = conn
+            .query_row_stream(
+                cx,
+                &wrapped_sql,
+                &binds,
+                caps.max_rows.max(1),
+                &serialize_opts,
+            )
+            .await
+            .map_err(|err| self.stream_db_error_envelope(err));
+        let restore = conn
+            .set_call_timeout(previous_timeout)
+            .map_err(DbError::into_envelope);
+        let stream_start = match (stream_start, restore) {
+            (Ok(value), Ok(())) => value,
+            (Err(err), _) => return Err(err),
+            (Ok(QueryRowStreamStart::Stream(stream)), Err(err)) => {
+                stream
+                    .recover(cx)
+                    .await
+                    .map_err(|recover_err| self.stream_db_error_envelope(recover_err))?;
+                return Err(err);
+            }
+            (Ok(_), Err(err)) => return Err(err),
+        };
+        match stream_start {
+            QueryRowStreamStart::Stream(stream) => {
+                let columns = stream.columns().to_vec();
+                Ok(QueryStreamDelivery::Rows(Box::new(QueryRowStreamPlan {
+                    stream,
+                    columns,
+                    cursor_sql: a.sql,
+                    active_profile,
+                    start_offset: offset,
+                    serialize_opts,
+                    request_budget: stream_budget,
+                })))
+            }
+            QueryRowStreamStart::Fallback { reason } => {
+                tracing::debug!(
+                    fallback_reason = %reason,
+                    "oracle_query row streaming fell back to cursor chunks"
+                );
+                let response = Self::stream_query_response(
+                    cx,
+                    conn,
+                    &executed_sql,
+                    &a.sql,
+                    &binds,
+                    caps,
+                    offset,
+                    &serialize_opts,
+                    active_profile.as_deref(),
+                )
+                .await?;
+                Ok(QueryStreamDelivery::Chunked(response))
+            }
+        }
+    }
+
+    async fn drive_query_row_stream(
+        &self,
+        cx: &Cx,
+        mut plan: QueryRowStreamPlan,
+        frames: ToolStreamSender,
+    ) -> Result<Value, ErrorEnvelope> {
+        let mut row_count = 0usize;
+        let mut total_bytes = 0usize;
+        let mut truncated = false;
+        let mut disconnected = false;
+        let mut failure: Option<ErrorEnvelope> = None;
+        loop {
+            if let Err(err) = plan
+                .request_budget
+                .enforce(cx)
+                .map_err(DbError::into_envelope)
+            {
+                failure = Some(err);
+                break;
+            }
+            let next = plan
+                .stream
+                .next_row(cx)
+                .await
+                .map_err(|err| self.stream_db_error_envelope(err));
+            let row = match next {
+                Ok(Some(row)) => row,
+                Ok(None) => break,
+                Err(err) => {
+                    failure = Some(err);
+                    break;
+                }
+            };
+            if row_count >= MAX_QUERY_STREAM_ROWS {
+                truncated = true;
+                break;
+            }
+            let row_json = serialize_row(&row, &plan.serialize_opts);
+            total_bytes = total_bytes.saturating_add(
+                serde_json::to_vec(&row_json)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(0),
+            );
+            let seq = u64::try_from(row_count).unwrap_or(u64::MAX);
+            if !send_stream_frame(cx, &frames, ToolStreamFrame::Row { seq, row: row_json }).await {
+                disconnected = true;
+                break;
+            }
+            row_count = row_count.saturating_add(1);
+        }
+        let recover = plan
+            .stream
+            .recover(cx)
+            .await
+            .map_err(|err| self.stream_db_error_envelope(err));
+        recover?;
+        if let Some(err) = failure {
+            return Err(err);
+        }
+        if disconnected {
+            return Err(ErrorEnvelope::new(
+                ErrorClass::Timeout,
+                "stream receiver disconnected before oracle_query row streaming completed",
+            ));
+        }
+        let next_cursor = if truncated {
+            Value::String(seal_raw_query_cursor(
+                &(plan.start_offset + row_count).to_string(),
+                &plan.cursor_sql,
+                plan.active_profile.as_deref(),
+            ))
+        } else {
+            Value::Null
+        };
+        Ok(json!({
+            "streaming": true,
+            "streaming_mode": "rows",
+            "columns": plan.columns,
+            "row_count": row_count,
+            "total_bytes": total_bytes,
+            "truncated": truncated,
+            "next_cursor": next_cursor,
+        }))
+    }
+
+    async fn emit_chunked_stream_frames(
+        cx: &Cx,
+        response: Value,
+        frames: ToolStreamSender,
+    ) -> Result<Value, ErrorEnvelope> {
+        if let Some(chunks) = response.get("chunks").and_then(Value::as_array) {
+            for (idx, chunk) in chunks.iter().enumerate() {
+                let seq = chunk
+                    .get("seq")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(idx as u64);
+                if !send_stream_frame(
+                    cx,
+                    &frames,
+                    ToolStreamFrame::Chunk {
+                        seq,
+                        chunk: chunk.clone(),
+                    },
+                )
+                .await
+                {
+                    return Err(ErrorEnvelope::new(
+                        ErrorClass::Timeout,
+                        "stream receiver disconnected before oracle_query chunk fallback completed",
+                    ));
+                }
+            }
+        }
+        Ok(response)
     }
 
     /// K10: deliver a proven read as an ordered, resumable `chunks` array —
