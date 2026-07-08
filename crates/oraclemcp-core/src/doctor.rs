@@ -2815,6 +2815,24 @@ mod tests {
         let trio = report.checks.iter().find(|c| c.id == 15).unwrap();
         assert_eq!(trio.status, CheckStatus::Pass, "{}", trio.detail);
         assert!(trio.detail.contains("plsql-intelligence detected"));
+
+        // B5.1 no-leak: the status is a bool render — JUST `detected`, never a
+        // filesystem/crate path or a version. Isolate the plsql-intelligence
+        // segment (the rest of the detail legitimately carries URLs) and assert.
+        let segment = trio
+            .detail
+            .split("; ")
+            .find(|s| s.starts_with("plsql-intelligence"))
+            .expect("plsql-intelligence status segment present");
+        assert_eq!(segment, "plsql-intelligence detected");
+        assert!(
+            !segment.contains('/') && !segment.contains('\\'),
+            "status must not leak a path: {segment}"
+        );
+        assert!(
+            !segment.chars().any(|c| c.is_ascii_digit()),
+            "status must not leak a version: {segment}"
+        );
     }
 
     #[test]

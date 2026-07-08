@@ -690,6 +690,96 @@ fn doctor_process_exit_code_matches_cli_contract() {
     assert_eq!(doctor_process_exit_code(&fix_report), 2);
 }
 
+/// B5.1 — plsql-intelligence DETECTION CONTRACT.
+///
+/// B5 wired the detection as a COMPILE-TIME gate
+/// (`cfg!(feature = "plsql-intelligence")`); the existing doctor.rs tests only
+/// cover the RENDER with a MOCK bool. This test proves the REAL feature path in
+/// the crate that OWNS the feature: it derives detection from the same
+/// `cfg!(...)` expression `run_doctor_cmd` uses (not a mock) and runs the actual
+/// doctor trio-stack, then asserts the outcome per build. The present/absent
+/// expectations are gated on the SAME real `cfg`, so under
+/// `--features plsql-intelligence` (and in the `cargo hack` feature powerset) the
+/// present-arm truly executes, and the default build executes the absent-arm.
+/// Neither arm may crash and neither may LEAK a path, crate name, or version.
+#[test]
+fn trio_stack_reports_real_cfg_gated_plsql_intelligence_detection() {
+    // Derive detection from the SAME compile-time gate `run_doctor_cmd` uses —
+    // this is the real feature path, not a mock bool.
+    let ctx = DoctorContext {
+        plsql_intelligence_detected: cfg!(feature = "plsql-intelligence"),
+        ..DoctorContext::default()
+    };
+    // Run the ACTUAL doctor path (offline, default context). It must not panic
+    // on either build.
+    let report = block_on_connect(|cx| async move { run_doctor(&cx, &ctx).await });
+    let trio = report
+        .checks
+        .iter()
+        .find(|c| c.id == 15)
+        .expect("trio-stack provenance check is present");
+    assert_eq!(
+        trio.status,
+        oraclemcp_core::CheckStatus::Pass,
+        "trio-stack must pass on both feature builds: {}",
+        trio.detail
+    );
+
+    // Isolate the plsql-intelligence status segment from the "; "-joined detail
+    // (the rest of the detail legitimately carries URLs with '/').
+    let segment = trio
+        .detail
+        .split("; ")
+        .find(|s| s.starts_with("plsql-intelligence"))
+        .expect("trio-stack renders a plsql-intelligence status segment");
+
+    // Present-arm vs absent-arm, gated on the SAME real cfg the code compiles
+    // against — so the present expectation only runs under the feature build and
+    // actually exercises the compiled-in engine's detection.
+    #[cfg(feature = "plsql-intelligence")]
+    assert_eq!(
+        segment, "plsql-intelligence detected",
+        "the --features plsql-intelligence build must report the engine PRESENT"
+    );
+    #[cfg(not(feature = "plsql-intelligence"))]
+    assert_eq!(
+        segment, "plsql-intelligence not detected",
+        "the default build must report the engine ABSENT, cleanly"
+    );
+
+    // No-leak: detection is a bool, so its rendered status is JUST
+    // `detected`/`not detected` — never a filesystem path, a crate path, or a
+    // version. Assert it so a future change that leaks an engine path or a
+    // version string is caught here.
+    assert!(
+        !segment.contains('/') && !segment.contains('\\'),
+        "plsql-intelligence status must not leak a filesystem/crate path: {segment:?}"
+    );
+    assert!(
+        !segment.chars().any(|c| c.is_ascii_digit()),
+        "plsql-intelligence status must not leak a version: {segment:?}"
+    );
+    for engine_crate in [
+        "plsql-core",
+        "plsql-engine",
+        "plsql-catalog",
+        "plsql-depgraph",
+        "plsql-lineage",
+        "plsql-ir",
+        "plsql-parser-antlr",
+        "plsql-symbols",
+        "plsql-cicd",
+        "plsql-doc",
+        "plsql-sast",
+        "plsql-output",
+    ] {
+        assert!(
+            !segment.contains(engine_crate),
+            "plsql-intelligence status must not leak the engine crate {engine_crate}: {segment:?}"
+        );
+    }
+}
+
 #[test]
 fn doctor_sensitive_values_include_connect_material() {
     let opts = OracleConnectOptions {
