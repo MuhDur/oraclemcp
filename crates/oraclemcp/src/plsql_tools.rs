@@ -885,21 +885,23 @@ fn ide_project_summary(run: &plsql_engine::AnalysisRun) -> Value {
                     }));
                 }
             }
+            // The length-guard is the match arm's guard (clippy::collapsible_match):
+            // when the sample is full the guard fails and a DependencyEdge — matching
+            // no other arm — falls through to `_ => {}`, exactly the no-op the inner
+            // `if` produced before. Behavior-preserving.
             FactPayload::DependencyEdge {
                 from_logical_id,
                 to_logical_id,
                 edge_kind,
-            } => {
-                if dependency_facts.len() < IDE_LIST_LIMIT {
-                    dependency_facts.push(json!({
-                        "fact_id": fact.id.0.as_str(),
-                        "from": from_logical_id,
-                        "to": to_logical_id,
-                        "kind": edge_kind,
-                        "source_file": fact.provenance.source_file.as_deref(),
-                        "source_logical_id": fact.provenance.source_logical_id.as_deref(),
-                    }));
-                }
+            } if dependency_facts.len() < IDE_LIST_LIMIT => {
+                dependency_facts.push(json!({
+                    "fact_id": fact.id.0.as_str(),
+                    "from": from_logical_id,
+                    "to": to_logical_id,
+                    "kind": edge_kind,
+                    "source_file": fact.provenance.source_file.as_deref(),
+                    "source_logical_id": fact.provenance.source_logical_id.as_deref(),
+                }));
             }
             _ => {}
         }
