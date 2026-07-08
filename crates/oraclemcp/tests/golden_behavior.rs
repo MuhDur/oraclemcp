@@ -65,6 +65,7 @@ impl OracleConnection for OneRowMock {
             terminal: None,
             program: Some("oraclemcp".to_owned()),
             client_driver: Some("oraclemcp-driver".to_owned()),
+            server_features: None,
         })
     }
 

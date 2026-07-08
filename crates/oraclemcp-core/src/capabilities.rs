@@ -5,7 +5,7 @@
 //! Kept serializable as a **standalone document** (no transport/session types)
 //! so the move to per-request `_meta` in a later MCP spec is cheap (§2.5).
 
-use oraclemcp_db::{CloudStatus, PrivilegeProfile};
+use oraclemcp_db::{CloudStatus, PrivilegeProfile, ServerFeatures};
 use oraclemcp_guard::OperatingLevel;
 use serde::{Deserialize, Serialize};
 
@@ -81,6 +81,13 @@ pub struct ConnectionStatus {
     pub server_version: Option<String>,
     /// Whether the target is a read-only standby (forces READ_ONLY).
     pub read_only_standby: bool,
+    /// Live server-capability probe (bead K2): driver-negotiated facts,
+    /// best-effort version-derived inferences, and privilege-degradable
+    /// edition/partitioning. Additive and observational — it never affects the
+    /// fail-closed guard. `None` until a live connection is probed (or when the
+    /// backend does not surface it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_features: Option<ServerFeatures>,
 }
 
 /// Which capability tiers are available (live-DB / engine intelligence).

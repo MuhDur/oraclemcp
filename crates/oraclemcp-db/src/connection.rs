@@ -3780,6 +3780,64 @@ mod driver {
             {
                 info.client_driver = r.text("CLIENT_DRIVER").map(str::to_owned);
             }
+            // K2: additive, observational server-capability probe. The
+            // fail-closed guard is UNTOUCHED — this only reports what the thin
+            // driver negotiated, best-effort version-derived inferences, and (if
+            // the account has the privilege) edition/partitioning.
+            //
+            // Driver-negotiated facts come straight from the thin driver's own
+            // synchronous accessors on the wrapped `oracledb::Connection` — the
+            // ONE seam allowed to name that type. The short lock scope is dropped
+            // before the dictionary round-trip below (which re-locks `inner`), so
+            // it never deadlocks. If the lock cannot be taken the whole block is
+            // simply omitted (`None`) rather than fabricated.
+            let driver_facts = match self.lock_inner(cx).await {
+                Ok(inner) => Some((
+                    inner.server_version_tuple(),
+                    inner.sdu(),
+                    inner.supports_pipelining(),
+                    inner.supports_oob(),
+                )),
+                Err(_) => None,
+            };
+            if let Some((version_tuple, sdu, supports_pipelining, supports_oob)) = driver_facts {
+                // ONE privilege-degradable dictionary query for edition +
+                // partitioning. `product_component_version` is broadly readable;
+                // `v$option` needs a catalog grant, so a low-privilege account
+                // fails the whole statement — `query_first_row` swallows the
+                // error and both fields degrade to `None` (never fails describe).
+                let (edition, partitioning) = match self
+                    .query_first_row(
+                        cx,
+                        // `product` is the edition/product descriptor, e.g.
+                        // "Oracle Database 21c Enterprise Edition" or the newer
+                        // "Oracle AI Database 26ai Free" — match "%DATABASE%"
+                        // (not "Oracle Database%") so both namings are captured.
+                        "SELECT \
+                         (SELECT product FROM product_component_version \
+                            WHERE UPPER(product) LIKE '%DATABASE%' AND rownum = 1) AS edition, \
+                         (SELECT value FROM v$option \
+                            WHERE parameter = 'Partitioning') AS partitioning \
+                         FROM dual",
+                    )
+                    .await
+                {
+                    Some(r) => (
+                        r.text("EDITION").map(str::to_owned),
+                        r.text("PARTITIONING")
+                            .map(|value| value.eq_ignore_ascii_case("TRUE")),
+                    ),
+                    None => (None, None),
+                };
+                info.server_features = Some(crate::server_features::ServerFeatures::from_probe(
+                    version_tuple,
+                    sdu,
+                    supports_pipelining,
+                    supports_oob,
+                    edition,
+                    partitioning,
+                ));
+            }
             super::db_checkpoint(cx, "oracle_db.describe.after")?;
             Ok(info.with_read_only_status())
         }

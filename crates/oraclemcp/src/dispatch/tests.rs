@@ -147,6 +147,7 @@ impl OracleConnection for OneRowMock {
             terminal: None,
             program: Some("oraclemcp".to_owned()),
             client_driver: Some("oraclemcp-driver".to_owned()),
+            server_features: None,
         })
     }
     async fn query_rows(
@@ -2669,6 +2670,7 @@ impl OracleConnection for LifecycleCleanupMock {
             terminal: None,
             program: None,
             client_driver: None,
+            server_features: None,
         })
     }
 

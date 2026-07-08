@@ -488,6 +488,12 @@ pub struct OracleConnectionInfo {
     /// Client driver as reported by V$SESSION_CONNECT_INFO, when visible.
     #[serde(default)]
     pub client_driver: Option<String>,
+    /// Live server-capability probe (bead K2): driver-negotiated facts,
+    /// best-effort version-derived inferences, and privilege-degradable
+    /// edition/partitioning. Additive and observational — it never affects the
+    /// fail-closed guard. `None` for backends/mocks that do not probe it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_features: Option<crate::server_features::ServerFeatures>,
 }
 
 impl OracleConnectionInfo {
@@ -968,6 +974,7 @@ mod tests {
             terminal: Some("N_S6_TERMINAL_SECRET".to_owned()),
             program: Some("N_S6_PROGRAM_SECRET".to_owned()),
             client_driver: Some("N_S6_CLIENT_DRIVER_SECRET".to_owned()),
+            server_features: None,
         };
         let rendered_debug = format!("{info:?}");
         let rendered_json =

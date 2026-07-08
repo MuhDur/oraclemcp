@@ -5303,6 +5303,7 @@ impl OracleDispatcher {
             profile: active_profile.clone(),
             server_version: None,
             read_only_standby: false,
+            server_features: None,
         };
         if detail == McpSurfaceDetail::Connection
             && let Ok(info) = describe_conn(cx, state.conn.as_ref()).await
@@ -5310,6 +5311,10 @@ impl OracleDispatcher {
             connection.connected = true;
             connection.read_only_standby = info.is_read_only_standby();
             connection.server_version = info.server_version;
+            // K2: additive server-capability block. `describe` populates it only
+            // for a live thin connection, so mocks/degraded backends leave it
+            // `None` and the field is omitted from the report.
+            connection.server_features = info.server_features;
         }
         Ok(McpSurfaceState {
             current_level: scoped_level.effective_level(),

@@ -73,6 +73,7 @@ mod privileges;
 mod query;
 mod schema_diff;
 mod serialize;
+mod server_features;
 mod standby;
 mod tns;
 mod types;
@@ -137,6 +138,10 @@ pub use schema_diff::{
 pub use serialize::{
     OracleMetadataCacheKey, SerializeOptions, StructuredDecodeCaps, TypeRepr, base64_encode,
     canonical_nls_statements, canonicalize_datetime, classify_type, serialize_cell, serialize_row,
+};
+pub use server_features::{
+    BOOLEAN_MIN_MAJOR, DerivedVersionCapabilities, JSON_MIN_MAJOR, SODA_MIN_MAJOR, ServerFeatures,
+    ServerVersion, VECTOR_MIN_MAJOR, derive_version_capabilities,
 };
 pub use standby::{StandbyStatus, detect_standby};
 pub use tns::{

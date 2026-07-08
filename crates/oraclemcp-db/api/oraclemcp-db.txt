@@ -2348,6 +2348,79 @@ pub type oraclemcp_db::DependentObject::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DependentObject where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DependentObject where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::DependentObject::vzip(self) -> V
+pub struct oraclemcp_db::DerivedVersionCapabilities
+pub oraclemcp_db::DerivedVersionCapabilities::supports_boolean: bool
+pub oraclemcp_db::DerivedVersionCapabilities::supports_json: bool
+pub oraclemcp_db::DerivedVersionCapabilities::supports_soda: bool
+pub oraclemcp_db::DerivedVersionCapabilities::supports_vector: bool
+impl core::clone::Clone for oraclemcp_db::DerivedVersionCapabilities
+pub fn oraclemcp_db::DerivedVersionCapabilities::clone(&self) -> oraclemcp_db::DerivedVersionCapabilities
+impl core::cmp::Eq for oraclemcp_db::DerivedVersionCapabilities
+impl core::cmp::PartialEq for oraclemcp_db::DerivedVersionCapabilities
+pub fn oraclemcp_db::DerivedVersionCapabilities::eq(&self, &oraclemcp_db::DerivedVersionCapabilities) -> bool
+impl core::default::Default for oraclemcp_db::DerivedVersionCapabilities
+pub fn oraclemcp_db::DerivedVersionCapabilities::default() -> oraclemcp_db::DerivedVersionCapabilities
+impl core::fmt::Debug for oraclemcp_db::DerivedVersionCapabilities
+pub fn oraclemcp_db::DerivedVersionCapabilities::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::DerivedVersionCapabilities
+impl core::marker::StructuralPartialEq for oraclemcp_db::DerivedVersionCapabilities
+impl serde_core::ser::Serialize for oraclemcp_db::DerivedVersionCapabilities
+pub fn oraclemcp_db::DerivedVersionCapabilities::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::DerivedVersionCapabilities
+pub fn oraclemcp_db::DerivedVersionCapabilities::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::DerivedVersionCapabilities
+impl core::marker::Send for oraclemcp_db::DerivedVersionCapabilities
+impl core::marker::Sync for oraclemcp_db::DerivedVersionCapabilities
+impl core::marker::Unpin for oraclemcp_db::DerivedVersionCapabilities
+impl core::marker::UnsafeUnpin for oraclemcp_db::DerivedVersionCapabilities
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::DerivedVersionCapabilities
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::DerivedVersionCapabilities
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::DerivedVersionCapabilities where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::DerivedVersionCapabilities where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::DerivedVersionCapabilities where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::DerivedVersionCapabilities::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::DerivedVersionCapabilities where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::DerivedVersionCapabilities where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::DerivedVersionCapabilities where U: core::convert::From<T>
+pub fn oraclemcp_db::DerivedVersionCapabilities::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::DerivedVersionCapabilities where U: core::convert::Into<T>
+pub type oraclemcp_db::DerivedVersionCapabilities::Error = core::convert::Infallible
+pub fn oraclemcp_db::DerivedVersionCapabilities::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::DerivedVersionCapabilities where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::DerivedVersionCapabilities::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::DerivedVersionCapabilities::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::DerivedVersionCapabilities where T: core::clone::Clone
+pub type oraclemcp_db::DerivedVersionCapabilities::Owned = T
+pub fn oraclemcp_db::DerivedVersionCapabilities::clone_into(&self, &mut T)
+pub fn oraclemcp_db::DerivedVersionCapabilities::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::DerivedVersionCapabilities
+impl<T> core::any::Any for oraclemcp_db::DerivedVersionCapabilities where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::DerivedVersionCapabilities::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::DerivedVersionCapabilities where T: ?core::marker::Sized
+pub fn oraclemcp_db::DerivedVersionCapabilities::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::DerivedVersionCapabilities where T: ?core::marker::Sized
+pub fn oraclemcp_db::DerivedVersionCapabilities::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::DerivedVersionCapabilities where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::DerivedVersionCapabilities::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::DerivedVersionCapabilities
+pub fn oraclemcp_db::DerivedVersionCapabilities::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::DerivedVersionCapabilities
+pub type oraclemcp_db::DerivedVersionCapabilities::Init = T
+pub const oraclemcp_db::DerivedVersionCapabilities::ALIGN: usize
+pub unsafe fn oraclemcp_db::DerivedVersionCapabilities::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::DerivedVersionCapabilities::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::DerivedVersionCapabilities::drop(usize)
+pub unsafe fn oraclemcp_db::DerivedVersionCapabilities::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::DerivedVersionCapabilities
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::DerivedVersionCapabilities
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::DerivedVersionCapabilities where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::DerivedVersionCapabilities
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::DerivedVersionCapabilities
+impl<T> typenum::type_operators::Same for oraclemcp_db::DerivedVersionCapabilities
+pub type oraclemcp_db::DerivedVersionCapabilities::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::DerivedVersionCapabilities where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::DerivedVersionCapabilities where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::DerivedVersionCapabilities::vzip(self) -> V
 pub struct oraclemcp_db::DrcpConfig
 pub oraclemcp_db::DrcpConfig::connection_class: core::option::Option<alloc::string::String>
 pub oraclemcp_db::DrcpConfig::pooled: bool
@@ -3227,6 +3300,7 @@ pub oraclemcp_db::OracleConnectionInfo::proxy_user: core::option::Option<alloc::
 pub oraclemcp_db::OracleConnectionInfo::read_only: bool
 pub oraclemcp_db::OracleConnectionInfo::read_only_reason: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectionInfo::serial_number: core::option::Option<alloc::string::String>
+pub oraclemcp_db::OracleConnectionInfo::server_features: core::option::Option<oraclemcp_db::ServerFeatures>
 pub oraclemcp_db::OracleConnectionInfo::server_version: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectionInfo::service_name: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectionInfo::session_user: core::option::Option<alloc::string::String>
@@ -5490,6 +5564,162 @@ pub type oraclemcp_db::SerializeOptions::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SerializeOptions where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::SerializeOptions where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::SerializeOptions::vzip(self) -> V
+pub struct oraclemcp_db::ServerFeatures
+pub oraclemcp_db::ServerFeatures::edition: core::option::Option<alloc::string::String>
+pub oraclemcp_db::ServerFeatures::partitioning: core::option::Option<bool>
+pub oraclemcp_db::ServerFeatures::sdu: core::option::Option<usize>
+pub oraclemcp_db::ServerFeatures::supports_boolean: core::option::Option<bool>
+pub oraclemcp_db::ServerFeatures::supports_json: core::option::Option<bool>
+pub oraclemcp_db::ServerFeatures::supports_oob: core::option::Option<bool>
+pub oraclemcp_db::ServerFeatures::supports_pipelining: core::option::Option<bool>
+pub oraclemcp_db::ServerFeatures::supports_soda: core::option::Option<bool>
+pub oraclemcp_db::ServerFeatures::supports_vector: core::option::Option<bool>
+pub oraclemcp_db::ServerFeatures::version: core::option::Option<oraclemcp_db::ServerVersion>
+impl oraclemcp_db::ServerFeatures
+pub fn oraclemcp_db::ServerFeatures::from_probe(core::option::Option<(u8, u8, u8, u8, u8)>, usize, bool, bool, core::option::Option<alloc::string::String>, core::option::Option<bool>) -> Self
+impl core::clone::Clone for oraclemcp_db::ServerFeatures
+pub fn oraclemcp_db::ServerFeatures::clone(&self) -> oraclemcp_db::ServerFeatures
+impl core::cmp::Eq for oraclemcp_db::ServerFeatures
+impl core::cmp::PartialEq for oraclemcp_db::ServerFeatures
+pub fn oraclemcp_db::ServerFeatures::eq(&self, &oraclemcp_db::ServerFeatures) -> bool
+impl core::default::Default for oraclemcp_db::ServerFeatures
+pub fn oraclemcp_db::ServerFeatures::default() -> oraclemcp_db::ServerFeatures
+impl core::fmt::Debug for oraclemcp_db::ServerFeatures
+pub fn oraclemcp_db::ServerFeatures::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::ServerFeatures
+impl serde_core::ser::Serialize for oraclemcp_db::ServerFeatures
+pub fn oraclemcp_db::ServerFeatures::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::ServerFeatures
+pub fn oraclemcp_db::ServerFeatures::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::ServerFeatures
+impl core::marker::Send for oraclemcp_db::ServerFeatures
+impl core::marker::Sync for oraclemcp_db::ServerFeatures
+impl core::marker::Unpin for oraclemcp_db::ServerFeatures
+impl core::marker::UnsafeUnpin for oraclemcp_db::ServerFeatures
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::ServerFeatures
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::ServerFeatures
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::ServerFeatures where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::ServerFeatures where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::ServerFeatures where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::ServerFeatures::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::ServerFeatures where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::ServerFeatures where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::ServerFeatures where U: core::convert::From<T>
+pub fn oraclemcp_db::ServerFeatures::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::ServerFeatures where U: core::convert::Into<T>
+pub type oraclemcp_db::ServerFeatures::Error = core::convert::Infallible
+pub fn oraclemcp_db::ServerFeatures::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::ServerFeatures where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::ServerFeatures::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::ServerFeatures::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::ServerFeatures where T: core::clone::Clone
+pub type oraclemcp_db::ServerFeatures::Owned = T
+pub fn oraclemcp_db::ServerFeatures::clone_into(&self, &mut T)
+pub fn oraclemcp_db::ServerFeatures::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::ServerFeatures
+impl<T> core::any::Any for oraclemcp_db::ServerFeatures where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::ServerFeatures::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::ServerFeatures where T: ?core::marker::Sized
+pub fn oraclemcp_db::ServerFeatures::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::ServerFeatures where T: ?core::marker::Sized
+pub fn oraclemcp_db::ServerFeatures::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::ServerFeatures where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::ServerFeatures::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::ServerFeatures
+pub fn oraclemcp_db::ServerFeatures::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::ServerFeatures
+pub type oraclemcp_db::ServerFeatures::Init = T
+pub const oraclemcp_db::ServerFeatures::ALIGN: usize
+pub unsafe fn oraclemcp_db::ServerFeatures::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::ServerFeatures::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::ServerFeatures::drop(usize)
+pub unsafe fn oraclemcp_db::ServerFeatures::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::ServerFeatures
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ServerFeatures
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::ServerFeatures where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ServerFeatures
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ServerFeatures
+impl<T> typenum::type_operators::Same for oraclemcp_db::ServerFeatures
+pub type oraclemcp_db::ServerFeatures::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ServerFeatures where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ServerFeatures where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::ServerFeatures::vzip(self) -> V
+pub struct oraclemcp_db::ServerVersion
+pub oraclemcp_db::ServerVersion::major: u8
+pub oraclemcp_db::ServerVersion::minor: u8
+pub oraclemcp_db::ServerVersion::patch: u8
+pub oraclemcp_db::ServerVersion::port_patch: u8
+pub oraclemcp_db::ServerVersion::port_update: u8
+impl oraclemcp_db::ServerVersion
+pub const fn oraclemcp_db::ServerVersion::from_tuple((u8, u8, u8, u8, u8)) -> Self
+impl core::clone::Clone for oraclemcp_db::ServerVersion
+pub fn oraclemcp_db::ServerVersion::clone(&self) -> oraclemcp_db::ServerVersion
+impl core::cmp::Eq for oraclemcp_db::ServerVersion
+impl core::cmp::PartialEq for oraclemcp_db::ServerVersion
+pub fn oraclemcp_db::ServerVersion::eq(&self, &oraclemcp_db::ServerVersion) -> bool
+impl core::default::Default for oraclemcp_db::ServerVersion
+pub fn oraclemcp_db::ServerVersion::default() -> oraclemcp_db::ServerVersion
+impl core::fmt::Debug for oraclemcp_db::ServerVersion
+pub fn oraclemcp_db::ServerVersion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::ServerVersion
+impl core::marker::StructuralPartialEq for oraclemcp_db::ServerVersion
+impl serde_core::ser::Serialize for oraclemcp_db::ServerVersion
+pub fn oraclemcp_db::ServerVersion::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::ServerVersion
+pub fn oraclemcp_db::ServerVersion::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::ServerVersion
+impl core::marker::Send for oraclemcp_db::ServerVersion
+impl core::marker::Sync for oraclemcp_db::ServerVersion
+impl core::marker::Unpin for oraclemcp_db::ServerVersion
+impl core::marker::UnsafeUnpin for oraclemcp_db::ServerVersion
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::ServerVersion
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::ServerVersion
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::ServerVersion where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::ServerVersion where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::ServerVersion where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::ServerVersion::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::ServerVersion where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::ServerVersion where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::ServerVersion where U: core::convert::From<T>
+pub fn oraclemcp_db::ServerVersion::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::ServerVersion where U: core::convert::Into<T>
+pub type oraclemcp_db::ServerVersion::Error = core::convert::Infallible
+pub fn oraclemcp_db::ServerVersion::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::ServerVersion where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::ServerVersion::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::ServerVersion::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::ServerVersion where T: core::clone::Clone
+pub type oraclemcp_db::ServerVersion::Owned = T
+pub fn oraclemcp_db::ServerVersion::clone_into(&self, &mut T)
+pub fn oraclemcp_db::ServerVersion::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::ServerVersion
+impl<T> core::any::Any for oraclemcp_db::ServerVersion where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::ServerVersion::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::ServerVersion where T: ?core::marker::Sized
+pub fn oraclemcp_db::ServerVersion::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::ServerVersion where T: ?core::marker::Sized
+pub fn oraclemcp_db::ServerVersion::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::ServerVersion where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::ServerVersion::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::ServerVersion
+pub fn oraclemcp_db::ServerVersion::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for oraclemcp_db::ServerVersion
+pub type oraclemcp_db::ServerVersion::Init = T
+pub const oraclemcp_db::ServerVersion::ALIGN: usize
+pub unsafe fn oraclemcp_db::ServerVersion::deref<'a>(usize) -> &'a T
+pub unsafe fn oraclemcp_db::ServerVersion::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn oraclemcp_db::ServerVersion::drop(usize)
+pub unsafe fn oraclemcp_db::ServerVersion::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for oraclemcp_db::ServerVersion
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ServerVersion
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::ServerVersion where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ServerVersion
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ServerVersion
+impl<T> typenum::type_operators::Same for oraclemcp_db::ServerVersion
+pub type oraclemcp_db::ServerVersion::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ServerVersion where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ServerVersion where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::ServerVersion::vzip(self) -> V
 pub struct oraclemcp_db::SourceText
 pub oraclemcp_db::SourceText::char_count: usize
 pub oraclemcp_db::SourceText::line_count: usize
@@ -6369,11 +6599,15 @@ pub type oraclemcp_db::WritePosture::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::WritePosture where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::WritePosture where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::WritePosture::vzip(self) -> V
+pub const oraclemcp_db::BOOLEAN_MIN_MAJOR: u8
 pub const oraclemcp_db::CONNECT_TRACE_NEXT_STEP: &str
 pub const oraclemcp_db::DEFAULT_ORACLE_CALL_TIMEOUT: core::time::Duration
 pub const oraclemcp_db::DRIVER_VERSION: &str
+pub const oraclemcp_db::JSON_MIN_MAJOR: u8
 pub const oraclemcp_db::ORACLE_CELL_STRUCTURED_CONTRACT_VERSION: u16
 pub const oraclemcp_db::PLAN_COST_ESTIMATE_NOTE: &str
+pub const oraclemcp_db::SODA_MIN_MAJOR: u8
+pub const oraclemcp_db::VECTOR_MIN_MAJOR: u8
 pub trait oraclemcp_db::IamTokenSource
 pub fn oraclemcp_db::IamTokenSource::fetch(&self) -> core::result::Result<oraclemcp_db::IamToken, oraclemcp_db::OciError>
 pub trait oraclemcp_db::OracleConnection: core::marker::Send + core::marker::Sync
@@ -6443,6 +6677,7 @@ pub async fn oraclemcp_db::compile_errors(&asupersync::cx::cx::Cx, &dyn oraclemc
 pub fn oraclemcp_db::compile_object_statements(&str, &str, &str, bool) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::cursor_to_offset(core::option::Option<&str>) -> usize
 pub fn oraclemcp_db::dependent_from_row(&oraclemcp_db::OracleRow) -> core::option::Option<oraclemcp_db::DependentObject>
+pub fn oraclemcp_db::derive_version_capabilities(u8) -> oraclemcp_db::DerivedVersionCapabilities
 pub async fn oraclemcp_db::describe_columns(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::describe_constraints(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::describe_index(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str) -> core::result::Result<oraclemcp_db::IndexDescription, oraclemcp_db::DbError>

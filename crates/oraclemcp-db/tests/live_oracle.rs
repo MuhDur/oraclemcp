@@ -557,6 +557,102 @@ fn live_connect_ping_query_bind_describe() {
     });
 }
 
+/// K2: the live `server_features` probe must match the server generation.
+///
+/// Self-adapting: it reads the negotiated version tuple and asserts the derived
+/// helpers exactly equal the pure `derive_version_capabilities(major)` math,
+/// plus per-generation invariants (xe18 → no vector/boolean; xe21 → json but no
+/// vector; free23 → vector+boolean+json). `edition`/`partitioning` are
+/// privilege-degradable, so they are asserted only when present (a low-privilege
+/// account omits them without failing the probe). Point the harness at any lane
+/// via `ORACLEMCP_TEST_DSN` / `_USER` / `_PASSWORD`.
+#[test]
+fn live_server_features_probe_matches_generation() {
+    run_with_cx(|cx| async move {
+        let Some(conn) = connect_or_skip(
+            &cx,
+            "live_server_features_probe_matches_generation",
+            test_opts(),
+        )
+        .await
+        else {
+            return;
+        };
+
+        let info = conn
+            .describe(&cx)
+            .await
+            .expect("describe should carry server_features");
+        let features = info
+            .server_features
+            .expect("server_features populated on a live thin connection");
+
+        // Driver-negotiated facts: always present on a real connection.
+        let version = features
+            .version
+            .expect("server_version_tuple negotiated at connect time");
+        assert!(
+            features.sdu.unwrap_or(0) > 0,
+            "SDU should be a positive negotiated size"
+        );
+        assert!(
+            features.supports_pipelining.is_some(),
+            "pipelining reported"
+        );
+        assert!(features.supports_oob.is_some(), "oob reported");
+
+        let major = version.major;
+
+        // The derived helpers must EXACTLY match the pure version math — no
+        // drift between the live path and the offline-tested derivation.
+        let expected = oraclemcp_db::derive_version_capabilities(major);
+        assert_eq!(features.supports_vector, Some(expected.supports_vector));
+        assert_eq!(features.supports_json, Some(expected.supports_json));
+        assert_eq!(features.supports_boolean, Some(expected.supports_boolean));
+        assert_eq!(features.supports_soda, Some(expected.supports_soda));
+
+        // Per-generation invariants for the K2 lanes.
+        if major >= 23 {
+            assert_eq!(features.supports_vector, Some(true), "23ai+ has vector");
+            assert_eq!(features.supports_boolean, Some(true), "23ai+ has BOOLEAN");
+            assert_eq!(features.supports_json, Some(true), "23ai+ has JSON type");
+        } else if major == 21 {
+            assert_eq!(features.supports_json, Some(true), "21c has JSON type");
+            assert_eq!(features.supports_vector, Some(false), "21c: no vector");
+            assert_eq!(features.supports_boolean, Some(false), "21c: no BOOLEAN");
+        } else if major <= 18 {
+            assert_eq!(features.supports_vector, Some(false), "<=18c: no vector");
+            assert_eq!(features.supports_boolean, Some(false), "<=18c: no BOOLEAN");
+            assert_eq!(features.supports_json, Some(false), "<=18c: no JSON type");
+        }
+
+        // Privilege-degradable dictionary bits: assert shape only when present.
+        if let Some(edition) = features.edition.as_deref() {
+            assert!(
+                edition.to_uppercase().contains("DATABASE"),
+                "edition banner should be an Oracle Database product descriptor: {edition}"
+            );
+        }
+
+        eprintln!(
+            "[live-xe] server_features: version={}.{}.{} sdu={:?} pipelining={:?} oob={:?} \
+             vector={:?} json={:?} boolean={:?} soda={:?} edition={:?} partitioning={:?}",
+            major,
+            version.minor,
+            version.patch,
+            features.sdu,
+            features.supports_pipelining,
+            features.supports_oob,
+            features.supports_vector,
+            features.supports_json,
+            features.supports_boolean,
+            features.supports_soda,
+            features.edition,
+            features.partitioning,
+        );
+    });
+}
+
 #[test]
 fn live_catalog_extract_current_schema_rowsets() {
     run_with_cx(|cx| async move {
