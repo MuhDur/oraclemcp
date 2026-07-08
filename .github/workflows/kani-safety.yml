@@ -1,0 +1,56 @@
+name: Kani Safety
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "16"
+  CARGO_TARGET_DIR: /home/runner/work/_cargo-target-server
+  RUST_TOOLCHAIN: nightly-2026-05-11
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kani-safety:
+    name: guard + audit BMC proofs
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
+
+      - name: Run guard lattice proof
+        run: cargo kani -p oraclemcp-guard --harness operating_level_lattice_is_total_and_monotone --default-unwind 16
+
+      - name: Run guard danger mapping proof
+        run: cargo kani -p oraclemcp-guard --harness danger_marker_default_required_level_has_floor --default-unwind 16
+
+      - name: Run guard session gate proof
+        run: cargo kani -p oraclemcp-guard --harness session_gate_never_allows_below_required_level --default-unwind 16
+
+      - name: Run audit chain proof
+        env:
+          RUSTFLAGS: '--cfg sha2_backend="soft" --cfg sha2_backend_soft="compact"'
+        run: cargo kani -p oraclemcp-audit --harness signed_chain_step_links_successor_to_predecessor_and_mac_verifies --default-unwind 128

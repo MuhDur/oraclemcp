@@ -326,6 +326,131 @@ impl SessionLevelState {
     }
 }
 
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    fn level_from_index(index: u8) -> OperatingLevel {
+        match index % 4 {
+            0 => OperatingLevel::ReadOnly,
+            1 => OperatingLevel::ReadWrite,
+            2 => OperatingLevel::Ddl,
+            _ => OperatingLevel::Admin,
+        }
+    }
+
+    fn danger_from_index(index: u8) -> DangerLevel {
+        match index % 4 {
+            0 => DangerLevel::Safe,
+            1 => DangerLevel::Guarded,
+            2 => DangerLevel::Destructive,
+            _ => DangerLevel::Forbidden,
+        }
+    }
+
+    fn level_rank(level: OperatingLevel) -> u8 {
+        match level {
+            OperatingLevel::ReadOnly => 0,
+            OperatingLevel::ReadWrite => 1,
+            OperatingLevel::Ddl => 2,
+            OperatingLevel::Admin => 3,
+        }
+    }
+
+    #[kani::proof]
+    fn operating_level_lattice_is_total_and_monotone() {
+        let a = level_from_index(kani::any());
+        let b = level_from_index(kani::any());
+        let c = level_from_index(kani::any());
+
+        assert!(a <= b || b <= a);
+        assert_eq!(a <= b, level_rank(a) <= level_rank(b));
+        assert_eq!(a.min(b), if a <= b { a } else { b });
+        assert_eq!(a.max(b), if a >= b { a } else { b });
+
+        if a <= b && b <= c {
+            assert!(a <= c);
+        }
+
+        assert_eq!(
+            OperatingLevel::all(),
+            [
+                OperatingLevel::ReadOnly,
+                OperatingLevel::ReadWrite,
+                OperatingLevel::Ddl,
+                OperatingLevel::Admin,
+            ]
+        );
+        assert_eq!(OperatingLevel::parse(a.as_str()), Some(a));
+    }
+
+    #[kani::proof]
+    fn danger_marker_default_required_level_has_floor() {
+        let danger = danger_from_index(kani::any());
+        let required = danger.default_required_level();
+
+        match danger {
+            DangerLevel::Safe => assert_eq!(required, Some(OperatingLevel::ReadOnly)),
+            DangerLevel::Guarded => {
+                let level = required.expect("guarded statements require a level");
+                assert!(level >= OperatingLevel::ReadWrite);
+            }
+            DangerLevel::Destructive => {
+                let level = required.expect("destructive statements require a level");
+                assert!(level >= OperatingLevel::Ddl);
+            }
+            DangerLevel::Forbidden => assert_eq!(required, None),
+        }
+    }
+
+    #[kani::proof]
+    fn session_gate_never_allows_below_required_level() {
+        let max_level = level_from_index(kani::any());
+        let requested_current = level_from_index(kani::any());
+        let required = level_from_index(kani::any());
+        let mut session = SessionLevelState::new(max_level, kani::any());
+
+        if requested_current <= session.effective_ceiling() {
+            assert!(session.set_current_level(requested_current).is_ok());
+        } else {
+            assert!(session.set_current_level(requested_current).is_err());
+        }
+
+        match session.evaluate(Some(required)) {
+            LevelDecision::Allow => {
+                assert!(required <= session.effective_ceiling());
+                assert!(required <= session.effective_level());
+            }
+            LevelDecision::RequireStepUp { target } => {
+                assert_eq!(target, required);
+                assert!(required <= session.effective_ceiling());
+                assert!(required > session.effective_level());
+            }
+            LevelDecision::Blocked {
+                reason:
+                    BlockReason::ExceedsCeiling {
+                        required: r,
+                        ceiling,
+                    },
+            } => {
+                assert_eq!(r, required);
+                assert_eq!(ceiling, session.effective_ceiling());
+                assert!(required > ceiling);
+            }
+            LevelDecision::Blocked {
+                reason: BlockReason::Forbidden,
+            } => unreachable!("Some(required) cannot produce a forbidden gate decision"),
+        }
+
+        assert_eq!(
+            session.evaluate(None),
+            LevelDecision::Blocked {
+                reason: BlockReason::Forbidden,
+            }
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

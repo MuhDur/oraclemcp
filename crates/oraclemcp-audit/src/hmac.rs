@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 const BLOCK_LEN: usize = 64;
 /// SHA-256 output size in bytes (`L`).
 const OUTPUT_LEN: usize = 32;
+const HMAC_SHA256_PREFIX: &str = "hmac-sha256:";
 
 /// Compute `HMAC-SHA256(key, message)` and return the 32 raw output bytes.
 ///
@@ -64,12 +65,53 @@ pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; OUTPUT_LEN] {
 #[must_use]
 pub fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
     let mac = hmac_sha256(key, message);
-    let mut out = String::with_capacity("hmac-sha256:".len() + mac.len() * 2);
-    out.push_str("hmac-sha256:");
+    let mut out = String::with_capacity(HMAC_SHA256_PREFIX.len() + mac.len() * 2);
+    out.push_str(HMAC_SHA256_PREFIX);
     for b in mac {
-        out.push_str(&format!("{b:02x}"));
+        push_hex_byte(&mut out, b);
     }
     out
+}
+
+/// Verify a stored `hmac-sha256:<lower-hex>` signature without allocating an
+/// expected hex string.
+#[must_use]
+pub fn hmac_sha256_hex_is_valid(key: &[u8], message: &[u8], signature: &str) -> bool {
+    let Some(hex) = signature.strip_prefix(HMAC_SHA256_PREFIX) else {
+        return false;
+    };
+    if hex.len() != OUTPUT_LEN * 2 {
+        return false;
+    }
+
+    let mut actual = [0_u8; OUTPUT_LEN];
+    let bytes = hex.as_bytes();
+    for i in 0..OUTPUT_LEN {
+        let Some(hi) = decode_lower_hex_nibble(bytes[i * 2]) else {
+            return false;
+        };
+        let Some(lo) = decode_lower_hex_nibble(bytes[i * 2 + 1]) else {
+            return false;
+        };
+        actual[i] = (hi << 4) | lo;
+    }
+
+    let expected = hmac_sha256(key, message);
+    ct_eq(&expected, &actual)
+}
+
+fn push_hex_byte(out: &mut String, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push(HEX[(byte >> 4) as usize] as char);
+    out.push(HEX[(byte & 0x0f) as usize] as char);
+}
+
+fn decode_lower_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }
 
 /// Constant-time comparison of two byte slices (no early-out on first
@@ -144,7 +186,27 @@ mod tests {
     fn hex_render_has_algorithm_prefix() {
         let s = hmac_sha256_hex(b"k", b"m");
         assert!(s.starts_with("hmac-sha256:"));
-        assert_eq!(s.len(), "hmac-sha256:".len() + 64);
+        assert_eq!(s.len(), HMAC_SHA256_PREFIX.len() + 64);
+    }
+
+    #[test]
+    fn hex_verify_accepts_exact_canonical_signature() {
+        let s = hmac_sha256_hex(b"k", b"m");
+        assert!(hmac_sha256_hex_is_valid(b"k", b"m", &s));
+    }
+
+    #[test]
+    fn hex_verify_rejects_malformed_or_noncanonical_signature() {
+        let s = hmac_sha256_hex(b"k", b"m");
+        assert!(!hmac_sha256_hex_is_valid(b"k2", b"m", &s));
+        assert!(!hmac_sha256_hex_is_valid(b"k", b"m2", &s));
+        assert!(!hmac_sha256_hex_is_valid(b"k", b"m", "sha256:abcd"));
+        assert!(!hmac_sha256_hex_is_valid(b"k", b"m", "hmac-sha256:abcd"));
+        assert!(!hmac_sha256_hex_is_valid(
+            b"k",
+            b"m",
+            &s.to_ascii_uppercase()
+        ));
     }
 
     #[test]

@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::hmac::{ct_eq, hmac_sha256_hex};
+use crate::hmac::{hmac_sha256_hex, hmac_sha256_hex_is_valid};
 
 /// Current on-disk audit record schema.
 pub const AUDIT_SCHEMA_VERSION: u16 = 4;
@@ -54,9 +54,15 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(7 + digest.len() * 2);
     out.push_str("sha256:");
     for b in digest {
-        out.push_str(&format!("{b:02x}"));
+        push_hex_byte(&mut out, b);
     }
     out
+}
+
+fn push_hex_byte(out: &mut String, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push(HEX[(byte >> 4) as usize] as char);
+    out.push(HEX[(byte & 0x0f) as usize] as char);
 }
 
 fn legacy_schema_version() -> u16 {
@@ -524,8 +530,7 @@ impl AuditRecord {
         let Some(signature) = self.signature.as_deref() else {
             return false;
         };
-        let expected = key.sign(&self.entry_hash);
-        ct_eq(expected.as_bytes(), signature.as_bytes())
+        hmac_sha256_hex_is_valid(&key.key, self.entry_hash.as_bytes(), signature)
     }
 }
 
@@ -566,7 +571,7 @@ pub(crate) fn compute_entry_hash_v1(
     let mut out = String::with_capacity(7 + digest.len() * 2);
     out.push_str("sha256:");
     for b in digest {
-        out.push_str(&format!("{b:02x}"));
+        push_hex_byte(&mut out, b);
     }
     out
 }
@@ -686,7 +691,7 @@ fn compute_entry_hash_v2(
     let mut out = String::with_capacity(7 + digest.len() * 2);
     out.push_str("sha256:");
     for b in digest {
-        out.push_str(&format!("{b:02x}"));
+        push_hex_byte(&mut out, b);
     }
     out
 }
@@ -735,7 +740,7 @@ fn compute_entry_hash_v3(
     let mut out = String::with_capacity(7 + digest.len() * 2);
     out.push_str("sha256:");
     for b in digest {
-        out.push_str(&format!("{b:02x}"));
+        push_hex_byte(&mut out, b);
     }
     out
 }
@@ -786,13 +791,73 @@ fn compute_entry_hash_v4(
     let mut out = String::with_capacity(7 + digest.len() * 2);
     out.push_str("sha256:");
     for b in digest {
-        out.push_str(&format!("{b:02x}"));
+        push_hex_byte(&mut out, b);
     }
     out
 }
 
 /// The genesis prev-hash for the first entry.
 pub const GENESIS_HASH: &str = "genesis";
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    fn signed_record(seq: u64, prev_hash: &str, entry_hash: &str, signature: &str) -> AuditRecord {
+        AuditRecord {
+            schema_version: AUDIT_SCHEMA_VERSION,
+            seq,
+            timestamp: "2026-07-08T00:00:00Z".to_owned(),
+            agent_identity: "kani:subject".to_owned(),
+            subject: AuditSubject::new("kani", "subject"),
+            db_evidence: None,
+            cancel: None,
+            tool: "oracle_execute".to_owned(),
+            sql_sha256: "sha256:sql".to_owned(),
+            sql_normalized_sha256: "sha256:sql".to_owned(),
+            sql_preview: "UPDATE t SET c = 1 WHERE id = 1".to_owned(),
+            danger_level: "GUARDED".to_owned(),
+            decision: AuditDecision::Allowed,
+            rows_affected: None,
+            outcome: AuditOutcome::Pending,
+            prev_hash: prev_hash.to_owned(),
+            entry_hash: entry_hash.to_owned(),
+            key_id: Some("kani-key".to_owned()),
+            signature: Some(signature.to_owned()),
+        }
+    }
+
+    #[kani::proof]
+    fn signed_chain_step_links_successor_to_predecessor_and_mac_verifies() {
+        let key = SigningKey::new("kani-key", b"kani-signing-key".to_vec());
+        // Fixed HMAC-SHA256 vectors over the entry hashes below. Full
+        // chained_signed construction remains pinned by unit and mutation tests;
+        // this BMC harness isolates the chain step and MAC verifier.
+        let first = signed_record(
+            1,
+            GENESIS_HASH,
+            "sha256:first",
+            "hmac-sha256:6a16998c95e4ef1cfc234d5ca243def4269287b0c89c41c939c63fa8ecdc0d90",
+        );
+        let second = signed_record(
+            2,
+            &first.entry_hash,
+            "sha256:second",
+            "hmac-sha256:faa0dc8c76ec2047b4173d005db23240c5996fffc617bf127bbf34bcabe78102",
+        );
+
+        assert_eq!(first.seq, 1);
+        assert_eq!(first.prev_hash, GENESIS_HASH);
+        assert_eq!(first.key_id.as_deref(), Some(key.key_id()));
+        assert!(first.signature_is_valid(&key));
+
+        assert_eq!(second.seq, first.seq + 1);
+        assert_eq!(second.prev_hash, first.entry_hash);
+        assert_eq!(second.key_id.as_deref(), Some(key.key_id()));
+        assert!(second.signature_is_valid(&key));
+        assert_ne!(second.entry_hash, first.entry_hash);
+    }
+}
 
 #[cfg(test)]
 mod tests {
