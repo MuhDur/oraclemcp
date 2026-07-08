@@ -5911,3 +5911,128 @@ fn scoped_principal_cannot_act_as_operator_without_allowlist_and_operator_action
     assert_eq!(records[0].sql_preview, "GET /operator/v1/sessions");
     assert!(!records[0].sql_preview.contains("force=true"));
 }
+
+// ===================================================================
+// K10 — streaming query results over SSE (the streaming assembly)
+// ===================================================================
+
+fn streaming_query_response() -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": {
+            "structuredContent": {
+                "streaming": true,
+                "columns": ["ID", "NAME"],
+                "chunk_count": 2,
+                "row_count": 3,
+                "truncated": false,
+                "next_cursor": Value::Null,
+                "chunks": [
+                    { "seq": 0, "rows": [{"ID": "1", "NAME": "a"}, {"ID": "2", "NAME": "b"}],
+                      "row_count": 2, "total_bytes": 40, "next_cursor": "sealed-cursor-0", "last": false },
+                    { "seq": 1, "rows": [{"ID": "3", "NAME": "c"}],
+                      "row_count": 1, "total_bytes": 20, "next_cursor": Value::Null, "last": true }
+                ]
+            }
+        }
+    })
+}
+
+#[test]
+fn streaming_query_chunks_detects_only_streaming_results() {
+    // A streaming oracle_query result exposes its ordered chunks.
+    let streaming = streaming_query_response();
+    let chunks = streaming_query_chunks(&streaming).expect("streaming result has chunks");
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks[0]["seq"], json!(0));
+
+    // A plain (non-streaming) tool result is never treated as streaming.
+    let inline = json!({
+        "jsonrpc": "2.0", "id": 1,
+        "result": { "structuredContent": { "columns": ["ID"], "rows": [], "row_count": 0 } }
+    });
+    assert!(streaming_query_chunks(&inline).is_none());
+
+    // A streaming flag without a chunks array degrades to None (no framing).
+    let no_chunks = json!({
+        "jsonrpc": "2.0", "id": 1,
+        "result": { "structuredContent": { "streaming": true } }
+    });
+    assert!(streaming_query_chunks(&no_chunks).is_none());
+
+    // An error response (no result) is never streaming.
+    let err = json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": -32000, "message": "x" } });
+    assert!(streaming_query_chunks(&err).is_none());
+}
+
+#[test]
+fn write_query_stream_chunks_frames_each_chunk_as_an_sse_event() {
+    let streaming = streaming_query_response();
+    let chunks = streaming_query_chunks(&streaming).expect("chunks");
+    let mut body = Vec::new();
+    let framed = write_query_stream_chunks(&mut body, chunks);
+    assert_eq!(framed, 2, "one SSE frame per chunk");
+    let text = String::from_utf8(body).expect("utf8 SSE body");
+    // Each chunk is its own `event: chunk` frame with a monotonic, resumable id.
+    assert_eq!(text.matches("event: chunk\n").count(), 2);
+    assert!(text.contains("id: chunk/0\n"));
+    assert!(text.contains("id: chunk/1\n"));
+    // The chunk rows ride in the frame data (progressive delivery).
+    assert!(text.contains("\"NAME\":\"a\""));
+    assert!(text.contains("\"NAME\":\"c\""));
+    // The re-sealed cursor of a non-final chunk is carried for resume.
+    assert!(text.contains("sealed-cursor-0"));
+}
+
+#[test]
+fn sse_response_emits_chunk_frames_before_the_authoritative_result() {
+    // End-to-end SSE assembly: a streaming query response frames each page as
+    // its own `event: chunk` SSE event, THEN the authoritative response frame —
+    // a plain client still reads the final result; a streaming-aware client
+    // renders chunks progressively.
+    let cfg = HttpTransportConfig::default();
+    let response = sse_response(
+        &cfg,
+        Some("tools/call"),
+        streaming_query_response(),
+        None,
+        "principal-test",
+        Some("1/0"),
+    );
+    assert_eq!(response.status, 200);
+    let text = String::from_utf8(response.body).expect("utf8 SSE body");
+    assert_eq!(
+        text.matches("event: chunk\n").count(),
+        2,
+        "two page chunks framed as SSE events"
+    );
+    // The chunk frames precede the authoritative response frame (id 1/0).
+    let first_chunk = text.find("event: chunk\n").expect("chunk frame present");
+    let response_frame = text
+        .find("id: 1/0\n")
+        .expect("authoritative response frame");
+    assert!(
+        first_chunk < response_frame,
+        "chunks stream before the final result"
+    );
+
+    // A NON-streaming response is unchanged: no chunk frames, just the result.
+    let inline = json!({
+        "jsonrpc": "2.0", "id": 1,
+        "result": { "structuredContent": { "columns": ["ID"], "rows": [], "row_count": 0 } }
+    });
+    let plain = sse_response(
+        &cfg,
+        Some("tools/call"),
+        inline,
+        None,
+        "principal-test",
+        Some("1/0"),
+    );
+    let plain_text = String::from_utf8(plain.body).expect("utf8");
+    assert!(
+        !plain_text.contains("event: chunk\n"),
+        "no chunk frames for inline reads"
+    );
+}

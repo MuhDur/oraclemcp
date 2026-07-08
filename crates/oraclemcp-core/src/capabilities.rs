@@ -90,6 +90,32 @@ pub struct ConnectionStatus {
     pub server_features: Option<ServerFeatures>,
 }
 
+/// Tool-surface delivery features advertised by the server (bead K10).
+///
+/// This is the **TOOL-SURFACE** capability block: it describes what the tool
+/// surface can do for *result delivery*. It is deliberately distinct from the
+/// build [`FeatureTiers`] (which tools/transports are compiled in) and from the
+/// connection-level K2 `server_features` probe (what the live Oracle server
+/// negotiated). Purely additive and observational — it never affects the
+/// fail-closed classifier; streaming/incremental fetch only change how an
+/// already-proven read is DELIVERED.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolSurfaceFeatures {
+    /// `oracle_query` supports **incremental fetch**: a large read returns
+    /// bounded pages plus an opaque `cursor`, and resuming with that cursor
+    /// yields the next page BYTE-IDENTICAL to a single full fetch. Available on
+    /// every transport.
+    pub incremental_fetch: bool,
+    /// `oracle_query` supports **streaming delivery** (`streaming=true`): the
+    /// result is delivered as an ordered, resumable page `chunks` array. Over
+    /// the HTTP/SSE transport each chunk is additionally emitted as its own SSE
+    /// `event: chunk` frame — that SSE chunk-frame delivery is what this flag
+    /// reflects, so it is `true` only when the HTTP transport is available. (The
+    /// `chunks` array itself still returns inline over stdio; see
+    /// `incremental_fetch` for the transport-independent contract.)
+    pub streaming: bool,
+}
+
 /// Which capability tiers are available (live-DB / engine intelligence).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeatureTiers {
@@ -123,6 +149,10 @@ pub struct CapabilitiesReport {
     pub connection: ConnectionStatus,
     /// Feature tiers.
     pub features: FeatureTiers,
+    /// Tool-surface delivery features (incremental fetch / streaming; bead K10).
+    /// The TOOL-SURFACE capability block, distinct from `features` (build tiers)
+    /// and `connection.server_features` (the K2 live-server probe).
+    pub tool_features: ToolSurfaceFeatures,
     /// The connected account's probed privilege profile (dictionary tier,
     /// Diagnostics Pack, PL/Scope), once a session exists (§5.11, bead P2-9).
     /// `None` before connect — the agent learns which tiers degrade and why.
@@ -161,6 +191,12 @@ impl CapabilitiesReport {
             },
             transports,
             connection: ConnectionStatus::default(),
+            tool_features: ToolSurfaceFeatures {
+                // Incremental fetch (cursor pagination) is transport-independent.
+                incremental_fetch: true,
+                // SSE chunk-frame streaming rides the HTTP transport.
+                streaming: features.http_transport,
+            },
             features,
             privileges: None,
             cloud: None,
@@ -227,6 +263,47 @@ mod tests {
             json["tools"][0]["name"],
             serde_json::json!("oracle_capabilities")
         );
+    }
+
+    #[test]
+    fn tool_surface_features_advertise_incremental_fetch_and_transport_gated_streaming() {
+        // K10: the TOOL-SURFACE block advertises incremental fetch (always) and
+        // SSE chunk-frame streaming (HTTP transport only), distinct from the
+        // build `features` tiers and the K2 connection `server_features` probe.
+        let stdio = CapabilitiesReport::new(
+            "0.1.0",
+            sample_tools(),
+            OperatingLevel::ReadOnly,
+            FeatureTiers {
+                live_db: true,
+                engine: true,
+                http_transport: false,
+            },
+        );
+        assert!(stdio.tool_features.incremental_fetch);
+        assert!(
+            !stdio.tool_features.streaming,
+            "SSE chunk-frame streaming needs the HTTP transport"
+        );
+        let json = serde_json::to_value(&stdio).expect("serialize");
+        assert_eq!(
+            json["tool_features"]["incremental_fetch"],
+            serde_json::json!(true)
+        );
+        assert_eq!(json["tool_features"]["streaming"], serde_json::json!(false));
+
+        let http = CapabilitiesReport::new(
+            "0.1.0",
+            sample_tools(),
+            OperatingLevel::ReadOnly,
+            FeatureTiers {
+                live_db: true,
+                engine: true,
+                http_transport: true,
+            },
+        );
+        assert!(http.tool_features.incremental_fetch);
+        assert!(http.tool_features.streaming, "HTTP exposes SSE streaming");
     }
 
     #[test]

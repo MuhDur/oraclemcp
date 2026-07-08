@@ -1137,8 +1137,8 @@ mod sse_writer;
 mod wire;
 use request_target::split_request_target;
 use sse_writer::{
-    write_chunked_sse_comment, write_chunked_sse_event, write_final_chunk, write_sse_event,
-    write_streaming_sse_headers,
+    write_chunked_sse_comment, write_chunked_sse_event, write_final_chunk,
+    write_query_stream_chunks, write_sse_event, write_streaming_sse_headers,
 };
 use wire::{read_http_request, write_http_response};
 
@@ -5648,6 +5648,17 @@ fn buffered_sse_response(events: &[HttpBufferedEvent]) -> HttpResponse {
     }
 }
 
+/// K10: if `response` is a streaming `oracle_query` tool result, borrow its
+/// ordered page `chunks` for SSE chunk-frame emission. `None` for every other
+/// response, so the standard single-frame SSE path is untouched.
+fn streaming_query_chunks(response: &Value) -> Option<&Vec<Value>> {
+    let structured = response.get("result")?.get("structuredContent")?;
+    if structured.get("streaming").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    structured.get("chunks").and_then(Value::as_array)
+}
+
 fn sse_response(
     config: &HttpTransportConfig,
     method: Option<&str>,
@@ -5672,6 +5683,14 @@ fn sse_response(
         initialized_session_id.or_else(|| Some(new_session_id()))
     } else {
         write_sse_event(&mut body, None, Some("0/0"), Some(3000), Some(&Value::Null));
+        // K10: a streaming `oracle_query` result carries an ordered page
+        // `chunks` array. Emit each chunk as its own `event: chunk` SSE frame
+        // BEFORE the authoritative response frame, so a streaming-aware client
+        // renders pages progressively while a plain client still reads the final
+        // result. Purely additive — every non-streaming response is unchanged.
+        if let Some(chunks) = streaming_query_chunks(&response) {
+            write_query_stream_chunks(&mut body, chunks);
+        }
         write_sse_event(
             &mut body,
             None,

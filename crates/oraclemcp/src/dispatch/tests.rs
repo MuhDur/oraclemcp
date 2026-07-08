@@ -5796,6 +5796,227 @@ mod read_only_backstop_wiring {
     }
 }
 
+// ===================================================================
+// K10 — streaming query results (incremental fetch + chunked delivery)
+// ===================================================================
+
+/// A read mock that HONORS the `OFFSET n ROWS FETCH NEXT m ROWS ONLY` envelope
+/// the server wraps around a proven SELECT, so a streamed/resumed page returns
+/// the true next window of a fixed dataset. This lets the dispatcher's streaming
+/// path be proven byte-identical to a single full read.
+struct StreamOffsetMock {
+    total: usize,
+}
+
+impl StreamOffsetMock {
+    fn window(sql: &str) -> (usize, usize) {
+        let after = |marker: &str| -> Option<usize> {
+            let idx = sql.find(marker)? + marker.len();
+            sql[idx..]
+                .split_whitespace()
+                .next()
+                .and_then(|tok| tok.parse::<usize>().ok())
+        };
+        (
+            after("OFFSET ").unwrap_or(0),
+            after("FETCH NEXT ").unwrap_or(usize::MAX),
+        )
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for StreamOffsetMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _b: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let (offset, fetch) = Self::window(sql);
+        let end = offset.saturating_add(fetch).min(self.total);
+        let start = offset.min(self.total);
+        Ok((start..end)
+            .map(|i| OracleRow {
+                columns: vec![
+                    (
+                        "ID".to_owned(),
+                        OracleCell::new("NUMBER", Some(format!("{}", i * 11 + 3))),
+                    ),
+                    (
+                        "NAME".to_owned(),
+                        OracleCell::new("VARCHAR2", Some(format!("row-{i}"))),
+                    ),
+                ],
+            })
+            .collect())
+    }
+    async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+        Ok(0)
+    }
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn streaming_query_delivers_chunks_byte_identical_to_a_full_read() {
+    // Full (non-streaming) read of all 23 rows in one page.
+    let full_dispatcher = OracleDispatcher::new_with_profile(
+        Box::new(StreamOffsetMock { total: 23 }),
+        Some("dev".to_owned()),
+    );
+    let full = full_dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({ "sql": "SELECT id, name FROM t", "max_rows": 1000 }),
+        )
+        .expect("full read");
+    let full_rows = full["rows"].as_array().expect("rows array").clone();
+    assert_eq!(full_rows.len(), 23);
+    assert_eq!(full["truncated"], json!(false));
+
+    // Streaming read: 5-row pages -> 5 chunks (5,5,5,5,3).
+    let dispatcher = OracleDispatcher::new_with_profile(
+        Box::new(StreamOffsetMock { total: 23 }),
+        Some("dev".to_owned()),
+    );
+    let streamed = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({ "sql": "SELECT id, name FROM t", "streaming": true, "max_rows": 5 }),
+        )
+        .expect("streaming read");
+    assert_eq!(streamed["streaming"], json!(true));
+    assert_eq!(streamed["columns"], json!(["ID", "NAME"]));
+    assert_eq!(streamed["row_count"], json!(23));
+    assert_eq!(streamed["truncated"], json!(false));
+    assert_eq!(streamed["next_cursor"], Value::Null);
+
+    let chunks = streamed["chunks"].as_array().expect("chunks array");
+    assert_eq!(chunks.len(), 5, "ceil(23/5) = 5 chunks");
+
+    // Concatenate every chunk's rows and prove BYTE-IDENTITY with the full read.
+    let mut streamed_rows: Vec<Value> = Vec::new();
+    for (i, chunk) in chunks.iter().enumerate() {
+        assert_eq!(chunk["seq"], json!(i));
+        let last = i + 1 == chunks.len();
+        assert_eq!(chunk["last"], json!(last));
+        if last {
+            assert_eq!(chunk["row_count"], json!(3));
+            assert_eq!(
+                chunk["next_cursor"],
+                Value::Null,
+                "final chunk has no cursor"
+            );
+        } else {
+            assert_eq!(chunk["row_count"], json!(5));
+            let cursor = chunk["next_cursor"].as_str().expect("sealed cursor");
+            assert!(
+                cursor.parse::<usize>().is_err(),
+                "next_cursor is a sealed, tamper-evident token, not a raw offset"
+            );
+        }
+        streamed_rows.extend(chunk["rows"].as_array().expect("chunk rows").clone());
+    }
+    assert_eq!(
+        streamed_rows, full_rows,
+        "streamed chunks concatenate byte-identically to the full read"
+    );
+}
+
+#[test]
+fn streaming_resume_cursor_matches_a_manual_incremental_fetch() {
+    // A streamed chunk's sealed next_cursor must be usable to resume a plain
+    // (non-streaming) oracle_query and land on exactly the next window — proving
+    // streaming and incremental cursor fetch share one cursor contract.
+    let dispatcher = OracleDispatcher::new_with_profile(
+        Box::new(StreamOffsetMock { total: 12 }),
+        Some("dev".to_owned()),
+    );
+    let streamed = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({ "sql": "SELECT id, name FROM t", "streaming": true, "max_rows": 4 }),
+        )
+        .expect("streaming read");
+    let chunks = streamed["chunks"].as_array().expect("chunks");
+    let first_cursor = chunks[0]["next_cursor"]
+        .as_str()
+        .expect("cursor")
+        .to_owned();
+
+    // Resume a NON-streaming read with the streamed cursor.
+    let resumed = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({ "sql": "SELECT id, name FROM t", "cursor": first_cursor, "max_rows": 4 }),
+        )
+        .expect("cursor resume");
+    // The resumed page equals the SECOND streamed chunk's rows.
+    assert_eq!(
+        resumed["rows"], chunks[1]["rows"],
+        "resuming with a streamed cursor yields the next chunk byte-identically"
+    );
+}
+
+#[test]
+fn streaming_never_bypasses_the_read_only_classifier() {
+    // Streaming only changes DELIVERY: a non-read statement is refused BEFORE
+    // any I/O exactly as it is on the inline path — the guard is untouched.
+    let dispatcher = OracleDispatcher::new_with_profile(
+        Box::new(StreamOffsetMock { total: 5 }),
+        Some("dev".to_owned()),
+    );
+    let err = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({ "sql": "DELETE FROM t", "streaming": true }),
+        )
+        .expect_err("a write is refused even with streaming=true");
+    // The classifier/level gate refuses the write (a DELETE exceeds the default
+    // READ_ONLY level) before any I/O — streaming did not weaken the guard.
+    assert_eq!(err.error_class, ErrorClass::OperatingLevelTooLow);
+}
+
+#[test]
+fn streaming_is_mutually_exclusive_with_export_and_as_of() {
+    let dispatcher = OracleDispatcher::new_with_profile(
+        Box::new(StreamOffsetMock { total: 5 }),
+        Some("dev".to_owned()),
+    );
+    let export_err = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({ "sql": "SELECT id FROM t", "streaming": true, "export": true }),
+        )
+        .expect_err("streaming + export refused");
+    assert_eq!(export_err.error_class, ErrorClass::InvalidArguments);
+    assert!(export_err.message.contains("mutually exclusive"));
+
+    let as_of_err = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({ "sql": "SELECT id FROM t", "streaming": true, "as_of": { "scn": 42 } }),
+        )
+        .expect_err("streaming + as_of refused");
+    assert_eq!(as_of_err.error_class, ErrorClass::InvalidArguments);
+}
+
 /// SEC-1 (plan §4-RS security-audit): a *stored* execute-grant is NEVER an
 /// authorization input at apply. Once the session ceiling is lowered by ANY
 /// path, a grant minted before the change must not run — the guard re-derives

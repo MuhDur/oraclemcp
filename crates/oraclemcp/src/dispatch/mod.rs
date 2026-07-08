@@ -88,6 +88,11 @@ const MAX_QUERY_RESULT_BYTES: usize = 25 * 1024 * 1024;
 /// (E3/E3b). Bounds the work + memory of one export independent of the inline
 /// page cap; rows beyond this are dropped and the export is marked truncated.
 const MAX_QUERY_EXPORT_ROWS: usize = 100_000;
+/// K10: hard cap on total rows a single streaming (`streaming=true`)
+/// `oracle_query` walks the cursor for. Bounds the work + memory of one
+/// streamed response; beyond it the final chunk carries a resume cursor and the
+/// response is flagged `truncated` so the caller can continue with the cursor.
+const MAX_QUERY_STREAM_ROWS: usize = 50_000;
 /// Hard cap on text/CLOB characters materialized by a single query cell.
 const MAX_QUERY_TEXT_CHARS: usize = 1_000_000;
 /// Hard cap on BLOB bytes materialized by a single query cell.
@@ -898,6 +903,16 @@ fn decode_query_cursor(
         .map_err(|_| invalid_args("invalid oracle_query pagination cursor payload"))
 }
 
+/// Sign one raw next-page offset as an opaque, tamper-evident cursor bound to
+/// this statement/profile (E2). The single sealing primitive shared by the
+/// inline-page path ([`reseal_query_cursor`]) and the streaming path
+/// ([`OracleMcpDispatcher::stream_query_response`]) so a streamed chunk's cursor
+/// is byte-identical to the one a paginated caller would receive.
+fn seal_raw_query_cursor(offset: &str, sql: &str, active_profile: Option<&str>) -> String {
+    let binding = query_cursor_binding(sql, active_profile);
+    oraclemcp_core::sign_token(QUERY_CURSOR_SCOPE, offset, &[&binding])
+}
+
 /// Re-sign a raw next-page offset from [`read_query`] as an opaque,
 /// tamper-evident cursor bound to this statement/profile. Replaces the raw
 /// `next_cursor` offset in the serialized response (E2).
@@ -909,8 +924,7 @@ fn reseal_query_cursor(mut response: Value, sql: &str, active_profile: Option<&s
     else {
         return response;
     };
-    let binding = query_cursor_binding(sql, active_profile);
-    let sealed = oraclemcp_core::sign_token(QUERY_CURSOR_SCOPE, &offset, &[&binding]);
+    let sealed = seal_raw_query_cursor(&offset, sql, active_profile);
     if let Value::Object(map) = &mut response {
         map.insert("next_cursor".to_owned(), Value::String(sealed));
     }
@@ -6457,6 +6471,40 @@ impl OracleDispatcher {
             // forged/cross-statement cursor fails closed).
             let offset =
                 decode_query_cursor(a.cursor.as_deref(), &a.sql, active_profile.as_deref())?;
+            // K10: streaming delivery. The classifier already proved this read
+            // (`gate?` above); streaming only changes how the SAME rows are
+            // DELIVERED — as an ordered, resumable `chunks` array driven by
+            // successive cursor pages, byte-identical to a manual cursor resume.
+            if a.streaming {
+                if a.export {
+                    return Err(invalid_args(
+                        "streaming and export are mutually exclusive: choose incremental \
+                         chunks (streaming=true) OR a single export resource (export=true)",
+                    )
+                    .with_next_step("re-run with exactly one of streaming / export"));
+                }
+                if as_of.is_some() {
+                    return Err(invalid_args(
+                        "streaming and as_of are mutually exclusive: a flashback read is \
+                         delivered as a single page — resume it with the returned cursor",
+                    )
+                    .with_next_step("drop streaming, or page the as_of read with cursor"));
+                }
+                let caps = query_caps_from_args(&a);
+                let serialize_opts = query_serialize_options_from_args(&a);
+                return Self::stream_query_response(
+                    cx,
+                    conn,
+                    &executed_sql,
+                    &a.sql,
+                    &binds,
+                    caps,
+                    offset,
+                    &serialize_opts,
+                    active_profile.as_deref(),
+                )
+                .await;
+            }
             // E3b: when the caller opts into export, materialize the bounded full
             // result as an oracle-export://{id} resource and return a
             // resource_link instead of inlining the rows.
@@ -6512,6 +6560,94 @@ impl OracleDispatcher {
                 .map_err(DbError::into_envelope)
         })
         .await
+    }
+
+    /// K10: deliver a proven read as an ordered, resumable `chunks` array —
+    /// streaming delivery of `oracle_query`. Each chunk is one [`read_query`]
+    /// cursor page, so a chunk's rows are BYTE-IDENTICAL to the page a caller
+    /// would get by resuming with the previous chunk's `next_cursor`; streaming
+    /// changes DELIVERY, never the proven-read bytes, and the classifier is
+    /// untouched (the read was already gated in `run_prepared_query`).
+    ///
+    /// Backpressure / budget: every chunk boundary re-checkpoints `cx`, so the
+    /// request deadline + cancellation (the asupersync budget carried on `cx`)
+    /// stop the walk between pages — a cancelled or expired stream never keeps
+    /// fetching. Bounded by [`MAX_QUERY_STREAM_ROWS`]: at the cap the final chunk
+    /// carries a resume cursor and the response is flagged `truncated`.
+    ///
+    /// Over the HTTP/SSE transport the assembled `chunks` are re-emitted as
+    /// individual `event: chunk` SSE frames by the transport layer
+    /// (`oraclemcp_core::http`); over stdio/JSON the same `chunks` array is the
+    /// inline incremental-delivery contract.
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_query_response(
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+        executed_sql: &str,
+        cursor_sql: &str,
+        binds: &[OracleBind],
+        caps: QueryCaps,
+        start_offset: usize,
+        serialize_opts: &SerializeOptions,
+        active_profile: Option<&str>,
+    ) -> Result<Value, ErrorEnvelope> {
+        let page_rows = caps.max_rows.max(1);
+        let max_chunks = MAX_QUERY_STREAM_ROWS.div_ceil(page_rows).max(1);
+        let mut offset = start_offset;
+        let mut chunks: Vec<Value> = Vec::new();
+        let mut columns: Vec<String> = Vec::new();
+        let mut total_rows = 0usize;
+        let mut truncated = false;
+        let mut final_cursor = Value::Null;
+        for seq in 0..max_chunks {
+            // Budget/cancellation checkpoint at every chunk boundary — the
+            // backpressure signal for the walk (A9-narrowed cx is sufficient;
+            // only the DB round trip inside read_query needs the full row).
+            dispatch_checkpoint(cx, "oraclemcp.dispatch.query.stream.chunk")?;
+            let page = read_query(cx, conn, executed_sql, binds, caps, offset, serialize_opts)
+                .await
+                .map_err(DbError::into_envelope)?;
+            if seq == 0 {
+                columns = page.columns.clone();
+            }
+            let more = page.truncated;
+            let reached_cap = seq + 1 >= max_chunks;
+            let last = !more || reached_cap;
+            total_rows += page.row_count;
+            // Re-seal the raw next offset as the tamper-evident cursor a
+            // paginated caller would receive (E2); present only when more rows
+            // remain. On the final chunk this doubles as the resume cursor.
+            let sealed_next = page
+                .next_cursor
+                .as_deref()
+                .map(|raw| Value::String(seal_raw_query_cursor(raw, cursor_sql, active_profile)))
+                .unwrap_or(Value::Null);
+            let next_offset = offset + page.row_count;
+            chunks.push(json!({
+                "seq": seq,
+                "rows": page.rows,
+                "row_count": page.row_count,
+                "total_bytes": page.total_bytes,
+                "next_cursor": sealed_next.clone(),
+                "last": last,
+            }));
+            if last {
+                truncated = more;
+                final_cursor = sealed_next;
+                break;
+            }
+            offset = next_offset;
+        }
+        let chunk_count = chunks.len();
+        Ok(json!({
+            "streaming": true,
+            "columns": columns,
+            "chunks": chunks,
+            "chunk_count": chunk_count,
+            "row_count": total_rows,
+            "truncated": truncated,
+            "next_cursor": final_cursor,
+        }))
     }
 }
 

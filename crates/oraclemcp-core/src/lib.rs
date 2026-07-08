@@ -84,7 +84,7 @@ pub use admission::{AdmissionController, AdmissionPermit};
 pub use audit_shipping::{SiemFormat, SiemHttpForwarder};
 pub use capabilities::{
     CapabilitiesReport, ConnectionStatus, FeatureTiers, OperatingLevelReport, PROTOCOL_VERSION,
-    SUPPORTED_PROTOCOL_VERSIONS,
+    SUPPORTED_PROTOCOL_VERSIONS, ToolSurfaceFeatures,
 };
 pub use capability::{
     LaneCaps, PrivilegedEffect, ReadPathCaps, narrow_to_lane, narrow_to_read_path,

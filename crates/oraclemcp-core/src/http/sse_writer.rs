@@ -43,6 +43,22 @@ pub(super) fn write_sse_event(
     body.push(b'\n');
 }
 
+/// K10: frame a streaming `oracle_query` result's ordered page `chunks` as
+/// individual SSE `event: chunk` frames into `body`. This is the streaming
+/// ASSEMBLY: the caller writes the authoritative JSON-RPC response frame AFTER
+/// these, so a streaming-aware client renders chunks progressively while a
+/// plain MCP client still consumes the final result. Each frame's `id` is
+/// `chunk/<seq>` (monotonic, resumable) and its `data` is the chunk object
+/// (rows + re-sealed `next_cursor`). Returns the number of chunk frames written.
+pub(super) fn write_query_stream_chunks(body: &mut Vec<u8>, chunks: &[Value]) -> usize {
+    for (i, chunk) in chunks.iter().enumerate() {
+        let seq = chunk.get("seq").and_then(Value::as_u64).unwrap_or(i as u64);
+        let id = format!("chunk/{seq}");
+        write_sse_event(body, Some("chunk"), Some(&id), None, Some(chunk));
+    }
+    chunks.len()
+}
+
 pub(super) fn write_streaming_sse_headers(stream: &mut impl Write) -> std::io::Result<()> {
     write!(
         stream,

@@ -677,6 +677,174 @@ mod tests {
         );
     }
 
+    // ===================================================================
+    // K10 — incremental fetch: resume == full-fetch byte-identity
+    // ===================================================================
+
+    /// A mock whose `query_rows` HONORS the `OFFSET n ROWS FETCH NEXT m ROWS
+    /// ONLY` envelope that [`paginated_sql`] wraps around the inner SELECT, so a
+    /// resumed page returns the true next window of a fixed dataset. This lets a
+    /// pure unit test prove the incremental-fetch contract (K10 phase 1): paging
+    /// with the returned cursor yields rows BYTE-IDENTICAL to a single full
+    /// fetch, because every row serializes deterministically regardless of the
+    /// page it lands on.
+    struct OffsetAwareMock {
+        total: usize,
+    }
+
+    impl OffsetAwareMock {
+        /// Parse `OFFSET {offset} ROWS FETCH NEXT {fetch} ROWS ONLY` out of the
+        /// server-built pagination envelope. Absent (an unwrapped query) means
+        /// "the whole dataset from 0".
+        fn window(sql: &str) -> (usize, usize) {
+            let after = |marker: &str| -> Option<usize> {
+                let idx = sql.find(marker)? + marker.len();
+                sql[idx..]
+                    .split_whitespace()
+                    .next()
+                    .and_then(|tok| tok.parse::<usize>().ok())
+            };
+            let offset = after("OFFSET ").unwrap_or(0);
+            let fetch = after("FETCH NEXT ").unwrap_or(usize::MAX);
+            (offset, fetch)
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for OffsetAwareMock {
+        fn backend(&self) -> crate::types::OracleBackend {
+            crate::types::OracleBackend::RustOracle
+        }
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            let (offset, fetch) = Self::window(sql);
+            let end = offset.saturating_add(fetch).min(self.total);
+            let start = offset.min(self.total);
+            Ok((start..end)
+                .map(|i| OracleRow {
+                    columns: vec![
+                        (
+                            "ID".to_owned(),
+                            OracleCell::new("NUMBER", Some(format!("{}", i * 7 + 1))),
+                        ),
+                        (
+                            "NAME".to_owned(),
+                            OracleCell::new("VARCHAR2", Some(format!("row-{i}-héllo"))),
+                        ),
+                    ],
+                })
+                .collect())
+        }
+        async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
+            Ok(0)
+        }
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    /// Walk the cursor from `offset 0` in `page_rows`-sized pages, concatenating
+    /// every page's serialized rows. Returns `(all_rows, page_row_counts)`.
+    fn drain_by_cursor(conn: &OffsetAwareMock, page_rows: usize) -> (Vec<Value>, Vec<usize>) {
+        run_with_cx(|cx| async move {
+            let caps = QueryCaps {
+                max_rows: page_rows,
+                max_result_bytes: 1_000_000,
+            };
+            let opts = SerializeOptions::default();
+            let mut all: Vec<Value> = Vec::new();
+            let mut counts: Vec<usize> = Vec::new();
+            let mut cursor: Option<String> = None;
+            loop {
+                let offset = cursor_to_offset(cursor.as_deref());
+                let page = read_query(
+                    &cx,
+                    conn,
+                    "SELECT id, name FROM t",
+                    &[],
+                    caps,
+                    offset,
+                    &opts,
+                )
+                .await
+                .expect("page read");
+                counts.push(page.row_count);
+                all.extend(page.rows);
+                match page.next_cursor {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+            (all, counts)
+        })
+    }
+
+    #[test]
+    fn incremental_fetch_resume_is_byte_identical_to_full_fetch() {
+        // K10 phase 1. A large read paged with the returned cursor must tile the
+        // full result exactly: same rows, same order, byte-identical serialized
+        // cells — the cursor changes DELIVERY, never the proven-read bytes.
+        let conn = OffsetAwareMock { total: 25 };
+        let full = run_with_cx(|cx| async move {
+            read_query(
+                &cx,
+                &OffsetAwareMock { total: 25 },
+                "SELECT id, name FROM t",
+                &[],
+                QueryCaps {
+                    max_rows: 1_000,
+                    max_result_bytes: 10 * 1024 * 1024,
+                },
+                0,
+                &SerializeOptions::default(),
+            )
+            .await
+            .expect("full fetch")
+        });
+        assert_eq!(full.row_count, 25);
+        assert!(!full.truncated, "a single big page reads all 25 rows");
+        assert!(full.next_cursor.is_none());
+
+        for page_rows in [1usize, 4, 7, 10, 25, 40] {
+            let (paged, counts) = drain_by_cursor(&conn, page_rows);
+            assert_eq!(
+                paged, full.rows,
+                "cursor-resumed pages of {page_rows} are byte-identical to the full fetch"
+            );
+            // Pages tile the result with no gaps or overlaps.
+            assert_eq!(counts.iter().sum::<usize>(), 25);
+            let full_pages = 25 / page_rows;
+            for c in counts.iter().take(full_pages) {
+                assert_eq!(*c, page_rows, "each non-final page is exactly page_rows");
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_fetch_empty_result_terminates_without_a_cursor() {
+        let conn = OffsetAwareMock { total: 0 };
+        let (paged, counts) = drain_by_cursor(&conn, 5);
+        assert!(paged.is_empty(), "no rows");
+        assert_eq!(
+            counts,
+            vec![0],
+            "exactly one terminal empty page, no cursor"
+        );
+    }
+
     #[test]
     fn read_query_as_of_disables_even_when_the_read_fails() {
         let conn = FlashbackRecorder {

@@ -45,6 +45,17 @@ pub(super) struct QueryArgs {
     /// with `export=true`.
     #[serde(default, alias = "format")]
     pub(super) export_format: Option<String>,
+    /// K10: when true, deliver the (bounded) result as an ordered sequence of
+    /// resumable page `chunks` instead of a single inline page — "incremental
+    /// fetch" made first-class. The server drives successive cursor pages
+    /// (byte-identical to a manual cursor resume) and, over the HTTP/SSE
+    /// transport, emits each chunk as its own `event: chunk` frame. Default
+    /// false preserves the single-page behavior. Mutually exclusive with
+    /// `export` and `as_of` (a typed refusal). Streaming never touches the
+    /// fail-closed classifier — it only changes DELIVERY of an already-proven
+    /// read.
+    #[serde(default, alias = "stream")]
+    pub(super) streaming: bool,
     /// K9: STRUCTURED flashback / AS-OF read target. The agent passes a NORMAL
     /// `SELECT` here plus an `as_of` value — never hand-written `AS OF` SQL. The
     /// base SELECT is proven read-only by the unchanged classifier FIRST; the

@@ -202,7 +202,7 @@
                   "type": "array"
                 },
                 "cursor": {
-                  "description": "Opaque pagination cursor from a prior truncated page.",
+                  "description": "Opaque pagination cursor from a prior truncated page (incremental fetch). Resuming with it yields the next page byte-identically.",
                   "type": "string"
                 },
                 "deep_decode": {
@@ -240,7 +240,7 @@
                   "type": "integer"
                 },
                 "max_rows": {
-                  "description": "Maximum rows in this page (default 200, hard cap 5000).",
+                  "description": "Maximum rows in this page / streamed chunk (default 200, hard cap 5000).",
                   "maximum": 5000,
                   "minimum": 1,
                   "type": "integer"
@@ -276,6 +276,10 @@
                 "sql": {
                   "description": "A single read-only SELECT. Use :1, :2 … for binds.",
                   "type": "string"
+                },
+                "streaming": {
+                  "description": "Deliver the result as an ordered, resumable page `chunks` array instead of one inline page (incremental fetch, made first-class). Over the HTTP/SSE transport each chunk is emitted as its own SSE `event: chunk` frame. Mutually exclusive with export and as_of. Never affects the read-only classifier.",
+                  "type": "boolean"
                 },
                 "timeout_seconds": {
                   "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call.",
@@ -1077,7 +1081,7 @@
                   "type": "array"
                 },
                 "cursor": {
-                  "description": "Opaque pagination cursor from a prior truncated page.",
+                  "description": "Opaque pagination cursor from a prior truncated page (incremental fetch).",
                   "type": "string"
                 },
                 "deep_decode": {
@@ -1163,6 +1167,10 @@
                 "sql": {
                   "description": "A single read-only SELECT. Use :1, :2 ... for binds.",
                   "type": "string"
+                },
+                "streaming": {
+                  "description": "Deliver the result as an ordered, resumable page `chunks` array instead of one inline page. Over HTTP/SSE each chunk is an SSE `event: chunk` frame. Mutually exclusive with export and as_of. Never affects the read-only classifier.",
+                  "type": "boolean"
                 },
                 "timeout_seconds": {
                   "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call.",

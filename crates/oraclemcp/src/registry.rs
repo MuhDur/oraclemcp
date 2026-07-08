@@ -347,8 +347,9 @@ pub fn tool_registry() -> ToolRegistry {
                         "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
                         "items": {}
                     },
-                    "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page." },
-                    "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum rows in this page (default 200, hard cap 5000)." },
+                    "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page (incremental fetch). Resuming with it yields the next page byte-identically." },
+                    "streaming": { "type": "boolean", "description": "Deliver the result as an ordered, resumable page `chunks` array instead of one inline page (incremental fetch, made first-class). Over the HTTP/SSE transport each chunk is emitted as its own SSE `event: chunk` frame. Mutually exclusive with export and as_of. Never affects the read-only classifier." },
+                    "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum rows in this page / streamed chunk (default 200, hard cap 5000)." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },
                     "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 26214400, "description": "Maximum serialized JSON bytes in this page (default 10485760, hard cap 26214400)." },
                     "max_col_width": { "type": "integer", "minimum": 1, "maximum": 1000000, "description": "Compatibility text cap for ordinary text/raw columns. Truncated values are returned as { value, truncated, char_length }." },
@@ -874,7 +875,8 @@ pub fn tool_registry() -> ToolRegistry {
                 json!({
                     "sql": { "type": "string", "description": "A single read-only SELECT. Use :1, :2 ... for binds." },
                     "binds": { "type": "array", "description": "Positional bind values for :1, :2 ...", "items": {} },
-                    "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page." },
+                    "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page (incremental fetch)." },
+                    "streaming": { "type": "boolean", "description": "Deliver the result as an ordered, resumable page `chunks` array instead of one inline page. Over HTTP/SSE each chunk is an SSE `event: chunk` frame. Mutually exclusive with export and as_of. Never affects the read-only classifier." },
                     "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum rows in this page (default 200, hard cap 5000)." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },
                     "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 26214400, "description": "Maximum serialized JSON bytes in this page." },
