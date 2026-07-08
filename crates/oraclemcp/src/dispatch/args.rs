@@ -45,6 +45,29 @@ pub(super) struct QueryArgs {
     /// with `export=true`.
     #[serde(default, alias = "format")]
     pub(super) export_format: Option<String>,
+    /// K9: STRUCTURED flashback / AS-OF read target. The agent passes a NORMAL
+    /// `SELECT` here plus an `as_of` value — never hand-written `AS OF` SQL. The
+    /// base SELECT is proven read-only by the unchanged classifier FIRST; the
+    /// server then bounds the proven query in a `DBMS_FLASHBACK` session window
+    /// (the SCN/timestamp is BOUND, never interpolated). Exactly one of `scn` /
+    /// `timestamp` may be set.
+    #[serde(default)]
+    pub(super) as_of: Option<AsOfArg>,
+}
+
+/// K9: the STRUCTURED flashback target for `oracle_query`. Exactly one of `scn`
+/// or `timestamp` must be set (both-set / neither-set is a typed refusal in the
+/// dispatcher, before any flashback is applied).
+#[derive(Deserialize)]
+pub(super) struct AsOfArg {
+    /// Read as of this system change number (the deterministic form).
+    #[serde(default)]
+    pub(super) scn: Option<u64>,
+    /// Read as of this wall-clock timestamp, `YYYY-MM-DD HH24:MI:SS` (a `T`
+    /// date/time separator is also accepted). Oracle resolves it to the nearest
+    /// SCN (~3s granularity).
+    #[serde(default)]
+    pub(super) timestamp: Option<String>,
 }
 
 #[derive(Deserialize)]

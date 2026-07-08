@@ -359,7 +359,15 @@ pub fn tool_registry() -> ToolRegistry {
                     "max_structured_cells": { "type": "integer", "minimum": 1, "maximum": 100000, "description": "Maximum structured value nodes decoded from one structured cell. Values above the safe default require deep_decode=true." },
                     "max_structured_bytes": { "type": "integer", "minimum": 1, "maximum": 5242880, "description": "Maximum compact JSON bytes decoded from one structured node. Values above the safe default require deep_decode=true." },
                     "max_structured_depth": { "type": "integer", "minimum": 1, "maximum": 32, "description": "Maximum ARRAY/JSON recursion depth decoded inside one structured cell. Values above the safe default require deep_decode=true." },
-                    "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible. Default false preserves Oracle NUMBER losslessly as strings." }
+                    "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible. Default false preserves Oracle NUMBER losslessly as strings." },
+                    "as_of": {
+                        "type": "object",
+                        "description": "Flashback / AS-OF read: run this SELECT against a PAST committed snapshot. Pass a NORMAL SELECT (never hand-written AS OF SQL); the base query is proven read-only first, then bounded in a DBMS_FLASHBACK window (the scn/timestamp is bound, never interpolated). Set exactly one of scn or timestamp. Requires the Oracle FLASHBACK privilege (a missing grant surfaces as ORA-01031).",
+                        "properties": {
+                            "scn": { "type": "integer", "minimum": 1, "description": "System change number to read as of (the deterministic form)." },
+                            "timestamp": { "type": "string", "description": "Wall-clock time to read as of, \"YYYY-MM-DD HH24:MI:SS\" (a T date/time separator is also accepted). Oracle resolves it to the nearest SCN (~3s granularity)." }
+                        }
+                    }
                 }),
                 &[timeout_seconds_prop()],
             ),

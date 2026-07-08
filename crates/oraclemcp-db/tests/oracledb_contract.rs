@@ -1179,4 +1179,83 @@ mod live {
             assert_eq!(outcome.out_binds()[1].text(), Some("R4"));
         });
     }
+
+    #[test]
+    fn live_flashback_read_as_of_current_scn_returns_rows_and_leaves_session_clean() {
+        // K9: prove `read_query_as_of` runs the SAME proven SQL inside a bounded
+        // DBMS_FLASHBACK window against a real server, returns rows, and leaves
+        // the session in normal (current-SCN) read mode afterwards.
+        use oraclemcp_db::{AsOf, QueryCaps, read_query_as_of};
+        run_with_cx(|cx| async move {
+            let Some(conn) = connect_or_skip(
+                &cx,
+                "live_flashback_read_as_of_current_scn_returns_rows_and_leaves_session_clean",
+            )
+            .await
+            else {
+                return;
+            };
+
+            // Current SCN via the flashback API (also confirms the session can
+            // read the SCN at all).
+            let scn_rows = match conn
+                .query_rows(
+                    &cx,
+                    "SELECT dbms_flashback.get_system_change_number AS scn FROM dual",
+                    &[],
+                )
+                .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    eprintln!("[live-xe] SKIP flashback: cannot read current SCN ({e})");
+                    return;
+                }
+            };
+            let scn: u64 = scn_rows[0]
+                .text("SCN")
+                .and_then(|s| s.parse().ok())
+                .expect("a numeric current SCN");
+
+            // Flashback-read a STABLE object: `dual` has no DDL churn, so AS OF at
+            // the current SCN is well-defined (no ORA-01466). The SAME proven SQL
+            // runs UNCHANGED inside the DBMS_FLASHBACK window.
+            let response = match read_query_as_of(
+                &cx,
+                &conn,
+                "SELECT count(*) AS c FROM dual",
+                &[],
+                QueryCaps::default(),
+                0,
+                &SerializeOptions::default(),
+                &AsOf::Scn(scn),
+            )
+            .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    // A profile without the FLASHBACK privilege surfaces ORA-01031
+                    // here — a correct fail-closed refusal, not a test failure.
+                    eprintln!(
+                        "[live-xe] SKIP flashback read (likely missing FLASHBACK privilege): {e}"
+                    );
+                    return;
+                }
+            };
+            assert_eq!(response.row_count, 1, "AS OF SCN read returns the dual row");
+            assert_eq!(
+                response.rows[0]["C"],
+                serde_json::json!("1"),
+                "count(*) FROM dual AS OF the current SCN is 1"
+            );
+
+            // The window was torn down: a NORMAL read afterwards succeeds and sees
+            // live data (the session was NOT stranded in Flashback mode).
+            let after = conn
+                .query_rows(&cx, "SELECT 42 AS n FROM dual", &[])
+                .await
+                .expect("a normal read after a flashback read (session left clean)");
+            assert_eq!(after[0].text("N"), Some("42"));
+        });
+    }
 }

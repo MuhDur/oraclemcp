@@ -181,6 +181,21 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
+                "as_of": {
+                  "description": "Flashback / AS-OF read: run this SELECT against a PAST committed snapshot. Pass a NORMAL SELECT (never hand-written AS OF SQL); the base query is proven read-only first, then bounded in a DBMS_FLASHBACK window (the scn/timestamp is bound, never interpolated). Set exactly one of scn or timestamp. Requires the Oracle FLASHBACK privilege (a missing grant surfaces as ORA-01031).",
+                  "properties": {
+                    "scn": {
+                      "description": "System change number to read as of (the deterministic form).",
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "timestamp": {
+                      "description": "Wall-clock time to read as of, \"YYYY-MM-DD HH24:MI:SS\" (a T date/time separator is also accepted). Oracle resolves it to the nearest SCN (~3s granularity).",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
                 "binds": {
                   "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
                   "items": {},

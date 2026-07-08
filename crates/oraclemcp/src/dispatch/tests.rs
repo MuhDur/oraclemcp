@@ -2909,6 +2909,135 @@ fn read_only_select_passes_the_gate() {
     assert!(out.is_object());
 }
 
+// =======================================================================
+// K9 — flashback / AS-OF read mode (STRUCTURED `as_of`)
+//
+// Safety contract: the base SELECT is proven read-only by the UNCHANGED
+// classifier FIRST; only then is the proven query bounded in a DBMS_FLASHBACK
+// window. `as_of` never enters the classifier input or the SQL text.
+// =======================================================================
+
+#[test]
+fn as_of_never_enters_the_classifier_input_so_the_base_decision_is_byte_identical() {
+    // `as_of` deserializes into its OWN field; it never touches `sql`. So the
+    // exact text the dispatcher marks + classifies is the SAME base SELECT with
+    // or without `as_of`, and therefore so is the GuardDecision (byte-identical).
+    let base = "SELECT count(*) AS c FROM app.t WHERE id = :1";
+    let args_without: QueryArgs = serde_json::from_value(json!({ "sql": base })).expect("args");
+    let args_with: QueryArgs =
+        serde_json::from_value(json!({ "sql": base, "as_of": { "scn": 42 } })).expect("args");
+    assert!(args_without.as_of.is_none());
+    assert!(args_with.as_of.is_some(), "as_of parses into its own field");
+    assert_eq!(
+        args_without.sql, args_with.sql,
+        "the SELECT text is untouched by as_of"
+    );
+
+    let marked_without = with_audit_marker(&args_without.sql, None, "oracle_query");
+    let marked_with = with_audit_marker(&args_with.sql, None, "oracle_query");
+    assert_eq!(
+        marked_without, marked_with,
+        "the classifier input is identical with and without as_of"
+    );
+    let decision_without: GuardDecision = DEFAULT_CLASSIFIER.classify(&marked_without);
+    let decision_with: GuardDecision = DEFAULT_CLASSIFIER.classify(&marked_with);
+    assert_eq!(
+        decision_without, decision_with,
+        "the base SELECT classifies to a byte-identical GuardDecision"
+    );
+    assert_eq!(
+        decision_without.required_level,
+        Some(OperatingLevel::ReadOnly),
+        "the base SELECT is proven read-only"
+    );
+}
+
+#[test]
+fn non_read_base_is_refused_before_any_flashback_or_db_io() {
+    // NoExecMock panics on any query/execute — so reaching the assertions proves
+    // the refusal happened BEFORE any DBMS_FLASHBACK ENABLE or DB round trip.
+    // The refusal is DERIVED from the GuardDecision on the classified text; a
+    // byte-identical refusal with and without `as_of` proves the classifier saw
+    // the SAME base SELECT (the flashback target is applied AFTER, never fused
+    // into the classified SQL).
+    let dispatcher = OracleDispatcher::new(Box::new(NoExecMock));
+    for base in [
+        "UPDATE app.t SET x = 1",
+        "SELECT * FROM app.t FOR UPDATE",
+        "DELETE FROM app.t",
+    ] {
+        let without = dispatcher
+            .dispatch("oracle_query", json!({ "sql": base }))
+            .expect_err("non-read base is refused");
+        let with_as_of = dispatcher
+            .dispatch(
+                "oracle_query",
+                json!({ "sql": base, "as_of": { "scn": 9_000_000 } }),
+            )
+            .expect_err("non-read base is refused even with a valid as_of");
+        assert_eq!(
+            without.error_class, with_as_of.error_class,
+            "{base}: refusal class identical with/without as_of"
+        );
+        assert_eq!(
+            without.message, with_as_of.message,
+            "{base}: byte-identical refusal message with/without as_of"
+        );
+        assert!(
+            matches!(
+                without.error_class,
+                ErrorClass::ForbiddenStatement | ErrorClass::OperatingLevelTooLow
+            ),
+            "{base} -> unexpected class {:?}",
+            without.error_class
+        );
+    }
+}
+
+#[test]
+fn as_of_with_both_scn_and_timestamp_is_rejected_before_db_io() {
+    // NoExecMock never runs; a both-set / empty as_of is a structural refusal
+    // returned before classification even completes.
+    let dispatcher = OracleDispatcher::new(Box::new(NoExecMock));
+    let both = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({
+                "sql": "SELECT 1 FROM dual",
+                "as_of": { "scn": 100, "timestamp": "2026-07-08 10:00:00" }
+            }),
+        )
+        .expect_err("both scn and timestamp set is invalid");
+    assert_eq!(both.error_class, ErrorClass::InvalidArguments);
+
+    let empty = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({ "sql": "SELECT 1 FROM dual", "as_of": {} }),
+        )
+        .expect_err("an empty as_of (neither scn nor timestamp) is invalid");
+    assert_eq!(empty.error_class, ErrorClass::InvalidArguments);
+}
+
+#[test]
+fn read_base_with_as_of_dispatches_through_the_flashback_wrapper() {
+    // A proven read + as_of runs end-to-end through `read_query_as_of` against a
+    // mock that accepts the DBMS_FLASHBACK enable/disable executes and returns
+    // rows — the happy path is wired and returns a normal query response.
+    let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+    let out = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({ "sql": "SELECT count(*) AS c FROM app.t", "as_of": { "scn": 9_000_000 } }),
+        )
+        .expect("a proven read with as_of runs inside the flashback window");
+    assert!(out.is_object());
+    assert!(
+        out.get("rows").is_some(),
+        "returns a normal, inline query response"
+    );
+}
+
 #[test]
 fn preview_sql_reports_read_only_gate_decision_without_running_sql() {
     let dispatcher = OracleDispatcher::new(Box::new(NoExecMock));

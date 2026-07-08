@@ -32,14 +32,14 @@ use oraclemcp_core::{
 };
 use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
-    DbError, DbmsOutput, DependentObject, DependentsProbe, OracleBackend, OracleBind,
+    AsOf, DbError, DbmsOutput, DependentObject, DependentsProbe, OracleBackend, OracleBind,
     OracleConnection, OracleConnectionInfo, OracleRow, QuarantineOutcome, QueryCaps,
     SerializeOptions, StructuredDecodeCaps, compile_errors, compile_object_statements,
     describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
     execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl, get_source,
     get_sources_by_name, list_objects, list_schemas, plan_cost_estimate, plscope_identifiers,
-    plscope_statements, probe_dependents, read_lob, read_query, read_query_named, sample_rows,
-    search_objects, search_source, serialize_row,
+    plscope_statements, probe_dependents, read_lob, read_query, read_query_as_of, read_query_named,
+    sample_rows, search_objects, search_source, serialize_row,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope, ReasonCategory, StructuredReason};
 use oraclemcp_guard::{
@@ -766,6 +766,34 @@ fn optional_row_to_json(row: Option<&oraclemcp_db::OracleRow>) -> Value {
     row.map(|r| serialize_row(r, &opts)).unwrap_or(Value::Null)
 }
 
+/// K9: validate the STRUCTURED `as_of` argument and translate it into a
+/// [`oraclemcp_db::AsOf`] flashback target. Exactly one of `scn` / `timestamp`
+/// must be set; both-set, or an empty `{}` (neither set), is a hard
+/// `InvalidArguments` refusal returned BEFORE any classification or I/O. The
+/// value never enters the classifier input (the base SELECT is classified
+/// unchanged) and never enters SQL text (it is bound at execution).
+fn query_as_of_from_args(arg: Option<&AsOfArg>) -> Result<Option<AsOf>, ErrorEnvelope> {
+    let Some(arg) = arg else {
+        return Ok(None);
+    };
+    let timestamp = arg
+        .timestamp
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match (arg.scn, timestamp) {
+        (Some(_), Some(_)) => Err(invalid_args(
+            "as_of accepts exactly one of `scn` or `timestamp`, not both",
+        )),
+        (None, None) => Err(invalid_args(
+            "as_of requires one of `scn` (a system change number) or `timestamp` \
+             (\"YYYY-MM-DD HH24:MI:SS\")",
+        )),
+        (Some(scn), None) => Ok(Some(AsOf::Scn(scn))),
+        (None, Some(ts)) => Ok(Some(AsOf::Timestamp(ts.to_owned()))),
+    }
+}
+
 fn query_caps_from_args(args: &QueryArgs) -> QueryCaps {
     let defaults = QueryCaps::default();
     QueryCaps {
@@ -945,6 +973,7 @@ async fn export_query_to_resource(
     active_profile: Option<&str>,
     export_scopes: Option<&[String]>,
     exports: Option<&oraclemcp_core::ExportRegistry>,
+    as_of: Option<&AsOf>,
 ) -> Result<Value, ErrorEnvelope> {
     let format = oraclemcp_core::ExportFormat::parse(a.export_format.as_deref())
         .ok_or_else(|| invalid_args("export_format must be \"csv\" or \"json\""))?;
@@ -962,16 +991,25 @@ async fn export_query_to_resource(
         max_rows: MAX_QUERY_EXPORT_ROWS,
         max_result_bytes: oraclemcp_core::export::MAX_EXPORT_BYTES,
     };
-    let response = read_query(
-        cx,
-        conn,
-        executed_sql,
-        binds,
-        caps,
-        offset,
-        &query_serialize_options_from_args(a),
-    )
-    .await
+    let serialize_opts = query_serialize_options_from_args(a);
+    // K9: an export honors the flashback target too — the SAME proven SQL is
+    // materialized as of the requested snapshot.
+    let response = match as_of {
+        Some(as_of) => {
+            read_query_as_of(
+                cx,
+                conn,
+                executed_sql,
+                binds,
+                caps,
+                offset,
+                &serialize_opts,
+                as_of,
+            )
+            .await
+        }
+        None => read_query(cx, conn, executed_sql, binds, caps, offset, &serialize_opts).await,
+    }
     .map_err(DbError::into_envelope)?;
     let response_value = serde_json::to_value(&response).unwrap_or(Value::Null);
     let more_rows = response.truncated;
@@ -5115,6 +5153,10 @@ struct QueryPrepared {
     executed_sql: String,
     /// The read-only gate verdict for `executed_sql`, computed once.
     gate: Result<(), ErrorEnvelope>,
+    /// K9: the validated flashback target (if any). It is NOT part of the
+    /// classifier input or the executed SQL text — the proven `executed_sql`
+    /// runs unchanged inside a `DBMS_FLASHBACK` session window when this is set.
+    as_of: Option<AsOf>,
 }
 
 impl OracleDispatcher {
@@ -5595,6 +5637,12 @@ impl OracleDispatcher {
         if tool == "oracle_query" {
             let prepared = {
                 let parsed = parse_args::<QueryArgs>(name, args)?;
+                // K9: validate the STRUCTURED as_of one-of and build the
+                // flashback target BEFORE any classification or I/O (both-set /
+                // empty -> typed refusal). The base SELECT below is classified
+                // UNCHANGED — as_of never enters the classifier input, it only
+                // selects WHICH committed snapshot the proven read observes.
+                let as_of = query_as_of_from_args(parsed.as_of.as_ref())?;
                 let executed_sql =
                     with_audit_marker(&parsed.sql, state.active_profile.as_deref(), "oracle_query");
                 let gate = ensure_read_only(&executed_sql);
@@ -5602,6 +5650,7 @@ impl OracleDispatcher {
                     args: parsed,
                     executed_sql,
                     gate,
+                    as_of,
                 }
             };
 
@@ -5618,18 +5667,32 @@ impl OracleDispatcher {
             // reuses the same verdict to surface the identical structured
             // refusal. The arm uses a disjoint &mut split of the guard's fields.
             if prepared.gate.is_ok() {
-                let DispatcherState {
-                    conn,
-                    read_only_backstop,
-                    ..
-                } = &mut *state;
-                // Consult the effective level that governs THIS request
-                // (scoped_level folds in any OAuth scope, which can only LOWER
-                // the level — so this arms at least as often as the unscoped
-                // level, never less).
-                read_only_backstop
-                    .ensure_armed(cx, conn.as_ref(), &scoped_level)
-                    .await?;
+                if prepared.as_of.is_some() {
+                    // K9: a flashback read cannot coexist with the SET
+                    // TRANSACTION READ ONLY backstop — Oracle refuses
+                    // DBMS_FLASHBACK.ENABLE inside a transaction (ORA-08183,
+                    // verified live). The flashback wrapper (`read_query_as_of`)
+                    // owns the session snapshot, and Oracle itself refuses DML
+                    // while flashback is enabled, so layer B is preserved by a
+                    // different DB mechanism. Reset the belief so the NEXT
+                    // non-flashback read re-arms SET TRANSACTION READ ONLY on a
+                    // fresh transaction (the wrapper rolls back the session, so
+                    // any previously-armed read-only transaction is gone).
+                    state.read_only_backstop.disarm();
+                } else {
+                    let DispatcherState {
+                        conn,
+                        read_only_backstop,
+                        ..
+                    } = &mut *state;
+                    // Consult the effective level that governs THIS request
+                    // (scoped_level folds in any OAuth scope, which can only
+                    // LOWER the level — so this arms at least as often as the
+                    // unscoped level, never less).
+                    read_only_backstop
+                        .ensure_armed(cx, conn.as_ref(), &scoped_level)
+                        .await?;
+                }
             }
 
             let active_profile = state.active_profile.clone();
@@ -6362,6 +6425,7 @@ impl OracleDispatcher {
             args: a,
             executed_sql,
             gate,
+            as_of,
         } = prepared;
         let timeout_seconds = a.timeout_seconds;
         let exports = self.exports.clone();
@@ -6402,22 +6466,45 @@ impl OracleDispatcher {
                     active_profile.as_deref(),
                     export_scopes.as_deref(),
                     exports.as_deref(),
+                    as_of.as_ref(),
                 )
                 .await;
             }
-            read_query(
-                cx,
-                conn,
-                &executed_sql,
-                &binds,
-                query_caps_from_args(&a),
-                offset,
-                &query_serialize_options_from_args(&a),
-            )
-            .await
-            .map(|resp| serde_json::to_value(resp).unwrap_or(Value::Null))
-            .map(|resp| reseal_query_cursor(resp, &a.sql, active_profile.as_deref()))
-            .map_err(DbError::into_envelope)
+            // K9: when a flashback target is set, run the SAME proven SQL inside
+            // a bounded DBMS_FLASHBACK window (`read_query_as_of`); otherwise the
+            // plain read path. Both take the identical proven `executed_sql`.
+            let caps = query_caps_from_args(&a);
+            let serialize_opts = query_serialize_options_from_args(&a);
+            let read = match as_of.as_ref() {
+                Some(as_of) => {
+                    read_query_as_of(
+                        cx,
+                        conn,
+                        &executed_sql,
+                        &binds,
+                        caps,
+                        offset,
+                        &serialize_opts,
+                        as_of,
+                    )
+                    .await
+                }
+                None => {
+                    read_query(
+                        cx,
+                        conn,
+                        &executed_sql,
+                        &binds,
+                        caps,
+                        offset,
+                        &serialize_opts,
+                    )
+                    .await
+                }
+            };
+            read.map(|resp| serde_json::to_value(resp).unwrap_or(Value::Null))
+                .map(|resp| reseal_query_cursor(resp, &a.sql, active_profile.as_deref()))
+                .map_err(DbError::into_envelope)
         })
         .await
     }

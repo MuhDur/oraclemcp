@@ -127,7 +127,8 @@ pub use privileges::{
     probe_write_posture, requirement_matrix,
 };
 pub use query::{
-    QueryCaps, QueryResponse, cursor_to_offset, paginated_sql, read_query, read_query_named,
+    AsOf, QueryCaps, QueryResponse, cursor_to_offset, paginated_sql, read_query, read_query_as_of,
+    read_query_named,
 };
 pub use schema_diff::{
     ChangeKind, MigrationStep, SchemaDiff, SchemaObject, SchemaSnapshot, StepKind, compare_schemas,

@@ -438,6 +438,23 @@ pub trait OracleConnection: Send + Sync {
     /// Roll back the current transaction on this session.
     async fn rollback(&self, cx: &Cx) -> Result<(), DbError>;
 
+    /// Tear down any `DBMS_FLASHBACK` session read-snapshot window (K9).
+    ///
+    /// This is **cleanup**: like [`OracleConnection::rollback`], the primary
+    /// backend issues it WITHOUT an adapter-level pre-checkpoint, so a cancelled
+    /// flashback read still reaches the driver and leaves the pinned session in
+    /// normal (current-SCN) read mode — never stranded reading a stale snapshot.
+    /// `DBMS_FLASHBACK.DISABLE` is idempotent (a no-op when flashback is not
+    /// enabled), so this is safe to call unconditionally. The default impl runs
+    /// it through [`OracleConnection::execute`]; backends that pre-checkpoint
+    /// `execute` should override this to skip that checkpoint (cleanup must not
+    /// be skipped on cancellation).
+    async fn flashback_disable(&self, cx: &Cx) -> Result<(), DbError> {
+        self.execute(cx, DBMS_FLASHBACK_DISABLE, &[] as &[OracleBind])
+            .await
+            .map(|_| ())
+    }
+
     /// Run a query expecting at most one row.
     async fn query_optional_row(
         &self,
@@ -448,6 +465,11 @@ pub trait OracleConnection: Send + Sync {
         Ok(self.query_rows(cx, sql, binds).await?.into_iter().next())
     }
 }
+
+/// The idempotent teardown for a `DBMS_FLASHBACK` session read-snapshot window
+/// (K9). A no-op when flashback is not enabled, so it is safe to call
+/// unconditionally as cleanup.
+const DBMS_FLASHBACK_DISABLE: &str = "BEGIN DBMS_FLASHBACK.DISABLE; END;";
 
 /// Thin pure-Rust Oracle connection wrapper over the native-async
 /// [`oracledb::Connection`] (B1).
@@ -4067,6 +4089,29 @@ mod driver {
                 .rollback(cx)
                 .await
                 .map_err(|err| DbError::Execute(sanitize_driver_error(err, &self.opts)))
+        }
+
+        async fn flashback_disable(&self, cx: &Cx) -> Result<(), DbError> {
+            // Cleanup, exactly like `rollback`: NO adapter-level pre-checkpoint,
+            // so a cancelled flashback read still reaches the driver and tears
+            // the `DBMS_FLASHBACK` window down (the default `execute`-based impl
+            // would pre-checkpoint and, under cancellation, skip the DISABLE —
+            // leaving the pinned session reading a stale snapshot). The wire
+            // round trip stays bounded by the configured Oracle call timeout.
+            let timeout = self.timeout_ms()?;
+            let mut inner = self.lock_inner(cx).await?;
+            execute_with_timeout(
+                cx,
+                &mut inner,
+                super::DBMS_FLASHBACK_DISABLE,
+                0,
+                &[],
+                timeout,
+                &self.opts,
+                "flashback_disable",
+            )
+            .await
+            .map(|_| ())
         }
     }
 }

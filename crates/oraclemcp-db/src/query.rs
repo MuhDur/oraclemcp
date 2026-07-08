@@ -122,6 +122,106 @@ pub async fn read_query_named(
     query_response_from_rows_checked(cx, rows, caps, offset, serialize_opts)
 }
 
+/// A point-in-time flashback target for a *proven-read* query (K9).
+///
+/// The base `SELECT` is classified read-only by the UNCHANGED guard classifier
+/// **before** any flashback is applied; a flashback read only changes WHICH
+/// committed snapshot is read, never read-vs-write, so no new proof obligation
+/// arises and the prover is never handed flashback SQL. The SCN / timestamp is
+/// always carried as a **bind** to the `DBMS_FLASHBACK` call — never
+/// interpolated into SQL text (no injection through the value).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AsOf {
+    /// Read as of a system change number (the deterministic form).
+    Scn(u64),
+    /// Read as of a wall-clock timestamp `YYYY-MM-DD HH24:MI:SS` (a leading `T`
+    /// date/time separator is accepted and normalized to a space). Oracle
+    /// resolves the timestamp to the nearest SCN (~3s granularity).
+    Timestamp(String),
+}
+
+impl AsOf {
+    /// The `DBMS_FLASHBACK.ENABLE_*` anonymous PL/SQL block and its single bound
+    /// argument. The SCN/timestamp is the ONLY value and it is a positional bind
+    /// (`:1`) against a FIXED template, so the value can never be interpolated or
+    /// injected into the SQL text.
+    fn enable_call(&self) -> (&'static str, OracleBind) {
+        match self {
+            AsOf::Scn(scn) => (
+                "BEGIN DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;",
+                // SCNs are ~48-bit, comfortably inside i64. A hypothetical
+                // overflow saturates to i64::MAX, which Oracle rejects as a
+                // future SCN (fail-closed) — it never silently reads a wrong
+                // snapshot.
+                OracleBind::I64(i64::try_from(*scn).unwrap_or(i64::MAX)),
+            ),
+            AsOf::Timestamp(ts) => (
+                "BEGIN DBMS_FLASHBACK.ENABLE_AT_TIME(TO_TIMESTAMP(:1, 'YYYY-MM-DD HH24:MI:SS')); END;",
+                OracleBind::String(ts.trim().replacen('T', " ", 1)),
+            ),
+        }
+    }
+}
+
+/// Execute a proven-read query as of a past SCN/timestamp by bounding it in a
+/// session-level `DBMS_FLASHBACK` window (K9).
+///
+/// The `sql` handed here is the SAME already-classified read-only statement the
+/// non-flashback path runs — it is executed **unchanged** (no per-table `AS OF`
+/// rewrite). The flashback target is set on the SESSION via
+/// `DBMS_FLASHBACK.ENABLE_*` (the SCN/timestamp **bound**, never interpolated),
+/// the proven query runs, and the window is ALWAYS torn down.
+///
+/// Session-mode contract (verified live against 23ai): Oracle refuses to enable
+/// flashback inside a transaction (`ORA-08183`), so this rolls back first — that
+/// is why the A1 `SET TRANSACTION READ ONLY` backstop is not armed on this path
+/// (the dispatcher resets its belief). While flashback is enabled the session
+/// itself refuses DML, so defense-in-depth is preserved by a different DB
+/// mechanism. `DBMS_FLASHBACK.DISABLE` runs even if the read is cancelled (see
+/// [`OracleConnection::flashback_disable`]) so the pinned session is never left
+/// stranded reading a stale snapshot.
+#[allow(clippy::too_many_arguments)]
+pub async fn read_query_as_of(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    sql: &str,
+    binds: &[OracleBind],
+    caps: QueryCaps,
+    offset: usize,
+    serialize_opts: &SerializeOptions,
+    as_of: &AsOf,
+) -> Result<QueryResponse, DbError> {
+    // ORA-08183: ENABLE must not run inside a transaction. Clear any open
+    // (startup / metadata / read-only-backstop) transaction first.
+    conn.rollback(cx).await?;
+    // Defensive: clear any flashback window leaked by a prior aborted call so
+    // ENABLE cannot hit ORA-08184 ("re-enable while in Flashback mode").
+    conn.flashback_disable(cx).await?;
+
+    let (enable_sql, bind) = as_of.enable_call();
+    // Set the session read snapshot. A failure here (e.g. ORA-01031 missing
+    // FLASHBACK privilege, ORA-08180 no snapshot at that SCN) is surfaced
+    // fail-closed; flashback was NOT enabled, so no window is left open.
+    conn.execute(cx, enable_sql, std::slice::from_ref(&bind))
+        .await?;
+
+    // Flashback is now active: guarantee teardown regardless of the read
+    // outcome. Capture the result WITHOUT `?` so the window is always closed.
+    let read = read_query(cx, conn, sql, binds, caps, offset, serialize_opts).await;
+    let disable = conn.flashback_disable(cx).await;
+    // End the flashback read transaction so the next statement starts clean.
+    let _ = conn.rollback(cx).await;
+
+    match (read, disable) {
+        (Ok(response), Ok(())) => Ok(response),
+        // The read error is the primary signal.
+        (Err(read_err), _) => Err(read_err),
+        // Read succeeded but the session could not leave Flashback mode — surface
+        // it: a silently-flashback session would serve stale data to later reads.
+        (Ok(_), Err(disable_err)) => Err(disable_err),
+    }
+}
+
 fn query_response_from_rows_checked<Caps>(
     cx: &Cx<Caps>,
     rows: Vec<crate::types::OracleRow>,
@@ -453,5 +553,169 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ===================================================================
+    // K9 — flashback / AS-OF read mode
+    // ===================================================================
+
+    /// Records the ORDER of session operations (rollback / execute-with-SQL /
+    /// query) so the flashback wrapper's rollback→disable→enable→read→disable
+    /// discipline is observable, and optionally fails the read to prove the
+    /// window is still torn down.
+    #[derive(Default)]
+    struct FlashbackRecorder {
+        events: std::sync::Mutex<Vec<String>>,
+        fail_read: bool,
+    }
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for FlashbackRecorder {
+        fn backend(&self) -> crate::types::OracleBackend {
+            crate::types::OracleBackend::RustOracle
+        }
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _b: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.events.lock().expect("events").push("query".to_owned());
+            if self.fail_read {
+                return Err(DbError::Query("boom".to_owned()));
+            }
+            Ok(vec![OracleRow {
+                columns: vec![(
+                    "C".to_owned(),
+                    OracleCell::new("NUMBER", Some("1".to_owned())),
+                )],
+            }])
+        }
+        async fn execute(&self, _cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
+            self.events
+                .lock()
+                .expect("events")
+                .push(format!("exec[{}]:{sql}", binds.len()));
+            Ok(0)
+        }
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            self.events
+                .lock()
+                .expect("events")
+                .push("rollback".to_owned());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn as_of_scn_binds_the_scn_and_never_interpolates_it() {
+        let (sql, bind) = AsOf::Scn(9_031_816).enable_call();
+        assert_eq!(
+            sql,
+            "BEGIN DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;"
+        );
+        assert!(sql.contains(":1"), "the scn is a positional bind");
+        assert!(
+            !sql.contains("9031816"),
+            "the scn value never appears in the SQL text (bound, not interpolated)"
+        );
+        assert_eq!(bind, OracleBind::I64(9_031_816));
+    }
+
+    #[test]
+    fn as_of_timestamp_binds_a_normalized_string_and_never_interpolates_it() {
+        let (sql, bind) = AsOf::Timestamp("2026-07-08T10:11:12".to_owned()).enable_call();
+        assert_eq!(
+            sql,
+            "BEGIN DBMS_FLASHBACK.ENABLE_AT_TIME(TO_TIMESTAMP(:1, 'YYYY-MM-DD HH24:MI:SS')); END;"
+        );
+        assert!(
+            !sql.contains("2026"),
+            "the timestamp value never appears in the SQL text (bound, not interpolated)"
+        );
+        // The `T` date/time separator is normalized to a space; the value is BOUND.
+        assert_eq!(bind, OracleBind::String("2026-07-08 10:11:12".to_owned()));
+    }
+
+    #[test]
+    fn read_query_as_of_brackets_the_proven_read_with_enable_disable() {
+        let conn = FlashbackRecorder::default();
+        let events = run_with_cx(|cx| async move {
+            read_query_as_of(
+                &cx,
+                &conn,
+                "SELECT count(*) AS c FROM t",
+                &[],
+                QueryCaps::default(),
+                0,
+                &SerializeOptions::default(),
+                &AsOf::Scn(4242),
+            )
+            .await
+            .expect("flashback read");
+            conn.events.into_inner().expect("events")
+        });
+        // rollback(pre) → defensive DISABLE → ENABLE(:1) → query → DISABLE → rollback
+        assert_eq!(
+            events,
+            vec![
+                "rollback".to_owned(),
+                "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
+                "exec[1]:BEGIN DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;".to_owned(),
+                "query".to_owned(),
+                "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
+                "rollback".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn read_query_as_of_disables_even_when_the_read_fails() {
+        let conn = FlashbackRecorder {
+            fail_read: true,
+            ..Default::default()
+        };
+        let (err, events) = run_with_cx(|cx| async move {
+            let err = read_query_as_of(
+                &cx,
+                &conn,
+                "SELECT 1 FROM t",
+                &[],
+                QueryCaps::default(),
+                0,
+                &SerializeOptions::default(),
+                &AsOf::Timestamp("2026-01-01 00:00:00".to_owned()),
+            )
+            .await
+            .expect_err("read fails");
+            (err, conn.events.into_inner().expect("events"))
+        });
+        assert!(
+            matches!(err, DbError::Query(_)),
+            "the read error is the surfaced signal: {err:?}"
+        );
+        // The window is torn down AFTER the failed read: DISABLE + rollback follow "query".
+        let after_query: Vec<_> = events
+            .iter()
+            .skip_while(|e| *e != "query")
+            .cloned()
+            .collect();
+        assert_eq!(
+            after_query,
+            vec![
+                "query".to_owned(),
+                "exec[0]:BEGIN DBMS_FLASHBACK.DISABLE; END;".to_owned(),
+                "rollback".to_owned(),
+            ],
+            "flashback is disabled and the read transaction ended even when the read errors"
+        );
     }
 }
