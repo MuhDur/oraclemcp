@@ -152,6 +152,8 @@ field is unset after inheritance.
 |---|---|---|---|---|
 | `call_timeout_seconds` | integer | `30` | no | Oracle call timeout and total request-budget ceiling, in seconds. Omit for the 30s default. Set `0` only to disable the driver call timeout deliberately; `doctor` warns. Tools exposing `timeout_seconds` can tighten the budget for one call but cannot loosen the profile ceiling. |
 | `connect_timeout_seconds` | integer | driver default `20` | no | Oracle Net transport connect timeout, in seconds. Bounds TCP/TLS/TNS connect and authentication reads before a session exists by passing `transport_connect_timeout` to the thin driver. Omit for the 20s driver default. Set a positive value to override; `0` is ignored by the driver and `doctor` warns. |
+| `inactivity_timeout_seconds` | integer | none | no | Per-read inactivity deadline on an established session. Omit to keep the driver's default read behavior. Set a positive value to bound silent or half-open sessions; `0` is treated as unset and `doctor` warns. |
+| `keepalive_minutes` | integer | none | no | Oracle dead-connection-detection probe interval (`EXPIRE_TIME`), in minutes. Omit to disable probes. Set a positive value to request keepalive probes; `0` is treated as unset and `doctor` warns. |
 | `sdu` | integer | none | no | Thin Session Data Unit request size. Validated as `512..=65535`; omit to keep the negotiated default. |
 | `login_script` | path | none | no | Path to a login script run on lease acquire. Restricted to allowlisted `ALTER SESSION SET …` parameters. |
 | `login_statements` | array of strings | none | no | Inline login statements (allowlist-validated `ALTER SESSION SET …`). |
@@ -178,10 +180,11 @@ field is unset after inheritance.
 | `ssl_server_dn_match` | bool | none (driver default) | Override server-certificate DN matching. |
 | `ssl_server_cert_dn` | string | none | Exact expected server-certificate DN. |
 | `use_sni` | bool | none (driver default) | Override TCPS SNI behavior. |
-| `use_iam_token` | bool | `false` | Authenticate with an OCI IAM database token. When set, a pre-fetched token (a JWT) is resolved at connect time from `token_env`/`token_file` (or the built-in `ORACLEMCP_IAM_TOKEN`) and injected over TCPS — see [Auth modes](#auth-modes). |
+| `use_iam_token` | bool | `false` | Authenticate with an OCI IAM database token. When set, a pre-fetched token (a JWT) is resolved at connect time from `token_env`/`token_file`/`token_exec` (or the built-in `ORACLEMCP_IAM_TOKEN`) and injected over TCPS — see [Auth modes](#auth-modes). |
 | `iam_config_profile` | string | none | `~/.oci/config` profile name for the IAM token. Parses; inert today (reserved for a future OCI-SDK token source). |
 | `token_env` | string | none | Name of an environment variable holding the pre-fetched IAM token (a *reference*, not the token). When unset, the built-in `ORACLEMCP_IAM_TOKEN` is read. Resolved fresh on every connect; never persisted or logged. |
 | `token_file` | string | none | Path to a file holding the pre-fetched IAM token, **re-read on every connect** so a rotated token is picked up without a restart. Takes precedence over `token_env`. A *reference* (path), never the token value. |
+| `token_exec` | array of strings | none | Command argv used to fetch a pre-fetched IAM token from stdout. Mutually exclusive with `token_env` and `token_file`. The command is run directly with no shell, has a timeout and output cap, and is refused before spawn on non-TCPS connections. A *reference* (command argv), never the token value. |
 
 #### `[profiles.drcp]`
 
@@ -336,7 +339,7 @@ hatch only and is rejected when `protected = true`. Supported forms:
 |---|---|---|
 | **Password** | `username` + `credential_ref` (for example `env:`, `file:`, `keyring:`; `literal:` dev-only). | Supported. |
 | **Wallet / TCPS (TLS/mTLS)** | `[profiles.oci]` `wallet_location`, `ssl_server_dn_match`, `ssl_server_cert_dn`, `use_sni`; or a `tcps://…` / TLS-descriptor `connect_string`. The default build loads `ewallet.pem`; `cwallet.sso` and standalone `ewallet.p12` are recognized and reported with structured wallet diagnostics instead of a silent fallback. | `ewallet.pem` supported; other recognized wallet formats are diagnostic-only in the default build. |
-| **OCI IAM database token** | `[profiles.oci]` `use_iam_token = true` + a token source (`token_env` / `token_file`, or the built-in `ORACLEMCP_IAM_TOKEN`). | Simple env/file token sources supported over TCPS (beta); an autonomous OCI-SDK token source is not yet wired — see below. |
+| **OCI IAM database token** | `[profiles.oci]` `use_iam_token = true` + a token source (`token_env` / `token_file` / `token_exec`, or the built-in `ORACLEMCP_IAM_TOKEN`). | Simple env/file/exec token sources supported over TCPS (beta); an autonomous OCI-SDK token source is not yet wired — see below. |
 | **Proxy** | `[profiles.proxy_auth]` `proxy_user` + `target_schema`; `credential_ref` belongs to `proxy_user`. Needs `ALTER USER <target_schema> GRANT CONNECT THROUGH <proxy_user>`. | Supported. |
 | **DRCP routing** | `[profiles.drcp]` `pooled` / `connection_class` / `purity`. | Supported (server routing; orthogonal to auth). |
 | **External/wallet-only (no user/pass), Kerberos, RADIUS** | — | Unsupported; reported with a structured unsupported-auth diagnostic (never a silent fallback). |
@@ -344,23 +347,27 @@ hatch only and is rejected when `protected = true`. Supported forms:
 ### OCI IAM database-token status
 
 With `use_iam_token = true` under `[profiles.oci]`, the server resolves a
-**pre-fetched** database token (a JWT) at connect time from ONE of two SIMPLE
-sources and injects it via the driver's `ConnectOptions::with_access_token`
+**pre-fetched** database token (a JWT) at connect time from one simple source
+and injects it via the driver's `ConnectOptions::with_access_token`
 (sent as `AUTH_TOKEN`, TCPS-enforced):
 
 - **`token_file`** — a file holding the token; **re-read on every connect** so a
   rotated token is picked up without a restart (takes precedence).
 - **`token_env`** — an environment variable holding the token; when unset, the
   built-in **`ORACLEMCP_IAM_TOKEN`** variable is read.
+- **`token_exec`** — an argv array that prints the token to stdout. It is
+  executed directly with no shell interpretation, has a timeout and stdout cap,
+  and is refused before spawn on non-TCPS connections.
 
-The token is a **reference**: only the env-var name / file path lives in config,
-and the token value is resolved transiently, never persisted, rendered, or
-logged. An empty or missing token is a typed, fail-closed error. Any token is
-**refused over a non-TCPS transport** before it reaches the driver — a token must
-never travel in clear text (defense in depth; the driver also rejects it). The
-`doctor` `IAM token` check reads the JWT `exp` claim (diagnostic only, no
-signature validation) and **warns when the token is expired or within 5 minutes
-of expiry** — never printing the token.
+The token is a **reference**: only the env-var name, file path, or command argv
+lives in config, and the token value is resolved transiently, never persisted,
+rendered, or logged. An empty or missing token is a typed, fail-closed error.
+Any token is **refused over a non-TCPS transport** before it reaches the driver
+or before `token_exec` can spawn — a token must never travel in clear text
+(defense in depth; the driver also rejects it). The `doctor` `IAM token` check
+reads the JWT `exp` claim (diagnostic only, no signature validation) and
+**warns when the token is expired or within 5 minutes of expiry** — never
+printing the token.
 
 `iam_config_profile` still only **parses** (inert), reserved for a future
 autonomous OCI-SDK token source that mints/refreshes tokens from an instance

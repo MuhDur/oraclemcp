@@ -68,6 +68,11 @@ Re-running the same one-liner is the update path. Re-running the same verified
 archive is a no-op for identical installed files; re-running with a newer target
 updates atomically after backing up the previous binary. A downgrade is refused unless you pass `--force`.
 
+Release 0.8.0 operator notes:
+[`docs/upgrading-to-0.8.0.md`](docs/upgrading-to-0.8.0.md),
+[`docs/downgrading-0.8.0-to-0.7.2.md`](docs/downgrading-0.8.0-to-0.7.2.md),
+and [`docs/feature-rollout-0.8.0.md`](docs/feature-rollout-0.8.0.md).
+
 Use the dry-run command first when you want a preview: it prints the archive,
 verification inputs, files, service plan, client-registration plan, and
 installer lock path, then exits before downloading, verifying, writing files, or

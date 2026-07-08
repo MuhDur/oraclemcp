@@ -172,6 +172,12 @@ call_timeout_seconds = 30
 # Optional Oracle Net transport connect timeout, in seconds. Default: the thin
 # driver's 20s transport_connect_timeout. Set a positive value to override.
 connect_timeout_seconds = 20
+# Optional per-read inactivity deadline on an established session, in seconds.
+# Default: none (driver default). Set a positive value to bound silent sessions.
+# inactivity_timeout_seconds = 300
+# Optional Oracle dead-connection-detection probe interval, in minutes.
+# Default: none. Set a positive value to request EXPIRE_TIME probes.
+# keepalive_minutes = 10
 # Optional thin Session Data Unit request size. Default: none (negotiated).
 # Validated as 512..=65535 bytes.
 sdu = 32768
@@ -222,6 +228,11 @@ use_sni = true
 # rotated token is picked up without a restart (takes precedence over token_env).
 # Default: none.
 # token_file = "/etc/oracle/iam-token.jwt"
+# Command argv that writes the pre-fetched IAM token to stdout. Mutually
+# exclusive with token_env/token_file. Executed directly with no shell, bounded
+# by timeout and stdout caps, and refused before spawn on non-TCPS connections.
+# Default: none.
+# token_exec = ["/usr/local/bin/fetch-adb-token", "--profile", "prod"]
 
 # [profiles.drcp] — Database Resident Connection Pooling server routing. Optional.
 # Separate from [profiles.pool] (which is local client-side reuse).
