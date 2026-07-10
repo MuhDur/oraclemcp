@@ -11,9 +11,12 @@ use oraclemcp_audit::{
     AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord, AuditSubject, GENESIS_HASH,
 };
 use oraclemcp_guard::{
-    AllowOnceError, AllowOnceStore, CiToken, OperatingLevel, StepUpOption, StepUpRegistry,
-    sql_digest,
+    AllowOnceError, AllowOnceStore, CiToken, ExecGrantBinding, ExecGrantError, ExecGrantStore,
+    OperatingLevel, StepUpOption, StepUpRegistry, sql_digest,
 };
+
+const QUOTED_IDENTIFIER_TWO_SPACES: &str = "UPDATE \"A  B\" SET x = 1";
+const QUOTED_IDENTIFIER_ONE_SPACE: &str = "UPDATE \"A B\" SET x = 1";
 
 #[test]
 fn allow_once_is_single_use_and_replay_rejected() {
@@ -36,6 +39,67 @@ fn allow_once_is_digest_bound() {
     );
     // The originally-approved statement still works.
     assert_eq!(store.consume(&tok, "DELETE FROM orders WHERE id=1"), Ok(()));
+}
+
+#[test]
+fn authorization_digests_preserve_semantic_whitespace() {
+    assert_ne!(
+        sql_digest(QUOTED_IDENTIFIER_TWO_SPACES),
+        sql_digest(QUOTED_IDENTIFIER_ONE_SPACE),
+        "quoted Oracle identifiers with different whitespace name different objects"
+    );
+    assert_ne!(
+        sql_digest("UPDATE t SET value = 'A  B'"),
+        sql_digest("UPDATE t SET value = 'A B'"),
+        "ordinary string literal contents are semantic data"
+    );
+    assert_ne!(
+        sql_digest("UPDATE t SET value = N'A  B'"),
+        sql_digest("UPDATE t SET value = N'A B'"),
+        "national string literal contents are semantic data"
+    );
+    assert_ne!(
+        sql_digest("UPDATE t SET value = q'[A  B]'"),
+        sql_digest("UPDATE t SET value = q'[A B]'"),
+        "alternative-quoted literal contents are semantic data"
+    );
+
+    let allow_once = AllowOnceStore::new();
+    let allow_token = allow_once.issue(QUOTED_IDENTIFIER_TWO_SPACES, Duration::from_secs(60));
+    assert_eq!(
+        allow_once.consume(&allow_token, QUOTED_IDENTIFIER_ONE_SPACE),
+        Err(AllowOnceError::DigestMismatch)
+    );
+
+    let binding = ExecGrantBinding::new("session", "lane", "subject", 7);
+    let grants = ExecGrantStore::new();
+    let grant = grants.issue(
+        QUOTED_IDENTIFIER_TWO_SPACES,
+        binding.clone(),
+        OperatingLevel::ReadWrite,
+        Duration::from_secs(60),
+    );
+    assert_eq!(
+        grants.consume(
+            &grant,
+            QUOTED_IDENTIFIER_ONE_SPACE,
+            &binding,
+            OperatingLevel::ReadWrite,
+        ),
+        Err(ExecGrantError::DigestMismatch)
+    );
+
+    let step_up = StepUpRegistry::new();
+    let challenge = step_up.issue(
+        OperatingLevel::ReadWrite,
+        QUOTED_IDENTIFIER_TWO_SPACES,
+        "write",
+        Duration::from_secs(60),
+    );
+    step_up
+        .resolve(&challenge.challenge_id, StepUpOption::ApproveOnce)
+        .expect("resolve step-up challenge");
+    assert!(!step_up.approval_matches_sql(&challenge.challenge_id, QUOTED_IDENTIFIER_ONE_SPACE,));
 }
 
 #[test]

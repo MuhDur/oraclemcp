@@ -8,8 +8,8 @@
 //! the statement runs:
 //!
 //! - **single-use** — a consumed grant cannot be replayed;
-//! - **digest match** — the executed SQL must be byte-for-byte (whitespace-
-//!   normalized) the statement that was approved;
+//! - **digest match** — the executed SQL bytes must exactly match the statement
+//!   that was approved;
 //! - **binding match** — the grant is pinned to the lane/session/subject that
 //!   requested it;
 //! - **generation match** — a grant minted before profile/level generation
@@ -222,14 +222,9 @@ mod tests {
         let store = ExecGrantStore::new();
         let binding = binding();
         let tok = store.issue(SQL, binding.clone(), OperatingLevel::ReadWrite, TTL);
-        // Whitespace-insensitive digest match, same session, level <= grant.
+        // Exact digest match, same session, level <= grant.
         assert_eq!(
-            store.consume(
-                &tok,
-                "UPDATE   orders SET status='X' WHERE id=42",
-                &binding,
-                OperatingLevel::ReadWrite
-            ),
+            store.consume(&tok, SQL, &binding, OperatingLevel::ReadWrite),
             Ok(OperatingLevel::ReadWrite)
         );
         // Replay -> unknown (single-use).

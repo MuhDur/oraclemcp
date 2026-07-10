@@ -328,7 +328,8 @@ mod tests {
                 resolution: StepUpResolution::ApprovedOnce
             }
         );
-        assert!(reg.approval_matches_sql(&c.challenge_id, "UPDATE   t SET x=1 WHERE id=2"));
+        assert!(reg.approval_matches_sql(&c.challenge_id, sql));
+        assert!(!reg.approval_matches_sql(&c.challenge_id, "UPDATE   t SET x=1 WHERE id=2"));
         assert!(!reg.approval_matches_sql(&c.challenge_id, "DROP TABLE t"));
     }
 

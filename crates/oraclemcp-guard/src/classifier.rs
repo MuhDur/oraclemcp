@@ -3,8 +3,8 @@
 //! predicate with a staged, fail-CLOSED classifier.
 //!
 //! Pipeline (per call):
-//! 1. **Stage A** ([`stage_a`]) — operator allow-list (SHA-256 of normalized
-//!    text) → block-list (regex) → PL/SQL-block detector. (P1-1a)
+//! 1. **Stage A** ([`stage_a`]) — operator allow-list (SHA-256 of exact
+//!    statement bytes) → block-list (regex) → PL/SQL-block detector. (P1-1a)
 //! 2. **Splitter** ([`analyze_batch`]) — a *lexer-based*, literal/quote-aware
 //!    balance check: `;`/`BEGIN`/`END` inside `'…'`/`q'[…]'`/`N'…'`/`"…"` are
 //!    never counted (they are single tokens), and a `BEGIN`/`END` desync makes
@@ -91,7 +91,7 @@ impl GuardDecision {
 /// anything they do not explicitly name.
 #[derive(Clone, Default)]
 pub struct ClassifierConfig {
-    /// SHA-256 (hex) of normalized text that is pre-approved as `Safe`.
+    /// SHA-256 (hex) of exact statement bytes that are pre-approved as `Safe`.
     allow_list: HashSet<String>,
     /// Regexes that, if matched, force `Forbidden`.
     block_patterns: Vec<Regex>,
@@ -104,10 +104,10 @@ impl ClassifierConfig {
         Self::default()
     }
 
-    /// Pre-approve a statement's normalized text as `Safe`.
+    /// Pre-approve one exact statement as `Safe`.
     #[must_use]
     pub fn with_allow(mut self, sql: &str) -> Self {
-        self.allow_list.insert(normalized_sha256(sql));
+        self.allow_list.insert(exact_sha256(sql));
         self
     }
 
@@ -122,15 +122,12 @@ impl ClassifierConfig {
     }
 }
 
-/// Normalize SQL for allow-list hashing: trim, collapse internal whitespace,
-/// lowercase. (Whitespace/case-insensitive; semantics-preserving for the hash.)
-fn normalized_sha256(sql: &str) -> String {
-    let normalized = sql
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-    let digest = Sha256::digest(normalized.as_bytes());
+/// Hash exact SQL bytes for operator allow-list binding.
+///
+/// Oracle quoted identifiers and literals preserve both case and whitespace,
+/// so normalizing either property can make distinct statements collide.
+fn exact_sha256(sql: &str) -> String {
+    let digest = Sha256::digest(sql.as_bytes());
     let mut out = String::with_capacity(digest.len() * 2);
     for b in digest {
         out.push_str(&format!("{b:02x}"));
@@ -437,11 +434,11 @@ fn has_buried_dangerous_verb(upper_source: &str) -> bool {
 /// Run Stage A: allow-list → block-list → PL/SQL-block detection.
 #[must_use]
 pub fn stage_a(sql: &str, config: &ClassifierConfig) -> StageA {
-    // Skip the normalize + SHA-256 + hex hash entirely when there is nothing to
-    // match against (the default: no operator-configured allow-list). An empty
+    // Skip the SHA-256 + hex hash entirely when there is nothing to match
+    // against (the default: no operator-configured allow-list). An empty
     // set can never contain the digest, so this short-circuit is behavior-
     // identical yet removes the per-statement hashing cost on the hot path.
-    if !config.allow_list.is_empty() && config.allow_list.contains(&normalized_sha256(sql)) {
+    if !config.allow_list.is_empty() && config.allow_list.contains(&exact_sha256(sql)) {
         return StageA::AllowListed;
     }
     for re in &config.block_patterns {
@@ -3003,20 +3000,44 @@ mod tests {
     fn allow_list_clears_to_safe() {
         let sql = "SELECT billing.weird_udf() FROM dual";
         let cfg = ClassifierConfig::new().with_allow(sql);
-        // Same statement, different whitespace/case → still allow-listed.
-        let d = Classifier::new(cfg).classify("select   billing.weird_udf()  from dual");
+        let d = Classifier::new(cfg).classify(sql);
         assert_eq!(d.danger, DangerLevel::Safe);
+        let changed = Classifier::new(ClassifierConfig::new().with_allow(sql))
+            .classify("select billing.weird_udf() from dual");
+        assert_ne!(changed.danger, DangerLevel::Safe);
     }
 
     #[test]
-    fn allow_list_hash_is_stable_and_specific() {
-        let a = normalized_sha256(" SELECT   * FROM dual ");
-        let b = normalized_sha256("select * from DUAL");
-        let c = normalized_sha256("select 2 from dual");
-        assert_eq!(a, b, "allow-list hash normalizes whitespace and case");
-        assert_ne!(a, c, "different normalized SQL must not share the digest");
+    fn allow_list_hash_is_stable_and_exact() {
+        let a = exact_sha256("SELECT * FROM dual");
+        let b = exact_sha256("SELECT * FROM dual");
+        let c = exact_sha256("select * from dual");
+        assert_eq!(a, b, "identical statement bytes must have a stable digest");
+        assert_ne!(
+            a, c,
+            "case-different SQL must not share an authorization digest"
+        );
         assert_eq!(a.len(), 64);
         assert!(a.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn allow_list_does_not_collapse_semantic_whitespace() {
+        let approved = "UPDATE \"A  B\" SET x = 1";
+        let different_object = "UPDATE \"A B\" SET x = 1";
+        assert_ne!(
+            exact_sha256(approved),
+            exact_sha256(different_object),
+            "quoted identifiers with different whitespace name different Oracle objects"
+        );
+        assert_eq!(
+            stage_a(
+                different_object,
+                &ClassifierConfig::new().with_allow(approved)
+            ),
+            StageA::PureSql,
+            "an allow-list entry must authorize only the reviewed statement"
+        );
     }
 
     #[test]

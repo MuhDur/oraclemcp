@@ -3742,6 +3742,52 @@ fn confirmation_grants_are_opaque_non_deterministic_references() {
 }
 
 #[test]
+fn execute_confirmation_preserves_semantic_whitespace_before_database_io() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+    let approved = "UPDATE \"A  B\" SET x = 1";
+    let different_object = "UPDATE \"A B\" SET x = 1";
+    let confirm = preview_confirm(&dispatcher, approved);
+
+    let err = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({
+                "sql": different_object,
+                "commit": true,
+                "confirm": confirm,
+            }),
+        )
+        .expect_err("grant for a two-space identifier cannot authorize a one-space identifier");
+    assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+    assert!(err.message.contains("different statement"));
+    assert!(
+        state.executed.lock().expect("exec mutex").is_empty(),
+        "digest mismatch must fail before Oracle execution"
+    );
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+
+    let out = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({
+                "sql": approved,
+                "commit": true,
+                "confirm": confirm,
+            }),
+        )
+        .expect("a non-consuming mismatch leaves the exact grant usable");
+    assert_eq!(out["committed"], json!(true));
+    assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+    assert_eq!(state.commits.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn session_level_grant_is_lane_bound_and_not_recomputable() {
     let dispatcher = OracleDispatcher::new_with_profile_level(
         Box::new(NoExecMock),

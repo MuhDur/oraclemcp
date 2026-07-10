@@ -47,11 +47,15 @@ pub struct AllowOnceStore {
     counter: AtomicU64,
 }
 
-/// SHA-256 (`sha256:<hex>`) of normalized SQL (trim + collapse whitespace).
+/// SHA-256 (`sha256:<hex>`) of the exact SQL bytes.
+///
+/// Authorization bindings deliberately do not normalize whitespace or case:
+/// both are semantic inside Oracle quoted identifiers and literals. The
+/// statement presented for execution must therefore be byte-identical to the
+/// statement that was reviewed.
 #[must_use]
 pub fn sql_digest(sql: &str) -> String {
-    let normalized = sql.split_whitespace().collect::<Vec<_>>().join(" ");
-    let digest = Sha256::digest(normalized.as_bytes());
+    let digest = Sha256::digest(sql.as_bytes());
     let mut out = String::with_capacity(7 + digest.len() * 2);
     out.push_str("sha256:");
     for b in digest {
@@ -125,11 +129,8 @@ mod tests {
             store.consume(&tok, "DROP TABLE orders"),
             Err(AllowOnceError::DigestMismatch)
         );
-        // Right SQL (whitespace-insensitive) -> ok, consumed.
-        assert_eq!(
-            store.consume(&tok, "UPDATE   orders SET status='X'   WHERE id=42"),
-            Ok(())
-        );
+        // The exact approved SQL succeeds and consumes the token.
+        assert_eq!(store.consume(&tok, sql), Ok(()));
         // Replay -> unknown.
         assert_eq!(store.consume(&tok, sql), Err(AllowOnceError::Unknown));
     }

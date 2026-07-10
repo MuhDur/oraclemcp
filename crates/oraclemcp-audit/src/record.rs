@@ -74,12 +74,13 @@ fn legacy_schema_version() -> u16 {
 ///
 /// This is a **hash-only** fingerprint (K5): unlike [`AuditRecord::sql_sha256`]
 /// — which hashes the exact bytes — this collapses trivial whitespace/case
-/// variants of the *same* statement to a single value so repeated blocked
-/// attempts correlate and dedupe in a SIEM. It intentionally has **no**
-/// accompanying preview, so it adds no new literal-exposure surface beyond the
-/// existing exact-hash. The normalization mirrors the guard's allow-list
-/// normalizer (`oraclemcp-guard` `normalized_sha256`); it is replicated here to
-/// keep this crate a dependency-free leaf.
+/// variants into one correlation bucket so repeated blocked attempts can be
+/// grouped in a SIEM. This correlation-only fingerprint is deliberately
+/// non-authoritative and may coalesce semantically distinct quoted identifiers
+/// or literals. [`AuditRecord::sql_sha256`] preserves the exact statement
+/// identity, and guard authorization never uses this normalized value. It has
+/// no accompanying preview, so it adds no new literal-exposure surface beyond
+/// the existing exact hash.
 #[must_use]
 pub fn normalized_sql_sha256(sql: &str) -> String {
     let normalized = sql
