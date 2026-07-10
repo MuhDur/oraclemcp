@@ -4275,7 +4275,7 @@ fn execute_commit_in_doubt_leaves_durable_intent_unresolved() {
 }
 
 #[test]
-fn execute_approved_replays_preview_token_once() {
+fn execute_approved_token_only_rolls_back_by_default_and_replays_token_once() {
     let state = Arc::new(ExecState::default());
     let dispatcher = OracleDispatcher::new_with_profile_level(
         Box::new(ExecRecordingMock::new(state.clone())),
@@ -4293,10 +4293,10 @@ fn execute_approved_replays_preview_token_once() {
     let out = dispatcher
         .dispatch("execute_approved", json!({ "token": token }))
         .expect("execute approved");
-    assert_eq!(out["committed"], json!(true));
-    assert_eq!(out["rolled_back"], json!(false));
-    assert_eq!(state.commits.load(Ordering::SeqCst), 1);
-    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+    assert_eq!(out["committed"], json!(false));
+    assert_eq!(out["rolled_back"], json!(true));
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
     assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
 
     let err = dispatcher
@@ -4307,7 +4307,7 @@ fn execute_approved_replays_preview_token_once() {
 }
 
 #[test]
-fn execute_approved_preview_token_race_allows_exactly_one_success() {
+fn execute_approved_explicit_commit_token_race_allows_exactly_one_success() {
     let state = Arc::new(ExecState::default());
     let dispatcher = Arc::new(OracleDispatcher::new_with_profile_level(
         Box::new(ExecRecordingMock::new(state.clone())),
@@ -4334,7 +4334,10 @@ fn execute_approved_preview_token_race_allows_exactly_one_success() {
             scope.spawn(move || {
                 barrier.wait();
                 let result = dispatcher
-                    .dispatch("execute_approved", json!({ "token": token }))
+                    .dispatch(
+                        "execute_approved",
+                        json!({ "token": token, "commit": true }),
+                    )
                     .map(|value| value["committed"] == json!(true))
                     .map_err(|err| err.error_class);
                 results.lock().expect("results mutex").push(result);
@@ -4370,7 +4373,7 @@ fn execute_approved_preview_token_race_allows_exactly_one_success() {
 }
 
 #[test]
-fn execute_approved_accepts_sql_and_preview_token() {
+fn execute_approved_with_sql_rolls_back_by_default() {
     let state = Arc::new(ExecState::default());
     let dispatcher = OracleDispatcher::new_with_profile_level(
         Box::new(ExecRecordingMock::new(state.clone())),
@@ -4381,15 +4384,32 @@ fn execute_approved_accepts_sql_and_preview_token() {
     let token = preview_confirm(&dispatcher, sql);
 
     let out = dispatcher
-        .dispatch(
-            "execute_approved",
-            json!({ "sql": sql, "token": token, "commit": false }),
-        )
+        .dispatch("execute_approved", json!({ "sql": sql, "token": token }))
         .expect("execute approved with sql");
     assert_eq!(out["committed"], json!(false));
     assert_eq!(out["rolled_back"], json!(true));
     assert_eq!(state.commits.load(Ordering::SeqCst), 0);
     assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn execute_approved_ddl_requires_explicit_commit_without_executing() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        Some("dev".to_owned()),
+        ddl_level(),
+    );
+    let sql = "CREATE TABLE app_smoke_execute_approved (id NUMBER)";
+    let token = preview_confirm(&dispatcher, sql);
+
+    let err = dispatcher
+        .dispatch("execute_approved", json!({ "token": token }))
+        .expect_err("DDL cannot use the rollback default");
+    assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+    assert!(state.executed.lock().expect("exec mutex").is_empty());
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -5016,7 +5036,10 @@ mod audit_wiring {
         let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
         let confirm = preview_confirm(&dispatcher, sql);
         let out = dispatcher
-            .dispatch("execute_approved", json!({ "sql": sql, "token": confirm }))
+            .dispatch(
+                "execute_approved",
+                json!({ "sql": sql, "token": confirm, "commit": true }),
+            )
             .expect("write dispatches");
         assert!(out.is_object());
 
@@ -5060,6 +5083,7 @@ mod audit_wiring {
                 "execute_approved",
                 json!({
                     "token": confirm,
+                    "commit": true,
                     "agent_identity": "attacker",
                     "operator_name": "HumanOperator",
                     "label": "spoofed",

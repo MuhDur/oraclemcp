@@ -917,7 +917,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "execute_approved",
             ToolTier::FoundationLiveDb,
-            "Compatibility alias for executing a statement previously previewed with preview_sql; token-only calls work for five minutes in the same server process.",
+            "Compatibility alias for executing a statement previously previewed with preview_sql; token-only calls work for five minutes in the same server process and DML rolls back unless commit=true is explicit.",
         )
         .with_input_schema(object_schema(
             props_with(
@@ -926,7 +926,7 @@ pub fn tool_registry() -> ToolRegistry {
                     "confirm": { "type": "string", "description": "Alias for token." },
                     "confirmation_token": { "type": "string", "description": "Alias for token." },
                     "sql": { "type": "string", "description": "Optional SQL statement. If omitted, the token must still be cached from preview_sql in this server process." },
-                    "commit": { "type": "boolean", "description": "Default true for this compatibility tool. Set false to rollback-preview DML." },
+                    "commit": { "type": "boolean", "description": "Default false rolls back after DML. Set true only when the preview grant represents deliberate commit intent; DDL/Admin statements require true." },
                     "save_output": { "type": "string", "description": "Unsupported in the generic core. Use capture_dbms_output=true and read dbms_output.lines instead." }
                 }),
                 &[
@@ -1586,6 +1586,28 @@ mod tests {
                     "{name} must advertise accepted {key} spelling"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn execute_tools_advertise_the_same_rollback_default() {
+        let registry = tool_registry();
+        for name in ["oracle_execute", "execute_approved"] {
+            let tool = registry
+                .tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} must be registered"));
+            let commit = tool
+                .input_schema
+                .as_ref()
+                .and_then(|schema| schema.pointer("/properties/commit/description"))
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("{name} must document commit"));
+            assert!(
+                commit.contains("Default false"),
+                "{name} must advertise rollback-by-default: {commit}"
+            );
         }
     }
 

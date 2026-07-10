@@ -1878,7 +1878,7 @@ expression: rendered
       "name": "execute_approved",
       "title": "Execute Approved",
       "tier": "foundation_live_db",
-      "summary": "Compatibility alias for executing a statement previously previewed with preview_sql; token-only calls work for five minutes in the same server process.",
+      "summary": "Compatibility alias for executing a statement previously previewed with preview_sql; token-only calls work for five minutes in the same server process and DML rolls back unless commit=true is explicit.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -1887,7 +1887,7 @@ expression: rendered
             "type": "boolean"
           },
           "commit": {
-            "description": "Default true for this compatibility tool. Set false to rollback-preview DML.",
+            "description": "Default false rolls back after DML. Set true only when the preview grant represents deliberate commit intent; DDL/Admin statements require true.",
             "type": "boolean"
           },
           "confirm": {

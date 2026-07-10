@@ -2421,6 +2421,10 @@ fn execute_approved_args(
     args: ExecuteApprovedArgs,
 ) -> Result<ExecuteArgs, ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
+    // Compatibility aliases inherit the canonical oracle_execute safety
+    // default: omitting commit always means rollback-preview for DML. A preview
+    // grant proves which SQL was reviewed; it is not implicit commit intent.
+    let commit = args.commit.unwrap_or(false);
     if args.save_output.is_some() {
         return Err(invalid_args(
             "execute_approved does not write DBMS_OUTPUT to files; set capture_dbms_output=true and read dbms_output.lines from the tool result",
@@ -2437,7 +2441,7 @@ fn execute_approved_args(
         return Ok(ExecuteArgs {
             sql,
             binds: Vec::new(),
-            commit: args.commit.unwrap_or(true),
+            commit,
             confirm: Some(token),
             capture_dbms_output: args.capture_dbms_output,
             dbms_output_max_lines: args.dbms_output_max_lines,
@@ -2478,7 +2482,7 @@ fn execute_approved_args(
     Ok(ExecuteArgs {
         sql: grant.sql,
         binds: Vec::new(),
-        commit: args.commit.unwrap_or(true),
+        commit,
         confirm: Some(token),
         capture_dbms_output: args.capture_dbms_output,
         dbms_output_max_lines: args.dbms_output_max_lines,
