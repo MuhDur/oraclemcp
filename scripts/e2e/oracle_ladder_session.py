@@ -910,6 +910,67 @@ class Ladder:
                 "container_after": after,
             }
 
+        def parsed_ddl_refused_at_read_write_and_metadata_preserved():
+            # Regression for QA84: COMMENT ON parses successfully, but Oracle
+            # treats it as implicit-commit DDL. At READ_WRITE it must require a
+            # DDL step-up and never reach Oracle, otherwise the outer rollback
+            # would falsely claim to undo a persistent metadata change.
+            comment_sql = (
+                "SELECT comments FROM user_tab_comments "
+                f"WHERE table_name = '{table.upper()}'"
+            )
+            before_rows = self.query_rows(comment_sql)
+            require(
+                len(before_rows) == 1,
+                "the live target has one table-comment metadata row",
+                before_rows,
+            )
+            before = before_rows[0].get("COMMENTS")
+            sql = f"COMMENT ON TABLE {table} IS 'qa84-must-not-land'"
+            preview = self.preview(sql)
+            require(
+                preview.get("required_level") == "DDL",
+                "parsed COMMENT ON keeps the DDL floor",
+                preview,
+            )
+            require(
+                preview.get("gate_decision") == "require_step_up",
+                "COMMENT ON cannot execute at READ_WRITE",
+                preview,
+            )
+            require(
+                preview.get("execute_confirmation") is None,
+                "no DDL grant is minted below DDL",
+                preview,
+            )
+
+            result = self.session.call(
+                "oracle_execute", {"sql": sql, "commit": False}
+            )
+            content = structured(result)
+            require(
+                result.get("isError") is True,
+                "parsed COMMENT ON is refused before Oracle at READ_WRITE",
+                content,
+            )
+            require(
+                content.get("error_class") == "OPERATING_LEVEL_TOO_LOW",
+                "parsed DDL refusal names the operating-level boundary",
+                content,
+            )
+            after_rows = self.query_rows(comment_sql)
+            after = after_rows[0].get("COMMENTS") if len(after_rows) == 1 else None
+            require(
+                after == before,
+                "table comment metadata is unchanged after refusal",
+                {"before": before, "after": after},
+            )
+            return {
+                "error_class": content.get("error_class"),
+                "comment_before": before,
+                "comment_after": after,
+            }
+
         def opaque_plsql_ddl_call_refused_and_target_preserved():
             # Regression for QA81: DBMS_UTILITY can execute caller-provided DDL,
             # so an opaque package call must never inherit the READ_WRITE block
@@ -1259,6 +1320,10 @@ class Ladder:
             (
                 "raw_alter_session_container_refused_and_identity_preserved",
                 raw_alter_session_container_refused_and_identity_preserved,
+            ),
+            (
+                "parsed_ddl_refused_at_read_write_and_metadata_preserved",
+                parsed_ddl_refused_at_read_write_and_metadata_preserved,
             ),
             (
                 "opaque_plsql_ddl_call_refused_and_target_preserved",

@@ -337,9 +337,33 @@ const LEADING_ADMIN_VERBS: &[&str] = &[
     "CREATE ROLE ",
     "ALTER ROLE ",
     "DROP ROLE ",
+    // Profiles govern login/password/resource policy for users. CREATE and DROP
+    // need the same Admin floor as the already-covered ALTER PROFILE; treating
+    // them as ordinary object DDL lets a DDL-only profile reshape account
+    // security policy.
+    "CREATE PROFILE ",
     "ALTER SYSTEM ",
     "ALTER DATABASE ",
     "ALTER PROFILE ",
+    "DROP PROFILE ",
+    // CREATE SCHEMA may embed GRANT statements. Whole-database and PDB
+    // lifecycle statements require administrative database privileges and can
+    // create, move, or delete data files; none belongs to the object-DDL tier.
+    "CREATE SCHEMA ",
+    "CREATE DATABASE ",
+    "DROP DATABASE ",
+    "CREATE PLUGGABLE DATABASE ",
+    "ALTER PLUGGABLE DATABASE ",
+    "DROP PLUGGABLE DATABASE ",
+    // Audit and lockdown policies alter security posture rather than one
+    // schema object. sqlparser does not reliably recognize the Oracle forms,
+    // so preserve their Admin floor independently of parser success.
+    "CREATE AUDIT POLICY ",
+    "ALTER AUDIT POLICY ",
+    "DROP AUDIT POLICY ",
+    "CREATE LOCKDOWN PROFILE ",
+    "ALTER LOCKDOWN PROFILE ",
+    "DROP LOCKDOWN PROFILE ",
     "SET ROLE ",
     // FLASHBACK of an entire (pluggable) database is a server-wide point-in-time
     // rewind — strictly an Admin operation, not object DDL. The shorter
@@ -1883,6 +1907,7 @@ fn classify_statement(
         | Statement::CreatePolicy { .. }
         | Statement::AlterPolicy { .. }
         | Statement::DropPolicy { .. }
+        | Statement::CreateSchema { .. }
         | Statement::CreateDatabase { .. }
         | Statement::AttachDatabase { .. }
         | Statement::CreateSecret { .. }
@@ -1910,7 +1935,6 @@ fn classify_statement(
         | Statement::CreateVirtualTable { .. }
         | Statement::CreateIndex { .. }
         | Statement::CreateSequence { .. }
-        | Statement::CreateSchema { .. }
         | Statement::CreateDomain { .. }
         | Statement::CreateType { .. }
         | Statement::CreateExtension { .. }
@@ -3328,7 +3352,12 @@ mod tests {
             ("CREATE TABLESPACE ts DATAFILE 'x.dbf' SIZE 10M", Ddl),
             ("ALTER TABLESPACE ts OFFLINE", Ddl),
             ("DROP TABLESPACE ts", Ddl),
-            ("CREATE PROFILE prof LIMIT SESSIONS_PER_USER 1", Ddl),
+            ("CREATE PROFILE prof LIMIT SESSIONS_PER_USER 1", Admin),
+            ("DROP PROFILE prof CASCADE", Admin),
+            (
+                "CREATE SCHEMA AUTHORIZATION app GRANT SELECT ON app.t TO reader",
+                Admin,
+            ),
             ("TRUNCATE TABLE emp", Ddl),
             ("CREATE DIRECTORY d AS '/tmp'", Ddl),
             ("CREATE MATERIALIZED VIEW mv AS SELECT 1 FROM dual", Ddl),
@@ -3349,6 +3378,14 @@ mod tests {
             ("ALTER SYSTEM FLUSH SHARED_POOL", Admin),
             ("ALTER DATABASE OPEN", Admin),
             ("CREATE DATABASE db", Admin),
+            ("DROP DATABASE", Admin),
+            ("CREATE PLUGGABLE DATABASE apppdb FROM pdb$seed", Admin),
+            ("ALTER PLUGGABLE DATABASE apppdb OPEN", Admin),
+            ("DROP PLUGGABLE DATABASE apppdb INCLUDING DATAFILES", Admin),
+            (
+                "CREATE AUDIT POLICY app_audit ACTIONS SELECT ON app.t",
+                Admin,
+            ),
             ("SET ROLE dba", Admin),
         ];
         for (sql, min_level) in cases {
@@ -3414,6 +3451,13 @@ mod tests {
             "CREATE USER u IDENTIFIED BY p",
             "ALTER USER u IDENTIFIED BY p",
             "ALTER SYSTEM FLUSH SHARED_POOL",
+            "CREATE PROFILE prof LIMIT SESSIONS_PER_USER 1",
+            "DROP PROFILE prof CASCADE",
+            "CREATE SCHEMA AUTHORIZATION app GRANT SELECT ON app.t TO reader",
+            "DROP DATABASE",
+            "CREATE PLUGGABLE DATABASE apppdb FROM pdb$seed",
+            "ALTER PLUGGABLE DATABASE apppdb OPEN",
+            "DROP PLUGGABLE DATABASE apppdb INCLUDING DATAFILES",
             "SET ROLE dba",
         ] {
             let d = classify(sql);

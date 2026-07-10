@@ -5295,6 +5295,53 @@ fn execute_requires_commit_confirmation_for_ddl_without_executing() {
 }
 
 #[test]
+fn parsed_and_unparsed_ddl_admin_floors_refuse_read_write_before_database_io() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+
+    for (sql, required_level) in [
+        ("COMMENT ON TABLE app.t IS 'x'", "DDL"),
+        ("ANALYZE TABLE app.t COMPUTE STATISTICS", "DDL"),
+        ("CREATE SEQUENCE app.s START WITH 1", "DDL"),
+        ("ALTER INDEX app.i REBUILD", "DDL"),
+        ("CREATE PROFILE prof LIMIT SESSIONS_PER_USER 1", "ADMIN"),
+        ("DROP PROFILE prof CASCADE", "ADMIN"),
+        (
+            "CREATE SCHEMA AUTHORIZATION app GRANT SELECT ON app.t TO reader",
+            "ADMIN",
+        ),
+        ("DROP DATABASE", "ADMIN"),
+        (
+            "DROP PLUGGABLE DATABASE apppdb INCLUDING DATAFILES",
+            "ADMIN",
+        ),
+    ] {
+        let preview = dispatcher
+            .dispatch("oracle_preview_sql", json!({ "sql": sql }))
+            .expect("a level-gated preview remains inspectable");
+        assert_eq!(preview["required_level"], json!(required_level), "{sql:?}");
+        assert_ne!(preview["gate_decision"], json!("allow"), "{sql:?}");
+        assert!(preview["execute_confirmation"].is_null(), "{sql:?}");
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": sql, "commit": true, "confirm": "irrelevant" }),
+            )
+            .expect_err("READ_WRITE must not authorize DDL/Admin");
+        assert_eq!(err.error_class, ErrorClass::OperatingLevelTooLow, "{sql:?}");
+    }
+
+    assert!(state.executed.lock().expect("exec mutex").is_empty());
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn compile_object_preview_is_default_and_does_not_execute() {
     let state = Arc::new(ExecState::default());
     let dispatcher = OracleDispatcher::new_with_profile_level(
