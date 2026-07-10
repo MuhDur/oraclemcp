@@ -46,9 +46,9 @@ use std::time::Instant;
 use asupersync::Cx;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use oraclemcp::dispatch::{
-    McpExposurePolicy, OracleDispatcher, ProfileConnector, ProfileDrainState,
-    ProfileStatelessConnector, StatelessReadStrategy, profile_draining_error,
-    stateless_read_worker_tool,
+    McpExposurePolicy, OracleDispatcher, ProfileConnectionBundle, ProfileConnector,
+    ProfileDrainState, ProfileGenerationAdmission, StatelessReadStrategy, profile_draining_error,
+    profile_not_available, stateless_read_worker_tool,
 };
 use oraclemcp::registry;
 use oraclemcp_audit::{
@@ -679,6 +679,7 @@ struct SelectedRuntimeProfile {
     name: String,
     level: SessionLevelState,
     request_timeout: Option<std::time::Duration>,
+    require_signed_tools: bool,
 }
 
 #[derive(Clone)]
@@ -686,6 +687,7 @@ struct ResolvedProfile {
     name: String,
     opts: OracleConnectOptions,
     level: SessionLevelState,
+    require_signed_tools: bool,
     pool_settings: Option<PoolSettings>,
     doctor_caps: DoctorProfileCaps,
     connect_timeout_seconds: Option<u64>,
@@ -726,15 +728,8 @@ fn select_runtime_profile_from_config(
         name: chosen.name.clone(),
         level: ctx.level_state,
         request_timeout: ctx.options.call_timeout,
+        require_signed_tools: chosen.require_signed_tools(),
     }))
-}
-
-fn select_runtime_profile(
-    profile: Option<&str>,
-) -> Result<Option<SelectedRuntimeProfile>, DbError> {
-    let cfg = OracleMcpConfig::load(None)
-        .map_err(|e| DbError::UnsupportedAuth(format!("config load failed: {e}")))?;
-    select_runtime_profile_from_config(&cfg, profile)
 }
 
 fn resolve_profile_options(profile: Option<&str>) -> Result<Option<ResolvedProfile>, DbError> {
@@ -749,7 +744,15 @@ fn resolve_profile_options_with(
     let cfg = OracleMcpConfig::load(None)
         .map_err(|e| DbError::UnsupportedAuth(format!("config load failed: {e}")))?;
 
-    let Some(chosen) = selected_config_profile(&cfg, profile)? else {
+    resolve_profile_options_from_config_with(&cfg, profile, secret_resolver)
+}
+
+fn resolve_profile_options_from_config_with(
+    cfg: &OracleMcpConfig,
+    profile: Option<&str>,
+    secret_resolver: &dyn SecretResolver,
+) -> Result<Option<ResolvedProfile>, DbError> {
+    let Some(chosen) = selected_config_profile(cfg, profile)? else {
         return Ok(None);
     };
 
@@ -784,6 +787,7 @@ fn resolve_profile_options_with(
         name: chosen.name.clone(),
         opts: ctx.options,
         level: ctx.level_state,
+        require_signed_tools: chosen.require_signed_tools(),
         pool_settings: ctx.pool_settings,
         doctor_caps,
         connect_timeout_seconds: chosen.connect_timeout_seconds,
@@ -834,45 +838,47 @@ fn secret_error_summary(error: &SecretError) -> String {
 }
 
 /// The `oracle_switch_profile` reconnect connector (B1: async + `Cx`-first).
-///
-/// Matches `oraclemcp::dispatch::ProfileConnector`: opens the session
-/// connection for `profile` as a native-async DB round trip, awaited on the
-/// dispatch runtime that already holds the request `Cx`. The connector captures
-/// the D18 SecretResolver seam so profile credentials are resolved only at the
-/// connect boundary.
+/// Open the primary and optional stateless connection from one resolved
+/// profile. In particular, password, wallet-password, and IAM-token references
+/// are resolved exactly once and the resulting options are cloned for both
+/// physical connections.
 fn profile_connector(secret_resolver: Arc<dyn SecretResolver>) -> Arc<ProfileConnector> {
-    Arc::new(move |cx: &Cx, profile: &str| {
+    Arc::new(move |cx: &Cx, generation| {
         let secret_resolver = Arc::clone(&secret_resolver);
         Box::pin(async move {
-            let Some(resolved) =
-                resolve_profile_options_with(Some(profile), secret_resolver.as_ref())?
+            let config = generation.config().ok_or_else(|| {
+                DbError::UnsupportedAuth(
+                    "profile generation has no accepted config snapshot".to_owned(),
+                )
+            })?;
+            let profile = generation.profile();
+            let Some(resolved) = resolve_profile_options_from_config_with(
+                config,
+                Some(profile),
+                secret_resolver.as_ref(),
+            )?
             else {
                 return Err(DbError::UnsupportedAuth(format!(
                     "connection profile `{profile}` not found"
                 )));
             };
-            try_open_connection(cx, resolved.opts).await
+            let connections = try_open_runtime_connections(cx, resolved).await?;
+            Ok(ProfileConnectionBundle::new(
+                connections.session,
+                connections.stateless,
+            ))
         })
     })
 }
 
-/// The `oracle_switch_profile` stateless-pool connector (B1: async + `Cx`-first).
-fn profile_stateless_connector(
-    secret_resolver: Arc<dyn SecretResolver>,
-) -> Arc<ProfileStatelessConnector> {
-    Arc::new(move |cx: &Cx, profile: &str| {
-        let secret_resolver = Arc::clone(&secret_resolver);
-        Box::pin(async move {
-            let Some(resolved) =
-                resolve_profile_options_with(Some(profile), secret_resolver.as_ref())?
-            else {
-                return Err(DbError::UnsupportedAuth(format!(
-                    "connection profile `{profile}` not found"
-                )));
-            };
-            try_open_stateless_connection(cx, resolved.opts, resolved.pool_settings).await
-        })
-    })
+fn load_custom_catalog_for_generation(
+    generation: &oraclemcp::dispatch::ProfileGenerationLease,
+    level: &SessionLevelState,
+) -> Result<CustomToolCatalog, ErrorEnvelope> {
+    let config = generation
+        .config()
+        .ok_or_else(|| custom_tool_error("profile generation has no accepted config snapshot"))?;
+    load_custom_catalog_for_snapshot(config, Some(generation.profile()), level)
 }
 
 async fn try_open_connection(
@@ -912,10 +918,28 @@ async fn try_open_runtime_connections(
     cx: &Cx,
     resolved: ResolvedProfile,
 ) -> Result<RuntimeConnections, DbError> {
-    let session = try_open_connection(cx, resolved.opts.clone()).await?;
-    let stateless =
-        try_open_stateless_connection(cx, resolved.opts, resolved.pool_settings).await?;
+    let (session_options, stateless_options, pool_settings) = runtime_connection_options(resolved);
+    let session = try_open_connection(cx, session_options).await?;
+    let stateless = try_open_stateless_connection(cx, stateless_options, pool_settings).await?;
     Ok(RuntimeConnections { session, stateless })
+}
+
+/// Split one fully-resolved profile into the two physical-connection plans.
+/// Secret references have already been resolved at this point, so cloning the
+/// options cannot mix credential epochs when the backing secret rotates.
+fn runtime_connection_options(
+    resolved: ResolvedProfile,
+) -> (
+    OracleConnectOptions,
+    OracleConnectOptions,
+    Option<PoolSettings>,
+) {
+    let ResolvedProfile {
+        opts,
+        pool_settings,
+        ..
+    } = resolved;
+    (opts.clone(), opts, pool_settings)
 }
 
 /// Drive a connection-establishment future to completion on a one-shot
@@ -973,19 +997,21 @@ fn stub_runtime_connections(error: DbError) -> RuntimeConnections {
 }
 
 fn open_profile_runtime_connections(
+    config: &OracleMcpConfig,
     profile: &str,
     secret_resolver: &dyn SecretResolver,
     include_stateless: bool,
 ) -> RuntimeConnections {
-    let resolved = match resolve_profile_options_with(Some(profile), secret_resolver) {
-        Ok(Some(resolved)) => resolved,
-        Ok(None) => {
-            return stub_runtime_connections(DbError::UnsupportedAuth(format!(
-                "connection profile `{profile}` not found"
-            )));
-        }
-        Err(e) => return stub_runtime_connections(e),
-    };
+    let resolved =
+        match resolve_profile_options_from_config_with(config, Some(profile), secret_resolver) {
+            Ok(Some(resolved)) => resolved,
+            Ok(None) => {
+                return stub_runtime_connections(DbError::UnsupportedAuth(format!(
+                    "connection profile `{profile}` not found"
+                )));
+            }
+            Err(e) => return stub_runtime_connections(e),
+        };
     if include_stateless {
         open_runtime_connections(resolved)
     } else {
@@ -998,12 +1024,13 @@ fn open_profile_runtime_connections(
 
 fn open_runtime_connection_plan(
     plan: RuntimeConnectionPlan,
+    config: &OracleMcpConfig,
     include_stateless: bool,
     secret_resolver: &dyn SecretResolver,
 ) -> RuntimeConnections {
     match plan {
         RuntimeConnectionPlan::Profile(profile) => {
-            open_profile_runtime_connections(&profile, secret_resolver, include_stateless)
+            open_profile_runtime_connections(config, &profile, secret_resolver, include_stateless)
         }
         RuntimeConnectionPlan::Default => RuntimeConnections {
             session: open_connection(OracleConnectOptions::default()),
@@ -1098,41 +1125,59 @@ fn validate_custom_tool_names(defs: &[CustomToolDef]) -> Result<(), ErrorEnvelop
 }
 
 fn custom_tools_require_signatures(
+    config: &OracleMcpConfig,
     active_profile: Option<&str>,
     level: &SessionLevelState,
-) -> bool {
+) -> Result<bool, ErrorEnvelope> {
     if level.is_protected() {
-        return true;
+        return Ok(true);
     }
     let Some(profile_name) = active_profile else {
-        return false;
+        return Ok(false);
     };
-    OracleMcpConfig::load(None)
-        .ok()
-        .and_then(|cfg| {
-            cfg.profile(profile_name)
-                .map(|profile| profile.require_signed_tools())
+    config
+        .profile(profile_name)
+        .map(|profile| profile.require_signed_tools())
+        .ok_or_else(|| {
+            custom_tool_error(format!(
+                "accepted config snapshot has no active profile `{profile_name}`"
+            ))
         })
-        .unwrap_or(false)
 }
 
-fn load_custom_catalog_for_profile(
+fn load_custom_catalog_for_snapshot(
+    config: &OracleMcpConfig,
     active_profile: Option<&str>,
     level: &SessionLevelState,
 ) -> Result<CustomToolCatalog, ErrorEnvelope> {
-    let Some(dir) = custom_tools_dir() else {
+    let require_signed_tools = custom_tools_require_signatures(config, active_profile, level)?;
+    load_custom_catalog_with_requirement(require_signed_tools)
+}
+
+fn load_custom_catalog_with_requirement(
+    require_signed_tools: bool,
+) -> Result<CustomToolCatalog, ErrorEnvelope> {
+    let dir = custom_tools_dir();
+    let key = std::env::var(CUSTOM_TOOLS_HMAC_KEY_ENV).ok();
+    load_custom_catalog_from_sources(dir.as_deref(), key.as_deref(), require_signed_tools)
+}
+
+fn load_custom_catalog_from_sources(
+    dir: Option<&Path>,
+    key: Option<&str>,
+    require_signed_tools: bool,
+) -> Result<CustomToolCatalog, ErrorEnvelope> {
+    let Some(dir) = dir else {
         return Ok(CustomToolCatalog::default());
     };
-    let defs = read_custom_tool_defs(&dir)?;
+    let defs = read_custom_tool_defs(dir)?;
     if defs.is_empty() {
         return Ok(CustomToolCatalog::default());
     }
     validate_custom_tool_names(&defs)?;
 
     let classifier = Classifier::new(ClassifierConfig::new());
-    let key = std::env::var(CUSTOM_TOOLS_HMAC_KEY_ENV).ok();
     let signed_defs_present = defs.iter().any(|def| def.signature.is_some());
-    let require_signed_tools = custom_tools_require_signatures(active_profile, level);
     let loaded = if require_signed_tools {
         let key = key.ok_or_else(|| {
             custom_tool_error(format!(
@@ -1588,6 +1633,15 @@ struct DispatcherWiring {
     notifications: Arc<oraclemcp_core::NotificationHub>,
 }
 
+fn apply_selected_profile_to_wiring(
+    wiring: &mut DispatcherWiring,
+    selected: SelectedRuntimeProfile,
+) {
+    wiring.active_profile = Some(selected.name);
+    wiring.level = selected.level;
+    wiring.request_timeout = selected.request_timeout;
+}
+
 fn build_oracle_dispatcher(
     conn: Box<dyn OracleConnection>,
     stateless_conn: Option<Box<dyn OracleConnection>>,
@@ -1598,14 +1652,9 @@ fn build_oracle_dispatcher(
         wiring.active_profile.clone(),
         wiring.level.clone(),
         profile_connector(Arc::clone(&wiring.secret_resolver)),
-        StatelessReadStrategy::new(
-            stateless_conn,
-            Some(profile_stateless_connector(Arc::clone(
-                &wiring.secret_resolver,
-            ))),
-        ),
+        StatelessReadStrategy::new(stateless_conn),
         wiring.custom_catalog.clone(),
-        Some(Arc::new(load_custom_catalog_for_profile)),
+        Some(Arc::new(load_custom_catalog_for_generation)),
     )
     .with_request_timeout(wiring.request_timeout)
     .with_mcp_exposure(wiring.exposure.clone())
@@ -1641,23 +1690,42 @@ fn audit_subject_from_principal_key(principal_key: &str) -> AuditSubject {
 async fn open_lane_runtime_connections(
     cx: &Cx,
     active_profile: Option<&str>,
+    accepted_config: Option<&OracleMcpConfig>,
     secret_resolver: &dyn SecretResolver,
-) -> Result<RuntimeConnections, DbError> {
+) -> Result<OpenedLaneRuntime, DbError> {
     match active_profile {
         Some(profile) => {
-            let Some(resolved) = resolve_profile_options_with(Some(profile), secret_resolver)?
+            let config = accepted_config.ok_or_else(|| {
+                DbError::UnsupportedAuth(
+                    "profile generation has no accepted config snapshot".to_owned(),
+                )
+            })?;
+            let Some(resolved) =
+                resolve_profile_options_from_config_with(config, Some(profile), secret_resolver)?
             else {
                 return Err(DbError::UnsupportedAuth(format!(
                     "connection profile `{profile}` not found"
                 )));
             };
+            let selected_profile = SelectedRuntimeProfile {
+                name: resolved.name.clone(),
+                level: resolved.level.clone(),
+                request_timeout: resolved.opts.call_timeout,
+                require_signed_tools: resolved.require_signed_tools,
+            };
             match try_open_runtime_connections(cx, resolved).await {
-                Ok(connections) => Ok(connections),
+                Ok(connections) => Ok(OpenedLaneRuntime {
+                    connections,
+                    selected_profile: Some(selected_profile),
+                }),
                 Err(e) => {
                     tracing::warn!(error = %e, "no live connection for lane; live tools will return a structured error envelope");
-                    Ok(RuntimeConnections {
-                        session: Box::new(stub::StubConnection::new(e)),
-                        stateless: None,
+                    Ok(OpenedLaneRuntime {
+                        connections: RuntimeConnections {
+                            session: Box::new(stub::StubConnection::new(e)),
+                            stateless: None,
+                        },
+                        selected_profile: Some(selected_profile),
                     })
                 }
             }
@@ -1670,12 +1738,20 @@ async fn open_lane_runtime_connections(
                     Box::new(stub::StubConnection::new(e)) as Box<dyn OracleConnection>
                 }
             };
-            Ok(RuntimeConnections {
-                session,
-                stateless: None,
+            Ok(OpenedLaneRuntime {
+                connections: RuntimeConnections {
+                    session,
+                    stateless: None,
+                },
+                selected_profile: None,
             })
         }
     }
+}
+
+struct OpenedLaneRuntime {
+    connections: RuntimeConnections,
+    selected_profile: Option<SelectedRuntimeProfile>,
 }
 
 struct MetricsDispatch {
@@ -1815,21 +1891,54 @@ fn stateful_lane_factory(
         let metrics = metrics.clone();
         let principal_key = lane_context.principal_key().to_owned();
         Box::pin(async move {
-            if let Some(active_profile) = wiring.active_profile.as_deref()
-                && wiring.profile_drain.is_draining(active_profile)
-            {
-                return Err(profile_draining_error(active_profile));
-            }
-            let connections = open_lane_runtime_connections(
+            let profile_generation = match wiring.active_profile.as_deref() {
+                Some(active_profile) => {
+                    match wiring.profile_drain.admit_mcp_profile(active_profile, true) {
+                        ProfileGenerationAdmission::Ready(lease) => Some(lease),
+                        ProfileGenerationAdmission::NotExposed => {
+                            return Err(profile_not_available(active_profile));
+                        }
+                        ProfileGenerationAdmission::Draining => {
+                            return Err(profile_draining_error(active_profile));
+                        }
+                    }
+                }
+                None => None,
+            };
+            let opened = open_lane_runtime_connections(
                 cx,
                 wiring.active_profile.as_deref(),
+                profile_generation.as_ref().and_then(|lease| lease.config()),
                 wiring.secret_resolver.as_ref(),
             )
             .await
             .map_err(DbError::into_envelope)?;
-            let dispatcher =
-                build_oracle_dispatcher(connections.session, connections.stateless, &wiring)
-                    .with_default_audit_subject(audit_subject_from_principal_key(&principal_key));
+            if profile_generation
+                .as_ref()
+                .is_some_and(oraclemcp::dispatch::ProfileGenerationLease::is_draining)
+            {
+                return Err(profile_draining_error(
+                    wiring.active_profile.as_deref().unwrap_or(""),
+                ));
+            }
+            let mut wiring = wiring;
+            if let Some(selected) = opened.selected_profile {
+                wiring.custom_catalog =
+                    load_custom_catalog_with_requirement(selected.require_signed_tools)?;
+                apply_selected_profile_to_wiring(&mut wiring, selected);
+            }
+            let dispatcher = build_oracle_dispatcher(
+                opened.connections.session,
+                opened.connections.stateless,
+                &wiring,
+            );
+            let dispatcher = match profile_generation {
+                Some(lease) => {
+                    dispatcher.with_profile_generation_lease(wiring.profile_drain.clone(), lease)
+                }
+                None => Ok(dispatcher),
+            }?
+            .with_default_audit_subject(audit_subject_from_principal_key(&principal_key));
             let dispatcher: Arc<dyn ToolDispatch> = Arc::new(dispatcher);
             Ok(maybe_wrap_metrics_dispatch(dispatcher, metrics.as_ref()))
         })
@@ -2019,33 +2128,56 @@ fn stateless_read_worker_factory(
         let active_profile = active_profile.clone();
         let principal_key = lane_context.principal_key().to_owned();
         Box::pin(async move {
-            if let Some(profile) = active_profile.as_deref()
-                && wiring.profile_drain.is_draining(profile)
+            let requested_profile = active_profile.as_deref().ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    "stateless read-worker lanes require an active connection profile",
+                )
+                .with_next_step("start the server with `oraclemcp serve --profile <name>`")
+            })?;
+            let profile_generation = match wiring
+                .profile_drain
+                .admit_mcp_profile(requested_profile, true)
             {
-                return Err(profile_draining_error(profile));
-            }
-            let Some(resolved) = resolve_profile_options_with(
-                active_profile.as_deref(),
+                ProfileGenerationAdmission::Ready(lease) => lease,
+                ProfileGenerationAdmission::NotExposed => {
+                    return Err(profile_not_available(requested_profile));
+                }
+                ProfileGenerationAdmission::Draining => {
+                    return Err(profile_draining_error(requested_profile));
+                }
+            };
+            let config = profile_generation.config().ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    "profile generation has no accepted config snapshot",
+                )
+            })?;
+            let Some(resolved) = resolve_profile_options_from_config_with(
+                config,
+                Some(requested_profile),
                 wiring.secret_resolver.as_ref(),
             )
             .map_err(DbError::into_envelope)?
             else {
-                return Err(ErrorEnvelope::new(
-                    ErrorClass::RuntimeStateRequired,
-                    "stateless read-worker lanes require an active connection profile",
-                )
-                .with_next_step("start the server with `oraclemcp serve --profile <name>`"));
+                return Err(profile_draining_error(requested_profile));
             };
             let profile = resolved.name.clone();
             let level = resolved.level.clone();
             let request_timeout = resolved.opts.call_timeout;
+            let require_signed_tools = resolved.require_signed_tools;
             let conn = try_open_connection(cx, resolved.opts)
                 .await
                 .map_err(DbError::into_envelope)?;
+            if profile_generation.is_draining() {
+                return Err(profile_draining_error(requested_profile));
+            }
             wiring.active_profile = Some(profile);
             wiring.level = level;
             wiring.request_timeout = request_timeout;
+            wiring.custom_catalog = load_custom_catalog_with_requirement(require_signed_tools)?;
             let dispatcher = build_oracle_dispatcher(conn, None, &wiring)
+                .with_profile_generation_lease(wiring.profile_drain.clone(), profile_generation)?
                 .with_default_audit_subject(audit_subject_from_principal_key(&principal_key));
             let dispatcher: Arc<dyn ToolDispatch> = Arc::new(dispatcher);
             Ok(maybe_wrap_metrics_dispatch(dispatcher, metrics.as_ref()))
@@ -2113,17 +2245,16 @@ fn build_server_with_lifecycle(
             http_transport: options.transport.is_http(),
         },
     );
-    // E5 connection-scope isolation: per-profile opt-out — every profile is
-    // reachable by the served surface (switch/list/search/complete) unless it
-    // sets `mcp_exposed = false`. A config load failure fails closed (an empty
-    // allow-list: nothing is exposed to the agent) rather than defaulting open.
-    let exposure = match OracleMcpConfig::load(None) {
-        Ok(cfg) => {
+    // E5 connection-scope isolation: derive the immutable startup policy from
+    // the same accepted snapshot used for generation admission. Missing or
+    // poisoned lifecycle state fails closed; serving paths never re-read disk.
+    let exposure = match options.profile_drain.accepted_config() {
+        Some(cfg) => {
             // Operator-visibility notice (stderr; never the stdio MCP channel).
             eprintln!("[oraclemcp] {}", exposed_profiles_summary(&cfg));
             oraclemcp::dispatch::McpExposurePolicy::from_config(&cfg)
         }
-        Err(_) => oraclemcp::dispatch::McpExposurePolicy::AllowList(HashSet::new()),
+        None => oraclemcp::dispatch::McpExposurePolicy::AllowList(HashSet::new()),
     };
     // E3/E3b: the dispatcher (which mints exports for oversized oracle_query
     // results) and the server (which serves them over resources/read) share the
@@ -2289,8 +2420,23 @@ impl ConfigReloadApplier for HttpConfigReloadApplier {
     fn apply_config_reload_plan(
         &self,
         plan: &oraclemcp_config::ConfigReloadPlan,
+        expected: &OracleMcpConfig,
+        next: &OracleMcpConfig,
     ) -> ConfigReloadApplyReport {
-        self.profile_drain.apply_config_reload_plan(plan);
+        if let Err(reason) = self
+            .profile_drain
+            .apply_config_reload_plan(plan, expected, next)
+        {
+            return ConfigReloadApplyReport {
+                status: "restart_required".to_owned(),
+                hot_reloadable: false,
+                restart_required: vec![reason.to_owned()],
+                draining_profiles: Vec::new(),
+                message: format!(
+                    "config file was updated but the live accepted snapshot was not changed: {reason}; restart the service"
+                ),
+            };
+        }
         let draining_profiles = self.profile_drain.draining_profiles();
         ConfigReloadApplyReport {
             status: "applied".to_owned(),
@@ -2340,17 +2486,12 @@ fn service_audit_path_for_backup(config_path: &Path) -> Result<PathBuf, String> 
 }
 
 fn resolve_http_transport_config(
+    cfg: &OracleMcpConfig,
     cli: &HttpServeArgs,
     level: &SessionLevelState,
     secret_resolver: &dyn SecretResolver,
 ) -> Result<ResolvedHttpTransportConfig, (&'static str, String)> {
-    let cfg = OracleMcpConfig::load(None).map_err(|e| {
-        (
-            "ORACLEMCP_CONFIG_INVALID",
-            format!("failed to load HTTP transport config: {e}"),
-        )
-    })?;
-    let http = apply_http_cli_overrides(cfg.http, cli);
+    let http = apply_http_cli_overrides(cfg.http.clone(), cli);
     http_transport_config_from_merged(http, level.is_protected(), secret_resolver)
 }
 
@@ -2522,54 +2663,68 @@ fn run_serve(
             "oraclemcp: OTLP telemetry export enabled (OTEL_EXPORTER_OTLP_* configured)"
         );
     }
+    // Load one validated startup snapshot. Every profile connection, level,
+    // exposure decision, custom-tool policy, and audit prerequisite below is
+    // derived from this exact value; runtime paths never re-read the file.
+    let full_config = match OracleMcpConfig::load(None) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            emit_status_error(
+                robot_json,
+                "ORACLEMCP_CONFIG_INVALID",
+                &format!("failed to load server config: {e}"),
+            );
+            return ExitCode::from(2);
+        }
+    };
     // Select only non-secret profile metadata at startup. DB credentials remain
     // as `credential_ref` / `wallet_password_ref` until the actual connection
     // opener runs (stdio/stateless startup connect, readiness probe connect, or
     // stateful per-lane connect).
-    let (connection_plan, active_profile, level, request_timeout) = match select_runtime_profile(
-        profile.as_deref(),
-    ) {
-        Ok(Some(selected)) => {
-            let active_profile = Some(selected.name.clone());
-            (
-                RuntimeConnectionPlan::Profile(selected.name),
-                active_profile,
-                selected.level,
-                selected.request_timeout,
-            )
-        }
-        Ok(None) => (
-            RuntimeConnectionPlan::Default,
-            None,
-            default_read_only_level(),
-            OracleConnectOptions::default().call_timeout,
-        ),
-        Err(e) if profile.is_some() => {
-            emit_status_error(
-                robot_json,
-                "ORACLEMCP_CONFIG_INVALID",
-                &format!("failed to resolve connection profile: {e}"),
-            );
-            return ExitCode::from(2);
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
-            (
-                RuntimeConnectionPlan::Stub(e),
+    let (connection_plan, active_profile, level, request_timeout) =
+        match select_runtime_profile_from_config(&full_config, profile.as_deref()) {
+            Ok(Some(selected)) => {
+                let active_profile = Some(selected.name.clone());
+                (
+                    RuntimeConnectionPlan::Profile(selected.name),
+                    active_profile,
+                    selected.level,
+                    selected.request_timeout,
+                )
+            }
+            Ok(None) => (
+                RuntimeConnectionPlan::Default,
                 None,
                 default_read_only_level(),
                 OracleConnectOptions::default().call_timeout,
-            )
-        }
-    };
+            ),
+            Err(e) if profile.is_some() => {
+                emit_status_error(
+                    robot_json,
+                    "ORACLEMCP_CONFIG_INVALID",
+                    &format!("failed to resolve connection profile: {e}"),
+                );
+                return ExitCode::from(2);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "no live connection; live tools will return a structured error envelope");
+                (
+                    RuntimeConnectionPlan::Stub(e),
+                    None,
+                    default_read_only_level(),
+                    OracleConnectOptions::default().call_timeout,
+                )
+            }
+        };
 
-    let custom_catalog = match load_custom_catalog_for_profile(active_profile.as_deref(), &level) {
-        Ok(catalog) => catalog,
-        Err(e) => {
-            emit_status_error(robot_json, "ORACLEMCP_CUSTOM_TOOLS_INVALID", &e.message);
-            return ExitCode::from(2);
-        }
-    };
+    let custom_catalog =
+        match load_custom_catalog_for_snapshot(&full_config, active_profile.as_deref(), &level) {
+            Ok(catalog) => catalog,
+            Err(e) => {
+                emit_status_error(robot_json, "ORACLEMCP_CUSTOM_TOOLS_INVALID", &e.message);
+                return ExitCode::from(2);
+            }
+        };
     let mut advertised_registry = registry::tool_registry();
     custom_catalog.register_first_class(&mut advertised_registry);
     let advertised_tools: Vec<String> = advertised_registry
@@ -2586,17 +2741,6 @@ fn run_serve(
     // server started on a read-only profile can `oracle_switch_profile` to a
     // writable `mcp_exposed` profile and run writes/DDL there, so the signing
     // key must be required if ANY reachable profile can exceed READ_ONLY.
-    let full_config = match OracleMcpConfig::load(None) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            emit_status_error(
-                robot_json,
-                "ORACLEMCP_CONFIG_INVALID",
-                &format!("failed to load audit config: {e}"),
-            );
-            return ExitCode::from(2);
-        }
-    };
     let reachable_ceiling = max_reachable_write_ceiling(&full_config, &level);
     let auditor = match build_auditor(
         &full_config.audit,
@@ -2631,8 +2775,12 @@ fn run_serve(
                     return ExitCode::from(2);
                 }
             };
-            let connections =
-                open_runtime_connection_plan(connection_plan, true, secret_resolver.as_ref());
+            let connections = open_runtime_connection_plan(
+                connection_plan,
+                &full_config,
+                true,
+                secret_resolver.as_ref(),
+            );
             let server = build_server(
                 connections.session,
                 connections.stateless,
@@ -2646,7 +2794,7 @@ fn run_serve(
                     secret_resolver: Arc::clone(&secret_resolver),
                     request_timeout,
                     metrics: None,
-                    profile_drain: ProfileDrainState::default(),
+                    profile_drain: ProfileDrainState::from_config(full_config.clone()),
                 },
             );
             emit_serve_status(robot_json, "stdio", None, &advertised_tools);
@@ -2660,14 +2808,18 @@ fn run_serve(
         }
         // ── Streamable HTTP transport (--listen) ───────────────────────────
         Some(addr) => {
-            let mut resolved_http =
-                match resolve_http_transport_config(&http, &level, secret_resolver.as_ref()) {
-                    Ok(cfg) => cfg,
-                    Err((code, message)) => {
-                        emit_status_error(robot_json, code, &message);
-                        return ExitCode::from(2);
-                    }
-                };
+            let mut resolved_http = match resolve_http_transport_config(
+                &full_config,
+                &http,
+                &level,
+                secret_resolver.as_ref(),
+            ) {
+                Ok(cfg) => cfg,
+                Err((code, message)) => {
+                    emit_status_error(robot_json, code, &message);
+                    return ExitCode::from(2);
+                }
+            };
             if http.client_credentials {
                 let store = match ClientCredentialStore::open_default() {
                     Ok(store) => store,
@@ -2745,10 +2897,15 @@ fn run_serve(
                     "stateful HTTP opens Oracle profile connections per lane".to_owned(),
                 ))
             } else {
-                open_runtime_connection_plan(connection_plan, false, secret_resolver.as_ref())
+                open_runtime_connection_plan(
+                    connection_plan,
+                    &full_config,
+                    false,
+                    secret_resolver.as_ref(),
+                )
             };
             let metrics = Arc::new(Metrics::new());
-            let profile_drain = ProfileDrainState::default();
+            let profile_drain = ProfileDrainState::from_config(full_config.clone());
             let built = build_server_with_lifecycle(
                 connections.session,
                 connections.stateless,
@@ -2834,8 +2991,13 @@ fn run_serve(
             // probe connection. With no live DB it probes a stub (always 503).
             let probe_conn: Box<dyn OracleConnection> = match active_profile.as_deref() {
                 Some(profile) => {
-                    open_profile_runtime_connections(profile, secret_resolver.as_ref(), false)
-                        .session
+                    open_profile_runtime_connections(
+                        &full_config,
+                        profile,
+                        secret_resolver.as_ref(),
+                        false,
+                    )
+                    .session
                 }
                 None => Box::new(stub::StubConnection::new(DbError::Connect(
                     "no connection profile configured".to_owned(),

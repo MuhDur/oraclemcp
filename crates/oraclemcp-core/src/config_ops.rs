@@ -101,6 +101,8 @@ pub struct ConfigDraftPlan {
     preview: ConfigDraftPreview,
     current_bytes: Vec<u8>,
     draft_bytes: Vec<u8>,
+    current_config: OracleMcpConfig,
+    draft_config: OracleMcpConfig,
 }
 
 impl fmt::Debug for ConfigDraftPlan {
@@ -224,8 +226,15 @@ impl ConfigReloadApplyReport {
 
 /// Live service hook that consumes validated reload plans.
 pub trait ConfigReloadApplier: Send + Sync {
-    /// Apply a hot-reloadable plan to live process state.
-    fn apply_config_reload_plan(&self, plan: &ConfigReloadPlan) -> ConfigReloadApplyReport;
+    /// Atomically apply a hot-reloadable plan and its already-validated target
+    /// snapshot to live process state. Runtime readers must consume this
+    /// accepted in-memory snapshot, never re-read the just-written file.
+    fn apply_config_reload_plan(
+        &self,
+        plan: &ConfigReloadPlan,
+        expected: &OracleMcpConfig,
+        next: &OracleMcpConfig,
+    ) -> ConfigReloadApplyReport;
 }
 
 /// Apply result retained for safe one-click rollback.
@@ -296,6 +305,8 @@ impl ConfigOpsBackend {
             preview,
             current_bytes,
             draft_bytes,
+            current_config: current,
+            draft_config: draft,
         })
     }
 
@@ -363,6 +374,9 @@ pub struct ConfigOpsService {
     backend: ConfigOpsBackend,
     target_path: PathBuf,
     reload_applier: Option<Arc<dyn ConfigReloadApplier>>,
+    /// Serializes stage, file replacement, and live snapshot application so
+    /// two dashboard requests cannot commit disk order A→B but live order B→A.
+    apply_lock: Mutex<()>,
     rollback_reports: Mutex<BTreeMap<String, ConfigApplyReport>>,
 }
 
@@ -378,6 +392,7 @@ impl ConfigOpsService {
             backend,
             target_path,
             reload_applier,
+            apply_lock: Mutex::new(()),
             rollback_reports: Mutex::new(BTreeMap::new()),
         }
     }
@@ -412,6 +427,7 @@ impl ConfigOpsService {
         draft_toml: &str,
         expected_current_sha256: Option<&str>,
     ) -> Result<ConfigApplyOutcome, ConfigOpsError> {
+        let _apply_guard = self.apply_lock.lock();
         let plan = self
             .backend
             .stage_config_draft(&self.target_path, draft_toml)?;
@@ -425,8 +441,10 @@ impl ConfigOpsService {
                 actual_sha256: plan.preview().current_sha256.clone(),
             });
         }
+        let current_config = plan.current_config.clone();
+        let next_config = plan.draft_config.clone();
         let report = self.backend.apply_config_draft(&plan)?;
-        let reload = self.reload_outcome(&report.reload_plan);
+        let reload = self.reload_outcome(&report.reload_plan, &current_config, &next_config);
         let rollback_id = rollback_id_for(&report);
         self.rollback_reports
             .lock()
@@ -440,38 +458,50 @@ impl ConfigOpsService {
 
     /// Restore a previously applied config from its timestamped backup.
     pub fn rollback(&self, rollback_id: &str) -> Result<ConfigRollbackOutcome, ConfigOpsError> {
+        let _apply_guard = self.apply_lock.lock();
         let report = self
             .rollback_reports
             .lock()
             .get(rollback_id)
             .cloned()
             .ok_or(ConfigOpsError::UnknownRollbackId)?;
-        let reverse_plan = reverse_reload_plan(&report)?;
+        let (reverse_plan, applied_config, restored_config) = reverse_reload_plan(&report)?;
         let rollback = self.backend.rollback_applied_config(&report)?;
-        let reload = self.reload_outcome(&reverse_plan);
+        let reload = self.reload_outcome(&reverse_plan, &applied_config, &restored_config);
         self.rollback_reports.lock().remove(rollback_id);
         Ok(ConfigRollbackOutcome { rollback, reload })
     }
 
-    fn reload_outcome(&self, plan: &ConfigReloadPlan) -> ConfigReloadApplyReport {
+    fn reload_outcome(
+        &self,
+        plan: &ConfigReloadPlan,
+        expected: &OracleMcpConfig,
+        next: &OracleMcpConfig,
+    ) -> ConfigReloadApplyReport {
         if !plan.hot_reloadable {
             return ConfigReloadApplyReport::restart_required(plan);
         }
         match &self.reload_applier {
-            Some(applier) => applier.apply_config_reload_plan(plan),
+            Some(applier) => applier.apply_config_reload_plan(plan, expected, next),
             None => ConfigReloadApplyReport::not_configured(plan),
         }
     }
 }
 
-fn reverse_reload_plan(report: &ConfigApplyReport) -> Result<ConfigReloadPlan, ConfigOpsError> {
+fn reverse_reload_plan(
+    report: &ConfigApplyReport,
+) -> Result<(ConfigReloadPlan, OracleMcpConfig, OracleMcpConfig), ConfigOpsError> {
     let applied_bytes = read_or_empty(&report.target_path)?;
     let backup = fs::read(&report.backup_path).map_err(|e| ConfigOpsError::Io(e.to_string()))?;
     let applied_toml = bytes_to_toml(&report.target_path, &applied_bytes)?;
     let backup_toml = bytes_to_toml(&report.backup_path, &backup)?;
     let applied = OracleMcpConfig::from_toml_str(applied_toml)?;
     let restored = OracleMcpConfig::from_toml_str(backup_toml)?;
-    Ok(ConfigReloadPlan::between(&applied, &restored))
+    Ok((
+        ConfigReloadPlan::between(&applied, &restored),
+        applied,
+        restored,
+    ))
 }
 
 fn rollback_id_for(report: &ConfigApplyReport) -> String {
@@ -751,6 +781,43 @@ mod tests {
     use super::*;
     use oraclemcp_config::ReloadProfileAction;
 
+    struct BlockingReloadApplier {
+        calls: Arc<Mutex<Vec<(String, String)>>>,
+        first_entered: std::sync::mpsc::Sender<()>,
+        release_first: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl ConfigReloadApplier for BlockingReloadApplier {
+        fn apply_config_reload_plan(
+            &self,
+            plan: &ConfigReloadPlan,
+            expected: &OracleMcpConfig,
+            next: &OracleMcpConfig,
+        ) -> ConfigReloadApplyReport {
+            let connect_string = |config: &OracleMcpConfig| {
+                config
+                    .profile("prod")
+                    .and_then(|profile| profile.connect_string.clone())
+                    .expect("prod connect string")
+            };
+            self.calls
+                .lock()
+                .push((connect_string(expected), connect_string(next)));
+            let release = self.release_first.lock().take();
+            if let Some(release) = release {
+                self.first_entered.send(()).expect("announce first apply");
+                release.recv().expect("release first apply");
+            }
+            ConfigReloadApplyReport {
+                status: "applied".to_owned(),
+                hot_reloadable: true,
+                restart_required: Vec::new(),
+                draining_profiles: plan.draining_profiles(),
+                message: "test reload applied".to_owned(),
+            }
+        }
+    }
+
     fn test_root(name: &str) -> PathBuf {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -970,5 +1037,80 @@ mod tests {
             err,
             ConfigOpsError::Config(ConfigError::Figment(_))
         ));
+    }
+
+    #[test]
+    fn concurrent_applies_serialize_disk_and_live_snapshot_order() {
+        let (backend, target) = backend("serialized-live-apply");
+        let config = |connect_string: &str| {
+            format!(
+                r#"
+                [[profiles]]
+                name = "prod"
+                connect_string = "{connect_string}"
+                "#
+            )
+        };
+        let a = config("a:1521/svc");
+        let b = config("b:1521/svc");
+        let c = config("c:1521/svc");
+        write_atomic_path(&target, a.as_bytes()).expect("seed A");
+
+        let (first_entered_tx, first_entered_rx) = std::sync::mpsc::channel();
+        let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let applier = Arc::new(BlockingReloadApplier {
+            calls: Arc::clone(&calls),
+            first_entered: first_entered_tx,
+            release_first: Mutex::new(Some(release_first_rx)),
+        });
+        let service = Arc::new(ConfigOpsService::new(
+            backend,
+            target.clone(),
+            Some(applier),
+        ));
+
+        let first_service = Arc::clone(&service);
+        let b_for_apply = b.clone();
+        let first = std::thread::spawn(move || first_service.apply(&b_for_apply, None));
+        first_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("first live apply entered");
+
+        let second_service = Arc::clone(&service);
+        let (second_done_tx, second_done_rx) = std::sync::mpsc::channel();
+        let c_for_apply = c.clone();
+        let second = std::thread::spawn(move || {
+            let result = second_service.apply(&c_for_apply, None);
+            second_done_tx.send(()).expect("announce second completion");
+            result
+        });
+        assert!(
+            second_done_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "the second request must not replace disk while A to B live apply is blocked"
+        );
+        assert_eq!(
+            fs::read_to_string(&target).expect("read blocked target"),
+            b,
+            "disk and live apply remain one serialized transaction"
+        );
+
+        release_first_tx.send(()).expect("release first live apply");
+        first.join().expect("first apply thread").expect("apply B");
+        second
+            .join()
+            .expect("second apply thread")
+            .expect("apply C");
+        assert_eq!(fs::read_to_string(&target).expect("read target"), c);
+        assert_eq!(
+            calls.lock().as_slice(),
+            &[
+                ("a:1521/svc".to_owned(), "b:1521/svc".to_owned()),
+                ("b:1521/svc".to_owned(), "c:1521/svc".to_owned()),
+            ],
+            "the exact expected snapshot handed to the applier follows disk order"
+        );
     }
 }

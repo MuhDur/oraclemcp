@@ -26,6 +26,10 @@ fn run_with_current_cx(f: impl FnOnce(&Cx)) {
     });
 }
 
+fn session_bundle(conn: impl OracleConnection + 'static) -> ProfileConnectionBundle {
+    ProfileConnectionBundle::new(Box::new(conn), None)
+}
+
 #[test]
 fn read_path_handler_work_runs_under_narrowed_read_cx() {
     // A9 (finding 7): the production read path narrows the handler context to
@@ -1027,9 +1031,7 @@ fn every_registry_tool_routes_and_deserializes_offline() {
             Box::new(OneRowMock),
             Some("dev".to_owned()),
             ddl_level(),
-            Arc::new(|_cx, _profile| {
-                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
-            }),
+            Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
         );
         let args = if name == "execute_approved" {
             let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
@@ -1051,9 +1053,7 @@ fn compatibility_aliases_route_to_prefixed_tools() {
         Box::new(OneRowMock),
         Some("dev".to_owned()),
         default_read_only_level(),
-        Arc::new(|_cx, _profile| {
-            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
-        }),
+        Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
     );
     for name in [
         "current_database",
@@ -1156,14 +1156,11 @@ fn connection_info_reports_stateless_read_strategy_when_configured() {
         Arc::new(|_cx, _profile| {
             Box::pin(async move { Err(DbError::Connect("unused".to_owned())) })
         }),
-        StatelessReadStrategy::new(
-            Some(Box::new(LabeledMock::new(
-                "pool",
-                "stateless_metadata_pool",
-                stateless_counts.clone(),
-            ))),
-            None,
-        ),
+        StatelessReadStrategy::new(Some(Box::new(LabeledMock::new(
+            "pool",
+            "stateless_metadata_pool",
+            stateless_counts.clone(),
+        )))),
         CustomToolCatalog::default(),
         None,
     );
@@ -1189,6 +1186,184 @@ fn connection_info_reports_stateless_read_strategy_when_configured() {
 }
 
 #[test]
+fn profile_switch_opens_one_connection_bundle() {
+    let config = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "dev"
+        connect_string = "dev:1521/svc"
+
+        [[profiles]]
+        name = "other"
+        connect_string = "other:1521/svc"
+        credential_ref = "env:ROTATING_PASSWORD"
+        "#,
+    )
+    .expect("config");
+    let state = ProfileDrainState::from_config(config);
+    let bundle_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&bundle_calls);
+    let dispatcher = OracleDispatcher::new_switchable_with_custom_tools_and_stateless(
+        Box::new(OneRowMock),
+        Some("dev".to_owned()),
+        default_read_only_level(),
+        Arc::new(move |_cx, generation| {
+            assert_eq!(generation.profile(), "other");
+            assert_eq!(
+                generation
+                    .config()
+                    .and_then(|config| config.profile("other"))
+                    .and_then(|profile| profile.credential_ref.as_deref()),
+                Some("env:ROTATING_PASSWORD")
+            );
+            calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(ProfileConnectionBundle::new(
+                    Box::new(LabeledMock::new(
+                        "bundle-session",
+                        "single_session",
+                        Arc::new(TouchCounts::default()),
+                    )),
+                    Some(Box::new(LabeledMock::new(
+                        "bundle-pool",
+                        "stateless_metadata_pool",
+                        Arc::new(TouchCounts::default()),
+                    ))),
+                ))
+            })
+        }),
+        StatelessReadStrategy::none(),
+        CustomToolCatalog::default(),
+        None,
+    )
+    .with_profile_drain_state(state);
+
+    dispatcher
+        .dispatch("oracle_switch_profile", json!({ "profile": "other" }))
+        .expect("bundle switch succeeds");
+    assert_eq!(bundle_calls.load(Ordering::SeqCst), 1);
+    let query = dispatcher
+        .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+        .expect("primary bundle connection is active");
+    assert_eq!(query["rows"][0]["LABEL"], json!("bundle-session"));
+    let schemas = dispatcher
+        .dispatch("oracle_list_schemas", json!({ "max_rows": 1 }))
+        .expect("stateless bundle connection is active");
+    assert_eq!(schemas["schemas"][0]["SCHEMA_NAME"], json!("bundle-pool"));
+}
+
+#[test]
+fn reload_rejects_a_connection_prepared_from_the_stale_generation() {
+    let before = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "dev"
+        connect_string = "dev:1521/svc"
+
+        [[profiles]]
+        name = "prod"
+        connect_string = "old-prod:1521/svc"
+        "#,
+    )
+    .expect("before config");
+    let after = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "dev"
+        connect_string = "dev:1521/svc"
+
+        [[profiles]]
+        name = "prod"
+        connect_string = "new-prod:1521/svc"
+        "#,
+    )
+    .expect("after config");
+    let drain = ProfileDrainState::from_config(before.clone());
+    let (started_tx, started_rx) = std_mpsc::channel();
+    let (release_tx, release_rx) = std_mpsc::channel();
+    let first_release = Arc::new(Mutex::new(Some(release_rx)));
+    let release_for_connector = Arc::clone(&first_release);
+    let connector_calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_connector = Arc::clone(&connector_calls);
+    let dispatcher = Arc::new(
+        OracleDispatcher::new_switchable(
+            Box::new(LabeledMock::new(
+                "old-lane",
+                "single_session",
+                Arc::new(TouchCounts::default()),
+            )),
+            Some("dev".to_owned()),
+            default_read_only_level(),
+            Arc::new(move |_cx, generation| {
+                let generation_number = generation.generation();
+                let call = calls_for_connector.fetch_add(1, Ordering::SeqCst);
+                let release = if call == 0 {
+                    release_for_connector.lock().expect("release mutex").take()
+                } else {
+                    None
+                };
+                let started_tx = started_tx.clone();
+                Box::pin(async move {
+                    if let Some(release) = release {
+                        started_tx.send(()).expect("announce blocked connector");
+                        release.recv().expect("release blocked connector");
+                    }
+                    let label = match generation_number {
+                        1 => "generation-1",
+                        2 => "generation-2",
+                        _ => "unexpected-generation",
+                    };
+                    Ok(session_bundle(LabeledMock::new(
+                        label,
+                        "single_session",
+                        Arc::new(TouchCounts::default()),
+                    )))
+                })
+            }),
+        )
+        .with_profile_drain_state(drain.clone()),
+    );
+
+    let switching = Arc::clone(&dispatcher);
+    let stale_switch = std::thread::spawn(move || {
+        switching.dispatch("oracle_switch_profile", json!({ "profile": "prod" }))
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("generation-1 connector blocks after admission");
+    drain
+        .apply_config_reload_plan(&ConfigReloadPlan::between(&before, &after), &before, &after)
+        .expect("generation-2 reload applies while connector is blocked");
+    release_tx.send(()).expect("release generation-1 connector");
+
+    let error = stale_switch
+        .join()
+        .expect("stale switch thread")
+        .expect_err("generation-1 connection cannot bind after generation-2 reload");
+    assert_eq!(error.error_class, ErrorClass::RuntimeStateRequired);
+    assert!(error.message.contains("draining"));
+
+    let current = dispatcher
+        .dispatch("oracle_connection_info", json!({}))
+        .expect("old lane remains active after stale switch rejection");
+    assert_eq!(current["active_profile"], json!("dev"));
+    let query = dispatcher
+        .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+        .expect("old connection remains usable");
+    assert_eq!(query["rows"][0]["LABEL"], json!("old-lane"));
+
+    let switched = dispatcher
+        .dispatch("oracle_switch_profile", json!({ "profile": "prod" }))
+        .expect("the current generation can be opened after stale rejection");
+    assert_eq!(switched["profile_generation"], json!(2));
+    let query = dispatcher
+        .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+        .expect("generation-2 connection is active");
+    assert_eq!(query["rows"][0]["LABEL"], json!("generation-2"));
+    assert_eq!(connector_calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
 fn stateless_pool_is_used_only_for_metadata_tools() {
     let session_counts = Arc::new(TouchCounts::default());
     let stateless_counts = Arc::new(TouchCounts::default());
@@ -1203,14 +1378,11 @@ fn stateless_pool_is_used_only_for_metadata_tools() {
         Arc::new(|_cx, _profile| {
             Box::pin(async move { Err(DbError::Connect("unused".to_owned())) })
         }),
-        StatelessReadStrategy::new(
-            Some(Box::new(LabeledMock::new(
-                "pool",
-                "stateless_metadata_pool",
-                stateless_counts.clone(),
-            ))),
-            None,
-        ),
+        StatelessReadStrategy::new(Some(Box::new(LabeledMock::new(
+            "pool",
+            "stateless_metadata_pool",
+            stateless_counts.clone(),
+        )))),
         CustomToolCatalog::default(),
         None,
     );
@@ -1296,11 +1468,9 @@ fn profile_response_omits_connection_and_secret_material() {
     )
     .expect("valid config");
 
-    let out = profiles_response(
-        &cfg,
-        &McpExposurePolicy::AllowAll,
-        &ProfileDrainState::default(),
-    );
+    let drain = ProfileDrainState::from_config(cfg);
+    let out =
+        profiles_response(&McpExposurePolicy::AllowAll, &drain).expect("accepted profile snapshot");
     assert_eq!(out["profiles"][0]["name"], json!("prod"));
     assert_eq!(out["profiles"][0]["is_default"], json!(true));
 
@@ -1361,17 +1531,20 @@ fn switch_profile_at_capacity_keeps_old_conn() {
         Some("dev".to_owned()),
         default_read_only_level(),
         Arc::new(move |_cx, profile| {
-            assert_eq!(profile, "other");
+            assert_eq!(profile.profile(), "other");
             connector_calls_for_connector.fetch_add(1, Ordering::SeqCst);
             let counts = new_counts_for_connector.clone();
             Box::pin(async move {
-                Ok(Box::new(LabeledMock::new("new", "single_session", counts))
-                    as Box<dyn OracleConnection>)
+                Ok(session_bundle(LabeledMock::new(
+                    "new",
+                    "single_session",
+                    counts,
+                )))
             })
         }),
         CustomToolCatalog::default(),
         Some(Arc::new(|profile, _level| {
-            assert_eq!(profile, Some("other"));
+            assert_eq!(profile.profile(), "other");
             Err(
                 ErrorEnvelope::new(ErrorClass::AtCapacity, "profile capacity exhausted")
                     .with_retry_after_ms(250),
@@ -1410,6 +1583,70 @@ fn switch_profile_at_capacity_keeps_old_conn() {
 }
 
 #[test]
+fn poisoned_quarantine_during_switch_returns_without_generation_deadlock() {
+    let config = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "dev"
+        connect_string = "dev:1521/svc"
+
+        [[profiles]]
+        name = "other"
+        connect_string = "other:1521/svc"
+        "#,
+    )
+    .expect("config");
+    let drain = ProfileDrainState::from_config(config);
+    let dispatcher = Arc::new(
+        OracleDispatcher::new_switchable(
+            Box::new(OneRowMock),
+            Some("dev".to_owned()),
+            default_read_only_level(),
+            Arc::new(|_cx, _generation| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
+        )
+        .with_profile_drain_state(drain.clone()),
+    );
+
+    let poison_target = Arc::clone(&dispatcher);
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _guard = poison_target.quarantine.lock().expect("quarantine lock");
+        panic!("poison quarantine for regression");
+    }));
+    assert!(poisoned.is_err());
+
+    let worker = Arc::clone(&dispatcher);
+    let (result_tx, result_rx) = std_mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        result_tx
+            .send(worker.dispatch("oracle_switch_profile", json!({ "profile": "other" })))
+            .expect("send switch result");
+    });
+    let error = result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("switch must not deadlock while dropping the pending lease")
+        .expect_err("poisoned quarantine aborts switch");
+    thread.join().expect("switch thread");
+    assert_eq!(error.error_class, ErrorClass::Internal);
+    assert!(error.message.contains("connection-quarantine mutex"));
+    assert_eq!(
+        dispatcher.request_timeout().expect("request timeout lock"),
+        Some(DEFAULT_REQUEST_TIMEOUT),
+        "fallible commit setup restores the old lane timeout"
+    );
+
+    let generations = drain.inner.lock().expect("generation lock");
+    assert_eq!(
+        generations.profiles["dev"].live_generations.get(&1),
+        Some(&1),
+        "the old lane keeps its generation lease"
+    );
+    assert!(
+        generations.profiles["other"].live_generations.is_empty(),
+        "the failed prepared lane releases its lease after the generation lock"
+    );
+}
+
+#[test]
 fn missing_profile_switch_target_is_actionable_invalid_arguments() {
     let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
     let err = dispatcher
@@ -1440,9 +1677,7 @@ fn profile_switch_reports_metadata_errors_after_switching() {
         Box::new(OneRowMock),
         Some("dev".to_owned()),
         default_read_only_level(),
-        Arc::new(|_cx, _profile| {
-            Box::pin(async move { Ok(Box::new(DescribeFailingMock) as Box<dyn OracleConnection>) })
-        }),
+        Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(DescribeFailingMock)) })),
     );
 
     let out = dispatcher
@@ -1478,9 +1713,7 @@ fn exposed_only_dispatcher() -> OracleDispatcher {
         default_read_only_level(),
         // The connector would happily connect to anything; the E5 gate must
         // refuse the non-exposed name BEFORE the connector is ever reached.
-        Arc::new(|_cx, _profile| {
-            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
-        }),
+        Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
     )
     .with_mcp_exposure(McpExposurePolicy::AllowList(
         ["agent_ro".to_owned()].into_iter().collect(),
@@ -1562,7 +1795,8 @@ fn e5_list_profiles_omits_non_exposed_profiles() {
     .expect("valid config");
 
     let exposed = McpExposurePolicy::AllowList(["agent_ro".to_owned()].into_iter().collect());
-    let out = profiles_response(&cfg, &exposed, &ProfileDrainState::default());
+    let drain = ProfileDrainState::from_config(cfg);
+    let out = profiles_response(&exposed, &drain).expect("accepted profile snapshot");
     let names: Vec<&str> = out["profiles"]
         .as_array()
         .expect("profiles array")
@@ -1604,10 +1838,13 @@ fn s5_draining_profiles_are_not_listed_or_switchable() {
     )
     .expect("valid reloaded config");
     let plan = ConfigReloadPlan::between(&cfg, &after);
-    let drain = ProfileDrainState::default();
-    drain.apply_config_reload_plan(&plan);
+    let drain = ProfileDrainState::from_config(cfg.clone());
+    drain
+        .apply_config_reload_plan(&plan, &cfg, &after)
+        .expect("reload plan applies");
 
-    let out = profiles_response(&cfg, &McpExposurePolicy::AllowAll, &drain);
+    let out =
+        profiles_response(&McpExposurePolicy::AllowAll, &drain).expect("accepted profile snapshot");
     let names: Vec<&str> = out["profiles"]
         .as_array()
         .expect("profiles array")
@@ -1620,21 +1857,121 @@ fn s5_draining_profiles_are_not_listed_or_switchable() {
         Box::new(OneRowMock),
         Some("agent_ro".to_owned()),
         default_read_only_level(),
-        Arc::new(|_cx, _profile| {
-            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
-        }),
+        Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
     )
     .with_profile_drain_state(drain);
     let err = dispatcher
         .dispatch("oracle_switch_profile", json!({ "profile": "rotated" }))
-        .expect_err("draining profile is refused before reconnect");
-    assert_eq!(err.error_class, ErrorClass::RuntimeStateRequired);
-    assert!(err.message.contains("draining"));
+        .expect_err("removed profile is refused before reconnect");
+    assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+    assert!(
+        err.message.contains("not available"),
+        "removed, hidden, and unknown names remain indistinguishable"
+    );
 
     let current = dispatcher
         .dispatch("oracle_connection_info", json!({}))
         .expect("failed switch does not replace active profile");
     assert_eq!(current["active_profile"], json!("agent_ro"));
+}
+
+#[test]
+fn stale_lane_lease_cannot_bind_after_reload_advances_generation() {
+    let before = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "prod"
+        connect_string = "old:1521/svc"
+        "#,
+    )
+    .expect("before config");
+    let after = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "prod"
+        connect_string = "new:1521/svc"
+        "#,
+    )
+    .expect("after config");
+    let state = ProfileDrainState::from_config(before.clone());
+    let prepared = match state.admit_mcp_profile("prod", true) {
+        ProfileGenerationAdmission::Ready(lease) => lease,
+        other => panic!("old generation was not admitted: {other:?}"),
+    };
+    state
+        .apply_config_reload_plan(&ConfigReloadPlan::between(&before, &after), &before, &after)
+        .expect("reload applies before lane bind");
+
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(OneRowMock),
+        Some("prod".to_owned()),
+        default_read_only_level(),
+    );
+    let error = match dispatcher.with_profile_generation_lease(state.clone(), prepared) {
+        Ok(_) => panic!("stale connection preparation must not bind to the new generation"),
+        Err(error) => error,
+    };
+    assert_eq!(error.error_class, ErrorClass::RuntimeStateRequired);
+    assert!(error.message.contains("draining"));
+    assert!(
+        state.draining_profiles().is_empty(),
+        "failed bind releases the final old-generation lease"
+    );
+}
+
+#[test]
+fn connection_diagnostics_report_exact_generation_without_config_secrets() {
+    let before = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "prod"
+        connect_string = "secret-old-host:1521/svc"
+        credential_ref = "env:SECRET_PASSWORD"
+        "#,
+    )
+    .expect("before config");
+    let after = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "prod"
+        connect_string = "secret-new-host:1521/svc"
+        credential_ref = "env:ROTATED_SECRET_PASSWORD"
+        "#,
+    )
+    .expect("after config");
+    let state = ProfileDrainState::from_config(before.clone());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(OneRowMock),
+        Some("prod".to_owned()),
+        default_read_only_level(),
+    )
+    .with_profile_drain_state(state.clone());
+
+    let current = dispatcher
+        .dispatch("oracle_connection_info", json!({}))
+        .expect("current generation diagnostics");
+    assert_eq!(current["active_profile"], json!("prod"));
+    assert_eq!(current["profile_generation_active"], json!(true));
+    assert_eq!(current["profile_generation"], json!(1));
+    assert_eq!(current["profile_generation_draining"], json!(false));
+
+    state
+        .apply_config_reload_plan(&ConfigReloadPlan::between(&before, &after), &before, &after)
+        .expect("reload applies");
+    let stale = dispatcher
+        .dispatch("oracle_connection_info", json!({}))
+        .expect("stale generation remains diagnosable");
+    assert_eq!(stale["profile_generation"], json!(1));
+    assert_eq!(stale["profile_generation_draining"], json!(true));
+    let rendered = serde_json::to_string(&stale).expect("diagnostics json");
+    for secret in [
+        "secret-old-host",
+        "secret-new-host",
+        "SECRET_PASSWORD",
+        "ROTATED_SECRET_PASSWORD",
+    ] {
+        assert!(!rendered.contains(secret), "diagnostics leaked {secret}");
+    }
 }
 
 #[test]
@@ -2092,9 +2429,7 @@ fn patch_source_preview_requires_unique_match_and_returns_confirmation() {
         Box::new(SourceLookupMock),
         Some("dev".to_owned()),
         ddl_level(),
-        Arc::new(|_cx, _profile| {
-            Box::pin(async move { Ok(Box::new(SourceLookupMock) as Box<dyn OracleConnection>) })
-        }),
+        Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(SourceLookupMock)) })),
     );
     let out = dispatcher
         .dispatch(
@@ -2161,9 +2496,7 @@ fn patch_source_execute_refetches_and_uses_create_or_replace_gate() {
         Box::new(ExecRecordingMock::new(state.clone())),
         Some("dev".to_owned()),
         ddl_level(),
-        Arc::new(|_cx, _profile| {
-            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
-        }),
+        Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
     );
     let preview_args = json!({
         "owner": "APP",
@@ -2205,9 +2538,7 @@ fn patch_view_alias_defaults_to_view_ddl() {
         Box::new(OneRowMock),
         Some("dev".to_owned()),
         ddl_level(),
-        Arc::new(|_cx, _profile| {
-            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
-        }),
+        Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
     );
     let out = dispatcher
         .dispatch("patch_view", args_for("patch_view"))
@@ -2224,9 +2555,7 @@ fn read_patch_preview_lists_and_reads_last_preview() {
         Box::new(SourceLookupMock),
         Some("dev".to_owned()),
         ddl_level(),
-        Arc::new(|_cx, _profile| {
-            Box::pin(async move { Ok(Box::new(SourceLookupMock) as Box<dyn OracleConnection>) })
-        }),
+        Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(SourceLookupMock)) })),
     );
 
     let empty = dispatcher
@@ -2320,9 +2649,7 @@ fn custom_read_only_tool_dispatches_with_named_binds() {
         Box::new(OneRowMock),
         Some("dev".to_owned()),
         default_read_only_level(),
-        Arc::new(|_cx, _profile| {
-            Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
-        }),
+        Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
         CustomToolCatalog::new(loaded),
         None,
     );
@@ -2357,17 +2684,13 @@ fn null_args_behave_like_empty_object_args() {
             Box::new(OneRowMock),
             Some("dev".to_owned()),
             ddl_level(),
-            Arc::new(|_cx, _profile| {
-                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
-            }),
+            Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
         );
         let d_null = OracleDispatcher::new_switchable(
             Box::new(OneRowMock),
             Some("dev".to_owned()),
             ddl_level(),
-            Arc::new(|_cx, _profile| {
-                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
-            }),
+            Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
         );
         let empty = d_empty.dispatch(name, json!({}));
         let null = d_null.dispatch(name, Value::Null);
@@ -2771,16 +3094,122 @@ fn lifecycle_close_rolls_back_and_revokes_execution_grants() {
             json!({ "sql": sql, "commit": true, "confirm": confirm }),
         )
         .expect_err("old grant must be rejected after lifecycle close");
-    assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+    assert_eq!(err.error_class, ErrorClass::RuntimeStateRequired);
     assert!(
-        err.message.contains("generation"),
-        "stale grant should fail as lane-generation-bound: {}",
+        err.message
+            .contains("no longer owns an active profile generation"),
+        "a closed lane must fail before it can evaluate a stale grant: {}",
         err.message
     );
     assert_eq!(
         executes.load(Ordering::SeqCst),
         0,
         "revoked grant must fail before database execute"
+    );
+}
+
+#[test]
+fn dispatch_reload_and_close_race_releases_only_the_bound_generation() {
+    let before = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "prod"
+        connect_string = "old:1521/svc"
+        "#,
+    )
+    .expect("before config");
+    let after = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "prod"
+        connect_string = "new:1521/svc"
+        "#,
+    )
+    .expect("after config");
+    let plan = ConfigReloadPlan::between(&before, &after);
+    let drain = ProfileDrainState::from_config(before.clone());
+    let dispatcher = Arc::new(
+        OracleDispatcher::new_with_profile_level(
+            Box::new(OneRowMock),
+            Some("prod".to_owned()),
+            default_read_only_level(),
+        )
+        .with_profile_drain_state(drain.clone()),
+    );
+    let start = Arc::new(Barrier::new(4));
+
+    let query_dispatcher = Arc::clone(&dispatcher);
+    let query_start = Arc::clone(&start);
+    let (query_tx, query_rx) = std_mpsc::channel();
+    let query = std::thread::spawn(move || {
+        query_start.wait();
+        query_tx
+            .send(query_dispatcher.dispatch(
+                "oracle_query",
+                json!({ "sql": "SELECT 1 AS label FROM dual" }),
+            ))
+            .expect("send query result");
+    });
+
+    let reload_state = drain.clone();
+    let reload_start = Arc::clone(&start);
+    let (reload_tx, reload_rx) = std_mpsc::channel();
+    let reload_before = before.clone();
+    let reload_after = after.clone();
+    let reload = std::thread::spawn(move || {
+        reload_start.wait();
+        reload_tx
+            .send(reload_state.apply_config_reload_plan(&plan, &reload_before, &reload_after))
+            .expect("send reload result");
+    });
+
+    let close_dispatcher = Arc::clone(&dispatcher);
+    let close_start = Arc::clone(&start);
+    let (close_tx, close_rx) = std_mpsc::channel();
+    let close = std::thread::spawn(move || {
+        close_start.wait();
+        close_tx
+            .send(close_dispatcher_for_test(
+                close_dispatcher.as_ref(),
+                DispatchCloseReason::SessionDelete,
+            ))
+            .expect("send close result");
+    });
+
+    start.wait();
+    let query_result = query_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("query completes without lock inversion");
+    if let Err(error) = query_result {
+        assert_eq!(error.error_class, ErrorClass::RuntimeStateRequired);
+    }
+    reload_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("reload completes without lock inversion")
+        .expect("reload applies");
+    close_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("close completes without lock inversion")
+        .expect("close succeeds");
+    query.join().expect("query thread");
+    reload.join().expect("reload thread");
+    close.join().expect("close thread");
+
+    let post_close = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({ "sql": "SELECT 1 AS label FROM dual" }),
+        )
+        .expect_err("closed old lane cannot dispatch on the replacement generation");
+    assert_eq!(post_close.error_class, ErrorClass::RuntimeStateRequired);
+    assert!(drain.draining_profiles().is_empty());
+    assert_eq!(
+        drain
+            .accepted_config()
+            .expect("replacement accepted")
+            .profile("prod")
+            .and_then(|profile| profile.connect_string.as_deref()),
+        Some("new:1521/svc")
     );
 }
 
@@ -5234,9 +5663,7 @@ mod audit_wiring {
             conn,
             Some("dev".to_owned()),
             level,
-            Arc::new(|_cx, _profile| {
-                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
-            }),
+            Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
         )
         .with_auditor(auditor)
     }
@@ -5589,9 +6016,7 @@ mod top_queries {
             Box::new(OneRowMock),
             Some("dev".to_owned()),
             read_write_level(),
-            Arc::new(|_cx, _profile| {
-                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
-            }),
+            Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
         )
     }
 
@@ -5675,9 +6100,7 @@ mod db_health {
             Box::new(conn),
             Some("dev".to_owned()),
             read_write_level(),
-            Arc::new(|_cx, _profile| {
-                Box::pin(async move { Ok(Box::new(OneRowMock) as Box<dyn OracleConnection>) })
-            }),
+            Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
         )
     }
 
@@ -6044,9 +6467,7 @@ mod read_only_backstop_wiring {
             default_read_only_level(),
             Arc::new(move |_cx, _profile| {
                 let state = second_for_connector.clone();
-                Box::pin(async move {
-                    Ok(Box::new(BackstopRecordingMock { state }) as Box<dyn OracleConnection>)
-                })
+                Box::pin(async move { Ok(session_bundle(BackstopRecordingMock { state })) })
             }),
         );
         // Arm on the first session.
@@ -6581,9 +7002,7 @@ mod sec1_stored_verdict_never_authorizes {
             level,
             Arc::new(move |_cx, _profile| {
                 let state = connector_state.clone();
-                Box::pin(async move {
-                    Ok(Box::new(ExecRecordingMock::new(state)) as Box<dyn OracleConnection>)
-                })
+                Box::pin(async move { Ok(session_bundle(ExecRecordingMock::new(state))) })
             }),
         );
         (dispatcher, state)

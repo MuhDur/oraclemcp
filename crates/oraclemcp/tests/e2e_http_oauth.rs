@@ -7,7 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use asupersync::{Cx, Outcome};
-use oraclemcp::dispatch::OracleDispatcher;
+use oraclemcp::dispatch::{OracleDispatcher, ProfileConnectionBundle};
 use oraclemcp::registry::{capabilities, tool_registry};
 use oraclemcp_auth::{ResourceServerConfig, SignatureVerifier};
 use oraclemcp_core::http::{
@@ -280,12 +280,14 @@ fn per_lane_profile_switch_server() -> OracleMcpServer {
         Box::pin(async move {
             let connector_lane_id = lane_id.clone();
             let connector: Arc<oraclemcp::dispatch::ProfileConnector> =
-                Arc::new(move |_cx: &Cx, profile: &str| {
-                    let profile = profile.to_owned();
+                Arc::new(move |_cx: &Cx, generation| {
+                    let profile = generation.profile().to_owned();
                     let lane_id = connector_lane_id.clone();
                     Box::pin(async move {
-                        Ok(Box::new(ProfileEchoMock::new(profile, lane_id))
-                            as Box<dyn OracleConnection>)
+                        Ok(ProfileConnectionBundle::new(
+                            Box::new(ProfileEchoMock::new(profile, lane_id)),
+                            None,
+                        ))
                     })
                 });
             Ok(Arc::new(OracleDispatcher::new_switchable(

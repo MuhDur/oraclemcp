@@ -799,6 +799,14 @@ pub struct ReloadProfileDecision {
     pub action: ReloadProfileAction,
     /// Reason for the action.
     pub reason: ReloadProfileReason,
+    /// MCP exposure of the profile in the newly installed snapshot. `None`
+    /// means the profile was removed. Reload consumers use this value instead
+    /// of retaining the process-start exposure snapshot.
+    pub next_mcp_exposed: Option<bool>,
+    /// Whether this transition changed MCP exposure. Retain decisions leave a
+    /// runtime exposure override untouched, which preserves the special case
+    /// where an operator deliberately starts on an initially hidden profile.
+    pub mcp_exposure_changed: bool,
 }
 
 /// A validated config-to-config reload plan.
@@ -844,6 +852,18 @@ impl ConfigReloadPlan {
             .chain(next_profiles.keys())
             .copied()
             .collect();
+        if names.iter().any(|name| {
+            profile_transition_expands_writable_authority(
+                current_profiles.get(name).copied(),
+                next_profiles.get(name).copied(),
+            )
+        }) {
+            // Audit signing and durable write-intent storage are provisioned
+            // once from the startup-reachable ceiling. A hot reload must never
+            // make a higher or newly exposed writable ceiling reachable without
+            // rebuilding those fail-closed prerequisites.
+            restart_required.push("profile writable authority or exposure expanded");
+        }
         let profiles = names
             .into_iter()
             .map(
@@ -852,28 +872,38 @@ impl ConfigReloadPlan {
                         profile: name.to_owned(),
                         action: ReloadProfileAction::Retain,
                         reason: ReloadProfileReason::Unchanged,
+                        next_mcp_exposed: Some(after.mcp_exposed()),
+                        mcp_exposure_changed: false,
                     },
                     (Some(before), Some(after)) if profile_hot_reload_compatible(before, after) => {
                         ReloadProfileDecision {
                             profile: name.to_owned(),
                             action: ReloadProfileAction::Retain,
                             reason: ReloadProfileReason::CompatibleMetadataChanged,
+                            next_mcp_exposed: Some(after.mcp_exposed()),
+                            mcp_exposure_changed: false,
                         }
                     }
-                    (Some(_), Some(_)) => ReloadProfileDecision {
+                    (Some(before), Some(after)) => ReloadProfileDecision {
                         profile: name.to_owned(),
                         action: ReloadProfileAction::Drain,
                         reason: ReloadProfileReason::IncompatibleChange,
+                        next_mcp_exposed: Some(after.mcp_exposed()),
+                        mcp_exposure_changed: before.mcp_exposed() != after.mcp_exposed(),
                     },
                     (Some(_), None) => ReloadProfileDecision {
                         profile: name.to_owned(),
                         action: ReloadProfileAction::Drain,
                         reason: ReloadProfileReason::Removed,
+                        next_mcp_exposed: None,
+                        mcp_exposure_changed: true,
                     },
-                    (None, Some(_)) => ReloadProfileDecision {
+                    (None, Some(after)) => ReloadProfileDecision {
                         profile: name.to_owned(),
                         action: ReloadProfileAction::Add,
                         reason: ReloadProfileReason::NewProfile,
+                        next_mcp_exposed: Some(after.mcp_exposed()),
+                        mcp_exposure_changed: true,
                     },
                     (None, None) => unreachable!("profile name came from one side"),
                 },
@@ -903,6 +933,27 @@ fn profile_map(cfg: &OracleMcpConfig) -> BTreeMap<&str, &ConnectionProfile> {
         .iter()
         .map(|profile| (profile.name.as_str(), profile))
         .collect()
+}
+
+fn profile_transition_expands_writable_authority(
+    before: Option<&ConnectionProfile>,
+    after: Option<&ConnectionProfile>,
+) -> bool {
+    let Some(after) = after else {
+        return false;
+    };
+    match before {
+        None => after.mcp_exposed() && after.max_level() > OperatingLevel::ReadOnly,
+        Some(before) => {
+            // A ceiling increase matters even while MCP-hidden: the profile may
+            // be the operator-selected active profile, which is deliberately
+            // reachable outside the MCP exposure policy.
+            after.max_level() > before.max_level()
+                || (!before.mcp_exposed()
+                    && after.mcp_exposed()
+                    && after.max_level() > OperatingLevel::ReadOnly)
+        }
+    }
 }
 
 fn profile_hot_reload_compatible(before: &ConnectionProfile, after: &ConnectionProfile) -> bool {
@@ -2192,6 +2243,183 @@ mod tests {
     }
 
     #[test]
+    fn every_connection_session_and_security_field_forces_a_drain() {
+        type Mutate = fn(&mut ConnectionProfile);
+        let cases: &[(&str, Mutate, Mutate)] = &[
+            (
+                "connect_string",
+                |_| {},
+                |p| p.connect_string = Some("other:1521/svc".into()),
+            ),
+            ("username", |_| {}, |p| p.username = Some("APP".into())),
+            (
+                "credential_ref",
+                |_| {},
+                |p| p.credential_ref = Some("env:APP_PASSWORD".into()),
+            ),
+            (
+                "login_script",
+                |_| {},
+                |p| p.login_script = Some(PathBuf::from("/operator/login.sql")),
+            ),
+            (
+                "login_statements",
+                |_| {},
+                |p| {
+                    p.login_statements =
+                        Some(vec!["ALTER SESSION SET NLS_LANGUAGE = english".into()])
+                },
+            ),
+            (
+                "trusted_session_statements",
+                |_| {},
+                |p| p.trusted_session_statements = Some(vec!["BEGIN NULL; END;".into()]),
+            ),
+            (
+                "call_timeout_seconds",
+                |_| {},
+                |p| p.call_timeout_seconds = Some(7),
+            ),
+            (
+                "connect_timeout_seconds",
+                |_| {},
+                |p| p.connect_timeout_seconds = Some(8),
+            ),
+            (
+                "inactivity_timeout_seconds",
+                |_| {},
+                |p| p.inactivity_timeout_seconds = Some(9),
+            ),
+            (
+                "keepalive_minutes",
+                |_| {},
+                |p| p.keepalive_minutes = Some(10),
+            ),
+            ("sdu", |_| {}, |p| p.sdu = Some(8192)),
+            (
+                "max_level",
+                |_| {},
+                |p| p.max_level = Some(OperatingLevel::Admin),
+            ),
+            (
+                "default_level",
+                |p| p.max_level = Some(OperatingLevel::Admin),
+                |p| {
+                    p.max_level = Some(OperatingLevel::Admin);
+                    p.default_level = Some(OperatingLevel::Ddl);
+                },
+            ),
+            ("protected", |_| {}, |p| p.protected = Some(true)),
+            (
+                "require_signed_tools",
+                |_| {},
+                |p| p.require_signed_tools = Some(true),
+            ),
+            (
+                "read_only_standby",
+                |_| {},
+                |p| p.read_only_standby = Some(true),
+            ),
+            ("mcp_exposed", |_| {}, |p| p.mcp_exposed = Some(false)),
+            (
+                "dashboard_ddl_workbench",
+                |_| {},
+                |p| p.dashboard_ddl_workbench = Some(true),
+            ),
+            (
+                "session_identity",
+                |_| {},
+                |p| {
+                    p.session_identity = Some(SessionIdentityConfig {
+                        program: Some("oraclemcp-test".into()),
+                        ..SessionIdentityConfig::default()
+                    });
+                },
+            ),
+            (
+                "pool",
+                |_| {},
+                |p| {
+                    p.pool = Some(PoolConfig {
+                        max_size: 4,
+                        min_idle: 1,
+                        ..PoolConfig::default()
+                    });
+                },
+            ),
+            (
+                "oci",
+                |_| {},
+                |p| {
+                    p.oci = Some(OciConfig {
+                        ssl_server_dn_match: Some(true),
+                        ..OciConfig::default()
+                    });
+                },
+            ),
+            (
+                "drcp",
+                |_| {},
+                |p| {
+                    p.drcp = Some(DrcpRoutingConfig {
+                        pooled: true,
+                        connection_class: Some("ORACLEMCP".into()),
+                        ..DrcpRoutingConfig::default()
+                    });
+                },
+            ),
+            (
+                "proxy_auth",
+                |_| {},
+                |p| {
+                    p.proxy_auth = Some(ProxyAuthConfig {
+                        proxy_user: Some("PROXY".into()),
+                        target_schema: Some("APP".into()),
+                    });
+                },
+            ),
+            (
+                "app_context",
+                |_| {},
+                |p| {
+                    p.app_context = Some(vec![AppContextConfig {
+                        namespace: Some("APP_CTX".into()),
+                        key: Some("TENANT".into()),
+                        value: Some("A".into()),
+                    }]);
+                },
+            ),
+        ];
+
+        for (field, mutate_before, mutate_after) in cases {
+            let mut before = OracleMcpConfig::from_toml_str(
+                r#"
+                [[profiles]]
+                name = "prod"
+                connect_string = "prod:1521/svc"
+                "#,
+            )
+            .expect("base config");
+            let mut after = before.clone();
+            mutate_before(&mut before.profiles[0]);
+            mutate_after(&mut after.profiles[0]);
+
+            let plan = ConfigReloadPlan::between(&before, &after);
+            let decision = reload_decision(&plan, "prod");
+            assert_eq!(
+                decision.action,
+                ReloadProfileAction::Drain,
+                "{field} must retire the old connection generation"
+            );
+            assert_eq!(
+                decision.reason,
+                ReloadProfileReason::IncompatibleChange,
+                "{field} must not be classified as cosmetic metadata"
+            );
+        }
+    }
+
+    #[test]
     fn safe_config_reload_drains_profile_exposure_or_ceiling_changes() {
         let before = OracleMcpConfig::from_toml_str(
             r#"
@@ -2220,7 +2448,114 @@ mod tests {
             reload_decision(&plan, "agent_ro").action,
             ReloadProfileAction::Drain
         );
+        assert_eq!(
+            reload_decision(&plan, "agent_ro").next_mcp_exposed,
+            Some(false)
+        );
+        assert!(reload_decision(&plan, "agent_ro").mcp_exposure_changed);
         assert_eq!(plan.draining_profiles(), vec!["agent_ro".to_owned()]);
+        assert!(!plan.hot_reloadable);
+        assert_eq!(
+            plan.restart_required,
+            vec!["profile writable authority or exposure expanded"]
+        );
+    }
+
+    #[test]
+    fn writable_authority_expansion_requires_restart_before_live_admission() {
+        let assert_restart = |before: &str, after: &str| {
+            let before = OracleMcpConfig::from_toml_str(before).expect("before config");
+            let after = OracleMcpConfig::from_toml_str(after).expect("after config");
+            let plan = ConfigReloadPlan::between(&before, &after);
+            assert!(!plan.hot_reloadable, "authority expansion must restart");
+            assert_eq!(
+                plan.restart_required,
+                vec!["profile writable authority or exposure expanded"]
+            );
+        };
+
+        // A startup-hidden writable profile did not contribute to MCP-reachable
+        // audit/write-intent provisioning. Exposing it cannot be hot-applied.
+        assert_restart(
+            r#"
+                [[profiles]]
+                name = "prod"
+                connect_string = "prod:1521/svc"
+                max_level = "ADMIN"
+                mcp_exposed = false
+            "#,
+            r#"
+                [[profiles]]
+                name = "prod"
+                connect_string = "prod:1521/svc"
+                max_level = "ADMIN"
+                mcp_exposed = true
+            "#,
+        );
+
+        // Hidden profiles can still be the operator-selected active profile,
+        // so raising their ceiling also requires startup prerequisite rebuild.
+        assert_restart(
+            r#"
+                [[profiles]]
+                name = "operator_only"
+                connect_string = "prod:1521/svc"
+                max_level = "READ_ONLY"
+                mcp_exposed = false
+            "#,
+            r#"
+                [[profiles]]
+                name = "operator_only"
+                connect_string = "prod:1521/svc"
+                max_level = "ADMIN"
+                mcp_exposed = false
+            "#,
+        );
+
+        // A newly added writable MCP profile likewise exceeds a read-only
+        // startup process's audit and durable-intent wiring.
+        assert_restart(
+            "",
+            r#"
+                [[profiles]]
+                name = "new_writer"
+                connect_string = "prod:1521/svc"
+                max_level = "READ_WRITE"
+                mcp_exposed = true
+            "#,
+        );
+    }
+
+    #[test]
+    fn writable_profile_replacement_stays_hot_when_authority_is_already_provisioned() {
+        let before = OracleMcpConfig::from_toml_str(
+            r#"
+                [[profiles]]
+                name = "prod"
+                connect_string = "old:1521/svc"
+                max_level = "ADMIN"
+                mcp_exposed = true
+            "#,
+        )
+        .expect("before config");
+        let after = OracleMcpConfig::from_toml_str(
+            r#"
+                [[profiles]]
+                name = "prod"
+                connect_string = "new:1521/svc"
+                max_level = "ADMIN"
+                mcp_exposed = true
+            "#,
+        )
+        .expect("after config");
+
+        let plan = ConfigReloadPlan::between(&before, &after);
+        assert!(plan.hot_reloadable);
+        assert!(plan.restart_required.is_empty());
+        assert_eq!(
+            reload_decision(&plan, "prod").action,
+            ReloadProfileAction::Drain
+        );
     }
 
     #[test]

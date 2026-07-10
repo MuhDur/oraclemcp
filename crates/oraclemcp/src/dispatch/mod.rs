@@ -22,7 +22,9 @@ use oraclemcp_audit::{
     AuditCancel, AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor, DbEvidence,
 };
 use oraclemcp_auth::apply_oauth_scopes;
-use oraclemcp_config::{ConfigReloadPlan, OracleMcpConfig};
+use oraclemcp_config::{
+    ConfigReloadPlan, OracleMcpConfig, ProfileMetadata, ReloadProfileAction, ReloadProfileReason,
+};
 use oraclemcp_core::{
     ConnectionStatus, CustomToolCatalog, CustomToolExecutor, DEFAULT_REQUEST_TIMEOUT,
     DispatchCloseFuture, DispatchCloseReason, DispatchContext, DispatchFuture, McpSurfaceDetail,
@@ -136,26 +138,36 @@ const MAX_CALL_TIMEOUT_SECONDS: u64 = 3_600;
 /// returns a boxed future awaited on the dispatch runtime.
 pub type ProfileConnector = dyn for<'a> Fn(
         &'a Cx,
-        &'a str,
-    )
-        -> Pin<Box<dyn Future<Output = Result<Box<dyn OracleConnection>, DbError>> + 'a>>
-    + Send
+        &'a ProfileGenerationLease,
+    ) -> Pin<Box<dyn Future<Output = Result<ProfileConnectionBundle, DbError>> + 'a>>
     + Sync
+    + Send
     + 'static;
 
-/// Optional stateless metadata-read connector used when a profile configures a
-/// local client-side pool. Async + `Cx`-first (B1).
-pub type ProfileStatelessConnector = dyn for<'a> Fn(
-        &'a Cx,
-        &'a str,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<Option<Box<dyn OracleConnection>>, DbError>> + 'a>,
-    > + Send
-    + Sync
-    + 'static;
+/// Primary and stateless connections opened from one resolved profile value.
+pub struct ProfileConnectionBundle {
+    session: Box<dyn OracleConnection>,
+    stateless: Option<Box<dyn OracleConnection>>,
+}
+
+impl ProfileConnectionBundle {
+    /// Build a connection bundle whose members share one resolved credential,
+    /// target, pool, and session-option snapshot.
+    #[must_use]
+    pub fn new(
+        session: Box<dyn OracleConnection>,
+        stateless: Option<Box<dyn OracleConnection>>,
+    ) -> Self {
+        Self { session, stateless }
+    }
+
+    fn into_parts(self) -> (Box<dyn OracleConnection>, Option<Box<dyn OracleConnection>>) {
+        (self.session, self.stateless)
+    }
+}
 
 /// Profile-scoped custom-tool loader used by `oracle_switch_profile`.
-pub type CustomToolLoader = dyn Fn(Option<&str>, &SessionLevelState) -> Result<CustomToolCatalog, ErrorEnvelope>
+pub type CustomToolLoader = dyn Fn(&ProfileGenerationLease, &SessionLevelState) -> Result<CustomToolCatalog, ErrorEnvelope>
     + Send
     + Sync
     + 'static;
@@ -164,26 +176,20 @@ pub type CustomToolLoader = dyn Fn(Option<&str>, &SessionLevelState) -> Result<C
 /// metadata-read pool.
 pub struct StatelessReadStrategy {
     conn: Option<Box<dyn OracleConnection>>,
-    connector: Option<Arc<ProfileStatelessConnector>>,
 }
 
 impl StatelessReadStrategy {
     /// Disable the stateless metadata-read path.
     #[must_use]
     pub fn none() -> Self {
-        Self {
-            conn: None,
-            connector: None,
-        }
+        Self { conn: None }
     }
 
-    /// Configure the initial stateless connection and profile-switch connector.
+    /// Configure the initial stateless connection. Profile switches receive a
+    /// complete primary/stateless bundle from [`ProfileConnector`].
     #[must_use]
-    pub fn new(
-        conn: Option<Box<dyn OracleConnection>>,
-        connector: Option<Arc<ProfileStatelessConnector>>,
-    ) -> Self {
-        Self { conn, connector }
+    pub fn new(conn: Option<Box<dyn OracleConnection>>) -> Self {
+        Self { conn }
     }
 }
 
@@ -199,19 +205,13 @@ struct ProfileDispatchPolicy {
 
 struct PreparedProfileSwitch {
     profile: String,
+    profile_generation: ProfileGenerationLease,
     conn: Box<dyn OracleConnection>,
     stateless_conn: Option<Box<dyn OracleConnection>>,
     level: SessionLevelState,
     request_timeout: Option<Duration>,
     custom_catalog: CustomToolCatalog,
     response: Value,
-}
-
-fn default_dispatch_policy() -> ProfileDispatchPolicy {
-    ProfileDispatchPolicy {
-        level: default_read_only_level(),
-        request_timeout: Some(DEFAULT_REQUEST_TIMEOUT),
-    }
 }
 
 fn profile_request_timeout(call_timeout_seconds: Option<u64>) -> Option<Duration> {
@@ -222,22 +222,48 @@ fn profile_request_timeout(call_timeout_seconds: Option<u64>) -> Option<Duration
     }
 }
 
-fn profile_dispatch_policy(profile: &str) -> ProfileDispatchPolicy {
-    OracleMcpConfig::load(None)
-        .ok()
-        .and_then(|cfg| {
-            cfg.profile(profile).map(|profile| ProfileDispatchPolicy {
-                level: oraclemcp_core::session_level_state(profile, false),
-                request_timeout: profile_request_timeout(profile.call_timeout_seconds),
-            })
-        })
-        .unwrap_or_else(default_dispatch_policy)
+fn standalone_read_only_policy() -> ProfileDispatchPolicy {
+    ProfileDispatchPolicy {
+        level: default_read_only_level(),
+        request_timeout: Some(DEFAULT_REQUEST_TIMEOUT),
+    }
+}
+
+fn profile_dispatch_policy(
+    lease: &ProfileGenerationLease,
+) -> Result<ProfileDispatchPolicy, ErrorEnvelope> {
+    let Some(profile) = lease
+        .config()
+        .and_then(|config| config.profile(lease.profile()))
+    else {
+        if !lease.snapshot_required {
+            // The public standalone dispatcher constructors are intentionally
+            // config-free: their caller supplies the connector and they pin
+            // every switched profile to a conservative immutable READ_ONLY
+            // policy. The served binary always installs `from_config`, where
+            // a missing profile is a fail-closed generation mismatch.
+            return Ok(standalone_read_only_policy());
+        }
+        return Err(ErrorEnvelope::new(
+            ErrorClass::RuntimeStateRequired,
+            format!(
+                "accepted config snapshot has no profile `{}` for generation {}",
+                lease.profile(),
+                lease.generation()
+            ),
+        ));
+    };
+    Ok(ProfileDispatchPolicy {
+        level: oraclemcp_core::session_level_state(profile, false),
+        request_timeout: profile_request_timeout(profile.call_timeout_seconds),
+    })
 }
 
 struct DispatcherState {
     conn: Box<dyn OracleConnection>,
     stateless_conn: Option<Box<dyn OracleConnection>>,
     active_profile: Option<String>,
+    profile_generation: Option<ProfileGenerationLease>,
     level: SessionLevelState,
     custom_catalog: CustomToolCatalog,
     execute_grants: ExecGrantStore,
@@ -285,7 +311,6 @@ pub struct OracleDispatcher {
     request_timeout: SyncMutex<Option<Duration>>,
     quarantine: SyncMutex<Option<ConnectionQuarantine>>,
     connector: Option<Arc<ProfileConnector>>,
-    stateless_connector: Option<Arc<ProfileStatelessConnector>>,
     custom_loader: Option<Arc<CustomToolLoader>>,
     /// Out-of-band, hash-chained, keyed-MAC auditor. Constructed once in server
     /// wiring; `None` only when no operating level above ReadOnly is reachable
@@ -304,8 +329,8 @@ pub struct OracleDispatcher {
     exports: Option<Arc<oraclemcp_core::ExportRegistry>>,
     /// E5 connection-scope isolation: which profiles the served surface may
     /// reach (switch/list/search/complete). Defaults to [`McpExposurePolicy::AllowAll`];
-    /// the served binary installs an explicit allow-list snapshotted from the
-    /// `mcp_exposed` config flags.
+    /// the served binary installs a startup snapshot and [`ProfileDrainState`]
+    /// overlays exposure transitions from every accepted live reload.
     mcp_exposure: McpExposurePolicy,
     /// S5 config reload/drain gate: profiles marked draining are omitted from
     /// runtime discovery, cannot be switched into, and cannot keep accepting
@@ -340,11 +365,16 @@ impl OracleDispatcher {
         active_profile: Option<String>,
         level: SessionLevelState,
     ) -> Self {
+        let profile_drain = ProfileDrainState::default();
+        let profile_generation = active_profile
+            .as_deref()
+            .and_then(|profile| profile_drain.bind_existing_profile(profile));
         OracleDispatcher {
             state: AsyncMutex::new(DispatcherState {
                 conn,
                 stateless_conn: None,
                 active_profile,
+                profile_generation,
                 level,
                 custom_catalog: CustomToolCatalog::default(),
                 execute_grants: ExecGrantStore::new(),
@@ -356,13 +386,12 @@ impl OracleDispatcher {
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             quarantine: SyncMutex::new(None),
             connector: None,
-            stateless_connector: None,
             custom_loader: None,
             auditor: None,
             default_audit_subject: process_audit_subject(),
             exports: None,
             mcp_exposure: McpExposurePolicy::default(),
-            profile_drain: ProfileDrainState::default(),
+            profile_drain,
             notifications: None,
             write_intents: None,
         }
@@ -416,11 +445,16 @@ impl OracleDispatcher {
         custom_catalog: CustomToolCatalog,
         custom_loader: Option<Arc<CustomToolLoader>>,
     ) -> Self {
+        let profile_drain = ProfileDrainState::default();
+        let profile_generation = active_profile
+            .as_deref()
+            .and_then(|profile| profile_drain.bind_existing_profile(profile));
         OracleDispatcher {
             state: AsyncMutex::new(DispatcherState {
                 conn,
                 stateless_conn: stateless.conn,
                 active_profile,
+                profile_generation,
                 level,
                 custom_catalog,
                 execute_grants: ExecGrantStore::new(),
@@ -432,13 +466,12 @@ impl OracleDispatcher {
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             quarantine: SyncMutex::new(None),
             connector: Some(connector),
-            stateless_connector: stateless.connector,
             custom_loader,
             auditor: None,
             default_audit_subject: process_audit_subject(),
             exports: None,
             mcp_exposure: McpExposurePolicy::default(),
-            profile_drain: ProfileDrainState::default(),
+            profile_drain,
             notifications: None,
             write_intents: None,
         }
@@ -458,9 +491,9 @@ impl OracleDispatcher {
     }
 
     /// Install the E5 connection-scope isolation policy (builder). The served
-    /// binary calls this with the allow-list snapshotted from the `mcp_exposed`
-    /// config flags so a non-exposed profile is never switchable, listable,
-    /// searchable, or completable by the agent.
+    /// binary calls this with the startup `mcp_exposed` snapshot. The shared
+    /// reload state overlays later exposure changes so a hidden profile stays
+    /// non-switchable, non-listable, non-searchable, and non-completable.
     #[must_use]
     pub fn with_mcp_exposure(mut self, exposure: McpExposurePolicy) -> Self {
         self.mcp_exposure = exposure;
@@ -472,8 +505,50 @@ impl OracleDispatcher {
     /// before any target profile reconnect or active-lane work.
     #[must_use]
     pub fn with_profile_drain_state(mut self, state: ProfileDrainState) -> Self {
-        self.profile_drain = state;
+        if let Ok(dispatcher_state) = self.state.get_mut() {
+            dispatcher_state.profile_generation = dispatcher_state
+                .active_profile
+                .as_deref()
+                .and_then(|profile| state.bind_existing_profile(profile));
+            self.profile_drain = state;
+        }
         self
+    }
+
+    /// Install the shared reload state together with the generation reservation
+    /// captured before an asynchronous connection open. This prevents a lane
+    /// from binding a connection prepared from generation N to generation N+1.
+    #[must_use = "a stale generation bind error must be handled"]
+    pub fn with_profile_generation_lease(
+        mut self,
+        state: ProfileDrainState,
+        lease: ProfileGenerationLease,
+    ) -> Result<Self, ErrorEnvelope> {
+        let profile = lease.profile().to_owned();
+        let generation = lease.generation();
+        if !lease.belongs_to(&state) {
+            return Err(profile_draining_error(&profile));
+        }
+        let dispatcher_state = self.state.get_mut().map_err(|_| {
+            ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
+        })?;
+        if dispatcher_state.active_profile.as_deref() != Some(profile.as_str()) {
+            return Err(profile_draining_error(&profile));
+        }
+
+        // Discard the standalone constructor's placeholder lease before
+        // entering the shared generation lock. The accepted lease itself stays
+        // outside the closure until the commit succeeds, so an error cannot run
+        // its Drop implementation while the same lifecycle mutex is held.
+        dispatcher_state.profile_generation.take();
+        let mut pending = Some(lease);
+        state
+            .commit_generation(&profile, generation, || {
+                dispatcher_state.profile_generation = pending.take();
+            })
+            .map_err(|()| profile_draining_error(&profile))?;
+        self.profile_drain = state;
+        Ok(self)
     }
 
     /// Attach the out-of-band auditor (builder; consumes and returns `self`).
@@ -626,25 +701,23 @@ async fn send_stream_frame(cx: &Cx, frames: &ToolStreamSender, frame: ToolStream
 /// exists. The CLI/operator path uses `cfg.list_profiles()` directly and still
 /// sees every profile.
 fn profiles_response(
-    cfg: &OracleMcpConfig,
     exposure: &McpExposurePolicy,
     drain: &ProfileDrainState,
-) -> Value {
-    let profiles: Vec<_> = cfg
-        .list_profiles()
-        .into_iter()
-        .filter(|metadata| {
-            exposure.is_exposed(&metadata.name) && !drain.is_draining(&metadata.name)
+) -> Result<Value, ErrorEnvelope> {
+    drain
+        .mcp_profiles_snapshot(exposure)
+        .map(|profiles| json!({ "profiles": profiles }))
+        .ok_or_else(|| {
+            DbError::UnsupportedAuth("accepted runtime config snapshot is unavailable".to_owned())
+                .into_envelope()
         })
-        .collect();
-    json!({ "profiles": profiles })
 }
 
 /// Fail-closed envelope (E5) for a profile that is not exposed to the MCP
 /// surface. Deliberately indistinguishable from an unknown profile so a guessed
 /// non-exposed name leaks nothing: same class, same message, no acknowledgement
 /// that the name happens to match a hidden profile.
-fn profile_not_available(profile: &str) -> ErrorEnvelope {
+pub fn profile_not_available(profile: &str) -> ErrorEnvelope {
     invalid_args(format!(
         "connection profile `{profile}` is not available on this MCP server"
     ))
@@ -663,10 +736,147 @@ pub fn profile_draining_error(profile: &str) -> ErrorEnvelope {
     .with_next_step("delete this MCP session to close a lane pinned to the drained profile")
 }
 
+fn profile_generation_inactive_error(profile: &str) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::RuntimeStateRequired,
+        format!(
+            "connection lane for profile `{profile}` no longer owns an active profile generation"
+        ),
+    )
+    .with_next_step("open a new MCP session to create a fresh profile-generation lane")
+}
+
 /// Shared hot-reload drain gate for profile-scoped dispatch.
 #[derive(Clone, Default)]
 pub struct ProfileDrainState {
-    profiles: Arc<SyncMutex<HashSet<String>>>,
+    inner: Arc<SyncMutex<ProfileDrainInner>>,
+}
+
+#[derive(Debug)]
+struct ProfileDrainInner {
+    profiles: HashMap<String, ProfileLifecycle>,
+    accepted_config: Option<Arc<OracleMcpConfig>>,
+    snapshot_required: bool,
+}
+
+impl Default for ProfileDrainInner {
+    fn default() -> Self {
+        Self {
+            profiles: HashMap::new(),
+            accepted_config: Some(Arc::new(OracleMcpConfig::default())),
+            snapshot_required: false,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ProfileLifecycle {
+    current_generation: Option<u64>,
+    last_generation: u64,
+    live_generations: HashMap<u64, usize>,
+    manually_drained: HashSet<u64>,
+    mcp_exposed: Option<bool>,
+}
+
+impl ProfileLifecycle {
+    fn initial() -> Self {
+        Self {
+            current_generation: Some(1),
+            last_generation: 1,
+            live_generations: HashMap::new(),
+            manually_drained: HashSet::new(),
+            mcp_exposed: None,
+        }
+    }
+
+    fn advance_generation(&mut self) {
+        self.current_generation = self.last_generation.checked_add(1).inspect(|next| {
+            self.last_generation = *next;
+        });
+    }
+
+    fn current_is_draining(&self) -> bool {
+        self.current_generation
+            .is_none_or(|generation| self.manually_drained.contains(&generation))
+    }
+
+    fn has_live_stale_generation(&self) -> bool {
+        self.live_generations
+            .keys()
+            .any(|generation| Some(*generation) != self.current_generation)
+    }
+}
+
+/// One live lane's binding to the exact profile generation it opened from.
+/// Dropping the lease releases that generation's lifecycle reference.
+pub struct ProfileGenerationLease {
+    state: ProfileDrainState,
+    profile: String,
+    generation: u64,
+    config: Option<Arc<OracleMcpConfig>>,
+    snapshot_required: bool,
+}
+
+impl std::fmt::Debug for ProfileGenerationLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProfileGenerationLease")
+            .field("profile", &self.profile)
+            .field("generation", &self.generation)
+            .field("draining", &self.is_draining())
+            .finish()
+    }
+}
+
+impl ProfileGenerationLease {
+    /// Profile name bound by this lease.
+    #[must_use]
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
+
+    /// Monotone generation number bound by this lease.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Immutable accepted configuration snapshot captured atomically with this
+    /// generation reservation. Production leases always carry one; focused
+    /// dispatcher tests built without service config may omit it.
+    #[must_use]
+    pub fn config(&self) -> Option<&OracleMcpConfig> {
+        self.config.as_deref()
+    }
+
+    /// Whether this lease is no longer the admitted current generation.
+    #[must_use]
+    pub fn is_draining(&self) -> bool {
+        self.state
+            .generation_is_draining(&self.profile, self.generation)
+    }
+
+    fn belongs_to(&self, state: &ProfileDrainState) -> bool {
+        Arc::ptr_eq(&self.state.inner, &state.inner)
+    }
+}
+
+impl Drop for ProfileGenerationLease {
+    fn drop(&mut self) {
+        self.state
+            .release_generation(&self.profile, self.generation);
+    }
+}
+
+/// Result of atomically checking MCP exposure and reserving a current profile
+/// generation for a new lane or profile switch.
+#[derive(Debug)]
+pub enum ProfileGenerationAdmission {
+    /// The profile is exposed and its current generation is reserved.
+    Ready(ProfileGenerationLease),
+    /// The profile is hidden from the MCP surface.
+    NotExposed,
+    /// No current usable generation exists (removed, drained, or lock poison).
+    Draining,
 }
 
 impl std::fmt::Debug for ProfileDrainState {
@@ -684,40 +894,964 @@ impl ProfileDrainState {
         Self::default()
     }
 
-    /// Replace the draining profile set atomically.
+    /// Create the runtime gate from the one configuration snapshot accepted at
+    /// process startup. Later hot reloads replace this snapshot only inside the
+    /// same mutex critical section that advances profile generations.
+    #[must_use]
+    pub fn from_config(config: OracleMcpConfig) -> Self {
+        Self {
+            inner: Arc::new(SyncMutex::new(ProfileDrainInner {
+                profiles: HashMap::new(),
+                accepted_config: Some(Arc::new(config)),
+                snapshot_required: true,
+            })),
+        }
+    }
+
+    /// Return the exact configuration generation currently accepted by the
+    /// live service. A missing snapshot or poisoned lifecycle lock fails
+    /// closed; serving paths must never compensate by re-reading the file.
+    #[must_use]
+    pub fn accepted_config(&self) -> Option<Arc<OracleMcpConfig>> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|guard| guard.accepted_config.clone())
+    }
+
+    /// Return agent-visible profile metadata from one linearized generation
+    /// snapshot. Config contents, exposure overrides, and generation usability
+    /// are all examined while holding the same lifecycle lock.
+    #[must_use]
+    pub fn mcp_profiles_snapshot(
+        &self,
+        exposure: &McpExposurePolicy,
+    ) -> Option<Vec<ProfileMetadata>> {
+        let guard = self.inner.lock().ok()?;
+        let config = guard.accepted_config.as_deref()?;
+        Some(
+            config
+                .list_profiles()
+                .into_iter()
+                .filter(|metadata| {
+                    let startup_exposed = exposure.is_exposed(&metadata.name);
+                    let Some(lifecycle) = guard.profiles.get(&metadata.name) else {
+                        return startup_exposed;
+                    };
+                    lifecycle.mcp_exposed.unwrap_or(startup_exposed)
+                        && !lifecycle.current_is_draining()
+                })
+                .collect(),
+        )
+    }
+
+    /// Replace the explicitly drained current-generation set atomically.
+    /// Config reloads use [`Self::apply_config_reload_plan`] instead so retired
+    /// generations remain monotone across later adjacent reloads.
     pub fn replace_draining_profiles<I, S>(&self, profiles: I)
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let mut guard = self.profiles.lock().unwrap_or_else(|err| err.into_inner());
-        *guard = profiles.into_iter().map(Into::into).collect();
+        let requested: HashSet<String> = profiles.into_iter().map(Into::into).collect();
+        let mut guard = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+        for lifecycle in guard.profiles.values_mut() {
+            lifecycle.manually_drained.clear();
+        }
+        for profile in requested {
+            let lifecycle = guard
+                .profiles
+                .entry(profile)
+                .or_insert_with(ProfileLifecycle::initial);
+            if let Some(generation) = lifecycle.current_generation {
+                lifecycle.manually_drained.insert(generation);
+            }
+        }
     }
 
-    /// Apply the drain set from a validated config reload plan.
-    pub fn apply_config_reload_plan(&self, plan: &ConfigReloadPlan) {
-        self.replace_draining_profiles(plan.draining_profiles());
+    /// Apply a validated config transition atomically. Incompatible or removed
+    /// generations are retired; later Retain decisions never reauthorize them.
+    /// A replacement profile receives a fresh generation that new lanes may
+    /// reserve while old live generations continue draining.
+    pub fn apply_config_reload_plan(
+        &self,
+        plan: &ConfigReloadPlan,
+        expected: &OracleMcpConfig,
+        next: &OracleMcpConfig,
+    ) -> Result<(), &'static str> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| "profile generation state lock is poisoned")?;
+        if let Some(current) = guard.accepted_config.as_deref()
+            && current != expected
+        {
+            return Err("reload base does not match the accepted config generation");
+        }
+        if ConfigReloadPlan::between(expected, next) != *plan {
+            return Err("reload plan does not match its exact config snapshots");
+        }
+        if !plan.hot_reloadable {
+            return Err("reload plan requires a service restart");
+        }
+        for decision in &plan.profiles {
+            let existed = guard.profiles.contains_key(&decision.profile);
+            let lifecycle = guard
+                .profiles
+                .entry(decision.profile.clone())
+                .or_insert_with(ProfileLifecycle::initial);
+            if decision.mcp_exposure_changed || matches!(decision.action, ReloadProfileAction::Add)
+            {
+                lifecycle.mcp_exposed = decision.next_mcp_exposed;
+            }
+            match (decision.action, decision.reason) {
+                (ReloadProfileAction::Retain, _) => {}
+                (ReloadProfileAction::Add, _) if !existed => {}
+                (ReloadProfileAction::Add, _) => lifecycle.advance_generation(),
+                (ReloadProfileAction::Drain, ReloadProfileReason::Removed) => {
+                    lifecycle.current_generation = None;
+                }
+                (ReloadProfileAction::Drain, _) => lifecycle.advance_generation(),
+            }
+        }
+        guard.accepted_config = Some(Arc::new(next.clone()));
+        Ok(())
     }
 
-    /// Whether a profile is currently draining. A poisoned lock fails closed.
+    /// Atomically check effective MCP exposure and reserve the current
+    /// generation for a new lane. `startup_exposed` is the immutable startup
+    /// policy fallback until the first applied reload supplies a live value.
+    #[must_use]
+    pub fn admit_mcp_profile(
+        &self,
+        profile: &str,
+        startup_exposed: bool,
+    ) -> ProfileGenerationAdmission {
+        let Ok(mut guard) = self.inner.lock() else {
+            return ProfileGenerationAdmission::Draining;
+        };
+        let config = guard.accepted_config.clone();
+        let snapshot_required = guard.snapshot_required;
+        if snapshot_required
+            && config
+                .as_deref()
+                .and_then(|accepted| accepted.profile(profile))
+                .is_none()
+        {
+            return ProfileGenerationAdmission::NotExposed;
+        }
+        if let Some(lifecycle) = guard.profiles.get(profile) {
+            if !lifecycle.mcp_exposed.unwrap_or(startup_exposed) {
+                return ProfileGenerationAdmission::NotExposed;
+            }
+        } else if !startup_exposed {
+            // Refuse hidden/unknown guesses before allocating lifecycle state.
+            return ProfileGenerationAdmission::NotExposed;
+        }
+        let lifecycle = guard
+            .profiles
+            .entry(profile.to_owned())
+            .or_insert_with(ProfileLifecycle::initial);
+        let Some(generation) = lifecycle.current_generation else {
+            return ProfileGenerationAdmission::Draining;
+        };
+        if lifecycle.manually_drained.contains(&generation) {
+            return ProfileGenerationAdmission::Draining;
+        }
+        let live = lifecycle.live_generations.entry(generation).or_default();
+        *live = live.saturating_add(1);
+        ProfileGenerationAdmission::Ready(ProfileGenerationLease {
+            state: self.clone(),
+            profile: profile.to_owned(),
+            generation,
+            config,
+            snapshot_required,
+        })
+    }
+
+    fn bind_existing_profile(&self, profile: &str) -> Option<ProfileGenerationLease> {
+        let mut guard = self.inner.lock().ok()?;
+        let config = guard.accepted_config.clone();
+        let snapshot_required = guard.snapshot_required;
+        if snapshot_required
+            && config
+                .as_deref()
+                .and_then(|accepted| accepted.profile(profile))
+                .is_none()
+        {
+            return None;
+        }
+        let lifecycle = guard
+            .profiles
+            .entry(profile.to_owned())
+            .or_insert_with(ProfileLifecycle::initial);
+        let generation = lifecycle.current_generation?;
+        let live = lifecycle.live_generations.entry(generation).or_default();
+        *live = live.saturating_add(1);
+        Some(ProfileGenerationLease {
+            state: self.clone(),
+            profile: profile.to_owned(),
+            generation,
+            config,
+            snapshot_required,
+        })
+    }
+
+    /// Effective MCP exposure after live reload overrides the startup policy.
+    #[must_use]
+    pub fn is_mcp_exposed(&self, profile: &str, startup_exposed: bool) -> bool {
+        self.inner.lock().is_ok_and(|guard| {
+            guard
+                .profiles
+                .get(profile)
+                .and_then(|lifecycle| lifecycle.mcp_exposed)
+                .unwrap_or(startup_exposed)
+        })
+    }
+
+    /// Whether a profile is both exposed and backed by an admitted current
+    /// generation. Exposure and generation are read from one mutex snapshot so
+    /// a concurrent visible-to-hidden reload cannot splice the old exposure
+    /// value together with the new non-draining generation.
+    #[must_use]
+    pub fn is_mcp_available(&self, profile: &str, startup_exposed: bool) -> bool {
+        self.inner.lock().is_ok_and(|guard| {
+            let Some(lifecycle) = guard.profiles.get(profile) else {
+                return startup_exposed;
+            };
+            lifecycle.mcp_exposed.unwrap_or(startup_exposed) && !lifecycle.current_is_draining()
+        })
+    }
+
+    /// Whether the current generation cannot admit a new lane. A poisoned lock
+    /// fails closed.
     #[must_use]
     pub fn is_draining(&self, profile: &str) -> bool {
-        self.profiles
+        self.inner
             .lock()
-            .map(|profiles| profiles.contains(profile))
+            .map(|guard| {
+                guard
+                    .profiles
+                    .get(profile)
+                    .is_some_and(ProfileLifecycle::current_is_draining)
+            })
             .unwrap_or(true)
     }
 
-    /// Sorted draining profile names for diagnostics and tests.
+    fn generation_is_draining(&self, profile: &str, generation: u64) -> bool {
+        self.inner
+            .lock()
+            .map(|guard| {
+                guard.profiles.get(profile).is_none_or(|lifecycle| {
+                    lifecycle.current_generation != Some(generation)
+                        || lifecycle.manually_drained.contains(&generation)
+                })
+            })
+            .unwrap_or(true)
+    }
+
+    fn commit_generation<T>(
+        &self,
+        profile: &str,
+        generation: u64,
+        commit: impl FnOnce() -> T,
+    ) -> Result<T, ()> {
+        let guard = self.inner.lock().map_err(|_| ())?;
+        let lifecycle = guard.profiles.get(profile).ok_or(())?;
+        if lifecycle.current_generation != Some(generation)
+            || lifecycle.manually_drained.contains(&generation)
+        {
+            return Err(());
+        }
+        Ok(commit())
+    }
+
+    fn release_generation(&self, profile: &str, generation: u64) {
+        let Ok(mut guard) = self.inner.lock() else {
+            return;
+        };
+        let Some(lifecycle) = guard.profiles.get_mut(profile) else {
+            return;
+        };
+        let Some(count) = lifecycle.live_generations.get_mut(&generation) else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            lifecycle.live_generations.remove(&generation);
+            lifecycle.manually_drained.remove(&generation);
+        }
+    }
+
+    /// Sorted profiles with at least one live retired generation or an
+    /// explicitly drained current generation.
     #[must_use]
     pub fn draining_profiles(&self) -> Vec<String> {
-        let mut profiles: Vec<_> = self
-            .profiles
+        let mut profiles = self
+            .inner
             .lock()
-            .map(|profiles| profiles.iter().cloned().collect())
+            .map(|guard| {
+                guard
+                    .profiles
+                    .iter()
+                    .filter(|(_, lifecycle)| {
+                        (lifecycle.current_is_draining() && !lifecycle.live_generations.is_empty())
+                            || lifecycle.has_live_stale_generation()
+                    })
+                    .map(|(profile, _)| profile.clone())
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         profiles.sort();
         profiles
+    }
+}
+
+#[cfg(test)]
+mod profile_drain_state_tests {
+    use super::*;
+
+    #[test]
+    fn incompatible_generation_stays_drained_after_later_retain_reload() {
+        let admin = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            description = "initial"
+            connect_string = "prod:1521/svc"
+            max_level = "ADMIN"
+            "#,
+        )
+        .expect("initial config");
+        let lowered = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            description = "initial"
+            connect_string = "prod:1521/svc"
+            max_level = "READ_ONLY"
+            "#,
+        )
+        .expect("lowered config");
+        let relabelled = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            description = "harmless metadata edit"
+            connect_string = "prod:1521/svc"
+            max_level = "READ_ONLY"
+            "#,
+        )
+        .expect("metadata-only config");
+
+        let drain = ProfileDrainState::from_config(admin.clone());
+        let old_admin = match drain.admit_mcp_profile("prod", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("initial generation was not admitted: {other:?}"),
+        };
+        drain
+            .apply_config_reload_plan(
+                &ConfigReloadPlan::between(&admin, &lowered),
+                &admin,
+                &lowered,
+            )
+            .expect("lowering reload applies");
+        assert!(old_admin.is_draining());
+        let current_read_only = match drain.admit_mcp_profile("prod", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("replacement generation was not admitted: {other:?}"),
+        };
+        assert_ne!(old_admin.generation(), current_read_only.generation());
+        assert!(!current_read_only.is_draining());
+
+        drain
+            .apply_config_reload_plan(
+                &ConfigReloadPlan::between(&lowered, &relabelled),
+                &lowered,
+                &relabelled,
+            )
+            .expect("metadata reload applies");
+        assert!(
+            old_admin.is_draining(),
+            "a later compatible reload must not revive the older ADMIN generation"
+        );
+        assert!(
+            !current_read_only.is_draining(),
+            "the compatible current READ_ONLY generation remains admitted"
+        );
+
+        drain
+            .apply_config_reload_plan(
+                &ConfigReloadPlan::between(&relabelled, &relabelled),
+                &relabelled,
+                &relabelled,
+            )
+            .expect("no-op reload applies");
+        assert!(
+            old_admin.is_draining(),
+            "a later no-op reload must not revive the older ADMIN generation"
+        );
+        assert!(
+            !current_read_only.is_draining(),
+            "the current READ_ONLY generation survives a no-op reload"
+        );
+        assert_eq!(drain.draining_profiles(), vec!["prod"]);
+
+        drop(old_admin);
+        assert!(
+            drain.draining_profiles().is_empty(),
+            "closing the last old-generation lane clears only that stale generation"
+        );
+    }
+
+    #[test]
+    fn removed_then_readded_name_never_reuses_the_removed_generation() {
+        let present = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "old:1521/svc"
+            "#,
+        )
+        .expect("present config");
+        let removed = OracleMcpConfig::from_toml_str("").expect("empty config");
+        let readded = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "new:1521/svc"
+            "#,
+        )
+        .expect("readded config");
+        let drain = ProfileDrainState::from_config(present.clone());
+        let removed_generation = match drain.admit_mcp_profile("prod", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("initial generation was not admitted: {other:?}"),
+        };
+
+        drain
+            .apply_config_reload_plan(
+                &ConfigReloadPlan::between(&present, &removed),
+                &present,
+                &removed,
+            )
+            .expect("removal applies");
+        assert!(removed_generation.is_draining());
+        assert!(matches!(
+            drain.admit_mcp_profile("prod", true),
+            ProfileGenerationAdmission::NotExposed
+        ));
+
+        drain
+            .apply_config_reload_plan(
+                &ConfigReloadPlan::between(&removed, &readded),
+                &removed,
+                &readded,
+            )
+            .expect("re-add applies");
+        let readded_generation = match drain.admit_mcp_profile("prod", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("readded generation was not admitted: {other:?}"),
+        };
+        assert_ne!(
+            removed_generation.generation(),
+            readded_generation.generation()
+        );
+        assert!(removed_generation.is_draining());
+        assert!(!readded_generation.is_draining());
+    }
+
+    #[test]
+    fn exposure_removal_survives_unrelated_reloads_and_hides_current_generation() {
+        let visible = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            description = "visible"
+            connect_string = "prod:1521/svc"
+            mcp_exposed = true
+            "#,
+        )
+        .expect("visible config");
+        let hidden = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            description = "visible"
+            connect_string = "prod:1521/svc"
+            mcp_exposed = false
+            "#,
+        )
+        .expect("hidden config");
+        let relabelled_hidden = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            description = "still hidden"
+            connect_string = "prod:1521/svc"
+            mcp_exposed = false
+            "#,
+        )
+        .expect("relabelled hidden config");
+        let drain = ProfileDrainState::from_config(visible.clone());
+        let visible_generation = match drain.admit_mcp_profile("prod", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("visible generation was not admitted: {other:?}"),
+        };
+
+        drain
+            .apply_config_reload_plan(
+                &ConfigReloadPlan::between(&visible, &hidden),
+                &visible,
+                &hidden,
+            )
+            .expect("exposure removal applies");
+        assert!(visible_generation.is_draining());
+        assert!(!drain.is_mcp_exposed("prod", true));
+        assert!(
+            !drain.is_draining("prod"),
+            "the replacement generation is usable; exposure alone must hide it"
+        );
+        assert!(!drain.is_mcp_available("prod", true));
+        assert!(matches!(
+            drain.admit_mcp_profile("prod", true),
+            ProfileGenerationAdmission::NotExposed
+        ));
+
+        drain
+            .apply_config_reload_plan(
+                &ConfigReloadPlan::between(&hidden, &relabelled_hidden),
+                &hidden,
+                &relabelled_hidden,
+            )
+            .expect("hidden metadata reload applies");
+        assert!(visible_generation.is_draining());
+        assert!(!drain.is_mcp_exposed("prod", true));
+        let listed = profiles_response(&McpExposurePolicy::AllowAll, &drain)
+            .expect("accepted profile snapshot");
+        assert_eq!(listed["profiles"], json!([]));
+    }
+
+    #[test]
+    fn retain_reload_does_not_revoke_operator_selected_initially_hidden_profile() {
+        let hidden = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "operator_only"
+            description = "before"
+            connect_string = "prod:1521/svc"
+            mcp_exposed = false
+            "#,
+        )
+        .expect("hidden config");
+        let relabelled = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "operator_only"
+            description = "after"
+            connect_string = "prod:1521/svc"
+            mcp_exposed = false
+            "#,
+        )
+        .expect("relabelled hidden config");
+        let drain = ProfileDrainState::from_config(hidden.clone());
+
+        drain
+            .apply_config_reload_plan(
+                &ConfigReloadPlan::between(&hidden, &relabelled),
+                &hidden,
+                &relabelled,
+            )
+            .expect("metadata reload applies");
+
+        assert!(
+            drain.is_mcp_exposed("operator_only", true),
+            "operator-selected startup fallback remains authoritative"
+        );
+        assert!(
+            !drain.is_mcp_exposed("operator_only", false),
+            "MCP switch/list fallback remains hidden"
+        );
+        assert!(matches!(
+            drain.admit_mcp_profile("operator_only", true),
+            ProfileGenerationAdmission::Ready(_)
+        ));
+    }
+
+    #[test]
+    fn stale_generation_cannot_cross_the_atomic_switch_commit_point() {
+        let before = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "old:1521/svc"
+            "#,
+        )
+        .expect("before config");
+        let after = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "new:1521/svc"
+            "#,
+        )
+        .expect("after config");
+        let drain = ProfileDrainState::from_config(before.clone());
+        let prepared = match drain.admit_mcp_profile("prod", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("initial generation was not admitted: {other:?}"),
+        };
+        drain
+            .apply_config_reload_plan(&ConfigReloadPlan::between(&before, &after), &before, &after)
+            .expect("replacement applies");
+
+        let mut committed = false;
+        assert!(
+            drain
+                .commit_generation("prod", prepared.generation(), || committed = true)
+                .is_err()
+        );
+        assert!(
+            !committed,
+            "stale preparation must not run its commit closure"
+        );
+    }
+
+    #[test]
+    fn rollback_transition_allocates_another_generation_without_reviving_older_lanes() {
+        let old = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "old:1521/svc"
+            max_level = "ADMIN"
+            "#,
+        )
+        .expect("old config");
+        let replacement = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "replacement:1521/svc"
+            max_level = "ADMIN"
+            "#,
+        )
+        .expect("replacement config");
+        let drain = ProfileDrainState::from_config(old.clone());
+        let generation_one = match drain.admit_mcp_profile("prod", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("initial generation was not admitted: {other:?}"),
+        };
+        drain
+            .apply_config_reload_plan(
+                &ConfigReloadPlan::between(&old, &replacement),
+                &old,
+                &replacement,
+            )
+            .expect("replacement applies");
+        let generation_two = match drain.admit_mcp_profile("prod", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("lowered generation was not admitted: {other:?}"),
+        };
+
+        drain
+            .apply_config_reload_plan(
+                &ConfigReloadPlan::between(&replacement, &old),
+                &replacement,
+                &old,
+            )
+            .expect("rollback applies");
+        let generation_three = match drain.admit_mcp_profile("prod", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("rollback generation was not admitted: {other:?}"),
+        };
+
+        assert!(generation_one.is_draining());
+        assert!(generation_two.is_draining());
+        assert!(!generation_three.is_draining());
+        assert!(generation_one.generation() < generation_two.generation());
+        assert!(generation_two.generation() < generation_three.generation());
+
+        drop(generation_one);
+        assert_eq!(
+            drain.draining_profiles(),
+            vec!["prod"],
+            "closing generation one cannot clear the still-live stale generation two"
+        );
+        drop(generation_two);
+        assert!(
+            drain.draining_profiles().is_empty(),
+            "only the final stale generation close clears the draining diagnostic"
+        );
+        assert!(!generation_three.is_draining());
+    }
+
+    #[test]
+    fn reload_and_switch_commit_have_one_generation_linearization_point() {
+        let before = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "old:1521/svc"
+            "#,
+        )
+        .expect("before config");
+        let after = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "new:1521/svc"
+            "#,
+        )
+        .expect("after config");
+        let plan = ConfigReloadPlan::between(&before, &after);
+        let drain = ProfileDrainState::from_config(before.clone());
+        let prepared = match drain.admit_mcp_profile("prod", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("initial generation was not admitted: {other:?}"),
+        };
+        let generation = prepared.generation();
+        let commit_state = drain.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let commit = std::thread::spawn(move || {
+            commit_state
+                .commit_generation("prod", generation, || {
+                    entered_tx.send(()).expect("announce commit lock");
+                    release_rx.recv().expect("release commit lock");
+                })
+                .expect("generation is current before reload")
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("commit reached its generation-locked critical section");
+        assert!(matches!(
+            drain.inner.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+
+        let reload_state = drain.clone();
+        let reload = std::thread::spawn(move || {
+            reload_state.apply_config_reload_plan(&plan, &before, &after)
+        });
+        release_tx.send(()).expect("release commit");
+        commit.join().expect("commit thread");
+        reload
+            .join()
+            .expect("reload thread")
+            .expect("reload applies");
+
+        assert!(
+            prepared.is_draining(),
+            "reload linearized after the completed commit and retired its generation"
+        );
+    }
+
+    #[test]
+    fn stale_coarse_reload_plan_cannot_replace_the_accepted_snapshot() {
+        let config = |connect_string: &str| {
+            OracleMcpConfig::from_toml_str(&format!(
+                r#"
+                [[profiles]]
+                name = "prod"
+                connect_string = "{connect_string}"
+                "#
+            ))
+            .expect("config")
+        };
+        let a = config("a:1521/svc");
+        let b = config("b:1521/svc");
+        let c = config("c:1521/svc");
+        let state = ProfileDrainState::from_config(a.clone());
+
+        let error = state
+            .apply_config_reload_plan(&ConfigReloadPlan::between(&b, &c), &b, &c)
+            .expect_err("B to C is stale while A is accepted");
+        assert!(error.contains("reload base"), "{error}");
+        assert_eq!(
+            state
+                .accepted_config()
+                .expect("accepted A")
+                .profile("prod")
+                .and_then(|profile| profile.connect_string.as_deref()),
+            Some("a:1521/svc")
+        );
+
+        state
+            .apply_config_reload_plan(&ConfigReloadPlan::between(&a, &b), &a, &b)
+            .expect("A to B applies");
+        let error = state
+            .apply_config_reload_plan(&ConfigReloadPlan::between(&a, &c), &a, &c)
+            .expect_err("stale A to C cannot overwrite accepted B");
+        assert!(error.contains("reload base"), "{error}");
+        assert_eq!(
+            state
+                .accepted_config()
+                .expect("accepted B")
+                .profile("prod")
+                .and_then(|profile| profile.connect_string.as_deref()),
+            Some("b:1521/svc")
+        );
+    }
+
+    #[test]
+    fn lifecycle_state_rejects_restart_required_authority_expansion() {
+        let read_only = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "prod:1521/svc"
+            max_level = "READ_ONLY"
+            "#,
+        )
+        .expect("read-only config");
+        let admin = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "prod:1521/svc"
+            max_level = "ADMIN"
+            "#,
+        )
+        .expect("admin config");
+        let state = ProfileDrainState::from_config(read_only.clone());
+        let original = match state.admit_mcp_profile("prod", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("initial generation was not admitted: {other:?}"),
+        };
+        let plan = ConfigReloadPlan::between(&read_only, &admin);
+        assert!(!plan.hot_reloadable);
+
+        let error = state
+            .apply_config_reload_plan(&plan, &read_only, &admin)
+            .expect_err("restart-required authority expansion must fail closed");
+        assert!(error.contains("requires a service restart"), "{error}");
+        assert!(!original.is_draining());
+        assert_eq!(
+            state
+                .accepted_config()
+                .expect("read-only snapshot remains accepted")
+                .profile("prod")
+                .expect("prod profile")
+                .max_level(),
+            OperatingLevel::ReadOnly
+        );
+    }
+
+    #[test]
+    fn unknown_profile_guesses_never_allocate_lifecycle_state() {
+        let config = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "known"
+            connect_string = "known:1521/svc"
+            "#,
+        )
+        .expect("config");
+        let state = ProfileDrainState::from_config(config);
+        assert_eq!(state.inner.lock().expect("state lock").profiles.len(), 0);
+
+        for index in 0..1_000 {
+            let guessed = format!("unknown-{index}");
+            assert!(matches!(
+                state.admit_mcp_profile(&guessed, true),
+                ProfileGenerationAdmission::NotExposed
+            ));
+            assert!(state.bind_existing_profile(&guessed).is_none());
+        }
+
+        assert_eq!(
+            state.inner.lock().expect("state lock").profiles.len(),
+            0,
+            "untrusted profile names must not grow the lifecycle map"
+        );
+    }
+
+    #[test]
+    fn poisoned_generation_lock_rejects_reload_and_fails_closed() {
+        let config = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "prod:1521/svc"
+            "#,
+        )
+        .expect("config");
+        let next = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "replacement:1521/svc"
+            "#,
+        )
+        .expect("next config");
+        let state = ProfileDrainState::from_config(config.clone());
+        let lease = match state.admit_mcp_profile("prod", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("initial generation was not admitted: {other:?}"),
+        };
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = state.commit_generation("prod", lease.generation(), || {
+                panic!("poison generation lock for regression");
+            });
+        }));
+        assert!(poisoned.is_err());
+
+        let error = state
+            .apply_config_reload_plan(&ConfigReloadPlan::between(&config, &next), &config, &next)
+            .expect_err("poisoned state must reject live reload");
+        assert!(error.contains("lock is poisoned"), "{error}");
+        assert!(state.accepted_config().is_none());
+        assert!(state.is_draining("prod"));
+    }
+
+    #[test]
+    fn competing_reloads_from_one_base_have_exactly_one_winner() {
+        let config = |connect_string: &str| {
+            OracleMcpConfig::from_toml_str(&format!(
+                r#"
+                [[profiles]]
+                name = "prod"
+                connect_string = "{connect_string}"
+                "#
+            ))
+            .expect("config")
+        };
+        let a = config("a:1521/svc");
+        let b = config("b:1521/svc");
+        let c = config("c:1521/svc");
+        let state = ProfileDrainState::from_config(a.clone());
+        let old = match state.admit_mcp_profile("prod", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("initial generation was not admitted: {other:?}"),
+        };
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let spawn_reload = |next: OracleMcpConfig| {
+            let state = state.clone();
+            let expected = a.clone();
+            let plan = ConfigReloadPlan::between(&expected, &next);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                state.apply_config_reload_plan(&plan, &expected, &next)
+            })
+        };
+        let to_b = spawn_reload(b);
+        let to_c = spawn_reload(c);
+        barrier.wait();
+        let results = [
+            to_b.join().expect("B reload thread"),
+            to_c.join().expect("C reload thread"),
+        ];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        assert!(old.is_draining());
+        let current = match state.admit_mcp_profile("prod", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("winning generation was not admitted: {other:?}"),
+        };
+        assert_eq!(current.generation(), old.generation() + 1);
     }
 }
 
@@ -732,21 +1866,20 @@ pub enum McpExposurePolicy {
     /// binary always installs an explicit [`Self::AllowList`].
     #[default]
     AllowAll,
-    /// Only these profile names (the exposed set — every profile except those
-    /// hidden with `mcp_exposed = false`, snapshotted at server-wiring time) are
-    /// reachable by the agent. Any name not in this set is invisible and
-    /// non-switchable.
+    /// Only these profile names (the startup exposed set — every profile except
+    /// those hidden with `mcp_exposed = false`) are reachable by the agent until
+    /// live generation state overlays a later exposure transition.
     AllowList(std::collections::HashSet<String>),
 }
 
 impl McpExposurePolicy {
-    /// Build the exposure policy from config (E5), per-profile opt-out. The
-    /// served binary calls this once with the loaded config.
+    /// Build the startup exposure policy from config (E5), per-profile opt-out.
+    /// Accepted reload plans update exposure through [`ProfileDrainState`].
     ///
     /// A profile is reachable by the agent UNLESS it sets `mcp_exposed = false`.
     /// When nothing is hidden (the common case) that is exactly
-    /// [`Self::AllowAll`]; otherwise the exposed (non-hidden) set is snapshotted
-    /// as an [`Self::AllowList`] so the hidden profiles are unreachable. One
+    /// [`Self::AllowAll`]; otherwise the exposed (non-hidden) startup set is an
+    /// [`Self::AllowList`] so the hidden profiles are unreachable. One
     /// profile's flag never changes another's exposure (no global activation).
     #[must_use]
     pub fn from_config(cfg: &OracleMcpConfig) -> Self {
@@ -5431,6 +6564,9 @@ impl OracleDispatcher {
                 AuditOutcome::UnknownDiscarded
             }
         };
+        // Closing the lane is the lifecycle point at which its exact profile
+        // generation stops contributing to drain diagnostics/refcounts.
+        state.profile_generation.take();
 
         append_lifecycle_audit(
             self.auditor.as_deref(),
@@ -5498,6 +6634,16 @@ impl OracleDispatcher {
         let request_budget = self.dispatch_request_budget(cx)?;
         let tool = canonical_tool_name(name);
         if tool == "oracle_switch_profile" {
+            {
+                let state = self.state.lock(cx).await.map_err(|_| {
+                    ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
+                })?;
+                if let Some(active_profile) = state.active_profile.as_deref()
+                    && state.profile_generation.is_none()
+                {
+                    return Err(profile_generation_inactive_error(active_profile));
+                }
+            }
             let a: SwitchProfileArgs = parse_args(name, args)?;
             let profile = required_switch_profile_arg(name, a.profile)?;
             // E5 connection-scope isolation: the served surface may only switch
@@ -5505,12 +6651,18 @@ impl OracleDispatcher {
             // unknown name is rejected here, BEFORE the connector ever resolves
             // the profile's credentials/DSN, with an envelope that does not
             // reveal whether the guessed name matched a hidden profile.
-            if !self.mcp_exposure.is_exposed(&profile) {
-                return Err(profile_not_available(&profile));
-            }
-            if self.profile_drain.is_draining(&profile) {
-                return Err(profile_draining_error(&profile));
-            }
+            let profile_generation = match self
+                .profile_drain
+                .admit_mcp_profile(&profile, self.mcp_exposure.is_exposed(&profile))
+            {
+                ProfileGenerationAdmission::Ready(lease) => lease,
+                ProfileGenerationAdmission::NotExposed => {
+                    return Err(profile_not_available(&profile));
+                }
+                ProfileGenerationAdmission::Draining => {
+                    return Err(profile_draining_error(&profile));
+                }
+            };
             let Some(connector) = &self.connector else {
                 return Err(ErrorEnvelope::new(
                     ErrorClass::RuntimeStateRequired,
@@ -5518,16 +6670,10 @@ impl OracleDispatcher {
                 )
                 .with_next_step("restart the server with `oraclemcp serve --profile <name>`"));
             };
-
-            let conn = connector(cx, &profile)
+            let (conn, stateless_conn) = connector(cx, &profile_generation)
                 .await
-                .map_err(DbError::into_envelope)?;
-            let stateless_conn = match &self.stateless_connector {
-                Some(connector) => connector(cx, &profile)
-                    .await
-                    .map_err(DbError::into_envelope)?,
-                None => None,
-            };
+                .map_err(DbError::into_envelope)?
+                .into_parts();
             let mut response = connection_info_json(
                 Some(profile.clone()),
                 describe_conn(cx, conn.as_ref()).await,
@@ -5541,14 +6687,15 @@ impl OracleDispatcher {
                 );
             }
             request_budget.enforce(cx).map_err(DbError::into_envelope)?;
-            let new_policy = profile_dispatch_policy(&profile);
+            let new_policy = profile_dispatch_policy(&profile_generation)?;
             let new_level = new_policy.level;
             let new_custom_catalog = match &self.custom_loader {
-                Some(loader) => loader(Some(&profile), &new_level)?,
+                Some(loader) => loader(&profile_generation, &new_level)?,
                 None => CustomToolCatalog::default(),
             };
             let prepared = PreparedProfileSwitch {
                 profile,
+                profile_generation,
                 conn,
                 stateless_conn,
                 level: new_level,
@@ -5565,38 +6712,65 @@ impl OracleDispatcher {
                 ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
             })?;
             let old_request_timeout = self.request_timeout()?;
-            self.set_request_timeout(prepared.request_timeout)?;
-            if let Err(err) = self.clear_connection_quarantine() {
-                let _ = self.set_request_timeout(old_request_timeout);
-                return Err(err);
-            }
             let PreparedProfileSwitch {
                 profile,
+                profile_generation,
                 conn,
                 stateless_conn,
                 level,
+                request_timeout,
                 custom_catalog,
                 mut response,
-                ..
             } = prepared;
-            state.conn = conn;
-            state.stateless_conn = stateless_conn;
-            state.active_profile = Some(profile.clone());
-            state.level = level;
-            state.custom_catalog = custom_catalog;
-            state.grant_generation = state.grant_generation.saturating_add(1);
-            state.execute_grants.clear();
-            state.execute_approved_tokens.clear();
-            state.patch_previews.clear();
-            // A1: the pinned session was replaced; the new session's transaction
-            // is fresh, so re-assert the read-only backstop on its first read.
-            state.read_only_backstop.reset();
-            if let Value::Object(map) = &mut response {
-                map.insert(
-                    "custom_tool_count".to_owned(),
-                    json!(state.custom_catalog.len()),
-                );
-            }
+            let generation = profile_generation.generation();
+            // Keep the lease outside the generation-locked closure until every
+            // fallible setup step has succeeded. If the closure captured the
+            // lease by value, an early `?` would drop it while
+            // `commit_generation` still held the same profile mutex, and its
+            // `Drop` implementation would deadlock trying to release the
+            // generation reference.
+            let mut pending_profile_generation = Some(profile_generation);
+            let mut retired_generation = None;
+            let response = self
+                .profile_drain
+                .commit_generation(&profile, generation, || {
+                    self.set_request_timeout(request_timeout)?;
+                    if let Err(err) = self.clear_connection_quarantine() {
+                        let _ = self.set_request_timeout(old_request_timeout);
+                        return Err(err);
+                    }
+                    let profile_generation =
+                        pending_profile_generation.take().ok_or_else(|| {
+                            ErrorEnvelope::new(
+                                ErrorClass::Internal,
+                                "prepared profile generation was already consumed",
+                            )
+                        })?;
+                    state.conn = conn;
+                    state.stateless_conn = stateless_conn;
+                    state.active_profile = Some(profile.clone());
+                    retired_generation = state.profile_generation.replace(profile_generation);
+                    state.level = level;
+                    state.custom_catalog = custom_catalog;
+                    state.grant_generation = state.grant_generation.saturating_add(1);
+                    state.execute_grants.clear();
+                    state.execute_approved_tokens.clear();
+                    state.patch_previews.clear();
+                    // A1: the pinned session was replaced; the new session's
+                    // transaction is fresh, so re-assert the read-only backstop
+                    // on its first read.
+                    state.read_only_backstop.reset();
+                    if let Value::Object(map) = &mut response {
+                        map.insert(
+                            "custom_tool_count".to_owned(),
+                            json!(state.custom_catalog.len()),
+                        );
+                        map.insert("profile_generation".to_owned(), json!(generation));
+                    }
+                    Ok(response)
+                })
+                .map_err(|()| profile_draining_error(&profile))??;
+            drop(retired_generation);
             drop(state);
             // E6: the switch may have changed the profile-scoped custom-tool
             // catalog (and thus the served tool set), so signal the client to
@@ -5636,9 +6810,14 @@ impl OracleDispatcher {
         if tool != "oracle_list_profiles"
             && tool != "oracle_connection_info"
             && let Some(active_profile) = state.active_profile.as_deref()
-            && self.profile_drain.is_draining(active_profile)
         {
-            return Err(profile_draining_error(active_profile));
+            match state.profile_generation.as_ref() {
+                None => return Err(profile_generation_inactive_error(active_profile)),
+                Some(generation) if generation.is_draining() => {
+                    return Err(profile_draining_error(active_profile));
+                }
+                Some(_) => {}
+            }
         }
         if tool == "oracle_set_session_level" {
             let a: SetSessionLevelArgs = parse_args(name, args)?;
@@ -6023,11 +7202,7 @@ impl OracleDispatcher {
             }
             "oracle_list_profiles" => {
                 ensure_no_args(name, args)?;
-                OracleMcpConfig::load(None)
-                    .map(|cfg| profiles_response(&cfg, &self.mcp_exposure, &self.profile_drain))
-                    .map_err(|e| {
-                        DbError::UnsupportedAuth(format!("config load failed: {e}")).into_envelope()
-                    })
+                profiles_response(&self.mcp_exposure, &self.profile_drain)
             }
             "oracle_connection_info" => {
                 ensure_no_args(name, args)?;
@@ -6035,13 +7210,26 @@ impl OracleDispatcher {
                     state.active_profile.clone(),
                     describe_conn(cx, conn).await,
                 );
-                if let Value::Object(map) = &mut value
-                    && let Some(stateless_conn) = state.stateless_conn.as_ref()
-                {
-                    map.insert(
-                        "stateless_read_connection".to_owned(),
-                        connection_strategy_json(cx, stateless_conn.as_ref()).await,
-                    );
+                if let Value::Object(map) = &mut value {
+                    if let Some(generation) = state.profile_generation.as_ref() {
+                        map.insert("profile_generation_active".to_owned(), json!(true));
+                        map.insert(
+                            "profile_generation".to_owned(),
+                            json!(generation.generation()),
+                        );
+                        map.insert(
+                            "profile_generation_draining".to_owned(),
+                            json!(generation.is_draining()),
+                        );
+                    } else if state.active_profile.is_some() {
+                        map.insert("profile_generation_active".to_owned(), json!(false));
+                    }
+                    if let Some(stateless_conn) = state.stateless_conn.as_ref() {
+                        map.insert(
+                            "stateless_read_connection".to_owned(),
+                            connection_strategy_json(cx, stateless_conn.as_ref()).await,
+                        );
+                    }
                 }
                 Ok(value)
             }
@@ -6739,10 +7927,14 @@ impl OracleDispatcher {
                 ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
             })?;
             let scoped_level = scoped_session_level(&state.level, context);
-            if let Some(active_profile) = state.active_profile.as_deref()
-                && self.profile_drain.is_draining(active_profile)
-            {
-                return Err(profile_draining_error(active_profile));
+            if let Some(active_profile) = state.active_profile.as_deref() {
+                match state.profile_generation.as_ref() {
+                    None => return Err(profile_generation_inactive_error(active_profile)),
+                    Some(generation) if generation.is_draining() => {
+                        return Err(profile_draining_error(active_profile));
+                    }
+                    Some(_) => {}
+                }
             }
             let prepared = {
                 let parsed = parse_args::<QueryArgs>(name, args)?;

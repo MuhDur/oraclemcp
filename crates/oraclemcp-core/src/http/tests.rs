@@ -2656,6 +2656,8 @@ impl crate::config_ops::ConfigReloadApplier for TestConfigReloadApplier {
     fn apply_config_reload_plan(
         &self,
         plan: &oraclemcp_config::ConfigReloadPlan,
+        _expected: &oraclemcp_config::OracleMcpConfig,
+        _next: &oraclemcp_config::OracleMcpConfig,
     ) -> crate::config_ops::ConfigReloadApplyReport {
         let draining = plan.draining_profiles();
         self.applied.lock().push(draining.clone());

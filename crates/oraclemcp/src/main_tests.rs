@@ -60,6 +60,135 @@ fn runtime_profile_selection_does_not_resolve_secret_refs() {
 }
 
 #[test]
+fn runtime_connection_bundle_uses_one_resolved_secret_epoch() {
+    use std::sync::atomic::AtomicUsize;
+
+    let cfg = OracleMcpConfig::from_toml_str(
+        r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "tcps://prod.example:1522/service"
+            username = "APP_USER"
+            credential_ref = "env:DB_PASSWORD"
+
+            [profiles.oci]
+            wallet_location = "/wallet"
+            wallet_password_ref = "env:WALLET_PASSWORD"
+
+            [profiles.pool]
+            max_size = 2
+            min_idle = 0
+        "#,
+    )
+    .expect("valid profile");
+    let calls = AtomicUsize::new(0);
+    let resolver = oraclemcp_auth::EnvLookupSecretResolver::new(|locator: &str| {
+        let epoch = calls.fetch_add(1, Ordering::SeqCst);
+        Some(format!("{locator}-epoch-{epoch}"))
+    });
+
+    let resolved = resolve_profile_options_from_config_with(&cfg, Some("prod"), &resolver)
+        .expect("profile resolves")
+        .expect("profile exists");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "each configured reference is resolved once for the bundle"
+    );
+
+    let (session, stateless, pool) = runtime_connection_options(resolved);
+    assert!(pool.is_some(), "the stateless pool connection is planned");
+    assert_eq!(session, stateless, "both connections use one secret epoch");
+    assert_eq!(session.password.as_deref(), Some("DB_PASSWORD-epoch-0"));
+    assert_eq!(
+        session.wallet_password.as_deref(),
+        Some("WALLET_PASSWORD-epoch-1")
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "splitting the connection plan must never re-resolve secrets"
+    );
+}
+
+#[test]
+fn fresh_stateful_lane_uses_reloaded_profile_ceiling_and_timeout() {
+    let lowered = OracleMcpConfig::from_toml_str(
+        r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "prod.example:1521/service"
+            max_level = "READ_ONLY"
+            call_timeout_seconds = 7
+            "#,
+    )
+    .expect("lowered config");
+    let selected = select_runtime_profile_from_config(&lowered, Some("prod"))
+        .expect("profile selection")
+        .expect("profile exists");
+    let mut wiring = DispatcherWiring {
+        active_profile: Some("prod".to_owned()),
+        level: SessionLevelState::new(OperatingLevel::Admin, false),
+        request_timeout: Some(std::time::Duration::from_secs(30)),
+        secret_resolver: Arc::new(SystemSecretResolver),
+        custom_catalog: CustomToolCatalog::default(),
+        exposure: McpExposurePolicy::AllowAll,
+        profile_drain: ProfileDrainState::new(),
+        auditor: None,
+        write_intents: None,
+        exports: Arc::new(ExportRegistry::new()),
+        notifications: Arc::new(oraclemcp_core::NotificationHub::new()),
+    };
+
+    apply_selected_profile_to_wiring(&mut wiring, selected);
+
+    assert_eq!(wiring.active_profile.as_deref(), Some("prod"));
+    assert_eq!(wiring.level.max_level(), OperatingLevel::ReadOnly);
+    assert_eq!(
+        wiring.request_timeout,
+        Some(std::time::Duration::from_secs(7))
+    );
+}
+
+#[test]
+fn failed_live_snapshot_compare_never_reports_reload_applied() {
+    let config = |connect_string: &str| {
+        OracleMcpConfig::from_toml_str(&format!(
+            r#"
+            [[profiles]]
+            name = "prod"
+            connect_string = "{connect_string}"
+            "#
+        ))
+        .expect("config")
+    };
+    let a = config("a:1521/svc");
+    let b = config("b:1521/svc");
+    let c = config("c:1521/svc");
+    let state = ProfileDrainState::from_config(a.clone());
+    let applier = HttpConfigReloadApplier {
+        profile_drain: state.clone(),
+    };
+
+    let report = applier.apply_config_reload_plan(
+        &oraclemcp_config::ConfigReloadPlan::between(&b, &c),
+        &b,
+        &c,
+    );
+    assert_eq!(report.status, "restart_required");
+    assert!(!report.hot_reloadable);
+    assert!(report.message.contains("accepted snapshot was not changed"));
+    assert_eq!(
+        state
+            .accepted_config()
+            .expect("A remains accepted")
+            .profile("prod")
+            .and_then(|profile| profile.connect_string.as_deref()),
+        Some("a:1521/svc")
+    );
+}
+
+#[test]
 fn http_listen_refused_without_allow_no_auth() {
     let err = http_listen_guard(false, false, false, "127.0.0.1:7070", false).unwrap_err();
     assert_eq!(err.0, "ORACLEMCP_AUTH_REQUIRED");
@@ -2074,6 +2203,82 @@ fn custom_tool_names_cannot_duplicate_or_shadow_advertised_tools() {
         .expect_err("compatibility alias collision rejected");
     assert_eq!(err.error_class, ErrorClass::InvalidArguments);
     assert!(err.message.contains("collides"));
+}
+
+#[test]
+fn reloaded_generation_enforces_its_own_custom_tool_signature_policy() {
+    let tools_dir = target_tmp_file("generation-tools");
+    fs::create_dir_all(&tools_dir).expect("create tools dir");
+    fs::write(
+        tools_dir.join("unsigned.toml"),
+        r#"
+        [[tool]]
+        name = "app_lookup"
+        description = "Unsigned read-only lookup"
+        sql = "SELECT 1 FROM dual"
+        output_mode = "rows"
+        "#,
+    )
+    .expect("write unsigned tool");
+    let before = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "prod"
+        connect_string = "prod:1521/svc"
+        require_signed_tools = false
+        "#,
+    )
+    .expect("before config");
+    let after = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "prod"
+        connect_string = "prod:1521/svc"
+        require_signed_tools = true
+        "#,
+    )
+    .expect("after config");
+    let level = default_read_only_level();
+    let state = ProfileDrainState::from_config(before.clone());
+    let old = match state.admit_mcp_profile("prod", true) {
+        oraclemcp::dispatch::ProfileGenerationAdmission::Ready(lease) => lease,
+        other => panic!("old generation was not admitted: {other:?}"),
+    };
+    let old_requires_signatures = custom_tools_require_signatures(
+        old.config().expect("old accepted config"),
+        Some(old.profile()),
+        &level,
+    )
+    .expect("old policy");
+    assert!(!old_requires_signatures);
+    assert_eq!(
+        load_custom_catalog_from_sources(Some(&tools_dir), None, old_requires_signatures,)
+            .expect("old generation admits unsigned read-only tool")
+            .len(),
+        1
+    );
+
+    let plan = oraclemcp_config::ConfigReloadPlan::between(&before, &after);
+    assert!(plan.hot_reloadable);
+    state
+        .apply_config_reload_plan(&plan, &before, &after)
+        .expect("signature policy reload applies");
+    let new = match state.admit_mcp_profile("prod", true) {
+        oraclemcp::dispatch::ProfileGenerationAdmission::Ready(lease) => lease,
+        other => panic!("new generation was not admitted: {other:?}"),
+    };
+    assert!(old.is_draining());
+    assert!(!new.is_draining());
+    let new_requires_signatures = custom_tools_require_signatures(
+        new.config().expect("new accepted config"),
+        Some(new.profile()),
+        &level,
+    )
+    .expect("new policy");
+    assert!(new_requires_signatures);
+    let error = load_custom_catalog_from_sources(Some(&tools_dir), None, new_requires_signatures)
+        .expect_err("new generation refuses unsigned catalog without signing key");
+    assert!(error.message.contains(CUSTOM_TOOLS_HMAC_KEY_ENV));
 }
 
 #[test]
