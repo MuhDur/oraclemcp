@@ -3,9 +3,9 @@
 //! predicate with a staged, fail-CLOSED classifier.
 //!
 //! Pipeline (per call):
-//! 0. **Transaction ownership** — caller-controlled COMMIT / ROLLBACK /
-//!    SAVEPOINT / SET TRANSACTION is always `Forbidden`, including inside
-//!    PL/SQL; only the server may end or reshape its transaction.
+//! 0. **Session ownership** — caller-controlled transaction boundaries and
+//!    non-allowlisted `ALTER SESSION` state changes are always `Forbidden`;
+//!    only the server policy may reshape its transaction or security context.
 //! 1. **Stage A** ([`stage_a`]) — operator allow-list (SHA-256 of exact
 //!    statement bytes) → block-list (regex) → PL/SQL-block detector. (P1-1a)
 //! 2. **Splitter** ([`analyze_batch`]) — a *lexer-based*, literal/quote-aware
@@ -43,6 +43,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 
 use oraclemcp_error::ReasonCategory;
 
+use crate::enforcement::alter_session_policy;
 use crate::levels::{DangerLevel, LevelDecision, OperatingLevel, SessionLevelState};
 use crate::purity::{ObjectRef, Purity, SideEffectOracle, UnknownOracle};
 
@@ -1763,12 +1764,47 @@ impl Classifier {
             };
         }
 
+        // ALTER SESSION persists independently of DML rollback and can change
+        // container, trace/events, hidden parameters, and other security or
+        // diagnostic state. Apply the same strict allowlist used by profile
+        // login/session setup before the operator allow-list or level gate, so
+        // raw oracle_execute and aliases cannot turn READ_WRITE into a bypass.
+        if let Some(allowed) = alter_session_policy(sql) {
+            if !allowed {
+                let mut decision = forbidden_decision(
+                    "ALTER SESSION targets a non-allowlisted or malformed session setting"
+                        .to_owned(),
+                );
+                decision.safe_alternative = Some(
+                    "use only an allowlisted ALTER SESSION SET parameter; configure trusted initialization through profile login_statements"
+                        .to_owned(),
+                );
+                return decision
+                    .categorized(ReasonCategory::Other, Some("ALTER SESSION".to_owned()));
+            }
+
+            return GuardDecision {
+                danger: DangerLevel::Guarded,
+                required_level: Some(OperatingLevel::ReadWrite),
+                objects_affected: Vec::new(),
+                safe_alternative: None,
+                reason: "allowlisted ALTER SESSION setting (persists outside transaction rollback)"
+                    .to_owned(),
+                reason_category: Some(ReasonCategory::RequiresHigherLevel),
+                offending_construct: Some("ALTER SESSION".to_owned()),
+                non_transactional_effect: true,
+                query_effect_requires_fetch: false,
+            };
+        }
+
         // The dispatcher owns the transaction boundary. If caller SQL can
         // commit, roll back, create a savepoint, or change transaction mode,
         // the rollback-default response and audit outcome cease to be true.
         // This invariant precedes the operator allow-list: an exact allow-list
         // entry may approve statement effects, but cannot transfer transaction
-        // ownership away from the server.
+        // ownership away from the server. ALTER SESSION is handled first so a
+        // session clause containing words such as COMMIT is still governed by
+        // the complete shared session-setting policy.
         if let Some(construct) = transaction_control_construct(sql) {
             let mut decision = forbidden_decision(format!(
                 "caller-controlled {construct} is forbidden because the server owns commit, rollback, and transaction audit outcomes"
@@ -3121,32 +3157,29 @@ mod tests {
     }
 
     #[test]
-    fn alter_session_classifies_guarded_readwrite_matching_doc() {
-        // oracle-clgt.13: locks the enforcement.rs module doc to reality. ALTER
-        // SESSION SET <param> does NOT parse under sqlparser's OracleDialect, so
-        // it falls through the parse-failure branch to Guarded/ReadWrite — it is
-        // NOT classified Admin (it is not a leading admin verb) and NOT Forbidden,
-        // and the ALTER SESSION allowlist is never consulted on the classify path.
-        // A READ_ONLY session must step up; a READ_WRITE session is Allowed.
+    fn allowlisted_alter_session_is_guarded_non_transactional_readwrite() {
         let read_only = SessionLevelState::new(OperatingLevel::ReadWrite, false);
         let mut read_write = SessionLevelState::new(OperatingLevel::ReadWrite, false);
         read_write
             .set_current_level(OperatingLevel::ReadWrite)
             .expect("step to ReadWrite");
         for sql in [
-            // Non-allowlisted (security/trace) AND allowlisted params both behave
-            // identically on the classify path — the allowlist is not consulted.
-            "ALTER SESSION SET SQL_TRACE = TRUE",
             "ALTER SESSION SET CURRENT_SCHEMA = hr",
-            "ALTER SESSION SET CONTAINER = CDB$ROOT",
+            "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'",
+            "ALTER SESSION SET PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL, STATEMENTS:ALL'",
+            "/* oraclemcp audit */ ALTER/**/SESSION SET NLS_DATE_FORMAT/**/=/**/'YYYY'",
         ] {
             let d = classify(sql);
             assert_eq!(
                 d.danger,
                 DangerLevel::Guarded,
-                "ALTER SESSION must classify Guarded (not Admin/Forbidden): {sql:?}"
+                "reviewed ALTER SESSION setting must stay Guarded: {sql:?}"
             );
             assert_eq!(d.required_level, Some(OperatingLevel::ReadWrite), "{sql:?}");
+            assert!(
+                d.non_transactional_effect,
+                "session state survives transaction rollback: {sql:?}"
+            );
             assert_eq!(
                 d.gate(&read_only),
                 LevelDecision::RequireStepUp {
@@ -3157,7 +3190,64 @@ mod tests {
             assert_eq!(
                 d.gate(&read_write),
                 LevelDecision::Allow,
-                "a READ_WRITE session is Allowed (allowlist not consulted in classify): {sql:?}"
+                "a reviewed setting is allowed at READ_WRITE after confirmation: {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_allowlisted_alter_session_is_forbidden_before_operator_allowlist() {
+        let denied = [
+            "ALTER SESSION SET SQL_TRACE = TRUE",
+            "ALTER SESSION SET CONTAINER = CDB$ROOT",
+            "ALTER SESSION SET EVENTS = '10046 trace name context forever, level 12'",
+            "ALTER SESSION SET \"_PRIVATE_PARAMETER\" = TRUE",
+            "ALTER SESSION DISABLE GUARD",
+            "ALTER SESSION ENABLE COMMIT IN PROCEDURE",
+            "ALTER/**/SESSION SET CURRENT_SCHEMA=HR/**/SQL_TRACE=TRUE",
+            "/* oraclemcp audit */ ALTER SESSION SET CONTAINER = CDB$ROOT",
+        ];
+
+        for sql in denied {
+            let d = classify(sql);
+            assert_eq!(d.danger, DangerLevel::Forbidden, "{sql:?} -> {d:?}");
+            assert_eq!(d.required_level, None, "{sql:?}");
+            assert_eq!(d.offending_construct.as_deref(), Some("ALTER SESSION"));
+            for ceiling in [
+                OperatingLevel::ReadOnly,
+                OperatingLevel::ReadWrite,
+                OperatingLevel::Ddl,
+                OperatingLevel::Admin,
+            ] {
+                let session = SessionLevelState::new(ceiling, false);
+                assert_eq!(
+                    d.gate(&session),
+                    LevelDecision::Blocked {
+                        reason: BlockReason::Forbidden
+                    },
+                    "no operating level may authorize {sql:?}"
+                );
+            }
+
+            let blessed = Classifier::new(ClassifierConfig::new().with_allow(sql)).classify(sql);
+            assert_eq!(
+                blessed.danger,
+                DangerLevel::Forbidden,
+                "an exact operator allow-list entry must not bypass session policy: {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn alter_session_text_in_data_is_not_a_session_statement() {
+        for sql in [
+            "SELECT 'ALTER SESSION SET SQL_TRACE=TRUE' AS text FROM dual",
+            "SELECT 1 AS alter_session FROM dual",
+            "ALTER TABLE session_log MOVE",
+        ] {
+            assert_ne!(
+                classify(sql).offending_construct.as_deref(),
+                Some("ALTER SESSION")
             );
         }
     }

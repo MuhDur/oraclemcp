@@ -4585,6 +4585,77 @@ fn opaque_plsql_calls_are_refused_before_database_io() {
 }
 
 #[test]
+fn non_allowlisted_alter_session_is_refused_before_database_io() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+
+    for sql in [
+        "ALTER SESSION SET CONTAINER = CDB$ROOT",
+        "ALTER SESSION SET SQL_TRACE = TRUE",
+        "ALTER SESSION SET EVENTS = '10046 trace name context forever, level 12'",
+        "ALTER SESSION SET \"_PRIVATE_PARAMETER\" = TRUE",
+        "ALTER SESSION DISABLE GUARD",
+        "ALTER SESSION SET CURRENT_SCHEMA=HR/**/SQL_TRACE=TRUE",
+        "/* oraclemcp audit */ ALTER/**/SESSION SET CONTAINER = CDB$ROOT",
+    ] {
+        let preview = dispatcher
+            .dispatch("oracle_preview_sql", json!({ "sql": sql }))
+            .expect("a forbidden preview remains inspectable");
+        assert_eq!(preview["gate_decision"], json!("blocked"), "{sql:?}");
+        assert_eq!(
+            preview["blocked_reason"]["type"],
+            json!("forbidden"),
+            "{sql:?}"
+        );
+        assert!(preview["execute_confirmation"].is_null(), "{sql:?}");
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": sql, "commit": true, "confirm": "irrelevant" }),
+            )
+            .expect_err("non-allowlisted session state is never executable");
+        assert_eq!(err.error_class, ErrorClass::ForbiddenStatement, "{sql:?}");
+    }
+
+    assert!(state.executed.lock().expect("exec mutex").is_empty());
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn allowlisted_alter_session_requires_confirmation_even_with_rollback_default() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+    let sql = "ALTER SESSION SET CURRENT_SCHEMA = APP";
+
+    let err = dispatcher
+        .dispatch("oracle_execute", json!({ "sql": sql }))
+        .expect_err("persistent session state requires exact-statement review");
+    assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+    assert!(err.message.contains("non-transactional effect"), "{err:?}");
+    assert!(state.executed.lock().expect("exec mutex").is_empty());
+
+    let confirm = preview_confirm(&dispatcher, sql);
+    let out = dispatcher
+        .dispatch("oracle_execute", json!({ "sql": sql, "confirm": confirm }))
+        .expect("reviewed allowlisted setting executes");
+    assert_eq!(out["committed"], json!(false));
+    assert_eq!(out["rolled_back"], json!(true));
+    assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn query_timeout_override_is_restored_after_call() {
     let state = Arc::new(ExecState::default());
     let dispatcher = OracleDispatcher::new_with_profile_level(

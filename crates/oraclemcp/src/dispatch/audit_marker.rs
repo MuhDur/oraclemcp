@@ -163,6 +163,8 @@ mod tests {
             "INSERT INTO t VALUES (1)",
             "DROP TABLE customers",
             "CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; END;",
+            "ALTER SESSION SET CURRENT_SCHEMA = APP",
+            "ALTER SESSION SET CONTAINER = CDB$ROOT",
         ] {
             let marked = with_audit_marker(sql, Some("dev"), "oracle_execute");
             assert_eq!(

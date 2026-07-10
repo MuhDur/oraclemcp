@@ -224,6 +224,30 @@ const CORPUS: &[(&str, DangerLevel)] = &[
         "WITH a AS (SELECT 1 x FROM dual) SELECT * FROM (WITH b AS (SELECT 1 y FROM dual) UPDATE t SET v=1)",
         DangerLevel::Guarded,
     ),
+    // --- QA100 .83: raw non-allowlisted ALTER SESSION must be Forbidden before
+    // the operator allow-list, never fall through parse-failure to READ_WRITE.
+    // Session state (container, trace, events, hidden params) persists across
+    // DML rollback, so it must be governed by the shared session-setting policy. ---
+    ("ALTER SESSION SET SQL_TRACE = TRUE", DangerLevel::Forbidden),
+    (
+        "ALTER SESSION SET CONTAINER = CDB$ROOT",
+        DangerLevel::Forbidden,
+    ),
+    (
+        "ALTER SESSION SET EVENTS = '10046 trace name context forever, level 12'",
+        DangerLevel::Forbidden,
+    ),
+    ("ALTER SESSION DISABLE GUARD", DangerLevel::Forbidden),
+    // A comment wedge smuggling a denied param after an allowlisted one must not
+    // downgrade to Guarded — the shared session policy canonicalizes first.
+    (
+        "ALTER/**/SESSION SET CURRENT_SCHEMA=HR/**/SQL_TRACE=TRUE",
+        DangerLevel::Forbidden,
+    ),
+    (
+        "/* audit */ ALTER SESSION SET CONTAINER = CDB$ROOT",
+        DangerLevel::Forbidden,
+    ),
 ];
 
 #[test]

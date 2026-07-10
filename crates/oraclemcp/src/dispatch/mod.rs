@@ -3281,7 +3281,7 @@ fn execute_confirmation_json(
             "confirm": confirm,
             "commit": false,
             "required_level": required_level,
-            "note": "NEXTVAL permanently advances the sequence even though the surrounding transaction is rolled back; pass confirm only when you intend that effect.",
+            "note": "This statement has a permanent or session-persistent effect even though the surrounding transaction is rolled back; pass confirm only when you intend that effect.",
         })
     } else {
         json!({
@@ -3360,7 +3360,7 @@ fn preview_next_actions(
                                 "commit": false,
                                 "confirm": confirm,
                             },
-                            "note": "The surrounding transaction rolls back, but NEXTVAL permanently advances the sequence.",
+                            "note": "The surrounding transaction rolls back, but this statement's non-transactional effect persists.",
                         }));
                     }
                 } else {
@@ -3508,8 +3508,8 @@ fn consume_execute_confirmation(
 ) -> Result<String, ErrorEnvelope> {
     let (challenge_message, next_step) = if non_transactional_effect {
         (
-            "sequence NEXTVAL permanently advances state even when rollback is requested; execution requires the single-use grant from oracle_preview_sql",
-            "call oracle_preview_sql with the exact sql, then pass execute_confirmation.confirm while keeping commit=false if the surrounding transaction should roll back",
+            "the statement has a non-transactional effect that persists even when rollback is requested; execution requires the single-use grant from oracle_preview_sql",
+            "call oracle_preview_sql with the exact sql, then pass execute_confirmation.confirm; commit=false still rolls back any surrounding transactional work",
         )
     } else {
         (
@@ -4460,7 +4460,7 @@ async fn execute_sql_inner(
             } else {
                 let message = if rollback.is_ok() {
                     format!(
-                        "execute failed after a non-transactional sequence effect may have occurred; rollback cannot establish its outcome: {e}"
+                        "execute failed after a non-transactional effect may have occurred; rollback cannot establish its outcome: {e}"
                     )
                 } else {
                     format!("execute failed and rollback cleanup failed: {e}")
@@ -4559,9 +4559,9 @@ async fn execute_sql_inner(
         }
     }
 
-    // A confirmed NEXTVAL is a successful permanent effect even when the
-    // surrounding transaction was rolled back. Recording it as `RolledBack`
-    // would falsely imply that replay is safe.
+    // A confirmed non-transactional statement is a successful persistent
+    // effect even when the surrounding transaction was rolled back. Recording
+    // it as `RolledBack` would falsely imply that replay is safe.
     let outcome = if args.commit || decision.non_transactional_effect {
         AuditOutcome::Succeeded
     } else {
@@ -4583,7 +4583,7 @@ async fn execute_sql_inner(
             if args.commit {
                 "commit completed"
             } else {
-                "confirmed non-transactional sequence effect completed"
+                "confirmed non-transactional effect completed"
             },
         )?;
     }
@@ -4604,6 +4604,7 @@ async fn execute_sql_inner(
         "rows_affected": rows_affected,
         "required_level": required_level,
         "danger": decision.danger,
+        "non_transactional_effect": decision.non_transactional_effect,
         "objects_affected": decision.objects_affected,
         "reason": decision.reason,
     });

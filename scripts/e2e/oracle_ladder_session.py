@@ -852,6 +852,64 @@ class Ladder:
         def elevate_read_write():
             return self.elevate("READ_WRITE")
 
+        def raw_alter_session_container_refused_and_identity_preserved():
+            # Regression for QA83: READ_WRITE authority must not bypass the
+            # reviewed ALTER SESSION parameter policy. SET CONTAINER persists
+            # outside transaction rollback, so prove both that no execution
+            # grant is minted and that the live container identity is unchanged.
+            identity_sql = (
+                "SELECT SYS_CONTEXT('USERENV', 'CON_NAME') AS con_name FROM dual"
+            )
+            before_rows = self.query_rows(identity_sql)
+            require(
+                len(before_rows) == 1 and before_rows[0].get("CON_NAME"),
+                "the live session exposes its current container identity",
+                before_rows,
+            )
+            before = before_rows[0].get("CON_NAME")
+            sql = "ALTER SESSION SET CONTAINER = CDB$ROOT"
+            preview = self.preview(sql)
+            require(
+                preview.get("gate_decision") == "blocked",
+                "raw SET CONTAINER is blocked at READ_WRITE",
+                preview,
+            )
+            require(
+                (preview.get("blocked_reason") or {}).get("type") == "forbidden",
+                "SET CONTAINER is a policy refusal, not an elevation request",
+                preview,
+            )
+            require(
+                preview.get("execute_confirmation") is None,
+                "a forbidden session change never mints an execution grant",
+                preview,
+            )
+
+            result = self.session.call("oracle_execute", {"sql": sql})
+            content = structured(result)
+            require(
+                result.get("isError") is True,
+                "raw SET CONTAINER is refused before Oracle sees it",
+                content,
+            )
+            require(
+                content.get("error_class") == "FORBIDDEN_STATEMENT",
+                "SET CONTAINER refusal has the fail-closed error class",
+                content,
+            )
+            after_rows = self.query_rows(identity_sql)
+            after = after_rows[0].get("CON_NAME") if len(after_rows) == 1 else None
+            require(
+                after == before,
+                "the live container identity is unchanged after refusal",
+                {"before": before, "after": after},
+            )
+            return {
+                "error_class": content.get("error_class"),
+                "container_before": before,
+                "container_after": after,
+            }
+
         def opaque_plsql_ddl_call_refused_and_target_preserved():
             # Regression for QA81: DBMS_UTILITY can execute caller-provided DDL,
             # so an opaque package call must never inherit the READ_WRITE block
@@ -1198,6 +1256,10 @@ class Ladder:
             ("source_drop_objects", source_drop_objects),
             ("drop_to_read_only_mid", drop_to_read_only_mid),
             ("elevate_read_write", elevate_read_write),
+            (
+                "raw_alter_session_container_refused_and_identity_preserved",
+                raw_alter_session_container_refused_and_identity_preserved,
+            ),
             (
                 "opaque_plsql_ddl_call_refused_and_target_preserved",
                 opaque_plsql_ddl_call_refused_and_target_preserved,
