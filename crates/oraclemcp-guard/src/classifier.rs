@@ -345,6 +345,20 @@ const LEADING_DDL_VERBS: &[&str] = &[
     "FLASHBACK ",
     "ASSOCIATE STATISTICS ",
     "DISASSOCIATE STATISTICS ",
+    // Object DDL that Oracle implicit-commits and that sqlparser 0.62 either
+    // cannot parse (DROP SYNONYM/TABLESPACE/DIRECTORY) or parses to a variant the
+    // pre-.84 catch-all under-levelled to ReadWrite (COMMENT ON, ANALYZE,
+    // TRUNCATE). A leading `COMMENT `/`ANALYZE ` unambiguously names the DDL form —
+    // no read statement starts with them — so, unlike the buried scan, matching
+    // them at the statement-leading position never over-restricts a legitimate
+    // read whose column merely happens to be named COMMENT/ANALYZE (bead
+    // QA100 .84). `DROP ` here floors every non-account object DROP at Ddl; the
+    // account/role DROPs (DROP USER / DROP ROLE) are resolved to Admin by the
+    // admin scan that every caller runs FIRST.
+    "COMMENT ",
+    "ANALYZE ",
+    "TRUNCATE ",
+    "DROP ",
     // Any leading `CREATE <object>` that reaches the parse-failure branch is an
     // unparseable object DDL form sqlparser 0.62 cannot handle (CREATE [OR
     // REPLACE] SYNONYM / DIRECTORY / TYPE / CONTEXT / MATERIALIZED VIEW / …).
@@ -428,7 +442,18 @@ fn starts_with_ddl_verb(upper_source: &str) -> bool {
     // `scan` is `" TOK1 TOK2 … "`; strip the leading pad so a leading verb sits
     // at offset 0 and the trailing space in each pattern enforces a word boundary.
     let leading = scan.strip_prefix(' ').unwrap_or(&scan);
-    LEADING_DDL_VERBS.iter().any(|v| leading.starts_with(v))
+    if LEADING_DDL_VERBS.iter().any(|v| leading.starts_with(v)) {
+        return true;
+    }
+    // Generic `ALTER <object>` (ALTER TABLE/INDEX/VIEW/SEQUENCE/TRIGGER/TYPE/
+    // TABLESPACE/MATERIALIZED VIEW/…) is object DDL that sqlparser 0.62 largely
+    // cannot parse; floor it at Ddl instead of letting it under-level to ReadWrite
+    // (bead QA100 .84). The admin-scope ALTER forms (USER/SYSTEM/DATABASE/PROFILE/
+    // ROLE) are resolved to Admin by `starts_with_admin_verb`, which every caller
+    // runs FIRST, so they never reach this generic arm. `ALTER SESSION SET …` is
+    // deliberately EXCLUDED: its safe-parameter policy is owned separately and it
+    // keeps its existing ReadWrite floor — this scan must not change it.
+    leading.starts_with("ALTER ") && !leading.starts_with("ALTER SESSION ")
 }
 
 /// Destructive / privilege / DML verbs that, when they appear at a NON-leading
@@ -1378,6 +1403,38 @@ fn query_embeds_reserved_dml_verb(sql: &str) -> bool {
         .any(|verb| scan.contains(verb))
 }
 
+/// Fold the conservative, parser-INDEPENDENT leading-verb floor into a
+/// statement's parser-derived classification (bead QA100 .84, defense-in-depth
+/// fix #2). A statement whose LEADING tokens name a DCL/admin operation floors at
+/// `Admin`; an object-DDL leading verb floors at `Ddl`; anything else contributes
+/// no floor. The floor is applied as a pure MAX on BOTH the danger tier and the
+/// required level, so a *successful* parse can never LOWER a statement below the
+/// tier its leading tokens demand — even if sqlparser evolves a new, lower-tier
+/// arm for it, or its arm is (mis)mapped here. This is the tighten-only twin of
+/// the parse-failure branch, which already applies the same leading-verb scans.
+///
+/// `Forbidden` (required `None`) is the strictest verdict; the floor never
+/// re-admits it to a permissible level. The admin scan is consulted FIRST so an
+/// admin-scope leading verb (GRANT / ALTER USER / …) wins over the broader
+/// object-DDL match.
+fn raise_to_leading_floor(class: StatementClass, sql: &str) -> StatementClass {
+    let upper = sql.trim_start().to_ascii_uppercase();
+    let (floor_danger, floor_level) = if starts_with_admin_verb(&upper) {
+        (DangerLevel::Destructive, OperatingLevel::Admin)
+    } else if starts_with_ddl_verb(&upper) {
+        (DangerLevel::Destructive, OperatingLevel::Ddl)
+    } else {
+        return class;
+    };
+    StatementClass {
+        danger: class.danger.max(floor_danger),
+        // `None` (Forbidden) is the strictest verdict; `map` preserves it, so the
+        // floor never relaxes a Forbidden statement back to a permissible level.
+        required: class.required.map(|level| level.max(floor_level)),
+        objects: class.objects,
+    }
+}
+
 /// Classify a single pre-split, pure-SQL statement (Stage B + purity consult).
 fn classify_statement(
     sql: &str,
@@ -1452,7 +1509,10 @@ fn classify_statement(
         required: Some(level),
         objects,
     };
-    match parsed {
+    // NOTE: `Statement::Variant { .. }` matches tuple / newtype variants too
+    // (their fields are positional `0`, `1`, …), so every arm below uses the
+    // uniform `{ .. }` form except genuine field-less unit variants.
+    let base = match parsed {
         Statement::Query(ref query) => {
             // A `Statement::Query` whose body is (or contains, under a set
             // operation / parenthesized subquery / CTE body / FROM-JOIN derived
@@ -1544,41 +1604,128 @@ fn classify_statement(
             required: Some(OperatingLevel::ReadWrite),
             objects: Vec::new(),
         },
+        // Transaction control, cursor lifecycle, table locks, non-role session
+        // SET, and CALL are session-/transaction-scoped ReadWrite operations —
+        // neither DDL nor DCL. They are enumerated EXPLICITLY so they keep their
+        // Guarded/ReadWrite floor rather than being swept into the fail-closed
+        // `Forbidden` default at the bottom (bead QA100 .84 fix #1). `SET ROLE`
+        // is NOT here — it is DCL and is handled with the Admin set below.
+        Statement::Commit { .. }
+        | Statement::Rollback { .. }
+        | Statement::Savepoint { .. }
+        | Statement::ReleaseSavepoint { .. }
+        | Statement::StartTransaction { .. }
+        | Statement::Declare { .. }
+        | Statement::Fetch { .. }
+        | Statement::Open { .. }
+        | Statement::Close { .. }
+        | Statement::Lock { .. }
+        | Statement::LockTables { .. }
+        | Statement::UnlockTables
+        | Statement::Call { .. } => guarded_rw(Vec::new()),
         // DROP USER / DROP ROLE is account/role administration (cross-schema
         // DCL, levels.rs:37), NOT ordinary object DDL — it requires Admin, not
-        // Ddl. Other DROPs (TABLE/VIEW/INDEX/…) stay Ddl (oracle-clgt.3).
+        // Ddl. Matched BEFORE the generic object `Drop` arm; other DROPs
+        // (TABLE/VIEW/INDEX/…) stay Ddl (oracle-clgt.3).
         Statement::Drop {
             object_type: sqlparser::ast::ObjectType::User | sqlparser::ast::ObjectType::Role,
             ..
         } => destructive(OperatingLevel::Admin, Vec::new()),
-        // DDL.
-        Statement::CreateTable(_)
-        | Statement::CreateView { .. }
-        | Statement::CreateIndex(_)
-        | Statement::AlterTable { .. }
-        | Statement::Drop { .. }
-        | Statement::Truncate { .. } => destructive(OperatingLevel::Ddl, Vec::new()),
-        // DCL / admin: GRANT/REVOKE, role creation/alteration, and SET ROLE all
-        // touch the privilege model and require Admin. CREATE ROLE parses to
-        // Statement::CreateRole, ALTER ROLE to Statement::AlterRole, and
-        // `SET [SESSION|LOCAL] ROLE …` to Statement::Set(Set::SetRole) — all
-        // previously fell through to the catch-all and under-levelled to
-        // ReadWrite, letting a ReadWrite-elevated session enable a write-bearing
-        // role post-connect (oracle-clgt.3 / oracle-clgt.13).
-        Statement::Grant { .. }
+        // DCL / privilege / security / instance / whole-database administration →
+        // Admin. GRANT/REVOKE/DENY touch the privilege model; role & policy
+        // create/alter/drop, database create/attach, secrets, servers/connectors,
+        // and instance verbs (KILL/FLUSH/DISCARD/INSTALL) are all account- or
+        // instance-level. `SET [SESSION|LOCAL] ROLE …` (Statement::Set(SetRole))
+        // enables a possibly write-bearing role post-connect and is DCL. Every one
+        // of these previously fell through the catch-all and under-levelled to
+        // ReadWrite (oracle-clgt.3 / oracle-clgt.13 / bead QA100 .84).
+        Statement::Set(sqlparser::ast::Set::SetRole { .. })
+        | Statement::Grant { .. }
+        | Statement::Deny { .. }
         | Statement::Revoke { .. }
-        | Statement::CreateRole(_)
-        | Statement::AlterRole { .. } => destructive(OperatingLevel::Admin, Vec::new()),
-        Statement::Set(sqlparser::ast::Set::SetRole { .. }) => {
-            destructive(OperatingLevel::Admin, Vec::new())
-        }
-        // Standalone transaction control is Guarded (lease-bound).
-        Statement::Commit { .. } | Statement::Rollback { .. } | Statement::Savepoint { .. } => {
-            guarded_rw(Vec::new())
-        }
-        // Anything else recognized but not explicitly safe → fail-closed Guarded.
-        _ => guarded_rw(Vec::new()),
-    }
+        | Statement::CreateRole { .. }
+        | Statement::AlterRole { .. }
+        | Statement::CreatePolicy { .. }
+        | Statement::AlterPolicy { .. }
+        | Statement::DropPolicy { .. }
+        | Statement::CreateDatabase { .. }
+        | Statement::AttachDatabase { .. }
+        | Statement::CreateSecret { .. }
+        | Statement::DropSecret { .. }
+        | Statement::CreateServer { .. }
+        | Statement::CreateConnector { .. }
+        | Statement::AlterConnector { .. }
+        | Statement::DropConnector { .. }
+        | Statement::Kill { .. }
+        | Statement::Flush { .. }
+        | Statement::Discard { .. }
+        | Statement::Install { .. } => destructive(OperatingLevel::Admin, Vec::new()),
+        // Any OTHER session-local `SET` (SET TRANSACTION READ ONLY, SET <NLS
+        // param>, …) is benign session state — Guarded/ReadWrite. Placed AFTER the
+        // `Set(SetRole)` DCL arm so role-switching never reaches here.
+        Statement::Set(_) => guarded_rw(Vec::new()),
+        // Object-level DDL (schema-object create/alter/drop, COMMENT ON, ANALYZE,
+        // TRUNCATE, table stats/cache). Oracle DDL implicit-commits before AND
+        // after and cannot be rolled back, so NONE of these may run at ReadWrite —
+        // they floor at Ddl. Every variant sqlparser 0.62 can produce for these
+        // forms is enumerated so a parsed-but-unmatched DDL statement can never
+        // fall through to the old ReadWrite default again (bead QA100 .84 fix #1).
+        Statement::CreateTable { .. }
+        | Statement::CreateView { .. }
+        | Statement::CreateVirtualTable { .. }
+        | Statement::CreateIndex { .. }
+        | Statement::CreateSequence { .. }
+        | Statement::CreateSchema { .. }
+        | Statement::CreateDomain { .. }
+        | Statement::CreateType { .. }
+        | Statement::CreateExtension { .. }
+        | Statement::CreateCollation { .. }
+        | Statement::CreateFunction { .. }
+        | Statement::CreateTrigger { .. }
+        | Statement::CreateProcedure { .. }
+        | Statement::CreateMacro { .. }
+        | Statement::CreateStage { .. }
+        | Statement::CreateOperator { .. }
+        | Statement::CreateOperatorClass { .. }
+        | Statement::CreateOperatorFamily { .. }
+        | Statement::AlterTable { .. }
+        | Statement::AlterIndex { .. }
+        | Statement::AlterView { .. }
+        | Statement::AlterType { .. }
+        | Statement::AlterFunction { .. }
+        | Statement::AlterCollation { .. }
+        | Statement::AlterSchema { .. }
+        | Statement::AlterOperator { .. }
+        | Statement::AlterOperatorClass { .. }
+        | Statement::AlterOperatorFamily { .. }
+        | Statement::Drop { .. }
+        | Statement::DropFunction { .. }
+        | Statement::DropDomain { .. }
+        | Statement::DropProcedure { .. }
+        | Statement::DropTrigger { .. }
+        | Statement::DropExtension { .. }
+        | Statement::DropOperator { .. }
+        | Statement::DropOperatorClass { .. }
+        | Statement::DropOperatorFamily { .. }
+        | Statement::Truncate { .. }
+        | Statement::Comment { .. }
+        | Statement::Analyze { .. }
+        | Statement::OptimizeTable { .. }
+        | Statement::Cache { .. }
+        | Statement::UNCache { .. }
+        | Statement::Msck { .. } => destructive(OperatingLevel::Ddl, Vec::new()),
+        // Anything else sqlparser recognizes but this classifier does not
+        // explicitly tier (exotic non-Oracle DDL, data-movement, dynamic EXECUTE,
+        // SHOW/USE, …) fails CLOSED to Forbidden — NEVER the old ReadWrite default.
+        // A successful parse is not a license to admit an unrecognized statement
+        // below its true floor (bead QA100 .84 fix #1). An operator who genuinely
+        // needs a specific such statement can allow-list it by exact bytes.
+        _ => StatementClass::forbidden(),
+    };
+    // Defense in depth (bead QA100 .84 fix #2): fold in the parser-INDEPENDENT
+    // leading-verb floor so a successful parse can never LOWER a statement below
+    // the DDL/DCL/Admin tier its leading tokens demand.
+    raise_to_leading_floor(base, sql)
 }
 
 /// Split a benign, balanced PL/SQL block's *outer* body (the tokens strictly
@@ -2774,6 +2921,193 @@ mod tests {
         let d = classify("GRANT SELECT ON orders TO scott");
         assert_eq!(d.danger, DangerLevel::Destructive);
         assert_eq!(d.required_level, Some(OperatingLevel::Admin));
+    }
+
+    #[test]
+    fn parsed_ddl_dcl_never_default_to_read_write() {
+        // bead QA100 .84: NO parsed-or-recognized DDL/DCL/Admin statement may be
+        // admitted at READ_WRITE. Oracle DDL implicit-commits and cannot be rolled
+        // back, so COMMENT ON / ANALYZE / CREATE SEQUENCE / the many CREATE/ALTER/
+        // DROP object & account forms must floor at Ddl (object DDL) or Admin
+        // (account/role/database/system/audit/policy DCL) — never at ReadWrite via
+        // the old catch-all. Each case asserts danger ≥ Guarded and the required
+        // level ≥ its floor; a `Forbidden` (None) verdict is STRICTER than any
+        // level and also satisfies the floor.
+        use OperatingLevel::{Admin, Ddl};
+        let cases: &[(&str, OperatingLevel)] = &[
+            // The headline regressions — parse-success variants that used to fall
+            // through the catch-all to Guarded/ReadWrite.
+            ("COMMENT ON TABLE emp IS 'x'", Ddl),
+            ("COMMENT ON COLUMN emp.id IS 'note'", Ddl),
+            ("ANALYZE TABLE emp COMPUTE STATISTICS", Ddl),
+            ("CREATE SEQUENCE s START WITH 1", Ddl),
+            // Object DDL — parse-success and parse-fail leading-verb floors alike.
+            ("CREATE TABLE t (id NUMBER)", Ddl),
+            ("ALTER TABLE emp ADD (x NUMBER)", Ddl),
+            ("DROP TABLE emp", Ddl),
+            ("CREATE OR REPLACE VIEW v AS SELECT 1 FROM dual", Ddl),
+            ("DROP VIEW v", Ddl),
+            ("CREATE INDEX i ON emp(id)", Ddl),
+            ("ALTER INDEX i REBUILD", Ddl),
+            ("DROP INDEX i", Ddl),
+            ("ALTER SEQUENCE s INCREMENT BY 2", Ddl),
+            ("DROP SEQUENCE s", Ddl),
+            ("CREATE SYNONYM syn FOR hr.emp", Ddl),
+            ("CREATE OR REPLACE SYNONYM syn FOR hr.emp", Ddl),
+            ("DROP SYNONYM syn", Ddl),
+            (
+                "CREATE TRIGGER trg BEFORE INSERT ON emp BEGIN NULL; END;",
+                Ddl,
+            ),
+            ("CREATE PROCEDURE p AS BEGIN NULL; END;", Ddl),
+            ("CREATE PACKAGE pkg AS PROCEDURE q; END;", Ddl),
+            ("CREATE TYPE ty AS OBJECT (id NUMBER)", Ddl),
+            ("DROP TYPE ty", Ddl),
+            ("CREATE TABLESPACE ts DATAFILE 'x.dbf' SIZE 10M", Ddl),
+            ("ALTER TABLESPACE ts OFFLINE", Ddl),
+            ("DROP TABLESPACE ts", Ddl),
+            ("CREATE PROFILE prof LIMIT SESSIONS_PER_USER 1", Ddl),
+            ("TRUNCATE TABLE emp", Ddl),
+            ("CREATE DIRECTORY d AS '/tmp'", Ddl),
+            ("CREATE MATERIALIZED VIEW mv AS SELECT 1 FROM dual", Ddl),
+            // Account / role / database / system / audit / policy DCL → Admin.
+            ("CREATE USER u IDENTIFIED BY p", Admin),
+            ("ALTER USER u IDENTIFIED BY p", Admin),
+            ("DROP USER u", Admin),
+            ("CREATE ROLE r", Admin),
+            ("ALTER ROLE r", Admin),
+            ("DROP ROLE r", Admin),
+            ("GRANT SELECT ON emp TO scott", Admin),
+            ("REVOKE SELECT ON emp FROM scott", Admin),
+            ("AUDIT SELECT ON emp", Admin),
+            ("NOAUDIT SELECT ON emp", Admin),
+            ("CREATE POLICY pol ON emp", Admin),
+            ("ALTER POLICY pol ON emp", Admin),
+            ("DROP POLICY pol ON emp", Admin),
+            ("ALTER SYSTEM FLUSH SHARED_POOL", Admin),
+            ("ALTER DATABASE OPEN", Admin),
+            ("CREATE DATABASE db", Admin),
+            ("SET ROLE dba", Admin),
+        ];
+        for (sql, min_level) in cases {
+            let d = classify(sql);
+            assert!(
+                d.danger >= DangerLevel::Guarded,
+                "DDL/DCL under-classified in danger: {sql:?} -> {d:?}"
+            );
+            assert_ne!(
+                d.required_level,
+                Some(OperatingLevel::ReadOnly),
+                "DDL/DCL must never be admitted at READ_ONLY: {sql:?} -> {d:?}"
+            );
+            assert_ne!(
+                d.required_level,
+                Some(OperatingLevel::ReadWrite),
+                "DDL/DCL must never be admitted at READ_WRITE: {sql:?} -> {d:?}"
+            );
+            // Forbidden (None) is stricter than any level and satisfies the floor.
+            assert!(
+                d.required_level.is_none_or(|l| l >= *min_level),
+                "DDL/DCL under-levelled below {min_level:?}: {sql:?} -> {:?}",
+                d.required_level
+            );
+        }
+    }
+
+    #[test]
+    fn successful_parse_never_lowers_the_leading_verb_floor() {
+        // bead QA100 .84 fix #2 (defense in depth): the parser-INDEPENDENT
+        // leading-verb floor is an invariant — for any statement whose LEADING
+        // tokens name a DDL/DCL/Admin verb, the final required level is ≥ that
+        // floor whether or not sqlparser parses it. Parsing is never a downgrade.
+        for sql in [
+            "CREATE TABLE t (id NUMBER)",
+            "CREATE SEQUENCE s START WITH 1",
+            "CREATE INDEX i ON emp(id)",
+            "ALTER TABLE emp ADD (x NUMBER)",
+            "ALTER INDEX i REBUILD",
+            "DROP TABLE emp",
+            "DROP INDEX i",
+            "TRUNCATE TABLE emp",
+            "COMMENT ON TABLE emp IS 'x'",
+            "ANALYZE TABLE emp COMPUTE STATISTICS",
+            "RENAME emp TO emp2",
+            "PURGE TABLE emp",
+        ] {
+            let d = classify(sql);
+            assert!(
+                d.danger >= DangerLevel::Destructive,
+                "leading-DDL danger lowered: {sql:?} -> {d:?}"
+            );
+            assert!(
+                d.required_level.is_none_or(|l| l >= OperatingLevel::Ddl),
+                "leading-DDL floor lowered by parse: {sql:?} -> {:?}",
+                d.required_level
+            );
+        }
+        for sql in [
+            "GRANT SELECT ON emp TO scott",
+            "REVOKE SELECT ON emp FROM scott",
+            "AUDIT SELECT ON emp",
+            "CREATE USER u IDENTIFIED BY p",
+            "ALTER USER u IDENTIFIED BY p",
+            "ALTER SYSTEM FLUSH SHARED_POOL",
+            "SET ROLE dba",
+        ] {
+            let d = classify(sql);
+            assert!(
+                d.danger >= DangerLevel::Destructive,
+                "leading-Admin danger lowered: {sql:?} -> {d:?}"
+            );
+            assert!(
+                d.required_level.is_none_or(|l| l >= OperatingLevel::Admin),
+                "leading-Admin floor lowered by parse: {sql:?} -> {:?}",
+                d.required_level
+            );
+        }
+    }
+
+    #[test]
+    fn exhaustive_ddl_match_spares_dml_but_keeps_txn_control_forbidden() {
+        // Guard against over-tightening from the .84 exhaustive-match / Forbidden
+        // default, with two invariants:
+        // (a) Caller transaction control is Forbidden — bead .80 owns this and its
+        //     check precedes classify_statement, so the exhaustive DDL match must
+        //     never silently downgrade SET TRANSACTION / COMMIT / ROLLBACK /
+        //     SAVEPOINT back to ReadWrite.
+        for sql in [
+            "SET TRANSACTION READ ONLY",
+            "SET TRANSACTION READ WRITE",
+            "COMMIT",
+            "ROLLBACK",
+            "SAVEPOINT sp",
+        ] {
+            let d = classify(sql);
+            assert_eq!(
+                d.danger,
+                DangerLevel::Forbidden,
+                "caller transaction control must stay Forbidden: {sql:?} -> {d:?}"
+            );
+        }
+        // (b) Ordinary DML is NOT DDL and must keep its Guarded/ReadWrite floor —
+        //     the exhaustive DDL match and the fail-closed Forbidden default must
+        //     not sweep an INSERT/UPDATE up into DDL/Admin/Forbidden.
+        for sql in [
+            "INSERT INTO audit_log (msg) VALUES ('x')",
+            "UPDATE orders SET status = 'X' WHERE id = 1",
+        ] {
+            let d = classify(sql);
+            assert_eq!(
+                d.danger,
+                DangerLevel::Guarded,
+                "ordinary DML must stay Guarded (not over-tightened): {sql:?} -> {d:?}"
+            );
+            assert_eq!(
+                d.required_level,
+                Some(OperatingLevel::ReadWrite),
+                "ordinary DML must stay ReadWrite: {sql:?} -> {d:?}"
+            );
+        }
     }
 
     #[test]

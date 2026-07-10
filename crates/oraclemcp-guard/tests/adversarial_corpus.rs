@@ -72,6 +72,23 @@ const CORPUS: &[(&str, DangerLevel)] = &[
     ("DROP TABLE orders", DangerLevel::Destructive),
     ("TRUNCATE TABLE orders", DangerLevel::Destructive),
     ("GRANT SELECT ON orders TO scott", DangerLevel::Destructive),
+    // bead QA100 .84: COMMENT ON and CREATE SEQUENCE parse cleanly under the
+    // OracleDialect but used to fall through the classify_statement catch-all to
+    // Guarded/READ_WRITE. Oracle DDL implicit-commits and cannot be rolled back,
+    // so they must sit at the DDL floor — Destructive, never below. ANALYZE joins
+    // them as object DDL that formerly under-classified the same way.
+    (
+        "COMMENT ON TABLE orders IS 'processed'",
+        DangerLevel::Destructive,
+    ),
+    (
+        "CREATE SEQUENCE order_seq START WITH 1",
+        DangerLevel::Destructive,
+    ),
+    (
+        "ANALYZE TABLE orders COMPUTE STATISTICS",
+        DangerLevel::Destructive,
+    ),
     // --- EXPLAIN PLAN writes PLAN_TABLE: Guarded, never Safe ---
     (
         "EXPLAIN PLAN FOR SELECT * FROM employees",
