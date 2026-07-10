@@ -651,17 +651,27 @@ impl OracleDispatcher {
     }
 }
 
-/// The process-wide default SQL classifier (empty `ClassifierConfig`, the
+/// The process-wide default SQL classifier for **caller-supplied** SQL (the
 /// fail-closed `UnknownOracle`). `Classifier::classify` takes `&self` and is
 /// pure given a fixed config + oracle, so every request arm can share one
-/// instance instead of rebuilding `Classifier::new(ClassifierConfig::new())`
-/// (which allocates a fresh `Arc<UnknownOracle>`) on each call. Behavior is
-/// identical — the same statement yields the same `GuardDecision` — this only
-/// drops the per-call allocation on the gate hot path. Allow/block-list
-/// configs are not used on this served surface, so the empty config is the one
-/// every existing site already constructed.
-static DEFAULT_CLASSIFIER: LazyLock<Classifier> =
-    LazyLock::new(|| Classifier::new(ClassifierConfig::new()));
+/// instance instead of rebuilding it on each call.
+///
+/// The served surface opts into the `.102` qualified-paren-less-callable guard:
+/// Oracle invokes a zero-arg function with no parentheses, so
+/// `SELECT app_admin.run_ddl FROM dual` *runs* `run_ddl`, but the `ident(`-only
+/// UDF scan reads it as a column reference and clears it to Safe. The guard
+/// forces a `SELECT` carrying a qualified identifier in value position whose
+/// leading qualifier is not a table / view / alias / schema in scope to
+/// `≥ Guarded` (so this READ_ONLY-ceilinged gate refuses it). It is surgical —
+/// an in-scope `alias.column` reference is never flagged. This does **not**
+/// close bead .82 (a read whose base object hides autonomous writes behind a
+/// view / VPD policy function): that needs a live-catalog semantic resolver, or
+/// the operator opting the whole gate into `Classifier::served_strict()` (which
+/// refuses every unproven base-object read). Allow/block-list configs are not
+/// used on this served surface.
+static DEFAULT_CLASSIFIER: LazyLock<Classifier> = LazyLock::new(|| {
+    Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded())
+});
 
 /// Classifier used for server-generated read SQL. It is deliberately separate
 /// from [`DEFAULT_CLASSIFIER`] so only this internal surface gets a tiny purity

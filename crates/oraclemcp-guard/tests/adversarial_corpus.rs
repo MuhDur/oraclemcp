@@ -9,7 +9,102 @@
 //! Pairs with the `fuzz/` cargo-fuzz target (never-panic + fail-closed on
 //! arbitrary input) and the never-panic test below (runs in stable CI).
 
-use oraclemcp_guard::{Classifier, DangerLevel};
+use oraclemcp_guard::{Classifier, ClassifierConfig, DangerLevel};
+
+/// Served/strict-mode corpus (beads .82 + .102). Each entry is a statement the
+/// **served/strict** classifier — the fail-closed posture of the raw-query gate
+/// — MUST classify at least as strictly as `min_danger`. These are the live
+/// fail-opens the default (permissive) classifier still admits as `Safe`:
+///
+/// - **.102** a paren-less function invocation — Oracle runs a zero-arg function
+///   with no `()`, so `SELECT app_admin.run_ddl FROM dual` *calls* `run_ddl`, but
+///   the `ident(`-only UDF scan reads it as a column reference.
+/// - **.82**  a read whose base object hides side effects (a view/policy function
+///   doing autonomous committed writes) — unprovable without a live catalog, so
+///   the strict posture refuses every unproven base-object read.
+const STRICT_CORPUS: &[(&str, DangerLevel)] = &[
+    // .102 — paren-less qualified callables (value position, root not in scope).
+    ("SELECT app_admin.run_ddl FROM dual", DangerLevel::Guarded),
+    (
+        "SELECT id, app_admin.run_ddl FROM orders",
+        DangerLevel::Guarded,
+    ),
+    ("SELECT app.pkg.side_effect FROM dual", DangerLevel::Guarded),
+    ("SELECT s.nextval FROM dual", DangerLevel::Guarded),
+    (
+        "SELECT id FROM orders WHERE audit_pkg.record = 1",
+        DangerLevel::Guarded,
+    ),
+    // .82 — an unproven base-object read (the default UnknownOracle proves
+    // nothing, so the strict posture cannot clear it to Safe).
+    ("SELECT * FROM reporting_view", DangerLevel::Guarded),
+    (
+        "SELECT id, name FROM some_schema.some_view",
+        DangerLevel::Guarded,
+    ),
+];
+
+/// Reads that MUST stay `Safe` even under served/strict `.102` guarding — a
+/// genuine in-scope column reference is not a callable. (These use the `.102`
+/// guard alone, without the aggressive `.82` statement-Unknown tightening, so
+/// legitimate reads stay usable.) Prevents the tightening from destroying normal
+/// qualified column references.
+const STRICT_FALSE_POSITIVE_GUARD: &[&str] = &[
+    "SELECT e.name, e.id FROM employees e",
+    "SELECT e.name FROM employees e JOIN dept d ON e.dept = d.id",
+    "SELECT hr.employees.salary FROM hr.employees",
+    "WITH x AS (SELECT id FROM orders) SELECT x.id FROM x",
+    "SELECT (SELECT o.amt FROM orders o WHERE o.id = c.id) FROM customers c",
+    "SELECT id FROM employees WHERE id IN (SELECT m.id FROM managers m)",
+    "SELECT t.* FROM t",
+    "SELECT id, name FROM employees WHERE dept = 10",
+];
+
+#[test]
+fn strict_corpus_is_never_underclassified() {
+    // The served/strict posture: full fail-closed (`.82` + `.102`).
+    let strict = Classifier::default().served_strict();
+    for (sql, min_danger) in STRICT_CORPUS {
+        let decision = strict.classify(sql);
+        assert!(
+            decision.danger >= *min_danger,
+            "STRICT UNDER-CLASSIFIED: {sql:?} got {:?}, expected >= {min_danger:?}",
+            decision.danger
+        );
+        assert_ne!(
+            decision.required_level,
+            Some(oraclemcp_guard::OperatingLevel::ReadOnly),
+            "strict posture must never admit {sql:?} at READ_ONLY"
+        );
+    }
+    // Mutation-killing counterpart: the DEFAULT (permissive) classifier still
+    // admits every `.102` entry as Safe — proving it is the guard, not some
+    // unrelated rule, that closes the hole under strict mode.
+    let permissive = Classifier::default();
+    assert_eq!(
+        permissive
+            .classify("SELECT app_admin.run_ddl FROM dual")
+            .danger,
+        DangerLevel::Safe,
+        "the default classifier documents the .102 fail-open (closed only under strict mode)"
+    );
+}
+
+#[test]
+fn strict_102_guard_spares_genuine_column_references() {
+    // The `.102` guard in isolation (no `.82` statement-Unknown tightening) must
+    // keep ordinary in-scope qualified column references Safe.
+    let guard_102 =
+        Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded());
+    for sql in STRICT_FALSE_POSITIVE_GUARD {
+        let d = guard_102.classify(sql);
+        assert_eq!(
+            d.danger,
+            DangerLevel::Safe,
+            "a genuine in-scope column reference must stay Safe under the .102 guard: {sql:?}"
+        );
+    }
+}
 
 /// `(sql, minimum danger the classifier must assign)`.
 const CORPUS: &[(&str, DangerLevel)] = &[

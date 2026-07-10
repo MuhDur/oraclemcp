@@ -5704,6 +5704,49 @@ mod parameterization_hint {
     }
 }
 
+/// Bead .102: the served read-only gate refuses a **paren-less** qualified
+/// function invocation. Oracle runs a zero-arg function with no `()`, so
+/// `SELECT app_admin.run_ddl FROM dual` *calls* `run_ddl` — the classifier's
+/// `ident(`-only UDF scan used to read it as a column reference and clear it to
+/// Safe. The `DEFAULT_CLASSIFIER` opts into the qualified-callable guard so the
+/// gate now fails closed, while genuine in-scope column references still pass.
+mod parenless_qualified_callable_gate {
+    use super::*;
+
+    #[test]
+    fn served_gate_refuses_parenless_qualified_callable() {
+        for sql in [
+            "SELECT app_admin.run_ddl FROM dual",
+            "SELECT id, app_admin.run_ddl FROM orders",
+            "SELECT s.nextval FROM dual",
+        ] {
+            let err = ensure_read_only(sql)
+                .expect_err("a paren-less qualified callable must be refused by the served gate");
+            assert!(
+                matches!(
+                    err.error_class,
+                    ErrorClass::ForbiddenStatement | ErrorClass::OperatingLevelTooLow
+                ),
+                "refusal should be a guard block, got {:?} for {sql:?}",
+                err.error_class
+            );
+        }
+    }
+
+    #[test]
+    fn served_gate_still_admits_genuine_qualified_column_reads() {
+        for sql in [
+            "SELECT e.id, e.name FROM employees e WHERE e.id = 42",
+            "SELECT hr.employees.salary FROM hr.employees",
+            "SELECT id, name FROM employees WHERE dept = 10",
+        ] {
+            ensure_read_only(sql).unwrap_or_else(|e| {
+                panic!("a genuine in-scope read must pass the gate: {sql:?} -> {e:?}")
+            });
+        }
+    }
+}
+
 /// K8: the read-only gate attaches a structured "why blocked + minimal safe
 /// rewrite" reason. Each refusal class returns a valid category, and a minimal
 /// rewrite where one exists (or none, deferring to `suggested_tool`).

@@ -107,6 +107,17 @@ pub struct ClassifierConfig {
     allow_list: HashSet<String>,
     /// Regexes that, if matched, force `Forbidden`.
     block_patterns: Vec<Regex>,
+    /// When set, a `SELECT`/`WITH` carrying a **qualified, paren-less** identifier
+    /// in value/expression position whose leading qualifier is not a table /
+    /// view / alias / schema in scope is treated as an unproven callable and
+    /// forced `≥ Guarded` (bead .102). Oracle invokes a zero-arg function with no
+    /// parentheses (`SELECT app_admin.run_ddl FROM dual` *calls* `run_ddl`), which
+    /// the `ident(`-only `user_defined_calls` scan never sees. Default `false`
+    /// (backward-compatible); the served/strict gate opts in. Over-restriction is
+    /// the only cost — an in-scope `alias.column` is never flagged, and an
+    /// attacker cannot alias their way out (`FROM dual app_admin` rebinds
+    /// `app_admin.run_ddl` to a *column* of `dual`, not the function).
+    guard_unresolved_qualified_calls: bool,
 }
 
 impl ClassifierConfig {
@@ -114,6 +125,24 @@ impl ClassifierConfig {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The fail-closed **served/strict** preset: enable the qualified paren-less
+    /// callable guard (bead .102). Pair with [`Classifier::served_strict`] (which
+    /// additionally tightens statement-level `Unknown` purity, bead .82) for the
+    /// full served posture.
+    #[must_use]
+    pub fn served_strict() -> Self {
+        Self::default().with_unresolved_qualified_calls_guarded()
+    }
+
+    /// Opt into treating a qualified, paren-less identifier whose root qualifier
+    /// is not in scope as an unproven callable → `≥ Guarded` (bead .102). See
+    /// [`ClassifierConfig::guard_unresolved_qualified_calls`].
+    #[must_use]
+    pub fn with_unresolved_qualified_calls_guarded(mut self) -> Self {
+        self.guard_unresolved_qualified_calls = true;
+        self
     }
 
     /// Pre-approve one exact statement as `Safe`.
@@ -1191,6 +1220,198 @@ fn sequence_nextval_query_requires_fetch(sql: &str) -> bool {
     }
 }
 
+/// The per-classification strict-mode flags threaded into the per-statement
+/// classifier. Both default off (the backward-compatible baseline); the
+/// served/strict gate flips them on. Purely additive — a set flag can only ever
+/// RAISE a statement's classification, never lower it.
+#[derive(Clone, Copy, Debug, Default)]
+struct StrictModes {
+    /// Treat a statement-level `Unknown` purity verdict over a non-empty base
+    /// object set as fail-closed `≥ Guarded` (bead .82). Meaningful only with a
+    /// bound oracle; under the default `UnknownOracle` this forces *every* read of
+    /// a real base object to `Guarded` (the documented aggressive containment).
+    statement_unknown_guarded: bool,
+    /// Treat a qualified, paren-less identifier whose root qualifier is not in
+    /// scope as an unproven callable → `≥ Guarded` (bead .102).
+    guard_unresolved_qualified_calls: bool,
+}
+
+/// Collect the in-scope **qualifier** names of a `SELECT`/`WITH` — every table /
+/// view name part (and schema part), table/derived alias, and (transitively)
+/// CTE name reachable from the statement. Lower-cased, quote-stripped. This is
+/// the allow-set for [`unresolved_qualified_calls`]: a value-position
+/// `root.member` whose `root` is in this set is an ordinary column reference; a
+/// `root` that is *not* is a paren-less function / package invocation (or a
+/// sequence pseudo-column) the classifier cannot prove read-only.
+///
+/// The scan is a single **linear token pass** over `FROM`/`JOIN` clauses, which
+/// is inherently global: every `FROM`/`JOIN` at every nesting depth (correlated
+/// scalar subqueries in the projection, `IN (SELECT …)` predicates, CTE bodies,
+/// derived tables) appears in the flat token stream, so aliases defined in an
+/// inner scope are collected for the whole statement. Aliases are detected via
+/// the tokenizer's `keyword` tag (a table reference is followed by an optional
+/// `AS` then a **non-keyword** word), so no hand-maintained keyword list is
+/// needed. A CTE name is always referenced in some `FROM`, so it is collected
+/// there without special handling.
+///
+/// **Safety direction:** incompleteness here can only *over*-collect a missed
+/// alias into over-restriction (a legit read is flagged — a usability cost,
+/// gated behind the opt-in flag), never a fail-open. An attacker cannot alias
+/// `root` into scope to hide a call: binding `root` as a table alias rebinds
+/// `root.member` to a *column* of that table (Oracle parses it as a column
+/// reference, not a function invocation), changing the semantics away from the
+/// call entirely.
+fn query_scope_qualifiers(sql: &str) -> HashSet<String> {
+    let dialect = OracleDialect {};
+    let Ok(tokens) = Tokenizer::new(&dialect, sql).tokenize() else {
+        return HashSet::new();
+    };
+    let toks: Vec<&Token> = tokens
+        .iter()
+        .filter(|t| !matches!(t, Token::Whitespace(_)))
+        .collect();
+    let mut scope: HashSet<String> = HashSet::new();
+    let mut i = 0;
+    while i < toks.len() {
+        if !is_from_or_join_keyword(toks[i]) {
+            i += 1;
+            continue;
+        }
+        // Parse the comma-separated table reference list following FROM / JOIN.
+        let mut j = i + 1;
+        loop {
+            match toks.get(j) {
+                Some(Token::LParen) => {
+                    // Derived subquery / nested join: skip to the matching `)`.
+                    // Its inner FROM/JOIN are caught separately by this same
+                    // linear pass, so only the trailing alias needs collecting.
+                    let mut depth = 1;
+                    j += 1;
+                    while j < toks.len() && depth > 0 {
+                        match toks[j] {
+                            Token::LParen => depth += 1,
+                            Token::RParen => depth -= 1,
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                    j = collect_optional_alias(&toks, j, &mut scope);
+                }
+                Some(Token::Word(_)) => {
+                    // A dotted table name: collect every word part (schema/table).
+                    loop {
+                        if let Some(Token::Word(w)) = toks.get(j) {
+                            scope.insert(scope_norm(&w.value));
+                        }
+                        if j + 2 < toks.len()
+                            && matches!(toks[j + 1], Token::Period)
+                            && matches!(toks[j + 2], Token::Word(_))
+                        {
+                            j += 2;
+                        } else {
+                            j += 1;
+                            break;
+                        }
+                    }
+                    j = collect_optional_alias(&toks, j, &mut scope);
+                }
+                _ => break,
+            }
+            if matches!(toks.get(j), Some(Token::Comma)) {
+                j += 1;
+                continue;
+            }
+            break;
+        }
+        i = j.max(i + 1);
+    }
+    scope
+}
+
+fn is_from_or_join_keyword(tok: &Token) -> bool {
+    matches!(tok, Token::Word(w) if w.quote_style.is_none()
+        && matches!(w.value.to_ascii_uppercase().as_str(), "FROM" | "JOIN"))
+}
+
+/// After a table reference, collect an optional alias: an optional `AS` then a
+/// **non-keyword** word (the tokenizer's `keyword` tag distinguishes an alias
+/// from a following clause keyword — `WHERE`/`ON`/`GROUP`/`JOIN`/… — with no
+/// hand-maintained list). Returns the advanced index.
+fn collect_optional_alias(toks: &[&Token], mut j: usize, scope: &mut HashSet<String>) -> usize {
+    if matches!(toks.get(j), Some(Token::Word(w)) if w.keyword == Keyword::AS) {
+        j += 1;
+    }
+    if let Some(Token::Word(w)) = toks.get(j)
+        && w.keyword == Keyword::NoKeyword
+    {
+        scope.insert(scope_norm(&w.value));
+        j += 1;
+    }
+    j
+}
+
+fn scope_norm(value: &str) -> String {
+    value.trim_matches('"').to_ascii_lowercase()
+}
+
+/// Token scan for **qualified, paren-less** identifiers whose leading qualifier
+/// is not in `scope` (bead .102). Oracle invokes a zero-arg function with no
+/// parentheses, so `SELECT app_admin.run_ddl FROM dual` *calls* `run_ddl` — but
+/// `user_defined_calls` only matches `ident(`, so the invocation reads as an
+/// ordinary column/record reference and clears to `Safe`. A maximal
+/// `word (. word)+` run **not** immediately followed by `(` whose root word is
+/// not a table / view / alias / schema in scope is exactly the high-signal case:
+/// it can only be a package/schema-qualified function call or a sequence
+/// pseudo-column (`seq.nextval`) — neither of which the classifier can prove
+/// read-only. Runs followed by `(` are already handled by [`user_defined_calls`]
+/// (they are calls with an argument list) and are skipped here to avoid
+/// double-surfacing. Returns the offending dotted names for audit.
+fn unresolved_qualified_calls(sql: &str, scope: &HashSet<String>) -> Vec<String> {
+    let dialect = OracleDialect {};
+    let Ok(tokens) = Tokenizer::new(&dialect, sql).tokenize() else {
+        return Vec::new();
+    };
+    let toks: Vec<&Token> = tokens
+        .iter()
+        .filter(|t| !matches!(t, Token::Whitespace(_)))
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < toks.len() {
+        // The start of a dotted run: a Word not preceded by `.` and followed by
+        // `. word`.
+        let prev_is_period = i > 0 && matches!(toks[i - 1], Token::Period);
+        let is_chain_start = matches!(toks[i], Token::Word(_))
+            && !prev_is_period
+            && i + 2 < toks.len()
+            && matches!(toks[i + 1], Token::Period)
+            && matches!(toks[i + 2], Token::Word(_));
+        if !is_chain_start {
+            i += 1;
+            continue;
+        }
+        // Extend the maximal `word (. word)+` run.
+        let mut j = i;
+        while j + 2 < toks.len()
+            && matches!(toks[j + 1], Token::Period)
+            && matches!(toks[j + 2], Token::Word(_))
+        {
+            j += 2;
+        }
+        let followed_by_lparen = j + 1 < toks.len() && matches!(toks[j + 1], Token::LParen);
+        let root = match toks[i] {
+            Token::Word(w) => scope_norm(&w.value),
+            _ => String::new(),
+        };
+        if !followed_by_lparen && !scope.contains(&root) {
+            let chain: String = toks[i..=j].iter().map(|t| t.to_string()).collect();
+            out.push(chain);
+        }
+        i = j + 1;
+    }
+    out
+}
+
 /// Convert a parsed `ObjectName` (the `schema.table` of a `FROM`/`JOIN` factor)
 /// into the guard's [`ObjectRef`]. Multi-part names keep the *last* part as the
 /// object name and the *second-to-last* as the schema (`a.b.c` → schema `b`,
@@ -1439,7 +1660,7 @@ fn raise_to_leading_floor(class: StatementClass, sql: &str) -> StatementClass {
 fn classify_statement(
     sql: &str,
     oracle: &dyn SideEffectOracle,
-    statement_unknown_guarded: bool,
+    modes: StrictModes,
 ) -> StatementClass {
     use sqlparser::ast::Statement;
     let dialect = OracleDialect {};
@@ -1561,13 +1782,26 @@ fn classify_statement(
                 oracle.statement_purity(&base_objects)
             };
             let stmt_blocks_safe = matches!(stmt_purity, Purity::ProvenSideEffecting)
-                || (statement_unknown_guarded && matches!(stmt_purity, Purity::Unknown));
+                || (modes.statement_unknown_guarded && matches!(stmt_purity, Purity::Unknown));
             // `SELECT … FOR UPDATE` (incl. OF/NOWAIT/SKIP LOCKED) takes row
             // locks and holds a transaction open — levels.rs:93 documents it as
             // Guarded, never Safe. The AST carries `query.locks`; a non-empty
             // lock list forces the guarded branch (oracle-ajm2.6).
             let has_row_lock = !query.locks.is_empty();
-            let stmt_pure = (calls.is_empty() || all_proven) && !stmt_blocks_safe && !has_row_lock;
+            // A qualified, paren-less callable in value position invokes a
+            // function Oracle never required `()` for (bead .102). Opt-in
+            // (served/strict): a `root.member` whose root is not a table / view /
+            // alias / schema in scope is an unproven call → block Safe.
+            let unresolved_calls = if modes.guard_unresolved_qualified_calls {
+                unresolved_qualified_calls(sql, &query_scope_qualifiers(sql))
+            } else {
+                Vec::new()
+            };
+            let has_unresolved_call = !unresolved_calls.is_empty();
+            let stmt_pure = (calls.is_empty() || all_proven)
+                && !stmt_blocks_safe
+                && !has_row_lock
+                && !has_unresolved_call;
             let mut objects: Vec<String> = calls.iter().map(|c| c.name.clone()).collect();
             if stmt_pure {
                 StatementClass {
@@ -1579,6 +1813,7 @@ fn classify_statement(
                 if stmt_blocks_safe {
                     objects.extend(base_objects.iter().map(|o| o.name.clone()));
                 }
+                objects.extend(unresolved_calls);
                 guarded_rw(objects)
             }
         }
@@ -1821,7 +2056,7 @@ fn block_interior_segments(sql: &str) -> Vec<String> {
 fn block_interior_floor(
     sql: &str,
     oracle: &dyn SideEffectOracle,
-    statement_unknown_guarded: bool,
+    modes: StrictModes,
 ) -> Option<(DangerLevel, OperatingLevel)> {
     let mut acc: Option<(DangerLevel, OperatingLevel)> = None;
     for seg in block_interior_segments(sql) {
@@ -1838,7 +2073,7 @@ fn block_interior_floor(
         {
             continue;
         }
-        let class = classify_statement(&seg, oracle, statement_unknown_guarded);
+        let class = classify_statement(&seg, oracle, modes);
         if let Some(level) = class.required {
             acc = Some(match acc {
                 Some((d, l)) => (d.max(class.danger), l.max(level)),
@@ -1891,6 +2126,28 @@ impl Classifier {
     pub fn with_statement_unknown_guarded(mut self) -> Self {
         self.statement_unknown_guarded = true;
         self
+    }
+
+    /// The fully fail-closed **served/strict** posture: tighten statement-level
+    /// `Unknown` purity (bead .82 — under the default `UnknownOracle` this
+    /// refuses *every* read whose base objects are not proven read-only) **and**
+    /// guard qualified paren-less callables (bead .102). Intended for the served
+    /// raw-query gate where usability is subordinate to fail-closed safety; the
+    /// caller accepts that reads then require a bound engine oracle proving the
+    /// base objects read-only, or an operator allow-list entry.
+    #[must_use]
+    pub fn served_strict(mut self) -> Self {
+        self.statement_unknown_guarded = true;
+        self.config.guard_unresolved_qualified_calls = true;
+        self
+    }
+
+    /// The strict-mode flags this classifier threads into per-statement analysis.
+    fn modes(&self) -> StrictModes {
+        StrictModes {
+            statement_unknown_guarded: self.statement_unknown_guarded,
+            guard_unresolved_qualified_calls: self.config.guard_unresolved_qualified_calls,
+        }
     }
 
     /// Classify a statement / batch into a [`GuardDecision`], fail-closed.
@@ -2068,7 +2325,7 @@ impl Classifier {
                 let mut body_danger = DangerLevel::Guarded;
                 let mut body_level = OperatingLevel::ReadWrite;
                 if let Some((interior_danger, interior_level)) =
-                    block_interior_floor(sql, self.oracle.as_ref(), self.statement_unknown_guarded)
+                    block_interior_floor(sql, self.oracle.as_ref(), self.modes())
                 {
                     body_danger = body_danger.max(interior_danger);
                     body_level = body_level.max(interior_level);
@@ -2159,23 +2416,13 @@ impl Classifier {
         // Classify each statement; the batch danger is the max, and any
         // Forbidden sub-statement rejects the whole batch.
         let classes: Vec<StatementClass> = if shape.statement_count <= 1 {
-            vec![classify_statement(
-                sql,
-                self.oracle.as_ref(),
-                self.statement_unknown_guarded,
-            )]
+            vec![classify_statement(sql, self.oracle.as_ref(), self.modes())]
         } else {
             // Multi-statement pure SQL: let the parser split, classify each.
             match Parser::parse_sql(&OracleDialect {}, sql) {
                 Ok(stmts) => stmts
                     .iter()
-                    .map(|s| {
-                        classify_statement(
-                            &s.to_string(),
-                            self.oracle.as_ref(),
-                            self.statement_unknown_guarded,
-                        )
-                    })
+                    .map(|s| classify_statement(&s.to_string(), self.oracle.as_ref(), self.modes()))
                     .collect(),
                 Err(_) => vec![StatementClass::forbidden()],
             }
@@ -2734,6 +2981,121 @@ mod tests {
         assert!(
             d.objects_affected.iter().any(|o| o == "orders"),
             "the unresolved base object should be surfaced for audit"
+        );
+    }
+
+    #[test]
+    fn parenless_qualified_callable_fails_open_by_default_but_guards_under_flag() {
+        // Bead .102 — the live fail-open: Oracle invokes a zero-arg function with
+        // NO parentheses, so `SELECT app_admin.run_ddl FROM dual` *runs* the
+        // function `run_ddl`, but `user_defined_calls` only sees `ident(`, so the
+        // paren-less (esp. schema-qualified) call reads as a column reference and
+        // clears to Safe.
+        let payloads = [
+            "SELECT app_admin.run_ddl FROM dual",
+            "SELECT app_admin.run_ddl, ROUND(x) FROM dual",
+            "SELECT id FROM orders WHERE app.flag = 1", // qualifier in WHERE
+        ];
+        // NOTE: `SELECT s.nextval FROM dual` is deliberately NOT in this list — the
+        // sequence pseudo-column is already classified Guarded by the dedicated
+        // bead-.79 NEXTVAL detector at the default level, so it cannot demonstrate
+        // the .102 flag's default-fail-open baseline. The .102 mechanism is proven
+        // here on genuinely paren-less schema/package callables instead.
+
+        // Baseline: the default classifier documents the (contained-elsewhere)
+        // fail-open — plain `Classifier::new` stays permissive for backward
+        // compatibility. This half is what makes the strict half mutation-killing:
+        // if the guard logic is deleted the strict assertion below flips to Safe.
+        let permissive = Classifier::default();
+        for sql in payloads {
+            assert_eq!(
+                permissive.classify(sql).danger,
+                DangerLevel::Safe,
+                "default (flag off) keeps the baseline: {sql:?}"
+            );
+        }
+
+        // Opt-in `.102` guard alone (no statement-Unknown tightening, so plain
+        // reads stay usable) forces every paren-less qualified callable to Guarded.
+        let strict =
+            Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded());
+        for sql in payloads {
+            let d = strict.classify(sql);
+            assert_eq!(
+                d.danger,
+                DangerLevel::Guarded,
+                "the .102 guard must fail closed on a paren-less qualified callable: {sql:?}"
+            );
+            assert_eq!(d.required_level, Some(OperatingLevel::ReadWrite), "{sql:?}");
+        }
+        // The offending dotted name is surfaced for audit.
+        assert!(
+            strict
+                .classify("SELECT app_admin.run_ddl FROM dual")
+                .objects_affected
+                .iter()
+                .any(|o| o.eq_ignore_ascii_case("app_admin.run_ddl")),
+            "the paren-less callable should be surfaced"
+        );
+    }
+
+    #[test]
+    fn parenless_qualified_guard_is_surgical_and_spares_real_column_refs() {
+        // Regression guard for the .102 tightening: an in-scope `alias.column` /
+        // `schema.table.column` / CTE-qualified / correlated column reference is
+        // an ordinary read and must stay Safe (no destruction of normal reads).
+        let strict =
+            Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded());
+        for sql in [
+            "SELECT e.name, e.id FROM employees e",
+            "SELECT e.name FROM employees e JOIN dept d ON e.dept = d.id",
+            "SELECT hr.employees.salary FROM hr.employees",
+            "WITH x AS (SELECT id FROM orders) SELECT x.id FROM x",
+            "SELECT (SELECT o.amt FROM orders o WHERE o.id = c.id) FROM customers c",
+            "SELECT t.* FROM t",
+            "SELECT id, name FROM employees WHERE dept = 10",
+            "SELECT ROUND(x), COUNT(*) FROM dual",
+            "SELECT d.* FROM (SELECT 1 id FROM dual) d WHERE d.id = 1",
+        ] {
+            assert_eq!(
+                strict.classify(sql).danger,
+                DangerLevel::Safe,
+                "a genuine in-scope column reference must stay Safe under the .102 guard: {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn served_strict_is_fully_fail_closed_over_unproven_reads() {
+        // Bead .82 containment: `served_strict` additionally tightens
+        // statement-level `Unknown` purity, so under the default `UnknownOracle`
+        // (which proves nothing) every read of a real base object — including a
+        // view whose hidden VPD/trigger dependency writes — fails closed to
+        // Guarded. This is the aggressive, documented containment; it is opt-in
+        // precisely because it refuses reads a bound engine oracle would clear.
+        let strict = Classifier::default().served_strict();
+        for sql in [
+            "SELECT * FROM orders", // .82: unprovable view/table read
+            "SELECT id FROM some_reporting_view",
+            "SELECT app_admin.run_ddl FROM dual", // .102: still caught here too
+        ] {
+            let d = strict.classify(sql);
+            assert_eq!(
+                d.danger,
+                DangerLevel::Guarded,
+                "served_strict must refuse an unproven read: {sql:?}"
+            );
+            assert_ne!(
+                d.required_level,
+                Some(OperatingLevel::ReadOnly),
+                "served_strict must never admit an unproven read at READ_ONLY: {sql:?}"
+            );
+        }
+        // A base-object-free scalar read has nothing to prove — it stays Safe.
+        assert_eq!(
+            strict.classify("SELECT 1").danger,
+            DangerLevel::Safe,
+            "a base-object-free read has no unproven object"
         );
     }
 
