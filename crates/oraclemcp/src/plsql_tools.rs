@@ -595,12 +595,14 @@ fn is_statement_object_kind(kind: NodeIdentityKind) -> bool {
 
 fn object_ref_candidates(reference: &ObjectRef) -> Vec<String> {
     let name = normalize_identifier(&reference.name);
-    let mut out = Vec::new();
     if let Some(schema) = &reference.schema {
-        out.push(format!("{}.{}", normalize_identifier(schema), name));
+        // A qualified reference must never inherit proof from an unrelated
+        // bare node. If the graph cannot resolve the exact two-part identity,
+        // purity is Unknown; Oracle name resolution is not a suffix match.
+        vec![format!("{}.{}", normalize_identifier(schema), name)]
+    } else {
+        vec![name]
     }
-    out.push(name);
-    out
 }
 
 fn normalize_identifier(value: &str) -> String {
@@ -1400,6 +1402,30 @@ mod tests {
                 .danger,
             DangerLevel::Guarded,
             "an unresolved routine remains Unknown and guarded"
+        );
+    }
+
+    #[test]
+    fn qualified_routine_proof_never_falls_back_to_an_unrelated_bare_node() {
+        let mut graph = DepGraph::new();
+        add_node(
+            &mut graph,
+            1,
+            "LOOKUP",
+            NodeIdentityKind::StandaloneFunction,
+        );
+        let run = analysis_run(graph, Some(empty_catalog()));
+        let oracle = PlsqlSideEffectOracle::from_analysis_run(&run);
+
+        assert_eq!(
+            oracle.routine_purity(&ObjectRef::parse("EVIL.LOOKUP")),
+            Purity::Unknown,
+            "a missing qualified identity must not inherit bare LOOKUP proof"
+        );
+        assert_eq!(
+            oracle.routine_purity(&ObjectRef::parse("LOOKUP")),
+            Purity::ProvenReadOnly,
+            "the exact bare identity remains resolvable"
         );
     }
 

@@ -901,6 +901,189 @@ fn user_defined_calls(sql: &str) -> Vec<ObjectRef> {
     calls
 }
 
+/// Whether the submitted text immediately executes PL/SQL rather than merely
+/// defining stored code. Leading PL/SQL labels are allowed on anonymous blocks,
+/// so skip `<<label>>` prefixes before checking the first executable keyword.
+/// Stored `CREATE PROCEDURE/FUNCTION/PACKAGE/TRIGGER` bodies are deliberately
+/// excluded: creation is already DDL-gated and does not invoke the body.
+fn plsql_invocation_keyword(sql: &str) -> Option<&'static str> {
+    let Ok(tokens) = Tokenizer::new(&OracleDialect {}, sql).tokenize() else {
+        return None;
+    };
+    let toks: Vec<&Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .collect();
+    let mut index = 0;
+    while index + 2 < toks.len()
+        && matches!(toks[index], Token::ShiftLeft)
+        && matches!(toks[index + 1], Token::Word(_))
+        && matches!(toks[index + 2], Token::ShiftRight)
+    {
+        index += 3;
+    }
+    let Some(Token::Word(word)) = toks.get(index) else {
+        return None;
+    };
+    if word.quote_style.is_some() {
+        return None;
+    }
+    ["BEGIN", "DECLARE", "CALL"]
+        .into_iter()
+        .find(|keyword| word.value.eq_ignore_ascii_case(keyword))
+}
+
+fn tokens_are_literal_or_bind_expression(tokens: &[&Token]) -> bool {
+    let mut depth = 0_i64;
+    let mut expect_bind_name = false;
+    for token in tokens {
+        if expect_bind_name {
+            if matches!(token, Token::Word(_) | Token::Number(_, _)) {
+                expect_bind_name = false;
+                continue;
+            }
+            return false;
+        }
+        match token {
+            Token::SingleQuotedString(_)
+            | Token::NationalStringLiteral(_)
+            | Token::QuoteDelimitedStringLiteral(_)
+            | Token::NationalQuoteDelimitedStringLiteral(_)
+            | Token::HexStringLiteral(_)
+            | Token::Number(_, _)
+            | Token::Placeholder(_)
+            | Token::Plus
+            | Token::Minus
+            | Token::Mul
+            | Token::Div
+            | Token::StringConcat => {}
+            Token::Word(word)
+                if word.quote_style.is_none()
+                    && ["NULL", "TRUE", "FALSE"]
+                        .iter()
+                        .any(|literal| word.value.eq_ignore_ascii_case(literal)) => {}
+            Token::Colon => expect_bind_name = true,
+            Token::LParen => depth += 1,
+            Token::RParen if depth > 0 => depth -= 1,
+            _ => return false,
+        }
+    }
+    !expect_bind_name && depth == 0
+}
+
+/// Comments and whitespace do not add executable behavior to a reviewed
+/// anonymous block. Tokenize them rather than stripping text so comment markers
+/// inside literals retain their ordinary data meaning.
+fn is_plsql_trivia(segment: &str) -> bool {
+    Tokenizer::new(&OracleDialect {}, segment)
+        .tokenize()
+        .is_ok_and(|tokens| {
+            !tokens.is_empty()
+                && tokens
+                    .iter()
+                    .all(|token| matches!(token, Token::Whitespace(_)))
+        })
+}
+
+fn is_plsql_null_statement(segment: &str) -> bool {
+    let Ok(tokens) = Tokenizer::new(&OracleDialect {}, segment).tokenize() else {
+        return false;
+    };
+    let toks: Vec<&Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .collect();
+    matches!(
+        toks.as_slice(),
+        [Token::Word(word)]
+            if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("NULL")
+    )
+}
+
+/// The one caller-visible package operation the engine-free server can prove
+/// locally: writing a literal/bind-derived value to SYS.DBMS_OUTPUT's session
+/// buffer. The full owner/package/member spelling is mandatory, and the
+/// argument grammar deliberately excludes identifiers that might resolve to a
+/// zero-argument function, subqueries, member access, or nested calls.
+fn is_reviewed_dbms_output_statement(segment: &str) -> bool {
+    let Ok(tokens) = Tokenizer::new(&OracleDialect {}, segment).tokenize() else {
+        return false;
+    };
+    let toks: Vec<&Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .collect();
+    if toks.len() < 7
+        || !matches!(toks[0], Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("SYS"))
+        || !matches!(toks[1], Token::Period)
+        || !matches!(toks[2], Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("DBMS_OUTPUT"))
+        || !matches!(toks[3], Token::Period)
+        || !matches!(toks[4], Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("PUT_LINE"))
+        || !matches!(toks[5], Token::LParen)
+        || !matches!(toks[toks.len() - 1], Token::RParen)
+    {
+        return false;
+    }
+
+    !toks[6..toks.len() - 1].is_empty()
+        && tokens_are_literal_or_bind_expression(&toks[6..toks.len() - 1])
+}
+
+/// Return the class of caller PL/SQL that the engine-free guard cannot prove
+/// complete. Oracle permits parameterless functions to omit parentheses in any
+/// PL/SQL expression, making them lexically indistinguishable from variables,
+/// constants, and record fields. Consequently DECLARE sections and procedural
+/// expressions/control flow must fail closed without a semantic PL/SQL engine.
+/// A BEGIN block remains available only for NULL and the exact reviewed
+/// SYS.DBMS_OUTPUT statement above. Static DML must be submitted directly so
+/// its SQL grammar is classified without PL/SQL name-resolution ambiguity.
+/// Explicit CALL also fails closed because the current two-field ObjectRef
+/// cannot distinguish schema routines, package/type members, and synonyms.
+fn unanalyzable_plsql_construct(sql: &str) -> Option<&'static str> {
+    let keyword = plsql_invocation_keyword(sql)?;
+    if keyword == "CALL" {
+        return Some("CALL target without complete semantic name resolution");
+    }
+
+    // Preserve the classifier's more specific fail-closed reasons for dynamic
+    // markers and structural desynchronization. This subset check runs before
+    // the operator allow-list only so allow-listing cannot bless an opaque
+    // block; it should not mask stronger diagnostics handled by Stage A.
+    let scan = canonical_marker_scan(&sql.trim_start().to_ascii_uppercase());
+    if PLSQL_SIDE_EFFECT_MARKERS
+        .iter()
+        .any(|marker| scan.contains(marker))
+    {
+        return None;
+    }
+    let shape = analyze_batch(sql);
+    if !shape.balanced || shape.saw_top_level_after_block_close {
+        return None;
+    }
+
+    match keyword {
+        "DECLARE" => Some("DECLARE section without complete semantic analysis"),
+        "BEGIN" => {
+            let segments = block_interior_segments(sql);
+            if segments.is_empty() {
+                return Some("empty or unrecognized PL/SQL body");
+            }
+            for segment in &segments {
+                let trimmed = segment.trim();
+                if is_plsql_trivia(trimmed)
+                    || is_plsql_null_statement(trimmed)
+                    || is_reviewed_dbms_output_statement(trimmed)
+                {
+                    continue;
+                }
+                return Some("procedural PL/SQL expression without complete semantic analysis");
+            }
+            None
+        }
+        _ => Some("unrecognized PL/SQL invocation context"),
+    }
+}
+
 /// Find Oracle sequence `NEXTVAL` pseudocolumn references.
 ///
 /// `NEXTVAL` has no call parentheses, so the UDF detector cannot see it. Oracle
@@ -1600,6 +1783,25 @@ impl Classifier {
             );
         }
 
+        // Oracle allows zero/default-argument functions to omit parentheses in
+        // PL/SQL expressions. Without a semantic symbol table, `pkg.value` (or
+        // even bare `value`) might be a variable, record field, or an opaque
+        // function invocation. Admit only the engine-free subset whose complete
+        // executable statements are independently classified.
+        if let Some(construct) = unanalyzable_plsql_construct(sql) {
+            let mut decision = forbidden_decision(format!(
+                "{construct}; hidden routine effects cannot be ruled out"
+            ));
+            decision.safe_alternative = Some(
+                "submit each static SQL statement directly; procedural execution requires catalog-aware resolution that is not available on this path"
+                    .to_owned(),
+            );
+            return decision.categorized(
+                ReasonCategory::UnprovenSideEffect,
+                Some(construct.to_owned()),
+            );
+        }
+
         let has_sequence_nextval = !sequence_nextval_refs(sql).is_empty();
 
         match stage_a(sql, &self.config) {
@@ -1991,11 +2193,10 @@ mod tests {
     }
 
     #[test]
-    fn sequence_nextval_marks_already_guarded_dml_and_plsql_as_non_transactional() {
+    fn sequence_nextval_marks_direct_dml_as_non_transactional() {
         for sql in [
             "INSERT INTO orders (id) VALUES (app_seq.NEXTVAL)",
             "UPDATE orders SET id = app_seq.NEXTVAL WHERE id = 1",
-            "BEGIN x := app_seq.NEXTVAL; END;",
         ] {
             let d = classify(sql);
             assert!(
@@ -2010,6 +2211,13 @@ mod tests {
                 "{sql:?} -> {d:?}"
             );
         }
+
+        let wrapped = classify("BEGIN x := app_seq.NEXTVAL; END;");
+        assert_eq!(wrapped.danger, DangerLevel::Forbidden);
+        assert_eq!(
+            wrapped.reason_category,
+            Some(ReasonCategory::UnprovenSideEffect)
+        );
     }
 
     #[test]
@@ -2493,25 +2701,21 @@ mod tests {
                 DangerLevel::Destructive,
                 "precondition: bare WHERE-less DML is Destructive: {bare:?}"
             );
-            assert_eq!(
-                w.danger,
-                DangerLevel::Destructive,
-                "block-wrapped WHERE-less DML must be >= bare Destructive: {wrapped:?}"
-            );
             assert!(
-                w.required_level >= b.required_level,
-                "block-wrapped required level must not drop below bare: {wrapped:?}"
+                w.danger >= b.danger,
+                "block-wrapped DML must never drop below bare: {wrapped:?}: {w:?}"
             );
+            assert_eq!(w.danger, DangerLevel::Forbidden, "{wrapped:?}");
         }
-        // A WHERE-qualified DML inside a block stays exactly where it was — the
-        // fold only ever RAISES; it must not over-tighten a benign block.
+        // Engine-free caller PL/SQL now refuses even WHERE-qualified DML: the
+        // same expression grammar can contain zero-argument functions without
+        // parentheses. Submit the static DML directly instead.
         let qualified = classify("BEGIN UPDATE orders SET status = 'X' WHERE id = 1; END;");
         assert_eq!(
             qualified.danger,
-            DangerLevel::Guarded,
-            "WHERE-qualified DML in a block stays Guarded (no over-tightening)"
+            DangerLevel::Forbidden,
+            "wrapped static DML needs semantic PL/SQL analysis"
         );
-        assert_eq!(qualified.required_level, Some(OperatingLevel::ReadWrite));
         // A benign no-op block is unaffected — its body carries no interior tier.
         let noop = classify("BEGIN NULL; END;");
         assert_eq!(noop.danger, DangerLevel::Guarded);
@@ -2667,21 +2871,14 @@ mod tests {
     fn plsql_create_ddl_floor_is_pure_tightening() {
         // Prove monotonicity for oracle-p0d6: the Ddl floor may only RAISE the
         // level of a PL/SQL-bearing create, and must not touch anything else.
-        // (a) A benign anonymous PL/SQL block is NOT a create — it keeps its
-        //     body-derived Guarded/ReadWrite floor (unaffected by the change).
-        for anon in ["BEGIN NULL; END;", "DECLARE x NUMBER; BEGIN x := 1; END;"] {
-            let d = classify(anon);
-            assert_eq!(
-                d.danger,
-                DangerLevel::Guarded,
-                "anonymous block stays Guarded: {anon:?}"
-            );
-            assert_eq!(
-                d.required_level,
-                Some(OperatingLevel::ReadWrite),
-                "anonymous block keeps its ReadWrite body floor (not floored to Ddl): {anon:?}"
-            );
-        }
+        // (a) The reviewed NULL-only anonymous block is not a create and keeps
+        // its body-derived ReadWrite floor. DECLARE needs semantic analysis and
+        // is now independently Forbidden, not accidentally DDL-floored.
+        let noop = classify("BEGIN NULL; END;");
+        assert_eq!(noop.danger, DangerLevel::Guarded);
+        assert_eq!(noop.required_level, Some(OperatingLevel::ReadWrite));
+        let declare = classify("DECLARE x NUMBER; BEGIN x := 1; END;");
+        assert_eq!(declare.danger, DangerLevel::Forbidden);
         // (b) The create floor never LOWERS a level: a PL/SQL create is >= Ddl,
         //     strictly above the ReadWrite it earned before, and never below the
         //     plain anonymous-block body floor.
@@ -3059,6 +3256,300 @@ mod tests {
     }
 
     #[test]
+    fn opaque_plsql_routine_calls_are_forbidden() {
+        for sql in [
+            "BEGIN DBMS_UTILITY.EXEC_DDL_STATEMENT('DROP TABLE target'); END;",
+            "BEGIN dbms_utility /* gap */ . execute_ddl_statement('DROP ' || 'TABLE target'); END;",
+            "BEGIN util.exec_ddl_statement('DROP TABLE target'); END;",
+            "CALL DBMS_UTILITY.EXEC_DDL_STATEMENT('DROP TABLE target')",
+            "BEGIN SYS.DBMS_SYSTEM.KSDWRT(2, 'operator message'); END;",
+            "BEGIN app_admin.run_ddl(:object_name); END;",
+            "BEGIN app_admin.run_ddl; END;",
+            "BEGIN app_owner.app_admin.run_ddl; END;",
+            "BEGIN app_admin.run_ddl@remote_db; END;",
+            "<<audit_step>> BEGIN app_admin.run_ddl; END;",
+            "BEGIN <<audit_step>> app_admin.run_ddl; END;",
+            "BEGIN dangerous_proc; END;",
+        ] {
+            let decision = classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Forbidden, "{sql:?}");
+            assert_eq!(decision.required_level, None, "{sql:?}");
+            assert_eq!(
+                decision.reason_category,
+                Some(ReasonCategory::UnprovenSideEffect),
+                "{sql:?}"
+            );
+            assert!(decision.objects_affected.is_empty(), "{sql:?}");
+        }
+    }
+
+    #[test]
+    fn stored_program_declarations_are_not_mistaken_for_invocation() {
+        for sql in [
+            "CREATE OR REPLACE PROCEDURE p(p_value NUMBER) AS BEGIN NULL; END;",
+            "CREATE OR REPLACE FUNCTION f(p_value NUMBER) RETURN NUMBER AS BEGIN RETURN p_value; END;",
+        ] {
+            let decision = classify(sql);
+            assert_ne!(
+                decision.reason_category,
+                Some(ReasonCategory::UnprovenSideEffect),
+                "a declaration signature is not an executed routine: {sql:?}"
+            );
+            assert_eq!(
+                decision.required_level,
+                Some(OperatingLevel::Ddl),
+                "{sql:?}"
+            );
+        }
+
+        // Package specifications currently take a separate, pre-existing
+        // unbalanced-block refusal path (tracked independently). This assertion
+        // is intentionally limited to the declaration-vs-invocation contract.
+        let package =
+            classify("CREATE OR REPLACE PACKAGE p AS PROCEDURE run(p_value NUMBER); END;");
+        assert_ne!(
+            package.reason_category,
+            Some(ReasonCategory::UnprovenSideEffect)
+        );
+    }
+
+    #[test]
+    fn wrapping_an_opaque_call_never_lowers_its_authority() {
+        for sql in [
+            "CALL app_admin.run_ddl(:target)",
+            "BEGIN app_admin.run_ddl(:target); END;",
+            "DECLARE n PLS_INTEGER := 1; BEGIN app_admin.run_ddl(:target); END;",
+            "BEGIN IF :enabled = 1 THEN app_admin.run_ddl(:target); END IF; END;",
+            "BEGIN LOOP app_admin.run_ddl; EXIT; END LOOP; END;",
+            "<<outer_block>> BEGIN <<step>> app_admin.run_ddl; END;",
+        ] {
+            let decision = classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Forbidden, "{sql:?}");
+            assert_eq!(
+                decision.reason_category,
+                Some(ReasonCategory::UnprovenSideEffect),
+                "{sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn routine_purity_proof_cannot_clear_call_without_exact_name_resolution() {
+        struct NarrowProof;
+        impl SideEffectOracle for NarrowProof {
+            fn routine_purity(&self, routine: &ObjectRef) -> Purity {
+                if routine.schema.as_deref() == Some("app_read")
+                    && routine.name.eq_ignore_ascii_case("lookup")
+                {
+                    Purity::ProvenReadOnly
+                } else {
+                    Purity::Unknown
+                }
+            }
+        }
+        let classifier = Classifier::default().with_oracle(Arc::new(NarrowProof));
+
+        let ambiguous = classifier.classify("CALL app_read.lookup(:id)");
+        assert_eq!(ambiguous.danger, DangerLevel::Forbidden);
+        assert_eq!(
+            ambiguous.reason_category,
+            Some(ReasonCategory::UnprovenSideEffect)
+        );
+
+        let unknown = classifier.classify("CALL app_read.unproven(:id)");
+        assert_eq!(unknown.danger, DangerLevel::Forbidden);
+        assert_eq!(
+            unknown.reason_category,
+            Some(ReasonCategory::UnprovenSideEffect)
+        );
+
+        let dynamic = classifier
+            .classify("BEGIN app_read.lookup(:id); EXECUTE IMMEDIATE 'DROP TABLE target'; END;");
+        assert_eq!(dynamic.danger, DangerLevel::Forbidden);
+        assert_eq!(dynamic.reason_category, Some(ReasonCategory::DynamicSql));
+
+        let quoted = classifier.classify("CALL \"app_read\".\"lookup\"(:id)");
+        assert_eq!(quoted.danger, DangerLevel::Forbidden);
+        assert_eq!(
+            quoted.reason_category,
+            Some(ReasonCategory::UnprovenSideEffect)
+        );
+
+        for sql in [
+            "CALL app_read.lookup(app_admin.run_ddl)",
+            "CALL app_read.lookup(dangerous_func)",
+        ] {
+            let hidden_argument = classifier.classify(sql);
+            assert_eq!(hidden_argument.danger, DangerLevel::Forbidden, "{sql:?}");
+            assert_eq!(
+                hidden_argument.reason_category,
+                Some(ReasonCategory::UnprovenSideEffect),
+                "callee proof cannot prove argument evaluation: {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_proof_cannot_launder_owner_chains_or_database_links() {
+        struct PackageMemberProof;
+        impl SideEffectOracle for PackageMemberProof {
+            fn routine_purity(&self, routine: &ObjectRef) -> Purity {
+                if routine.schema.as_deref() == Some("pkg")
+                    && routine.name.eq_ignore_ascii_case("run")
+                {
+                    Purity::ProvenReadOnly
+                } else {
+                    Purity::Unknown
+                }
+            }
+        }
+        let classifier = Classifier::default().with_oracle(Arc::new(PackageMemberProof));
+
+        for sql in [
+            "BEGIN trusted_owner.pkg.run(:id); END;",
+            "BEGIN evil_owner.pkg.run(:id); END;",
+            "BEGIN trusted_owner.pkg.run; END;",
+            "BEGIN evil_owner.pkg.run; END;",
+            "BEGIN pkg.run@trusted_link(:id); END;",
+            "BEGIN pkg.run@evil_link; END;",
+            "BEGIN run@evil_link; END;",
+        ] {
+            let decision = classifier.classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Forbidden, "{sql:?}");
+            assert_eq!(
+                decision.reason_category,
+                Some(ReasonCategory::UnprovenSideEffect),
+                "a two-part proof must not clear a richer identity: {sql:?}"
+            );
+        }
+
+        let ambiguous_two_part = classifier.classify("CALL pkg.run(:id)");
+        assert_eq!(ambiguous_two_part.danger, DangerLevel::Forbidden);
+        assert_eq!(
+            ambiguous_two_part.reason_category,
+            Some(ReasonCategory::UnprovenSideEffect)
+        );
+
+        struct AllProof;
+        impl SideEffectOracle for AllProof {
+            fn routine_purity(&self, _routine: &ObjectRef) -> Purity {
+                Purity::ProvenReadOnly
+            }
+        }
+        let all_proven = Classifier::default().with_oracle(Arc::new(AllProof));
+        for sql in [
+            "BEGIN owner.pkg.run(:id); END;",
+            "BEGIN owner.pkg.run; END;",
+            "BEGIN pkg.run@evil_link(:id); END;",
+            "BEGIN pkg.run@evil_link; END;",
+            "BEGIN run@evil_link; END;",
+            "CALL pkg.run@evil_link(:id)",
+            "<<step>> CALL pkg.run(:id)",
+            "CALL pkg.run(:id)",
+            "CALL run(:id)",
+        ] {
+            let decision = all_proven.classify(sql);
+            assert_eq!(
+                decision.danger,
+                DangerLevel::Forbidden,
+                "even an all-accepting two-field oracle cannot prove a richer identity: {sql:?}"
+            );
+            assert_eq!(
+                decision.reason_category,
+                Some(ReasonCategory::UnprovenSideEffect),
+                "{sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pragma_syntax_is_not_misreported_as_a_routine_but_declare_fails_closed() {
+        for sql in [
+            "DECLARE e EXCEPTION; PRAGMA EXCEPTION_INIT(e, -20001); BEGIN NULL; END;",
+            "DECLARE PROCEDURE p IS BEGIN NULL; END; PRAGMA INLINE(p, 'YES'); BEGIN NULL; END;",
+            "DECLARE PROCEDURE p; PRAGMA RESTRICT_REFERENCES(p, WNDS); BEGIN NULL; END;",
+        ] {
+            let decision = classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Forbidden, "{sql:?}");
+            assert!(decision.objects_affected.is_empty(), "{sql:?}");
+            assert!(
+                !decision.reason.contains("EXCEPTION_INIT")
+                    && !decision.reason.contains("RESTRICT_REFERENCES")
+                    && !decision.reason.contains("INLINE"),
+                "pragma syntax must not be misreported as a routine: {decision:?}"
+            );
+        }
+
+        let real_call = classify("BEGIN exception_init(:code); END;");
+        assert_eq!(
+            real_call.reason_category,
+            Some(ReasonCategory::UnprovenSideEffect)
+        );
+    }
+
+    #[test]
+    fn dbms_output_exception_requires_exact_sys_identity_and_safe_arguments() {
+        let exact = classify("BEGIN SYS.DBMS_OUTPUT.PUT_LINE('hello' || :suffix); END;");
+        assert_ne!(exact.danger, DangerLevel::Forbidden);
+        assert_eq!(exact.required_level, Some(OperatingLevel::ReadWrite));
+
+        for sql in [
+            "BEGIN DBMS_OUTPUT.PUT_LINE('shadowable'); END;",
+            "BEGIN APP.DBMS_OUTPUT.PUT_LINE('wrong owner'); END;",
+            "BEGIN SYS.DBMS_OUTPUT.PUT_LINE@remote_db('remote'); END;",
+            "BEGIN SYS.DBMS_OUTPUT.PUT_LINE(app_admin.message()); END;",
+            "BEGIN SYS.DBMS_OUTPUT.PUT_LINE(app_admin.message); END;",
+            "BEGIN SYS.DBMS_OUTPUT.PUT_LINE(local_value); END;",
+            "CALL SYS.DBMS_OUTPUT.PUT_LINE(app_admin.message)",
+        ] {
+            let decision = classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Forbidden, "{sql:?}");
+            assert_eq!(
+                decision.reason_category,
+                Some(ReasonCategory::UnprovenSideEffect),
+                "{sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_narrow_reviewed_engine_free_plsql_subset_is_admitted() {
+        for sql in [
+            "BEGIN NULL; END;",
+            "BEGIN /* before */ NULL /* after */; END;",
+            "BEGIN NULL; -- trailing note\n END;",
+            "BEGIN -- before statement\n NULL; /* body note */ END;",
+            "BEGIN SYS /* owner */ . DBMS_OUTPUT . PUT_LINE('hello' || :suffix); -- note\n END;",
+        ] {
+            let reviewed = classify(sql);
+            assert_ne!(reviewed.danger, DangerLevel::Forbidden, "{sql:?}");
+            assert_eq!(
+                reviewed.required_level,
+                Some(OperatingLevel::ReadWrite),
+                "{sql:?}"
+            );
+        }
+
+        for sql in [
+            "BEGIN UPDATE t SET x = ROUND(x), note = 'DBMS_UTILITY.EXEC_DDL_STATEMENT()' WHERE id = NVL(:id, 0); END;",
+            "BEGIN :out := app_admin.run_ddl; END;",
+            "BEGIN :out := dangerous_func; END;",
+            "BEGIN IF app_admin.can_run THEN NULL; END IF; END;",
+            "BEGIN WHILE app_admin.keep_running LOOP NULL; END LOOP; END;",
+            "BEGIN rec.status := rec.previous_status; NULL; END;",
+            "BEGIN note := 'DBMS_UTILITY.EXEC_DDL_STATEMENT()'; NULL; END;",
+        ] {
+            let decision = classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Forbidden, "{sql:?}");
+            assert_eq!(
+                decision.reason_category,
+                Some(ReasonCategory::UnprovenSideEffect),
+                "procedural expressions are ambiguous without semantic analysis: {sql:?}"
+            );
+        }
+    }
+
+    #[test]
     fn whitespace_or_comment_split_marker_is_still_forbidden() {
         // oracle-rwjl.1: a comment / extra space / tab / newline wedged between
         // the two keywords of a multi-word side-effect marker must NOT split it
@@ -3099,10 +3590,11 @@ mod tests {
         // plain block, but never wrongly hard-Forbidden by a phantom marker).
         // EXECUTE and IMMEDIATE on opposite sides of a `;` are not adjacent.
         let d = classify("BEGIN x := EXECUTE; y := IMMEDIATE; END;");
+        assert_eq!(d.danger, DangerLevel::Forbidden);
         assert_ne!(
-            d.danger,
-            DangerLevel::Forbidden,
-            "punctuation-separated marker words must not trigger the dynamic-SQL marker"
+            d.reason_category,
+            Some(ReasonCategory::DynamicSql),
+            "punctuation-separated words must not be misreported as EXECUTE IMMEDIATE"
         );
     }
 
@@ -3239,8 +3731,9 @@ mod tests {
         );
         // Control: a buried `;` inside a *real* PL/SQL block (StageA routes it
         // via PlSqlBlock, not PureSql) is a legitimate nested statement
-        // terminator — the buried-`;` desync rule only fires on the PureSql path,
-        // so the block stays balanced and Guarded, never Forbidden.
+        // terminator — the buried-`;` desync rule only fires on the PureSql path.
+        // The shape stays balanced, while the independent semantic-completeness
+        // rule now refuses the caller PL/SQL block.
         let plsql = analyze_batch("BEGIN UPDATE t SET x = 1 WHERE id = 2; END;");
         assert!(
             plsql.balanced,
@@ -3248,8 +3741,8 @@ mod tests {
         );
         assert_eq!(
             classify("BEGIN UPDATE t SET x = 1 WHERE id = 2; END;").danger,
-            DangerLevel::Guarded,
-            "a balanced PL/SQL block with a nested `;` must stay Guarded, not Forbidden"
+            DangerLevel::Forbidden,
+            "balanced shape alone cannot prove PL/SQL name resolution"
         );
     }
 
@@ -3308,10 +3801,10 @@ mod tests {
 
         // Distinguishability controls (a naive fix that keyed only on
         // statement_count / saw_buried_semicolon would regress every one of these):
-        // legitimate single anonymous blocks — including a leading `DECLARE … ;`
-        // section, which sets has_plsql_block but never raises depth — and a block
-        // followed only by the SQL*Plus `/` run terminator must STAY balanced,
-        // Guarded/ReadWrite, and gate to Allow at ReadWrite.
+        // Legitimate single anonymous-block SHAPES — including a leading
+        // `DECLARE … ;` section and SQL*Plus `/` terminators — must not be
+        // misreported as trailing SQL. The independent semantic-completeness
+        // policy may still refuse DECLARE or wrapped DML.
         for sql in [
             "DECLARE x NUMBER; BEGIN x := 1; END;",
             "BEGIN NULL; END;",
@@ -3326,21 +3819,20 @@ mod tests {
                  as trailing-after-END: {sql:?} -> {shape:?}"
             );
             let d = classify(sql);
-            assert_eq!(
-                d.danger,
-                DangerLevel::Guarded,
-                "a legitimate single anonymous block must stay Guarded: {sql:?} -> {d:?}"
-            );
-            assert_eq!(
-                d.required_level,
-                Some(OperatingLevel::ReadWrite),
-                "a legitimate single anonymous block must require ReadWrite: {sql:?}"
-            );
-            assert_eq!(
-                d.gate(&session),
-                LevelDecision::Allow,
-                "a ReadWrite-elevated session must still Allow a legitimate block: {sql:?}"
-            );
+            let reviewed_noop = !sql.starts_with("DECLARE") && !sql.contains("UPDATE");
+            if reviewed_noop {
+                assert_eq!(d.danger, DangerLevel::Guarded, "{sql:?} -> {d:?}");
+                assert_eq!(d.required_level, Some(OperatingLevel::ReadWrite));
+                assert_eq!(d.gate(&session), LevelDecision::Allow);
+            } else {
+                assert_eq!(d.danger, DangerLevel::Forbidden, "{sql:?} -> {d:?}");
+                assert_eq!(
+                    d.gate(&session),
+                    LevelDecision::Blocked {
+                        reason: BlockReason::Forbidden
+                    }
+                );
+            }
         }
     }
 

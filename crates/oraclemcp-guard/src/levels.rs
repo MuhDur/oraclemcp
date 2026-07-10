@@ -87,8 +87,7 @@ impl OperatingLevel {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[non_exhaustive]
 pub enum DangerLevel {
-    /// Proven read-only: SELECT/WITH with no unproven function call,
-    /// `DBMS_OUTPUT.PUT_LINE`.
+    /// Proven read-only: SELECT/WITH with no unproven function call.
     Safe,
     /// Writes data or has a bounded effect: INSERT, UPDATE/DELETE with WHERE,
     /// MERGE, sequence `NEXTVAL`, CTAS, `SELECT … FOR UPDATE`, COMMIT/ROLLBACK,

@@ -395,12 +395,12 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_execute",
             ToolTier::FoundationLiveDb,
-            "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default, while commits and non-transactional effects such as sequence NEXTVAL require the confirmation token from oracle_preview_sql. Query-shaped NEXTVAL is refused because this path does not fetch rows.",
+            "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default, while commits and non-transactional effects such as sequence NEXTVAL require the confirmation token from oracle_preview_sql. Query-shaped NEXTVAL is refused because this path does not fetch rows. Engine-free caller PL/SQL is limited to NULL and literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements; explicit CALL remains refused until its runtime target can be resolved exactly.",
         )
         .with_input_schema(object_schema(
             props_with(
                 json!({
-                    "sql": { "type": "string", "description": "A single non-read SQL statement. Use :1, :2 … for binds." },
+                    "sql": { "type": "string", "description": "A single non-read SQL statement. Use :1, :2 … for binds. Submit static DML directly; engine-free caller PL/SQL is limited to NULL and literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements, and explicit CALL is refused." },
                     "binds": {
                         "type": "array",
                         "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
@@ -410,7 +410,7 @@ pub fn tool_registry() -> ToolRegistry {
                 }),
                 &[
                     confirm_trio("Execution confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true and whenever the statement has a non-transactional effect such as sequence NEXTVAL, even with commit=false."),
-                    dbms_output_props("Default false. When true, enables DBMS_OUTPUT before execution and returns bounded captured lines after commit/rollback."),
+                    dbms_output_props("Default false. When true, enables DBMS_OUTPUT before execution and returns bounded captured lines after commit/rollback. Caller PL/SQL must use literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements."),
                     timeout_seconds_prop(),
                 ],
             ),
@@ -931,7 +931,7 @@ pub fn tool_registry() -> ToolRegistry {
                 }),
                 &[
                     timeout_seconds_prop(),
-                    dbms_output_props("Default false. When true, returns bounded DBMS_OUTPUT lines."),
+                    dbms_output_props("Default false. When true, returns bounded DBMS_OUTPUT lines. Caller PL/SQL must use literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements."),
                 ],
             ),
             &[],

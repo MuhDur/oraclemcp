@@ -926,15 +926,11 @@ mod tests {
     }
 
     #[test]
-    fn write_block_refuses_on_a_read_only_profile() {
+    fn write_statement_refuses_on_a_read_only_profile() {
         let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
-        // A PL/SQL block is >= Guarded (ReadWrite); on a READ_ONLY ceiling it
-        // refuses to load (fail-fast).
-        let d = def_sql(
-            "bump",
-            "BEGIN UPDATE t SET x = 1 WHERE id = :id; END;",
-            None,
-        );
+        // Static DML is Guarded (ReadWrite); on a READ_ONLY ceiling it refuses
+        // to load fail-fast. Caller PL/SQL is intentionally not needed here.
+        let d = def_sql("bump", "UPDATE t SET x = 1 WHERE id = :id", None);
         let err = classify_at_load(&d, &c, OperatingLevel::ReadOnly).unwrap_err();
         assert!(
             matches!(err, LoadError::OverCeiling { required, .. } if required >= OperatingLevel::ReadWrite)
@@ -963,9 +959,9 @@ mod tests {
         assert!(
             matches!(err, LoadError::OverCeiling { required, .. } if required == OperatingLevel::Ddl)
         );
-        // The author CANNOT loosen: declaring READ_ONLY on a write block keeps
-        // the derived (write) level.
-        let w = def_sql("w", "BEGIN UPDATE t SET x=1; END;", Some("READ_ONLY"));
+        // The author CANNOT loosen: declaring READ_ONLY on static DML keeps the
+        // derived write level.
+        let w = def_sql("w", "UPDATE t SET x=1", Some("READ_ONLY"));
         let loaded = classify_at_load(&w, &c, OperatingLevel::Admin).expect("loads");
         assert!(loaded.required_level >= OperatingLevel::ReadWrite);
     }

@@ -852,6 +852,49 @@ class Ladder:
         def elevate_read_write():
             return self.elevate("READ_WRITE")
 
+        def opaque_plsql_ddl_call_refused_and_target_preserved():
+            # Regression for QA81: DBMS_UTILITY can execute caller-provided DDL,
+            # so an opaque package call must never inherit the READ_WRITE block
+            # floor. Prove the live target still exists after both preview and
+            # execution refuse the statement before Oracle sees it.
+            sql = (
+                "BEGIN DBMS_UTILITY.EXEC_DDL_STATEMENT("
+                f"'DROP TABLE {table} PURGE'); END;"
+            )
+            preview = self.preview(sql)
+            require(
+                preview.get("gate_decision") == "blocked",
+                "opaque DBMS_UTILITY DDL is blocked at READ_WRITE",
+                preview,
+            )
+            require(
+                preview.get("execute_confirmation") is None,
+                "a forbidden opaque call never mints an execution grant",
+                preview,
+            )
+            result = self.session.call("oracle_execute", {"sql": sql})
+            content = structured(result)
+            require(
+                result.get("isError") is True,
+                "opaque DBMS_UTILITY DDL is refused before execution",
+                content,
+            )
+            require(
+                content.get("error_class") == "FORBIDDEN_STATEMENT",
+                "opaque-call refusal has the fail-closed error class",
+                content,
+            )
+            present = self.count_rows(
+                "SELECT COUNT(*) AS n FROM user_tables "
+                f"WHERE table_name = '{table.upper()}'"
+            )
+            require(
+                present == 1,
+                "the live target table remains after the refused opaque call",
+                present,
+            )
+            return {"error_class": content.get("error_class"), "target_present": True}
+
         def dml_rollback_by_default():
             result = self.governed_execute(
                 f"INSERT INTO {table} (id, note) VALUES (1, 'rollback-me')",
@@ -964,9 +1007,12 @@ class Ladder:
         def dbms_output_capture_caps():
             # A PL/SQL block emitting 50 DBMS_OUTPUT lines, captured with a
             # 10-line cap: the capture is truncated and the line cap is enforced.
+            output_calls = " ".join(
+                f"SYS.DBMS_OUTPUT.PUT_LINE('ladder line {i}');"
+                for i in range(1, 51)
+            )
             dbms = self.governed_execute_capture(
-                "BEGIN FOR i IN 1..50 LOOP "
-                "DBMS_OUTPUT.PUT_LINE('ladder line '||i); END LOOP; END;",
+                f"BEGIN {output_calls} END;",
                 dbms_output_max_lines=10,
             )
             require(
@@ -1152,6 +1198,10 @@ class Ladder:
             ("source_drop_objects", source_drop_objects),
             ("drop_to_read_only_mid", drop_to_read_only_mid),
             ("elevate_read_write", elevate_read_write),
+            (
+                "opaque_plsql_ddl_call_refused_and_target_preserved",
+                opaque_plsql_ddl_call_refused_and_target_preserved,
+            ),
             ("dml_rollback_by_default", dml_rollback_by_default),
             ("dml_commit", dml_commit),
             ("dml_commit_clob_row", dml_commit_clob_row),

@@ -306,9 +306,8 @@ fn mr_normalize_stability(
 /// MR6 — block-wrap monotonicity: `BEGIN <S>; END;` is never LESS strict than
 /// bare `<S>`. A statement's classification can only ever RISE when wrapped in a
 /// PL/SQL block (the block floor is at minimum Guarded/ReadWrite, and the
-/// interior-tier fold lifts it to at least what the interior earns bare), so a
-/// WHERE-less DELETE/UPDATE that is Destructive bare stays Destructive wrapped
-/// rather than collapsing to Guarded.
+/// engine-free PL/SQL completeness rule now lifts general wrapped SQL to
+/// Forbidden, which is still monotone above the bare statement.
 fn mr_block_wrap_monotone(
     classify: &dyn Fn(&str) -> GuardDecision,
     base_sql: &str,
@@ -409,7 +408,7 @@ const WRAPPABLE_STATEMENTS: &[&str] = &[
     // WHERE-less DML — the bead's core case: Destructive/ReadWrite bare.
     "DELETE FROM orders",
     "UPDATE orders SET status = 'X'",
-    // WHERE-qualified DML — Guarded/ReadWrite bare; must NOT be over-raised.
+    // WHERE-qualified DML — Guarded/ReadWrite bare; the wrapper may tighten.
     "DELETE FROM orders WHERE id = 1",
     "UPDATE orders SET status = 'X' WHERE id = 1",
     "INSERT INTO audit_log (id, msg) VALUES (1, 'x')",
@@ -590,17 +589,15 @@ fn mutant_flashback_blind(sql: &str) -> GuardDecision {
     }
 }
 
-/// MUT-BLOCKWRAP: the pre-fix flat benign-block floor — any PL/SQL block collapses
-/// to the Guarded/ReadWrite tier regardless of its interior, so a WHERE-less DML
-/// wrapped in `BEGIN … END` is scored Guarded even though bare it is Destructive.
-/// Non-uniform (only block inputs whose interior out-ranks Guarded are loosened);
-/// a Forbidden dangerous block is left untouched → breaks MR6 monotonicity.
+/// MUT-BLOCKWRAP: a flat benign-block floor — any PL/SQL block above Guarded
+/// collapses to Guarded/ReadWrite regardless of its interior or completeness.
+/// This models both the historical WHERE-less-DML bug and a regression that
+/// removes the current engine-free opaque-block refusal.
 fn mutant_blockwrap_collapse(sql: &str) -> GuardDecision {
     let upper = sql.trim_start().to_ascii_uppercase();
     let real = real_classify(sql);
     let is_block = upper.starts_with("BEGIN") || upper.starts_with("DECLARE");
-    let interior_outranks_guarded = danger_rank(real.danger) > danger_rank(DangerLevel::Guarded)
-        && danger_rank(real.danger) < danger_rank(DangerLevel::Forbidden);
+    let interior_outranks_guarded = danger_rank(real.danger) > danger_rank(DangerLevel::Guarded);
     if is_block && interior_outranks_guarded {
         with_danger(real, DangerLevel::Guarded)
     } else {
@@ -652,7 +649,7 @@ proptest! {
 
     /// MR6 — wrapping a statement in `BEGIN … END` never lowers its verdict.
     /// This is the wrap-relation MR1 had to drop before the interior-tier fold
-    /// (iec3.2.30); a WHERE-less DML must stay Destructive when block-wrapped.
+    /// (iec3.2.30); a wrapper may tighten to Forbidden but can never loosen.
     #[test]
     fn mr6_block_wrap_never_loosens(
         base in wrappable_stmt(),

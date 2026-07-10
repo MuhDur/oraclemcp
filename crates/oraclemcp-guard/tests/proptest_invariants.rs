@@ -14,6 +14,10 @@
 //!    `EXECUTE`/`IMMEDIATE` must keep the block Forbidden, not silently downgrade
 //!    it). Danger is monotone non-decreasing under comment insertion.
 //!
+//! 3. **Opaque-call wrapping monotonicity.** Generated package/member calls stay
+//!    Forbidden when wrapped in anonymous-block control flow, declarations,
+//!    labels, comments, case changes, or no-argument procedure syntax.
+//!
 //! Small case counts keep CI fast; the standing adversarial corpus + cargo-fuzz
 //! target cover the example-level and never-panic dimensions.
 
@@ -365,6 +369,66 @@ proptest! {
             wedged_danger >= DangerLevel::Destructive,
             "COMMENT-WEDGE DOWNGRADE: a dangerous-marker block dropped below \
              Destructive to {wedged_danger:?}\n  wedged: {wedged_sql:?}"
+        );
+    }
+
+    /// Invariant #3: an unproven package/member call is already Forbidden as an
+    /// explicit CALL, and adding PL/SQL wrappers/noise must never lower that
+    /// authority. This is generated rather than a fixed wrapper table so new
+    /// identifier spellings, comments, labels, and wrapper combinations keep
+    /// exercising the proof boundary.
+    #[test]
+    fn opaque_call_wrapping_never_lowers_authority(
+        package in "[a-z][a-z0-9_]{0,12}",
+        member in "[a-z][a-z0-9_]{0,12}",
+        wrapper in 0u8..5,
+        comment in prop_oneof![Just("/**/"), Just("/* proof gap */"), Just("-- gap\n")],
+        uppercase in any::<bool>(),
+        noarg in any::<bool>(),
+    ) {
+        let classifier = Classifier::default();
+        let base = format!("CALL {package}.{member}(:value)");
+        let base_decision = classifier.classify(&base);
+        prop_assert_eq!(
+            base_decision.danger,
+            DangerLevel::Forbidden,
+            "base {:?}",
+            base
+        );
+
+        let qualified = format!("{package} {comment} . {comment} {member}");
+        let invocation = if noarg {
+            qualified
+        } else {
+            format!("{qualified}(:value)")
+        };
+        let mut wrapped = match wrapper {
+            0 => format!("BEGIN {invocation}; END;"),
+            1 => format!(
+                "DECLARE n PLS_INTEGER := 1; BEGIN {invocation}; END;"
+            ),
+            2 => format!(
+                "BEGIN IF :enabled = 1 THEN {invocation}; END IF; END;"
+            ),
+            3 => format!("BEGIN LOOP {invocation}; EXIT; END LOOP; END;"),
+            _ => format!(
+                "<<outer_label>> BEGIN <<call_label>> {invocation}; END;"
+            ),
+        };
+        if uppercase {
+            wrapped = wrapped.to_ascii_uppercase();
+        }
+
+        let wrapped_decision = classifier.classify(&wrapped);
+        prop_assert!(
+            wrapped_decision.danger >= base_decision.danger,
+            "OPAQUE-CALL DOWNGRADE: {base:?} -> {wrapped:?}: {wrapped_decision:?}"
+        );
+        prop_assert_eq!(
+            wrapped_decision.required_level,
+            None,
+            "wrapped {:?}",
+            wrapped
         );
     }
 }

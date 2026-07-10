@@ -369,7 +369,7 @@ expression: rendered
       "name": "oracle_execute",
       "title": "Oracle Execute",
       "tier": "foundation_live_db",
-      "summary": "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default, while commits and non-transactional effects such as sequence NEXTVAL require the confirmation token from oracle_preview_sql. Query-shaped NEXTVAL is refused because this path does not fetch rows.",
+      "summary": "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default, while commits and non-transactional effects such as sequence NEXTVAL require the confirmation token from oracle_preview_sql. Query-shaped NEXTVAL is refused because this path does not fetch rows. Engine-free caller PL/SQL is limited to NULL and literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements; explicit CALL remains refused until its runtime target can be resolved exactly.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -379,7 +379,7 @@ expression: rendered
             "type": "array"
           },
           "capture_dbms_output": {
-            "description": "Default false. When true, enables DBMS_OUTPUT before execution and returns bounded captured lines after commit/rollback.",
+            "description": "Default false. When true, enables DBMS_OUTPUT before execution and returns bounded captured lines after commit/rollback. Caller PL/SQL must use literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements.",
             "type": "boolean"
           },
           "commit": {
@@ -423,7 +423,7 @@ expression: rendered
             "type": "integer"
           },
           "sql": {
-            "description": "A single non-read SQL statement. Use :1, :2 … for binds.",
+            "description": "A single non-read SQL statement. Use :1, :2 … for binds. Submit static DML directly; engine-free caller PL/SQL is limited to NULL and literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements, and explicit CALL is refused.",
             "type": "string"
           },
           "timeout_seconds": {
@@ -1884,7 +1884,7 @@ expression: rendered
         "additionalProperties": false,
         "properties": {
           "capture_dbms_output": {
-            "description": "Default false. When true, returns bounded DBMS_OUTPUT lines.",
+            "description": "Default false. When true, returns bounded DBMS_OUTPUT lines. Caller PL/SQL must use literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements.",
             "type": "boolean"
           },
           "commit": {

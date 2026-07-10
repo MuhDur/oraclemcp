@@ -3435,13 +3435,19 @@ fn sequence_nextval_rollback_default_requires_confirmation_before_database_io() 
     for sql in [
         "INSERT INTO orders (id) VALUES (app_seq.NEXTVAL)",
         "UPDATE orders SET id = app_seq.NEXTVAL WHERE id = 1",
-        "BEGIN x := app_seq.NEXTVAL; END;",
     ] {
         let err = dispatcher
             .dispatch("oracle_execute", json!({ "sql": sql }))
             .expect_err("rollback cannot undo NEXTVAL, so omission of confirm must fail closed");
         assert_eq!(err.error_class, ErrorClass::ChallengeRequired, "{sql:?}");
     }
+    let wrapped = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": "BEGIN x := app_seq.NEXTVAL; END;" }),
+        )
+        .expect_err("engine-free caller PL/SQL must use direct static DML instead");
+    assert_eq!(wrapped.error_class, ErrorClass::ForbiddenStatement);
     assert!(state.executed.lock().expect("exec mutex").is_empty());
     assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
 }
@@ -4553,6 +4559,32 @@ fn caller_transaction_control_is_refused_before_database_io() {
 }
 
 #[test]
+fn opaque_plsql_calls_are_refused_before_database_io() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+
+    for sql in [
+        "BEGIN DBMS_UTILITY.EXEC_DDL_STATEMENT('DROP TABLE protected_target'); END;",
+        "BEGIN dbms_utility /* gap */ . execute_ddl_statement('DROP ' || 'TABLE protected_target'); END;",
+        "CALL app_admin.run_ddl('protected_target')",
+        "BEGIN app_admin.run_ddl; END;",
+    ] {
+        let err = dispatcher
+            .dispatch("oracle_execute", json!({ "sql": sql }))
+            .expect_err("an unproven routine cannot inherit READ_WRITE authority");
+        assert_eq!(err.error_class, ErrorClass::ForbiddenStatement, "{sql:?}");
+    }
+
+    assert!(state.executed.lock().expect("exec mutex").is_empty());
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn query_timeout_override_is_restored_after_call() {
     let state = Arc::new(ExecState::default());
     let dispatcher = OracleDispatcher::new_with_profile_level(
@@ -4647,7 +4679,7 @@ fn execute_can_capture_bounded_dbms_output() {
         .dispatch(
             "oracle_execute",
             json!({
-                "sql": "BEGIN DBMS_OUTPUT.PUT_LINE('first'); DBMS_OUTPUT.PUT_LINE('second'); END;",
+                "sql": "BEGIN SYS.DBMS_OUTPUT.PUT_LINE('first'); SYS.DBMS_OUTPUT.PUT_LINE('second'); END;",
                 "dbms_output": true,
                 "max_dbms_output_lines": 10,
                 "max_dbms_output_chars": 100
@@ -4688,7 +4720,7 @@ fn execute_dbms_output_limits_are_clamped() {
         .dispatch(
             "oracle_execute",
             json!({
-                "sql": "BEGIN DBMS_OUTPUT.PUT_LINE('x'); END;",
+                "sql": "BEGIN SYS.DBMS_OUTPUT.PUT_LINE('x'); END;",
                 "capture_dbms_output": true,
                 "dbms_output_max_lines": 999999,
                 "dbms_output_max_chars": 999999999
