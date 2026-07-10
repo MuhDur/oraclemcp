@@ -124,9 +124,7 @@ fn take_leading_word(mut input: &str) -> Option<(&str, &str)> {
     loop {
         input = input.trim_start();
         if let Some(comment) = input.strip_prefix("--") {
-            let Some(line_end) = comment.find(['\r', '\n']) else {
-                return None;
-            };
+            let line_end = comment.find(['\r', '\n'])?;
             input = &comment[line_end..];
             continue;
         }
