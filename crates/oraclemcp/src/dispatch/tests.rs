@@ -5766,6 +5766,17 @@ mod parenless_qualified_callable_gate {
             "SELECT app_admin.run_ddl FROM dual",
             "SELECT id, app_admin.run_ddl FROM orders",
             "SELECT s.nextval FROM dual",
+            "SELECT hr.dangerous_fn FROM hr.employees",
+            "SELECT app_admin.run_ddl FROM dual WHERE EXISTS (SELECT 1 FROM audit_log app_admin)",
+            "SELECT employees.dangerous_fn FROM hr.employees e",
+            "WITH c AS (SELECT dbms_random.value v FROM dual) SELECT c.v FROM dual dbms_random, c",
+            "SELECT dbms_random.v FROM (SELECT dbms_random.value v FROM dual) dbms_random",
+            "SELECT 1 FROM dual d JOIN dual x ON dbms_random.value > 0 JOIN dual dbms_random ON 1=1",
+            "SELECT emp.dummy FROM dual \"emp\"",
+            "SELECT run_ddl@oraclemcp_missing_link FROM dual",
+            "SELECT dbms_random.value@oraclemcp_missing_link FROM dual dbms_random",
+            "SELECT sys.dbms_random.value@oraclemcp_missing_link FROM dual sys",
+            "SELECT dbms_random.value@prod.example.com FROM dual dbms_random",
         ] {
             let err = ensure_read_only(sql)
                 .expect_err("a paren-less qualified callable must be refused by the served gate");
@@ -5786,6 +5797,22 @@ mod parenless_qualified_callable_gate {
             "SELECT e.id, e.name FROM employees e WHERE e.id = 42",
             "SELECT hr.employees.salary FROM hr.employees",
             "SELECT id, name FROM employees WHERE dept = 10",
+            "SELECT c.id FROM customers c WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)",
+            "SELECT \"Emp\".\"Name\" FROM employees \"Emp\"",
+            "SELECT EMP.dummy FROM dual \"EMP\"",
+            "SELECT \"EMP\".dummy FROM dual EMP",
+            "SELECT d.dummy, q.v FROM dual d, LATERAL (SELECT d.dummy v FROM dual) q",
+            "SELECT d.dummy, q.v FROM dual d CROSS APPLY (SELECT d.dummy v FROM dual) q",
+            "SELECT j.doc.a FROM (SELECT json_col doc FROM json_docs) j",
+            "SELECT e.address.city.name FROM employees e",
+            "SELECT t.x FROM nested_docs d, TABLE(d.vals) t",
+            "SELECT jt.a FROM json_docs d, JSON_TABLE(d.doc, '$' COLUMNS(a NUMBER PATH '$.a')) jt",
+            "SELECT xt.a FROM xml_docs d, XMLTABLE('/r' PASSING d.doc COLUMNS a NUMBER PATH '.') xt",
+            "SELECT employees.name FROM hr.employees@prod",
+            "SELECT employees.name FROM employees@prod",
+            "SELECT employees.name FROM hr.employees@prod.example.com",
+            "SELECT employees.name FROM employees@prod.example.com",
+            "SELECT \"run@ddl\" FROM (SELECT 1 \"run@ddl\" FROM dual)",
         ] {
             ensure_read_only(sql).unwrap_or_else(|e| {
                 panic!("a genuine in-scope read must pass the gate: {sql:?} -> {e:?}")

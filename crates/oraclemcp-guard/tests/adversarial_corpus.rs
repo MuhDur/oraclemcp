@@ -35,6 +35,47 @@ const STRICT_CORPUS: &[(&str, DangerLevel)] = &[
         "SELECT id FROM orders WHERE audit_pkg.record = 1",
         DangerLevel::Guarded,
     ),
+    (
+        "SELECT hr.dangerous_fn FROM hr.employees",
+        DangerLevel::Guarded,
+    ),
+    (
+        "SELECT app_admin.run_ddl FROM dual WHERE EXISTS (SELECT 1 FROM audit_log app_admin)",
+        DangerLevel::Guarded,
+    ),
+    (
+        "SELECT employees.dangerous_fn FROM hr.employees e",
+        DangerLevel::Guarded,
+    ),
+    (
+        "WITH c AS (SELECT dbms_random.value v FROM dual) SELECT c.v FROM dual dbms_random, c",
+        DangerLevel::Guarded,
+    ),
+    (
+        "SELECT dbms_random.v FROM (SELECT dbms_random.value v FROM dual) dbms_random",
+        DangerLevel::Guarded,
+    ),
+    (
+        "SELECT 1 FROM dual d JOIN dual x ON dbms_random.value > 0 JOIN dual dbms_random ON 1=1",
+        DangerLevel::Guarded,
+    ),
+    ("SELECT emp.dummy FROM dual \"emp\"", DangerLevel::Guarded),
+    (
+        "SELECT run_ddl@oraclemcp_missing_link FROM dual",
+        DangerLevel::Guarded,
+    ),
+    (
+        "SELECT dbms_random.value@oraclemcp_missing_link FROM dual dbms_random",
+        DangerLevel::Guarded,
+    ),
+    (
+        "SELECT sys.dbms_random.value@oraclemcp_missing_link FROM dual sys",
+        DangerLevel::Guarded,
+    ),
+    (
+        "SELECT dbms_random.value@prod.example.com FROM dual dbms_random",
+        DangerLevel::Guarded,
+    ),
     // .82 — an unproven base-object read (the default UnknownOracle proves
     // nothing, so the strict posture cannot clear it to Safe).
     ("SELECT * FROM reporting_view", DangerLevel::Guarded),
@@ -56,6 +97,22 @@ const STRICT_FALSE_POSITIVE_GUARD: &[&str] = &[
     "WITH x AS (SELECT id FROM orders) SELECT x.id FROM x",
     "SELECT (SELECT o.amt FROM orders o WHERE o.id = c.id) FROM customers c",
     "SELECT id FROM employees WHERE id IN (SELECT m.id FROM managers m)",
+    "SELECT c.id FROM customers c WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)",
+    "SELECT \"Emp\".\"Name\" FROM employees \"Emp\"",
+    "SELECT EMP.dummy FROM dual \"EMP\"",
+    "SELECT \"EMP\".dummy FROM dual EMP",
+    "SELECT d.dummy, q.v FROM dual d, LATERAL (SELECT d.dummy v FROM dual) q",
+    "SELECT d.dummy, q.v FROM dual d CROSS APPLY (SELECT d.dummy v FROM dual) q",
+    "SELECT j.doc.a FROM (SELECT json_col doc FROM json_docs) j",
+    "SELECT e.address.city.name FROM employees e",
+    "SELECT t.x FROM nested_docs d, TABLE(d.vals) t",
+    "SELECT jt.a FROM json_docs d, JSON_TABLE(d.doc, '$' COLUMNS(a NUMBER PATH '$.a')) jt",
+    "SELECT xt.a FROM xml_docs d, XMLTABLE('/r' PASSING d.doc COLUMNS a NUMBER PATH '.') xt",
+    "SELECT employees.name FROM hr.employees@prod",
+    "SELECT employees.name FROM employees@prod",
+    "SELECT employees.name FROM hr.employees@prod.example.com",
+    "SELECT employees.name FROM employees@prod.example.com",
+    "SELECT \"run@ddl\" FROM (SELECT 1 \"run@ddl\" FROM dual)",
     "SELECT t.* FROM t",
     "SELECT id, name FROM employees WHERE dept = 10",
 ];

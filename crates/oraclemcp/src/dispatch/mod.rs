@@ -661,7 +661,7 @@ impl OracleDispatcher {
 /// `SELECT app_admin.run_ddl FROM dual` *runs* `run_ddl`, but the `ident(`-only
 /// UDF scan reads it as a column reference and clears it to Safe. The guard
 /// forces a `SELECT` carrying a qualified identifier in value position whose
-/// leading qualifier is not a table / view / alias / schema in scope to
+/// qualifier is not an exact relation/alias in the current or correlated scope to
 /// `≥ Guarded` (so this READ_ONLY-ceilinged gate refuses it). It is surgical —
 /// an in-scope `alias.column` reference is never flagged. This does **not**
 /// close bead .82 (a read whose base object hides autonomous writes behind a

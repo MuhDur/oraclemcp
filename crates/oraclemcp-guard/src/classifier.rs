@@ -32,10 +32,14 @@
 //! statements; any `Forbidden` sub-statement rejects the whole batch.
 
 use std::collections::HashSet;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use regex::Regex;
 use sha2::{Digest, Sha256};
+use sqlparser::ast::{
+    Expr, Ident, Query, Select, SetExpr, TableAlias, TableFactor, TableWithJoins, Visit, Visitor,
+};
 use sqlparser::dialect::OracleDialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
@@ -108,11 +112,12 @@ pub struct ClassifierConfig {
     /// Regexes that, if matched, force `Forbidden`.
     block_patterns: Vec<Regex>,
     /// When set, a `SELECT`/`WITH` carrying a **qualified, paren-less** identifier
-    /// in value/expression position whose leading qualifier is not a table /
-    /// view / alias / schema in scope is treated as an unproven callable and
-    /// forced `≥ Guarded` (bead .102). Oracle invokes a zero-arg function with no
-    /// parentheses (`SELECT app_admin.run_ddl FROM dual` *calls* `run_ddl`), which
-    /// the `ident(`-only `user_defined_calls` scan never sees. Default `false`
+    /// in value/expression position whose qualifier has no exact relation/alias
+    /// prefix exposed by the current or correlated scope is treated as an
+    /// unproven callable and forced `≥ Guarded` (bead .102). Oracle invokes a
+    /// zero-arg function with no parentheses (`SELECT app_admin.run_ddl FROM
+    /// dual` *calls* `run_ddl`), which the `ident(`-only `user_defined_calls`
+    /// scan never sees. Default `false`
     /// (backward-compatible); the served/strict gate opts in. Over-restriction is
     /// the only cost — an in-scope `alias.column` is never flagged, and an
     /// attacker cannot alias their way out (`FROM dual app_admin` rebinds
@@ -1260,180 +1265,435 @@ struct StrictModes {
     guard_unresolved_qualified_calls: bool,
 }
 
-/// Collect the in-scope **qualifier** names of a `SELECT`/`WITH` — every table /
-/// view name part (and schema part), table/derived alias, and (transitively)
-/// CTE name reachable from the statement. Lower-cased, quote-stripped. This is
-/// the allow-set for [`unresolved_qualified_calls`]: a value-position
-/// `root.member` whose `root` is in this set is an ordinary column reference; a
-/// `root` that is *not* is a paren-less function / package invocation (or a
-/// sequence pseudo-column) the classifier cannot prove read-only.
-///
-/// The scan is a single **linear token pass** over `FROM`/`JOIN` clauses, which
-/// is inherently global: every `FROM`/`JOIN` at every nesting depth (correlated
-/// scalar subqueries in the projection, `IN (SELECT …)` predicates, CTE bodies,
-/// derived tables) appears in the flat token stream, so aliases defined in an
-/// inner scope are collected for the whole statement. Aliases are detected via
-/// the tokenizer's `keyword` tag (a table reference is followed by an optional
-/// `AS` then a **non-keyword** word), so no hand-maintained keyword list is
-/// needed. A CTE name is always referenced in some `FROM`, so it is collected
-/// there without special handling.
-///
-/// **Safety direction:** incompleteness here can only *over*-collect a missed
-/// alias into over-restriction (a legit read is flagged — a usability cost,
-/// gated behind the opt-in flag), never a fail-open. An attacker cannot alias
-/// `root` into scope to hide a call: binding `root` as a table alias rebinds
-/// `root.member` to a *column* of that table (Oracle parses it as a column
-/// reference, not a function invocation), changing the semantics away from the
-/// call entirely.
-fn query_scope_qualifiers(sql: &str) -> HashSet<String> {
-    let dialect = OracleDialect {};
-    let Ok(tokens) = Tokenizer::new(&dialect, sql).tokenize() else {
-        return HashSet::new();
-    };
-    let toks: Vec<&Token> = tokens
-        .iter()
-        .filter(|t| !matches!(t, Token::Whitespace(_)))
-        .collect();
-    let mut scope: HashSet<String> = HashSet::new();
-    let mut i = 0;
-    while i < toks.len() {
-        if !is_from_or_join_keyword(toks[i]) {
-            i += 1;
-            continue;
-        }
-        // Parse the comma-separated table reference list following FROM / JOIN.
-        let mut j = i + 1;
-        loop {
-            match toks.get(j) {
-                Some(Token::LParen) => {
-                    // Derived subquery / nested join: skip to the matching `)`.
-                    // Its inner FROM/JOIN are caught separately by this same
-                    // linear pass, so only the trailing alias needs collecting.
-                    let mut depth = 1;
-                    j += 1;
-                    while j < toks.len() && depth > 0 {
-                        match toks[j] {
-                            Token::LParen => depth += 1,
-                            Token::RParen => depth -= 1,
-                            _ => {}
-                        }
-                        j += 1;
-                    }
-                    j = collect_optional_alias(&toks, j, &mut scope);
-                }
-                Some(Token::Word(_)) => {
-                    // A dotted table name: collect every word part (schema/table).
-                    loop {
-                        if let Some(Token::Word(w)) = toks.get(j) {
-                            scope.insert(scope_norm(&w.value));
-                        }
-                        if j + 2 < toks.len()
-                            && matches!(toks[j + 1], Token::Period)
-                            && matches!(toks[j + 2], Token::Word(_))
-                        {
-                            j += 2;
-                        } else {
-                            j += 1;
-                            break;
-                        }
-                    }
-                    j = collect_optional_alias(&toks, j, &mut scope);
-                }
-                _ => break,
+/// Oracle identifier identity for relation qualifiers. Unquoted names fold to
+/// uppercase; quoted names retain their exact spelling. Consequently `EMP` and
+/// `"EMP"` resolve to the same identifier, while `EMP` and `"emp"` do not.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct QualifierPart(String);
+
+fn qualifier_part(ident: &Ident) -> QualifierPart {
+    QualifierPart(if ident.quote_style.is_some() {
+        ident.value.clone()
+    } else {
+        ident.value.to_ascii_uppercase()
+    })
+}
+
+type RelationQualifier = Vec<QualifierPart>;
+
+fn alias_qualifier(alias: &TableAlias) -> RelationQualifier {
+    vec![qualifier_part(&alias.name)]
+}
+
+fn object_name_qualifiers(name: &sqlparser::ast::ObjectName) -> Vec<RelationQualifier> {
+    let mut parts = RelationQualifier::new();
+    for ident in name.0.iter().filter_map(|part| part.as_ident()) {
+        // sqlparser encodes `employees@prod.example.com` as ObjectName parts
+        // `[employees@prod, example, com]`. Oracle column qualification uses
+        // only the local relation (`employees.name`), so truncate at the first
+        // unquoted @ and discard every database-link domain component after it.
+        if ident.quote_style.is_none()
+            && let Some((relation, _link)) = ident.value.split_once('@')
+        {
+            if relation.is_empty() {
+                return Vec::new();
             }
-            if matches!(toks.get(j), Some(Token::Comma)) {
-                j += 1;
-                continue;
-            }
+            parts.push(QualifierPart(relation.to_ascii_uppercase()));
             break;
         }
-        i = j.max(i + 1);
+        parts.push(qualifier_part(ident));
     }
-    scope
-}
-
-fn is_from_or_join_keyword(tok: &Token) -> bool {
-    matches!(tok, Token::Word(w) if w.quote_style.is_none()
-        && matches!(w.value.to_ascii_uppercase().as_str(), "FROM" | "JOIN"))
-}
-
-/// After a table reference, collect an optional alias: an optional `AS` then a
-/// **non-keyword** word (the tokenizer's `keyword` tag distinguishes an alias
-/// from a following clause keyword — `WHERE`/`ON`/`GROUP`/`JOIN`/… — with no
-/// hand-maintained list). Returns the advanced index.
-fn collect_optional_alias(toks: &[&Token], mut j: usize, scope: &mut HashSet<String>) -> usize {
-    if matches!(toks.get(j), Some(Token::Word(w)) if w.keyword == Keyword::AS) {
-        j += 1;
+    let mut qualifiers = Vec::new();
+    if let Some(last) = parts.last() {
+        qualifiers.push(vec![last.clone()]);
     }
-    if let Some(Token::Word(w)) = toks.get(j)
-        && w.keyword == Keyword::NoKeyword
-    {
-        scope.insert(scope_norm(&w.value));
-        j += 1;
+    if parts.len() > 1 {
+        qualifiers.push(parts);
     }
-    j
+    qualifiers
 }
 
-fn scope_norm(value: &str) -> String {
-    value.trim_matches('"').to_ascii_lowercase()
+/// Collect only the relation qualifiers exposed by one SELECT scope. A table
+/// alias hides its underlying table/schema qualifier; a schema component alone
+/// is never a column qualifier. This is deliberately per-scope — aliases from a
+/// nested subquery must not turn an outer `pkg.member` function invocation into
+/// a supposed column reference (the fail-open in the first .102 containment).
+fn collect_factor_qualifiers(factor: &TableFactor, out: &mut Vec<RelationQualifier>) {
+    match factor {
+        TableFactor::Table { name, alias, .. } => {
+            if let Some(alias) = alias {
+                out.push(alias_qualifier(alias));
+            } else {
+                out.extend(object_name_qualifiers(name));
+            }
+        }
+        TableFactor::NestedJoin {
+            table_with_joins,
+            alias,
+        } => {
+            if let Some(alias) = alias {
+                out.push(alias_qualifier(alias));
+            } else {
+                collect_table_with_joins_qualifiers(table_with_joins, out);
+            }
+        }
+        TableFactor::Pivot { table, alias, .. }
+        | TableFactor::Unpivot { table, alias, .. }
+        | TableFactor::MatchRecognize { table, alias, .. } => {
+            if let Some(alias) = alias {
+                out.push(alias_qualifier(alias));
+            } else {
+                collect_factor_qualifiers(table, out);
+            }
+        }
+        TableFactor::Derived {
+            alias: Some(alias), ..
+        }
+        | TableFactor::TableFunction {
+            alias: Some(alias), ..
+        }
+        | TableFactor::Function {
+            alias: Some(alias), ..
+        }
+        | TableFactor::UNNEST {
+            alias: Some(alias), ..
+        }
+        | TableFactor::JsonTable {
+            alias: Some(alias), ..
+        }
+        | TableFactor::OpenJsonTable {
+            alias: Some(alias), ..
+        }
+        | TableFactor::XmlTable {
+            alias: Some(alias), ..
+        }
+        | TableFactor::SemanticView {
+            alias: Some(alias), ..
+        } => out.push(alias_qualifier(alias)),
+        // An unaliased derived/table-function factor exposes no reliable dotted
+        // qualifier we can prove from syntax alone. Omitting it is fail-closed:
+        // a genuine reference is over-restricted rather than a callable admitted.
+        _ => {}
+    }
 }
 
-/// Token scan for **qualified, paren-less** identifiers whose leading qualifier
-/// is not in `scope` (bead .102). Oracle invokes a zero-arg function with no
-/// parentheses, so `SELECT app_admin.run_ddl FROM dual` *calls* `run_ddl` — but
-/// `user_defined_calls` only matches `ident(`, so the invocation reads as an
-/// ordinary column/record reference and clears to `Safe`. A maximal
-/// `word (. word)+` run **not** immediately followed by `(` whose root word is
-/// not a table / view / alias / schema in scope is exactly the high-signal case:
-/// it can only be a package/schema-qualified function call or a sequence
-/// pseudo-column (`seq.nextval`) — neither of which the classifier can prove
-/// read-only. Runs followed by `(` are already handled by [`user_defined_calls`]
-/// (they are calls with an argument list) and are skipped here to avoid
-/// double-surfacing. Returns the offending dotted names for audit.
-fn unresolved_qualified_calls(sql: &str, scope: &HashSet<String>) -> Vec<String> {
-    let dialect = OracleDialect {};
-    let Ok(tokens) = Tokenizer::new(&dialect, sql).tokenize() else {
-        return Vec::new();
-    };
-    let toks: Vec<&Token> = tokens
-        .iter()
-        .filter(|t| !matches!(t, Token::Whitespace(_)))
-        .collect();
-    let mut out: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < toks.len() {
-        // The start of a dotted run: a Word not preceded by `.` and followed by
-        // `. word`.
-        let prev_is_period = i > 0 && matches!(toks[i - 1], Token::Period);
-        let is_chain_start = matches!(toks[i], Token::Word(_))
-            && !prev_is_period
-            && i + 2 < toks.len()
-            && matches!(toks[i + 1], Token::Period)
-            && matches!(toks[i + 2], Token::Word(_));
-        if !is_chain_start {
-            i += 1;
-            continue;
-        }
-        // Extend the maximal `word (. word)+` run.
-        let mut j = i;
-        while j + 2 < toks.len()
-            && matches!(toks[j + 1], Token::Period)
-            && matches!(toks[j + 2], Token::Word(_))
-        {
-            j += 2;
-        }
-        let followed_by_lparen = j + 1 < toks.len() && matches!(toks[j + 1], Token::LParen);
-        let root = match toks[i] {
-            Token::Word(w) => scope_norm(&w.value),
-            _ => String::new(),
-        };
-        if !followed_by_lparen && !scope.contains(&root) {
-            let chain: String = toks[i..=j].iter().map(|t| t.to_string()).collect();
-            out.push(chain);
-        }
-        i = j + 1;
+fn collect_table_with_joins_qualifiers(table: &TableWithJoins, out: &mut Vec<RelationQualifier>) {
+    collect_factor_qualifiers(&table.relation, out);
+    for join in &table.joins {
+        collect_factor_qualifiers(&join.relation, out);
+    }
+}
+
+fn select_scope_qualifiers(select: &Select) -> Vec<RelationQualifier> {
+    let mut out = Vec::new();
+    for table in &select.from {
+        collect_table_with_joins_qualifiers(table, &mut out);
     }
     out
+}
+
+fn select_id(select: &Select) -> usize {
+    select as *const Select as usize
+}
+
+fn table_factor_id(factor: &TableFactor) -> usize {
+    factor as *const TableFactor as usize
+}
+
+fn collect_body_select_ids(body: &SetExpr, out: &mut HashSet<usize>) {
+    match body {
+        SetExpr::Select(select) => {
+            out.insert(select_id(select));
+        }
+        SetExpr::SetOperation { left, right, .. } => {
+            collect_body_select_ids(left, out);
+            collect_body_select_ids(right, out);
+        }
+        // A parenthesized Query owns its own query frame and lexical scope.
+        SetExpr::Query(_) => {}
+        _ => {}
+    }
+}
+
+struct QueryScopeFrame {
+    /// SELECT nodes belonging to this Query's body, excluding WITH bodies and
+    /// nested parenthesized Query nodes. Used to end the WITH visibility barrier
+    /// exactly when traversal reaches the main query body.
+    body_select_ids: HashSet<usize>,
+    /// Only a single direct SELECT exposes relation qualifiers to Query-level
+    /// ORDER BY/FETCH expressions. Set-operation arm aliases never leak across.
+    direct_select_id: Option<usize>,
+    order_scope: Vec<RelationQualifier>,
+    /// WITH bodies cannot see aliases introduced later by the main query body.
+    /// Stop lookup at this frame until traversal reaches a body SELECT.
+    barrier_outer: bool,
+}
+
+impl QueryScopeFrame {
+    fn new(query: &Query) -> Self {
+        let mut body_select_ids = HashSet::new();
+        collect_body_select_ids(query.body.as_ref(), &mut body_select_ids);
+        Self {
+            direct_select_id: match query.body.as_ref() {
+                SetExpr::Select(select) => Some(select_id(select)),
+                _ => None,
+            },
+            barrier_outer: query.with.is_some(),
+            body_select_ids,
+            order_scope: Vec::new(),
+        }
+    }
+}
+
+struct SelectScopeFrame {
+    /// All relations are visible to the projection, regardless of their textual
+    /// order in FROM.
+    full_scope: Vec<RelationQualifier>,
+    /// FROM/JOIN traversal activates relations left-to-right. This prevents a
+    /// later alias from laundering a package call in an earlier JOIN condition.
+    active_scope: Vec<RelationQualifier>,
+    in_from: bool,
+    factor_depth: usize,
+    /// Oracle CROSS/OUTER APPLY is lateral even though sqlparser records the
+    /// correlation on JoinOperator rather than TableFactor::Derived.
+    implicit_lateral_factor_ids: HashSet<usize>,
+    /// A non-lateral factor's children cannot correlate to this query block (or
+    /// any older block). Treat the frame as a lexical barrier while visiting it.
+    suppressed: bool,
+}
+
+impl SelectScopeFrame {
+    fn new(select: &Select) -> Self {
+        let implicit_lateral_factor_ids = select
+            .from
+            .iter()
+            .flat_map(|table| &table.joins)
+            .filter(|join| {
+                matches!(
+                    join.join_operator,
+                    sqlparser::ast::JoinOperator::CrossApply
+                        | sqlparser::ast::JoinOperator::OuterApply
+                )
+            })
+            .map(|join| table_factor_id(&join.relation))
+            .collect();
+        Self {
+            full_scope: select_scope_qualifiers(select),
+            active_scope: Vec::new(),
+            in_from: false,
+            factor_depth: 0,
+            implicit_lateral_factor_ids,
+            suppressed: false,
+        }
+    }
+
+    fn visible_scope(&self) -> &[RelationQualifier] {
+        if self.in_from {
+            &self.active_scope
+        } else {
+            &self.full_scope
+        }
+    }
+}
+
+enum QualifierScopeFrame {
+    Query(QueryScopeFrame),
+    Select(SelectScopeFrame),
+}
+
+struct UnresolvedQualifiedCallVisitor {
+    scopes: Vec<QualifierScopeFrame>,
+    unresolved: Vec<String>,
+}
+
+impl UnresolvedQualifiedCallVisitor {
+    fn qualifier_is_visible(&self, qualifier: &[QualifierPart]) -> bool {
+        for frame in self.scopes.iter().rev() {
+            match frame {
+                QualifierScopeFrame::Select(select) => {
+                    if select.suppressed {
+                        return false;
+                    }
+                    if select
+                        .visible_scope()
+                        .iter()
+                        .any(|visible| qualifier.starts_with(visible))
+                    {
+                        return true;
+                    }
+                }
+                QualifierScopeFrame::Query(query) => {
+                    if query
+                        .order_scope
+                        .iter()
+                        .any(|visible| qualifier.starts_with(visible))
+                    {
+                        return true;
+                    }
+                    if query.barrier_outer {
+                        return false;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn current_select_mut(&mut self) -> Option<&mut SelectScopeFrame> {
+        self.scopes.iter_mut().rev().find_map(|frame| match frame {
+            QualifierScopeFrame::Select(select) => Some(select),
+            QualifierScopeFrame::Query(_) => None,
+        })
+    }
+
+    fn current_query_mut(&mut self) -> Option<&mut QueryScopeFrame> {
+        self.scopes.iter_mut().rev().find_map(|frame| match frame {
+            QualifierScopeFrame::Query(query) => Some(query),
+            QualifierScopeFrame::Select(_) => None,
+        })
+    }
+}
+
+impl Visitor for UnresolvedQualifiedCallVisitor {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        self.scopes
+            .push(QualifierScopeFrame::Query(QueryScopeFrame::new(query)));
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
+        debug_assert!(matches!(
+            self.scopes.pop(),
+            Some(QualifierScopeFrame::Query(_))
+        ));
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<Self::Break> {
+        let id = select_id(select);
+        if let Some(query) = self.current_query_mut()
+            && query.body_select_ids.contains(&id)
+        {
+            query.barrier_outer = false;
+        }
+        self.scopes
+            .push(QualifierScopeFrame::Select(SelectScopeFrame::new(select)));
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_select(&mut self, select: &Select) -> ControlFlow<Self::Break> {
+        let Some(QualifierScopeFrame::Select(scope)) = self.scopes.pop() else {
+            debug_assert!(false, "SELECT scope stack must remain balanced");
+            return ControlFlow::Continue(());
+        };
+        if let Some(query) = self.current_query_mut()
+            && query.direct_select_id == Some(select_id(select))
+        {
+            query.order_scope = scope.full_scope;
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
+        let Some(select) = self.current_select_mut() else {
+            return ControlFlow::Continue(());
+        };
+        if select.factor_depth == 0 {
+            if !select.in_from {
+                select.in_from = true;
+                select.active_scope.clear();
+            }
+            let lateral = matches!(
+                factor,
+                TableFactor::Derived { lateral: true, .. }
+                    | TableFactor::Function { lateral: true, .. }
+                    // Oracle makes these table-producing factors implicitly
+                    // lateral: their input expression can reference relations
+                    // already activated to the left.
+                    | TableFactor::TableFunction { .. }
+                    | TableFactor::JsonTable { .. }
+                    | TableFactor::XmlTable { .. }
+            ) || select
+                .implicit_lateral_factor_ids
+                .contains(&table_factor_id(factor));
+            select.suppressed = !lateral;
+        }
+        select.factor_depth += 1;
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
+        let Some(select) = self.current_select_mut() else {
+            return ControlFlow::Continue(());
+        };
+        debug_assert!(select.factor_depth > 0);
+        select.factor_depth = select.factor_depth.saturating_sub(1);
+        if select.factor_depth == 0 {
+            select.suppressed = false;
+            collect_factor_qualifiers(factor, &mut select.active_scope);
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        let parts = match expr {
+            Expr::Identifier(part) if part.quote_style.is_none() && part.value.contains('@') => {
+                self.unresolved.push(part.to_string());
+                return ControlFlow::Continue(());
+            }
+            Expr::CompoundIdentifier(parts) => parts,
+            _ => return ControlFlow::Continue(()),
+        };
+        if parts.len() < 2 {
+            return ControlFlow::Continue(());
+        }
+        let rendered = parts
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(".");
+        // Oracle's `pkg.fn@dblink` expression syntax resolves a remote callable
+        // even when `pkg` is also a local table alias; alias-prefix shadowing
+        // does not apply across the database link. Remote table columns put the
+        // @link only in the FROM ObjectName, never in the value qualifier.
+        if parts
+            .iter()
+            .any(|part| part.quote_style.is_none() && part.value.contains('@'))
+        {
+            self.unresolved.push(rendered);
+            return ControlFlow::Continue(());
+        }
+        let qualifier: RelationQualifier = parts[..parts.len() - 1]
+            .iter()
+            .map(qualifier_part)
+            .collect();
+        if !self.qualifier_is_visible(&qualifier) {
+            self.unresolved.push(rendered);
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// AST/scope-aware scan for qualified, paren-less expression identifiers that
+/// are not proven relation-qualified columns. Oracle permits a zero/default-arg
+/// function invocation without `()`. Only a relation-qualifier prefix exposed
+/// by the current or correlated outer SELECT scope is treated as data; schema
+/// names and aliases from sibling/nested scopes never bless a callable. Remote
+/// expression identifiers are always unresolved because `fn@dblink` overrides
+/// local alias shadowing. Catalog-backed
+/// identity is still required for unqualified bare identifiers (the .102
+/// residual), but this containment no longer carries the original scope leaks.
+fn unresolved_qualified_calls(query: &Query) -> Vec<String> {
+    let mut visitor = UnresolvedQualifiedCallVisitor {
+        scopes: Vec::new(),
+        unresolved: Vec::new(),
+    };
+    let _ = query.visit(&mut visitor);
+    visitor.unresolved.sort();
+    visitor.unresolved.dedup();
+    visitor.unresolved
 }
 
 /// Convert a parsed `ObjectName` (the `schema.table` of a `FROM`/`JOIN` factor)
@@ -1815,9 +2075,9 @@ fn classify_statement(
             // A qualified, paren-less callable in value position invokes a
             // function Oracle never required `()` for (bead .102). Opt-in
             // (served/strict): a `root.member` whose root is not a table / view /
-            // alias / schema in scope is an unproven call → block Safe.
+            // alias in the current/correlated scope is an unproven call → block Safe.
             let unresolved_calls = if modes.guard_unresolved_qualified_calls {
-                unresolved_qualified_calls(sql, &query_scope_qualifiers(sql))
+                unresolved_qualified_calls(query)
             } else {
                 Vec::new()
             };
@@ -3019,6 +3279,32 @@ mod tests {
             "SELECT app_admin.run_ddl FROM dual",
             "SELECT app_admin.run_ddl, ROUND(x) FROM dual",
             "SELECT id FROM orders WHERE app.flag = 1", // qualifier in WHERE
+            // A schema name used in FROM is not itself a column qualifier. The
+            // first containment globally collected every name part and therefore
+            // let this real schema-qualified zero-arg call through as Safe.
+            "SELECT hr.dangerous_fn FROM hr.employees",
+            // An alias from a nested scope is not visible in the outer SELECT.
+            "SELECT app_admin.run_ddl FROM dual WHERE EXISTS (SELECT 1 FROM audit_log app_admin)",
+            // Once a table is aliased, its underlying name is hidden as a column
+            // qualifier; it cannot bless a same-named package/function call.
+            "SELECT employees.dangerous_fn FROM hr.employees e",
+            // Main-query aliases are not visible while a preceding WITH body is
+            // evaluated. Oracle executes DBMS_RANDOM.VALUE in this CTE.
+            "WITH c AS (SELECT dbms_random.value v FROM dual) SELECT c.v FROM dual dbms_random, c",
+            // A derived-table alias is visible only outside its subquery; it
+            // cannot bless the same package name inside the derived query.
+            "SELECT dbms_random.v FROM (SELECT dbms_random.value v FROM dual) dbms_random",
+            // JOIN aliases become visible left-to-right. A later alias cannot
+            // launder a package call in an earlier ON condition.
+            "SELECT 1 FROM dual d JOIN dual x ON dbms_random.value > 0 JOIN dual dbms_random ON 1=1",
+            // Quoted lowercase and unquoted-uppercase identifiers are distinct.
+            "SELECT emp.dummy FROM dual \"emp\"",
+            // An expression-level database link forces remote callable
+            // resolution even when the root also names a local relation.
+            "SELECT run_ddl@oraclemcp_missing_link FROM dual",
+            "SELECT dbms_random.value@oraclemcp_missing_link FROM dual dbms_random",
+            "SELECT sys.dbms_random.value@oraclemcp_missing_link FROM dual sys",
+            "SELECT dbms_random.value@prod.example.com FROM dual dbms_random",
         ];
         // NOTE: `SELECT s.nextval FROM dual` is deliberately NOT in this list — the
         // sequence pseudo-column is already classified Guarded by the dedicated
@@ -3080,6 +3366,29 @@ mod tests {
             "SELECT id, name FROM employees WHERE dept = 10",
             "SELECT ROUND(x), COUNT(*) FROM dual",
             "SELECT d.* FROM (SELECT 1 id FROM dual) d WHERE d.id = 1",
+            // A correlated outer qualifier remains visible inside the nested
+            // query, while a sibling/nested alias never leaks outward.
+            "SELECT c.id FROM customers c WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)",
+            // Quote identity is preserved for a genuinely quoted alias.
+            "SELECT \"Emp\".\"Name\" FROM employees \"Emp\"",
+            // Oracle folds an unquoted name to uppercase, so a quoted-uppercase
+            // alias and its unquoted spelling are the same identifier.
+            "SELECT EMP.dummy FROM dual \"EMP\"",
+            "SELECT \"EMP\".dummy FROM dual EMP",
+            "SELECT d.dummy, q.v FROM dual d, LATERAL (SELECT d.dummy v FROM dual) q",
+            "SELECT d.dummy, q.v FROM dual d CROSS APPLY (SELECT d.dummy v FROM dual) q",
+            // Once the relation prefix resolves, remaining dotted parts are
+            // object/JSON attributes, not a package invocation.
+            "SELECT j.doc.a FROM (SELECT json_col doc FROM json_docs) j",
+            "SELECT e.address.city.name FROM employees e",
+            "SELECT t.x FROM nested_docs d, TABLE(d.vals) t",
+            "SELECT jt.a FROM json_docs d, JSON_TABLE(d.doc, '$' COLUMNS(a NUMBER PATH '$.a')) jt",
+            "SELECT xt.a FROM xml_docs d, XMLTABLE('/r' PASSING d.doc COLUMNS a NUMBER PATH '.') xt",
+            "SELECT employees.name FROM hr.employees@prod",
+            "SELECT employees.name FROM employees@prod",
+            "SELECT employees.name FROM hr.employees@prod.example.com",
+            "SELECT employees.name FROM employees@prod.example.com",
+            "SELECT \"run@ddl\" FROM (SELECT 1 \"run@ddl\" FROM dual)",
         ] {
             assert_eq!(
                 strict.classify(sql).danger,

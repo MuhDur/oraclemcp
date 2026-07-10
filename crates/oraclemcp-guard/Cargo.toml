@@ -15,7 +15,7 @@ oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.8.0" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-sqlparser = "0.62"
+sqlparser = { version = "0.62", features = ["visitor"] }
 regex = "1"
 thiserror.workspace = true
 
