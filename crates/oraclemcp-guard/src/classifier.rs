@@ -3,6 +3,9 @@
 //! predicate with a staged, fail-CLOSED classifier.
 //!
 //! Pipeline (per call):
+//! 0. **Transaction ownership** — caller-controlled COMMIT / ROLLBACK /
+//!    SAVEPOINT / SET TRANSACTION is always `Forbidden`, including inside
+//!    PL/SQL; only the server may end or reshape its transaction.
 //! 1. **Stage A** ([`stage_a`]) — operator allow-list (SHA-256 of exact
 //!    statement bytes) → block-list (regex) → PL/SQL-block detector. (P1-1a)
 //! 2. **Splitter** ([`analyze_batch`]) — a *lexer-based*, literal/quote-aware
@@ -155,6 +158,58 @@ const PLSQL_SIDE_EFFECT_MARKERS: &[&str] = &[
     "DBMS_JOB",
     "PRAGMA AUTONOMOUS_TRANSACTION",
 ];
+
+/// Return the exact caller-controlled transaction boundary present in `sql`.
+/// The Oracle tokenizer keeps literals, q-quotes, comments, and quoted
+/// identifiers out of the bare-word stream, so data containing the text
+/// `COMMIT` is not confused with executable transaction control. Comments and
+/// whitespace between `SET` and `TRANSACTION` are intentionally ignored.
+fn transaction_control_construct(sql: &str) -> Option<&'static str> {
+    // Keep the classifier hot path cheap: most SQL contains none of these
+    // words, so avoid a second Oracle-tokenizer pass unless a case-insensitive
+    // byte prefilter finds a candidate. The tokenizer below remains the source
+    // of truth and removes literal/comment/quoted-identifier false positives.
+    let candidate = [
+        b"COMMIT".as_slice(),
+        b"ROLLBACK",
+        b"SAVEPOINT",
+        b"TRANSACTION",
+    ]
+    .iter()
+    .any(|needle| {
+        sql.as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+    });
+    if !candidate {
+        return None;
+    }
+
+    let tokens = Tokenizer::new(&OracleDialect {}, sql).tokenize().ok()?;
+    let mut previous_was_set = false;
+    for token in &tokens {
+        match token {
+            Token::Whitespace(_) => continue,
+            Token::Word(word) if word.quote_style.is_none() => {
+                if previous_was_set && word.value.eq_ignore_ascii_case("TRANSACTION") {
+                    return Some("SET TRANSACTION");
+                }
+                previous_was_set = word.value.eq_ignore_ascii_case("SET");
+                if word.value.eq_ignore_ascii_case("COMMIT") {
+                    return Some("COMMIT");
+                }
+                if word.value.eq_ignore_ascii_case("ROLLBACK") {
+                    return Some("ROLLBACK");
+                }
+                if word.value.eq_ignore_ascii_case("SAVEPOINT") {
+                    return Some("SAVEPOINT");
+                }
+            }
+            _ => previous_was_set = false,
+        }
+    }
+    None
+}
 
 /// Stage A outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1525,6 +1580,26 @@ impl Classifier {
             };
         }
 
+        // The dispatcher owns the transaction boundary. If caller SQL can
+        // commit, roll back, create a savepoint, or change transaction mode,
+        // the rollback-default response and audit outcome cease to be true.
+        // This invariant precedes the operator allow-list: an exact allow-list
+        // entry may approve statement effects, but cannot transfer transaction
+        // ownership away from the server.
+        if let Some(construct) = transaction_control_construct(sql) {
+            let mut decision = forbidden_decision(format!(
+                "caller-controlled {construct} is forbidden because the server owns commit, rollback, and transaction audit outcomes"
+            ));
+            decision.safe_alternative = Some(
+                "submit only the DML body and let oracle_execute perform the requested commit or rollback"
+                    .to_owned(),
+            );
+            return decision.categorized(
+                ReasonCategory::TransactionControl,
+                Some(construct.to_owned()),
+            );
+        }
+
         let has_sequence_nextval = !sequence_nextval_refs(sql).is_empty();
 
         match stage_a(sql, &self.config) {
@@ -2373,7 +2448,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_explain_and_transaction_control_have_explicit_floors() {
+    fn merge_explain_have_floors_and_transaction_control_is_forbidden() {
         let merge = classify(
             "MERGE INTO t USING s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.v = s.v",
         );
@@ -2386,8 +2461,13 @@ mod tests {
 
         for sql in ["COMMIT", "ROLLBACK", "SAVEPOINT before_patch"] {
             let d = classify(sql);
-            assert_eq!(d.danger, DangerLevel::Guarded, "{sql:?}");
-            assert_eq!(d.required_level, Some(OperatingLevel::ReadWrite), "{sql:?}");
+            assert_eq!(d.danger, DangerLevel::Forbidden, "{sql:?}");
+            assert_eq!(d.required_level, None, "{sql:?}");
+            assert_eq!(
+                d.reason_category,
+                Some(ReasonCategory::TransactionControl),
+                "{sql:?}"
+            );
         }
     }
 
@@ -2902,6 +2982,80 @@ mod tests {
         let d = classify("BEGIN EXECUTE IMMEDIATE 'DELETE FROM orders'; END;");
         assert_eq!(d.danger, DangerLevel::Forbidden);
         assert_eq!(d.required_level, None);
+    }
+
+    #[test]
+    fn caller_transaction_control_is_always_forbidden() {
+        for (sql, construct) in [
+            ("COMMIT", "COMMIT"),
+            ("COMMIT WORK WRITE NOWAIT", "COMMIT"),
+            ("ROLLBACK", "ROLLBACK"),
+            ("ROLLBACK TO SAVEPOINT before_change", "ROLLBACK"),
+            ("SAVEPOINT before_change", "SAVEPOINT"),
+            ("SET TRANSACTION READ WRITE", "SET TRANSACTION"),
+            (
+                "BEGIN UPDATE t SET x = 1 WHERE id = 7; COMMIT; END;",
+                "COMMIT",
+            ),
+            (
+                "BEGIN IF flag = 1 THEN COMMIT WRITE BATCH NOWAIT; END IF; END;",
+                "COMMIT",
+            ),
+            (
+                "BEGIN LOOP ROLLBACK TO SAVEPOINT before_change; EXIT; END LOOP; END;",
+                "ROLLBACK",
+            ),
+            (
+                "BEGIN SAVEPOINT before_change; EXCEPTION WHEN OTHERS THEN ROLLBACK; END;",
+                "SAVEPOINT",
+            ),
+            (
+                "BEGIN SET /* operator comment */ TRANSACTION READ ONLY; END;",
+                "SET TRANSACTION",
+            ),
+        ] {
+            let decision = classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Forbidden, "{sql:?}");
+            assert_eq!(decision.required_level, None, "{sql:?}");
+            assert_eq!(
+                decision.reason_category,
+                Some(ReasonCategory::TransactionControl),
+                "{sql:?}"
+            );
+            assert_eq!(
+                decision.offending_construct.as_deref(),
+                Some(construct),
+                "{sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn transaction_control_cannot_be_operator_allow_listed() {
+        let sql = "BEGIN UPDATE t SET x = 1 WHERE id = 7; COMMIT; END;";
+        let decision = Classifier::new(ClassifierConfig::new().with_allow(sql)).classify(sql);
+        assert_eq!(decision.danger, DangerLevel::Forbidden);
+        assert_eq!(
+            decision.reason_category,
+            Some(ReasonCategory::TransactionControl)
+        );
+    }
+
+    #[test]
+    fn transaction_words_in_data_and_identifiers_do_not_false_trigger() {
+        for sql in [
+            "SELECT 'COMMIT ROLLBACK SAVEPOINT SET TRANSACTION' AS message FROM dual",
+            r#"SELECT "COMMIT", commitment, rollback_count, savepoint_name FROM ledger"#,
+            "BEGIN note := 'COMMIT'; -- ROLLBACK TO x\n NULL; END;",
+            "BEGIN commitment := rollback_count + savepoint_count; END;",
+        ] {
+            let decision = classify(sql);
+            assert_ne!(
+                decision.reason_category,
+                Some(ReasonCategory::TransactionControl),
+                "data-only keyword mention was treated as executable control: {sql:?}"
+            );
+        }
     }
 
     #[test]

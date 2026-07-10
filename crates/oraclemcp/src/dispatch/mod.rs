@@ -2592,6 +2592,7 @@ fn minimal_rewrite_for(decision: &GuardDecision) -> Option<String> {
         ),
         // A benign PL/SQL block carries its own packaging suggestion.
         Some(ReasonCategory::PlSqlBlock) => decision.safe_alternative.clone(),
+        Some(ReasonCategory::TransactionControl) => decision.safe_alternative.clone(),
         // A well-formed write/DDL that only needs a higher level: the minimal
         // change is to run it at that level (surfaced via `required_level`).
         Some(ReasonCategory::RequiresHigherLevel) => decision.required_level.map(|level| {

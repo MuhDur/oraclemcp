@@ -120,6 +120,9 @@ pub enum ReasonCategory {
     /// Dynamic SQL or a side-effecting marker (EXECUTE IMMEDIATE, DBMS_SQL,
     /// UTL_FILE/HTTP/TCP/SMTP, a scheduler/job) the guard cannot prove safe.
     DynamicSql,
+    /// Caller-controlled COMMIT, ROLLBACK, SAVEPOINT, or SET TRANSACTION would
+    /// escape the server-owned transaction and audit boundary.
+    TransactionControl,
     /// A PL/SQL `BEGIN`/`END` desync or an unterminated literal — the batch does
     /// not lex cleanly, so it is refused fail-closed.
     UnbalancedBlock,

@@ -4512,6 +4512,47 @@ fn execute_rolls_back_dml_by_default() {
 }
 
 #[test]
+fn caller_transaction_control_is_refused_before_database_io() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+
+    for (sql, commit) in [
+        ("COMMIT", false),
+        ("ROLLBACK TO SAVEPOINT before_change", false),
+        ("SAVEPOINT before_change", false),
+        ("SET TRANSACTION READ WRITE", false),
+        (
+            "BEGIN UPDATE employees SET name = name WHERE employee_id = 100; COMMIT; END;",
+            false,
+        ),
+        (
+            "BEGIN UPDATE employees SET name = name WHERE employee_id = 100; COMMIT; END;",
+            true,
+        ),
+    ] {
+        let err = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": sql, "commit": commit, "confirm": "irrelevant" }),
+            )
+            .expect_err("caller transaction boundaries are never executable");
+        assert_eq!(err.error_class, ErrorClass::ForbiddenStatement, "{sql:?}");
+        assert!(
+            err.message.contains("server owns"),
+            "refusal must explain transaction ownership: {err:?}"
+        );
+    }
+
+    assert!(state.executed.lock().expect("exec mutex").is_empty());
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn query_timeout_override_is_restored_after_call() {
     let state = Arc::new(ExecState::default());
     let dispatcher = OracleDispatcher::new_with_profile_level(
