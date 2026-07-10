@@ -46,8 +46,7 @@ fn make_om_alias(dir: &std::path::Path) -> PathBuf {
     }
 }
 
-fn wait_with_timeout(mut cmd: Command, timeout: Duration) -> Output {
-    let mut child = cmd.spawn().expect("spawn oraclemcp");
+fn wait_child_with_timeout(mut child: std::process::Child, timeout: Duration) -> Output {
     let deadline = Instant::now() + timeout;
     loop {
         if child.try_wait().expect("poll child").is_some() {
@@ -64,6 +63,11 @@ fn wait_with_timeout(mut cmd: Command, timeout: Duration) -> Output {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn wait_with_timeout(mut cmd: Command, timeout: Duration) -> Output {
+    let child = cmd.spawn().expect("spawn oraclemcp");
+    wait_child_with_timeout(child, timeout)
 }
 
 fn run_binary(args: &[&str]) -> Output {
@@ -141,6 +145,75 @@ fn serve_with_missing_explicit_profile_fails_fast() {
             .as_str()
             .expect("message")
             .contains("connection profile `missing` not found")
+    );
+}
+
+#[test]
+fn required_stdio_binary_rejects_tool_call_before_initialize() {
+    let config = temp_config(
+        r#"
+        [[profiles]]
+        name = "dev"
+        connect_string = "127.0.0.1:1/FREEPDB1"
+        credential_ref = "env:ORACLEMCP_MISSING_TEST_PASSWORD"
+        max_level = "READ_ONLY"
+        default_level = "READ_ONLY"
+        "#,
+    );
+    let dir = temp_dir("stdio-auth-first-frame");
+    let state = dir.join("state");
+    let tools_dir = dir.join("tools.d");
+    fs::create_dir_all(&tools_dir).expect("create empty tools dir");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    cmd.args([
+        "--json",
+        "serve",
+        "--stdio-token",
+        "s3cr3t",
+        "--profile",
+        "dev",
+    ])
+    .env(CONFIG_PATH_ENV, &config)
+    .env("XDG_STATE_HOME", &state)
+    .env("HOME", &dir)
+    .env("ORACLEMCP_TOOLS_DIR", &tools_dir)
+    .env_remove("ORACLEMCP_MISSING_TEST_PASSWORD")
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn authenticated stdio server");
+    let first_frame = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {
+            "name": "oracle_query",
+            "arguments": { "sql": "SELECT 1 FROM dual" },
+        },
+    });
+    {
+        let mut stdin = child.stdin.take().expect("child stdin is piped");
+        serde_json::to_writer(&mut stdin, &first_frame).expect("write first frame");
+        stdin.write_all(b"\n").expect("terminate first frame");
+    }
+
+    let output = wait_child_with_timeout(child, Duration::from_secs(10));
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    let reply: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON-RPC reply");
+    assert_eq!(reply["id"], serde_json::json!(7));
+    assert_eq!(reply["error"]["code"], serde_json::json!(-32600));
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("initialize")),
+        "first-frame tool call must be rejected at the lifecycle/auth gate: {reply}"
+    );
+    assert!(
+        reply.get("result").is_none(),
+        "the protected call must not reach tool dispatch: {reply}"
     );
 }
 

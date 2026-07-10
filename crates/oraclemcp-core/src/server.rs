@@ -940,6 +940,24 @@ impl OracleMcpServer {
                 id.map(|id| jsonrpc_error(id, JSONRPC_INVALID_REQUEST, "Invalid Request")),
             );
         }
+        // The stdio init token authenticates the whole MCP session, not only
+        // the initialize method itself. Until Required auth has successfully
+        // completed initialize, no request except the lifecycle-permitted
+        // `ping` may reach discovery, resources, or tool dispatch. HTTP passes
+        // `auth: None` and authenticates at its transport boundary; explicit
+        // stdio Disabled mode preserves its existing no-auth behavior.
+        if !matches!(method, "initialize" | "ping")
+            && matches!(auth, Some(StdioAuthPolicy::Required { .. }))
+            && self.stdio_negotiated.lock().is_none()
+        {
+            return Outcome::Ok(id.map(|id| {
+                jsonrpc_error(
+                    id,
+                    JSONRPC_INVALID_REQUEST,
+                    "stdio initialize with a valid init token must complete before other requests",
+                )
+            }));
+        }
         let Some(id) = id else {
             return Outcome::Ok(None);
         };
@@ -947,6 +965,7 @@ impl OracleMcpServer {
             "initialize" => {
                 Outcome::Ok(Some(self.handle_initialize(id, object.get("params"), auth)))
             }
+            "ping" => Outcome::Ok(Some(jsonrpc_result(id, json!({})))),
             "notifications/initialized" => Outcome::Ok(None),
             "resources/list" => {
                 Outcome::Ok(Some(self.handle_resources_list(id, object.get("params"))))
@@ -2662,6 +2681,252 @@ mod tests {
 
         let right = run_stdio_raw_with_auth(&s, initialize_frame(Some("s3cr3t")), &auth);
         assert!(right[0].get("result").is_some());
+    }
+
+    #[test]
+    fn required_stdio_rejects_requests_until_successful_initialize() {
+        let mut registry = ToolRegistry::new();
+        registry.register(ToolDescriptor::new(
+            "oracle_query",
+            ToolTier::FoundationLiveDb,
+            "run a query",
+        ));
+        let caps = CapabilitiesReport::new(
+            "0.1.0",
+            registry.tools.clone(),
+            OperatingLevel::ReadOnly,
+            FeatureTiers {
+                live_db: true,
+                engine: true,
+                http_transport: false,
+            },
+        );
+        let active = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let s = OracleMcpServer::new(
+            "0.1.0",
+            registry,
+            caps,
+            Arc::new(TrackingCancelDispatcher {
+                active: active.clone(),
+                calls: calls.clone(),
+            }),
+        );
+        let auth = StdioAuthPolicy::Required {
+            expected: "s3cr3t".to_owned(),
+        };
+
+        let tool_call = |id| {
+            stdio_frame(&json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {
+                    "name": "oracle_query",
+                    "arguments": {},
+                },
+            }))
+        };
+        let mut input = stdio_frame(&json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "ping",
+        }));
+        input.extend(tool_call(10));
+        input.extend(stdio_frame(&json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "resources/list",
+            "params": {},
+        })));
+        input.extend(stdio_frame(&json!({
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "unit", "version": "1.0" },
+                "_meta": { (INIT_TOKEN_META_KEY): "wrong" },
+            },
+        })));
+        input.extend(tool_call(13));
+        input.extend(stdio_frame(&json!({
+            "jsonrpc": "2.0",
+            "id": 14,
+            "method": "ping",
+        })));
+        input.extend(initialize_frame(Some("s3cr3t")));
+        input.extend(stdio_frame(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        })));
+        input.extend(tool_call(15));
+        input.extend(stdio_frame(&json!({
+            "jsonrpc": "2.0",
+            "id": 16,
+            "method": "ping",
+        })));
+        input.extend(stdio_frame(&json!({
+            "jsonrpc": "2.0",
+            "id": 17,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "unit", "version": "1.0" },
+                "_meta": { (INIT_TOKEN_META_KEY): "s3cr3t" },
+            },
+        })));
+
+        let replies = run_stdio_raw_with_auth(&s, input, &auth);
+        assert_eq!(
+            replies.len(),
+            10,
+            "the initialized notification is one-way and must not emit a null-id reply"
+        );
+        assert!(
+            replies.iter().all(|reply| !reply["id"].is_null()),
+            "stdio notifications must not produce JSON-RPC responses: {replies:?}"
+        );
+        let reply = |id| {
+            replies
+                .iter()
+                .find(|reply| reply["id"] == json!(id))
+                .expect("expected protocol reply id")
+        };
+        for id in [10, 11, 13] {
+            assert_eq!(reply(id)["error"]["code"], json!(JSONRPC_INVALID_REQUEST));
+            assert!(
+                reply(id)["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("initialize")),
+                "pre-initialize request {id} must receive a lifecycle/auth error: {}",
+                reply(id)
+            );
+        }
+        assert_eq!(
+            reply(12)["error"]["message"],
+            json!("stdio init token mismatch")
+        );
+        for id in [9, 14, 16] {
+            assert_eq!(
+                reply(id)["result"],
+                json!({}),
+                "ping must remain available throughout the MCP lifecycle"
+            );
+        }
+        assert_eq!(reply(1)["result"]["protocolVersion"], json!("2025-11-25"));
+        assert_eq!(reply(15)["result"]["isError"], json!(false));
+        assert_eq!(reply(17)["error"]["code"], json!(JSONRPC_INVALID_REQUEST));
+        assert!(
+            reply(17)["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("already completed")),
+            "a second initialize remains a lifecycle violation: {}",
+            reply(17)
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "only the post-authentication tool call may reach the dispatcher"
+        );
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn required_stdio_preinitialize_policy_covers_every_routed_surface() {
+        let s = server_with_tools(&["oracle_query"]);
+        let auth = StdioAuthPolicy::Required {
+            expected: "s3cr3t".to_owned(),
+        };
+        let protected = [
+            ("resources/list", json!({})),
+            ("resources/templates/list", json!({})),
+            ("resources/read", json!({ "uri": "oracle://capabilities" })),
+            (
+                "resources/subscribe",
+                json!({ "uri": "oracle://capabilities" }),
+            ),
+            (
+                "resources/unsubscribe",
+                json!({ "uri": "oracle://capabilities" }),
+            ),
+            ("prompts/list", json!({})),
+            ("prompts/get", json!({ "name": "oracle_query" })),
+            ("tools/list", json!({})),
+            (
+                "tools/call",
+                json!({ "name": "oracle_query", "arguments": {} }),
+            ),
+            ("completion/complete", json!({})),
+            ("unknown/extension", json!({})),
+        ];
+
+        for (index, (method, params)) in protected.into_iter().enumerate() {
+            let id = 100 + index;
+            let response = s
+                .handle_jsonrpc_request_with_context(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "method": method,
+                        "params": params,
+                    }),
+                    Some(&auth),
+                    DispatchContext::default(),
+                )
+                .expect("protected pre-initialize request returns an error");
+            assert_eq!(
+                response["error"]["code"],
+                json!(JSONRPC_INVALID_REQUEST),
+                "pre-initialize method {method} must fail at the lifecycle/auth gate: {response}"
+            );
+            assert!(response.get("result").is_none());
+        }
+
+        let initialized_notification = s.handle_jsonrpc_request_with_context(
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+            }),
+            Some(&auth),
+            DispatchContext::default(),
+        );
+        assert!(
+            initialized_notification.is_none(),
+            "pre-initialize notifications are ignored without a JSON-RPC response"
+        );
+        let still_locked = s
+            .handle_jsonrpc_request_with_context(
+                json!({ "jsonrpc": "2.0", "id": 200, "method": "tools/list" }),
+                Some(&auth),
+                DispatchContext::default(),
+            )
+            .expect("tools/list receives lifecycle error");
+        assert_eq!(
+            still_locked["error"]["code"],
+            json!(JSONRPC_INVALID_REQUEST),
+            "initialized notification alone must not unlock Required stdio auth"
+        );
+
+        let ping = s
+            .handle_jsonrpc_request_with_context(
+                json!({ "jsonrpc": "2.0", "id": 201, "method": "ping" }),
+                Some(&auth),
+                DispatchContext::default(),
+            )
+            .expect("pre-initialize ping receives a response");
+        assert_eq!(ping["result"], json!({}));
+        assert!(
+            s.handle_jsonrpc_request_with_context(
+                json!({ "jsonrpc": "2.0", "method": "ping" }),
+                Some(&auth),
+                DispatchContext::default(),
+            )
+            .is_none(),
+            "ping notifications remain one-way"
+        );
     }
 
     #[test]
