@@ -28,9 +28,9 @@ deliberate step.
 
 - Cargo workspace, `resolver = "2"`, pinned nightly
   **`nightly-2026-05-11`**, `edition = "2024"`. The thin-native line has no
-  stable MSRV because **asupersync 0.3.4** requires nightly-only language
+  stable MSRV because **asupersync 0.3.5** requires nightly-only language
   features (`try_trait_v2` + `try_trait_v2_residual`); the pinned `oracledb`
-  0.7.1 driver is stable-clean.
+  0.8.2 driver is stable-clean.
 - Every crate is `#![forbid(unsafe_code)]`. Do not introduce `unsafe`.
 - Before committing: `cargo fmt --all -- --check`, `cargo clippy --workspace
   --all-targets -- -D warnings`, `cargo test --workspace`, `cargo deny check`
