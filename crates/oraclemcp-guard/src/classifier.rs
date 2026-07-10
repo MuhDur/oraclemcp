@@ -64,6 +64,14 @@ pub struct GuardDecision {
     /// it (a marker keyword, the matched block pattern, `BEGIN/END`, …). Never
     /// contains bind values or secrets.
     pub offending_construct: Option<String>,
+    /// Whether successful evaluation can persist an effect even when the
+    /// surrounding transaction is rolled back. Such statements need explicit
+    /// execution confirmation even on the rollback-default path.
+    pub non_transactional_effect: bool,
+    /// Whether the permanent effect sits in a top-level query and therefore
+    /// occurs only when query rows are fetched. The generic execute path must
+    /// not report this effect as completed without driving that fetch.
+    pub query_effect_requires_fetch: bool,
 }
 
 impl GuardDecision {
@@ -838,6 +846,87 @@ fn user_defined_calls(sql: &str) -> Vec<ObjectRef> {
     calls
 }
 
+/// Find Oracle sequence `NEXTVAL` pseudocolumn references.
+///
+/// `NEXTVAL` has no call parentheses, so the UDF detector cannot see it. Oracle
+/// accepts `sequence.NEXTVAL`, `schema.sequence.NEXTVAL`, and the latter with a
+/// trailing `@dblink`. Advancing a sequence is permanent even if the surrounding
+/// transaction rolls back, so a query containing this token shape is never a
+/// read-only statement.
+///
+/// Tokens inside comments and literals are kept out by `sqlparser`'s tokenizer.
+/// A quoted `"NEXTVAL"` remains an ordinary delimited identifier and is not the
+/// pseudocolumn. An unquoted qualified column named `NEXTVAL` is conservatively
+/// treated as the pseudocolumn: over-detection requires a governed READ_WRITE
+/// path, while under-detection would irreversibly mutate state at READ_ONLY.
+fn sequence_nextval_refs(sql: &str) -> Vec<ObjectRef> {
+    let dialect = OracleDialect {};
+    let Ok(tokens) = Tokenizer::new(&dialect, sql).tokenize() else {
+        return Vec::new();
+    };
+    let toks: Vec<&Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .collect();
+
+    let mut refs = Vec::new();
+    for i in 2..toks.len() {
+        let Token::Word(pseudocolumn) = toks[i] else {
+            continue;
+        };
+        // OracleDialect keeps an immediately-attached database link in the
+        // same word (`NEXTVAL@prod`). Compare the pseudocolumn portion before
+        // `@`; spaced `NEXTVAL @ prod` is already the exact-word case.
+        let pseudocolumn_name = pseudocolumn
+            .value
+            .split_once('@')
+            .map_or(pseudocolumn.value.as_str(), |(name, _)| name);
+        if pseudocolumn.quote_style.is_some()
+            || !pseudocolumn_name.eq_ignore_ascii_case("NEXTVAL")
+            || !matches!(toks[i - 1], Token::Period)
+        {
+            continue;
+        }
+        let Token::Word(sequence) = toks[i - 2] else {
+            continue;
+        };
+        let schema = if i >= 4 && matches!(toks[i - 3], Token::Period) {
+            match toks[i - 4] {
+                Token::Word(owner) => Some(owner.value.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        refs.push(ObjectRef::new(schema, sequence.value.clone()));
+    }
+    refs
+}
+
+/// Whether a sequence effect belongs to a top-level query result.
+///
+/// Oracle does not evaluate a `SELECT sequence.NEXTVAL` merely because the
+/// statement was parsed/executed: the result must be fetched. This distinction
+/// lets callers that only have an execute-with-rowcount primitive refuse the
+/// query rather than falsely reporting that the permanent effect occurred.
+fn sequence_nextval_query_requires_fetch(sql: &str) -> bool {
+    if sequence_nextval_refs(sql).is_empty() {
+        return false;
+    }
+    match Parser::parse_sql(&OracleDialect {}, sql) {
+        Ok(statements) => statements
+            .iter()
+            .any(|statement| matches!(statement, sqlparser::ast::Statement::Query(_))),
+        Err(_) => {
+            // Fail closed for valid Oracle query syntax that sqlparser cannot
+            // model. PL/SQL is handled by Stage A before this value is exposed.
+            let scan = canonical_marker_scan(&sql.trim_start().to_ascii_uppercase());
+            let leading = scan.strip_prefix(' ').unwrap_or(&scan);
+            leading.starts_with("SELECT ") || leading.starts_with("WITH ")
+        }
+    }
+}
+
 /// Convert a parsed `ObjectName` (the `schema.table` of a `FROM`/`JOIN` factor)
 /// into the guard's [`ObjectRef`]. Multi-part names keep the *last* part as the
 /// object name and the *second-to-last* as the schema (`a.b.c` → schema `b`,
@@ -1141,6 +1230,19 @@ fn classify_statement(
             if set_expr_carries_dml(&query.body) || query_embeds_reserved_dml_verb(sql) {
                 return guarded_rw(Vec::new());
             }
+            // `sequence.NEXTVAL` is syntactically a pseudocolumn rather than a
+            // function call, but it permanently advances sequence state even if
+            // the surrounding transaction rolls back. It therefore requires the
+            // governed READ_WRITE path and must never reach `oracle_query`.
+            let sequence_nextvals = sequence_nextval_refs(sql);
+            if !sequence_nextvals.is_empty() {
+                return guarded_rw(
+                    sequence_nextvals
+                        .into_iter()
+                        .map(|sequence| sequence.name)
+                        .collect(),
+                );
+            }
             // SELECT/WITH: Safe only if it calls no unproven user-defined
             // function (R15). Any UDF not ProvenReadOnly → Guarded.
             let calls = user_defined_calls(sql);
@@ -1418,8 +1520,12 @@ impl Classifier {
                 reason: "empty input".to_owned(),
                 reason_category: None,
                 offending_construct: None,
+                non_transactional_effect: false,
+                query_effect_requires_fetch: false,
             };
         }
+
+        let has_sequence_nextval = !sequence_nextval_refs(sql).is_empty();
 
         match stage_a(sql, &self.config) {
             StageA::AllowListed => {
@@ -1431,6 +1537,8 @@ impl Classifier {
                     reason: "operator allow-listed".to_owned(),
                     reason_category: None,
                     offending_construct: None,
+                    non_transactional_effect: false,
+                    query_effect_requires_fetch: false,
                 };
             }
             StageA::BlockListed(pat) => {
@@ -1528,6 +1636,14 @@ impl Classifier {
                         "PL/SQL block (cannot be proven side-effect-free here)".to_owned(),
                     )
                 };
+                let reason = if has_sequence_nextval {
+                    format!(
+                        "sequence NEXTVAL advances state independently of transaction rollback; classified PL/SQL block as {danger:?}/{}",
+                        required.as_str()
+                    )
+                } else {
+                    reason
+                };
                 return GuardDecision {
                     danger,
                     required_level: Some(required),
@@ -1539,6 +1655,8 @@ impl Classifier {
                     reason,
                     reason_category: Some(ReasonCategory::PlSqlBlock),
                     offending_construct: Some("PL/SQL block".to_owned()),
+                    non_transactional_effect: has_sequence_nextval,
+                    query_effect_requires_fetch: false,
                 };
             }
             StageA::PureSql => {}
@@ -1630,17 +1748,34 @@ impl Classifier {
         // (K8: RequiresHigherLevel); a proven read stays uncategorized.
         let needs_escalation = required_level.is_some_and(|level| level > OperatingLevel::ReadOnly);
         let reason_category = needs_escalation.then_some(ReasonCategory::RequiresHigherLevel);
+        let query_effect_requires_fetch =
+            has_sequence_nextval && sequence_nextval_query_requires_fetch(sql);
         GuardDecision {
             danger,
             required_level,
             objects_affected,
-            safe_alternative: None,
-            reason: format!(
-                "classified {} statement(s) as {danger:?}",
-                shape.statement_count.max(1)
-            ),
+            safe_alternative: query_effect_requires_fetch.then(|| {
+                "use sequence NEXTVAL inside a governed DML or PL/SQL statement; a query-shaped NEXTVAL must be fetched and is not an execute-with-rowcount operation"
+                    .to_owned()
+            }),
+            reason: if has_sequence_nextval {
+                format!(
+                    "sequence NEXTVAL advances state independently of transaction rollback; classified {} statement(s) as {danger:?}/{}",
+                    shape.statement_count.max(1),
+                    required_level
+                        .map(OperatingLevel::as_str)
+                        .unwrap_or("FORBIDDEN")
+                )
+            } else {
+                format!(
+                    "classified {} statement(s) as {danger:?}",
+                    shape.statement_count.max(1)
+                )
+            },
             reason_category,
-            offending_construct: None,
+            offending_construct: has_sequence_nextval.then(|| "sequence.NEXTVAL".to_owned()),
+            non_transactional_effect: has_sequence_nextval,
+            query_effect_requires_fetch,
         }
     }
 }
@@ -1656,6 +1791,8 @@ fn forbidden_decision(reason: String) -> GuardDecision {
         // via `categorized` where they can name the specific construct.
         reason_category: Some(ReasonCategory::Other),
         offending_construct: None,
+        non_transactional_effect: false,
+        query_effect_requires_fetch: false,
     }
 }
 
@@ -1714,6 +1851,90 @@ mod tests {
     fn select_with_builtin_only_is_safe() {
         let d = classify("SELECT COUNT(*), MAX(salary) FROM employees");
         assert_eq!(d.danger, DangerLevel::Safe);
+    }
+
+    #[test]
+    fn sequence_nextval_is_not_read_only() {
+        for sql in [
+            "SELECT app_seq.NEXTVAL FROM dual",
+            "SELECT app.app_seq.nextval FROM dual",
+            "SELECT \"App Seq\".NeXtVaL FROM dual",
+            "SELECT \"App\".\"App Seq\".NEXTVAL FROM dual",
+            "SELECT (app_seq . NEXTVAL) AS generated_id FROM dual",
+            "SELECT app_seq /* split */ . /* split */ NEXTVAL FROM dual",
+            "SELECT app.app_seq.NEXTVAL@prod.example FROM dual",
+        ] {
+            assert!(
+                !sequence_nextval_refs(sql).is_empty(),
+                "token detector missed {sql:?}: {:?}",
+                Tokenizer::new(&OracleDialect {}, sql).tokenize()
+            );
+            let d = classify(sql);
+            assert_eq!(d.danger, DangerLevel::Guarded, "{sql:?}");
+            assert_eq!(d.required_level, Some(OperatingLevel::ReadWrite), "{sql:?}");
+            assert!(
+                d.reason.contains("independently of transaction rollback"),
+                "the governed execution preview must warn about permanence: {sql:?}"
+            );
+            assert_eq!(d.offending_construct.as_deref(), Some("sequence.NEXTVAL"));
+            assert!(d.non_transactional_effect, "{sql:?}");
+            assert!(d.query_effect_requires_fetch, "{sql:?}");
+        }
+    }
+
+    #[test]
+    fn sequence_currval_and_quoted_nextval_column_remain_read_only() {
+        for sql in [
+            "SELECT app_seq.CURRVAL FROM dual",
+            "SELECT t.\"NEXTVAL\" FROM app.t t",
+            "SELECT 'app_seq.NEXTVAL' FROM dual",
+            "SELECT q'[app_seq.NEXTVAL]' FROM dual",
+            "SELECT 1 FROM dual /* app_seq.NEXTVAL */",
+        ] {
+            let d = classify(sql);
+            assert_eq!(d.danger, DangerLevel::Safe, "{sql:?}");
+            assert_eq!(d.required_level, Some(OperatingLevel::ReadOnly), "{sql:?}");
+            assert!(!d.non_transactional_effect, "{sql:?}");
+            assert!(!d.query_effect_requires_fetch, "{sql:?}");
+        }
+    }
+
+    #[test]
+    fn sequence_nextval_reason_preserves_the_aggregate_danger_and_level() {
+        let d = classify("SELECT app_seq.NEXTVAL FROM dual; DROP TABLE audit_log");
+        assert_eq!(d.danger, DangerLevel::Destructive);
+        assert_eq!(d.required_level, Some(OperatingLevel::Ddl));
+        assert!(
+            d.reason.contains("Destructive/DDL"),
+            "reason must describe the aggregate class, not only the NEXTVAL sub-statement: {d:?}"
+        );
+        assert!(
+            !d.reason.contains("Guarded/READ_WRITE"),
+            "a DDL batch must not claim its aggregate classification is Guarded/READ_WRITE: {d:?}"
+        );
+        assert!(d.query_effect_requires_fetch);
+    }
+
+    #[test]
+    fn sequence_nextval_marks_already_guarded_dml_and_plsql_as_non_transactional() {
+        for sql in [
+            "INSERT INTO orders (id) VALUES (app_seq.NEXTVAL)",
+            "UPDATE orders SET id = app_seq.NEXTVAL WHERE id = 1",
+            "BEGIN x := app_seq.NEXTVAL; END;",
+        ] {
+            let d = classify(sql);
+            assert!(
+                d.required_level
+                    .is_some_and(|level| level >= OperatingLevel::ReadWrite),
+                "{sql:?} -> {d:?}"
+            );
+            assert!(d.non_transactional_effect, "{sql:?} -> {d:?}");
+            assert!(!d.query_effect_requires_fetch, "{sql:?} -> {d:?}");
+            assert!(
+                d.reason.contains("independently of transaction rollback"),
+                "{sql:?} -> {d:?}"
+            );
+        }
     }
 
     #[test]

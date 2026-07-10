@@ -30,7 +30,8 @@ pub enum OperatingLevel {
     /// `DBMS_XPLAN.DISPLAY_CURSOR`, safe sampling. Always allowed.
     #[default]
     ReadOnly,
-    /// INSERT / UPDATE / DELETE / MERGE, transaction control, `DBMS_OUTPUT`.
+    /// INSERT / UPDATE / DELETE / MERGE, sequence `NEXTVAL`, transaction
+    /// control, `DBMS_OUTPUT`.
     ReadWrite,
     /// CREATE / ALTER / DROP / TRUNCATE, CREATE OR REPLACE, recompile.
     Ddl,
@@ -90,7 +91,8 @@ pub enum DangerLevel {
     /// `DBMS_OUTPUT.PUT_LINE`.
     Safe,
     /// Writes data or has a bounded effect: INSERT, UPDATE/DELETE with WHERE,
-    /// MERGE, CTAS, `SELECT … FOR UPDATE`, COMMIT/ROLLBACK, EXPLAIN PLAN.
+    /// MERGE, sequence `NEXTVAL`, CTAS, `SELECT … FOR UPDATE`, COMMIT/ROLLBACK,
+    /// EXPLAIN PLAN.
     Guarded,
     /// DROP, TRUNCATE, DELETE/UPDATE without WHERE, GRANT/REVOKE, ALTER
     /// USER/SYSTEM, CREATE OR REPLACE on an existing object.

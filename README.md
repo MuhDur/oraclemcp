@@ -934,7 +934,7 @@ Connection modes are configured per profile in `profiles.toml`; see
 | `oracle_set_session_level` | Preview/apply a temporary session operating-level elevation within the profile ceiling, or drop back to `READ_ONLY` |
 | `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |
 | `oracle_preview_sql` | Classify SQL and report whether it is read-only, needs profile-permitted step-up, or exceeds the active profile ceiling, without executing it |
-| `oracle_execute` | Execute one non-read statement through the active profile/session gate; DML rolls back by default, while commits and DDL/Admin require the execution grant from `oracle_preview_sql`; optionally captures bounded `DBMS_OUTPUT` |
+| `oracle_execute` | Execute one non-read statement through the active profile/session gate; DML rolls back by default, while commits, DDL/Admin, and non-transactional effects such as sequence `NEXTVAL` require the execution grant from `oracle_preview_sql`; query-shaped `NEXTVAL` is refused because this path does not fetch rows; optionally captures bounded `DBMS_OUTPUT` |
 | `oracle_compile_object` | Preview or compile one PL/SQL/view object through the `DDL` profile gate; execution requires the single-use confirmation grant returned by preview |
 | `oracle_create_or_replace` | Preview or apply one `CREATE OR REPLACE` statement through the classifier and `DDL` profile gate |
 | `oracle_patch_source` | Preview or apply an exact `old_text`→`new_text` patch to one stored PL/SQL source object (package/body/type/view) through the classifier and `DDL` profile gate; TOCTOU-safe, re-fetching the current source and re-confirming at execute time |
@@ -997,7 +997,7 @@ compatibility aliases that route to the guarded `oracle_*` tools:
 | `disable_writes` | `oracle_set_session_level` with `action=drop`; immediately returns the session to `READ_ONLY` |
 | `query` | `oracle_query` |
 | `preview_sql` | `oracle_preview_sql` |
-| `execute_approved` | Compatibility wrapper around `oracle_execute`; token-only calls work for five minutes after `preview_sql`/`oracle_preview_sql` in the same server process, DML rolls back when `commit` is omitted, and durable execution requires explicit `commit=true` |
+| `execute_approved` | Compatibility wrapper around `oracle_execute`; token-only calls work for five minutes after `preview_sql`/`oracle_preview_sql` in the same server process, DML rolls back when `commit` is omitted, and durable commit requires explicit `commit=true`; non-transactional effects still consume confirmation even when rollback is requested |
 | `compile_object` | `oracle_compile_object` |
 | `compile_with_warnings` | `oracle_compile_object` with `warnings=true` |
 | `create_or_replace` | `oracle_create_or_replace` |
@@ -1020,14 +1020,15 @@ compatibility aliases that route to the guarded `oracle_*` tools:
 Aliases share the same SQL classifier, argument validation, profile handling,
 and operating-level behavior as their `oracle_*` targets.
 
-`oracle_query` and the inner SQL of `oracle_explain_plan` pass through the read-only gate. `oracle_explain_plan` is not a pure read on Oracle primary databases: `EXPLAIN PLAN` writes `PLAN_TABLE`, so the tool refuses by default, refuses on read-only standby, and only runs when the active session is already `READ_WRITE` and the caller passes `allow_plan_table_write=true`. `oracle_preview_sql` runs the classifier without executing the SQL and includes the active profile ceiling so agents can distinguish "allowed on this profile", "requires a higher profile/session level", and "blocked by policy." When a non-read statement is currently executable, `oracle_preview_sql` also returns `execute_confirmation.confirm`; pass that opaque grant reference to `oracle_execute` with `commit=true` only when you intend to commit that exact statement on the active profile, MCP session, lane, principal, and lane generation. The dictionary tools build their own parameterized SQL and never execute caller-supplied statements.
+`oracle_query` and the inner SQL of `oracle_explain_plan` pass through the read-only gate. `oracle_explain_plan` is not a pure read on Oracle primary databases: `EXPLAIN PLAN` writes `PLAN_TABLE`, so the tool refuses by default, refuses on read-only standby, and only runs when the active session is already `READ_WRITE` and the caller passes `allow_plan_table_write=true`. `oracle_preview_sql` runs the classifier without executing the SQL and includes the active profile ceiling so agents can distinguish "allowed on this profile", "requires a higher profile/session level", and "blocked by policy." When a non-read statement is currently executable, `oracle_preview_sql` also returns `execute_confirmation.confirm`; pass that opaque grant reference to `oracle_execute` when you intend either to commit that exact statement or to permit a non-transactional effect such as sequence `NEXTVAL` on the active profile, MCP session, lane, principal, and lane generation. A query-shaped `NEXTVAL` is refused because `oracle_execute` reports row counts rather than fetching query rows; place it inside governed DML or PL/SQL instead. The dictionary tools build their own parameterized SQL and never execute caller-supplied statements.
 
 Execution grants are process-local, single-use preview grants. Regenerate them
 after restarting the server, switching profiles, changing session level, or
 changing HTTP session/principal/lane.
 
-For committing tools, the server also writes a durable intent before it touches
-Oracle. The intent log stores only non-secret hashes and routing facts
+For committing tools and confirmed non-transactional effects, the server also
+writes a durable intent before it touches Oracle. The intent log stores only
+non-secret hashes and routing facts
 (idempotency-key hash, subject, lane, SQL hash, timestamp) under
 `$XDG_STATE_HOME/oraclemcp/write-intents/intents.jsonl`, or
 `$HOME/.local/state/oraclemcp/...` when `XDG_STATE_HOME` is unset. If a writable
@@ -1073,7 +1074,7 @@ preview. Elevating to `READ_WRITE`, `DDL`, or `ADMIN` requires the preview token
 and creates a bounded window (default 900 seconds, maximum 3600 seconds).
 Lowering to a less-capable level is immediate and does not require a token.
 
-`oracle_execute` is intentionally narrow. It accepts one statement with positional binds, refuses read-only SQL (use `oracle_query`), refuses anything above the active profile/session level, rolls DML back unless `commit=true`, and requires the single-use `oracle_preview_sql` execution grant before any commit. DDL/Admin statements cannot be rollback-previewed by Oracle, so they require `commit=true` plus confirmation before execution. Set `capture_dbms_output=true` to enable `DBMS_OUTPUT` before the statement and return bounded output after the commit or rollback; `dbms_output_max_lines` and `dbms_output_max_chars` cap the response.
+`oracle_execute` is intentionally narrow. It accepts one statement with positional binds, refuses read-only SQL (use `oracle_query`), refuses anything above the active profile/session level, rolls DML back unless `commit=true`, and requires the single-use `oracle_preview_sql` execution grant before any commit. Sequence `NEXTVAL` is non-transactional: governed DML or PL/SQL containing it also requires confirmation when `commit=false`, records a durable intent, and warns that rollback cannot restore the consumed value. A query-shaped `NEXTVAL` is refused because this execute-with-rowcount path cannot prove the effect occurred without fetching a row. DDL/Admin statements cannot be rollback-previewed by Oracle, so they require `commit=true` plus confirmation before execution. Set `capture_dbms_output=true` to enable `DBMS_OUTPUT` before the statement and return bounded output after the commit or rollback; `dbms_output_max_lines` and `dbms_output_max_chars` cap the response.
 
 Cancellation and timeouts are fail-closed at the DB boundary. Profile
 `call_timeout_seconds` defaults to 30 seconds and is met with any per-tool

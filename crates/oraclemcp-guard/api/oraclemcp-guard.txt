@@ -166,8 +166,10 @@ impl<T> typenum::type_operators::Same for oraclemcp_guard::classifier::Classifie
 pub type oraclemcp_guard::classifier::ClassifierConfig::Output = T
 pub struct oraclemcp_guard::classifier::GuardDecision
 pub oraclemcp_guard::classifier::GuardDecision::danger: oraclemcp_guard::levels::DangerLevel
+pub oraclemcp_guard::classifier::GuardDecision::non_transactional_effect: bool
 pub oraclemcp_guard::classifier::GuardDecision::objects_affected: alloc::vec::Vec<alloc::string::String>
 pub oraclemcp_guard::classifier::GuardDecision::offending_construct: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::classifier::GuardDecision::query_effect_requires_fetch: bool
 pub oraclemcp_guard::classifier::GuardDecision::reason: alloc::string::String
 pub oraclemcp_guard::classifier::GuardDecision::reason_category: core::option::Option<oraclemcp_error::ReasonCategory>
 pub oraclemcp_guard::classifier::GuardDecision::required_level: core::option::Option<oraclemcp_guard::levels::OperatingLevel>
@@ -2515,8 +2517,10 @@ impl<T> typenum::type_operators::Same for oraclemcp_guard::exec_grant::ExecGrant
 pub type oraclemcp_guard::exec_grant::ExecGrantStore::Output = T
 pub struct oraclemcp_guard::GuardDecision
 pub oraclemcp_guard::GuardDecision::danger: oraclemcp_guard::levels::DangerLevel
+pub oraclemcp_guard::GuardDecision::non_transactional_effect: bool
 pub oraclemcp_guard::GuardDecision::objects_affected: alloc::vec::Vec<alloc::string::String>
 pub oraclemcp_guard::GuardDecision::offending_construct: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::GuardDecision::query_effect_requires_fetch: bool
 pub oraclemcp_guard::GuardDecision::reason: alloc::string::String
 pub oraclemcp_guard::GuardDecision::reason_category: core::option::Option<oraclemcp_error::ReasonCategory>
 pub oraclemcp_guard::GuardDecision::required_level: core::option::Option<oraclemcp_guard::levels::OperatingLevel>

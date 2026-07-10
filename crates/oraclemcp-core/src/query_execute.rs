@@ -217,6 +217,15 @@ pub fn oracle_query_execute(
     if !matches!(gate, LevelDecision::Allow) {
         return Err(gate_refusal(&decision, gate, session));
     }
+    if decision.query_effect_requires_fetch {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::InvalidArguments,
+            "query-shaped sequence NEXTVAL is refused: this execute-with-rowcount path does not fetch query rows and cannot prove that the permanent effect occurred",
+        )
+        .with_next_step(
+            "use NEXTVAL inside a governed DML or PL/SQL statement instead",
+        ));
+    }
 
     // 1) Consume the grant: single-use, digest, session, level, expiry.
     let binding = ExecGrantBinding::new(
@@ -468,6 +477,42 @@ mod tests {
         assert!(
             sink.records().is_empty(),
             "no audit before a rejected grant"
+        );
+    }
+
+    #[test]
+    fn query_nextval_is_refused_before_grant_consumption_or_execution() {
+        let sql = "SELECT app_seq.NEXTVAL FROM dual";
+        let grants = ExecGrantStore::new();
+        let tok = grants.issue(
+            sql,
+            binding(),
+            OperatingLevel::ReadWrite,
+            Duration::from_secs(60),
+        );
+        let (aud, sink) = auditor();
+        let exec = MockExecutor::ok(0);
+
+        let err = oracle_query_execute(
+            &grants,
+            &classifier(),
+            &session_admin(),
+            &aud,
+            &exec,
+            &subject(),
+            &params(&tok, sql, Some("READ_WRITE")),
+            clock(),
+        )
+        .expect_err("execute-with-rowcount must not claim a SELECT NEXTVAL was fetched");
+
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+        assert_eq!(exec.call_count(), 0);
+        assert!(sink.records().is_empty());
+        assert!(
+            grants
+                .consume(&tok, sql, &binding(), OperatingLevel::ReadWrite,)
+                .is_ok(),
+            "the structural refusal must happen before consuming the single-use grant"
         );
     }
 

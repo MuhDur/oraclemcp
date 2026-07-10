@@ -1,5 +1,6 @@
 ---
 source: crates/oraclemcp/tests/golden_scrubber_framework.rs
+assertion_line: 155
 expression: rendered
 ---
 {
@@ -368,7 +369,7 @@ expression: rendered
       "name": "oracle_execute",
       "title": "Oracle Execute",
       "tier": "foundation_live_db",
-      "summary": "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default and commits require the confirmation token from oracle_preview_sql.",
+      "summary": "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default, while commits and non-transactional effects such as sequence NEXTVAL require the confirmation token from oracle_preview_sql. Query-shaped NEXTVAL is refused because this path does not fetch rows.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -382,11 +383,11 @@ expression: rendered
             "type": "boolean"
           },
           "commit": {
-            "description": "Default false rolls back after DML. Set true only with confirm from oracle_preview_sql. DDL/Admin statements require true because Oracle cannot rollback them.",
+            "description": "Default false rolls back transactional DML, but non-transactional effects such as sequence NEXTVAL persist and still require confirm from oracle_preview_sql. Set true only to commit; DDL/Admin statements require true because Oracle cannot rollback them.",
             "type": "boolean"
           },
           "confirm": {
-            "description": "Commit confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true.",
+            "description": "Execution confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true and whenever the statement has a non-transactional effect such as sequence NEXTVAL, even with commit=false.",
             "type": "string"
           },
           "confirmation_token": {
@@ -1878,7 +1879,7 @@ expression: rendered
       "name": "execute_approved",
       "title": "Execute Approved",
       "tier": "foundation_live_db",
-      "summary": "Compatibility alias for executing a statement previously previewed with preview_sql; token-only calls work for five minutes in the same server process and DML rolls back unless commit=true is explicit.",
+      "summary": "Compatibility alias for executing a statement previously previewed with preview_sql; token-only calls work for five minutes in the same server process and DML rolls back unless commit=true is explicit, except that non-transactional effects such as sequence NEXTVAL persist after rollback.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -1887,7 +1888,7 @@ expression: rendered
             "type": "boolean"
           },
           "commit": {
-            "description": "Default false rolls back after DML. Set true only when the preview grant represents deliberate commit intent; DDL/Admin statements require true.",
+            "description": "Default false rolls back transactional DML, but non-transactional effects such as sequence NEXTVAL persist and still require the preview grant. Set true only when the grant represents deliberate commit intent; DDL/Admin statements require true.",
             "type": "boolean"
           },
           "confirm": {

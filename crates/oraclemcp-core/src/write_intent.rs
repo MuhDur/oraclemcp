@@ -1,4 +1,4 @@
-//! Durable write-ahead idempotency intents for committing tools.
+//! Durable write-ahead idempotency intents for permanent database effects.
 //!
 //! This layer is intentionally smaller than the audit chain: it records only
 //! non-secret idempotency and routing facts needed to fail closed after a crash.
@@ -64,7 +64,8 @@ pub enum WriteIntentError {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[non_exhaustive]
 pub enum WriteIntentOutcome {
-    /// The committed database action completed successfully.
+    /// The permanent database action completed successfully, either through a
+    /// commit or through a non-transactional effect such as sequence `NEXTVAL`.
     Succeeded,
     /// The action was rolled back or never committed.
     RolledBack,
@@ -74,7 +75,7 @@ pub enum WriteIntentOutcome {
     AbortedBeforeExecute,
 }
 
-/// The durable pending fact for a committing tool.
+/// The durable pending fact for a committing or non-transactional tool.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WriteIntent {
     /// Stable path-safe id derived from the non-serialized idempotency key
@@ -88,7 +89,7 @@ pub struct WriteIntent {
     /// Active profile, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_profile: Option<String>,
-    /// Tool whose commit boundary this intent protects.
+    /// Tool whose permanent-effect boundary this intent protects.
     pub tool: String,
     /// Streamable HTTP session id or process fallback.
     pub session_id: String,
@@ -114,7 +115,7 @@ pub struct WriteIntentDetails<'a> {
     pub subject: &'a str,
     /// Active profile, if any.
     pub active_profile: Option<&'a str>,
-    /// Tool whose commit boundary this intent protects.
+    /// Tool whose permanent-effect boundary this intent protects.
     pub tool: &'a str,
     /// Exact SQL bytes sent to the database.
     pub sql: &'a str,

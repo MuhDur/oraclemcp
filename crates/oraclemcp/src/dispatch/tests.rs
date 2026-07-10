@@ -2901,6 +2901,210 @@ fn malformed_and_unauthorized_sql_are_refused_before_any_db_io() {
 }
 
 #[test]
+fn sequence_nextval_is_refused_by_oracle_query_before_any_db_io() {
+    let counts = Arc::new(TouchCounts::default());
+    let dispatcher = OracleDispatcher::new(Box::new(TouchCountingMock {
+        counts: Arc::clone(&counts),
+    }));
+
+    for sql in [
+        "SELECT app_seq.NEXTVAL FROM dual",
+        "SELECT app.app_seq.nextval FROM dual",
+        "SELECT \"App\".\"App Seq\".NEXTVAL FROM dual",
+        "SELECT (app_seq . NEXTVAL) AS generated_id FROM dual",
+        "SELECT app_seq /* split */ . /* split */ NEXTVAL FROM dual",
+        "SELECT app.app_seq.NEXTVAL@prod.example FROM dual",
+    ] {
+        let err = dispatcher
+            .dispatch("oracle_query", json!({ "sql": sql }))
+            .expect_err("NEXTVAL must not enter the read-only query path");
+        assert_eq!(err.error_class, ErrorClass::OperatingLevelTooLow, "{sql:?}");
+    }
+
+    assert_eq!(
+        counts.total(),
+        0,
+        "sequence mutation must be rejected by the guard before any database I/O"
+    );
+}
+
+#[test]
+fn sequence_nextval_dml_execution_warns_that_rollback_cannot_restore_it() {
+    let state = Arc::new(ExecState::default());
+    let intents = write_intent_log("sequence-nextval");
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(IntentObservingExecMock {
+            state: Arc::clone(&state),
+            intents: Arc::clone(&intents),
+        }),
+        Some("dev".to_owned()),
+        read_write_level(),
+    )
+    .with_write_intent_log(Arc::clone(&intents));
+    let sql = "INSERT INTO orders (id) VALUES (app_seq.NEXTVAL)";
+
+    let preview = dispatcher
+        .dispatch("oracle_preview_sql", json!({ "sql": sql }))
+        .expect("NEXTVAL has a governed READ_WRITE preview path");
+    assert_eq!(preview["allowed_on_read_only"], json!(false));
+    assert_eq!(preview["required_level"], json!("READ_WRITE"));
+    assert!(
+        preview["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("independently of transaction rollback")),
+        "preview must disclose that sequence advancement is permanent"
+    );
+    let confirm = preview
+        .pointer("/execute_confirmation/confirm")
+        .and_then(Value::as_str)
+        .expect("preview minted a confirmation")
+        .to_owned();
+    assert_eq!(preview["execute_confirmation"]["commit"], json!(false));
+    assert_eq!(
+        preview["next_actions"][0]["intent"],
+        json!("execute_non_transactional_effect")
+    );
+    assert_eq!(
+        preview["next_actions"][0]["args"]["confirm"],
+        json!(confirm.clone())
+    );
+
+    let out = dispatcher
+        .dispatch("oracle_execute", json!({ "sql": sql, "confirm": confirm }))
+        .expect("confirmed NEXTVAL executes only on the governed path");
+    assert_eq!(out["committed"], json!(false));
+    assert_eq!(out["rolled_back"], json!(true));
+    assert!(
+        out["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("independently of transaction rollback"))
+    );
+    assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+    assert!(
+        intents.unresolved().expect("intent snapshot").is_empty(),
+        "the confirmed permanent effect must resolve its durable intent after execution"
+    );
+
+    let replay = dispatcher
+        .dispatch("oracle_execute", json!({ "sql": sql, "confirm": confirm }))
+        .expect_err("the confirmation for a permanent effect must be single-use");
+    assert_eq!(replay.error_class, ErrorClass::ChallengeRequired);
+    assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn sequence_nextval_rollback_default_requires_confirmation_before_database_io() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+
+    for sql in [
+        "INSERT INTO orders (id) VALUES (app_seq.NEXTVAL)",
+        "UPDATE orders SET id = app_seq.NEXTVAL WHERE id = 1",
+        "BEGIN x := app_seq.NEXTVAL; END;",
+    ] {
+        let err = dispatcher
+            .dispatch("oracle_execute", json!({ "sql": sql }))
+            .expect_err("rollback cannot undo NEXTVAL, so omission of confirm must fail closed");
+        assert_eq!(err.error_class, ErrorClass::ChallengeRequired, "{sql:?}");
+    }
+    assert!(state.executed.lock().expect("exec mutex").is_empty());
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn sequence_nextval_rollback_default_rejects_wrong_confirmation_before_database_io() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+    let wrong_confirm = preview_confirm(
+        &dispatcher,
+        "UPDATE employees SET name = name WHERE employee_id = 100",
+    );
+
+    let err = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({
+                "sql": "INSERT INTO orders (id) VALUES (app_seq.NEXTVAL)",
+                "confirm": wrong_confirm,
+            }),
+        )
+        .expect_err("a confirmation for different SQL must not authorize NEXTVAL");
+    assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+    assert!(state.executed.lock().expect("exec mutex").is_empty());
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn sequence_nextval_query_is_never_offered_to_execute_without_fetching() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+    let sql = "SELECT app_seq.NEXTVAL FROM dual";
+    let preview = dispatcher
+        .dispatch("oracle_preview_sql", json!({ "sql": sql }))
+        .expect("query-shaped NEXTVAL can be explained safely");
+
+    assert_eq!(preview["required_level"], json!("READ_WRITE"));
+    assert_eq!(preview["execute_confirmation"], Value::Null);
+    assert_eq!(preview["next_actions"][0]["intent"], json!("rewrite_sql"));
+    assert!(
+        preview["next_actions"][0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("does not fetch query rows"))
+    );
+
+    let err = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": sql, "confirm": "must-not-be-consumed" }),
+        )
+        .expect_err("execute-with-rowcount cannot prove a SELECT NEXTVAL was fetched");
+    assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+    assert!(state.executed.lock().expect("exec mutex").is_empty());
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn sequence_nextval_ddl_batch_preview_keeps_aggregate_class_but_offers_no_execution() {
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(NoExecMock),
+        Some("dev".to_owned()),
+        ddl_level(),
+    );
+    let preview = dispatcher
+        .dispatch(
+            "oracle_preview_sql",
+            json!({
+                "sql": "SELECT app_seq.NEXTVAL FROM dual; DROP TABLE audit_log"
+            }),
+        )
+        .expect("DDL-capable profile can preview the aggregate batch");
+
+    assert_eq!(preview["danger"], json!("DESTRUCTIVE"));
+    assert_eq!(preview["required_level"], json!("DDL"));
+    assert!(
+        preview["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("Destructive/DDL"))
+    );
+    assert_eq!(preview["execute_confirmation"], Value::Null);
+    assert_eq!(preview["next_actions"][0]["intent"], json!("rewrite_sql"));
+}
+
+#[test]
 fn read_only_select_passes_the_gate() {
     // A plain SELECT (no unproven function call) is proven read-only and runs.
     let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));

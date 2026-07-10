@@ -395,7 +395,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_execute",
             ToolTier::FoundationLiveDb,
-            "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default and commits require the confirmation token from oracle_preview_sql.",
+            "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default, while commits and non-transactional effects such as sequence NEXTVAL require the confirmation token from oracle_preview_sql. Query-shaped NEXTVAL is refused because this path does not fetch rows.",
         )
         .with_input_schema(object_schema(
             props_with(
@@ -406,10 +406,10 @@ pub fn tool_registry() -> ToolRegistry {
                         "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
                         "items": {}
                     },
-                    "commit": { "type": "boolean", "description": "Default false rolls back after DML. Set true only with confirm from oracle_preview_sql. DDL/Admin statements require true because Oracle cannot rollback them." }
+                    "commit": { "type": "boolean", "description": "Default false rolls back transactional DML, but non-transactional effects such as sequence NEXTVAL persist and still require confirm from oracle_preview_sql. Set true only to commit; DDL/Admin statements require true because Oracle cannot rollback them." }
                 }),
                 &[
-                    confirm_trio("Commit confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true."),
+                    confirm_trio("Execution confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true and whenever the statement has a non-transactional effect such as sequence NEXTVAL, even with commit=false."),
                     dbms_output_props("Default false. When true, enables DBMS_OUTPUT before execution and returns bounded captured lines after commit/rollback."),
                     timeout_seconds_prop(),
                 ],
@@ -917,7 +917,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "execute_approved",
             ToolTier::FoundationLiveDb,
-            "Compatibility alias for executing a statement previously previewed with preview_sql; token-only calls work for five minutes in the same server process and DML rolls back unless commit=true is explicit.",
+            "Compatibility alias for executing a statement previously previewed with preview_sql; token-only calls work for five minutes in the same server process and DML rolls back unless commit=true is explicit, except that non-transactional effects such as sequence NEXTVAL persist after rollback.",
         )
         .with_input_schema(object_schema(
             props_with(
@@ -926,7 +926,7 @@ pub fn tool_registry() -> ToolRegistry {
                     "confirm": { "type": "string", "description": "Alias for token." },
                     "confirmation_token": { "type": "string", "description": "Alias for token." },
                     "sql": { "type": "string", "description": "Optional SQL statement. If omitted, the token must still be cached from preview_sql in this server process." },
-                    "commit": { "type": "boolean", "description": "Default false rolls back after DML. Set true only when the preview grant represents deliberate commit intent; DDL/Admin statements require true." },
+                    "commit": { "type": "boolean", "description": "Default false rolls back transactional DML, but non-transactional effects such as sequence NEXTVAL persist and still require the preview grant. Set true only when the grant represents deliberate commit intent; DDL/Admin statements require true." },
                     "save_output": { "type": "string", "description": "Unsupported in the generic core. Use capture_dbms_output=true and read dbms_output.lines instead." }
                 }),
                 &[
@@ -1609,6 +1609,51 @@ mod tests {
                 "{name} must advertise rollback-by-default: {commit}"
             );
         }
+    }
+
+    #[test]
+    fn execute_tools_advertise_non_transactional_confirmation() {
+        let registry = tool_registry();
+        for name in ["oracle_execute", "execute_approved"] {
+            let tool = registry
+                .tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} must be registered"));
+            assert!(
+                tool.summary.contains("sequence NEXTVAL"),
+                "{name} must disclose the permanent effect: {}",
+                tool.summary
+            );
+            let commit = tool
+                .input_schema
+                .as_ref()
+                .and_then(|schema| schema.pointer("/properties/commit/description"))
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("{name} must document commit"));
+            assert!(
+                commit.contains("sequence NEXTVAL") && commit.contains("persist"),
+                "{name} commit docs must cover rollback-default non-transactional effects: {commit}"
+            );
+        }
+
+        let canonical = registry
+            .tools
+            .iter()
+            .find(|tool| tool.name == "oracle_execute")
+            .expect("oracle_execute must be registered");
+        assert!(
+            canonical.summary.contains("does not fetch rows"),
+            "oracle_execute must disclose its query-fetch limitation: {}",
+            canonical.summary
+        );
+        let confirm = canonical
+            .input_schema
+            .as_ref()
+            .and_then(|schema| schema.pointer("/properties/confirm/description"))
+            .and_then(Value::as_str)
+            .expect("oracle_execute must document confirm");
+        assert!(confirm.contains("commit=false"));
     }
 
     #[test]

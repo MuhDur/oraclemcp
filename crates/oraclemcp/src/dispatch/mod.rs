@@ -2125,11 +2125,14 @@ fn set_session_level(
 }
 
 fn execute_confirmation_json(
-    required_level: Option<OperatingLevel>,
+    decision: &GuardDecision,
     gate: &LevelDecision,
     confirm: Option<&str>,
 ) -> Value {
-    let Some(required_level) = required_level else {
+    if decision.query_effect_requires_fetch {
+        return Value::Null;
+    }
+    let Some(required_level) = decision.required_level else {
         return Value::Null;
     };
     let Some(confirm) = confirm else {
@@ -2138,13 +2141,23 @@ fn execute_confirmation_json(
     if required_level <= OperatingLevel::ReadOnly || !matches!(gate, LevelDecision::Allow) {
         return Value::Null;
     }
-    json!({
-        "tool": "oracle_execute",
-        "confirm": confirm,
-        "commit": true,
-        "required_level": required_level,
-        "note": "Pass confirm only when you intend to commit this exact statement on this active profile.",
-    })
+    if decision.non_transactional_effect && required_level < OperatingLevel::Ddl {
+        json!({
+            "tool": "oracle_execute",
+            "confirm": confirm,
+            "commit": false,
+            "required_level": required_level,
+            "note": "NEXTVAL permanently advances the sequence even though the surrounding transaction is rolled back; pass confirm only when you intend that effect.",
+        })
+    } else {
+        json!({
+            "tool": "oracle_execute",
+            "confirm": confirm,
+            "commit": true,
+            "required_level": required_level,
+            "note": "Pass confirm only when you intend to commit this exact statement on this active profile.",
+        })
+    }
 }
 
 // The RequireStepUp and ExceedsCeiling next_actions arms are identical across
@@ -2187,6 +2200,12 @@ fn preview_next_actions(
 ) -> Value {
     let mut actions: Vec<Value> = Vec::new();
     match gate {
+        LevelDecision::Allow if decision.query_effect_requires_fetch => {
+            actions.push(json!({
+                "intent": "rewrite_sql",
+                "message": "Query-shaped NEXTVAL is refused because oracle_execute does not fetch query rows; use NEXTVAL inside governed DML or PL/SQL instead."
+            }));
+        }
         LevelDecision::Allow => match decision.required_level {
             Some(level) if level <= OperatingLevel::ReadOnly => {
                 actions.push(json!({
@@ -2196,11 +2215,27 @@ fn preview_next_actions(
                 }));
             }
             Some(level) if level < OperatingLevel::Ddl => {
-                actions.push(json!({
-                    "intent": "rollback_preview",
-                    "tool": "oracle_execute",
-                    "args": { "sql": sql, "binds": [], "commit": false },
-                }));
+                if decision.non_transactional_effect {
+                    if let Some(confirm) = confirm {
+                        actions.push(json!({
+                            "intent": "execute_non_transactional_effect",
+                            "tool": "oracle_execute",
+                            "args": {
+                                "sql": sql,
+                                "binds": [],
+                                "commit": false,
+                                "confirm": confirm,
+                            },
+                            "note": "The surrounding transaction rolls back, but NEXTVAL permanently advances the sequence.",
+                        }));
+                    }
+                } else {
+                    actions.push(json!({
+                        "intent": "rollback_preview",
+                        "tool": "oracle_execute",
+                        "args": { "sql": sql, "binds": [], "commit": false },
+                    }));
+                }
                 if let Some(confirm) = confirm {
                     actions.push(json!({
                         "intent": "commit",
@@ -2335,7 +2370,19 @@ fn consume_execute_confirmation(
     grants: &ExecGrantStore,
     binding: &ExecGrantBinding,
     confirm: Option<&str>,
+    non_transactional_effect: bool,
 ) -> Result<String, ErrorEnvelope> {
+    let (challenge_message, next_step) = if non_transactional_effect {
+        (
+            "sequence NEXTVAL permanently advances state even when rollback is requested; execution requires the single-use grant from oracle_preview_sql",
+            "call oracle_preview_sql with the exact sql, then pass execute_confirmation.confirm while keeping commit=false if the surrounding transaction should roll back",
+        )
+    } else {
+        (
+            "commit requires the execution grant from oracle_preview_sql for this exact statement, lane, principal, and active profile",
+            "call oracle_preview_sql with the exact sql, then pass execute_confirmation.confirm as confirm",
+        )
+    };
     consume_confirmation_grant(ConfirmationGrantRequest {
         material: sql,
         required_level,
@@ -2343,9 +2390,9 @@ fn consume_execute_confirmation(
         grants,
         binding,
         confirm,
-        challenge_message: "commit requires the execution grant from oracle_preview_sql for this exact statement, lane, principal, and active profile",
+        challenge_message,
         suggested_tool: "oracle_preview_sql",
-        next_step: "call oracle_preview_sql with the exact sql, then pass execute_confirmation.confirm as confirm",
+        next_step,
     })
 }
 
@@ -3171,6 +3218,14 @@ async fn execute_sql_inner(
         )
         .with_suggested_tool("oracle_query"));
     }
+    if decision.query_effect_requires_fetch {
+        return Err(invalid_args(
+            "query-shaped sequence NEXTVAL is refused: oracle_execute does not fetch query rows and therefore cannot prove that the permanent sequence effect occurred",
+        )
+        .with_next_step(
+            "use NEXTVAL inside a governed DML or PL/SQL statement, then preview and confirm that exact statement",
+        ));
+    }
     if required_level >= OperatingLevel::Ddl && !args.commit {
         return Err(ErrorEnvelope::new(
             ErrorClass::ChallengeRequired,
@@ -3179,7 +3234,12 @@ async fn execute_sql_inner(
         .with_suggested_tool("oracle_preview_sql")
         .with_next_step("call oracle_preview_sql and pass execute_confirmation.confirm to oracle_execute with commit=true"));
     }
-    let commit_idempotency_key = if args.commit {
+    // A rollback-preview normally needs no per-statement confirmation because
+    // Oracle can undo its effects. Sequence NEXTVAL is the exception: it
+    // advances independently of transaction rollback, so it must consume the
+    // same exact-SQL, single-use grant as a commit even when `commit=false`.
+    let confirmation_required = args.commit || decision.non_transactional_effect;
+    let confirmation_idempotency_key = if confirmation_required {
         Some(consume_execute_confirmation(
             &args.sql,
             required_level,
@@ -3187,6 +3247,7 @@ async fn execute_sql_inner(
             ctx.execute_grants,
             ctx.grant_binding,
             args.confirm.as_deref(),
+            decision.non_transactional_effect && !args.commit,
         )?)
     } else {
         None
@@ -3217,7 +3278,7 @@ async fn execute_sql_inner(
     // The audited danger tier (SAFE/GUARDED/DESTRUCTIVE) as a string; reads were
     // rejected above, so this is always a Guarded/Destructive write/DDL/Admin.
     let danger_str = audit_danger_string(decision.danger);
-    let write_intent_id = match commit_idempotency_key.as_deref() {
+    let write_intent_id = match confirmation_idempotency_key.as_deref() {
         Some(key) => append_write_intent(&ctx, audit_tool, &executed_sql, required_level, key)?,
         None => None,
     };
@@ -3260,17 +3321,27 @@ async fn execute_sql_inner(
         Ok(rows) => rows,
         Err(e) => {
             let rollback = conn.rollback(cx).await;
-            let outcome = if rollback.is_ok() {
+            let outcome = if rollback.is_ok() && !decision.non_transactional_effect {
                 AuditOutcome::RolledBack
             } else {
+                let message = if rollback.is_ok() {
+                    format!(
+                        "execute failed after a non-transactional sequence effect may have occurred; rollback cannot establish its outcome: {e}"
+                    )
+                } else {
+                    format!("execute failed and rollback cleanup failed: {e}")
+                };
                 mark_connection_quarantined(
                     ctx.quarantine,
                     AuditOutcome::UnknownDiscarded,
-                    format!("execute failed and rollback cleanup failed: {e}"),
+                    message,
                 )?;
                 AuditOutcome::UnknownDiscarded
             };
-            if e.is_uncertain_session_state() && rollback.is_ok() {
+            if e.is_uncertain_session_state()
+                && rollback.is_ok()
+                && !decision.non_transactional_effect
+            {
                 mark_connection_quarantined(
                     ctx.quarantine,
                     AuditOutcome::RolledBack,
@@ -3354,8 +3425,10 @@ async fn execute_sql_inner(
         }
     }
 
-    // Durably log the successful (committed or rolled-back-preview) outcome.
-    let outcome = if args.commit {
+    // A confirmed NEXTVAL is a successful permanent effect even when the
+    // surrounding transaction was rolled back. Recording it as `RolledBack`
+    // would falsely imply that replay is safe.
+    let outcome = if args.commit || decision.non_transactional_effect {
         AuditOutcome::Succeeded
     } else {
         AuditOutcome::RolledBack
@@ -3368,12 +3441,16 @@ async fn execute_sql_inner(
         Some(rows_affected),
         outcome,
     )?;
-    if args.commit {
+    if confirmation_required {
         resolve_write_intent_after_db(
             &ctx,
             write_intent_id.as_deref(),
             WriteIntentOutcome::Succeeded,
-            "commit completed",
+            if args.commit {
+                "commit completed"
+            } else {
+                "confirmed non-transactional sequence effect completed"
+            },
         )?;
     }
     let dbms_output = match dbms_output_limits {
@@ -4991,19 +5068,23 @@ fn preview_sql(
     };
     let execute_confirm = match (decision.required_level, &gate) {
         (Some(level), LevelDecision::Allow) if level > OperatingLevel::ReadOnly => {
-            grants.purge_expired();
-            let raw = grants.issue(
-                sql,
-                binding.clone(),
-                level,
-                Duration::from_secs(EXECUTE_APPROVED_TOKEN_TTL_SECONDS),
-            );
-            Some(sign_execute_grant_reference(
-                &raw,
-                binding,
-                active_profile,
-                level,
-            ))
+            if decision.query_effect_requires_fetch {
+                None
+            } else {
+                grants.purge_expired();
+                let raw = grants.issue(
+                    sql,
+                    binding.clone(),
+                    level,
+                    Duration::from_secs(EXECUTE_APPROVED_TOKEN_TTL_SECONDS),
+                );
+                Some(sign_execute_grant_reference(
+                    &raw,
+                    binding,
+                    active_profile,
+                    level,
+                ))
+            }
         }
         _ => None,
     };
@@ -5025,7 +5106,7 @@ fn preview_sql(
         "reason": decision.reason,
         "safe_alternative": decision.safe_alternative,
         "execute_confirmation": execute_confirmation_json(
-            decision.required_level,
+            &decision,
             &gate,
             execute_confirm.as_deref(),
         ),
