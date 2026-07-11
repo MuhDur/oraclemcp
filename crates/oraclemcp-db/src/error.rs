@@ -308,9 +308,16 @@ impl DbError {
                 // Classify via the embedded ORA- code where present.
                 let env = envelope_from_oracle_message(&msg);
                 if env.error_class == ErrorClass::Internal {
-                    // No ORA- code recognised: keep it as a connection-class
-                    // failure rather than a bare Internal.
-                    ErrorEnvelope::new(ErrorClass::ConnectionFailed, msg)
+                    // An absent or as-yet-unclassified ORA code remains a
+                    // connection-class failure rather than a bare Internal.
+                    // Preserve a parsed code: rebuilding the fallback envelope
+                    // must not erase useful structured diagnostics such as
+                    // application-error ORA-20000.
+                    let mut fallback = ErrorEnvelope::new(ErrorClass::ConnectionFailed, msg);
+                    if let Some(code) = env.ora_code {
+                        fallback = fallback.with_ora_code(code);
+                    }
+                    fallback
                 } else {
                     env
                 }
@@ -489,6 +496,14 @@ mod tests {
             DbError::Query("ORA-00942: table or view does not exist".to_owned()).into_envelope();
         assert_eq!(env.error_class, ErrorClass::ObjectNotFound);
         assert_eq!(env.ora_code, Some(942));
+    }
+
+    #[test]
+    fn unclassified_oracle_error_keeps_code_in_connection_fallback() {
+        let env =
+            DbError::Execute("ORA-20000: server detail suppressed".to_owned()).into_envelope();
+        assert_eq!(env.error_class, ErrorClass::ConnectionFailed);
+        assert_eq!(env.ora_code, Some(20_000));
     }
 
     #[test]

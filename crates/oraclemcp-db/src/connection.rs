@@ -1216,6 +1216,7 @@ mod driver {
         },
         vector::{Vector, VectorValues},
     };
+    use oraclemcp_error::parse_ora_code;
     use serde_json::{Number, Value, json};
     use std::fmt::Display;
     use std::future::{Future, poll_fn};
@@ -1258,8 +1259,9 @@ mod driver {
         for stmt in crate::serialize::canonical_nls_statements() {
             execute_raw(cx, &mut inner, stmt, &[], &opts, "connect").await?;
         }
-        for stmt in &opts.session_statements {
-            execute_raw(cx, &mut inner, stmt, &[], &opts, "session setup").await?;
+        for (index, stmt) in opts.session_statements.iter().enumerate() {
+            let result = execute_raw(cx, &mut inner, stmt, &[], &opts, "session setup").await;
+            redact_session_setup_result(result, index + 1)?;
         }
         let call_timeout = opts.call_timeout;
         Ok(RustOracleConnection {
@@ -1699,6 +1701,36 @@ mod driver {
             .map_err(|err| {
                 DbError::Execute(format!("{context}: {}", sanitize_driver_error(err, opts)))
             })
+    }
+
+    /// Convert a trusted, profile-owned session statement failure into the
+    /// only detail that may cross the connection boundary: its 1-based ordinal
+    /// and Oracle error code. The statement text and the driver's server detail
+    /// are deliberately discarded wholesale. Exact-value scrubbing is not
+    /// sufficient here because trusted PL/SQL can synthesize a message that
+    /// contains a literal, application-context value, or derived secret.
+    pub(super) fn redact_session_setup_result<T>(
+        result: Result<T, DbError>,
+        statement_ordinal: usize,
+    ) -> Result<T, DbError> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(DbError::Execute(message)) => {
+                let detail = match parse_ora_code(&message) {
+                    Some(code) => format!(
+                        "session setup statement {statement_ordinal} failed (ORA-{code:05}); server detail suppressed"
+                    ),
+                    None => format!(
+                        "session setup statement {statement_ordinal} failed; server detail suppressed"
+                    ),
+                };
+                Err(DbError::Execute(detail))
+            }
+            // Deadline/quota cancellation occurs before the driver sees SQL,
+            // so it contains no server-echoed statement detail and must retain
+            // its structural cancellation class for fail-fast propagation.
+            Err(error) => Err(error),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6403,6 +6435,98 @@ mod tests {
             assert!(!redacted.contains(forbidden), "{redacted}");
         }
         assert!(redacted.contains("<redacted>"));
+    }
+
+    #[test]
+    fn session_setup_errors_discard_sql_and_server_detail_but_keep_code_and_ordinal() {
+        const SECRET: &str = "qa47-session-token-must-never-render";
+        const SQL: &str =
+            "BEGIN raise_application_error(-20000, 'qa47-session-token-must-never-render'); END;";
+        let raw = DbError::Execute(format!(
+            "session setup: ORA-20000: {SECRET}\nORA-06512: at line 1; SQL={SQL}"
+        ));
+
+        let error = driver::redact_session_setup_result::<()>(Err(raw), 2)
+            .expect_err("the second trusted statement must remain a failure");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("session setup statement 2 failed"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("ORA-20000"), "{rendered}");
+        assert!(rendered.contains("server detail suppressed"), "{rendered}");
+        assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+        assert!(!rendered.contains(SQL), "statement leaked: {rendered}");
+        assert!(
+            !rendered.contains("ORA-06512"),
+            "server detail leaked: {rendered}"
+        );
+
+        let envelope = error.into_envelope();
+        assert_eq!(envelope.ora_code, Some(20_000));
+        assert_eq!(
+            envelope.error_class,
+            oraclemcp_error::ErrorClass::ConnectionFailed
+        );
+        let json = envelope.to_json().to_string();
+        assert!(!json.contains(SECRET), "doctor/tool JSON leaked: {json}");
+        assert!(!json.contains(SQL), "doctor/tool JSON leaked SQL: {json}");
+    }
+
+    #[test]
+    fn session_setup_redaction_preserves_known_class_and_success() {
+        let error = driver::redact_session_setup_result::<()>(
+            Err(DbError::Execute(
+                "session setup: ORA-01031: qa47-private-context".to_owned(),
+            )),
+            1,
+        )
+        .expect_err("insufficient privilege remains a failure");
+        let envelope = error.into_envelope();
+        assert_eq!(envelope.ora_code, Some(1_031));
+        assert_eq!(
+            envelope.error_class,
+            oraclemcp_error::ErrorClass::InsufficientPrivilege
+        );
+        assert!(!envelope.message.contains("qa47-private-context"));
+
+        let success = driver::redact_session_setup_result::<u64>(Ok(7), 3)
+            .expect("successful setup is unchanged");
+        assert_eq!(success, 7);
+    }
+
+    #[test]
+    fn session_setup_errors_without_an_oracle_code_still_suppress_detail() {
+        let error = driver::redact_session_setup_result::<()>(
+            Err(DbError::Execute(
+                "driver rejected qa47-non-oracle-secret".to_owned(),
+            )),
+            4,
+        )
+        .expect_err("driver failure remains a failure");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("session setup statement 4 failed"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("qa47-non-oracle-secret"), "{rendered}");
+        assert_eq!(error.into_envelope().ora_code, None);
+    }
+
+    #[test]
+    fn session_setup_redaction_preserves_structural_cancellation() {
+        let error = driver::redact_session_setup_result::<()>(
+            Err(DbError::Cancelled(
+                "session setup: request deadline exceeded".to_owned(),
+            )),
+            1,
+        )
+        .expect_err("cancelled setup remains cancelled");
+        assert!(matches!(error, DbError::Cancelled(_)), "{error:?}");
+        assert_eq!(
+            error.into_envelope().error_class,
+            oraclemcp_error::ErrorClass::Timeout
+        );
     }
 
     // --- structured / decomposed / upper-cased redaction (bead p0sd) ------
