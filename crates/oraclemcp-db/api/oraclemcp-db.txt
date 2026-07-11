@@ -3427,7 +3427,6 @@ pub struct oraclemcp_db::OraclePool
 impl oraclemcp_db::OraclePool
 pub async fn oraclemcp_db::OraclePool::connect(&asupersync::cx::cx::Cx, oraclemcp_db::OracleConnectOptions, oraclemcp_db::PoolSettings) -> core::result::Result<Self, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::OraclePool::describe(&self, &asupersync::cx::cx::Cx) -> core::result::Result<oraclemcp_db::OracleConnectionInfo, oraclemcp_db::DbError>
-pub async fn oraclemcp_db::OraclePool::execute(&self, &asupersync::cx::cx::Cx, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<oraclemcp_db::OracleBind>) -> core::result::Result<u64, oraclemcp_db::DbError>
 pub fn oraclemcp_db::OraclePool::metrics(&self) -> oraclemcp_db::PoolMetrics
 pub async fn oraclemcp_db::OraclePool::ping(&self, &asupersync::cx::cx::Cx) -> core::result::Result<(), oraclemcp_db::DbError>
 pub async fn oraclemcp_db::OraclePool::query_rows(&self, &asupersync::cx::cx::Cx, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<oraclemcp_db::OracleBind>) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>

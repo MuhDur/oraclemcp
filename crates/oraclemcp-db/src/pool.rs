@@ -327,22 +327,6 @@ impl OraclePool {
         .await
     }
 
-    /// Run a DML/DDL statement on a pooled connection with cancellation-aware
-    /// checkout and DB execution boundaries. Cancelled or failed mutating calls
-    /// discard the checked-out connection.
-    pub async fn execute(
-        &self,
-        cx: &Cx,
-        sql: impl Into<String>,
-        binds: Vec<OracleBind>,
-    ) -> Result<u64, DbError> {
-        let sql = sql.into();
-        self.with_conn(cx, |cx, conn| {
-            Box::pin(async move { conn.execute(cx, &sql, &binds).await })
-        })
-        .await
-    }
-
     /// Run one page of a read query (bind-first, paginated, capped) on a pooled
     /// connection (plan §8.2, bead P1-2).
     pub async fn read_query(
@@ -768,6 +752,50 @@ mod tests {
         assert_eq!(s.min_idle, 2);
         assert_eq!(s.acquire_timeout_secs, 5);
         assert_eq!(s.statement_cache_size, 50);
+    }
+
+    #[test]
+    fn stateless_pool_refuses_mutation_without_checking_out_a_session() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let pool = OraclePool::for_test_at_open_count(PoolSettings::default(), 0);
+
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            let concrete_error = pool
+                .execute(&cx, "UPDATE sensitive_table SET value = 1", &[])
+                .await
+                .expect_err("concrete stateless pool must refuse mutation");
+            assert!(
+                matches!(
+                    concrete_error,
+                    DbError::Execute(ref message)
+                        if message == "pooled stateless metadata connection does not execute statements"
+                ),
+                "unexpected concrete refusal: {concrete_error:?}"
+            );
+
+            let connection: &dyn OracleConnection = &pool;
+            let trait_error = connection
+                .execute(&cx, "ALTER SESSION SET CURRENT_SCHEMA = OTHER", &[])
+                .await
+                .expect_err("trait-object stateless pool must refuse mutation");
+            assert!(
+                matches!(
+                    trait_error,
+                    DbError::Execute(ref message)
+                        if message == "pooled stateless metadata connection does not execute statements"
+                ),
+                "unexpected trait-object refusal: {trait_error:?}"
+            );
+        });
+
+        let metrics = pool.metrics();
+        assert_eq!(metrics.acquired, 0, "refusal must happen before checkout");
+        assert_eq!(metrics.released, 0);
+        assert_eq!(metrics.discarded, 0);
+        assert_eq!(metrics.in_use, 0);
     }
 
     #[test]
