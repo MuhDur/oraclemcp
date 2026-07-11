@@ -141,7 +141,7 @@ field is unset after inheritance.
 | `max_level` | enum | `READ_ONLY` | no | Per-target operating-level ceiling. Immutable cap; session elevation can never exceed it. See [the ladder](#the-operating-level-ladder). |
 | `default_level` | enum | `READ_ONLY` | no | The level a fresh session starts at. Must not exceed `max_level` (else config load error). |
 | `protected` | bool | `false` | no | Production profile: pins the ceiling immutable. When `true`, `max_level` **must** be `READ_ONLY` (else load error) and `literal:` secret refs are rejected. Implies `require_signed_tools`. |
-| `require_signed_tools` | bool | `false` | no | Require a valid HMAC signature for every operator-defined custom tool loaded with this profile. A `protected` profile implies this even when unset. |
+| `require_signed_tools` | bool | `false` | no | Require a valid HMAC signature for every operator-defined custom tool loaded with this profile. A `protected` profile implies this even when unset. `ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY` must resolve to at least 32 bytes. |
 | `read_only_standby` | bool | `false` | no | Mark the target as a read-only standby (Active Data Guard): forces `READ_ONLY` regardless of `max_level`. |
 | `mcp_exposed` | bool | `true` | no | E5 per-profile MCP exposure (opt-out). See [The `mcp_exposed` opt-out](#the-mcp_exposed-opt-out). |
 | `dashboard_ddl_workbench` | bool | `false` | no | Browser dashboard DDL/Admin apply opt-in for this profile. Still capped by `max_level`, `protected`, `read_only_standby`, confirmation, rollback, and audit controls. |
@@ -331,6 +331,12 @@ hatch only and is rejected when `protected = true`. Supported forms:
 | `vault:path` | Future backend seam; fails closed unless a Vault resolver is wired. |
 | `literal:value` | **Dev-only** inline value. **Rejected** when `protected = true`. |
 
+Security-sensitive HMAC keys have an additional size requirement: resolved
+`[audit].key_ref`, `[http.oauth].hs256_secret_ref`, and
+`ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY` values must contain at least 32 bytes (256
+bits). Generate random key material; empty, newline-only, and shorter values
+fail closed during startup, verification, or `sign-tool` before use.
+
 ---
 
 ## Auth modes
@@ -438,6 +444,8 @@ per-client credentials are enabled, granted `oracle:*` scopes can only **lower**
 the effective ceiling, never raise it, and protected profiles stay `READ_ONLY`.
 Server-only TLS is transport encryption, not application authentication —
 `/mcp` still needs per-client credentials, OAuth, mTLS, or `--allow-no-auth`.
+The built-in HS256 verifier requires the resolved
+`[http.oauth].hs256_secret_ref` to contain at least 32 bytes.
 Adding `[http.tls.client_ca_path]` requires mTLS client certs, but only leaf DER
 SHA-256 fingerprints listed in `[http.mtls].client_fingerprints` become
 `mtls:sha256:<hex>` principals.

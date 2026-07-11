@@ -14,12 +14,77 @@
 //! upheld — this is pure safe Rust.
 
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 /// SHA-256 block size in bytes (RFC 2104 `B`).
 const BLOCK_LEN: usize = 64;
 /// SHA-256 output size in bytes (`L`).
 const OUTPUT_LEN: usize = 32;
 const HMAC_SHA256_PREFIX: &str = "hmac-sha256:";
+
+/// Minimum key size for security-sensitive HMAC-SHA256 consumers.
+///
+/// RFC 7518 section 3.2 requires an HS256 key at least as large as the SHA-256
+/// output. Audit and custom-tool signatures use the same floor so their keyed
+/// anti-forgery claim cannot be configured with a trivially guessable secret.
+pub const MIN_HMAC_SHA256_KEY_BYTES: usize = OUTPUT_LEN;
+
+/// A rejected security-sensitive HMAC-SHA256 key.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[error("HMAC-SHA256 key is too short ({actual} bytes); at least {minimum} bytes are required")]
+pub struct HmacSha256KeyError {
+    /// Resolved key length; secret bytes are never retained in the error.
+    pub actual: usize,
+    /// Required minimum length.
+    pub minimum: usize,
+}
+
+/// An opaque HMAC-SHA256 key validated for authorization and anti-forgery use.
+#[derive(Clone)]
+pub struct HmacSha256Key(Vec<u8>);
+
+impl HmacSha256Key {
+    /// Validate and wrap raw secret bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HmacSha256KeyError`] when fewer than
+    /// [`MIN_HMAC_SHA256_KEY_BYTES`] bytes are supplied.
+    pub fn new(key: impl Into<Vec<u8>>) -> Result<Self, HmacSha256KeyError> {
+        let key = key.into();
+        if key.len() < MIN_HMAC_SHA256_KEY_BYTES {
+            return Err(HmacSha256KeyError {
+                actual: key.len(),
+                minimum: MIN_HMAC_SHA256_KEY_BYTES,
+            });
+        }
+        Ok(Self(key))
+    }
+
+    /// Compute a raw HMAC-SHA256 value without exposing the key material.
+    #[must_use]
+    pub fn authenticate(&self, message: &[u8]) -> [u8; OUTPUT_LEN] {
+        hmac_sha256(&self.0, message)
+    }
+
+    /// Compute the audit wire-format HMAC without exposing the key material.
+    #[must_use]
+    pub fn authenticate_hex(&self, message: &[u8]) -> String {
+        hmac_sha256_hex(&self.0, message)
+    }
+
+    /// Verify an audit wire-format HMAC without exposing the key material.
+    #[must_use]
+    pub fn verify_hex(&self, message: &[u8], signature: &str) -> bool {
+        hmac_sha256_hex_is_valid(&self.0, message, signature)
+    }
+}
+
+impl std::fmt::Debug for HmacSha256Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HmacSha256Key(***redacted***)")
+    }
+}
 
 /// Compute `HMAC-SHA256(key, message)` and return the 32 raw output bytes.
 ///
@@ -131,6 +196,28 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn security_key_rejects_undersized_material_and_accepts_minimum() {
+        for len in [0, 1, MIN_HMAC_SHA256_KEY_BYTES - 1] {
+            let error = HmacSha256Key::new(vec![0x5a; len])
+                .expect_err("undersized security key must fail closed");
+            assert_eq!(error.actual, len);
+            assert_eq!(error.minimum, MIN_HMAC_SHA256_KEY_BYTES);
+        }
+        for len in [MIN_HMAC_SHA256_KEY_BYTES, MIN_HMAC_SHA256_KEY_BYTES + 1] {
+            HmacSha256Key::new(vec![0x5a; len]).expect("minimum-size security key is valid");
+        }
+    }
+
+    #[test]
+    fn security_key_debug_and_error_do_not_expose_material() {
+        let sentinel = "qa2-do-not-print-this-key-material";
+        let key = HmacSha256Key::new(sentinel.as_bytes().to_vec()).expect("valid key");
+        assert!(!format!("{key:?}").contains(sentinel));
+        let error = HmacSha256Key::new(b"short-secret".to_vec()).expect_err("short key");
+        assert!(!error.to_string().contains("short-secret"));
+    }
 
     /// RFC 4231 Test Case 2: key="Jefe", data="what do ya want for nothing?".
     /// Known-answer test pins our HMAC-SHA256 to the standard.

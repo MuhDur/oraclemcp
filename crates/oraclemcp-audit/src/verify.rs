@@ -208,7 +208,7 @@ mod tests {
     use std::sync::Arc;
 
     fn key() -> SigningKey {
-        SigningKey::new("k1", b"verify-test-key".to_vec())
+        SigningKey::new("k1", b"0123456789abcdef0123456789abcdef".to_vec()).expect("valid test key")
     }
 
     fn draft(sql: &str) -> AuditEntryDraft {
@@ -305,7 +305,8 @@ mod tests {
     #[test]
     fn wrong_key_fails() {
         let records = signed_chain(2);
-        let attacker = SigningKey::new("k1", b"wrong-key".to_vec());
+        let attacker = SigningKey::new("k1", b"fedcba9876543210fedcba9876543210".to_vec())
+            .expect("valid test key");
         match verify_records(&records, &[attacker]) {
             VerifyOutcome::Broken { reason, .. } => {
                 assert_eq!(reason, BrokenReason::SignatureMismatch);
@@ -317,7 +318,8 @@ mod tests {
     #[test]
     fn unknown_key_id_is_reported() {
         let records = signed_chain(1);
-        let other = SigningKey::new("k2", b"verify-test-key".to_vec());
+        let other = SigningKey::new("k2", b"0123456789abcdef0123456789abcdef".to_vec())
+            .expect("valid test key");
         match verify_records(&records, &[other]) {
             VerifyOutcome::Broken { reason, .. } => {
                 assert_eq!(reason, BrokenReason::UnknownKeyId("k1".to_owned()));
@@ -391,7 +393,8 @@ mod tests {
         // Records 1..2 under k1, record 3 under k2 (simulated by signing a
         // tail record with a second key). Both keys supplied -> Ok.
         let k1 = key();
-        let k2 = SigningKey::new("k2", b"rotated-key".to_vec());
+        let k2 = SigningKey::new("k2", b"abcdef0123456789abcdef0123456789".to_vec())
+            .expect("valid test key");
         let sink = Arc::new(MemoryAuditSink::new());
         let auditor = Auditor::new(Box::new(Shared(sink.clone())), k1.clone());
         auditor

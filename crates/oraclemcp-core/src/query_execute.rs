@@ -353,7 +353,11 @@ mod tests {
         (
             Auditor::new(
                 Box::new(Shared(sink.clone())),
-                oraclemcp_audit::SigningKey::new("test", b"qe-test-key".to_vec()),
+                oraclemcp_audit::SigningKey::new(
+                    "test",
+                    b"0123456789abcdef0123456789abcdef".to_vec(),
+                )
+                .expect("valid test key"),
             ),
             sink,
         )

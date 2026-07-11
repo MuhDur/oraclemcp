@@ -16,6 +16,7 @@
 //! (P1-13a / 2.12.1); classify-at-load (2.12.2), Form A/B execution (2.12.3/4),
 //! HMAC signing (2.12.5), and meta-dispatch registration (2.12.6) layer on here.
 
+use oraclemcp_audit::HmacSha256Key;
 use oraclemcp_db::OracleBind;
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{Classifier, OperatingLevel};
@@ -406,45 +407,19 @@ fn canonical_bytes(def: &CustomToolDef) -> Vec<u8> {
     out
 }
 
-/// HMAC-SHA256 (RFC 2104) over `sha2`.
-fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    const BLOCK: usize = 64;
-    let mut k = [0u8; BLOCK];
-    if key.len() > BLOCK {
-        k[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        k[..key.len()].copy_from_slice(key);
-    }
-    let mut ipad = [0x36u8; BLOCK];
-    let mut opad = [0x5cu8; BLOCK];
-    for i in 0..BLOCK {
-        ipad[i] ^= k[i];
-        opad[i] ^= k[i];
-    }
-    let mut inner = Sha256::new();
-    inner.update(ipad);
-    inner.update(msg);
-    let inner = inner.finalize();
-    let mut outer = Sha256::new();
-    outer.update(opad);
-    outer.update(inner);
-    outer.finalize().into()
-}
-
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Compute the hex HMAC signature for a definition (operator-side signing).
 #[must_use]
-pub fn sign(def: &CustomToolDef, hmac_key: &[u8]) -> String {
-    hex(&hmac_sha256(hmac_key, &canonical_bytes(def)))
+pub fn sign(def: &CustomToolDef, hmac_key: &HmacSha256Key) -> String {
+    hex(&hmac_key.authenticate(&canonical_bytes(def)))
 }
 
 /// Whether `def.signature` is present and a valid HMAC over its canonical bytes.
 #[must_use]
-pub fn verify_signature(def: &CustomToolDef, hmac_key: &[u8]) -> bool {
+pub fn verify_signature(def: &CustomToolDef, hmac_key: &HmacSha256Key) -> bool {
     let Some(sig) = &def.signature else {
         return false;
     };
@@ -463,7 +438,7 @@ pub fn verify_signature(def: &CustomToolDef, hmac_key: &[u8]) -> bool {
 /// unprotected profile signing is optional (verified if present).
 pub fn enforce_signature(
     def: &CustomToolDef,
-    hmac_key: &[u8],
+    hmac_key: &HmacSha256Key,
     protected: bool,
 ) -> Result<(), LoadError> {
     if protected {
@@ -491,7 +466,7 @@ pub fn load_tools_for_profile(
     defs: &[CustomToolDef],
     classifier: &Classifier,
     max_level: OperatingLevel,
-    hmac_key: &[u8],
+    hmac_key: &HmacSha256Key,
     protected: bool,
 ) -> Result<Vec<LoadedTool>, LoadError> {
     defs.iter()
@@ -1010,10 +985,14 @@ mod tests {
 
     // ── HMAC signing (2.12.5) ─────────────────────────────────────────────────
 
-    const KEY: &[u8] = b"operator-hmac-key";
+    fn key() -> HmacSha256Key {
+        HmacSha256Key::new(b"0123456789abcdef0123456789abcdef".to_vec())
+            .expect("valid custom-tool test key")
+    }
 
     #[test]
     fn sign_then_verify_roundtrips() {
+        let key = key();
         let mut d = def_sql("rep", "SELECT 1 FROM dual", None);
         d.params = vec![ParamDef {
             name: "x".to_owned(),
@@ -1021,69 +1000,75 @@ mod tests {
             required: true,
             description: None,
         }];
-        d.signature = Some(sign(&d, KEY));
-        assert!(verify_signature(&d, KEY));
+        d.signature = Some(sign(&d, &key));
+        assert!(verify_signature(&d, &key));
         // Wrong key fails.
-        assert!(!verify_signature(&d, b"other-key"));
+        let other = HmacSha256Key::new(b"fedcba9876543210fedcba9876543210".to_vec())
+            .expect("valid custom-tool test key");
+        assert!(!verify_signature(&d, &other));
     }
 
     #[test]
     fn tampering_invalidates_the_signature() {
+        let key = key();
         let mut d = def_sql("rep", "SELECT 1 FROM dual", None);
-        d.signature = Some(sign(&d, KEY));
+        d.signature = Some(sign(&d, &key));
         // Tamper the body after signing.
         d.sql = Some("SELECT secret FROM admin_only".to_owned());
-        assert!(!verify_signature(&d, KEY));
+        assert!(!verify_signature(&d, &key));
     }
 
     #[test]
     fn protected_profile_requires_a_valid_signature() {
+        let key = key();
         let d = def_sql("rep", "SELECT 1 FROM dual", None);
         // Unsigned on protected -> SignatureRequired.
         assert!(matches!(
-            enforce_signature(&d, KEY, true),
+            enforce_signature(&d, &key, true),
             Err(LoadError::SignatureRequired { .. })
         ));
         // Tampered/forged signature on protected -> SignatureInvalid.
         let mut forged = d.clone();
         forged.signature = Some("deadbeef".to_owned());
         assert!(matches!(
-            enforce_signature(&forged, KEY, true),
+            enforce_signature(&forged, &key, true),
             Err(LoadError::SignatureInvalid { .. })
         ));
         // Correctly signed -> ok.
         let mut signed = d.clone();
-        signed.signature = Some(sign(&signed, KEY));
-        assert!(enforce_signature(&signed, KEY, true).is_ok());
+        signed.signature = Some(sign(&signed, &key));
+        assert!(enforce_signature(&signed, &key, true).is_ok());
     }
 
     #[test]
     fn unprotected_profile_allows_unsigned_but_rejects_bad_signature() {
+        let key = key();
         let d = def_sql("rep", "SELECT 1 FROM dual", None);
         // Unsigned on an unprotected profile is fine.
-        assert!(enforce_signature(&d, KEY, false).is_ok());
+        assert!(enforce_signature(&d, &key, false).is_ok());
         // But a present-yet-invalid signature is still rejected.
         let mut bad = d.clone();
         bad.signature = Some("00".to_owned());
         assert!(matches!(
-            enforce_signature(&bad, KEY, false),
+            enforce_signature(&bad, &key, false),
             Err(LoadError::SignatureInvalid { .. })
         ));
     }
 
     #[test]
     fn load_tools_for_profile_enforces_signing_then_classifies() {
+        let key = key();
         let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
         let mut d = def_sql("rep", "SELECT 1 FROM dual", None);
-        d.signature = Some(sign(&d, KEY));
+        d.signature = Some(sign(&d, &key));
         // Protected: signed + read-only -> loads.
-        let loaded = load_tools_for_profile(&[d.clone()], &c, OperatingLevel::ReadOnly, KEY, true)
+        let loaded = load_tools_for_profile(&[d.clone()], &c, OperatingLevel::ReadOnly, &key, true)
             .expect("loads");
         assert_eq!(loaded[0].required_level, OperatingLevel::ReadOnly);
         // Protected + unsigned -> refuses before classification.
         let unsigned = def_sql("rep2", "SELECT 1 FROM dual", None);
         assert!(matches!(
-            load_tools_for_profile(&[unsigned], &c, OperatingLevel::ReadOnly, KEY, true),
+            load_tools_for_profile(&[unsigned], &c, OperatingLevel::ReadOnly, &key, true),
             Err(LoadError::SignatureRequired { .. })
         ));
     }

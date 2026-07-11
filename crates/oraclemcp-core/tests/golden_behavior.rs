@@ -225,9 +225,10 @@ fn oauth_enforcement() -> Arc<OAuthEnforcement> {
             authorization_servers: vec!["https://idp.example".to_owned()],
             required_scopes: vec![],
         },
-        verifier: Arc::new(oraclemcp_auth::Hs256Verifier {
-            secret: b"synthetic-harness-key".to_vec(),
-        }),
+        verifier: Arc::new(
+            oraclemcp_auth::Hs256Verifier::new(b"0123456789abcdef0123456789abcdef".to_vec())
+                .expect("valid test key"),
+        ),
         metadata_url: "https://oraclemcp.example/.well-known/oauth-protected-resource".to_owned(),
     })
 }

@@ -213,7 +213,8 @@ mod tests {
             1,
             GENESIS_HASH,
             "2026-06-20T00:00:00Z".to_owned(),
-            &SigningKey::new("k1", b"ship-test".to_vec()),
+            &SigningKey::new("k1", b"0123456789abcdef0123456789abcdef".to_vec())
+                .expect("valid test key"),
         )
     }
 

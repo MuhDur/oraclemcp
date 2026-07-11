@@ -432,7 +432,9 @@ oraclemcp --json clients rotate <client_id>
 oraclemcp --json clients revoke <client_id>
 ```
 
-OAuth configuration can come from `profiles.toml` or CLI flags:
+OAuth configuration can come from `profiles.toml` or CLI flags. The resolved
+HS256 secret must be at least 32 bytes (256 bits); use randomly generated key
+material rather than a password or memorable phrase:
 
 ```sh
 export ORACLEMCP_OAUTH_HS256_SECRET='replace-with-a-long-random-secret'
@@ -625,7 +627,9 @@ the connect-time client identity fields (`program`, `machine`, `os_user`,
 `action`, `client_identifier`, and `client_info` after connect through Oracle
 session APIs.
 `require_signed_tools = true` requires HMAC signatures for operator-defined
-custom tools on that profile; `protected = true` implies the same policy.
+custom tools on that profile; `protected = true` implies the same policy. The
+resolved audit, OAuth HS256, and custom-tool HMAC keys must each contain at
+least 32 bytes of randomly generated key material.
 
 A few further profile keys are optional:
 
@@ -840,7 +844,8 @@ On protected profiles, every custom tool must carry a valid HMAC signature. Set
 `ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY` in the server environment to verify signed
 definitions. On unprotected profiles, unsigned tools are allowed for local use;
 if any definition includes a `signature`, the same key is required and invalid
-signatures are rejected.
+signatures are rejected. The key must contain at least 32 bytes of randomly
+generated key material.
 
 Sign local tool definitions from the same binary:
 

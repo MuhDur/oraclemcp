@@ -3516,7 +3516,8 @@ mod tests {
         let memory_sink = Arc::new(MemoryAuditSink::new());
         let auditor = Arc::new(Auditor::new(
             Box::new(SharedAuditSink(Arc::clone(&memory_sink))),
-            SigningKey::new("test-key", b"test-secret-for-finalization-timeout".to_vec()),
+            SigningKey::new("test-key", b"test-secret-for-finalization-timeout".to_vec())
+                .expect("valid test key"),
         ));
         let (entered_tx, entered_rx) = std_mpsc::channel();
         let lane = LaneRuntime::spawn_default_with_panic_auditor(
@@ -4930,7 +4931,8 @@ mod tests {
         let memory_sink = Arc::new(MemoryAuditSink::new());
         let auditor = Arc::new(Auditor::new(
             Box::new(SharedAuditSink(Arc::clone(&memory_sink))),
-            SigningKey::new("test-key", b"test-secret-for-lane-panic".to_vec()),
+            SigningKey::new("test-key", b"test-secret-for-lane-panic-12345".to_vec())
+                .expect("valid test key"),
         ));
         let panicking = LaneRuntime::spawn_default_with_panic_auditor(
             "panic-test",

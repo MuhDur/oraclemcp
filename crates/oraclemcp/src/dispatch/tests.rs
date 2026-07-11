@@ -3114,7 +3114,8 @@ fn lifecycle_close_rolls_back_and_revokes_execution_grants() {
     let sink = Arc::new(MemoryAuditSink::new());
     let auditor = Arc::new(oraclemcp_audit::Auditor::new(
         Box::new(SharedSink(sink.clone())),
-        SigningKey::new("test-key", b"lifecycle-close-test-key".to_vec()),
+        SigningKey::new("test-key", b"lifecycle-close-test-key-12345678".to_vec())
+            .expect("valid test key"),
     ));
     let dispatcher = OracleDispatcher::new_with_profile_level(
         Box::new(LifecycleCleanupMock {
@@ -3291,7 +3292,8 @@ fn lifecycle_timeout_close_audits_timeout_reason() {
     let sink = Arc::new(MemoryAuditSink::new());
     let auditor = Arc::new(oraclemcp_audit::Auditor::new(
         Box::new(SharedSink(sink.clone())),
-        SigningKey::new("test-key", b"lifecycle-timeout-test-key".to_vec()),
+        SigningKey::new("test-key", b"lifecycle-timeout-test-key-12345".to_vec())
+            .expect("valid test key"),
     ));
     let dispatcher = OracleDispatcher::new_with_profile_level(
         Box::new(LifecycleCleanupMock {
@@ -3401,7 +3403,8 @@ fn finalization_timeout_audits_unknown_before_best_effort_cleanup() {
         SigningKey::new(
             "test-key",
             b"request-finalization-timeout-test-key".to_vec(),
-        ),
+        )
+        .expect("valid test key"),
     ));
     let dispatcher = OracleDispatcher::new_with_profile_level(
         Box::new(FinalizationTimeoutMock {
@@ -5467,7 +5470,8 @@ fn execute_commit_in_doubt_audits_and_quarantines_dispatcher() {
     let sink = Arc::new(MemoryAuditSink::new());
     let auditor = Arc::new(oraclemcp_audit::Auditor::new(
         Box::new(SharedSink(sink.clone())),
-        SigningKey::new("test-key", b"commit-in-doubt-test-key".to_vec()),
+        SigningKey::new("test-key", b"commit-in-doubt-test-key-1234567".to_vec())
+            .expect("valid test key"),
     ));
     let dispatcher = OracleDispatcher::new_with_profile_level(
         Box::new(CommitInDoubtMock {
@@ -6212,7 +6216,11 @@ mod qa85_terminal_boundaries {
         let sink = Arc::new(MemoryAuditSink::new());
         let auditor = Arc::new(Auditor::new(
             Box::new(SharedSink(Arc::clone(&sink))),
-            SigningKey::new("qa85-test-key", b"qa85-terminal-boundary-key".to_vec()),
+            SigningKey::new(
+                "qa85-test-key",
+                b"qa85-terminal-boundary-key-12345".to_vec(),
+            )
+            .expect("valid test key"),
         ));
         (auditor, sink)
     }
@@ -6500,7 +6508,8 @@ mod qa85_terminal_boundaries {
                 SigningKey::new(
                     "qa85-test-key",
                     b"qa85-cancel-after-elevation-audit".to_vec(),
-                ),
+                )
+                .expect("valid test key"),
             ));
             let dispatcher = OracleDispatcher::new_with_profile_level(
                 Box::new(ExecRecordingMock::new(Arc::new(ExecState::default()))),
@@ -6731,7 +6740,11 @@ mod qa85_terminal_boundaries {
                 inner: Arc::clone(&memory_sink),
                 appends: Arc::clone(&append_count),
             }),
-            SigningKey::new("qa85-test-key", b"qa85-terminal-audit-failure".to_vec()),
+            SigningKey::new(
+                "qa85-test-key",
+                b"qa85-terminal-audit-failure-1234".to_vec(),
+            )
+            .expect("valid test key"),
         ));
         let dispatcher = OracleDispatcher::new_with_profile_level(
             Box::new(CommitInDoubtMock {
@@ -7033,7 +7046,8 @@ mod audit_wiring {
 
     fn auditor_with_sink() -> (Arc<Auditor>, Arc<MemoryAuditSink>) {
         let sink = Arc::new(MemoryAuditSink::new());
-        let key = SigningKey::new("test-key", b"0123456789abcdef0123456789abcdef".to_vec());
+        let key = SigningKey::new("test-key", b"0123456789abcdef0123456789abcdef".to_vec())
+            .expect("valid test key");
         let auditor = Arc::new(Auditor::new(Box::new(SharedSink(sink.clone())), key));
         (auditor, sink)
     }
@@ -7073,7 +7087,8 @@ mod audit_wiring {
     }
 
     fn failing_auditor() -> Arc<Auditor> {
-        let key = SigningKey::new("test-key", b"0123456789abcdef0123456789abcdef".to_vec());
+        let key = SigningKey::new("test-key", b"0123456789abcdef0123456789abcdef".to_vec())
+            .expect("valid test key");
         Arc::new(Auditor::new(Box::new(FailingSink), key))
     }
 
@@ -7923,7 +7938,8 @@ mod read_only_backstop_wiring {
         let sink = Arc::new(MemoryAuditSink::new());
         let auditor = Arc::new(Auditor::new(
             Box::new(SharedSink(sink.clone())),
-            SigningKey::new("test-key", b"generated-read-audit-test-key".to_vec()),
+            SigningKey::new("test-key", b"generated-read-audit-test-key-123".to_vec())
+                .expect("valid test key"),
         ));
         let dispatcher = OracleDispatcher::new_with_profile(
             Box::new(BackstopRecordingMock {

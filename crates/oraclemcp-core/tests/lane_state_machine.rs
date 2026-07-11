@@ -181,7 +181,8 @@ fn switch_generation_invalidates_stale_grants_and_subject_mix() {
     let sink = Arc::new(MemoryAuditSink::new());
     let auditor = Auditor::new(
         Box::new(SharedSink(Arc::clone(&sink))),
-        SigningKey::new("n9-test", b"n9-state-machine-test-key".to_vec()),
+        SigningKey::new("n9-test", b"n9-state-machine-test-key-12345678".to_vec())
+            .expect("valid test key"),
     );
     let executor = CountingExecutor {
         calls: AtomicU64::new(0),

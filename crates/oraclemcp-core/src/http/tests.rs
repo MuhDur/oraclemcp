@@ -484,7 +484,11 @@ fn operator_auditor() -> (Arc<Auditor>, Arc<oraclemcp_audit::MemoryAuditSink>) {
     }
 
     let sink = Arc::new(oraclemcp_audit::MemoryAuditSink::default());
-    let key = oraclemcp_audit::SigningKey::new("operator-test", b"operator-key".to_vec());
+    let key = oraclemcp_audit::SigningKey::new(
+        "operator-test",
+        b"0123456789abcdef0123456789abcdef".to_vec(),
+    )
+    .expect("valid test key");
     let auditor = Arc::new(Auditor::new(Box::new(SharedSink(Arc::clone(&sink))), key));
     (auditor, sink)
 }
@@ -535,7 +539,9 @@ fn audit_tail_draft(
 }
 
 fn write_audit_tail_fixture(name: &str, break_second_hash: bool) -> PathBuf {
-    let key = oraclemcp_audit::SigningKey::new("tail-test", b"tail-test-key".to_vec());
+    let key =
+        oraclemcp_audit::SigningKey::new("tail-test", b"0123456789abcdef0123456789abcdef".to_vec())
+            .expect("valid test key");
     let db_evidence = DbEvidence {
         availability: Some("captured".to_owned()),
         db_unique_name: Some("ORCLPDB1".to_owned()),
@@ -1042,7 +1048,11 @@ fn classifier_ladder_draft(
 /// Write a self-lane audit fixture that carries one statement per ladder verdict
 /// plus an `operator_api` meta entry (which the ladder must skip).
 fn write_classifier_ladder_fixture(name: &str) -> PathBuf {
-    let key = oraclemcp_audit::SigningKey::new("ladder-test", b"ladder-test-key".to_vec());
+    let key = oraclemcp_audit::SigningKey::new(
+        "ladder-test",
+        b"0123456789abcdef0123456789abcdef".to_vec(),
+    )
+    .expect("valid test key");
     let drafts = [
         classifier_ladder_draft(
             "oracle_query",
@@ -4116,9 +4126,10 @@ fn oauth_enforcement() -> Arc<OAuthEnforcement> {
             authorization_servers: vec!["https://idp.example".to_owned()],
             required_scopes: vec![],
         },
-        verifier: Arc::new(oraclemcp_auth::Hs256Verifier {
-            secret: b"k".to_vec(),
-        }),
+        verifier: Arc::new(
+            oraclemcp_auth::Hs256Verifier::new(b"0123456789abcdef0123456789abcdef".to_vec())
+                .expect("valid test key"),
+        ),
         metadata_url: "https://oraclemcp.example/.well-known/oauth-protected-resource".to_owned(),
     })
 }

@@ -135,7 +135,8 @@ pub struct AuditConfig {
     /// default under the XDG state home.
     pub path: Option<PathBuf>,
     /// Secret reference for the HMAC signing key
-    /// (`env:`/`file:`/`keyring:`/future `vault:`/dev-only `literal:`).
+    /// (`env:`/`file:`/`keyring:`/future `vault:`/dev-only `literal:`). The
+    /// resolved key must contain at least 32 bytes.
     pub key_ref: Option<String>,
     /// Identifier of the active signing key, recorded in each record so the key
     /// can be rotated while old records keep verifying. Defaults to `default`.
@@ -399,7 +400,8 @@ pub struct HttpOAuthConfig {
     pub authorization_servers: Vec<String>,
     /// Scopes that every token must carry before dispatch.
     pub required_scopes: Vec<String>,
-    /// Secret reference used by the built-in HS256 verifier.
+    /// Secret reference used by the built-in HS256 verifier. The resolved key
+    /// must contain at least 32 bytes.
     pub hs256_secret_ref: Option<String>,
     /// Metadata URL advertised in `WWW-Authenticate`; defaults from resource.
     pub metadata_url: Option<String>,

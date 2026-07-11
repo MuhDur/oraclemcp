@@ -425,7 +425,7 @@ mod tests {
     use std::sync::Arc;
 
     fn key() -> SigningKey {
-        SigningKey::new("k1", b"shipping-test-key".to_vec())
+        SigningKey::new("k1", b"0123456789abcdef0123456789abcdef".to_vec()).expect("valid test key")
     }
 
     fn draft(sql: &str, danger: &str) -> AuditEntryDraft {

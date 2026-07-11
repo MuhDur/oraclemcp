@@ -403,7 +403,8 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
         "config": {
             "profiles": "~/.config/oraclemcp/profiles.toml or ORACLEMCP_CONFIG",
             "custom_tools": "~/.config/oraclemcp/tools.d/*.toml or ORACLEMCP_TOOLS_DIR",
-            "custom_tool_signing": "protected profiles and profiles with require_signed_tools=true require ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY plus per-tool signatures from oraclemcp sign-tool",
+            "custom_tool_signing": "protected profiles and profiles with require_signed_tools=true require ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY plus per-tool signatures from oraclemcp sign-tool; the HMAC key must contain at least 32 bytes",
+            "hmac_key_size": "resolved OAuth HS256, audit-signing, and custom-tool HMAC keys must contain at least 32 bytes of randomly generated key material",
             "secret_refs": "prefer credential_ref and wallet_password_ref over literal passwords",
             "http_transport": "use --client-credentials for service-owned per-client bearers, or top-level http config / serve --oauth-* / --http-* / --tls-* flags for Streamable HTTP; native rustls TLS and optional mTLS are served directly, mTLS identities require registered leaf fingerprints, and server-only TLS still needs per-client credentials, OAuth, or explicit --allow-no-auth",
             "proxy_auth": "use profiles.proxy_auth for thin proxy auth; credential_ref belongs to proxy_user and target_schema is the CONNECT THROUGH client",
@@ -566,6 +567,7 @@ Configuration
 - Profiles: ~/.config/oraclemcp/profiles.toml or ORACLEMCP_CONFIG.
 - Custom tools: ~/.config/oraclemcp/tools.d/*.toml or ORACLEMCP_TOOLS_DIR.
 - Custom tool signing: protected profiles and profiles with require_signed_tools=true require ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY and signatures from oraclemcp sign-tool.
+- HMAC key size: resolved OAuth HS256, audit-signing, and custom-tool HMAC keys must contain at least 32 bytes of randomly generated key material.
 - Prefer credential_ref and wallet_password_ref over literal passwords.
 - Use profiles.proxy_auth for thin proxy authentication: credential_ref belongs to proxy_user and target_schema is the CONNECT THROUGH client.
 - Use top-level sdu and profiles.drcp for validated thin SDU and DRCP server routing instead of raw connect_string query parameters.

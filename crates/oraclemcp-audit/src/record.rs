@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::hmac::{hmac_sha256_hex, hmac_sha256_hex_is_valid};
+use crate::hmac::{HmacSha256Key, HmacSha256KeyError};
 
 /// Current on-disk audit record schema.
 pub const AUDIT_SCHEMA_VERSION: u16 = 4;
@@ -313,17 +313,24 @@ pub struct AuditRecord {
 #[derive(Clone)]
 pub struct SigningKey {
     key_id: String,
-    key: Vec<u8>,
+    key: HmacSha256Key,
 }
 
 impl SigningKey {
-    /// Build a signing key from an id and the raw secret bytes.
-    #[must_use]
-    pub fn new(key_id: impl Into<String>, key: impl Into<Vec<u8>>) -> Self {
-        SigningKey {
+    /// Validate raw secret bytes and build a signing key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HmacSha256KeyError`] when the secret is shorter than the
+    /// minimum accepted HMAC-SHA256 key size.
+    pub fn new(
+        key_id: impl Into<String>,
+        key: impl Into<Vec<u8>>,
+    ) -> Result<Self, HmacSha256KeyError> {
+        Ok(SigningKey {
             key_id: key_id.into(),
-            key: key.into(),
-        }
+            key: HmacSha256Key::new(key)?,
+        })
     }
 
     /// The key identifier recorded alongside each signature.
@@ -335,7 +342,7 @@ impl SigningKey {
     /// The `hmac-sha256:<hex>` signature over an `entry_hash`.
     #[must_use]
     pub fn sign(&self, entry_hash: &str) -> String {
-        hmac_sha256_hex(&self.key, entry_hash.as_bytes())
+        self.key.authenticate_hex(entry_hash.as_bytes())
     }
 }
 
@@ -531,7 +538,7 @@ impl AuditRecord {
         let Some(signature) = self.signature.as_deref() else {
             return false;
         };
-        hmac_sha256_hex_is_valid(&key.key, self.entry_hash.as_bytes(), signature)
+        key.key.verify_hex(self.entry_hash.as_bytes(), signature)
     }
 }
 
@@ -830,7 +837,8 @@ mod kani_proofs {
 
     #[kani::proof]
     fn signed_chain_step_links_successor_to_predecessor_and_mac_verifies() {
-        let key = SigningKey::new("kani-key", b"kani-signing-key".to_vec());
+        let key = SigningKey::new("kani-key", b"0123456789abcdef0123456789abcdef".to_vec())
+            .expect("valid Kani key");
         // Fixed HMAC-SHA256 vectors over the entry hashes below. Full
         // chained_signed construction remains pinned by unit and mutation tests;
         // this BMC harness isolates the chain step and MAC verifier.
@@ -838,13 +846,13 @@ mod kani_proofs {
             1,
             GENESIS_HASH,
             "sha256:first",
-            "hmac-sha256:6a16998c95e4ef1cfc234d5ca243def4269287b0c89c41c939c63fa8ecdc0d90",
+            "hmac-sha256:f647748194ba8967e69c7b3c506d7d87c324368fd2105fbcaab8717348a9914b",
         );
         let second = signed_record(
             2,
             &first.entry_hash,
             "sha256:second",
-            "hmac-sha256:faa0dc8c76ec2047b4173d005db23240c5996fffc617bf127bbf34bcabe78102",
+            "hmac-sha256:c68ad5a61a3a4c8b21ac2b0ea486bf910766a95b5b5e2fb424d344edd5d43fce",
         );
 
         assert_eq!(first.seq, 1);
@@ -879,7 +887,17 @@ mod tests {
     }
 
     fn key() -> SigningKey {
-        SigningKey::new("k1", b"audit-signing-key".to_vec())
+        SigningKey::new("k1", b"0123456789abcdef0123456789abcdef".to_vec()).expect("valid test key")
+    }
+
+    #[test]
+    fn signing_key_enforces_31_32_byte_boundary() {
+        for len in [0, 1, 31] {
+            SigningKey::new("k1", vec![0x5a; len])
+                .expect_err("undersized audit signing key must fail closed");
+        }
+        SigningKey::new("k1", vec![0x5a; 32]).expect("32-byte audit signing key is valid");
+        SigningKey::new("k1", vec![0x5a; 33]).expect("longer audit signing key is valid");
     }
 
     #[test]
@@ -1229,10 +1247,12 @@ mod tests {
 
     #[test]
     fn signing_key_debug_redacts_secret_material() {
-        let dbg = format!("{:?}", SigningKey::new("kid", b"do-not-print-me".to_vec()));
+        let sentinel = "do-not-print-this-signing-key-123";
+        let key = SigningKey::new("kid", sentinel.as_bytes().to_vec()).expect("valid test key");
+        let dbg = format!("{key:?}");
         assert!(dbg.contains("kid"), "{dbg}");
         assert!(dbg.contains("***redacted***"), "{dbg}");
-        assert!(!dbg.contains("do-not-print-me"), "{dbg}");
+        assert!(!dbg.contains(sentinel), "{dbg}");
     }
 
     #[test]
@@ -1408,7 +1428,8 @@ mod tests {
             "2026-06-01T00:00:00Z".to_owned(),
             &key(),
         );
-        let attacker = SigningKey::new("k1", b"guessed-key".to_vec());
+        let attacker = SigningKey::new("k1", b"fedcba9876543210fedcba9876543210".to_vec())
+            .expect("valid test key");
         assert!(
             !r.signature_is_valid(&attacker),
             "a record signed with one key must not verify under another"

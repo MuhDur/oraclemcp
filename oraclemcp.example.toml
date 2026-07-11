@@ -80,7 +80,8 @@ authorization_servers = ["https://issuer.example.com"]
 # Scopes every token must carry before dispatch. Required (non-empty). Granted
 # `oracle:*` scopes can only LOWER the effective operating ceiling, never raise it.
 required_scopes = ["oracle:read"]
-# Secret reference for the built-in HS256 verifier. Required when [http.oauth] is present.
+# Secret reference for the built-in HS256 verifier. Required when [http.oauth]
+# is present. The resolved key must contain at least 32 random bytes.
 hs256_secret_ref = "env:ORACLEMCP_OAUTH_HS256_SECRET"
 # Metadata URL advertised in `WWW-Authenticate`. Default: derived from `resource`.
 # metadata_url = "http://127.0.0.1:7070/.well-known/oauth-protected-resource"
@@ -104,8 +105,8 @@ hs256_secret_ref = "env:ORACLEMCP_OAUTH_HS256_SECRET"
 # Audit log file path. Default: $XDG_STATE_HOME/oraclemcp/audit/audit.jsonl
 # when unset, or $HOME/.local/state/oraclemcp/audit/audit.jsonl without XDG_STATE_HOME.
 path = "/var/log/oraclemcp/audit.jsonl"
-# Secret reference for the HMAC signing key (`env:`/`file:`/`keyring:`/dev-only `literal:`).
-# Default: none.
+# Secret reference for the HMAC signing key (`env:`/`file:`/`keyring:`/dev-only
+# `literal:`). The resolved key must contain at least 32 random bytes. Default: none.
 key_ref = "env:ORACLEMCP_AUDIT_KEY"
 # Label for the active signing key, recorded per record so keys can rotate while
 # old records keep verifying. Default: "default".
@@ -147,6 +148,7 @@ max_level = "READ_ONLY"
 # The level a fresh session starts at. Default: READ_ONLY. Must not exceed max_level.
 default_level = "READ_ONLY"
 # Require HMAC signatures for operator-defined custom tools on this profile.
+# ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY must contain at least 32 random bytes.
 # Default: false (a `protected = true` profile implies true regardless).
 require_signed_tools = true
 # Mark target as a read-only standby (Active Data Guard): forces READ_ONLY

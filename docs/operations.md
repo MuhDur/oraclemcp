@@ -326,6 +326,10 @@ default_level = "READ_ONLY"   # starting session level
 require_signed_tools = true   # operator-defined custom tools must be HMAC-signed
 ```
 
+When signed custom tools are enabled, provision
+`ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY` with at least 32 bytes of randomly generated
+key material.
+
 With `max_level = "READ_ONLY"`, `oracle_set_session_level`/`enable_writes` can
 never elevate this profile, and write/DDL/admin work stays blocked regardless of
 any client request or OAuth scope. Mark a physical standby with
@@ -714,6 +718,8 @@ backup` does this for you).
 Configure the log under `[audit]` in your config
 (`path`, `key_ref` as a secret-ref like `env:ORACLEMCP_AUDIT_KEY`, and `key_id`
 to label the active key for rotation; the default key id is `default`). When
+resolved, the audit signing key must contain at least 32 bytes of randomly
+generated key material; empty, newline-only, and shorter keys fail closed. When
 `[audit].path` is unset, the binary writes to
 `$XDG_STATE_HOME/oraclemcp/audit/audit.jsonl`, or
 `$HOME/.local/state/oraclemcp/audit/audit.jsonl` when `XDG_STATE_HOME` is unset.
@@ -825,7 +831,8 @@ still the write-intent/audit path, not this HTTP-edge cache.
   re-point the `env:` / `file:` / `keyring:` reference and restart). For proxy auth, rotate the *proxy*
   credential.
 - **OAuth HS256 secret:** rotate the value behind `--oauth-hs256-secret-ref` and
-  restart; tokens signed with the old secret stop verifying.
+  restart; tokens signed with the old secret stop verifying. The resolved key
+  must contain at least 32 bytes of randomly generated key material.
 - **Per-client HTTP access credential:** service-owned client credentials live
   in `$XDG_STATE_HOME/oraclemcp/clients.json` (or
   `$HOME/.local/state/oraclemcp/clients.json`) as salted hashes only. Issued
@@ -834,7 +841,8 @@ still the write-intent/audit path, not this HTTP-edge cache.
   once, and `oraclemcp --json clients revoke <client_id>` revokes that client.
   Close that client's active lanes or restart the service so in-memory grants
   are revoked.
-- **Audit signing key:** add the new key under `[audit].key_ref` with a new
+- **Audit signing key:** add a randomly generated key of at least 32 bytes under
+  `[audit].key_ref` with a new
   `key_id`, restart, and keep the old `key_id` available to `audit verify` so
   historical records still verify.
 

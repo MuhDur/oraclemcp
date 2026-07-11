@@ -52,7 +52,7 @@ use oraclemcp::dispatch::{
 };
 use oraclemcp::registry;
 use oraclemcp_audit::{
-    AuditError, AuditSink, AuditSubject, Auditor, FileAuditSink, ShippingAuditSink,
+    AuditError, AuditSink, AuditSubject, Auditor, FileAuditSink, HmacSha256Key, ShippingAuditSink,
     ShippingForwarder, SigningKey, WormFileForwarder,
 };
 use oraclemcp_auth::{
@@ -254,6 +254,8 @@ enum Command {
     #[command(name = "self-update", alias = "self_update")]
     SelfUpdate(SelfUpdateCliArgs),
     /// Print HMAC signatures for operator-defined custom tool definitions.
+    ///
+    /// ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY must contain at least 32 bytes.
     #[command(name = "sign-tool", alias = "sign_tools")]
     SignTool {
         /// TOML file containing one or more [[tool]] definitions.
@@ -470,7 +472,8 @@ struct HttpServeArgs {
     /// Required OAuth scope. Repeat for multiple required scopes.
     #[arg(long = "oauth-required-scope")]
     oauth_required_scopes: Vec<String>,
-    /// Secret reference for the built-in HS256 verifier, e.g. env:JWT_SECRET.
+    /// Secret reference for the built-in HS256 verifier (at least 32 bytes),
+    /// e.g. env:JWT_SECRET.
     #[arg(long = "oauth-hs256-secret-ref")]
     oauth_hs256_secret_ref: Option<String>,
     /// Metadata URL advertised in WWW-Authenticate.
@@ -1176,10 +1179,18 @@ fn load_custom_catalog_from_sources(
     }
     validate_custom_tool_names(&defs)?;
 
+    let key = key
+        .map(|key| {
+            HmacSha256Key::new(key.as_bytes().to_vec()).map_err(|error| {
+                custom_tool_error(format!("{CUSTOM_TOOLS_HMAC_KEY_ENV} is invalid: {error}"))
+            })
+        })
+        .transpose()?;
+
     let classifier = Classifier::new(ClassifierConfig::new());
     let signed_defs_present = defs.iter().any(|def| def.signature.is_some());
     let loaded = if require_signed_tools {
-        let key = key.ok_or_else(|| {
+        let key = key.as_ref().ok_or_else(|| {
             custom_tool_error(format!(
                 "{CUSTOM_TOOLS_HMAC_KEY_ENV} is required when this profile requires signed custom tools"
             ))
@@ -1188,15 +1199,15 @@ fn load_custom_catalog_from_sources(
             &defs,
             &classifier,
             OperatingLevel::ReadOnly,
-            key.as_bytes(),
+            key,
             true,
         )
-    } else if let Some(key) = key {
+    } else if let Some(key) = key.as_ref() {
         load_tools_for_profile(
             &defs,
             &classifier,
             OperatingLevel::ReadOnly,
-            key.as_bytes(),
+            key,
             false,
         )
     } else if signed_defs_present {
@@ -1260,15 +1271,23 @@ fn resolve_audit_signing_key(
                 ),
             )
         })?;
-        return Ok(Some(SigningKey::new(
-            key_id,
-            secret.expose().as_bytes().to_vec(),
-        )));
+        let key =
+            SigningKey::new(key_id, secret.expose().as_bytes().to_vec()).map_err(|error| {
+                (
+                    "ORACLEMCP_AUDIT_KEY_INVALID",
+                    format!("resolved [audit].key_ref is invalid: {error}"),
+                )
+            })?;
+        return Ok(Some(key));
     }
-    if let Ok(raw) = std::env::var(AUDIT_KEY_ENV)
-        && !raw.is_empty()
-    {
-        return Ok(Some(SigningKey::new(key_id, raw.into_bytes())));
+    if let Ok(raw) = std::env::var(AUDIT_KEY_ENV) {
+        let key = SigningKey::new(key_id, raw.into_bytes()).map_err(|error| {
+            (
+                "ORACLEMCP_AUDIT_KEY_INVALID",
+                format!("{AUDIT_KEY_ENV} is invalid: {error}"),
+            )
+        })?;
+        return Ok(Some(key));
     }
     Ok(None)
 }
@@ -2755,11 +2774,16 @@ fn http_transport_config_from_merged(
                 required_scopes: oauth_cfg.required_scopes,
             };
             let metadata = resource_config.protected_resource_metadata();
+            let verifier =
+                Hs256Verifier::new(secret.expose().as_bytes().to_vec()).map_err(|error| {
+                    (
+                        "ORACLEMCP_HTTP_OAUTH_SECRET_INVALID",
+                        format!("resolved http.oauth.hs256_secret_ref is invalid: {error}"),
+                    )
+                })?;
             let enforcement = OAuthEnforcement {
                 config: resource_config,
-                verifier: Arc::new(Hs256Verifier {
-                    secret: secret.expose().as_bytes().to_vec(),
-                }),
+                verifier: Arc::new(verifier),
                 metadata_url,
             };
             (Some(metadata), Some(Arc::new(enforcement)))
@@ -4202,6 +4226,17 @@ fn custom_tool_signatures(
             "{CUSTOM_TOOLS_HMAC_KEY_ENV} is required to sign custom tool definitions"
         ))
     })?;
+    custom_tool_signatures_with_key(path, only_tool, &key)
+}
+
+fn custom_tool_signatures_with_key(
+    path: &Path,
+    only_tool: Option<&str>,
+    key: &str,
+) -> Result<serde_json::Value, ErrorEnvelope> {
+    let key = HmacSha256Key::new(key.as_bytes().to_vec()).map_err(|error| {
+        custom_tool_error(format!("{CUSTOM_TOOLS_HMAC_KEY_ENV} is invalid: {error}"))
+    })?;
     let src = std::fs::read_to_string(path).map_err(|e| {
         custom_tool_error(format!(
             "failed to read custom tool file {}: {e}",
@@ -4221,7 +4256,7 @@ fn custom_tool_signatures(
         }
         signatures.push(serde_json::json!({
             "name": def.name,
-            "signature": sign(&def, key.as_bytes()),
+            "signature": sign(&def, &key),
         }));
     }
     if signatures.is_empty() {
@@ -4266,6 +4301,21 @@ fn audit_verification_keys(key_id_override: Option<&str>) -> Result<Vec<SigningK
     let audit = OracleMcpConfig::load(None)
         .map(|cfg| cfg.audit)
         .map_err(|e| format!("failed to load audit config: {e}"))?;
+    let legacy_env_key = std::env::var(AUDIT_KEY_ENV).ok();
+    audit_verification_keys_from_sources(
+        &audit,
+        key_id_override,
+        &SystemSecretResolver,
+        legacy_env_key.as_deref(),
+    )
+}
+
+fn audit_verification_keys_from_sources(
+    audit: &AuditConfig,
+    key_id_override: Option<&str>,
+    secret_resolver: &dyn SecretResolver,
+    legacy_env_key: Option<&str>,
+) -> Result<Vec<SigningKey>, String> {
     let key_id = key_id_override
         .map(str::to_owned)
         .unwrap_or_else(|| audit.key_id_or_default().to_owned());
@@ -4273,20 +4323,21 @@ fn audit_verification_keys(key_id_override: Option<&str>) -> Result<Vec<SigningK
     if let Some(key_ref) = audit.key_ref.as_deref() {
         // `protected=false`: verification is an operator action that may run
         // off-box against a copied log, where a dev `literal:` key is legitimate.
-        let secret = resolve_secret_with(key_ref, false, &SystemSecretResolver).map_err(|e| {
+        let secret = resolve_secret_with(key_ref, false, secret_resolver).map_err(|e| {
             format!(
                 "failed to resolve [audit].key_ref: {}",
                 secret_error_summary(&e)
             )
         })?;
-        return Ok(vec![SigningKey::new(
-            key_id,
-            secret.expose().as_bytes().to_vec(),
-        )]);
+        let key = SigningKey::new(key_id, secret.expose().as_bytes().to_vec())
+            .map_err(|error| format!("resolved [audit].key_ref is invalid: {error}"))?;
+        return Ok(vec![key]);
     }
-    match std::env::var(AUDIT_KEY_ENV) {
-        Ok(raw) if !raw.is_empty() => Ok(vec![SigningKey::new(key_id, raw.into_bytes())]),
-        _ => Err(format!(
+    match legacy_env_key {
+        Some(raw) => SigningKey::new(key_id, raw.as_bytes().to_vec())
+            .map(|key| vec![key])
+            .map_err(|error| format!("{AUDIT_KEY_ENV} is invalid: {error}")),
+        None => Err(format!(
             "no audit signing key configured; set [audit].key_ref or {AUDIT_KEY_ENV} to verify the chain"
         )),
     }

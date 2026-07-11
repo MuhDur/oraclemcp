@@ -23,7 +23,10 @@ pub use anchor::{
     ANCHOR_VERSION, AnchorFile, AnchorLoadError, AnchorStatus, AnchorViolation, ChainAnchor,
     anchor_path_for, check_anchor, load_anchor,
 };
-pub use hmac::{ct_eq, hmac_sha256, hmac_sha256_hex};
+pub use hmac::{
+    HmacSha256Key, HmacSha256KeyError, MIN_HMAC_SHA256_KEY_BYTES, ct_eq, hmac_sha256,
+    hmac_sha256_hex,
+};
 pub use record::{
     AUDIT_SCHEMA_VERSION, AuditCancel, AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord,
     AuditSubject, DbEvidence, GENESIS_HASH, SigningKey, normalized_sql_sha256, sha256_hex,

@@ -325,7 +325,7 @@ fn build_auditor_installs_when_writable_profile_has_a_key() {
     fs::create_dir_all(&dir).expect("tmp dir");
     let audit = AuditConfig {
         path: Some(dir.join("audit.jsonl")),
-        key_ref: Some("literal:test-signing-key-material".to_owned()),
+        key_ref: Some("literal:0123456789abcdef0123456789abcdef".to_owned()),
         ..AuditConfig::default()
     };
     let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
@@ -335,6 +335,138 @@ fn build_auditor_installs_when_writable_profile_has_a_key() {
             "an auditor must be installed when a write level is reachable"
         ),
         Err((code, msg)) => panic!("auditor should build with a key: {code}: {msg}"),
+    }
+}
+
+#[test]
+fn audit_startup_rejects_short_resolved_keys_before_opening_the_log() {
+    let locator = "QA2_AUDIT_KEY_LOCATOR_MUST_NOT_RENDER";
+    for len in [0, 1, 31] {
+        let secret = "S".repeat(len);
+        let resolver = oraclemcp_auth::EnvLookupSecretResolver::new({
+            let secret = secret.clone();
+            move |_: &str| Some(secret.clone())
+        });
+        let root = target_tmp_file(&format!("qa2-short-audit-{len}"));
+        let audit = AuditConfig {
+            path: Some(root.join("audit.jsonl")),
+            key_ref: Some(format!("env:{locator}")),
+            ..AuditConfig::default()
+        };
+        let level = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+        let error = match build_auditor(&audit, &level, OperatingLevel::Ddl, &resolver) {
+            Err(error) => error,
+            Ok(_) => panic!("undersized resolved audit key must fail closed"),
+        };
+        assert_eq!(error.0, "ORACLEMCP_AUDIT_KEY_INVALID");
+        assert!(error.1.contains(&format!("{len} bytes")), "{}", error.1);
+        assert!(!error.1.contains(locator), "{}", error.1);
+        if len == 31 {
+            assert!(!error.1.contains(&secret), "{}", error.1);
+        }
+        assert!(
+            !root.exists(),
+            "key validation must precede audit directory/file creation"
+        );
+    }
+}
+
+#[test]
+fn audit_startup_accepts_32_byte_and_longer_resolved_keys() {
+    for len in [32, 33] {
+        let secret = "K".repeat(len);
+        let resolver =
+            oraclemcp_auth::EnvLookupSecretResolver::new(move |_: &str| Some(secret.clone()));
+        let audit = AuditConfig {
+            key_ref: Some("env:QA2_AUDIT_KEY".to_owned()),
+            ..AuditConfig::default()
+        };
+        let key = resolve_audit_signing_key(&audit, false, &resolver)
+            .expect("minimum-size resolved audit key is valid");
+        assert!(key.is_some());
+    }
+}
+
+#[test]
+fn audit_startup_rejects_newline_only_key_file_without_leaking_its_path() {
+    let key_path = target_tmp_file("qa2-newline-audit-key");
+    fs::write(&key_path, "\n").expect("write newline-only key fixture");
+    let audit = AuditConfig {
+        key_ref: Some(format!("file:{}", key_path.display())),
+        ..AuditConfig::default()
+    };
+    let error = resolve_audit_signing_key(&audit, false, &SystemSecretResolver)
+        .expect_err("newline-only audit key resolves empty and must be rejected");
+    assert_eq!(error.0, "ORACLEMCP_AUDIT_KEY_INVALID");
+    assert!(error.1.contains("0 bytes"), "{}", error.1);
+    assert!(
+        !error.1.contains(&key_path.display().to_string()),
+        "{}",
+        error.1
+    );
+}
+
+#[test]
+fn audit_verify_enforces_key_size_for_config_and_legacy_env_sources() {
+    let locator = "QA2_VERIFY_KEY_LOCATOR_MUST_NOT_RENDER";
+    let audit = AuditConfig {
+        key_ref: Some(format!("env:{locator}")),
+        ..AuditConfig::default()
+    };
+    for len in [0, 1, 31] {
+        let secret = "V".repeat(len);
+        let resolver = oraclemcp_auth::EnvLookupSecretResolver::new({
+            let secret = secret.clone();
+            move |_: &str| Some(secret.clone())
+        });
+        let error = audit_verification_keys_from_sources(&audit, None, &resolver, None)
+            .expect_err("undersized resolved verification key must fail closed");
+        assert!(error.contains(&format!("{len} bytes")), "{error}");
+        assert!(!error.contains(locator), "{error}");
+        if len == 31 {
+            assert!(!error.contains(&secret), "{error}");
+        }
+    }
+    for len in [32, 33] {
+        let secret = "V".repeat(len);
+        let resolver =
+            oraclemcp_auth::EnvLookupSecretResolver::new(move |_: &str| Some(secret.clone()));
+        assert_eq!(
+            audit_verification_keys_from_sources(&audit, None, &resolver, None)
+                .expect("minimum-size resolved verification key is valid")
+                .len(),
+            1
+        );
+    }
+
+    let no_config = AuditConfig::default();
+    for len in [0, 1, 31] {
+        let secret = "E".repeat(len);
+        let error = audit_verification_keys_from_sources(
+            &no_config,
+            None,
+            &SystemSecretResolver,
+            Some(&secret),
+        )
+        .expect_err("undersized legacy environment verification key must fail closed");
+        assert!(error.contains(&format!("{len} bytes")), "{error}");
+        if len == 31 {
+            assert!(!error.contains(&secret), "{error}");
+        }
+    }
+    for len in [32, 33] {
+        let secret = "E".repeat(len);
+        assert_eq!(
+            audit_verification_keys_from_sources(
+                &no_config,
+                None,
+                &SystemSecretResolver,
+                Some(&secret),
+            )
+            .expect("minimum-size legacy environment verification key is valid")
+            .len(),
+            1
+        );
     }
 }
 
@@ -425,7 +557,7 @@ fn http_cli_oauth_builds_enforced_transport_config() {
         oauth_issuers: vec!["https://idp.example.com".to_owned()],
         oauth_authorization_servers: vec!["https://idp.example.com".to_owned()],
         oauth_required_scopes: vec!["oracle:read".to_owned()],
-        oauth_hs256_secret_ref: Some("literal:test-secret".to_owned()),
+        oauth_hs256_secret_ref: Some("literal:0123456789abcdef0123456789abcdef".to_owned()),
         ..Default::default()
     };
     let http = apply_http_cli_overrides(HttpConfig::default(), &args);
@@ -467,6 +599,76 @@ fn http_oauth_literal_secret_is_rejected_for_protected_profiles() {
     assert_eq!(err.0, "ORACLEMCP_HTTP_OAUTH_SECRET_INVALID");
     assert!(err.1.contains("plaintext literal credential is forbidden"));
     assert!(!err.1.contains("test-secret"));
+}
+
+fn oauth_http_config(secret_ref: String) -> HttpConfig {
+    HttpConfig {
+        oauth: Some(HttpOAuthConfig {
+            resource: Some("https://mcp.example.com/mcp".to_owned()),
+            allowed_issuers: vec!["https://idp.example.com".to_owned()],
+            authorization_servers: vec!["https://idp.example.com".to_owned()],
+            required_scopes: vec!["oracle:read".to_owned()],
+            hs256_secret_ref: Some(secret_ref),
+            metadata_url: None,
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn http_oauth_resolved_secret_enforces_31_32_byte_boundary_and_redacts() {
+    let locator = "QA2_OAUTH_SECRET_LOCATOR_MUST_NOT_RENDER";
+    for len in [0, 1, 31] {
+        let secret = "O".repeat(len);
+        let resolver = oraclemcp_auth::EnvLookupSecretResolver::new({
+            let secret = secret.clone();
+            move |_: &str| Some(secret.clone())
+        });
+        let error = http_transport_config_from_merged(
+            oauth_http_config(format!("env:{locator}")),
+            false,
+            &resolver,
+        )
+        .expect_err("undersized resolved OAuth key must fail closed");
+        assert_eq!(error.0, "ORACLEMCP_HTTP_OAUTH_SECRET_INVALID");
+        assert!(error.1.contains(&format!("{len} bytes")), "{}", error.1);
+        assert!(!error.1.contains(locator), "{}", error.1);
+        if len == 31 {
+            assert!(!error.1.contains(&secret), "{}", error.1);
+        }
+    }
+
+    for len in [32, 33] {
+        let secret = "O".repeat(len);
+        let resolver =
+            oraclemcp_auth::EnvLookupSecretResolver::new(move |_: &str| Some(secret.clone()));
+        let resolved = http_transport_config_from_merged(
+            oauth_http_config("env:QA2_OAUTH_SECRET".to_owned()),
+            false,
+            &resolver,
+        )
+        .expect("minimum-size resolved OAuth key is valid");
+        assert!(resolved.transport.oauth.is_some());
+    }
+}
+
+#[test]
+fn http_oauth_rejects_newline_only_key_file_without_leaking_its_path() {
+    let key_path = target_tmp_file("qa2-newline-oauth-key");
+    fs::write(&key_path, "\n").expect("write newline-only key fixture");
+    let error = http_transport_config_from_merged(
+        oauth_http_config(format!("file:{}", key_path.display())),
+        false,
+        &SystemSecretResolver,
+    )
+    .expect_err("newline-only OAuth key resolves empty and must be rejected");
+    assert_eq!(error.0, "ORACLEMCP_HTTP_OAUTH_SECRET_INVALID");
+    assert!(error.1.contains("0 bytes"), "{}", error.1);
+    assert!(
+        !error.1.contains(&key_path.display().to_string()),
+        "{}",
+        error.1
+    );
 }
 
 #[test]
@@ -1635,7 +1837,8 @@ fn resolved_secret_material_is_absent_from_rendered_surfaces() {
     };
     let connection_info_json = serde_json::to_string(&connection_info).expect("conn json");
 
-    let signing_key = SigningKey::new("test-key", resolved_audit_secret.as_bytes().to_vec());
+    let signing_key = SigningKey::new("test-key", resolved_audit_secret.as_bytes().to_vec())
+        .expect("valid test key");
     let signing_key_debug = format!("{signing_key:?}");
     let audit_record = oraclemcp_audit::AuditRecord::chained_signed(
         &oraclemcp_audit::AuditEntryDraft {
@@ -1680,7 +1883,8 @@ fn resolved_secret_material_is_absent_from_rendered_surfaces() {
 }
 
 fn audit_record_for_db_evidence_summary(seq: u64, db_evidence: Option<DbEvidence>) -> AuditRecord {
-    let key = SigningKey::new("test-key", b"db-evidence-summary-key".to_vec());
+    let key = SigningKey::new("test-key", b"db-evidence-summary-key-123456789".to_vec())
+        .expect("valid test key");
     AuditRecord::chained_signed(
         &oraclemcp_audit::AuditEntryDraft {
             subject: AuditSubject::new("oauth", "subject-hash"),
@@ -2609,6 +2813,84 @@ fn custom_tool_names_cannot_duplicate_or_shadow_advertised_tools() {
         .expect_err("compatibility alias collision rejected");
     assert_eq!(err.error_class, ErrorClass::InvalidArguments);
     assert!(err.message.contains("collides"));
+}
+
+#[test]
+fn custom_tool_catalog_and_sign_cli_enforce_hmac_key_size() {
+    let tools_dir = target_tmp_file("qa2-custom-tool-keys");
+    fs::create_dir_all(&tools_dir).expect("create tools dir");
+    let tool_path = tools_dir.join("qa2.toml");
+    fs::write(
+        &tool_path,
+        r#"
+        [[tool]]
+        name = "qa2_lookup"
+        description = "QA2 signed lookup"
+        sql = "SELECT 1 FROM dual"
+        output_mode = "rows"
+        "#,
+    )
+    .expect("write unsigned custom tool");
+
+    for len in [0, 1, 31] {
+        let secret = if len == 1 {
+            "\n".to_owned()
+        } else {
+            "C".repeat(len)
+        };
+        let catalog_error = load_custom_catalog_from_sources(Some(&tools_dir), Some(&secret), true)
+            .expect_err("undersized custom-tool load key must fail closed");
+        assert!(
+            catalog_error.message.contains(&format!("{len} bytes")),
+            "{}",
+            catalog_error.message
+        );
+        if len == 31 {
+            assert!(!catalog_error.message.contains(&secret));
+        }
+
+        let sign_error = custom_tool_signatures_with_key(&tool_path, None, &secret)
+            .expect_err("undersized sign-tool key must fail closed");
+        assert!(
+            sign_error.message.contains(&format!("{len} bytes")),
+            "{}",
+            sign_error.message
+        );
+        if len == 31 {
+            assert!(!sign_error.message.contains(&secret));
+        }
+    }
+
+    for len in [32, 33] {
+        let secret = "C".repeat(len);
+        let key = HmacSha256Key::new(secret.as_bytes().to_vec()).expect("valid custom-tool key");
+        let def = custom_def("qa2_lookup");
+        let signature = sign(&def, &key);
+        fs::write(
+            &tool_path,
+            format!(
+                r#"
+                [[tool]]
+                name = "qa2_lookup"
+                description = "Test custom tool"
+                sql = "SELECT 1 FROM dual"
+                output_mode = "rows"
+                signature = "{signature}"
+                "#
+            ),
+        )
+        .expect("write signed custom tool");
+
+        assert_eq!(
+            load_custom_catalog_from_sources(Some(&tools_dir), Some(&secret), true)
+                .expect("minimum-size custom-tool load key is valid")
+                .len(),
+            1
+        );
+        let payload = custom_tool_signatures_with_key(&tool_path, None, &secret)
+            .expect("minimum-size sign-tool key is valid");
+        assert_eq!(payload["signatures"].as_array().map(Vec::len), Some(1));
+    }
 }
 
 #[test]

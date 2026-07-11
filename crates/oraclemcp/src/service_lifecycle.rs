@@ -2568,7 +2568,8 @@ mod tests {
         let config_path = root.join("config").join("profiles.toml");
         let audit_path = state_dir.join("audit").join("audit.jsonl");
         let backup_dir = root.join("backup");
-        let key = SigningKey::new("default", b"backup-restore-test-key".to_vec());
+        let key = SigningKey::new("default", b"backup-restore-test-key-123456789".to_vec())
+            .expect("valid test key");
 
         fs::create_dir_all(audit_path.parent().expect("audit parent")).expect("audit dir");
         fs::create_dir_all(config_path.parent().expect("config parent")).expect("config dir");

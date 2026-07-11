@@ -701,7 +701,8 @@ mod tests {
     use std::thread;
 
     fn test_key() -> SigningKey {
-        SigningKey::new("test", b"sink-test-key".to_vec())
+        SigningKey::new("test", b"0123456789abcdef0123456789abcdef".to_vec())
+            .expect("valid test key")
     }
 
     fn draft(sql: &str, danger: &str) -> AuditEntryDraft {
@@ -1563,7 +1564,11 @@ mod tests {
         // key_id label but not the secret).
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("audit.jsonl");
-        let forger = SigningKey::new(test_key().key_id(), b"not-the-real-key".to_vec());
+        let forger = SigningKey::new(
+            test_key().key_id(),
+            b"fedcba9876543210fedcba9876543210".to_vec(),
+        )
+        .expect("valid test key");
         let r1 = AuditRecord::chained_signed(
             &draft("DELETE FROM t WHERE id=1", "GUARDED"),
             1,
@@ -1630,7 +1635,8 @@ mod tests {
         // tail signed under the active key.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("audit.jsonl");
-        let old_key = SigningKey::new("old-key", b"prior-rotation-key".to_vec());
+        let old_key = SigningKey::new("old-key", b"abcdef0123456789abcdef0123456789".to_vec())
+            .expect("valid test key");
         let r1 = AuditRecord::chained_signed(
             &draft("DELETE FROM t WHERE id=1", "GUARDED"),
             1,

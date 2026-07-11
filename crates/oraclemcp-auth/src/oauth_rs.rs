@@ -23,7 +23,10 @@
 //! ceiling (scope can only LOWER it; bead P1-9e).
 
 use serde_json::{Value, json};
+#[cfg(test)]
 use sha2::{Digest, Sha256};
+
+use oraclemcp_audit::{HmacSha256Key, HmacSha256KeyError};
 
 /// Why resource-server token validation failed.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -68,15 +71,29 @@ pub trait SignatureVerifier {
 }
 
 /// HS256 (HMAC-SHA256) verifier.
+#[derive(Debug)]
 pub struct Hs256Verifier {
-    /// The shared secret.
-    pub secret: Vec<u8>,
+    secret: HmacSha256Key,
+}
+
+impl Hs256Verifier {
+    /// Validate and install the HS256 shared secret.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HmacSha256KeyError`] when the secret is shorter than the
+    /// 256-bit minimum required for HS256.
+    pub fn new(secret: impl Into<Vec<u8>>) -> Result<Self, HmacSha256KeyError> {
+        Ok(Self {
+            secret: HmacSha256Key::new(secret)?,
+        })
+    }
 }
 
 impl SignatureVerifier for Hs256Verifier {
     fn verify(&self, alg: &str, signing_input: &[u8], signature: &[u8]) -> bool {
         // Reject `none` and any non-HS256 alg outright (alg-confusion / alg=none).
-        alg == "HS256" && constant_time_eq(&hmac_sha256(&self.secret, signing_input), signature)
+        alg == "HS256" && constant_time_eq(&self.secret.authenticate(signing_input), signature)
     }
 }
 
@@ -227,6 +244,7 @@ fn token_scopes(claims: &Value) -> Vec<String> {
 }
 
 /// HMAC-SHA256 (RFC 2104) over `sha2`.
+#[cfg(test)]
 fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     const BLOCK: usize = 64;
     let mut k = [0u8; BLOCK];
@@ -322,7 +340,7 @@ mod tests {
         out
     }
 
-    const SECRET: &[u8] = b"super-secret-signing-key";
+    const SECRET: &[u8] = b"0123456789abcdef0123456789abcdef";
 
     fn mint(claims: Value) -> String {
         let header = json!({ "alg": "HS256", "typ": "JWT" });
@@ -343,9 +361,16 @@ mod tests {
     }
 
     fn verifier() -> Hs256Verifier {
-        Hs256Verifier {
-            secret: SECRET.to_vec(),
+        Hs256Verifier::new(SECRET.to_vec()).expect("valid HS256 test key")
+    }
+
+    #[test]
+    fn hs256_verifier_rejects_undersized_keys() {
+        for len in [0, 1, 31] {
+            Hs256Verifier::new(vec![0x5a; len]).expect_err("undersized HS256 key must fail closed");
         }
+        Hs256Verifier::new(vec![0x5a; 32]).expect("32-byte HS256 key is valid");
+        Hs256Verifier::new(vec![0x5a; 33]).expect("longer HS256 key is valid");
     }
 
     fn good_claims() -> Value {

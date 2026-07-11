@@ -315,7 +315,7 @@ mod tests {
     use crate::record::{AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord, AuditSubject};
 
     fn key() -> SigningKey {
-        SigningKey::new("k1", b"anchor-test-key".to_vec())
+        SigningKey::new("k1", b"0123456789abcdef0123456789abcdef".to_vec()).expect("valid test key")
     }
 
     fn draft(sql: &str) -> AuditEntryDraft {
@@ -432,7 +432,8 @@ mod tests {
     #[test]
     fn anchor_under_unknown_key_id_is_reported() {
         let records = signed_chain(1);
-        let other = SigningKey::new("k2", b"other-key".to_vec());
+        let other = SigningKey::new("k2", b"fedcba9876543210fedcba9876543210".to_vec())
+            .expect("valid test key");
         let anchor = ChainAnchor::signed(1, &records[0].entry_hash, &other);
         assert_eq!(
             check_anchor(&records, &anchor, &[key()]),
