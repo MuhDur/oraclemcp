@@ -17,7 +17,8 @@ use crate::file_store::{FileStore, FileStoreError, StoreId};
 const SOURCE_SNAPSHOT_COLLECTION: &str = "source-snapshots";
 const SOURCE_HISTORY_COLLECTION: &str = "source-history";
 const SOURCE_HISTORY_EXTENSION: &str = "json";
-const SOURCE_HISTORY_SCHEMA_VERSION: u8 = 1;
+const SOURCE_HISTORY_SCHEMA_VERSION: u8 = 2;
+const LEGACY_SOURCE_HISTORY_SCHEMA_VERSION: u8 = 1;
 
 /// Persistent source-history store.
 pub struct SourceHistoryStore {
@@ -42,12 +43,32 @@ impl SourceHistoryStore {
         draft: SourceSnapshotDraft,
     ) -> Result<SourceSnapshotView, SourceHistoryError> {
         let profile = normalize_non_empty(draft.profile, "profile")?;
-        let owner = normalize_identifier(draft.owner, "owner")?;
-        let name = normalize_identifier(draft.name, "name")?;
+        let owner = normalize_identifier(draft.owner, draft.owner_quoted, "owner")?;
+        let name = normalize_identifier(draft.name, draft.name_quoted, "name")?;
         let object_type = normalize_source_object_type(&draft.object_type).ok_or(
             SourceHistoryError::Invalid("unsupported source object type"),
         )?;
+        let target_identity_sha256 = source_identity_sha256(&owner, &name, object_type.as_str());
+        if target_identity_sha256 != draft.target_identity_sha256 {
+            return Err(SourceHistoryError::Invalid(
+                "source target identity changed before persistence",
+            ));
+        }
         let source = normalize_non_empty(draft.source, "source")?;
+        let source_target = source_object_from_create_or_replace_sql(&source).ok_or(
+            SourceHistoryError::Invalid("snapshot source target could not be parsed"),
+        )?;
+        if source_target.name != name
+            || source_target.object_type != object_type
+            || source_target
+                .owner
+                .as_deref()
+                .is_some_and(|source_owner| source_owner != owner)
+        {
+            return Err(SourceHistoryError::Invalid(
+                "snapshot source target does not match captured target",
+            ));
+        }
         let created_at = unix_timestamp();
         let source_sha256 = prefixed_sha256_hex(source.as_bytes());
         let source_lines = source.lines().count();
@@ -71,8 +92,11 @@ impl SourceHistoryStore {
             created_at,
             profile,
             owner,
+            owner_quoted: draft.owner_quoted,
             name,
+            name_quoted: draft.name_quoted,
             object_type,
+            target_identity_sha256,
             source_kind: draft.source_kind,
             source_sha256,
             source_lines,
@@ -194,8 +218,8 @@ pub struct SourceHistoryFilter {
 impl SourceHistoryFilter {
     fn matches(&self, view: &SourceSnapshotView) -> bool {
         matches_optional_case_insensitive(self.profile.as_deref(), &view.profile)
-            && matches_optional_case_insensitive(self.owner.as_deref(), &view.owner)
-            && matches_optional_case_insensitive(self.name.as_deref(), &view.name)
+            && matches_optional_identifier(self.owner.as_deref(), &view.owner)
+            && matches_optional_identifier(self.name.as_deref(), &view.name)
             && self
                 .object_type
                 .as_deref()
@@ -208,8 +232,40 @@ impl SourceHistoryFilter {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceObjectTarget {
     pub owner: Option<String>,
+    #[serde(default)]
+    pub owner_quoted: bool,
     pub name: String,
+    #[serde(default)]
+    pub name_quoted: bool,
     pub object_type: String,
+}
+
+impl SourceObjectTarget {
+    /// Render an identifier for tools whose identifier arguments retain Oracle
+    /// quote syntax. Quoted spelling is never collapsed into an unquoted name.
+    #[must_use]
+    pub fn owner_lookup(&self) -> Option<String> {
+        self.owner
+            .as_deref()
+            .map(|owner| render_identifier(owner, self.owner_quoted))
+    }
+
+    /// Render the object name without losing quoted-identifier identity.
+    #[must_use]
+    pub fn name_lookup(&self) -> String {
+        render_identifier(&self.name, self.name_quoted)
+    }
+
+    /// Digest the concrete Oracle identity after an unqualified target's owner
+    /// has been resolved by the source lookup.
+    #[must_use]
+    pub fn identity_sha256(&self, resolved_owner: &str) -> String {
+        source_identity_sha256(
+            self.owner.as_deref().unwrap_or(resolved_owner),
+            &self.name,
+            &self.object_type,
+        )
+    }
 }
 
 /// Full on-disk source snapshot.
@@ -220,8 +276,14 @@ pub struct SourceSnapshot {
     pub created_at: String,
     pub profile: String,
     pub owner: String,
+    #[serde(default)]
+    pub owner_quoted: bool,
     pub name: String,
+    #[serde(default)]
+    pub name_quoted: bool,
     pub object_type: String,
+    #[serde(default)]
+    pub target_identity_sha256: String,
     pub source_kind: String,
     pub source_sha256: String,
     pub source_lines: usize,
@@ -245,8 +307,11 @@ impl SourceSnapshot {
             created_at: self.created_at.clone(),
             profile: self.profile.clone(),
             owner: self.owner.clone(),
+            owner_quoted: self.owner_quoted,
             name: self.name.clone(),
+            name_quoted: self.name_quoted,
             object_type: self.object_type.clone(),
+            target_identity_sha256: self.target_identity_sha256.clone(),
             source_kind: self.source_kind.clone(),
             source_sha256: self.source_sha256.clone(),
             source_lines: self.source_lines,
@@ -268,8 +333,14 @@ pub struct SourceSnapshotView {
     pub created_at: String,
     pub profile: String,
     pub owner: String,
+    #[serde(default)]
+    pub owner_quoted: bool,
     pub name: String,
+    #[serde(default)]
+    pub name_quoted: bool,
     pub object_type: String,
+    #[serde(default)]
+    pub target_identity_sha256: String,
     pub source_kind: String,
     pub source_sha256: String,
     pub source_lines: usize,
@@ -287,8 +358,11 @@ pub struct SourceSnapshotView {
 pub struct SourceSnapshotDraft {
     pub profile: String,
     pub owner: String,
+    pub owner_quoted: bool,
     pub name: String,
+    pub name_quoted: bool,
     pub object_type: String,
+    pub target_identity_sha256: String,
     pub source_kind: String,
     pub source: String,
     pub proposal_id: String,
@@ -322,59 +396,213 @@ pub enum SourceHistoryError {
 /// Parse a plain `CREATE OR REPLACE` source-replaceable object target.
 #[must_use]
 pub fn source_object_from_create_or_replace_sql(sql: &str) -> Option<SourceObjectTarget> {
-    let words: Vec<&str> = sql.split_whitespace().collect();
-    if words.len() < 4
-        || !words[0].eq_ignore_ascii_case("CREATE")
-        || !words[1].eq_ignore_ascii_case("OR")
-        || !words[2].eq_ignore_ascii_case("REPLACE")
-    {
+    let mut cursor = SourceHeaderCursor::new(sql);
+    cursor.consume_keyword("CREATE")?;
+    cursor.consume_keyword("OR")?;
+    cursor.consume_keyword("REPLACE")?;
+
+    loop {
+        let checkpoint = cursor.position();
+        let Some(modifier) = cursor.identifier() else {
+            cursor.restore(checkpoint);
+            break;
+        };
+        if modifier.quoted
+            || !matches!(
+                modifier.value.to_ascii_uppercase().as_str(),
+                "EDITIONABLE" | "NONEDITIONABLE" | "FORCE" | "NOFORCE"
+            )
+        {
+            cursor.restore(checkpoint);
+            break;
+        }
+    }
+
+    let first = cursor.identifier()?;
+    if first.quoted {
         return None;
     }
-    let mut idx = 3;
-    while matches!(
-        words
-            .get(idx)
-            .map(|word| word.to_ascii_uppercase())
-            .as_deref(),
-        Some("EDITIONABLE" | "NONEDITIONABLE" | "FORCE" | "NOFORCE")
-    ) {
-        idx += 1;
-    }
-    let first = words.get(idx)?.to_ascii_uppercase();
-    let (object_type, name_idx) = match first.as_str() {
-        "PACKAGE"
-            if words
-                .get(idx + 1)
-                .is_some_and(|word| word.eq_ignore_ascii_case("BODY")) =>
-        {
-            ("PACKAGE BODY".to_owned(), idx + 2)
+    let first = first.value.to_ascii_uppercase();
+    let object_type = match first.as_str() {
+        "PACKAGE" | "TYPE" => {
+            let checkpoint = cursor.position();
+            let body = cursor.identifier();
+            if body
+                .as_ref()
+                .is_some_and(|body| !body.quoted && body.value.eq_ignore_ascii_case("BODY"))
+            {
+                format!("{first} BODY")
+            } else {
+                cursor.restore(checkpoint);
+                first
+            }
         }
-        "TYPE"
-            if words
-                .get(idx + 1)
-                .is_some_and(|word| word.eq_ignore_ascii_case("BODY")) =>
-        {
-            ("TYPE BODY".to_owned(), idx + 2)
-        }
-        "PACKAGE" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "TYPE" | "VIEW" => (first, idx + 1),
+        "PROCEDURE" | "FUNCTION" | "TRIGGER" | "VIEW" => first,
         _ => return None,
     };
-    let name = clean_source_name_token(words.get(name_idx)?)?;
-    let mut parts = name.split('.');
-    let first = parts.next()?.to_ascii_uppercase();
-    let second = parts.next().map(str::to_ascii_uppercase);
-    if parts.next().is_some() {
+
+    let first = cursor.identifier()?;
+    let (owner, owner_quoted, name) = if cursor.consume_dot()? {
+        let name = cursor.identifier()?;
+        let owner = if first.quoted {
+            first.value
+        } else {
+            first.value.to_ascii_uppercase()
+        };
+        (Some(owner), first.quoted, name)
+    } else {
+        (None, false, first)
+    };
+    if cursor.consume_dot()? {
         return None;
     }
-    let (owner, name) = match second {
-        Some(name) => (Some(first), name),
-        None => (None, first),
-    };
     Some(SourceObjectTarget {
         owner,
-        name,
+        owner_quoted,
+        name: if name.quoted {
+            name.value
+        } else {
+            name.value.to_ascii_uppercase()
+        },
+        name_quoted: name.quoted,
         object_type,
     })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParsedSourceIdentifier {
+    value: String,
+    quoted: bool,
+}
+
+/// Header-only Oracle lexer for the small recovery eligibility grammar. It
+/// deliberately stops before the object body, but handles comments and quoted
+/// identifiers without using whitespace splitting or quote stripping.
+struct SourceHeaderCursor<'a> {
+    sql: &'a str,
+    offset: usize,
+}
+
+impl<'a> SourceHeaderCursor<'a> {
+    fn new(sql: &'a str) -> Self {
+        Self { sql, offset: 0 }
+    }
+
+    fn position(&self) -> usize {
+        self.offset
+    }
+
+    fn restore(&mut self, offset: usize) {
+        self.offset = offset;
+    }
+
+    fn consume_keyword(&mut self, expected: &str) -> Option<()> {
+        let identifier = self.identifier()?;
+        (!identifier.quoted && identifier.value.eq_ignore_ascii_case(expected)).then_some(())
+    }
+
+    fn consume_dot(&mut self) -> Option<bool> {
+        self.skip_trivia()?;
+        if self.remaining().starts_with('.') {
+            self.offset += 1;
+            Some(true)
+        } else {
+            Some(false)
+        }
+    }
+
+    fn identifier(&mut self) -> Option<ParsedSourceIdentifier> {
+        self.skip_trivia()?;
+        if self.remaining().starts_with('"') {
+            return self.quoted_identifier();
+        }
+        let bytes = self.sql.as_bytes();
+        let start = self.offset;
+        if !bytes.get(start).is_some_and(u8::is_ascii_alphabetic) {
+            return None;
+        }
+        self.offset += 1;
+        while bytes
+            .get(self.offset)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'$' | b'#'))
+        {
+            self.offset += 1;
+        }
+        Some(ParsedSourceIdentifier {
+            value: self.sql[start..self.offset].to_owned(),
+            quoted: false,
+        })
+    }
+
+    fn quoted_identifier(&mut self) -> Option<ParsedSourceIdentifier> {
+        self.offset += 1;
+        let start = self.offset;
+        let bytes = self.sql.as_bytes();
+        while let Some(byte) = bytes.get(self.offset) {
+            match *byte {
+                b'\0' => return None,
+                b'"' => {
+                    if bytes.get(self.offset + 1) == Some(&b'"') {
+                        // Oracle object names cannot contain a double quote.
+                        // Treat doubled-quote syntax as unsupported, never as a
+                        // lossy spelling of another object.
+                        return None;
+                    }
+                    let value = self.sql[start..self.offset].to_owned();
+                    if value.is_empty() {
+                        return None;
+                    }
+                    self.offset += 1;
+                    if bytes.get(self.offset).is_some_and(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'$' | b'#' | b'"')
+                    }) {
+                        return None;
+                    }
+                    return Some(ParsedSourceIdentifier {
+                        value,
+                        quoted: true,
+                    });
+                }
+                _ => self.offset += 1,
+            }
+        }
+        None
+    }
+
+    fn skip_trivia(&mut self) -> Option<()> {
+        loop {
+            while self
+                .sql
+                .as_bytes()
+                .get(self.offset)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                self.offset += 1;
+            }
+            if self.remaining().starts_with("--") {
+                self.offset += 2;
+                while self
+                    .sql
+                    .as_bytes()
+                    .get(self.offset)
+                    .is_some_and(|byte| !matches!(*byte, b'\n' | b'\r'))
+                {
+                    self.offset += 1;
+                }
+                continue;
+            }
+            if self.remaining().starts_with("/*") {
+                let end = self.remaining()[2..].find("*/")?;
+                self.offset += 2 + end + 2;
+                continue;
+            }
+            return Some(());
+        }
+    }
+
+    fn remaining(&self) -> &str {
+        &self.sql[self.offset..]
+    }
 }
 
 /// Normalize source-replaceable object types. VIEW is included because the
@@ -403,29 +631,27 @@ fn object_history_id(
 
 fn load_snapshot_from_path(path: &Path) -> Result<SourceSnapshot, SourceHistoryError> {
     let bytes = fs::read(path).map_err(|e| SourceHistoryError::Io(e.to_string()))?;
-    let snapshot: SourceSnapshot =
+    let mut snapshot: SourceSnapshot =
         serde_json::from_slice(&bytes).map_err(|e| SourceHistoryError::Json(e.to_string()))?;
-    if snapshot.schema_version != SOURCE_HISTORY_SCHEMA_VERSION {
+    if !matches!(
+        snapshot.schema_version,
+        LEGACY_SOURCE_HISTORY_SCHEMA_VERSION | SOURCE_HISTORY_SCHEMA_VERSION
+    ) {
         return Err(SourceHistoryError::Invalid(
             "unsupported source-history schema version",
         ));
     }
-    Ok(snapshot)
-}
-
-fn clean_source_name_token(raw: &str) -> Option<String> {
-    let token = raw
-        .split('(')
-        .next()
-        .unwrap_or(raw)
-        .trim()
-        .trim_end_matches(';')
-        .trim_matches('"');
-    if is_simple_source_name(token) {
-        Some(token.to_owned())
-    } else {
-        None
+    if snapshot.schema_version == LEGACY_SOURCE_HISTORY_SCHEMA_VERSION
+        && snapshot.target_identity_sha256.is_empty()
+    {
+        snapshot.target_identity_sha256 =
+            source_identity_sha256(&snapshot.owner, &snapshot.name, &snapshot.object_type);
+    } else if snapshot.target_identity_sha256.is_empty() {
+        return Err(SourceHistoryError::Invalid(
+            "source-history target identity digest is required",
+        ));
     }
+    Ok(snapshot)
 }
 
 fn is_simple_source_name(value: &str) -> bool {
@@ -458,8 +684,30 @@ fn normalize_non_empty(value: String, field: &'static str) -> Result<String, Sou
     Ok(value.to_owned())
 }
 
-fn normalize_identifier(value: String, field: &'static str) -> Result<String, SourceHistoryError> {
-    let value = normalize_non_empty(value, field)?.to_ascii_uppercase();
+fn normalize_identifier(
+    value: String,
+    quoted: bool,
+    field: &'static str,
+) -> Result<String, SourceHistoryError> {
+    if quoted {
+        if value.is_empty() {
+            return Err(SourceHistoryError::Invalid(match field {
+                "owner" => "owner is required",
+                "name" => "name is required",
+                _ => "required field is empty",
+            }));
+        }
+        if value.contains('"') || value.contains('\0') || value.len() > 128 {
+            return Err(SourceHistoryError::Invalid(match field {
+                "owner" => "owner is not a supported quoted identifier",
+                "name" => "name is not a supported quoted identifier",
+                _ => "invalid quoted identifier",
+            }));
+        }
+        return Ok(value);
+    }
+    let value = normalize_non_empty(value, field)?;
+    let value = value.to_ascii_uppercase();
     if !is_simple_source_name(&value) || value.contains('.') {
         return Err(SourceHistoryError::Invalid(match field {
             "owner" => "owner must be one unquoted identifier",
@@ -470,11 +718,43 @@ fn normalize_identifier(value: String, field: &'static str) -> Result<String, So
     Ok(value)
 }
 
+fn render_identifier(value: &str, quoted: bool) -> String {
+    if quoted {
+        format!("\"{value}\"")
+    } else {
+        value.to_owned()
+    }
+}
+
+pub(crate) fn source_identity_sha256(owner: &str, name: &str, object_type: &str) -> String {
+    let mut bytes = Vec::new();
+    for part in [owner, name, object_type] {
+        bytes.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(part.as_bytes());
+    }
+    oraclemcp_audit::sha256_hex(&bytes)
+}
+
 fn matches_optional_case_insensitive(expected: Option<&str>, actual: &str) -> bool {
     expected
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .is_none_or(|value| value.eq_ignore_ascii_case(actual))
+}
+
+fn matches_optional_identifier(expected: Option<&str>, actual: &str) -> bool {
+    let Some(expected) = expected.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    if let Some(quoted) = expected
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .filter(|value| !value.is_empty() && !value.contains('"'))
+    {
+        quoted == actual
+    } else {
+        expected.to_ascii_uppercase() == actual
+    }
 }
 
 fn unix_timestamp() -> String {
@@ -503,7 +783,9 @@ mod tests {
         )
         .expect("package body target");
         assert_eq!(pkg.owner.as_deref(), Some("APP"));
+        assert!(!pkg.owner_quoted);
         assert_eq!(pkg.name, "EMP_API");
+        assert!(!pkg.name_quoted);
         assert_eq!(pkg.object_type, "PACKAGE BODY");
 
         let view = source_object_from_create_or_replace_sql(
@@ -521,6 +803,73 @@ mod tests {
     }
 
     #[test]
+    fn quoted_targets_preserve_identity_through_comments_and_edition_modifiers() {
+        let target = source_object_from_create_or_replace_sql(
+            "CREATE /* header */ OR\n-- still header\nREPLACE NONEDITIONABLE PROCEDURE \"MiXeD Owner\" . \"foo\"(p NUMBER) IS BEGIN NULL; END;",
+        )
+        .expect("quoted procedure target");
+        assert_eq!(target.owner.as_deref(), Some("MiXeD Owner"));
+        assert!(target.owner_quoted);
+        assert_eq!(target.name, "foo");
+        assert!(target.name_quoted);
+        assert_eq!(target.object_type, "PROCEDURE");
+        assert_eq!(target.owner_lookup().as_deref(), Some("\"MiXeD Owner\""));
+        assert_eq!(target.name_lookup(), "\"foo\"");
+
+        let spaced = source_object_from_create_or_replace_sql(
+            "CREATE OR REPLACE PROCEDURE \" owner \".\" name \" IS BEGIN NULL; END;",
+        )
+        .expect("space-sensitive quoted target");
+        assert_eq!(spaced.owner.as_deref(), Some(" owner "));
+        assert_eq!(spaced.name, " name ");
+    }
+
+    #[test]
+    fn quoted_lowercase_and_unquoted_uppercase_have_distinct_identities() {
+        let unquoted = source_object_from_create_or_replace_sql(
+            "CREATE OR REPLACE PROCEDURE foo IS BEGIN NULL; END;",
+        )
+        .expect("unquoted target");
+        let quoted = source_object_from_create_or_replace_sql(
+            "CREATE OR REPLACE PROCEDURE \"foo\" IS BEGIN NULL; END;",
+        )
+        .expect("quoted target");
+        assert_eq!(unquoted.name, "FOO");
+        assert_eq!(quoted.name, "foo");
+        assert_ne!(
+            unquoted.identity_sha256("APP"),
+            quoted.identity_sha256("APP")
+        );
+
+        let quoted_upper = source_object_from_create_or_replace_sql(
+            "CREATE OR REPLACE PROCEDURE \"FOO\" IS BEGIN NULL; END;",
+        )
+        .expect("quoted uppercase target");
+        assert_eq!(
+            unquoted.identity_sha256("APP"),
+            quoted_upper.identity_sha256("APP"),
+            "quoted uppercase and unquoted uppercase are the same Oracle identity"
+        );
+    }
+
+    #[test]
+    fn ambiguous_or_unsupported_target_syntax_fails_closed() {
+        for sql in [
+            "CREATE OR REPLACE PROCEDURE \"fo\"\"o\" IS BEGIN NULL; END;",
+            "CREATE OR REPLACE PROCEDURE \"foo\"bar IS BEGIN NULL; END;",
+            "CREATE OR REPLACE PROCEDURE app.foo.extra IS BEGIN NULL; END;",
+            "CREATE OR REPLACE PROCEDURE app.",
+            "CREATE /* unterminated OR REPLACE PROCEDURE foo IS BEGIN NULL; END;",
+            "CREATE OR REPLACE \"PROCEDURE\" foo IS BEGIN NULL; END;",
+        ] {
+            assert!(
+                source_object_from_create_or_replace_sql(sql).is_none(),
+                "unsupported header must not be rebound: {sql}"
+            );
+        }
+    }
+
+    #[test]
     fn list_views_exclude_source_text() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -535,8 +884,11 @@ mod tests {
             .record_snapshot(SourceSnapshotDraft {
                 profile: "prod".to_owned(),
                 owner: "app".to_owned(),
+                owner_quoted: false,
                 name: "p".to_owned(),
+                name_quoted: false,
                 object_type: "procedure".to_owned(),
+                target_identity_sha256: source_identity_sha256("APP", "P", "PROCEDURE"),
                 source_kind: "all_source".to_owned(),
                 source,
                 proposal_id: "cp-1".to_owned(),
@@ -560,5 +912,83 @@ mod tests {
         assert!(!rendered.contains("BEGIN NULL"));
         let full = store.load_snapshot(&entries[0].id).expect("snapshot loads");
         assert!(full.source.contains("BEGIN NULL"));
+    }
+
+    #[test]
+    fn quoted_snapshot_metadata_and_identity_digest_round_trip() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/source-history-tests")
+            .join(format!("{}-{stamp}-quoted", std::process::id()));
+        let store = SourceHistoryStore::new(FileStore::open(root).expect("file store"));
+        let target_identity_sha256 = source_identity_sha256("MiXeD Owner", "foo", "PROCEDURE");
+        let draft = SourceSnapshotDraft {
+            profile: "prod".to_owned(),
+            owner: "MiXeD Owner".to_owned(),
+            owner_quoted: true,
+            name: "foo".to_owned(),
+            name_quoted: true,
+            object_type: "procedure".to_owned(),
+            target_identity_sha256: target_identity_sha256.clone(),
+            source_kind: "all_source".to_owned(),
+            source: "CREATE OR REPLACE PROCEDURE \"foo\" IS BEGIN NULL; END;".to_owned(),
+            proposal_id: "cp-quoted".to_owned(),
+            statement_id: "stmt-quoted".to_owned(),
+            statement_sql_sha256: "sha256:stmt".to_owned(),
+            lane_id: Some("operator".to_owned()),
+            subject_id_hash: "subject-sha256:test".to_owned(),
+        };
+        let mut wrong_digest = draft.clone();
+        wrong_digest.target_identity_sha256 =
+            source_identity_sha256("MiXeD Owner", "FOO", "PROCEDURE");
+        assert!(matches!(
+            store.record_snapshot(wrong_digest),
+            Err(SourceHistoryError::Invalid(
+                "source target identity changed before persistence"
+            ))
+        ));
+        let mut wrong_source = draft.clone();
+        wrong_source.source = "CREATE OR REPLACE PROCEDURE FOO IS BEGIN NULL; END;".to_owned();
+        assert!(matches!(
+            store.record_snapshot(wrong_source),
+            Err(SourceHistoryError::Invalid(
+                "snapshot source target does not match captured target"
+            ))
+        ));
+        let view = store
+            .record_snapshot(draft)
+            .expect("quoted snapshot recorded");
+        assert_eq!(view.owner, "MiXeD Owner");
+        assert!(view.owner_quoted);
+        assert_eq!(view.name, "foo");
+        assert!(view.name_quoted);
+        assert_eq!(view.target_identity_sha256, target_identity_sha256);
+        assert_eq!(
+            store
+                .list(SourceHistoryFilter {
+                    owner: Some("\"MiXeD Owner\"".to_owned()),
+                    name: Some("\"foo\"".to_owned()),
+                    ..Default::default()
+                })
+                .expect("quoted identity filter"),
+            vec![view.clone()]
+        );
+        assert!(
+            store
+                .list(SourceHistoryFilter {
+                    name: Some("foo".to_owned()),
+                    ..Default::default()
+                })
+                .expect("unquoted identity filter")
+                .is_empty(),
+            "an unquoted foo filter denotes FOO, not quoted lowercase foo"
+        );
+        let loaded = store
+            .load_snapshot(&view.id)
+            .expect("quoted snapshot loaded");
+        assert_eq!(loaded.view(), view);
     }
 }

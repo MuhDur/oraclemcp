@@ -74,7 +74,7 @@ use crate::server::{
 };
 use crate::source_history::{
     SourceHistoryError, SourceHistoryFilter, SourceHistoryRevertRequest, SourceHistoryStore,
-    SourceObjectTarget, SourceSnapshotDraft, normalize_source_object_type,
+    SourceObjectTarget, SourceSnapshotDraft, normalize_source_object_type, source_identity_sha256,
     source_object_from_create_or_replace_sql,
 };
 use crate::tls::TlsServerConfig;
@@ -3196,8 +3196,11 @@ fn forward_operator_action(
 
 struct CurrentSourceDocument {
     owner: String,
+    owner_quoted: bool,
     name: String,
+    name_quoted: bool,
     object_type: String,
+    target_identity_sha256: String,
     source_kind: String,
     source: String,
 }
@@ -3239,8 +3242,11 @@ fn capture_source_snapshot_for_statement(
     match store.record_snapshot(SourceSnapshotDraft {
         profile: proposal.profile.clone(),
         owner: document.owner,
+        owner_quoted: document.owner_quoted,
         name: document.name,
+        name_quoted: document.name_quoted,
         object_type: document.object_type,
+        target_identity_sha256: document.target_identity_sha256,
         source_kind: document.source_kind,
         source: document.source,
         proposal_id: proposal.id.clone(),
@@ -3338,10 +3344,12 @@ fn source_snapshot_fetch_action(
     object_type: &str,
 ) -> (&'static str, Value) {
     let mut arguments = serde_json::Map::new();
-    if let Some(owner) = target.owner.as_ref() {
+    if let Some(owner) = target.owner_lookup() {
         arguments.insert("owner".to_owned(), json!(owner));
     }
-    arguments.insert("name".to_owned(), json!(target.name.as_str()));
+    arguments.insert("name".to_owned(), json!(target.name_lookup()));
+    arguments.insert("owner_quoted".to_owned(), json!(target.owner_quoted));
+    arguments.insert("name_quoted".to_owned(), json!(target.name_quoted));
     arguments.insert("object_type".to_owned(), json!(object_type));
     if object_type == "VIEW" {
         ("oracle_get_ddl", Value::Object(arguments))
@@ -3370,22 +3378,22 @@ fn source_snapshot_document_from_ddl(
             "object": source_target_json(target, "VIEW"),
         }));
     }
-    SourceSnapshotFetchOutcome::Document(CurrentSourceDocument {
-        owner: structured
+    current_source_document(
+        target,
+        "VIEW",
+        structured
             .get("owner")
             .and_then(Value::as_str)
             .or(target.owner.as_deref())
-            .unwrap_or_default()
-            .to_ascii_uppercase(),
-        name: structured
+            .unwrap_or_default(),
+        structured
             .get("name")
             .and_then(Value::as_str)
-            .unwrap_or(&target.name)
-            .to_ascii_uppercase(),
-        object_type: "VIEW".to_owned(),
-        source_kind: "dbms_metadata".to_owned(),
-        source: source.to_owned(),
-    })
+            .unwrap_or(&target.name),
+        "VIEW",
+        "dbms_metadata",
+        source,
+    )
 }
 
 fn source_snapshot_document_from_all_source(
@@ -3431,26 +3439,95 @@ fn source_snapshot_document_from_all_source(
             "object": source_target_json(target, object_type),
         }));
     }
-    SourceSnapshotFetchOutcome::Document(CurrentSourceDocument {
-        owner: source
+    current_source_document(
+        target,
+        object_type,
+        source
             .get("owner")
             .and_then(Value::as_str)
             .or(target.owner.as_deref())
-            .unwrap_or_default()
-            .to_ascii_uppercase(),
-        name: source
+            .unwrap_or_default(),
+        source
             .get("name")
             .and_then(Value::as_str)
-            .unwrap_or(&target.name)
-            .to_ascii_uppercase(),
-        object_type: source
+            .unwrap_or(&target.name),
+        source
             .get("object_type")
             .and_then(Value::as_str)
-            .and_then(normalize_source_object_type)
-            .unwrap_or_else(|| object_type.to_owned()),
-        source_kind: "all_source".to_owned(),
-        source: create_or_replace_ddl_for_source(text),
+            .unwrap_or(object_type),
+        "all_source",
+        &create_or_replace_ddl_for_source(text),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn current_source_document(
+    target: &SourceObjectTarget,
+    expected_object_type: &str,
+    owner: &str,
+    name: &str,
+    object_type: &str,
+    source_kind: &str,
+    source: &str,
+) -> SourceSnapshotFetchOutcome {
+    let Some(object_type) = normalize_source_object_type(object_type) else {
+        return source_identity_mismatch(target, expected_object_type, owner, name, object_type);
+    };
+    let source_target = source_object_from_create_or_replace_sql(source);
+    let expected_identity_sha256 = target.identity_sha256(owner);
+    let actual_identity_sha256 = source_identity_sha256(owner, name, &object_type);
+    let metadata_matches = !owner.is_empty()
+        && !name.is_empty()
+        && object_type == expected_object_type
+        && target
+            .owner
+            .as_deref()
+            .is_none_or(|expected_owner| expected_owner == owner)
+        && target.name == name
+        && expected_identity_sha256 == actual_identity_sha256;
+    let source_matches = source_target.as_ref().is_some_and(|source_target| {
+        source_target.object_type == target.object_type
+            && source_target.name == target.name
+            && match (source_target.owner.as_deref(), target.owner.as_deref()) {
+                (Some(source_owner), Some(target_owner)) => source_owner == target_owner,
+                (None, _) => true,
+                (Some(_), None) => false,
+            }
+    });
+    if !metadata_matches || !source_matches {
+        return source_identity_mismatch(target, expected_object_type, owner, name, &object_type);
+    }
+    SourceSnapshotFetchOutcome::Document(CurrentSourceDocument {
+        owner: owner.to_owned(),
+        owner_quoted: target.owner_quoted,
+        name: name.to_owned(),
+        name_quoted: target.name_quoted,
+        object_type,
+        target_identity_sha256: actual_identity_sha256,
+        source_kind: source_kind.to_owned(),
+        source: source.to_owned(),
     })
+}
+
+fn source_identity_mismatch(
+    target: &SourceObjectTarget,
+    object_type: &str,
+    owner: &str,
+    name: &str,
+    actual_object_type: &str,
+) -> SourceSnapshotFetchOutcome {
+    SourceSnapshotFetchOutcome::Skipped(json!({
+        "status": "skipped",
+        "reason": "source fetch target identity did not match apply target",
+        "expected_object": source_target_json(target, object_type),
+        "expected_identity_sha256": target.identity_sha256(owner),
+        "actual_object": {
+            "owner": owner,
+            "name": name,
+            "object_type": actual_object_type,
+        },
+        "actual_identity_sha256": source_identity_sha256(owner, name, actual_object_type),
+    }))
 }
 
 fn create_or_replace_ddl_for_source(source: &str) -> String {
@@ -3468,7 +3545,9 @@ fn create_or_replace_ddl_for_source(source: &str) -> String {
 fn source_target_json(target: &SourceObjectTarget, object_type: &str) -> Value {
     json!({
         "owner": target.owner.as_deref(),
+        "owner_quoted": target.owner_quoted,
         "name": target.name.as_str(),
+        "name_quoted": target.name_quoted,
         "object_type": object_type,
     })
 }

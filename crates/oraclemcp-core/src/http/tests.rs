@@ -232,6 +232,49 @@ impl ToolDispatch for SourceHistoryDispatch {
     }
 }
 
+struct QuotedSourceHistoryDispatch {
+    calls: Arc<Mutex<Vec<(String, Value)>>>,
+    return_wrong_unquoted_object: bool,
+}
+
+impl ToolDispatch for QuotedSourceHistoryDispatch {
+    fn dispatch<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        _context: DispatchContext<'a>,
+        name: &'a str,
+        args: Value,
+    ) -> DispatchFuture<'a> {
+        self.calls.lock().push((name.to_owned(), args.clone()));
+        let tool = name.to_owned();
+        let wrong = self.return_wrong_unquoted_object;
+        Box::pin(async move {
+            if tool == "oracle_get_source" {
+                let (owner, name, source) = if wrong {
+                    ("APP", "FOO", "PROCEDURE FOO IS BEGIN NULL; END;")
+                } else {
+                    ("App", "foo", "PROCEDURE \"foo\" IS BEGIN NULL; END;")
+                };
+                return Outcome::Ok(serde_json::json!({
+                    "source": {
+                        "owner": owner,
+                        "name": name,
+                        "object_type": "PROCEDURE",
+                        "source": source,
+                        "line_count": 1,
+                        "char_count": source.len(),
+                        "truncated": false
+                    }
+                }));
+            }
+            Outcome::Ok(serde_json::json!({
+                "tool": tool,
+                "args": args,
+            }))
+        })
+    }
+}
+
 fn server_with_dispatch(dispatcher: Arc<dyn ToolDispatch>) -> OracleMcpServer {
     let report = CapabilitiesReport::new(
         "0.1.0",
@@ -2788,6 +2831,251 @@ fn source_history_snapshots_prior_source_and_revert_drafts_review_proposal() {
         call_names,
         vec!["oracle_get_source".to_owned(), "oracle_execute".to_owned()]
     );
+}
+
+type QuotedSourceApplyFixture = (
+    OracleMcpServer,
+    HttpTransportConfig,
+    Arc<Mutex<Vec<(String, Value)>>>,
+    Value,
+);
+
+fn apply_quoted_source_change(return_wrong_unquoted_object: bool) -> QuotedSourceApplyFixture {
+    let (auditor, _sink) = operator_auditor();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let server = server_with_dispatch(Arc::new(QuotedSourceHistoryDispatch {
+        calls: Arc::clone(&calls),
+        return_wrong_unquoted_object,
+    }));
+    let dir = dashboard_test_dir(if return_wrong_unquoted_object {
+        "source-history-quoted-mismatch"
+    } else {
+        "source-history-quoted-exact"
+    });
+    let state = dir.join("state");
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        change_proposals: Some(Arc::new(crate::change_proposal::ChangeProposalStore::new(
+            crate::file_store::FileStore::open(&state).expect("proposal store"),
+        ))),
+        source_history: Some(Arc::new(crate::source_history::SourceHistoryStore::new(
+            crate::file_store::FileStore::open(&state).expect("source-history store"),
+        ))),
+        ..Default::default()
+    };
+    let ddl = "CREATE /* identity */ OR\n-- quote guard\nREPLACE EDITIONABLE PROCEDURE \"App\".\"foo\" IS BEGIN NULL; END;";
+    let draft = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/change-proposals/draft",
+            &serde_json::json!({
+                "profile": "prod",
+                "author": "agent",
+                "title": "Patch quoted procedure",
+                "statements": [{
+                    "sql_template": ddl,
+                    "unit": "ddl",
+                    "commit": true
+                }]
+            }),
+        ),
+    );
+    assert_eq!(draft.status, 200);
+    let proposal_id = response_json(&draft)["data"]["proposal"]["id"]
+        .as_str()
+        .expect("proposal id")
+        .to_owned();
+    let apply = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/change-proposals/apply",
+            &serde_json::json!({
+                "proposal_id": proposal_id,
+                "confirm": "opaque-preview-grant",
+                "commit": true,
+                "idempotency_key": "source-history-quoted-apply"
+            }),
+        ),
+    );
+    assert_eq!(apply.status, 200);
+    let apply_json = response_json(&apply);
+    (server, cfg, calls, apply_json)
+}
+
+#[test]
+fn quoted_source_snapshot_fetch_capture_and_revert_keep_exact_identity() {
+    let (server, cfg, calls, apply_json) = apply_quoted_source_change(false);
+    let source_snapshot = &apply_json["data"]["results"][0]["source_snapshot"];
+    assert_eq!(source_snapshot["status"], serde_json::json!("captured"));
+    let snapshot = &source_snapshot["snapshot"];
+    assert_eq!(snapshot["owner"], serde_json::json!("App"));
+    assert_eq!(snapshot["owner_quoted"], serde_json::json!(true));
+    assert_eq!(snapshot["name"], serde_json::json!("foo"));
+    assert_eq!(snapshot["name_quoted"], serde_json::json!(true));
+    assert!(
+        snapshot["target_identity_sha256"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:"))
+    );
+
+    let snapshot_id = snapshot["id"].as_str().expect("snapshot id");
+    let revert = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/source-history/revert",
+            &serde_json::json!({ "snapshot_id": snapshot_id }),
+        ),
+    );
+    assert_eq!(revert.status, 200);
+    let revert_json = response_json(&revert);
+    let revert_sql = revert_json["data"]["proposal"]["statements"][0]["sql_template"]
+        .as_str()
+        .expect("revert SQL");
+    assert!(revert_sql.starts_with("CREATE OR REPLACE PROCEDURE \"foo\""));
+
+    let calls = calls.lock();
+    assert_eq!(calls[0].0, "oracle_get_source");
+    assert_eq!(calls[0].1["owner"], serde_json::json!("\"App\""));
+    assert_eq!(calls[0].1["name"], serde_json::json!("\"foo\""));
+    assert_eq!(calls[0].1["owner_quoted"], serde_json::json!(true));
+    assert_eq!(calls[0].1["name_quoted"], serde_json::json!(true));
+    assert_eq!(calls[1].0, "oracle_execute");
+}
+
+#[test]
+fn coexisting_unquoted_object_cannot_satisfy_quoted_snapshot_identity() {
+    let (server, cfg, calls, apply_json) = apply_quoted_source_change(true);
+    let source_snapshot = &apply_json["data"]["results"][0]["source_snapshot"];
+    assert_eq!(source_snapshot["status"], serde_json::json!("skipped"));
+    assert_eq!(
+        source_snapshot["reason"],
+        serde_json::json!("source fetch target identity did not match apply target")
+    );
+    assert_eq!(source_snapshot["expected_object"]["name"], "foo");
+    assert_eq!(source_snapshot["actual_object"]["name"], "FOO");
+    assert_ne!(
+        source_snapshot["expected_identity_sha256"],
+        source_snapshot["actual_identity_sha256"]
+    );
+
+    let history = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_get("/operator/v1/source-history"),
+    );
+    assert_eq!(
+        response_json(&history)["data"]["snapshots"],
+        serde_json::json!([])
+    );
+    let call_names = calls
+        .lock()
+        .iter()
+        .map(|(tool, _)| tool.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        call_names,
+        vec!["oracle_get_source".to_owned(), "oracle_execute".to_owned()]
+    );
+}
+
+#[test]
+fn fetched_source_text_cannot_disagree_with_exact_quoted_metadata() {
+    let target = source_object_from_create_or_replace_sql(
+        "CREATE OR REPLACE PROCEDURE \"App\".\"foo\" IS BEGIN NULL; END;",
+    )
+    .expect("quoted target");
+    let outcome = current_source_document(
+        &target,
+        "PROCEDURE",
+        "App",
+        "foo",
+        "PROCEDURE",
+        "all_source",
+        "CREATE OR REPLACE PROCEDURE FOO IS BEGIN NULL; END;",
+    );
+    let SourceSnapshotFetchOutcome::Skipped(skipped) = outcome else {
+        panic!("mismatched source text must not become a captured document");
+    };
+    assert_eq!(skipped["status"], serde_json::json!("skipped"));
+    assert_eq!(
+        skipped["reason"],
+        serde_json::json!("source fetch target identity did not match apply target")
+    );
+}
+
+#[test]
+fn unsupported_quoted_source_header_skips_snapshot_without_fetching() {
+    let (auditor, _sink) = operator_auditor();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let server = server_with_dispatch(Arc::new(SourceHistoryDispatch {
+        calls: Arc::clone(&calls),
+    }));
+    let state = dashboard_test_dir("source-history-unsupported-quote").join("state");
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        change_proposals: Some(Arc::new(crate::change_proposal::ChangeProposalStore::new(
+            crate::file_store::FileStore::open(&state).expect("proposal store"),
+        ))),
+        source_history: Some(Arc::new(crate::source_history::SourceHistoryStore::new(
+            crate::file_store::FileStore::open(&state).expect("source-history store"),
+        ))),
+        ..Default::default()
+    };
+    let draft = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/change-proposals/draft",
+            &serde_json::json!({
+                "profile": "prod",
+                "author": "agent",
+                "statements": [{
+                    "sql_template": "CREATE OR REPLACE PROCEDURE \"fo\"\"o\" IS BEGIN NULL; END;",
+                    "unit": "ddl",
+                    "commit": true
+                }]
+            }),
+        ),
+    );
+    assert_eq!(draft.status, 200);
+    let proposal_id = response_json(&draft)["data"]["proposal"]["id"]
+        .as_str()
+        .expect("proposal id")
+        .to_owned();
+    let apply = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/change-proposals/apply",
+            &serde_json::json!({
+                "proposal_id": proposal_id,
+                "confirm": "opaque-preview-grant",
+                "commit": true,
+                "idempotency_key": "source-history-unsupported-quote"
+            }),
+        ),
+    );
+    assert_eq!(apply.status, 200);
+    let apply_json = response_json(&apply);
+    assert_eq!(
+        apply_json["data"]["results"][0]["source_snapshot"]["status"],
+        serde_json::json!("skipped")
+    );
+    assert_eq!(
+        apply_json["data"]["results"][0]["source_snapshot"]["reason"],
+        serde_json::json!(
+            "statement is not a supported source-replaceable CREATE OR REPLACE shape"
+        )
+    );
+    let call_names = calls
+        .lock()
+        .iter()
+        .map(|(tool, _)| tool.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(call_names, vec!["oracle_execute".to_owned()]);
 }
 
 fn dashboard_test_dir(name: &str) -> PathBuf {
