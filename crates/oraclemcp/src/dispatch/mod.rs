@@ -4134,6 +4134,7 @@ struct AuditEntryCtx<'a> {
 struct DbToolCtx<'a> {
     cx: &'a Cx,
     conn: &'a dyn OracleConnection,
+    read_only_backstop: &'a ReadOnlyBackstop,
     request_budget: RequestBudget,
     active_profile: Option<&'a str>,
     session: &'a SessionLevelState,
@@ -4142,6 +4143,39 @@ struct DbToolCtx<'a> {
     write_intents: Option<&'a WriteIntentLog>,
     audit: AuditCtx<'a>,
     quarantine: &'a SyncMutex<Option<ConnectionQuarantine>>,
+}
+
+/// End the real Oracle read-only transaction before the first governed write.
+///
+/// `ReadOnlyBackstop::disarm` alone cannot change Oracle transaction state. A
+/// failed rollback means the session cannot prove whether it crossed the
+/// boundary, so fail before executing the approved statement and quarantine it.
+async fn clear_read_only_transaction_before_write(
+    ctx: &DbToolCtx<'_>,
+) -> Result<(), ErrorEnvelope> {
+    if let Err(error) = ctx
+        .read_only_backstop
+        .clear_before_write(ctx.cx, ctx.conn)
+        .await
+    {
+        let message = format!(
+            "could not end the armed read-only transaction before the governed write; the approved statement was not executed and the session was quarantined: {error}"
+        );
+        mark_connection_quarantined(
+            ctx.quarantine,
+            AuditOutcome::UnknownDiscarded,
+            message.clone(),
+        )?;
+        return Err(
+            quarantined_db_error(QuarantineOutcome::UnknownDiscarded, message).into_envelope(),
+        );
+    }
+    // The rollback finalizer deliberately has a fresh cleanup budget. Re-check
+    // the original request after it completes so a slow transition cannot let
+    // the approved effect start after the caller's total budget expired.
+    ctx.request_budget
+        .enforce(ctx.cx)
+        .map_err(DbError::into_envelope)
 }
 
 /// Build an audit draft for a served committing tool at a known danger level.
@@ -4946,6 +4980,14 @@ async fn execute_sql_inner(
         ));
     }
 
+    // The read-only backstop is transaction-scoped in Oracle. A prior read can
+    // leave this pinned session inside `SET TRANSACTION READ ONLY` even after a
+    // later request elevates the operating level. End that real transaction
+    // only after every classifier/gate/confirmation check has passed, but
+    // before audit evidence, DBMS_OUTPUT setup, or the approved statement can
+    // touch the database.
+    clear_read_only_transaction_before_write(&ctx).await?;
+
     // The audited danger tier (SAFE/GUARDED/DESTRUCTIVE) as a string; reads were
     // rejected above, so this is always a Guarded/Destructive write/DDL/Admin.
     let danger_str = audit_danger_string(decision.danger);
@@ -5477,6 +5519,8 @@ async fn compile_object_inner(
         suggested_tool: "oracle_compile_object",
         next_step: "call oracle_compile_object without execute=true, then pass confirmation.confirm with execute=true",
     })?;
+
+    clear_read_only_transaction_before_write(&ctx).await?;
 
     let danger_str = audit_danger_string(compile_danger);
     let write_intent_id = append_write_intent(
@@ -6417,6 +6461,8 @@ async fn patch_source_inner(
         suggested_tool: tool_name,
         next_step: "call the patch tool without execute=true, then pass confirmation.confirm with execute=true",
     })?;
+
+    clear_read_only_transaction_before_write(&ctx).await?;
 
     let danger_str = audit_danger_string(decision.danger);
     let write_intent_id =
@@ -7867,11 +7913,6 @@ impl OracleDispatcher {
             let active_profile = state.active_profile.clone();
             let subject = request_subject.clone();
             let grant_binding = grant_binding_for_context(&state, context);
-            // A1: a gated write commits/rolls back the pinned session's
-            // transaction, so disarm the read-only backstop before it runs (the
-            // authorized write must never be refused with ORA-01456) and let the
-            // next read re-assert it on the fresh transaction.
-            state.read_only_backstop.disarm();
             let conn: &dyn OracleConnection = state.conn.as_ref();
             let audit = AuditCtx {
                 auditor: self.auditor.as_deref(),
@@ -7880,6 +7921,7 @@ impl OracleDispatcher {
             let tool_ctx = DbToolCtx {
                 cx,
                 conn,
+                read_only_backstop: &state.read_only_backstop,
                 request_budget,
                 active_profile: active_profile.as_deref(),
                 session: &scoped_level,
@@ -7896,8 +7938,6 @@ impl OracleDispatcher {
             let active_profile = state.active_profile.clone();
             let subject = request_subject.clone();
             let grant_binding = grant_binding_for_context(&state, context);
-            // A1: see execute_approved — disarm before a gated write/DDL.
-            state.read_only_backstop.disarm();
             let conn: &dyn OracleConnection = state.conn.as_ref();
             let audit = AuditCtx {
                 auditor: self.auditor.as_deref(),
@@ -7906,6 +7946,7 @@ impl OracleDispatcher {
             let tool_ctx = DbToolCtx {
                 cx,
                 conn,
+                read_only_backstop: &state.read_only_backstop,
                 request_budget,
                 active_profile: active_profile.as_deref(),
                 session: &scoped_level,
@@ -7920,23 +7961,6 @@ impl OracleDispatcher {
         if tool == "read_patch_preview" {
             let a: ReadPatchPreviewArgs = parse_args(name, args)?;
             return read_patch_preview(&state, name, a);
-        }
-        // A1: the remaining write-class tools (oracle_execute and the DDL/source
-        // mutators) run a gated write on the pinned session that commits or rolls
-        // back, ending the read-only transaction. Disarm the backstop BEFORE the
-        // immutable `conn` borrow below so the authorized write is not refused
-        // with ORA-01456 and the next read re-asserts the backstop afresh. Pure
-        // read/dictionary tools leave the backstop untouched (the read arm arms
-        // it lazily). This is the only place the pinned session is mutated, so it
-        // is the precise transaction boundary.
-        if matches!(
-            tool,
-            "oracle_execute"
-                | "oracle_compile_object"
-                | "oracle_create_or_replace"
-                | "oracle_patch_source"
-        ) {
-            state.read_only_backstop.disarm();
         }
         // A3/perf: oracle_query is handled here as a dedicated early-return arm
         // (like the write-class tools above) so its args are parsed ONCE and the
@@ -8126,6 +8150,7 @@ impl OracleDispatcher {
                 let tool_ctx = DbToolCtx {
                     cx,
                     conn,
+                    read_only_backstop: &state.read_only_backstop,
                     request_budget,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
@@ -8148,6 +8173,7 @@ impl OracleDispatcher {
                 let tool_ctx = DbToolCtx {
                     cx,
                     conn,
+                    read_only_backstop: &state.read_only_backstop,
                     request_budget,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
@@ -8170,6 +8196,7 @@ impl OracleDispatcher {
                 let tool_ctx = DbToolCtx {
                     cx,
                     conn,
+                    read_only_backstop: &state.read_only_backstop,
                     request_budget,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
@@ -8192,6 +8219,7 @@ impl OracleDispatcher {
                 let tool_ctx = DbToolCtx {
                     cx,
                     conn,
+                    read_only_backstop: &state.read_only_backstop,
                     request_budget,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,

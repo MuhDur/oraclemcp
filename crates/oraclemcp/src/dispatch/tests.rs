@@ -12,7 +12,7 @@ use oraclemcp_db::{OracleBackend, OracleCell, OracleRow, QueryRowStream, QueryRo
 use std::path::{Path, PathBuf};
 use std::sync::Barrier;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -7487,6 +7487,9 @@ mod read_only_backstop_wiring {
     #[derive(Default)]
     struct BackstopRecordingState {
         executed: Mutex<Vec<String>>,
+        events: Mutex<Vec<String>>,
+        read_only_transaction: AtomicBool,
+        fail_next_rollback: AtomicBool,
     }
 
     struct BackstopRecordingMock {
@@ -7535,14 +7538,71 @@ mod read_only_backstop_wiring {
                 .lock()
                 .expect("exec mutex")
                 .push(sql.to_owned());
+            self.state
+                .events
+                .lock()
+                .expect("events mutex")
+                .push(sql.to_owned());
+            if sql == SET_TRANSACTION_READ_ONLY {
+                self.state
+                    .read_only_transaction
+                    .store(true, Ordering::SeqCst);
+            } else if self.state.read_only_transaction.load(Ordering::SeqCst)
+                && DEFAULT_CLASSIFIER
+                    .classify(sql)
+                    .required_level
+                    .is_some_and(|level| level >= OperatingLevel::ReadWrite)
+            {
+                return Err(DbError::Execute(
+                    "ORA-01456: may not perform insert/delete/update operation inside a READ ONLY transaction"
+                        .to_owned(),
+                ));
+            }
             Ok(0)
         }
         async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
         async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            self.state
+                .events
+                .lock()
+                .expect("events mutex")
+                .push("ROLLBACK".to_owned());
+            if self.state.fail_next_rollback.swap(false, Ordering::SeqCst) {
+                return Err(DbError::Cancelled(
+                    "injected read-only transition rollback failure".to_owned(),
+                ));
+            }
+            self.state
+                .read_only_transaction
+                .store(false, Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    fn elevate_session(dispatcher: &OracleDispatcher, level: &str) {
+        let preview = dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({ "level": level, "ttl_seconds": 60 }),
+            )
+            .expect("elevation preview");
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("elevation confirmation")
+            .to_owned();
+        dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({
+                    "level": level,
+                    "ttl_seconds": 60,
+                    "execute": true,
+                    "confirm": confirm,
+                }),
+            )
+            .expect("confirmed elevation");
     }
 
     fn backstop_statements(state: &Arc<BackstopRecordingState>) -> usize {
@@ -7683,6 +7743,164 @@ mod read_only_backstop_wiring {
     }
 
     #[test]
+    fn read_then_elevate_then_governed_dml_rolls_back_read_only_transaction_first() {
+        let state = Arc::new(BackstopRecordingState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(BackstopRecordingMock {
+                state: state.clone(),
+            }),
+            Some("dev".to_owned()),
+            SessionLevelState::new(OperatingLevel::ReadWrite, false),
+        );
+
+        dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("read arms a real read-only transaction");
+        assert!(state.read_only_transaction.load(Ordering::SeqCst));
+
+        elevate_session(&dispatcher, "READ_WRITE");
+        let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+        let out = dispatcher
+            .dispatch("oracle_execute", json!({ "sql": sql }))
+            .expect("rollback-by-default DML runs after ending the read-only transaction");
+        assert_eq!(out["executed"], json!(true));
+        assert_eq!(out["committed"], json!(false));
+        assert!(!state.read_only_transaction.load(Ordering::SeqCst));
+
+        let events = state.events.lock().expect("events mutex").clone();
+        let write = events
+            .iter()
+            .position(|event| event.contains("UPDATE employees"))
+            .expect("governed DML reached the mock");
+        assert_eq!(
+            events.get(write.wrapping_sub(1)).map(String::as_str),
+            Some("ROLLBACK"),
+            "the real Oracle transaction boundary must precede the governed DML"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.as_str() == "ROLLBACK")
+                .count(),
+            3,
+            "one reset arms the backstop, one clears it before DML, and rollback-by-default cleans up the DML"
+        );
+    }
+
+    #[test]
+    fn failed_transition_rollback_prevents_write_and_quarantines_session() {
+        let state = Arc::new(BackstopRecordingState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(BackstopRecordingMock {
+                state: state.clone(),
+            }),
+            Some("dev".to_owned()),
+            SessionLevelState::new(OperatingLevel::ReadWrite, false),
+        );
+        dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("read arms a real read-only transaction");
+        elevate_session(&dispatcher, "READ_WRITE");
+        state.fail_next_rollback.store(true, Ordering::SeqCst);
+
+        let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+        let error = dispatcher
+            .dispatch("oracle_execute", json!({ "sql": sql }))
+            .expect_err("an uncertain transition rollback must fail before execute");
+        assert_eq!(error.error_class, ErrorClass::ConnectionFailed);
+        assert!(
+            error
+                .message
+                .contains("approved statement was not executed"),
+            "{error:?}"
+        );
+        assert!(
+            state
+                .executed
+                .lock()
+                .expect("exec mutex")
+                .iter()
+                .all(|statement| !statement.contains("UPDATE employees")),
+            "governed DML must not reach Oracle after transition rollback failure"
+        );
+        assert!(
+            state.read_only_transaction.load(Ordering::SeqCst),
+            "a failed rollback must not claim the read-only transaction was cleared"
+        );
+        let quarantine = dispatcher
+            .connection_quarantine()
+            .expect("quarantine lock")
+            .expect("rollback failure quarantines");
+        assert_eq!(quarantine.outcome, AuditOutcome::UnknownDiscarded);
+
+        let retry = dispatcher
+            .dispatch("oracle_execute", json!({ "sql": sql }))
+            .expect_err("the quarantined pinned session must not be reused");
+        assert_eq!(retry.error_class, ErrorClass::RuntimeStateRequired);
+    }
+
+    #[test]
+    fn ddl_preview_preserves_backstop_and_confirmed_compile_clears_it_before_effect() {
+        let state = Arc::new(BackstopRecordingState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(BackstopRecordingMock {
+                state: state.clone(),
+            }),
+            Some("dev".to_owned()),
+            SessionLevelState::new(OperatingLevel::Ddl, false),
+        );
+        dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("read arms a real read-only transaction");
+        elevate_session(&dispatcher, "DDL");
+
+        let preview = dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({ "object_type": "PACKAGE", "name": "EMP_API" }),
+            )
+            .expect("compile preview");
+        assert!(state.read_only_transaction.load(Ordering::SeqCst));
+        assert_eq!(
+            state
+                .events
+                .lock()
+                .expect("events mutex")
+                .iter()
+                .filter(|event| event.as_str() == "ROLLBACK")
+                .count(),
+            1,
+            "preview-only work must preserve the armed transaction"
+        );
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("compile confirmation")
+            .to_owned();
+        dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({
+                    "object_type": "PACKAGE",
+                    "name": "EMP_API",
+                    "execute": true,
+                    "confirm": confirm,
+                }),
+            )
+            .expect("confirmed compile runs after the transaction transition");
+
+        let events = state.events.lock().expect("events mutex").clone();
+        let ddl = events
+            .iter()
+            .position(|event| event.contains("ALTER PACKAGE"))
+            .expect("compile DDL reached the mock");
+        assert_eq!(
+            events.get(ddl.wrapping_sub(1)).map(String::as_str),
+            Some("ROLLBACK"),
+            "the real transaction boundary must precede confirmed DDL"
+        );
+    }
+
+    #[test]
     fn read_only_session_write_attempt_is_classifier_blocked_with_backstop_set() {
         // Defense-in-depth contract: on a READ_ONLY session a read arms the
         // backstop; an attempted write via oracle_execute is refused by the
@@ -7719,6 +7937,18 @@ mod read_only_backstop_wiring {
             ),
             "write refused by the operating-level gate, not silently run: {:?}",
             err.error_class
+        );
+        assert!(state.read_only_transaction.load(Ordering::SeqCst));
+        assert_eq!(
+            state
+                .events
+                .lock()
+                .expect("events mutex")
+                .iter()
+                .filter(|event| event.as_str() == "ROLLBACK")
+                .count(),
+            1,
+            "a refused write must not end the armed read-only transaction"
         );
     }
 

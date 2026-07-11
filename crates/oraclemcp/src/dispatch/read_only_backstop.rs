@@ -43,11 +43,16 @@
 //!   reads in the SAME read-only transaction pay no extra round trip — the
 //!   property persists until a transaction boundary. The deterministic test
 //!   asserts the statement is issued exactly once across many reads.
-//! - **Reset on a transaction boundary.** Anything that ends the transaction
-//!   disarms the backstop so the next read re-asserts it: a committed/rolled-back
-//!   write ([`ReadOnlyBackstop::disarm`], called by the write path before it runs
-//!   so the gated write is never refused by `ORA-01456`), and a profile switch
-//!   that swaps the underlying session ([`ReadOnlyBackstop::reset`]).
+//! - **Clear before a governed write.** Flipping the in-memory belief is not a
+//!   transaction boundary. When an armed session is about to run an authorized
+//!   write, [`ReadOnlyBackstop::clear_before_write`] first performs a bounded,
+//!   cancellation-masked `ROLLBACK`; only a successful rollback disarms the
+//!   tracker. This ends the real Oracle read-only transaction so the write is
+//!   not refused by `ORA-01456`. A failed rollback leaves the tracker armed and
+//!   the dispatcher quarantines the uncertain session.
+//! - **Reset on an external transaction boundary.** Flashback cleanup and a
+//!   profile switch can replace/reset the underlying transaction or session;
+//!   those paths disarm/reset the belief so the next read re-asserts it.
 //! - **Re-assert on a silent drop back to `READ_ONLY`.** The read path always
 //!   consults the live [`effective_level`](oraclemcp_guard::SessionLevelState::effective_level):
 //!   when it is `READ_ONLY` and the backstop is disarmed (e.g. after a TTL
@@ -76,6 +81,7 @@ use asupersync::Cx;
 use oraclemcp_db::{OracleBind, OracleConnection};
 use oraclemcp_error::ErrorEnvelope;
 use oraclemcp_guard::{OperatingLevel, SET_TRANSACTION_READ_ONLY, SessionLevelState};
+use std::cell::Cell;
 
 use super::DbError;
 
@@ -88,19 +94,21 @@ use super::DbError;
 /// (the engine raises `ORA-01456` regardless of this flag).
 #[derive(Debug, Default)]
 pub(crate) struct ReadOnlyBackstop {
-    armed: bool,
+    armed: Cell<bool>,
 }
 
 impl ReadOnlyBackstop {
     /// A fresh, disarmed backstop (the next read at `READ_ONLY` will assert it).
     pub(crate) fn new() -> Self {
-        Self { armed: false }
+        Self {
+            armed: Cell::new(false),
+        }
     }
 
     /// Whether the read-only transaction is currently believed to be in force.
     #[cfg(test)]
     pub(crate) fn is_armed(&self) -> bool {
-        self.armed
+        self.armed.get()
     }
 
     /// Read-path entry point. When the live effective level is `READ_ONLY` and
@@ -125,7 +133,7 @@ impl ReadOnlyBackstop {
         if session.effective_level() != OperatingLevel::ReadOnly {
             return Ok(());
         }
-        if self.armed {
+        if self.armed.get() {
             return Ok(());
         }
         self.assert_read_only(cx, conn).await
@@ -145,23 +153,41 @@ impl ReadOnlyBackstop {
         conn.execute(cx, SET_TRANSACTION_READ_ONLY, &[] as &[OracleBind])
             .await
             .map_err(DbError::into_envelope)?;
-        self.armed = true;
+        self.armed.set(true);
         Ok(())
     }
 
-    /// Disarm the backstop because the current transaction is about to end (a
-    /// gated write commits or rolls back). Called by the write path BEFORE the
-    /// write runs so the authorized write is never refused with `ORA-01456`, and
-    /// so the NEXT read re-asserts the backstop on the fresh transaction.
-    pub(crate) fn disarm(&mut self) {
-        self.armed = false;
+    /// End an armed Oracle read-only transaction before a governed write.
+    ///
+    /// The rollback is a fresh bounded cleanup finalizer, independent of the
+    /// spent request budget. Only a successful rollback clears the belief. On
+    /// failure the caller must quarantine the session because whether Oracle
+    /// crossed the transaction boundary is unknown.
+    pub(crate) async fn clear_before_write(
+        &self,
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+    ) -> Result<(), DbError> {
+        if !self.armed.get() {
+            return Ok(());
+        }
+        super::rollback_conn_cleanup(cx, conn).await?;
+        self.armed.set(false);
+        Ok(())
+    }
+
+    /// Disarm after another path has already established a real transaction
+    /// boundary (for example, flashback teardown). This must never be used as a
+    /// substitute for [`Self::clear_before_write`] on a governed write path.
+    pub(crate) fn disarm(&self) {
+        self.armed.set(false);
     }
 
     /// Reset because the underlying pinned session was replaced (profile switch).
     /// The new session has its own transaction; the backstop must re-assert on
     /// its first read.
-    pub(crate) fn reset(&mut self) {
-        self.armed = false;
+    pub(crate) fn reset(&self) {
+        self.armed.set(false);
     }
 }
 
