@@ -4481,6 +4481,172 @@ struct GuardedGeneratedReadConn<'a> {
     audit: GeneratedReadAuditCtx<'a>,
 }
 
+/// Observe read failures at the connection-ownership boundary.
+///
+/// A dispatcher-owned primary connection is retained across calls, so an
+/// uncertain read failure must quarantine that physical session. A stateless
+/// [`OraclePool`] owns and dirty-discards the failed checkout itself; poisoning
+/// the dispatcher's unrelated primary session would be both unnecessary and
+/// incorrect. Keeping that distinction in this decorator prevents individual
+/// read helpers from silently choosing different reuse semantics.
+struct ReadUncertaintyConn<'a> {
+    inner: &'a dyn OracleConnection,
+    quarantine: Option<&'a SyncMutex<Option<ConnectionQuarantine>>>,
+}
+
+impl ReadUncertaintyConn<'_> {
+    fn observe<T>(&self, operation: &str, result: Result<T, DbError>) -> Result<T, DbError> {
+        let Err(err) = result else {
+            return result;
+        };
+        if err.is_uncertain_session_state()
+            && let Some(quarantine) = self.quarantine
+            && let Err(mark_err) = mark_connection_quarantined(
+                quarantine,
+                AuditOutcome::UnknownDiscarded,
+                format!("{operation} failed at an uncertain read boundary: {err}"),
+            )
+        {
+            return Err(db_internal_from_envelope(mark_err));
+        }
+        Err(err)
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for ReadUncertaintyConn<'_> {
+    fn backend(&self) -> OracleBackend {
+        self.inner.backend()
+    }
+
+    async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
+        self.observe("database ping", self.inner.ping(cx).await)
+    }
+
+    async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        self.observe("database describe", self.inner.describe(cx).await)
+    }
+
+    async fn query_rows(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        self.observe("query", self.inner.query_rows(cx, sql, binds).await)
+    }
+
+    async fn query_rows_with_serialize_options(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+        serialize_opts: &SerializeOptions,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        self.observe(
+            "query",
+            self.inner
+                .query_rows_with_serialize_options(cx, sql, binds, serialize_opts)
+                .await,
+        )
+    }
+
+    async fn query_row_stream(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+        arraysize: usize,
+        serialize_opts: &SerializeOptions,
+    ) -> Result<QueryRowStreamStart, DbError> {
+        self.observe(
+            "row stream startup",
+            self.inner
+                .query_row_stream(cx, sql, binds, arraysize, serialize_opts)
+                .await,
+        )
+    }
+
+    async fn query_rows_named(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[(String, OracleBind)],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        self.observe(
+            "named-bind query",
+            self.inner.query_rows_named(cx, sql, binds).await,
+        )
+    }
+
+    async fn query_rows_named_with_serialize_options(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[(String, OracleBind)],
+        serialize_opts: &SerializeOptions,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        self.observe(
+            "named-bind query",
+            self.inner
+                .query_rows_named_with_serialize_options(cx, sql, binds, serialize_opts)
+                .await,
+        )
+    }
+
+    async fn query_optional_row(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Option<OracleRow>, DbError> {
+        self.observe(
+            "optional-row query",
+            self.inner.query_optional_row(cx, sql, binds).await,
+        )
+    }
+
+    async fn execute(&self, cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
+        self.inner.execute(cx, sql, binds).await
+    }
+
+    async fn commit(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.commit(cx).await
+    }
+
+    async fn rollback(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.rollback(cx).await
+    }
+
+    fn call_timeout(&self) -> Result<Option<Duration>, DbError> {
+        self.inner.call_timeout()
+    }
+
+    fn set_call_timeout(&self, timeout: Option<Duration>) -> Result<(), DbError> {
+        self.inner.set_call_timeout(timeout)
+    }
+
+    fn request_deadline(&self, cx: &Cx) -> Result<Option<Time>, DbError> {
+        self.inner.request_deadline(cx)
+    }
+
+    fn set_request_deadline(&self, cx: &Cx, deadline: Option<Time>) -> Result<(), DbError> {
+        self.inner.set_request_deadline(cx, deadline)
+    }
+
+    fn request_quota(&self, cx: &Cx) -> Result<Option<DbRequestQuota>, DbError> {
+        self.inner.request_quota(cx)
+    }
+
+    fn set_request_quota(&self, cx: &Cx, quota: Option<DbRequestQuota>) -> Result<(), DbError> {
+        self.inner.set_request_quota(cx, quota)
+    }
+
+    async fn flashback_disable(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.flashback_disable(cx).await
+    }
+}
+
 impl GuardedGeneratedReadConn<'_> {
     fn before_query(&self, sql: &str) -> Result<String, DbError> {
         let danger = ensure_generated_read_sql_allowed(sql).map_err(db_internal_from_envelope)?;
@@ -8119,12 +8285,20 @@ impl OracleDispatcher {
             },
             tool,
         };
-        let guarded_conn = GuardedGeneratedReadConn {
+        let observed_conn = ReadUncertaintyConn {
             inner: conn,
+            quarantine: Some(&self.quarantine),
+        };
+        let observed_metadata_conn = ReadUncertaintyConn {
+            inner: metadata_conn,
+            quarantine: std::ptr::eq(conn, metadata_conn).then_some(&self.quarantine),
+        };
+        let guarded_conn = GuardedGeneratedReadConn {
+            inner: &observed_conn,
             audit: generated_read_audit,
         };
         let guarded_metadata_conn = GuardedGeneratedReadConn {
-            inner: metadata_conn,
+            inner: &observed_metadata_conn,
             audit: generated_read_audit,
         };
 
@@ -8863,7 +9037,10 @@ impl OracleDispatcher {
             }
             other => {
                 if let Some(loaded) = state.custom_catalog.get(other) {
-                    let executor = ReadOnlyCustomToolExecutor { cx, conn };
+                    let executor = ReadOnlyCustomToolExecutor {
+                        cx,
+                        conn: &observed_conn,
+                    };
                     execute_custom_tool(loaded, &args, &executor).await
                 } else {
                     Err(invalid_args(format!(
@@ -8941,6 +9118,10 @@ impl OracleDispatcher {
         let timeout_seconds = a.timeout_seconds;
         let exports = self.exports.clone();
         let body_budget = request_budget.clone();
+        let read_conn = ReadUncertaintyConn {
+            inner: conn,
+            quarantine: Some(&self.quarantine),
+        };
         // A9: narrow the handler context to the read-path capability row
         // (TIME + IO; no SPAWN / REMOTE / RANDOM). The pure handler work below —
         // gate, bind conversion, cursor decode, serialization — runs under this
@@ -8994,7 +9175,7 @@ impl OracleDispatcher {
                     let serialize_opts = query_serialize_options_from_args(&a);
                     return Self::stream_query_response(
                         cx,
-                        conn,
+                        &read_conn,
                         &body_budget,
                         &executed_sql,
                         &a.sql,
@@ -9012,7 +9193,7 @@ impl OracleDispatcher {
                 if a.export {
                     return export_query_to_resource(
                         cx,
-                        conn,
+                        &read_conn,
                         &executed_sql,
                         &a,
                         &binds,
@@ -9033,7 +9214,7 @@ impl OracleDispatcher {
                     Some(as_of) => {
                         read_query_as_of(
                             cx,
-                            conn,
+                            &read_conn,
                             &executed_sql,
                             &binds,
                             caps,
@@ -9046,7 +9227,7 @@ impl OracleDispatcher {
                     None => {
                         read_query(
                             cx,
-                            conn,
+                            &read_conn,
                             &executed_sql,
                             &binds,
                             caps,
