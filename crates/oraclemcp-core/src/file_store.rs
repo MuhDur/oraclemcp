@@ -5,8 +5,8 @@
 //! callers can build durable config, metrics, proposal, and idempotency stores
 //! without inventing their own path handling.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
@@ -86,10 +86,13 @@ impl StoreId {
 }
 
 /// Token proving this process holds the single-writer service lock.
+///
+/// Ownership is an advisory OS lock tied to the open descriptor. The
+/// `.service.lock` sidecar persists as an operator hint and must not be
+/// manually removed; process exit releases ownership automatically.
 pub struct ServiceLock {
     root: PathBuf,
-    path: PathBuf,
-    _file: File,
+    file: File,
 }
 
 impl ServiceLock {
@@ -104,10 +107,12 @@ impl ServiceLock {
 
 impl Drop for ServiceLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-        if let Some(parent) = self.path.parent() {
-            let _ = fsync_dir(parent);
-        }
+        // SAFETY: ownership is the advisory OS lock on this exact open file,
+        // never the mutable pathname. Closing the descriptor also releases it
+        // after a crash. The sidecar is deliberately persistent: unlinking it
+        // could let another process lock a replacement inode while this one is
+        // still live, and an old holder must never delete a replacement lock.
+        let _ = self.file.unlock();
     }
 }
 
@@ -203,21 +208,42 @@ impl FileStore {
 
     /// Acquire the mandatory single-writer service lock for this store.
     pub fn acquire_service_lock(&self, owner: &str) -> Result<ServiceLock> {
+        self.acquire_service_lock_with_metadata(owner, write_service_lock_metadata)
+    }
+
+    fn acquire_service_lock_with_metadata(
+        &self,
+        owner: &str,
+        write_metadata: impl FnOnce(&mut File, &str) -> std::io::Result<()>,
+    ) -> Result<ServiceLock> {
         let path = self.root.join(SERVICE_LOCK_FILE);
-        let mut file = create_new_private_file(&path).map_err(|e| match e.kind() {
-            std::io::ErrorKind::AlreadyExists => FileStoreError::Locked,
-            _ => FileStoreError::Io(e.to_string()),
-        })?;
-        writeln!(file, "pid={}", std::process::id())
-            .and_then(|()| writeln!(file, "owner={owner}"))
+        let mut file = open_private_lock_file(&path)
+            .map_err(|e| FileStoreError::Io(format!("cannot open {}: {e}", path.display())))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return Err(FileStoreError::Locked),
+            Err(TryLockError::Error(error)) => {
+                return Err(FileStoreError::Io(format!(
+                    "cannot lock {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+
+        // The descriptor already owns the lock. All fallible initialization
+        // below is therefore crash-safe: `?` drops the descriptor and releases
+        // ownership, while the persistent (possibly partial) sidecar is never
+        // interpreted as ownership by a future process.
+        file.set_len(0)
+            .and_then(|()| file.seek(SeekFrom::Start(0)).map(|_| ()))
+            .and_then(|()| write_metadata(&mut file, owner))
             .map_err(|e| FileStoreError::Io(e.to_string()))?;
         file.sync_all()
             .map_err(|e| FileStoreError::Io(e.to_string()))?;
         fsync_dir(&self.root)?;
         Ok(ServiceLock {
             root: self.root.clone(),
-            path,
-            _file: file,
+            file,
         })
     }
 
@@ -492,6 +518,21 @@ fn create_new_private_file(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
+fn open_private_lock_file(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options.open(path)
+}
+
+fn write_service_lock_metadata(file: &mut File, owner: &str) -> std::io::Result<()> {
+    writeln!(file, "pid={}", std::process::id())?;
+    // Debug formatting escapes control characters so this operator hint stays
+    // one physical line even if a caller supplied an unusual owner label.
+    writeln!(file, "owner={owner:?}")
+}
+
 fn open_append_private_file(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.append(true).create(true);
@@ -558,8 +599,12 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
     use std::thread;
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::time::{Duration, Instant, UNIX_EPOCH};
+
+    const LOCK_HELPER_ROOT_ENV: &str = "ORACLEMCP_FILE_STORE_LOCK_HELPER_ROOT";
+    const LOCK_HELPER_READY_ENV: &str = "ORACLEMCP_FILE_STORE_LOCK_HELPER_READY";
 
     fn test_root(name: &str) -> PathBuf {
         let stamp = SystemTime::now()
@@ -643,6 +688,125 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn service_lock_subprocess_holder() {
+        let Some(root) = std::env::var_os(LOCK_HELPER_ROOT_ENV) else {
+            return;
+        };
+        let ready = std::env::var_os(LOCK_HELPER_READY_ENV).expect("helper ready path");
+        let store = FileStore::open(root).expect("helper store");
+        let _lock = store
+            .acquire_service_lock("subprocess-holder")
+            .expect("helper service lock");
+        let ready = PathBuf::from(ready);
+        fs::write(&ready, b"ready\n").expect("publish helper readiness");
+        File::open(ready.parent().expect("ready parent"))
+            .and_then(|dir| dir.sync_all())
+            .expect("fsync helper readiness");
+        loop {
+            thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    #[test]
+    fn service_lock_recovers_after_holder_process_is_killed() {
+        let root = test_root("crash-recovery");
+        let contender = FileStore::open(&root).expect("contender store");
+
+        // Ten crash/restart cycles exercise the exact workload at 10x the
+        // original reproducer, not merely a clean-drop happy path.
+        for round in 0..10 {
+            let ready = root.with_extension(format!("ready-{round}"));
+            let mut child = Command::new(std::env::current_exe().expect("test executable"))
+                .arg("--exact")
+                .arg("file_store::tests::service_lock_subprocess_holder")
+                .arg("--nocapture")
+                .env(LOCK_HELPER_ROOT_ENV, &root)
+                .env(LOCK_HELPER_READY_ENV, &ready)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn service-lock holder");
+
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !ready.exists() && Instant::now() < deadline {
+                if let Some(status) = child.try_wait().expect("poll helper") {
+                    panic!("service-lock helper exited before readiness: {status}");
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            if !ready.exists() {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("service-lock helper did not become ready");
+            }
+
+            let live_contender_was_excluded = matches!(
+                contender.acquire_service_lock("live-contender"),
+                Err(FileStoreError::Locked)
+            );
+
+            child
+                .kill()
+                .expect("forcibly terminate service-lock holder");
+            child.wait().expect("reap service-lock holder");
+            assert!(
+                live_contender_was_excluded,
+                "a second process must not acquire while the holder is live"
+            );
+            let recovered = contender
+                .acquire_service_lock("post-crash-owner")
+                .expect("process death must release the service lock immediately");
+            drop(recovered);
+        }
+    }
+
+    #[test]
+    fn service_lock_initialization_failure_releases_os_lock() {
+        let store = FileStore::open(test_root("partial-lock-init")).expect("store");
+        let error = match store
+            .acquire_service_lock_with_metadata("failing-owner", |_file, _owner| {
+                Err(std::io::Error::other("injected metadata failure"))
+            }) {
+            Ok(_) => panic!("metadata initialization must fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, FileStoreError::Io(_)));
+
+        let recovered = store
+            .acquire_service_lock("recovered-owner")
+            .expect("partial initialization must not leave a permanent lock");
+        drop(recovered);
+    }
+
+    #[test]
+    fn old_lock_drop_does_not_unlink_replacement_lock() {
+        let store = FileStore::open(test_root("replacement-identity")).expect("store");
+        let old_lock = store.acquire_service_lock("old-owner").expect("old lock");
+        let lock_path = store.root().join(SERVICE_LOCK_FILE);
+        let displaced_path = store.root().join(".service.lock.displaced");
+        fs::rename(&lock_path, &displaced_path).expect("displace old lock pathname");
+
+        let replacement = store
+            .acquire_service_lock("replacement-owner")
+            .expect("replacement lock");
+        drop(old_lock);
+
+        assert!(
+            lock_path.exists(),
+            "dropping an old handle must not unlink a replacement pathname"
+        );
+        assert!(
+            matches!(
+                store.acquire_service_lock("third-owner"),
+                Err(FileStoreError::Locked)
+            ),
+            "the replacement must continue excluding a third writer"
+        );
+        drop(replacement);
     }
 
     #[test]
