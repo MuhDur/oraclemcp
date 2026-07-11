@@ -1509,7 +1509,9 @@ fn live_top_queries_resolves_source_and_runs_including_statspack_fallback() {
         conn.ping(&cx).await.expect("top_queries ping");
 
         // Default mode: always the free live cursor cache, query must run.
-        let default_source = oraclemcp_db::resolve_top_sql_source(&cx, &conn, false).await;
+        let default_source = oraclemcp_db::resolve_top_sql_source(&cx, &conn, false)
+            .await
+            .expect("default top-SQL source resolves");
         assert_eq!(default_source, oraclemcp_db::DiagnosticsSource::LiveCursor);
         let live_sql = oraclemcp_db::top_sql_query(
             default_source,
@@ -1523,7 +1525,9 @@ fn live_top_queries_resolves_source_and_runs_including_statspack_fallback() {
             .expect("live top-SQL runs as a pure read");
 
         // Historical mode: resolve the real posture and exercise the resolved path.
-        let historical = oraclemcp_db::resolve_top_sql_source(&cx, &conn, true).await;
+        let historical = oraclemcp_db::resolve_top_sql_source(&cx, &conn, true)
+            .await
+            .expect("historical top-SQL source probe remains certain");
         eprintln!("[live-xe] top_queries historical source resolved to {historical:?}");
         match oraclemcp_db::top_sql_query(historical, oraclemcp_db::TopSqlMetric::Elapsed, 5, None)
         {

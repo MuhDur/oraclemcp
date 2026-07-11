@@ -1532,12 +1532,16 @@ mod tests {
             assert!(!crate::awr::detect_diagnostics_pack(&cx, &with_statspack).await);
             assert!(crate::awr::detect_statspack(&cx, &with_statspack).await);
             assert_eq!(
-                crate::awr::resolve_top_sql_source(&cx, &with_statspack, true).await,
+                crate::awr::resolve_top_sql_source(&cx, &with_statspack, true)
+                    .await
+                    .expect("historical source resolution"),
                 crate::awr::DiagnosticsSource::Statspack,
                 "no pack + Statspack installed -> Statspack"
             );
             assert_eq!(
-                crate::awr::resolve_top_sql_source(&cx, &with_statspack, false).await,
+                crate::awr::resolve_top_sql_source(&cx, &with_statspack, false)
+                    .await
+                    .expect("live source resolution"),
                 crate::awr::DiagnosticsSource::LiveCursor,
                 "default mode is unaffected by the historical fallback"
             );
@@ -1548,11 +1552,15 @@ mod tests {
             };
             assert!(!crate::awr::detect_statspack(&cx, &without_statspack).await);
             assert_eq!(
-                crate::awr::resolve_top_sql_source(&cx, &without_statspack, true).await,
+                crate::awr::resolve_top_sql_source(&cx, &without_statspack, true)
+                    .await
+                    .expect("unavailable historical source resolution"),
                 crate::awr::DiagnosticsSource::Unavailable
             );
             assert_eq!(
-                crate::awr::resolve_top_sql_source(&cx, &without_statspack, false).await,
+                crate::awr::resolve_top_sql_source(&cx, &without_statspack, false)
+                    .await
+                    .expect("live source resolution"),
                 crate::awr::DiagnosticsSource::LiveCursor
             );
         });

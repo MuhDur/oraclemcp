@@ -7282,6 +7282,57 @@ mod top_queries {
     use super::*;
     use std::sync::Arc;
 
+    struct CancelledLicenseProbeMock {
+        queries: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for CancelledLicenseProbeMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo {
+                current_schema: Some("APP".to_owned()),
+                ..Default::default()
+            })
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.queries.fetch_add(1, Ordering::SeqCst);
+            Err(DbError::Cancelled(
+                "injected Diagnostics Pack probe cancellation".to_owned(),
+            ))
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
     fn dispatcher() -> OracleDispatcher {
         OracleDispatcher::new_switchable(
             Box::new(OneRowMock),
@@ -7317,6 +7368,41 @@ mod top_queries {
             .expect("5%-of-total dispatches");
         assert_eq!(out["source"], json!("live_cursor"));
         assert!(out["rows"].is_array());
+    }
+
+    #[test]
+    fn uncertain_historical_probe_stops_fallback_and_quarantines_pinned_session() {
+        let queries = Arc::new(AtomicUsize::new(0));
+        let dispatcher = OracleDispatcher::new_with_profile(
+            Box::new(CancelledLicenseProbeMock {
+                queries: Arc::clone(&queries),
+            }),
+            Some("dev".to_owned()),
+        );
+
+        let error = dispatcher
+            .dispatch("oracle_top_queries", json!({ "historical": true }))
+            .expect_err("uncertain license probe must stop source resolution");
+        assert_eq!(error.error_class, ErrorClass::Timeout);
+        assert_eq!(
+            queries.load(Ordering::SeqCst),
+            1,
+            "Statspack must not be probed after connection uncertainty"
+        );
+        assert_eq!(
+            dispatcher
+                .connection_quarantine()
+                .expect("quarantine lock")
+                .expect("uncertain pinned probe quarantines")
+                .outcome,
+            AuditOutcome::UnknownDiscarded
+        );
+
+        let retry = dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect_err("quarantined pinned session cannot be reused");
+        assert_eq!(retry.error_class, ErrorClass::RuntimeStateRequired);
+        assert_eq!(queries.load(Ordering::SeqCst), 1);
     }
 }
 

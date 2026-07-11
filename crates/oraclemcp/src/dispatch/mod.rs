@@ -8806,7 +8806,8 @@ impl OracleDispatcher {
                     || async {
                         let source =
                             oraclemcp_db::resolve_top_sql_source(cx, &guarded_conn, historical)
-                                .await;
+                                .await
+                                .map_err(DbError::into_envelope)?;
                         let sql = oraclemcp_db::top_sql_query(source, metric, top_n, min_pct)?;
                         let rows = guarded_conn
                             .query_rows(cx, &sql, &[])

@@ -8,6 +8,7 @@
 //! contract, gated by the P2-9 privilege matrix).
 
 use crate::error_envelope::{ErrorClass, ErrorEnvelope};
+use oraclemcp_error::parse_ora_code;
 
 /// Which performance-diagnostics source is available for this target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -91,11 +92,21 @@ pub async fn detect_statspack(
         .unwrap_or(false)
 }
 
+/// A historical-source probe may degrade only when Oracle positively reports
+/// that the catalog object is absent or unreadable by this principal. Arbitrary
+/// SQL/adapter failures are not evidence that the feature is unavailable.
+fn is_probe_absence_or_privilege(error: &crate::error::DbError) -> bool {
+    let crate::error::DbError::Query(message) = error else {
+        return false;
+    };
+    parse_ora_code(message).is_some_and(|code| matches!(code, 942 | 1031))
+}
+
 /// Detect Statspack for the DBA-suite preflight while preserving structurally
-/// uncertain connection failures. Ordinary absence/privilege/query failures
-/// still degrade to `false`, matching [`detect_statspack`]'s best-effort public
-/// contract; cancellation or a lost/dirty session is returned so doctor can
-/// fail rather than describing an untrustworthy connection as merely limited.
+/// uncertain connection failures. Proven absence/privilege failures still
+/// degrade to `false`, matching [`detect_statspack`]'s best-effort public
+/// contract; cancellation, connection loss, and arbitrary adapter/query
+/// failures propagate instead of describing an untrustworthy result.
 pub(crate) async fn detect_statspack_for_preflight(
     cx: &asupersync::Cx,
     conn: &dyn crate::connection::OracleConnection,
@@ -110,7 +121,8 @@ pub(crate) async fn detect_statspack_for_preflight(
     {
         Ok(_) => Ok(true),
         Err(error) if error.is_uncertain_session_state() => Err(error),
-        Err(_) => Ok(false),
+        Err(error) if is_probe_absence_or_privilege(&error) => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
@@ -128,8 +140,9 @@ pub async fn detect_diagnostics_pack(
 }
 
 /// Detect Diagnostics Pack licensing for the DBA-suite preflight while
-/// preserving structurally uncertain connection failures. Ordinary failures
-/// remain fail-closed as "not licensed"; cancellation/session loss propagates
+/// preserving structurally uncertain connection failures. Proven
+/// absence/privilege failures remain fail-closed as "not licensed";
+/// cancellation, session loss, and arbitrary adapter/query failures propagate
 /// because the preflight cannot truthfully report connection posture afterward.
 pub(crate) async fn detect_diagnostics_pack_for_preflight(
     cx: &asupersync::Cx,
@@ -148,26 +161,33 @@ pub(crate) async fn detect_diagnostics_pack_for_preflight(
             .and_then(|row| row.text("value").map(str::to_owned))
             .is_some_and(|value| value.to_ascii_uppercase().contains("DIAGNOSTIC"))),
         Err(error) if error.is_uncertain_session_state() => Err(error),
-        Err(_) => Ok(false),
+        Err(error) if is_probe_absence_or_privilege(&error) => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
 /// Resolve the top-SQL source from the request. The free live cursor cache is
 /// the default; `historical` opts into AWR (only when the Diagnostics Pack is
 /// licensed) → Statspack → structured-unavailable. We **never** probe or query a
-/// licensed pack object unless `detect_diagnostics_pack` confirmed the license.
+/// licensed pack object unless the license probe confirmed it. Structurally
+/// uncertain probe failures propagate so the connection owner can quarantine
+/// or discard the affected physical session instead of relabelling uncertainty
+/// as an ordinary unavailable feature.
 pub async fn resolve_top_sql_source(
     cx: &asupersync::Cx,
     conn: &dyn crate::connection::OracleConnection,
     historical: bool,
-) -> DiagnosticsSource {
+) -> Result<DiagnosticsSource, crate::error::DbError> {
     if !historical {
-        return DiagnosticsSource::LiveCursor;
+        return Ok(DiagnosticsSource::LiveCursor);
     }
-    select_diagnostics_source(
-        detect_diagnostics_pack(cx, conn).await,
-        detect_statspack(cx, conn).await,
-    )
+    if detect_diagnostics_pack_for_preflight(cx, conn).await? {
+        return Ok(DiagnosticsSource::AwrAsh);
+    }
+    Ok(select_diagnostics_source(
+        false,
+        detect_statspack_for_preflight(cx, conn).await?,
+    ))
 }
 
 /// The top-SQL query for a source, ranked by `metric`. `top_n` is clamped to a
@@ -245,6 +265,198 @@ pub fn top_sql_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection::OracleConnection;
+    use crate::error::DbError;
+    use crate::types::{OracleBackend, OracleBind, OracleCell, OracleConnectionInfo, OracleRow};
+    use asupersync::{Cx, runtime::RuntimeBuilder};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    struct ProbeMock {
+        outcomes: Mutex<VecDeque<Result<Vec<OracleRow>, DbError>>>,
+        sql: Mutex<Vec<String>>,
+    }
+
+    impl ProbeMock {
+        fn new(outcomes: Vec<Result<Vec<OracleRow>, DbError>>) -> Self {
+            Self {
+                outcomes: Mutex::new(outcomes.into()),
+                sql: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn sql(&self) -> Vec<String> {
+            self.sql.lock().expect("SQL mutex").clone()
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for ProbeMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.sql.lock().expect("SQL mutex").push(sql.to_owned());
+            self.outcomes
+                .lock()
+                .expect("outcome mutex")
+                .pop_front()
+                .expect("unexpected diagnostics probe")
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    fn run_with_cx<F, Fut, T>(body: F) -> T
+    where
+        F: FnOnce(Cx) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime")
+            .block_on(async move {
+                let cx = Cx::current().expect("block_on installs a current Cx");
+                body(cx).await
+            })
+    }
+
+    fn diagnostics_pack_row() -> OracleRow {
+        OracleRow {
+            columns: vec![(
+                "VALUE".to_owned(),
+                OracleCell::new("VARCHAR2", Some("DIAGNOSTIC+TUNING".to_owned())),
+            )],
+        }
+    }
+
+    #[test]
+    fn cancelled_license_probe_stops_before_statspack_fallback() {
+        run_with_cx(|cx| async move {
+            let conn = ProbeMock::new(vec![Err(DbError::Cancelled(
+                "license probe deadline exceeded".to_owned(),
+            ))]);
+
+            let error = resolve_top_sql_source(&cx, &conn, true)
+                .await
+                .expect_err("cancellation must propagate");
+
+            assert!(matches!(error, DbError::Cancelled(_)), "{error:?}");
+            let sql = conn.sql();
+            assert_eq!(sql.len(), 1);
+            assert!(sql[0].contains("v$parameter"));
+        });
+    }
+
+    #[test]
+    fn disconnected_license_probe_stops_before_statspack_fallback() {
+        run_with_cx(|cx| async move {
+            let conn = ProbeMock::new(vec![Err(DbError::Query(
+                "ORA-03113: end-of-file on communication channel".to_owned(),
+            ))]);
+
+            let error = resolve_top_sql_source(&cx, &conn, true)
+                .await
+                .expect_err("connection uncertainty must propagate");
+
+            assert!(error.is_uncertain_session_state());
+            assert_eq!(conn.sql().len(), 1);
+        });
+    }
+
+    #[test]
+    fn deterministic_unlicensed_probe_falls_back_to_statspack() {
+        run_with_cx(|cx| async move {
+            let conn = ProbeMock::new(vec![
+                Err(DbError::Query(
+                    "ORA-01031: insufficient privileges".to_owned(),
+                )),
+                Ok(Vec::new()),
+            ]);
+
+            let source = resolve_top_sql_source(&cx, &conn, true)
+                .await
+                .expect("ordinary privilege failure may use the free fallback");
+
+            assert_eq!(source, DiagnosticsSource::Statspack);
+            let sql = conn.sql();
+            assert_eq!(sql.len(), 2);
+            assert!(sql[1].contains("perfstat.stats$snapshot"));
+        });
+    }
+
+    #[test]
+    fn arbitrary_oracle_probe_failure_does_not_select_fallback() {
+        run_with_cx(|cx| async move {
+            let conn = ProbeMock::new(vec![Err(DbError::Query(
+                "ORA-00600: internal error code".to_owned(),
+            ))]);
+
+            let error = resolve_top_sql_source(&cx, &conn, true)
+                .await
+                .expect_err("an arbitrary query failure is not an unlicensed result");
+
+            assert!(matches!(error, DbError::Query(_)), "{error:?}");
+            assert_eq!(conn.sql().len(), 1, "fallback requires proven absence");
+        });
+    }
+
+    #[test]
+    fn licensed_awr_short_circuits_statspack_probe() {
+        run_with_cx(|cx| async move {
+            let conn = ProbeMock::new(vec![Ok(vec![diagnostics_pack_row()])]);
+
+            let source = resolve_top_sql_source(&cx, &conn, true)
+                .await
+                .expect("licensed AWR source");
+
+            assert_eq!(source, DiagnosticsSource::AwrAsh);
+            assert_eq!(conn.sql().len(), 1, "licensed AWR needs no fallback probe");
+        });
+    }
+
+    #[test]
+    fn live_source_performs_no_historical_probe() {
+        run_with_cx(|cx| async move {
+            let conn = ProbeMock::new(Vec::new());
+
+            let source = resolve_top_sql_source(&cx, &conn, false)
+                .await
+                .expect("live source");
+
+            assert_eq!(source, DiagnosticsSource::LiveCursor);
+            assert!(conn.sql().is_empty());
+        });
+    }
 
     #[test]
     fn diagnostics_pack_selects_awr_ash() {
