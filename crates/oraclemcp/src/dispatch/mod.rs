@@ -50,7 +50,7 @@ use oraclemcp_error::{ErrorClass, ErrorEnvelope, ReasonCategory, StructuredReaso
 use oraclemcp_guard::{
     Classifier, ClassifierConfig, DangerLevel, EscalationError, ExecGrantBinding, ExecGrantError,
     ExecGrantStore, GuardDecision, LevelDecision, ObjectRef, OperatingLevel, Purity,
-    SessionLevelState, SideEffectOracle, StageA, stage_a,
+    SessionLevelState, SideEffectOracle,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -6334,24 +6334,6 @@ fn patch_next_actions(
     Value::Array(actions)
 }
 
-fn is_patch_body_object_type(object_type: &str) -> bool {
-    matches!(object_type, "PACKAGE BODY" | "TYPE BODY")
-}
-
-fn contains_patch_side_effect_marker(source: &str) -> bool {
-    // Reuse the guard's comment-stripping, token-aware Stage-A scan instead of a
-    // hand-rolled substring match: a comment wedged between the two keywords of a
-    // multi-word marker (`EXECUTE/**/IMMEDIATE`) defeats a plain `.contains`, but
-    // not the canonicalized scan. Avoids drifting from the guard's marker set.
-    matches!(
-        stage_a(source, &ClassifierConfig::new()),
-        StageA::PlSqlBlock {
-            dangerous: true,
-            ..
-        } | StageA::BlockListed(_)
-    )
-}
-
 fn patch_preview_key(active_profile: Option<&str>, owner: &str, name: &str) -> String {
     format!(
         "{}\0{}\0{}",
@@ -6525,29 +6507,13 @@ async fn patch_source_inner(
     };
     let patched_ddl = create_or_replace_source_arg(tool_name, Some(patched_ddl))?;
     let decision = DEFAULT_CLASSIFIER.classify(&patched_ddl);
-    let classifier_gate = decision.gate(session);
-    let classifier_forbidden = matches!(
-        &classifier_gate,
-        LevelDecision::Blocked {
-            reason: oraclemcp_guard::BlockReason::Forbidden
-        }
-    );
-    let body_balance_override = classifier_forbidden
-        && is_patch_body_object_type(&object_type)
-        && !contains_patch_side_effect_marker(&patched_ddl);
-    let patch_required_level = if decision.required_level.is_some() || body_balance_override {
-        Some(OperatingLevel::Ddl)
-    } else {
-        None
-    };
-    let patch_guard_note = body_balance_override.then_some(
-        "generic classifier could not balance a stored package/type body; patch path enforced DDL gate and side-effect marker scan",
-    );
-    let gate = if classifier_forbidden && !body_balance_override {
-        classifier_gate
-    } else {
-        session.evaluate(patch_required_level)
-    };
+    // Source patches and direct CREATE OR REPLACE now share the guard's
+    // token-aware stored-unit shape analysis. There is no patch-only
+    // "balanced enough" override: malformed nesting, trailing SQL, and every
+    // dynamic side-effect marker receive the exact same fail-closed decision on
+    // both paths.
+    let patch_required_level = decision.required_level;
+    let gate = decision.gate(session);
     let (gate_decision, blocked_reason, step_up_target) = gate_decision_json(&gate);
     let confirm = match (patch_required_level, &gate) {
         (Some(level), LevelDecision::Allow) => Some(issue_confirmation_grant(
@@ -6591,7 +6557,6 @@ async fn patch_source_inner(
             "blocked_reason": blocked_reason,
             "step_up_target": step_up_target,
             "reason": decision.reason,
-            "patch_guard_note": patch_guard_note,
             "confirmation": confirmation_block(
                 tool_name,
                 confirm.as_deref(),
@@ -6832,7 +6797,6 @@ async fn patch_source_inner(
             "danger": decision.danger,
             "objects_affected": decision.objects_affected,
             "reason": decision.reason,
-            "patch_guard_note": patch_guard_note,
             "diff": patch_diff_json(&document.text, match_idx, &old_text, &new_text),
             "errors": errors.as_ref().map(|rows| rows_to_json(rows)),
             "error_count": errors.as_ref().map(Vec::len),

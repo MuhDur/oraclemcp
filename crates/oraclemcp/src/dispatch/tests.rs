@@ -421,7 +421,7 @@ impl OracleConnection for SourceLookupMock {
         &self,
         _cx: &Cx,
         sql: &str,
-        _b: &[OracleBind],
+        binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
         if sql.contains("SELECT type") {
             return Ok(vec![
@@ -440,16 +440,18 @@ impl OracleConnection for SourceLookupMock {
             ]);
         }
 
+        let is_type_body = binds
+            .iter()
+            .any(|bind| matches!(bind, OracleBind::String(value) if value == "TYPE BODY"));
+        let source = if is_type_body {
+            "TYPE BODY EMPLOYEE_T AS\nMEMBER PROCEDURE P IS BEGIN NULL; END P;\nEND EMPLOYEE_T;\n"
+        } else {
+            "PACKAGE BODY EMP_API AS\nPROCEDURE P IS BEGIN NULL; END;\nEND EMP_API;\n"
+        };
         Ok(vec![OracleRow {
             columns: vec![(
                 "TEXT".to_owned(),
-                OracleCell::new(
-                    "VARCHAR2",
-                    Some(
-                        "PACKAGE BODY EMP_API AS\nPROCEDURE P IS BEGIN NULL; END;\nEND EMP_API;\n"
-                            .to_owned(),
-                    ),
-                ),
+                OracleCell::new("VARCHAR2", Some(source.to_owned())),
             )],
         }])
     }
@@ -2515,6 +2517,26 @@ fn patch_source_preview_requires_unique_match_and_returns_confirmation() {
     );
     assert_eq!(out["confirmation"]["tool"], json!("oracle_patch_source"));
     assert_eq!(out["next_actions"][0]["tool"], json!("oracle_patch_source"));
+    assert!(
+        out.get("patch_guard_note").is_none(),
+        "package/type bodies use the central classifier, not a patch-only balance override"
+    );
+
+    let patched_ddl = out["patched_ddl_preview"]["text"]
+        .as_str()
+        .expect("complete patched DDL preview");
+    let direct = dispatcher
+        .dispatch(
+            "oracle_create_or_replace",
+            json!({ "source_code": patched_ddl }),
+        )
+        .expect("the same stored body previews through create-or-replace");
+    for field in ["danger", "required_level", "gate_decision", "reason"] {
+        assert_eq!(
+            out[field], direct[field],
+            "patch and create-or-replace must share the {field} decision"
+        );
+    }
 
     let err = dispatcher
         .dispatch(
@@ -2539,12 +2561,50 @@ fn patch_source_preview_requires_unique_match_and_returns_confirmation() {
                 "name": "EMP_API",
                 "object_type": "PACKAGE_BODY",
                 "old_text": "NULL",
-                "new_text": "EXECUTE IMMEDIATE 'DROP TABLE T'",
+                "new_text": "EXECUTE/**/IMMEDIATE 'DROP TABLE T'",
             }),
         )
         .expect("unsafe patch previews but does not mint confirmation");
     assert_eq!(blocked["gate_decision"], json!("blocked"));
     assert_eq!(blocked["confirmation"], Value::Null);
+}
+
+#[test]
+fn patch_type_body_and_create_or_replace_share_guard_decision() {
+    let dispatcher = OracleDispatcher::new_switchable(
+        Box::new(SourceLookupMock),
+        Some("dev".to_owned()),
+        ddl_level(),
+        Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(SourceLookupMock)) })),
+    );
+    let patch = dispatcher
+        .dispatch(
+            "oracle_patch_source",
+            json!({
+                "owner": "APP",
+                "name": "EMPLOYEE_T",
+                "object_type": "TYPE_BODY",
+                "old_text": "NULL",
+                "new_text": "SELF.id := SELF.id",
+            }),
+        )
+        .expect("valid type-body patch previews");
+    assert_eq!(patch["object_type"], json!("TYPE BODY"));
+    let patched_ddl = patch["patched_ddl_preview"]["text"]
+        .as_str()
+        .expect("complete patched type-body DDL");
+    let direct = dispatcher
+        .dispatch(
+            "oracle_create_or_replace",
+            json!({ "source_code": patched_ddl }),
+        )
+        .expect("the same type body previews directly");
+    for field in ["danger", "required_level", "gate_decision", "reason"] {
+        assert_eq!(
+            patch[field], direct[field],
+            "TYPE BODY patch/create parity drifted for {field}"
+        );
+    }
 }
 
 #[test]
@@ -2761,27 +2821,6 @@ fn null_args_behave_like_empty_object_args() {
             _ => panic!("{name}: null args and empty-object args disagree (one Ok, one Err)"),
         }
     }
-}
-
-#[test]
-fn patch_side_effect_marker_catches_comment_wedged_dynamic_sql() {
-    let wedged = "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE x IS BEGIN \
-                      EXECUTE/**/IMMEDIATE 'DROP TABLE t'; END; END;";
-    assert!(
-        contains_patch_side_effect_marker(wedged),
-        "comment-wedged EXECUTE IMMEDIATE must be detected"
-    );
-    let plain = "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE x IS BEGIN \
-                     EXECUTE IMMEDIATE 'DROP TABLE t'; END; END;";
-    assert!(contains_patch_side_effect_marker(plain));
-    let pragma = "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE x IS \
-                      PRAGMA/**/AUTONOMOUS_TRANSACTION; BEGIN NULL; END; END;";
-    assert!(contains_patch_side_effect_marker(pragma));
-    let clean = "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE x IS BEGIN NULL; END; END;";
-    assert!(
-        !contains_patch_side_effect_marker(clean),
-        "a body with no side-effect marker must not be flagged"
-    );
 }
 
 #[test]
@@ -4236,6 +4275,152 @@ fn create_or_replace_package_spec_apply_uses_preview_grant_once() {
         .expect_err("package preview grant is single-use");
     assert_eq!(replay.error_class, ErrorClass::ChallengeRequired);
     assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+}
+
+#[test]
+fn create_or_replace_stored_bodies_preview_and_apply_exactly_once() {
+    for (source, object_type) in [
+        (
+            "CREATE OR REPLACE PACKAGE BODY emp_api AS PROCEDURE run IS BEGIN NULL; END run; END emp_api;",
+            "PACKAGE BODY",
+        ),
+        (
+            "CREATE OR REPLACE TYPE BODY employee_t AS MEMBER FUNCTION label RETURN VARCHAR2 IS BEGIN RETURN 'ok'; END label; END employee_t;",
+            "TYPE BODY",
+        ),
+    ] {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            ddl_level(),
+        );
+
+        let preview = dispatcher
+            .dispatch("oracle_create_or_replace", json!({ "source_code": source }))
+            .expect("valid stored body previews");
+        assert_eq!(preview["preview"], json!(true), "{source}");
+        assert_eq!(preview["applied"], json!(false), "{source}");
+        assert_eq!(preview["danger"], json!("DESTRUCTIVE"), "{source}");
+        assert_eq!(preview["required_level"], json!("DDL"), "{source}");
+        assert_eq!(preview["gate_decision"], json!("allow"), "{source}");
+        assert_eq!(
+            preview["detected_object"]["object_type"],
+            json!(object_type),
+            "{source}"
+        );
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("stored-body preview mints DDL confirmation");
+        assert!(
+            state.executed.lock().expect("exec mutex").is_empty(),
+            "preview must not execute the stored body"
+        );
+        assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+
+        let applied = dispatcher
+            .dispatch(
+                "oracle_create_or_replace",
+                json!({
+                    "source_code": source,
+                    "execute": true,
+                    "confirm": confirm,
+                    "include_errors": false,
+                }),
+            )
+            .expect("confirmed stored body applies");
+        assert_eq!(applied["applied"], json!(true), "{source}");
+        assert_eq!(applied["committed"], json!(true), "{source}");
+        let executed = state.executed.lock().expect("exec mutex");
+        assert_eq!(
+            executed.len(),
+            1,
+            "stored body executes exactly once: {source}"
+        );
+        assert!(executed[0].0.ends_with(source), "{source}");
+        drop(executed);
+        assert_eq!(state.commits.load(Ordering::SeqCst), 1, "{source}");
+    }
+}
+
+#[test]
+fn create_or_replace_stored_call_specs_preview_and_apply_exactly_once() {
+    for (source, object_type) in [
+        (
+            "CREATE OR REPLACE PACKAGE BODY emp_api AS PROCEDURE run AS LANGUAGE JAVA NAME 'EmployeeApi.run()'; END emp_api;",
+            "PACKAGE BODY",
+        ),
+        (
+            "CREATE OR REPLACE TYPE BODY employee_t AS STATIC FUNCTION label RETURN VARCHAR2 AS LANGUAGE C NAME \"employee_label\" LIBRARY employee_lib; END employee_t;",
+            "TYPE BODY",
+        ),
+    ] {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            ddl_level(),
+        );
+
+        let preview = dispatcher
+            .dispatch("oracle_create_or_replace", json!({ "source_code": source }))
+            .expect("valid stored call specification previews");
+        assert_eq!(preview["danger"], json!("DESTRUCTIVE"), "{source}");
+        assert_eq!(preview["required_level"], json!("DDL"), "{source}");
+        assert_eq!(preview["gate_decision"], json!("allow"), "{source}");
+        assert_eq!(
+            preview["detected_object"]["object_type"],
+            json!(object_type),
+            "{source}"
+        );
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("call-spec preview mints DDL confirmation");
+        assert!(state.executed.lock().expect("exec mutex").is_empty());
+
+        let applied = dispatcher
+            .dispatch(
+                "oracle_create_or_replace",
+                json!({
+                    "source_code": source,
+                    "execute": true,
+                    "confirm": confirm,
+                    "include_errors": false,
+                }),
+            )
+            .expect("confirmed stored call specification applies");
+        assert_eq!(applied["applied"], json!(true), "{source}");
+        let executed = state.executed.lock().expect("exec mutex");
+        assert_eq!(executed.len(), 1, "{source}");
+        assert!(executed[0].0.ends_with(source), "{source}");
+        drop(executed);
+        assert_eq!(state.commits.load(Ordering::SeqCst), 1, "{source}");
+    }
+}
+
+#[test]
+fn create_or_replace_stored_body_refusals_never_execute() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        Some("dev".to_owned()),
+        ddl_level(),
+    );
+
+    for source in [
+        "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q IS BEGIN NULL; END q; END p; DROP TABLE t",
+        "CREATE OR REPLACE TYPE BODY t AS MEMBER PROCEDURE q IS BEGIN EXECUTE/**/IMMEDIATE 'DROP TABLE t'; END q; END t;",
+        "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q IS BEGIN NULL; END q;",
+    ] {
+        let preview = dispatcher
+            .dispatch("oracle_create_or_replace", json!({ "source_code": source }))
+            .expect("forbidden source remains inspectable as a preview");
+        assert_eq!(preview["gate_decision"], json!("blocked"), "{source}");
+        assert_eq!(preview["required_level"], Value::Null, "{source}");
+        assert_eq!(preview["confirmation"], Value::Null, "{source}");
+    }
+    assert!(state.executed.lock().expect("exec mutex").is_empty());
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
 }
 
 #[test]

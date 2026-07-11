@@ -458,17 +458,52 @@ const PLSQL_BEARING_CREATE_FORMS: &[&str] = &[
     "CREATE OR REPLACE TRIGGER ",
 ];
 
-/// Whether `sql` begins with a `CREATE [OR REPLACE]
-/// [EDITIONABLE|NONEDITIONABLE] PACKAGE` specification rather than a package
-/// body. Package specifications are declaration units: their final `END`
-/// closes the package itself even though no executable `BEGIN` opened it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StoredUnitKind {
+    PackageSpec,
+    PackageBody,
+    TypeBody,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StoredUnitCreate {
+    kind: StoredUnitKind,
+    /// Canonical token identity of the unit's unqualified object name. Quoted
+    /// and unquoted names intentionally occupy distinct namespaces.
+    end_name: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PackageSubprogramHeader {
+    Declaration,
+    AfterAsOrIs,
+    AfterLanguage,
+    PlSqlBody,
+    CallSpec,
+}
+
+fn identifier_key(token: &Token) -> Option<String> {
+    let Token::Word(word) = token else {
+        return None;
+    };
+    Some(if word.quote_style.is_some() {
+        format!("Q:{}", word.value)
+    } else {
+        format!("U:{}", word.value.to_ascii_uppercase())
+    })
+}
+
+/// Recognize the stored declaration units whose member semicolons and final
+/// named `END` belong to one `CREATE` statement. The result also captures the
+/// unqualified object name so only the unit's real optional end-name is accepted
+/// after the outer `END`; an arbitrary trailing keyword cannot masquerade as it.
 ///
 /// Keep this token-aware. Comments and arbitrary whitespace are valid between
 /// header keywords, while quoted identifiers and literals must never be
-/// mistaken for `PACKAGE` / `BODY` keywords.
-fn is_package_spec_create(sql: &str) -> bool {
+/// mistaken for `PACKAGE`, `TYPE`, or `BODY` keywords.
+fn stored_unit_create(sql: &str) -> Option<StoredUnitCreate> {
     let Ok(tokens) = Tokenizer::new(&OracleDialect {}, sql).tokenize() else {
-        return false;
+        return None;
     };
     let tokens: Vec<&Token> = tokens
         .iter()
@@ -483,19 +518,108 @@ fn is_package_spec_create(sql: &str) -> bool {
     };
 
     if !bare_word_is(0, "CREATE") {
-        return false;
+        return None;
     }
     let mut idx = 1;
     if bare_word_is(idx, "OR") {
         if !bare_word_is(idx + 1, "REPLACE") {
-            return false;
+            return None;
         }
         idx += 2;
     }
     if bare_word_is(idx, "EDITIONABLE") || bare_word_is(idx, "NONEDITIONABLE") {
         idx += 1;
     }
-    bare_word_is(idx, "PACKAGE") && !bare_word_is(idx + 1, "BODY")
+    let kind = if bare_word_is(idx, "PACKAGE") {
+        idx += 1;
+        if bare_word_is(idx, "BODY") {
+            idx += 1;
+            StoredUnitKind::PackageBody
+        } else {
+            StoredUnitKind::PackageSpec
+        }
+    } else if bare_word_is(idx, "TYPE") && bare_word_is(idx + 1, "BODY") {
+        idx += 2;
+        StoredUnitKind::TypeBody
+    } else {
+        return None;
+    };
+
+    let mut end_name = identifier_key(tokens.get(idx).copied()?)?;
+    if matches!(tokens.get(idx + 1), Some(Token::Period)) {
+        end_name = identifier_key(tokens.get(idx + 2).copied()?)?;
+    }
+    Some(StoredUnitCreate { kind, end_name })
+}
+
+fn stored_unit_final_end(tokens: &[Token], unit: &StoredUnitCreate) -> Option<usize> {
+    let significant: Vec<usize> = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, token)| (!matches!(token, Token::Whitespace(_))).then_some(idx))
+        .collect();
+    let mut pos = significant.len().checked_sub(1)?;
+    if matches!(tokens.get(significant[pos]), Some(Token::Div)) {
+        pos = pos.checked_sub(1)?;
+    }
+    if !matches!(tokens.get(significant[pos]), Some(Token::SemiColon)) {
+        return None;
+    }
+    pos = pos.checked_sub(1)?;
+    if identifier_key(tokens.get(significant[pos])?).as_ref() == Some(&unit.end_name) {
+        pos = pos.checked_sub(1)?;
+    }
+    let end_idx = significant[pos];
+    matches!(tokens.get(end_idx), Some(Token::Word(word))
+        if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("END"))
+    .then_some(end_idx)
+}
+
+/// Whether the structural `END` matching `tokens[begin_idx]` is exactly the
+/// stored unit's final terminator. This mirrors the analyzer's BEGIN/END and
+/// END-IF/LOOP/CASE rules and deliberately ignores literals/comments/quoted
+/// identifiers. It lets a PACKAGE BODY initialization section share the final
+/// unit END without suppressing member or nested BEGIN depth.
+fn begin_matches_final_end(tokens: &[Token], begin_idx: usize, final_end_idx: usize) -> bool {
+    let mut depth = 0i64;
+    let mut expecting_close = false;
+    for (idx, token) in tokens
+        .iter()
+        .enumerate()
+        .take(final_end_idx + 1)
+        .skip(begin_idx)
+    {
+        match token {
+            Token::Word(word) if word.quote_style.is_none() => {
+                match word.value.to_ascii_uppercase().as_str() {
+                    "BEGIN" => {
+                        depth += 1;
+                        expecting_close = false;
+                    }
+                    "IF" | "CASE" | "LOOP" => {
+                        if !expecting_close {
+                            depth += 1;
+                        }
+                        expecting_close = false;
+                    }
+                    "END" => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return idx == final_end_idx;
+                        }
+                        if depth < 0 {
+                            return false;
+                        }
+                        expecting_close = true;
+                    }
+                    _ => expecting_close = false,
+                }
+            }
+            Token::Whitespace(_) => {}
+            _ => expecting_close = false,
+        }
+    }
+    false
 }
 
 /// Whether the statement is a PL/SQL-bearing `CREATE [OR REPLACE]` of a stored
@@ -506,7 +630,7 @@ fn is_package_spec_create(sql: &str) -> bool {
 /// it through the public `StageA` enum (which would be a breaking API change for
 /// an internal classifier detail).
 fn is_plsql_bearing_create(sql: &str) -> bool {
-    if is_package_spec_create(sql) {
+    if stored_unit_create(sql).is_some() {
         return true;
     }
     let upper = sql.trim_start().to_ascii_uppercase();
@@ -716,12 +840,18 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
             saw_top_level_after_block_close: false,
         };
     };
-    // A package specification is a declaration unit with an implicit outer
-    // scope: member declaration semicolons are internal, and the unit-closing
-    // END balances that scope without a preceding executable BEGIN. Do not
-    // apply this to PACKAGE BODY (or any anonymous/stored executable block),
-    // whose existing BEGIN/END model remains unchanged.
-    let mut depth: i64 = i64::from(is_package_spec_create(sql));
+    // Stored package/type units have an implicit outer scope: member declaration
+    // semicolons are internal, and the unit-closing END balances that scope
+    // without a matching executable BEGIN. This is equally true of package
+    // specifications, package bodies, and type bodies.
+    let stored_unit = stored_unit_create(sql);
+    let stored_unit_final_end = stored_unit
+        .as_ref()
+        .and_then(|unit| stored_unit_final_end(&tokens, unit));
+    let is_package_body = stored_unit
+        .as_ref()
+        .is_some_and(|unit| unit.kind == StoredUnitKind::PackageBody);
+    let mut depth: i64 = i64::from(stored_unit.is_some());
     let mut went_negative = false;
     let mut has_plsql_block = false;
     let mut segment_has_content = false;
@@ -748,11 +878,29 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
     // `StageA::PlSqlBlock` caller can fail closed.
     let mut block_body_opened = false;
     let mut saw_top_level_after_block_close = false;
+    // Once the implicit stored-unit scope closes, only its optional matching
+    // unqualified object name, a terminator semicolon, and the SQL*Plus slash
+    // are legal. This special state prevents `END member_name` and `END
+    // unit_name` from looking like trailing SQL without granting arbitrary
+    // trailing words the same exception.
+    let mut stored_unit_closed = false;
+    let mut stored_unit_end_name_seen = false;
+    let mut stored_unit_terminated = false;
+    // A package body may end with an optional initialization section whose
+    // `BEGIN ... END package_name;` is simultaneously the executable section
+    // and the outer unit terminator. Track open member/local subprogram headers
+    // so only a terminal, non-subprogram BEGIN receives that one-level shape
+    // treatment. The header state also distinguishes a PL/SQL body from a
+    // completed Java/C/MLE call specification: both use AS/IS, but only the
+    // call specification legitimately ends at that member semicolon without a
+    // BEGIN. A semicolon in Declaration is a forward declaration.
+    let mut package_subprogram_headers: Vec<PackageSubprogramHeader> = Vec::new();
+    let mut package_initialization_opened = false;
     // `END IF` / `END LOOP` / `END CASE` close one opener: the `END` decrements
     // and the trailing IF/LOOP/CASE must NOT re-increment. `expecting_close`
     // tracks "previous significant token was END" (whitespace does not reset it).
     let mut expecting_close = false;
-    for token in &tokens {
+    for (token_idx, token) in tokens.iter().enumerate() {
         match token {
             Token::Word(w) => {
                 // A double-quoted (delimited) identifier — `w.quote_style.is_some()`,
@@ -765,18 +913,43 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
                     .quote_style
                     .is_none()
                     .then(|| w.value.to_ascii_uppercase());
+                let is_matching_stored_unit_end_name = stored_unit_closed
+                    && !stored_unit_end_name_seen
+                    && !stored_unit_terminated
+                    && identifier_key(token)
+                        == stored_unit.as_ref().map(|unit| unit.end_name.clone());
+                if is_matching_stored_unit_end_name {
+                    stored_unit_end_name_seen = true;
+                    expecting_close = false;
+                    segment_has_content = true;
+                    continue;
+                }
                 // A bare word at depth 0 *after* a block body opened and closed is
                 // trailing top-level SQL smuggled after `END` (oracle-lokg.1). This
                 // is evaluated against the depth *before* this token's own
                 // structural effect, so a re-opening `BEGIN` (a second stacked
                 // block) is caught too; a stray top-level `END` is already a desync
                 // via `went_negative`.
-                if block_body_opened && depth == 0 {
+                if (block_body_opened && depth == 0) || stored_unit_closed {
                     saw_top_level_after_block_close = true;
                 }
                 match keyword.as_deref() {
                     Some("BEGIN") => {
-                        depth += 1;
+                        let package_initialization_begin = is_package_body
+                            && depth == 1
+                            && !package_initialization_opened
+                            && package_subprogram_headers.is_empty()
+                            && stored_unit_final_end.is_some_and(|final_end_idx| {
+                                begin_matches_final_end(&tokens, token_idx, final_end_idx)
+                            });
+                        if package_initialization_begin {
+                            package_initialization_opened = true;
+                        } else {
+                            depth += 1;
+                            if is_package_body && depth == 2 {
+                                package_subprogram_headers.pop();
+                            }
+                        }
                         has_plsql_block = true;
                         block_body_opened = true;
                         expecting_close = false;
@@ -792,13 +965,71 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
                         expecting_close = false;
                     }
                     Some("END") => {
+                        let closes_stored_unit = stored_unit.is_some() && depth == 1;
                         depth -= 1;
                         if depth < 0 {
                             went_negative = true;
                         }
+                        if closes_stored_unit {
+                            stored_unit_closed = true;
+                        }
                         expecting_close = true;
                     }
-                    _ => expecting_close = false,
+                    Some("PROCEDURE" | "FUNCTION")
+                        if is_package_body && depth == 1 && !package_initialization_opened =>
+                    {
+                        package_subprogram_headers.push(PackageSubprogramHeader::Declaration);
+                        expecting_close = false;
+                    }
+                    Some("AS" | "IS")
+                        if is_package_body
+                            && depth == 1
+                            && !package_initialization_opened
+                            && package_subprogram_headers.last()
+                                == Some(&PackageSubprogramHeader::Declaration) =>
+                    {
+                        if let Some(header) = package_subprogram_headers.last_mut() {
+                            *header = PackageSubprogramHeader::AfterAsOrIs;
+                        }
+                        expecting_close = false;
+                    }
+                    Some("LANGUAGE")
+                        if package_subprogram_headers.last()
+                            == Some(&PackageSubprogramHeader::AfterAsOrIs) =>
+                    {
+                        if let Some(header) = package_subprogram_headers.last_mut() {
+                            *header = PackageSubprogramHeader::AfterLanguage;
+                        }
+                        expecting_close = false;
+                    }
+                    Some("JAVA" | "C")
+                        if package_subprogram_headers.last()
+                            == Some(&PackageSubprogramHeader::AfterLanguage) =>
+                    {
+                        if let Some(header) = package_subprogram_headers.last_mut() {
+                            *header = PackageSubprogramHeader::CallSpec;
+                        }
+                        expecting_close = false;
+                    }
+                    Some("EXTERNAL" | "MLE")
+                        if package_subprogram_headers.last()
+                            == Some(&PackageSubprogramHeader::AfterAsOrIs) =>
+                    {
+                        if let Some(header) = package_subprogram_headers.last_mut() {
+                            *header = PackageSubprogramHeader::CallSpec;
+                        }
+                        expecting_close = false;
+                    }
+                    _ => {
+                        if let Some(
+                            header @ (PackageSubprogramHeader::AfterAsOrIs
+                            | PackageSubprogramHeader::AfterLanguage),
+                        ) = package_subprogram_headers.last_mut()
+                        {
+                            *header = PackageSubprogramHeader::PlSqlBody;
+                        }
+                        expecting_close = false;
+                    }
                 }
                 segment_has_content = true;
             }
@@ -809,6 +1040,9 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
                         statement_count += 1;
                     }
                     segment_has_content = false;
+                    if stored_unit_closed {
+                        stored_unit_terminated = true;
+                    }
                 } else {
                     // A `;` nested inside CASE/IF/LOOP/BEGIN depth. Only a real
                     // PL/SQL block (StageA::PlSqlBlock) can legitimately carry a
@@ -816,6 +1050,19 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
                     // this as a hidden top-level boundary the counter swallowed
                     // and forces Forbidden.
                     saw_buried_semicolon = true;
+                    if is_package_body
+                        && depth == 1
+                        && !package_initialization_opened
+                        && matches!(
+                            package_subprogram_headers.last(),
+                            Some(
+                                PackageSubprogramHeader::Declaration
+                                    | PackageSubprogramHeader::CallSpec
+                            )
+                        )
+                    {
+                        package_subprogram_headers.pop();
+                    }
                 }
             }
             // Whitespace must NOT reset `expecting_close` (END <ws> IF).
@@ -826,13 +1073,16 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
             // `expecting_close` and (defensively) does not count as statement
             // content so a lone `/` after a closed block stays a clean terminator.
             Token::Div => {
+                if stored_unit_closed && !stored_unit_terminated {
+                    saw_top_level_after_block_close = true;
+                }
                 expecting_close = false;
             }
             _ => {
                 // Any other significant token (punctuation, operator, literal,
                 // number, string) at depth 0 after a block body has opened and
                 // closed is trailing top-level SQL after `END` (oracle-lokg.1).
-                if block_body_opened && depth == 0 {
+                if (block_body_opened && depth == 0) || stored_unit_closed {
                     saw_top_level_after_block_close = true;
                 }
                 expecting_close = false;
@@ -844,7 +1094,7 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
         statement_count += 1;
     }
     BatchShape {
-        balanced: depth == 0 && !went_negative,
+        balanced: depth == 0 && !went_negative && package_subprogram_headers.is_empty(),
         has_plsql_block,
         statement_count,
         saw_buried_semicolon,
@@ -2601,7 +2851,7 @@ impl Classifier {
                 // enum (that would break the crate API for an internal detail).
                 // oracle-p0d6.
                 let plsql_create = is_plsql_bearing_create(sql);
-                let package_spec_create = is_package_spec_create(sql);
+                let stored_unit_create = stored_unit_create(sql).is_some();
                 // Any PL/SQL block is at minimum Guarded; a dangerous
                 // side-effect marker (EXECUTE IMMEDIATE / UTL_FILE / …) is
                 // Forbidden (fail-closed — we cannot prove its purity here).
@@ -2628,21 +2878,19 @@ impl Classifier {
                         Some("unbalanced BEGIN/END".to_owned()),
                     );
                 }
-                // Package specs have no executable BEGIN, so the generic
-                // trailing-after-block-close detector never arms. Their
-                // implicit declaration depth makes one final unit-closing `;`
-                // the sole top-level statement boundary; anything else is a
-                // second statement and must fail closed. This check is essential
-                // to ensure the package-spec balance exception cannot admit
-                // `END; DROP ...` / `END; GRANT ...` suffixes.
-                if package_spec_create && shape.statement_count != 1 {
+                // Stored package/type units have one implicit outer scope, so
+                // member semicolons stay nested and the unit-closing `;` is the
+                // sole top-level boundary. Anything else is a second statement
+                // and must fail closed. This keeps package specs and executable
+                // package/type bodies on the same token-aware shape law.
+                if stored_unit_create && shape.statement_count != 1 {
                     return forbidden_decision(
-                        "package specification contains trailing or multiple top-level statements — fail-closed"
+                        "stored package/type unit contains trailing or multiple top-level statements — fail-closed"
                             .to_owned(),
                     )
                     .categorized(
                         ReasonCategory::MultiStatementBatch,
-                        Some("multiple statements around package specification".to_owned()),
+                        Some("multiple statements around stored package/type unit".to_owned()),
                     );
                 }
                 // oracle-lokg.1: a balanced anonymous block followed by trailing
@@ -4606,6 +4854,152 @@ mod tests {
             classify("CREATE OR REPLACE TYPE t AS OBJECT (x NUMBER, MEMBER PROCEDURE run);");
         assert_eq!(object_type.danger, DangerLevel::Destructive);
         assert_eq!(object_type.required_level, Some(OperatingLevel::Ddl));
+    }
+
+    #[test]
+    fn stored_package_and_type_bodies_are_single_ddl_units() {
+        for sql in [
+            // Initialization sections: the terminal END closes both the
+            // executable section and the package unit, with or without a name.
+            "CREATE OR REPLACE PACKAGE BODY p AS BEGIN NULL; END;",
+            "CREATE OR REPLACE PACKAGE BODY p AS BEGIN NULL; END p;",
+            // Member bodies may use named or unnamed END independently of the
+            // final unit END.
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q IS BEGIN NULL; END q; END p;",
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q IS BEGIN NULL; END; END p;",
+            // Declarations/member bodies followed by package initialization.
+            "CREATE OR REPLACE PACKAGE BODY p AS g NUMBER := 0; PROCEDURE q IS BEGIN g := 1; END q; BEGIN g := 2; END p;",
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q IS BEGIN NULL; END; BEGIN NULL; END;",
+            "CREATE OR REPLACE PACKAGE BODY app.p AUTHID DEFINER AS FUNCTION f RETURN NUMBER IS BEGIN RETURN 1; END f; END p;",
+            "create /* header */ or replace editionable package body \"App\".\"P\" as procedure \"Q\" is begin null; end \"Q\"; end \"P\";",
+            "CREATE NONEDITIONABLE TYPE BODY app.t AS MEMBER PROCEDURE q IS BEGIN NULL; END q; END t;",
+            "CREATE OR REPLACE TYPE BODY t AS MEMBER PROCEDURE q IS BEGIN NULL; END; END t;",
+            "CREATE OR REPLACE TYPE BODY \"App\".\"T\" AS MEMBER FUNCTION f RETURN NUMBER IS BEGIN RETURN 1; END f; END \"T\";",
+        ] {
+            let shape = analyze_batch(sql);
+            assert!(
+                shape.balanced,
+                "stored body must balance: {sql:?} -> {shape:?}"
+            );
+            assert_eq!(
+                shape.statement_count, 1,
+                "member semicolons stay inside the stored unit: {sql:?} -> {shape:?}"
+            );
+            assert!(
+                !shape.saw_top_level_after_block_close,
+                "named member/unit terminators are not trailing SQL: {sql:?} -> {shape:?}"
+            );
+
+            let decision = classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Destructive, "{sql:?}");
+            assert_eq!(
+                decision.required_level,
+                Some(OperatingLevel::Ddl),
+                "stored-code replacement must retain the DDL floor: {sql:?}"
+            );
+            assert_eq!(
+                decision.reason_category,
+                Some(ReasonCategory::PlSqlBlock),
+                "{sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stored_body_shape_exception_stays_fail_closed() {
+        for sql in [
+            // Missing and extra outer closes.
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q IS BEGIN NULL; END q;",
+            "CREATE OR REPLACE TYPE BODY t AS MEMBER PROCEDURE q IS BEGIN NULL; END q; END t; END;",
+            // The optional named terminator must match the created unit.
+            "CREATE OR REPLACE PACKAGE BODY p AS BEGIN NULL; END other;",
+            // Nothing may follow the final unit terminator except SQL*Plus `/`.
+            "CREATE OR REPLACE PACKAGE BODY p AS BEGIN NULL; END p; DROP TABLE t",
+            "CREATE OR REPLACE TYPE BODY t AS MEMBER PROCEDURE q IS BEGIN NULL; END q; END t; GRANT DBA TO app",
+            "CREATE OR REPLACE PACKAGE BODY p AS BEGIN NULL; END p; / DROP TABLE t",
+        ] {
+            let decision = classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Forbidden, "{sql:?}");
+            assert_eq!(decision.required_level, None, "{sql:?}");
+        }
+
+        for sql in [
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q IS BEGIN EXECUTE/**/IMMEDIATE 'DROP TABLE t'; END q; END p;",
+            "CREATE OR REPLACE TYPE BODY t AS MEMBER PROCEDURE q IS BEGIN UTL_FILE.PUT_LINE(f, 'x'); END q; END t;",
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q IS BEGIN UTL_HTTP.REQUEST('https://example.invalid'); END q; END p;",
+            "CREATE OR REPLACE TYPE BODY t AS MEMBER PROCEDURE q IS BEGIN DBMS_SCHEDULER.RUN_JOB('j'); END q; END t;",
+        ] {
+            let decision = classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Forbidden, "{sql:?}");
+            assert_eq!(decision.required_level, None, "{sql:?}");
+            assert_eq!(
+                decision.reason_category,
+                Some(ReasonCategory::DynamicSql),
+                "side-effect marker scan must precede stored-unit balancing: {sql:?}"
+            );
+        }
+
+        // The implicit outer scope belongs only to recognized CREATE package/type
+        // units. Anonymous-block behavior must not inherit the stored-unit name
+        // exception or the DDL floor.
+        let anonymous = classify("BEGIN NULL; END;");
+        assert_eq!(anonymous.danger, DangerLevel::Guarded);
+        assert_eq!(anonymous.required_level, Some(OperatingLevel::ReadWrite));
+
+        for sql in [
+            "BEGIN NULL; END block_name;",
+            "BEGIN NULL; END; DROP TABLE t",
+            "BEGIN EXECUTE IMMEDIATE 'DROP TABLE t'; END;",
+        ] {
+            assert_eq!(classify(sql).danger, DangerLevel::Forbidden, "{sql:?}");
+        }
+    }
+
+    #[test]
+    fn stored_body_call_specifications_are_single_ddl_units() {
+        for sql in [
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q AS LANGUAGE JAVA NAME 'X.y()'; END p;",
+            "CREATE OR REPLACE PACKAGE BODY p AS FUNCTION f RETURN NUMBER AS LANGUAGE C NAME \"c_f\" LIBRARY c_lib; END p;",
+            "CREATE OR REPLACE PACKAGE BODY p AS FUNCTION f RETURN NUMBER IS EXTERNAL NAME \"c_f\" LIBRARY c_lib LANGUAGE C WITH CONTEXT; END p;",
+            "CREATE OR REPLACE TYPE BODY t AS MEMBER PROCEDURE q AS LANGUAGE JAVA NAME 'X.y(oracle.sql.STRUCT)'; END t;",
+            "CREATE OR REPLACE TYPE BODY t AS STATIC FUNCTION f RETURN NUMBER AS LANGUAGE C NAME \"c_f\" LIBRARY c_lib; END t;",
+        ] {
+            let shape = analyze_batch(sql);
+            assert!(
+                shape.balanced,
+                "stored call specification must balance: {sql:?} -> {shape:?}"
+            );
+            assert_eq!(shape.statement_count, 1, "{sql:?} -> {shape:?}");
+            let decision = classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Destructive, "{sql:?}");
+            assert_eq!(
+                decision.required_level,
+                Some(OperatingLevel::Ddl),
+                "{sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stored_body_call_spec_shape_stays_fail_closed() {
+        for sql in [
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q AS LANGUAGE JAVA NAME 'X.y()';",
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q AS LANGUAGE JAVA NAME 'X.y()'; END p; END;",
+            "CREATE OR REPLACE TYPE BODY t AS MEMBER PROCEDURE q AS LANGUAGE JAVA NAME 'X.y(oracle.sql.STRUCT)'; END t; DROP TABLE x",
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q AS LANGUAGE JAVA NAME 'X.y()'; PROCEDURE bad IS BEGIN EXECUTE IMMEDIATE 'DROP TABLE x'; END bad; END p;",
+        ] {
+            let decision = classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Forbidden, "{sql:?}");
+            assert_eq!(decision.required_level, None, "{sql:?}");
+        }
+
+        // Marker text inside the foreign symbol string is data, not an
+        // executable PL/SQL side-effect marker.
+        let literal = classify(
+            "CREATE OR REPLACE PACKAGE BODY p AS PROCEDURE q AS LANGUAGE JAVA NAME 'X.UTL_FILE_EXECUTE_IMMEDIATE()'; END p;",
+        );
+        assert_eq!(literal.danger, DangerLevel::Destructive);
+        assert_eq!(literal.required_level, Some(OperatingLevel::Ddl));
     }
 
     #[test]
