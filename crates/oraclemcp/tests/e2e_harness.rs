@@ -214,6 +214,7 @@ fn release_acceptance_suite_schedules_hci_component_gates() {
         "scripts/local_release_gate_check.sh",
         "scripts/installer_lint_and_offline_smoke.sh --log",
         "scripts/e2e/release_rollback_dry_run.sh --log --dry-run",
+        "scripts/validate_docker_provenance_workflow.sh",
         "scripts/e2e/clean_machine_e2e.sh --log --dry-run",
         "scripts/oraclemcp_feature_powerset.sh",
         "scripts/oraclemcp_arch_fitness_lint.sh",
@@ -240,6 +241,21 @@ fn release_acceptance_suite_schedules_hci_component_gates() {
                 .is_some_and(|message| message.contains("installer-jsonl")
                     && message.contains("clean-machine"))),
         "release acceptance summary must account for installer JSON-line logs: {events:?}"
+    );
+}
+
+#[test]
+fn docker_recovery_is_bound_to_immutable_release_provenance() {
+    let output = run_script("scripts/validate_docker_provenance_workflow.sh", &[]);
+    assert!(
+        output.status.success(),
+        "Docker provenance workflow guard failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("immutable tag, digest comparison, and rollback contracts verified"),
+        "Docker provenance workflow guard did not report its verified contract"
     );
 }
 

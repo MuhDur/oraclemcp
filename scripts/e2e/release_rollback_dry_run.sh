@@ -72,8 +72,8 @@ done
 e2e_run_command "act" gh release edit "$TAG" --prerelease
 e2e_run_command "act" gh release delete "$TAG" --yes --cleanup-tag
 
-e2e_run_command "act" gh workflow run docker.yml -f "version=$PREVIOUS_VERSION" -f "variant=core"
-e2e_run_command "act" gh workflow run docker.yml -f "version=$PREVIOUS_VERSION" -f "variant=plsql-intelligence"
+e2e_run_command "act" gh workflow run docker.yml -f "version=$PREVIOUS_VERSION" -f "variant=core" -f "operation=rollback"
+e2e_run_command "act" gh workflow run docker.yml -f "version=$PREVIOUS_VERSION" -f "variant=plsql-intelligence" -f "operation=rollback"
 
 e2e_run_command "act" git restore --source="$PREVIOUS_TAG" -- server.json
 e2e_run_command "act" git commit -m "chore: revert MCP registry listing to $PREVIOUS_TAG" server.json

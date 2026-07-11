@@ -159,9 +159,20 @@ After explicit operator approval, execute the reviewed commands in this order:
 3. **Mark or remove the GitHub release.** First mark `v0.6.0` as prerelease.
    Delete the GitHub release and cleanup tag only if the artifacts must be
    hidden; otherwise leave the prerelease visible with the incident note.
-4. **Revert GHCR `:latest`.** Dispatch `docker.yml` for the previous good
-   version with `variant=core`; if the PL/SQL intelligence image shipped,
-   dispatch the same version with `variant=plsql-intelligence`.
+4. **Revert GHCR `:latest` without rebuilding history.** Dispatch `docker.yml`
+   for the previous good version with `variant=core` and
+   `operation=rollback`; if the PL/SQL intelligence image shipped, dispatch the
+   same version with `variant=plsql-intelligence`. The workflow resolves
+   `refs/tags/v<version>`, verifies Cargo/server metadata plus the existing
+   digest's keyless signature, and retags only `:latest` (or
+   `:plsql-intelligence-latest`). It never rewrites the versioned image. Use
+   `operation=rebuild` only as a reproducibility proof: a digest mismatch is a
+   hard failure and still leaves both versioned and rolling tags unchanged. A
+   rebuild can repair an absent version tag from the exact release source, but
+   it checks again immediately before creation and refuses to replace a tag
+   that already exists. For a legacy image without source-bound annotations,
+   rollback refuses it; `operation=rebuild` may add the binding only after the
+   exact-tag rebuild produces the already-published digest byte for byte.
 5. **Revert MCP registry metadata.** Restore `server.json` from the previous
    good tag, commit that rollback on `main`, push, then dispatch
    `publish-mcp.yml` so the registry no longer points at the broken image.

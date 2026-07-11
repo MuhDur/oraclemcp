@@ -1094,10 +1094,13 @@ OIDC_ISSUER="https://token.actions.githubusercontent.com"
 ```
 
 `IDENTITY` is the exact release workflow ref that signed the artifacts; cosign
-refuses a signature minted by any other identity. (For images rebuilt via the
-manual [`docker.yml`](../.github/workflows/docker.yml) path, the identity ends
-in `docker.yml@refs/heads/main` instead — match it to the workflow that built
-what you hold.)
+refuses a signature minted by any other identity. The manual
+[`docker.yml`](../.github/workflows/docker.yml) recovery path never rewrites an
+existing versioned image. Rollback verifies this tag-bound release identity
+before it retags the already-attested digest as `latest`. An explicit
+byte-identical rebuild adds a second `docker.yml@refs/heads/main` signature whose
+`oraclemcp.source_sha`, `oraclemcp.version`, and `oraclemcp.variant`
+annotations bind that signature to the checked-out release tag.
 
 ### 6.1 Checksum (integrity only — not authenticity)
 

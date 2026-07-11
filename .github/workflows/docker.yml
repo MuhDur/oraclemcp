@@ -1,112 +1,185 @@
-name: Docker image
+name: Docker image provenance repair
 
-# Manual rebuild path for the thin-driver container image. Normal tag releases
-# publish this image from release.yml after tests, GitHub release, and crates.io
-# publishing have succeeded. This workflow rebuilds an image for the current
-# Cargo/server.json version without cutting a new release.
+# Manual recovery for an already-tagged release. This workflow either retags a
+# previously signed digest as latest (rollback), or rebuilds the exact Git tag.
+# A rebuild may repair a missing version tag, but can never replace an existing
+# version tag unless the candidate digest is byte-identical.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Image version tag. Empty means the current Cargo package version."
-        required: false
-        default: ""
+        description: "Existing release version whose immutable image should be promoted."
+        required: true
+        type: string
       variant:
-        description: "Image variant to build."
-        required: false
+        description: "Image variant to promote."
+        required: true
         default: "core"
         type: choice
         options:
           - core
           - plsql-intelligence
+      operation:
+        description: "Rollback retags the existing digest; rebuild first proves byte identity."
+        required: true
+        default: "rollback"
+        type: choice
+        options:
+          - rollback
+          - rebuild
 
 permissions:
   contents: read
-  packages: write
-  # Match release.yml: image provenance attestation + keyless signing need OIDC.
-  id-token: write
-  attestations: write
+
+concurrency:
+  group: docker-provenance-${{ inputs.version }}-${{ inputs.variant }}
+  cancel-in-progress: false
 
 env:
   RUST_TOOLCHAIN: nightly-2026-05-11
   NODE_VERSION: 22.17.0
+  IMAGE_REPOSITORY: ghcr.io/muhdur/oraclemcp
 
 jobs:
-  docker:
-    name: build + push (GHCR)
+  verify-release:
+    name: verify immutable release source
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      variant: ${{ steps.release.outputs.variant }}
+      operation: ${{ steps.release.outputs.operation }}
+      source_sha: ${{ steps.provenance.outputs.source_sha }}
+      version_image: ${{ steps.provenance.outputs.version_image }}
+      rolling_image: ${{ steps.provenance.outputs.rolling_image }}
+      target: ${{ steps.provenance.outputs.target }}
+      expected_engine: ${{ steps.provenance.outputs.expected_engine }}
     steps:
+      - name: Validate dispatch inputs
+        id: release
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_VARIANT: ${{ inputs.variant }}
+          INPUT_OPERATION: ${{ inputs.operation }}
+        run: |
+          set -euo pipefail
+          [[ "$INPUT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid release version: $INPUT_VERSION" >&2
+            exit 1
+          }
+          case "$INPUT_VARIANT" in
+            core|plsql-intelligence) ;;
+            *) echo "invalid image variant: $INPUT_VARIANT" >&2; exit 1 ;;
+          esac
+          case "$INPUT_OPERATION" in
+            rollback|rebuild) ;;
+            *) echo "invalid recovery operation: $INPUT_OPERATION" >&2; exit 1 ;;
+          esac
+          {
+            echo "version=$INPUT_VERSION"
+            echo "variant=$INPUT_VARIANT"
+            echo "operation=$INPUT_OPERATION"
+          } >> "$GITHUB_OUTPUT"
+
+      # A missing tag fails here, before any job receives packages:write.
       - uses: actions/checkout@v6
         with:
+          ref: refs/tags/v${{ steps.release.outputs.version }}
+          fetch-depth: 0
           persist-credentials: false
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: web/package-lock.json
 
-      - name: Resolve version and variant
-        id: ver
+      - name: Verify tag commit and release metadata
+        id: provenance
         shell: bash
         env:
-          INPUT_VERSION: ${{ github.event.inputs.version }}
-          INPUT_VARIANT: ${{ github.event.inputs.variant }}
+          VERSION: ${{ steps.release.outputs.version }}
+          VARIANT: ${{ steps.release.outputs.variant }}
         run: |
-          if [ -n "$INPUT_VERSION" ]; then
-            version="$INPUT_VERSION"
-          else
-            version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "oraclemcp") | .version')"
-          fi
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
-            echo "invalid image version: $version" >&2
+          set -euo pipefail
+          tag="refs/tags/v$VERSION"
+          git show-ref --verify --quiet "$tag" || {
+            echo "release tag does not exist: $tag" >&2
             exit 1
           }
-          variant="${INPUT_VARIANT:-core}"
-          case "$variant" in
+          source_sha="$(git rev-parse HEAD)"
+          tag_sha="$(git rev-parse "$tag^{commit}")"
+          [ "$source_sha" = "$tag_sha" ] || {
+            echo "checked-out source $source_sha does not match $tag at $tag_sha" >&2
+            exit 1
+          }
+
+          cargo_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "oraclemcp") | .version')"
+          server_version="$(jq -r '.version' server.json)"
+          [ "$cargo_version" = "$VERSION" ] || {
+            echo "tag $tag has Cargo version $cargo_version, expected $VERSION" >&2
+            exit 1
+          }
+          [ "$server_version" = "$VERSION" ] || {
+            echo "tag $tag has server.json version $server_version, expected $VERSION" >&2
+            exit 1
+          }
+          RELEASE_TAG="v$VERSION" bash scripts/release_preflight.sh
+
+          case "$VARIANT" in
             core)
+              suffix=""
+              rolling="latest"
               target="runtime"
               expected_engine="false"
-              image="ghcr.io/muhdur/oraclemcp:${version}"
-              tags="$(printf 'ghcr.io/muhdur/oraclemcp:%s\nghcr.io/muhdur/oraclemcp:latest\n' "$version")"
               ;;
             plsql-intelligence)
+              suffix="-plsql-intelligence"
+              rolling="plsql-intelligence-latest"
               target="runtime-plsql-intelligence"
               expected_engine="true"
-              image="ghcr.io/muhdur/oraclemcp:${version}-plsql-intelligence"
-              tags="$(printf 'ghcr.io/muhdur/oraclemcp:%s-plsql-intelligence\nghcr.io/muhdur/oraclemcp:plsql-intelligence-latest\n' "$version")"
-              ;;
-            *)
-              echo "invalid image variant: $variant" >&2
-              exit 1
               ;;
           esac
           {
-            echo "v=$version"
-            echo "variant=$variant"
+            echo "source_sha=$source_sha"
+            echo "version_image=$IMAGE_REPOSITORY:$VERSION$suffix"
+            echo "rolling_image=$IMAGE_REPOSITORY:$rolling"
             echo "target=$target"
             echo "expected_engine=$expected_engine"
-            echo "image=$image"
-            echo "tags<<EOF"
-            printf '%s\n' "$tags"
-            echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build dashboard bundle
-        run: |
-          npm ci
-          npm run check
-        working-directory: web
+  promote:
+    name: promote attested digest
+    needs: verify-release
+    runs-on: ubuntu-latest
+    environment: ghcr
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/v${{ needs.verify-release.outputs.version }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Validate release metadata
+      - name: Re-verify checked-out source
+        shell: bash
         env:
-          RELEASE_TAG: v${{ steps.ver.outputs.v }}
-        run: bash scripts/release_preflight.sh
+          EXPECTED_SOURCE_SHA: ${{ needs.verify-release.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA" ] || {
+            echo "source changed between verification and promotion" >&2
+            exit 1
+          }
 
       - uses: docker/setup-buildx-action@v4
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.10.1
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -115,40 +188,199 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Resolve immutable version digest
+        id: existing
+        shell: bash
+        env:
+          OPERATION: ${{ needs.verify-release.outputs.operation }}
+          VERSION_IMAGE: ${{ needs.verify-release.outputs.version_image }}
+        run: |
+          set -euo pipefail
+          if digest="$(docker buildx imagetools inspect "$VERSION_IMAGE" --format '{{.Manifest.Digest}}' 2>/dev/null)"; then
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "registry returned an invalid digest for $VERSION_IMAGE: $digest" >&2
+              exit 1
+            }
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          elif [ "$OPERATION" = "rollback" ]; then
+            echo "immutable release image does not exist: $VERSION_IMAGE" >&2
+            echo "rollback never rebuilds or creates a version tag" >&2
+            exit 1
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "digest=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify existing digest provenance
+        # Rollback never rebuilds, so it must already have a source-bound
+        # signature. Rebuild establishes that binding only after digest equality.
+        if: needs.verify-release.outputs.operation == 'rollback' && steps.existing.outputs.exists == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify-release.outputs.version }}
+          VARIANT: ${{ needs.verify-release.outputs.variant }}
+          SOURCE_SHA: ${{ needs.verify-release.outputs.source_sha }}
+          DIGEST: ${{ steps.existing.outputs.digest }}
+        run: |
+          set -euo pipefail
+          subject="$IMAGE_REPOSITORY@$DIGEST"
+          issuer="https://token.actions.githubusercontent.com"
+          release_identity="https://github.com/MuhDur/oraclemcp/.github/workflows/release.yml@refs/tags/v$VERSION"
+          rebuild_identity="https://github.com/MuhDur/oraclemcp/.github/workflows/docker.yml@refs/heads/main"
+
+          if cosign verify \
+            --certificate-identity "$release_identity" \
+            --certificate-oidc-issuer "$issuer" \
+            "$subject" >/dev/null; then
+            echo "verified tag-workflow signature for $subject"
+          else
+            cosign verify \
+              --certificate-identity "$rebuild_identity" \
+              --certificate-oidc-issuer "$issuer" \
+              -a "oraclemcp.source_sha=$SOURCE_SHA" \
+              -a "oraclemcp.version=$VERSION" \
+              -a "oraclemcp.variant=$VARIANT" \
+              "$subject" >/dev/null
+            echo "verified source-bound rebuild signature for $subject"
+          fi
+
+      - uses: actions/setup-node@v6
+        if: needs.verify-release.outputs.operation == 'rebuild'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build dashboard bundle
+        if: needs.verify-release.outputs.operation == 'rebuild'
+        working-directory: web
+        run: |
+          npm ci
+          npm run check
+
+      # Push by digest only. No tag is mutated until byte identity is proven.
+      - name: Rebuild exact tag source by digest
+        if: needs.verify-release.outputs.operation == 'rebuild'
         id: build
         uses: docker/build-push-action@v7
         with:
           context: .
-          target: ${{ steps.ver.outputs.target }}
-          push: true
-          tags: ${{ steps.ver.outputs.tags }}
-          # SLSA provenance + SBOM baked into the manifest, matching release.yml.
+          target: ${{ needs.verify-release.outputs.target }}
+          outputs: type=image,name=${{ env.IMAGE_REPOSITORY }},push-by-digest=true,name-canonical=true,push=true
           provenance: mode=max
           sbom: true
 
-      # GitHub-native build provenance attestation, keyed by the image digest.
-      - name: Attest image build provenance
+      - name: Refuse a non-identical rebuild
+        if: needs.verify-release.outputs.operation == 'rebuild'
+        shell: bash
+        env:
+          EXPECTED_DIGEST: ${{ steps.existing.outputs.digest }}
+          REBUILT_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$REBUILT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "rebuild did not produce a valid digest: $REBUILT_DIGEST" >&2
+            exit 1
+          }
+          if [ -n "$EXPECTED_DIGEST" ] && [ "$REBUILT_DIGEST" != "$EXPECTED_DIGEST" ]; then
+            echo "refusing to replace immutable release image" >&2
+            echo "existing digest: $EXPECTED_DIGEST" >&2
+            echo "rebuilt digest:  $REBUILT_DIGEST" >&2
+            exit 1
+          fi
+
+      - name: Attest source-bound rebuild
+        if: needs.verify-release.outputs.operation == 'rebuild'
         uses: actions/attest-build-provenance@v3.2.0
         with:
           subject-name: ghcr.io/muhdur/oraclemcp
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
-      # Keyless cosign signature over the image digest.
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3.10.1
-      - name: Sign image (keyless)
-        env:
-          COSIGN_YES: "true"
-        run: cosign sign --recursive "ghcr.io/muhdur/oraclemcp@${{ steps.build.outputs.digest }}"
-
-      - name: Smoke pushed image
+      - name: Sign source-bound rebuild
+        if: needs.verify-release.outputs.operation == 'rebuild'
         shell: bash
         env:
-          IMAGE: ${{ steps.ver.outputs.image }}
-          VERSION: ${{ steps.ver.outputs.v }}
-          EXPECTED_ENGINE: ${{ steps.ver.outputs.expected_engine }}
+          SOURCE_SHA: ${{ needs.verify-release.outputs.source_sha }}
+          VERSION: ${{ needs.verify-release.outputs.version }}
+          VARIANT: ${{ needs.verify-release.outputs.variant }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          COSIGN_YES: "true"
+        run: |
+          cosign sign --recursive \
+            -a "oraclemcp.source_sha=$SOURCE_SHA" \
+            -a "oraclemcp.version=$VERSION" \
+            -a "oraclemcp.variant=$VARIANT" \
+            "$IMAGE_REPOSITORY@$DIGEST"
+
+      - name: Select verified digest
+        id: selected
+        shell: bash
+        env:
+          OPERATION: ${{ needs.verify-release.outputs.operation }}
+          EXISTING_DIGEST: ${{ steps.existing.outputs.digest }}
+          REBUILT_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ "$OPERATION" = "rebuild" ]; then
+            digest="$REBUILT_DIGEST"
+          else
+            digest="$EXISTING_DIGEST"
+          fi
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "no verified digest available for promotion: $digest" >&2
+            exit 1
+          }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # Rebuild may repair a missing version tag, but performs a second
+      # existence check immediately before creation and never overwrites one.
+      - name: Publish missing immutable version tag
+        if: needs.verify-release.outputs.operation == 'rebuild' && steps.existing.outputs.exists != 'true'
+        shell: bash
+        env:
+          DIGEST: ${{ steps.selected.outputs.digest }}
+          VERSION_IMAGE: ${{ needs.verify-release.outputs.version_image }}
+        run: |
+          set -euo pipefail
+          if current="$(docker buildx imagetools inspect "$VERSION_IMAGE" --format '{{.Manifest.Digest}}' 2>/dev/null)"; then
+            echo "refusing to race or replace newly-created version tag $VERSION_IMAGE at $current" >&2
+            exit 1
+          fi
+          docker buildx imagetools create \
+            --tag "$VERSION_IMAGE" \
+            "$IMAGE_REPOSITORY@$DIGEST"
+          published="$(docker buildx imagetools inspect "$VERSION_IMAGE" --format '{{.Manifest.Digest}}')"
+          [ "$published" = "$DIGEST" ] || {
+            echo "version tag resolved to $published, expected $DIGEST" >&2
+            exit 1
+          }
+
+      # Existing immutable version tags are only read. Promotion mutates only
+      # the rolling tag after signature verification or a byte-identical build.
+      - name: Promote verified digest to rolling tag
+        shell: bash
+        env:
+          DIGEST: ${{ steps.selected.outputs.digest }}
+          ROLLING_IMAGE: ${{ needs.verify-release.outputs.rolling_image }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "$ROLLING_IMAGE" \
+            "$IMAGE_REPOSITORY@$DIGEST"
+          promoted="$(docker buildx imagetools inspect "$ROLLING_IMAGE" --format '{{.Manifest.Digest}}')"
+          [ "$promoted" = "$DIGEST" ] || {
+            echo "rolling tag resolved to $promoted, expected $DIGEST" >&2
+            exit 1
+          }
+
+      - name: Smoke promoted image
+        shell: bash
+        env:
+          IMAGE: ${{ needs.verify-release.outputs.rolling_image }}
+          VERSION: ${{ needs.verify-release.outputs.version }}
+          EXPECTED_ENGINE: ${{ needs.verify-release.outputs.expected_engine }}
         run: |
           set -euo pipefail
           docker pull "$IMAGE"
@@ -169,5 +401,27 @@ jobs:
             else
               ! grep -q "oracle_plsql_parse" /tmp/oraclemcp-info.json
             fi
-            oraclemcp capabilities | head -c 1200 >/dev/null
           '
+
+      - name: Record immutable provenance
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify-release.outputs.version }}
+          VARIANT: ${{ needs.verify-release.outputs.variant }}
+          OPERATION: ${{ needs.verify-release.outputs.operation }}
+          SOURCE_SHA: ${{ needs.verify-release.outputs.source_sha }}
+          VERSION_IMAGE: ${{ needs.verify-release.outputs.version_image }}
+          ROLLING_IMAGE: ${{ needs.verify-release.outputs.rolling_image }}
+          DIGEST: ${{ steps.selected.outputs.digest }}
+        run: |
+          {
+            echo "## Docker provenance recovery"
+            echo
+            echo "- Operation: \`$OPERATION\`"
+            echo "- Release: \`v$VERSION\`"
+            echo "- Variant: \`$VARIANT\`"
+            echo "- Source commit: \`$SOURCE_SHA\`"
+            echo "- Immutable subject: \`$VERSION_IMAGE@$DIGEST\`"
+            echo "- Promoted rolling tag: \`$ROLLING_IMAGE\`"
+            echo "- Existing version tag rewritten: \`false\`"
+          } >> "$GITHUB_STEP_SUMMARY"

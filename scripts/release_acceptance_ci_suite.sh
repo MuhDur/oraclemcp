@@ -67,6 +67,7 @@ required=(
   scripts/oraclemcp_arch_fitness_lint.sh
   scripts/e2e/clean_machine_e2e.sh
   scripts/e2e/release_rollback_dry_run.sh
+  scripts/validate_docker_provenance_workflow.sh
   scripts/installer_lint_and_offline_smoke.sh
   scripts/merge_release_sbom.sh
   scripts/release_sbom_check.sh
@@ -157,6 +158,9 @@ fi
 if ! e2e_run_command "assert" bash scripts/e2e/release_rollback_dry_run.sh --log --dry-run; then
   e2e_finish_fail "H7 rollback runbook dry-run failed"
 fi
+if ! e2e_run_command "assert" bash scripts/validate_docker_provenance_workflow.sh; then
+  e2e_finish_fail "Docker immutable provenance workflow guard failed"
+fi
 if ! e2e_run_command "assert" bash scripts/e2e/clean_machine_e2e.sh --log --dry-run; then
   e2e_finish_fail "H5 clean-machine harness dry-run failed"
 fi
@@ -171,5 +175,5 @@ if ! e2e_run_command "assert" bash scripts/oraclemcp_arch_fitness_lint.sh; then
   e2e_finish_fail "architecture fitness lint failed"
 fi
 
-e2e_log_event "suite_summary" "assert" "pass" 0 "DL-9 ERG-10 DOC-10 E0 S-sbom D3.1 D3.2 installer-jsonl rollback clean-machine feature-powerset arch-fitness accounted"
+e2e_log_event "suite_summary" "assert" "pass" 0 "DL-9 ERG-10 DOC-10 E0 S-sbom D3.1 D3.2 installer-jsonl rollback docker-provenance clean-machine feature-powerset arch-fitness accounted"
 e2e_finish_pass
