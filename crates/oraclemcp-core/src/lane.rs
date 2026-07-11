@@ -26,6 +26,7 @@ use asupersync::channel::{
     oneshot,
 };
 use asupersync::runtime::{Runtime, RuntimeBuilder};
+use asupersync::sync::OnceCell;
 use asupersync::{Budget, CancelReason, Cx, Outcome, PanicPayload, Time};
 use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
@@ -275,12 +276,14 @@ enum LaneCommand {
 
 /// Cross-task cancellation edge for one lane command.
 ///
-/// Asupersync's `Cx` is `Send + Sync`, but its documented semantic contract is
-/// task-local. A caller Cx must therefore never become the lane dispatch Cx.
-/// This bridge carries only a cancellation reason and a waker: the caller side
-/// signals it when its wait is cancelled/dropped, and the lane side forwards
-/// that signal into the fresh lane-owned Cx for this command.
+/// A caller Cx must never become the lane dispatch Cx: the lane always creates
+/// a fresh owner-local Cx for factory and database effects. This bridge retains
+/// one cheap Cx clone solely as a read-only cancellation witness; Asupersync's
+/// Cx contract explicitly makes cancellation visible across clones. That lets
+/// a still-queued command observe cancellation even when the caller task was
+/// woken but has not yet been scheduled to publish the same reason below.
 struct LaneCallerSignal {
+    source_cx: Cx,
     cancelled: AtomicBool,
     reason: Mutex<Option<CancelReason>>,
     lane_waker: Mutex<Option<Waker>>,
@@ -339,6 +342,7 @@ fn tool_request_timeout_ceiling(profile_ceiling: Duration, args: &Value) -> Dura
 impl LaneCallerSignal {
     fn new(cx: &Cx) -> Self {
         Self {
+            source_cx: cx.clone(),
             cancelled: AtomicBool::new(false),
             reason: Mutex::new(None),
             lane_waker: Mutex::new(None),
@@ -364,6 +368,12 @@ impl LaneCallerSignal {
     }
 
     fn reason(&self) -> Option<CancelReason> {
+        if !self.cancelled.load(Ordering::Acquire) && self.source_cx.is_cancel_requested() {
+            let reason = self.source_cx.cancel_reason().unwrap_or_else(|| {
+                CancelReason::user("dispatch caller cancellation requested before lane execution")
+            });
+            self.cancel(reason);
+        }
         if self.cancelled.load(Ordering::Acquire) {
             self.reason.lock().clone()
         } else {
@@ -1796,6 +1806,13 @@ async fn recv_lane_reply<T>(
     reply: &mut oneshot::Receiver<T>,
 ) -> Result<T, oneshot::RecvError> {
     let mut receive = std::pin::pin!(reply.recv(cx));
+    // `oneshot::recv` observes cancellation when polled but its value waker is
+    // not registered with an externally supplied caller Cx. An uninitialized
+    // OnceCell wait is the public Asupersync cancellation sentinel: it installs
+    // the Cx cancellation waker, closes the cancel/register race with a second
+    // checkpoint, and unregisters cleanly when this wait completes.
+    let cancel_sentinel = OnceCell::<()>::new();
+    let mut cancelled = std::pin::pin!(cancel_sentinel.wait(cx));
     std::future::poll_fn(|task_cx| {
         // A ready lane reply may carry the only safe terminal classification
         // for a commit/DDL/elevation. Preserve it even when caller cancellation
@@ -1803,10 +1820,10 @@ async fn recv_lane_reply<T>(
         // cancellation here would invite an unsafe retry after a real effect.
         match receive.as_mut().poll(task_cx) {
             Poll::Ready(result) => Poll::Ready(result),
-            Poll::Pending if cx.checkpoint().is_err() => {
-                Poll::Ready(Err(oneshot::RecvError::Cancelled))
-            }
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => match cancelled.as_mut().poll(task_cx) {
+                Poll::Ready(_) => Poll::Ready(Err(oneshot::RecvError::Cancelled)),
+                Poll::Pending => Poll::Pending,
+            },
         }
     })
     .await
@@ -4098,6 +4115,112 @@ mod tests {
                 .recv_timeout(Duration::from_secs(5))
                 .expect("dispatcher observes stream receiver drop"),
             "dropping the final-result receiver must cancel orphaned stream work"
+        );
+    }
+
+    #[test]
+    fn pending_lane_reply_is_woken_by_external_caller_cancellation() {
+        use std::sync::atomic::AtomicUsize;
+        use std::task::{Context, Wake};
+
+        struct CountingWaker(AtomicUsize);
+
+        impl Wake for CountingWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let cx = Cx::for_testing();
+        let (_reply_tx, mut reply_rx) = oneshot::channel::<()>();
+        let wakes = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut receive = std::pin::pin!(recv_lane_reply(&cx, &mut reply_rx));
+
+        assert!(matches!(receive.as_mut().poll(&mut task_cx), Poll::Pending));
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+
+        cx.set_cancel_requested(true);
+        assert_eq!(
+            wakes.0.load(Ordering::SeqCst),
+            1,
+            "external caller cancellation must wake the pending lane reply"
+        );
+        assert!(matches!(
+            receive.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(oneshot::RecvError::Cancelled))
+        ));
+    }
+
+    #[test]
+    fn queued_lane_observes_source_cancellation_before_caller_is_repolled() {
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let lane = LaneRuntime::spawn(
+            "source-cancel-before-repoll",
+            Arc::new(BlockingDispatch {
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+            }),
+            1,
+        );
+
+        let first_lane = lane.clone();
+        let first = thread::spawn(move || {
+            block_on_lane_bridge(async move {
+                let cx = Cx::current().expect("bridge installs Cx");
+                first_lane
+                    .dispatch(&cx, DispatchContext::default(), "first", Value::Null)
+                    .await
+            })
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first command blocks the lane");
+
+        let queued_cx = Cx::for_testing();
+        let mut queued = std::pin::pin!(lane.dispatch(
+            &queued_cx,
+            DispatchContext::default(),
+            "queued",
+            Value::Null,
+        ));
+        let waker = Waker::noop();
+        let mut task_cx = std::task::Context::from_waker(waker);
+        assert!(matches!(queued.as_mut().poll(&mut task_cx), Poll::Pending));
+        wait_for_queued_lane_command(&lane);
+
+        // Do not poll the caller future again yet. The lane must observe the
+        // shared source-Cx cancellation witness itself before dispatch entry.
+        queued_cx.set_cancel_requested(true);
+        release_tx.send(()).expect("release first command");
+        assert!(matches!(
+            first.join().expect("first caller joined"),
+            Outcome::Ok(_)
+        ));
+
+        let unexpected_entry = entered_rx.recv_timeout(Duration::from_millis(250));
+        if unexpected_entry.is_ok() {
+            let _ = release_tx.send(());
+        }
+        let queued_outcome = (0..50)
+            .find_map(|_| match queued.as_mut().poll(&mut task_cx) {
+                Poll::Ready(outcome) => Some(outcome),
+                Poll::Pending => {
+                    thread::sleep(Duration::from_millis(10));
+                    None
+                }
+            })
+            .expect("cancelled queued caller reaches its authoritative terminal reply");
+        assert!(matches!(queued_outcome, Outcome::Cancelled(_)));
+        assert!(
+            unexpected_entry.is_err(),
+            "source-cancelled queued command must not enter the dispatcher"
         );
     }
 
