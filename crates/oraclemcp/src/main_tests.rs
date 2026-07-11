@@ -9,6 +9,76 @@ use super::*;
 use oraclemcp_audit::{AuditRecord, DbEvidence};
 use oraclemcp_config::HttpOAuthConfig;
 
+#[test]
+fn self_update_uses_only_authenticated_embedded_installer_bytes() {
+    assert_eq!(embedded_installer_sha256(EMBEDDED_INSTALLER_SH).len(), 64);
+    assert_eq!(embedded_installer_sha256(EMBEDDED_INSTALLER_PS1).len(), 64);
+    assert!(self_update_installer_source().starts_with("embedded:install."));
+    assert!(!self_update_installer_source().contains("/main/"));
+
+    let expected = embedded_installer_sha256(EMBEDDED_SELF_UPDATE_INSTALLER);
+    let verified = materialize_verified_installer(EMBEDDED_SELF_UPDATE_INSTALLER, &expected)
+        .expect("exact embedded installer authenticates");
+    assert_eq!(
+        fs::read(verified.path()).expect("read verified installer"),
+        EMBEDDED_SELF_UPDATE_INSTALLER
+    );
+
+    let mut tampered = EMBEDDED_SELF_UPDATE_INSTALLER.to_vec();
+    tampered[0] ^= 1;
+    let error = materialize_verified_installer(&tampered, &expected)
+        .expect_err("tampered installer is rejected before a command is built");
+    assert!(error.contains("authentication failed"), "{error}");
+}
+
+#[test]
+fn self_update_resolves_and_validates_one_immutable_release_tag() {
+    assert_eq!(
+        parse_latest_release_version(br#"{"tag_name":"v0.8.0"}"#).expect("release tag"),
+        "0.8.0"
+    );
+    assert_eq!(
+        normalize_self_update_version("v1.2.3-rc.1").expect("prerelease"),
+        "1.2.3-rc.1"
+    );
+    for invalid in [
+        "latest",
+        "1.2",
+        "01.2.3",
+        "1.2.3-01",
+        "1.2.3;touch-pwned",
+        "v1.2.3-",
+    ] {
+        assert!(
+            normalize_self_update_version(invalid).is_err(),
+            "invalid version accepted: {invalid}"
+        );
+    }
+    assert!(parse_latest_release_version(br#"{"tag_name":"main"}"#).is_err());
+    assert!(parse_latest_release_version(&vec![b'x'; LATEST_RELEASE_MAX_BYTES + 1]).is_err());
+}
+
+#[test]
+fn self_update_plan_never_references_a_mutable_installer_url() {
+    let args = SelfUpdateCliArgs {
+        version: "0.8.0".to_owned(),
+        verify: Some("require".to_owned()),
+        yes: true,
+        no_service: true,
+        dry_run: true,
+    };
+    let argv = self_update_argv(&args, "0.8.0", "<verified-embedded-installer>");
+    let rendered = argv.join(" ");
+    assert!(
+        !rendered.contains("raw.githubusercontent.com"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("/main/"), "{rendered}");
+    assert!(rendered.contains("0.8.0"), "{rendered}");
+    assert!(rendered.contains("require"), "{rendered}");
+    assert!(rendered.contains("<verified-embedded-installer>"));
+}
+
 fn self_signed_cert() -> (Vec<u8>, Vec<u8>) {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
     (

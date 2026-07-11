@@ -35,7 +35,7 @@ use audit_evidence::{
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode, ExitStatus};
@@ -251,7 +251,7 @@ enum Command {
         #[arg(long, default_value = "~/.config/oraclemcp/tools.d")]
         tools_dir: String,
     },
-    /// Re-run the release installer to update this binary.
+    /// Run the authenticated installer embedded in this binary to update it.
     #[command(name = "self-update", alias = "self_update")]
     SelfUpdate(SelfUpdateCliArgs),
     /// Print HMAC signatures for operator-defined custom tool definitions.
@@ -4179,35 +4179,198 @@ fn run_setup(
     }
 }
 
+const LATEST_RELEASE_API_URL: &str =
+    "https://api.github.com/repos/MuhDur/oraclemcp/releases/latest";
+const LATEST_RELEASE_MAX_BYTES: usize = 1024 * 1024;
+#[cfg(any(test, not(windows)))]
+const EMBEDDED_INSTALLER_SH: &[u8] = include_bytes!("../../../install.sh");
+#[cfg(any(test, windows))]
+const EMBEDDED_INSTALLER_PS1: &[u8] = include_bytes!("../../../install.ps1");
 #[cfg(not(windows))]
-const SELF_UPDATE_INSTALLER_SH_URL: &str =
-    "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh";
+const EMBEDDED_SELF_UPDATE_INSTALLER: &[u8] = EMBEDDED_INSTALLER_SH;
 #[cfg(windows)]
-const SELF_UPDATE_INSTALLER_PS_URL: &str =
-    "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.ps1";
+const EMBEDDED_SELF_UPDATE_INSTALLER: &[u8] = EMBEDDED_INSTALLER_PS1;
+#[cfg(not(windows))]
+const EMBEDDED_SELF_UPDATE_NAME: &str = "install.sh";
+#[cfg(windows)]
+const EMBEDDED_SELF_UPDATE_NAME: &str = "install.ps1";
+
+fn self_update_installer_source() -> String {
+    format!(
+        "embedded:{EMBEDDED_SELF_UPDATE_NAME}@oraclemcp-{}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+fn normalize_self_update_version(value: &str) -> Result<String, String> {
+    let value = value.strip_prefix('v').unwrap_or(value);
+    let (core, prerelease) = value
+        .split_once('-')
+        .map_or((value, None), |(core, prerelease)| (core, Some(prerelease)));
+    let parts = core.split('.').collect::<Vec<_>>();
+    if parts.len() != 3
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || !part.bytes().all(|byte| byte.is_ascii_digit())
+                || (part.len() > 1 && part.starts_with('0'))
+        })
+    {
+        return Err(
+            "release version must be X.Y.Z or vX.Y.Z with an optional prerelease".to_owned(),
+        );
+    }
+    if prerelease.is_some_and(|value| {
+        value.is_empty()
+            || value.split('.').any(|part| {
+                part.is_empty()
+                    || (part.len() > 1
+                        && part.starts_with('0')
+                        && part.bytes().all(|byte| byte.is_ascii_digit()))
+            })
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+    }) {
+        return Err("release prerelease contains unsupported characters".to_owned());
+    }
+    Ok(value.to_owned())
+}
+
+fn parse_latest_release_version(body: &[u8]) -> Result<String, String> {
+    if body.len() > LATEST_RELEASE_MAX_BYTES {
+        return Err("latest-release metadata exceeded 1 MiB".to_owned());
+    }
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|_| "latest-release metadata was not valid JSON".to_owned())?;
+    let tag = value
+        .get("tag_name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "latest-release metadata omitted tag_name".to_owned())?;
+    normalize_self_update_version(tag)
+}
 
 #[cfg(not(windows))]
-fn self_update_installer_url() -> &'static str {
-    SELF_UPDATE_INSTALLER_SH_URL
+fn fetch_latest_release_version() -> Result<String, String> {
+    let output = ProcessCommand::new("curl")
+        .args([
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--proto",
+            "=https",
+            "--tlsv1.2",
+            "--max-time",
+            "15",
+            "--max-filesize",
+            "1048576",
+            "--header",
+            concat!(
+                "user-agent: oraclemcp-self-update/",
+                env!("CARGO_PKG_VERSION")
+            ),
+            LATEST_RELEASE_API_URL,
+        ])
+        .output()
+        .map_err(|error| format!("could not run curl to resolve latest release: {error}"))?;
+    if !output.status.success() {
+        return Err("GitHub latest-release lookup failed".to_owned());
+    }
+    parse_latest_release_version(&output.stdout)
 }
 
 #[cfg(windows)]
-fn self_update_installer_url() -> &'static str {
-    SELF_UPDATE_INSTALLER_PS_URL
+fn fetch_latest_release_version() -> Result<String, String> {
+    const SCRIPT: &str = concat!(
+        "$ProgressPreference = 'SilentlyContinue'; ",
+        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; ",
+        "$response = Invoke-RestMethod -UseBasicParsing -Uri $args[0] ",
+        "-Headers @{'User-Agent'='oraclemcp-self-update/",
+        env!("CARGO_PKG_VERSION"),
+        "'} -MaximumRedirection 3 -TimeoutSec 15; ",
+        "[Console]::Out.Write([string]$response.tag_name)"
+    );
+    let output = ProcessCommand::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            SCRIPT,
+            LATEST_RELEASE_API_URL,
+        ])
+        .output()
+        .map_err(|error| format!("could not run PowerShell to resolve latest release: {error}"))?;
+    if !output.status.success() {
+        return Err("GitHub latest-release lookup failed".to_owned());
+    }
+    if output.stdout.len() > 256 {
+        return Err("latest-release tag exceeded 256 bytes".to_owned());
+    }
+    let tag = std::str::from_utf8(&output.stdout)
+        .map_err(|_| "latest-release tag was not UTF-8".to_owned())?;
+    normalize_self_update_version(tag.trim())
+}
+
+fn resolve_self_update_version(requested: &str) -> Result<String, String> {
+    if requested != "latest" {
+        return normalize_self_update_version(requested);
+    }
+    fetch_latest_release_version()
+}
+
+fn embedded_installer_sha256(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
+fn materialize_verified_installer(
+    bytes: &[u8],
+    expected_sha256: &str,
+) -> Result<tempfile::NamedTempFile, String> {
+    let suffix = if cfg!(windows) { ".ps1" } else { ".sh" };
+    let mut file = tempfile::Builder::new()
+        .prefix("oraclemcp-self-update-")
+        .suffix(suffix)
+        .tempfile()
+        .map_err(|error| format!("could not create private installer file: {error}"))?;
+    file.write_all(bytes)
+        .and_then(|()| file.as_file().sync_all())
+        .map_err(|error| format!("could not write embedded installer: {error}"))?;
+    let mut reader = file
+        .reopen()
+        .map_err(|error| format!("could not reopen embedded installer: {error}"))?;
+    let length = reader
+        .metadata()
+        .map_err(|error| format!("could not inspect embedded installer: {error}"))?
+        .len();
+    if length != bytes.len() as u64 {
+        return Err("embedded installer length changed before execution".to_owned());
+    }
+    let mut readback = Vec::with_capacity(bytes.len());
+    reader
+        .read_to_end(&mut readback)
+        .map_err(|error| format!("could not verify embedded installer: {error}"))?;
+    if embedded_installer_sha256(&readback) != expected_sha256 {
+        return Err("embedded installer authentication failed before execution".to_owned());
+    }
+    Ok(file)
 }
 
 #[cfg(not(windows))]
-fn self_update_argv(args: &SelfUpdateCliArgs) -> Vec<String> {
+fn self_update_argv(args: &SelfUpdateCliArgs, resolved_version: &str, path: &str) -> Vec<String> {
     let mut argv = vec![
         "bash".to_owned(),
-        "-c".to_owned(),
-        "set -euo pipefail; url=\"$1\"; shift; curl -fsSL \"${url}?$(date +%s)\" | bash -s -- \"$@\""
-            .to_owned(),
-        "oraclemcp-self-update".to_owned(),
-        SELF_UPDATE_INSTALLER_SH_URL.to_owned(),
+        path.to_owned(),
         "--update".to_owned(),
         "--version".to_owned(),
-        args.version.clone(),
+        resolved_version.to_owned(),
     ];
     if let Some(verify) = &args.verify {
         argv.push("--verify".to_owned());
@@ -4223,19 +4386,17 @@ fn self_update_argv(args: &SelfUpdateCliArgs) -> Vec<String> {
 }
 
 #[cfg(windows)]
-fn self_update_argv(args: &SelfUpdateCliArgs) -> Vec<String> {
+fn self_update_argv(args: &SelfUpdateCliArgs, resolved_version: &str, path: &str) -> Vec<String> {
     let mut argv = vec![
         "powershell.exe".to_owned(),
         "-NoProfile".to_owned(),
         "-ExecutionPolicy".to_owned(),
         "Bypass".to_owned(),
-        "-Command".to_owned(),
-        "$ErrorActionPreference = 'Stop'; $url = $args[0]; $installer = Join-Path ([IO.Path]::GetTempPath()) ('oraclemcp-install-' + [guid]::NewGuid().ToString('N') + '.ps1'); Invoke-WebRequest -UseBasicParsing -Uri ($url + '?' + [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) -OutFile $installer; $installerArgs = @(); for ($i = 1; $i -lt $args.Count; $i++) { $installerArgs += $args[$i] }; try { & $installer @installerArgs; if ($LASTEXITCODE -is [int] -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } finally { Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue }"
-            .to_owned(),
-        SELF_UPDATE_INSTALLER_PS_URL.to_owned(),
+        "-File".to_owned(),
+        path.to_owned(),
         "-Update".to_owned(),
         "-Version".to_owned(),
-        args.version.clone(),
+        resolved_version.to_owned(),
     ];
     if let Some(verify) = &args.verify {
         argv.push("-Verify".to_owned());
@@ -4258,22 +4419,41 @@ fn exit_code_from_status(status: ExitStatus) -> ExitCode {
 }
 
 fn run_self_update_cmd(robot_json: bool, args: SelfUpdateCliArgs) -> ExitCode {
-    let argv = self_update_argv(&args);
-    let installer_url = self_update_installer_url();
+    let resolved_version = match resolve_self_update_version(&args.version) {
+        Ok(version) => version,
+        Err(error) => {
+            emit_command_error(
+                robot_json,
+                "self-update",
+                "ORACLEMCP_SELF_UPDATE_VERSION_RESOLUTION_FAILED",
+                &error,
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let installer_sha256 = embedded_installer_sha256(EMBEDDED_SELF_UPDATE_INSTALLER);
+    let installer_source = self_update_installer_source();
+    let preview_path = format!("<verified-embedded:{EMBEDDED_SELF_UPDATE_NAME}>");
+    let preview_argv = self_update_argv(&args, &resolved_version, &preview_path);
     if args.dry_run {
         let payload = serde_json::json!({
             "kind": "oraclemcp_self_update",
-            "installer_url": installer_url,
-            "version": args.version,
-            "argv": argv,
+            "installer_source": installer_source,
+            "installer_sha256": installer_sha256,
+            "requested_version": args.version,
+            "resolved_version": resolved_version,
+            "release_tag": format!("v{}", resolved_version),
+            "argv": preview_argv,
             "notes": [
-                "self-update re-runs the same verified installer path as the one-line install",
+                "self-update executes installer bytes embedded in this signed binary, never a mutable branch",
                 "the platform installer --update flag is an alias for the version-aware update path"
             ]
         });
         let mut text = String::new();
         text.push_str("oraclemcp self-update\n\n");
-        text.push_str(&format!("Installer:\n  {installer_url}\n\n"));
+        text.push_str(&format!(
+            "Installer:\n  source: {installer_source}\n  sha256: {installer_sha256}\n  release_tag: v{resolved_version}\n\n"
+        ));
         text.push_str("Command argv:\n");
         for arg in payload["argv"].as_array().expect("argv array") {
             text.push_str(&format!(
@@ -4291,12 +4471,27 @@ fn run_self_update_cmd(robot_json: bool, args: SelfUpdateCliArgs) -> ExitCode {
         };
     }
 
+    let installer =
+        match materialize_verified_installer(EMBEDDED_SELF_UPDATE_INSTALLER, &installer_sha256) {
+            Ok(installer) => installer,
+            Err(error) => {
+                emit_command_error(
+                    robot_json,
+                    "self-update",
+                    "ORACLEMCP_SELF_UPDATE_INSTALLER_AUTH_FAILED",
+                    &error,
+                );
+                return ExitCode::from(2);
+            }
+        };
+    let installer_path = installer.path().to_string_lossy().into_owned();
+    let argv = self_update_argv(&args, &resolved_version, &installer_path);
     let Some((program, rest)) = argv.split_first() else {
         emit_command_error(
             robot_json,
             "self-update",
             "ORACLEMCP_SELF_UPDATE_COMMAND_EMPTY",
-            "internal self-update command was empty",
+            "internal verified self-update command was empty",
         );
         return ExitCode::from(2);
     };
