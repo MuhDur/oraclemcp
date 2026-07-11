@@ -339,6 +339,37 @@ fn build_auditor_installs_when_writable_profile_has_a_key() {
 }
 
 #[test]
+fn audit_startup_rejects_lexical_worm_alias_before_creating_files() {
+    let root = target_tmp_file("qa32-lexical-worm-alias");
+    let primary = root.join("audit.jsonl");
+    let audit = AuditConfig {
+        path: Some(primary.clone()),
+        key_ref: Some("literal:0123456789abcdef0123456789abcdef".to_owned()),
+        shipping: Some(oraclemcp_config::AuditShippingConfig {
+            worm_path: Some(root.join("nested/../audit.jsonl")),
+            ..oraclemcp_config::AuditShippingConfig::default()
+        }),
+        ..AuditConfig::default()
+    };
+    let level = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+    let error = match build_auditor(&audit, &level, OperatingLevel::Ddl, &SystemSecretResolver) {
+        Err(error) => error,
+        Ok(_) => panic!("same WORM destination must fail closed"),
+    };
+    assert_eq!(error.0, "ORACLEMCP_AUDIT_SHIPPING_INVALID");
+    assert!(error.1.contains("distinct"), "{}", error.1);
+    assert!(
+        !error.1.contains(&root.display().to_string()),
+        "{}",
+        error.1
+    );
+    assert!(
+        !root.exists(),
+        "obvious aliases must fail before creating a primary log or lock"
+    );
+}
+
+#[test]
 fn audit_startup_rejects_short_resolved_keys_before_opening_the_log() {
     let locator = "QA2_AUDIT_KEY_LOCATOR_MUST_NOT_RENDER";
     for len in [0, 1, 31] {

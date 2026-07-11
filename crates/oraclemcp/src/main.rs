@@ -1387,6 +1387,31 @@ fn build_auditor(
     };
 
     let path = audit.path.clone().unwrap_or_else(default_audit_path);
+    if let Some(worm_path) = audit
+        .shipping
+        .as_ref()
+        .and_then(|shipping| shipping.worm_path.as_deref())
+    {
+        let primary = normalized_destination_path(&path).map_err(|error| {
+            (
+                "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                format!("cannot validate primary audit destination identity: {error}"),
+            )
+        })?;
+        let mirror = normalized_destination_path(worm_path).map_err(|error| {
+            (
+                "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                format!("cannot validate WORM destination identity: {error}"),
+            )
+        })?;
+        if primary == mirror {
+            return Err((
+                "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                "WORM mirror must be a filesystem object distinct from the primary audit log"
+                    .to_owned(),
+            ));
+        }
+    }
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -1419,12 +1444,11 @@ fn build_auditor(
     // `[audit.shipping]` configures a destination do we wrap the durable local
     // sink in the fail-safe ShippingAuditSink decorator. A forward failure never
     // loses the local record (the decorator logs + counts it).
-    let local: Box<dyn AuditSink> = Box::new(sink);
     let local = match audit.shipping.as_ref() {
         Some(shipping) => {
-            build_shipping_sink(local, shipping, level.is_protected(), secret_resolver)?
+            build_shipping_sink(sink, shipping, level.is_protected(), secret_resolver)?
         }
-        None => local,
+        None => Box::new(sink) as Box<dyn AuditSink>,
     };
     // Head anchor sidecar (bead oraclemcp-xb51): `<audit path>.anchor` tracks
     // the durable chain head so `audit verify` detects tail truncation. Record
@@ -1449,6 +1473,37 @@ fn build_auditor(
             )
         })?;
     Ok(Some(Arc::new(auditor)))
+}
+
+/// Normalize a destination without requiring the final file to exist. Existing
+/// paths are canonicalized (resolving symlinks); nonexistent paths are made
+/// absolute and lexically collapse `.`/`..`. The open-handle identity check in
+/// `WormFileForwarder` remains authoritative for hard links and races.
+fn normalized_destination_path(path: &Path) -> std::io::Result<PathBuf> {
+    match fs::canonicalize(path) {
+        Ok(path) => return Ok(path),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        Err(_) => {}
+    }
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    Ok(normalized)
 }
 
 fn build_write_intent_log(
@@ -1521,7 +1576,7 @@ fn finish_write_intent_log_build(
 /// (asupersync HTTP client, no tokio/reqwest), composing both into a single
 /// forwarder when both are configured. Shipping never weakens the local chain.
 fn build_shipping_sink(
-    local: Box<dyn AuditSink>,
+    local: FileAuditSink,
     shipping: &oraclemcp_config::AuditShippingConfig,
     protected: bool,
     secret_resolver: &dyn SecretResolver,
@@ -1542,12 +1597,21 @@ fn build_shipping_sink(
                 )
             })?;
         }
-        let worm = WormFileForwarder::open(worm_path).map_err(|e| {
-            (
-                "ORACLEMCP_AUDIT_SHIPPING_INVALID",
-                format!("failed to open WORM mirror {}: {e}", worm_path.display()),
-            )
-        })?;
+        let worm =
+            WormFileForwarder::open_distinct(worm_path, &local).map_err(|error| match error {
+                oraclemcp_audit::ShippingError::AliasedPrimaryAuditLog => (
+                    "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                    "WORM mirror must be a filesystem object distinct from the primary audit log"
+                        .to_owned(),
+                ),
+                other => (
+                    "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                    format!(
+                        "failed to open WORM mirror {}: {other}",
+                        worm_path.display()
+                    ),
+                ),
+            })?;
         tracing::info!(worm_path = %worm_path.display(), "audit WORM mirror armed");
         forwarders.push(Box::new(worm));
     }
@@ -1582,11 +1646,11 @@ fn build_shipping_sink(
     }
 
     let forwarder: Box<dyn ShippingForwarder> = match forwarders.len() {
-        0 => return Ok(local), // validate() guarantees ≥1, but stay total.
+        0 => return Ok(Box::new(local)), // validate() guarantees ≥1, but stay total.
         1 => forwarders.into_iter().next().expect("len==1"),
         _ => Box::new(TeeForwarder::new(forwarders)),
     };
-    Ok(Box::new(ShippingAuditSink::new(local, forwarder)))
+    Ok(Box::new(ShippingAuditSink::new(Box::new(local), forwarder)))
 }
 
 /// A forwarder that fans one record out to several forwarders (WORM + SIEM).

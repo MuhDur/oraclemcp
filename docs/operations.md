@@ -885,6 +885,12 @@ siem_auth_header_ref = "env:SIEM_TOKEN"  # secret-ref for the auth header value
 siem_auth_header_name = "Authorization"  # defaults to Authorization
 ```
 
+The WORM destination must be a different filesystem object from the primary
+audit log. Startup compares normalized paths and the identities of the opened
+files, rejecting direct paths, relative aliases, symlinks, and hard links before
+any signed record is appended. This check is fail-closed because mirroring into
+the primary file would duplicate each sequence and corrupt the audit chain.
+
 How it behaves — the load-bearing properties:
 
 - **Fail-safe ordering.** Each record is written and **fsynced to the local log

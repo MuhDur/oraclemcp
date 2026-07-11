@@ -55,7 +55,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::Mutex;
 
 use crate::record::AuditRecord;
-use crate::sink::{AuditError, AuditSink};
+use crate::sink::{AuditError, AuditSink, FileAuditSink, open_file_identity};
 
 /// A shipping (forwarding) failure. Distinct from [`AuditError`] because a
 /// shipping failure is **non-fatal** to the local durable chain: the decorator
@@ -65,12 +65,19 @@ use crate::sink::{AuditError, AuditSink};
 pub enum ShippingError {
     /// An I/O / transport error mirroring a record to the destination.
     Transport(String),
+    /// The WORM mirror resolves to the primary audit log's open filesystem
+    /// object. Arming it would append every signed record twice and corrupt the
+    /// local chain.
+    AliasedPrimaryAuditLog,
 }
 
 impl std::fmt::Display for ShippingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ShippingError::Transport(msg) => write!(f, "audit shipping transport error: {msg}"),
+            ShippingError::AliasedPrimaryAuditLog => {
+                f.write_str("WORM mirror aliases the primary audit log")
+            }
         }
     }
 }
@@ -109,25 +116,42 @@ pub trait ShippingForwarder: Send + Sync {
 /// The mirrored bytes are byte-identical to the primary log's JSONL, so
 /// `oraclemcp audit verify <worm-file>` verifies the destination copy under the
 /// same key — detecting tampering at the destination independently of the
-/// primary.
+/// primary. The opened handle is retained for the forwarder's lifetime; any
+/// future rotation/reopen must construct a new forwarder and therefore repeats
+/// the identity proof before another record can be mirrored.
 pub struct WormFileForwarder {
     file: Mutex<File>,
 }
 
 impl WormFileForwarder {
-    /// Open (creating + appending) the WORM mirror file at `path`. Uses
+    /// Open (creating + appending) the WORM mirror file at `path`, after proving
+    /// its open filesystem identity differs from `primary`. Uses
     /// `O_APPEND` so every write lands at the current end of file — the
     /// write-once posture is enforced by the destination filesystem / bucket
     /// object-lock; this side never seeks or truncates.
     ///
     /// # Errors
-    /// Returns [`ShippingError::Transport`] if the file cannot be opened.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, ShippingError> {
+    /// Returns [`ShippingError::Transport`] if either identity cannot be
+    /// established or the mirror cannot be opened, and
+    /// [`ShippingError::AliasedPrimaryAuditLog`] for any same-object alias.
+    pub fn open_distinct(
+        path: impl AsRef<Path>,
+        primary: &FileAuditSink,
+    ) -> Result<Self, ShippingError> {
+        let primary_identity = primary
+            .open_identity()
+            .map_err(|error| ShippingError::Transport(error.to_string()))?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
             .map_err(|e| ShippingError::Transport(e.to_string()))?;
+        let mirror_identity = open_file_identity(&file).map_err(|error| {
+            ShippingError::Transport(format!("cannot establish WORM file identity: {error}"))
+        })?;
+        if mirror_identity == primary_identity {
+            return Err(ShippingError::AliasedPrimaryAuditLog);
+        }
         Ok(WormFileForwarder {
             file: Mutex::new(file),
         })
@@ -730,7 +754,8 @@ mod tests {
         let worm = dir.path().join("worm-mirror.jsonl");
         {
             let local = crate::sink::FileAuditSink::open(&primary).expect("open primary");
-            let forwarder = WormFileForwarder::open(&worm).expect("open worm");
+            let forwarder =
+                WormFileForwarder::open_distinct(&worm, &local).expect("open distinct worm");
             let sink = ShippingAuditSink::new(Box::new(local), Box::new(forwarder));
             let auditor = Auditor::new(Box::new(sink), key());
             for i in 0..4 {
@@ -762,6 +787,62 @@ mod tests {
             VerifyOutcome::Ok { records: 4 },
             "the WORM mirror re-verifies under the signing key"
         );
+    }
+
+    #[test]
+    fn worm_open_rejects_the_primary_file_without_appending() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary = dir.path().join("audit.jsonl");
+        let local = crate::sink::FileAuditSink::open(&primary).expect("open primary");
+        let before = std::fs::metadata(&primary).expect("primary metadata").len();
+
+        let error = match WormFileForwarder::open_distinct(&primary, &local) {
+            Err(error) => error,
+            Ok(_) => panic!("same open file must be rejected"),
+        };
+        assert!(matches!(error, ShippingError::AliasedPrimaryAuditLog));
+        assert_eq!(
+            std::fs::metadata(&primary).expect("primary metadata").len(),
+            before,
+            "identity rejection must not append or truncate the primary"
+        );
+    }
+
+    #[test]
+    fn worm_open_rejects_a_hard_link_to_the_primary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary = dir.path().join("audit.jsonl");
+        let alias = dir.path().join("worm-hardlink.jsonl");
+        let local = crate::sink::FileAuditSink::open(&primary).expect("open primary");
+        std::fs::hard_link(&primary, &alias).expect("create hard-link alias");
+
+        let error = match WormFileForwarder::open_distinct(&alias, &local) {
+            Err(error) => error,
+            Ok(_) => panic!("hard-link alias must be rejected"),
+        };
+        assert!(matches!(error, ShippingError::AliasedPrimaryAuditLog));
+        assert_eq!(
+            std::fs::metadata(&primary).expect("primary metadata").len(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worm_open_rejects_a_symlink_to_the_primary() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary = dir.path().join("audit.jsonl");
+        let alias = dir.path().join("worm-symlink.jsonl");
+        let local = crate::sink::FileAuditSink::open(&primary).expect("open primary");
+        symlink(&primary, &alias).expect("create symlink alias");
+
+        let error = match WormFileForwarder::open_distinct(&alias, &local) {
+            Err(error) => error,
+            Ok(_) => panic!("symlink alias must be rejected"),
+        };
+        assert!(matches!(error, ShippingError::AliasedPrimaryAuditLog));
     }
 
     #[test]

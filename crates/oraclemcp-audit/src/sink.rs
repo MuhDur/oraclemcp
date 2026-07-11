@@ -21,6 +21,51 @@ use crate::anchor::{AnchorFile, ChainAnchor, load_anchor};
 use crate::record::{AuditEntryDraft, AuditRecord, GENESIS_HASH, SigningKey};
 use crate::verify::parse_jsonl;
 
+/// Stable identity of an already-open filesystem object. Comparing identities
+/// from the open handles (rather than path strings) catches symlink, hard-link,
+/// case-folding, and mount aliases without a check/open race.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OpenFileIdentity {
+    volume: u64,
+    file: u64,
+}
+
+#[cfg(unix)]
+pub(crate) fn open_file_identity(file: &File) -> std::io::Result<OpenFileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file.metadata()?;
+    Ok(OpenFileIdentity {
+        volume: metadata.dev(),
+        file: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn open_file_identity(file: &File) -> std::io::Result<OpenFileIdentity> {
+    use std::os::windows::fs::MetadataExt;
+
+    let metadata = file.metadata()?;
+    let volume = metadata.volume_serial_number().ok_or_else(|| {
+        std::io::Error::other("filesystem did not provide a volume serial number")
+    })?;
+    let file_index = metadata
+        .file_index()
+        .ok_or_else(|| std::io::Error::other("filesystem did not provide a file index"))?;
+    Ok(OpenFileIdentity {
+        volume: u64::from(volume),
+        file: file_index,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn open_file_identity(_file: &File) -> std::io::Result<OpenFileIdentity> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "open-file identity is unavailable on this platform",
+    ))
+}
+
 /// Audit sink errors.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -255,6 +300,16 @@ impl FileAuditSink {
         Ok(FileAuditSink {
             file: Mutex::new(file),
             _lock: lock,
+        })
+    }
+
+    /// Identity of the exact open primary-log handle. Used by the WORM
+    /// forwarder constructor to prove the two destinations are independent.
+    pub(crate) fn open_identity(&self) -> Result<OpenFileIdentity, AuditError> {
+        open_file_identity(&self.file.lock()).map_err(|error| {
+            AuditError::Io(format!(
+                "cannot establish primary audit file identity: {error}"
+            ))
         })
     }
 }
