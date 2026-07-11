@@ -123,6 +123,7 @@ pub oraclemcp_error::ReasonCategory::MultiStatementBatch
 pub oraclemcp_error::ReasonCategory::Other
 pub oraclemcp_error::ReasonCategory::PlSqlBlock
 pub oraclemcp_error::ReasonCategory::RequiresHigherLevel
+pub oraclemcp_error::ReasonCategory::TransactionControl
 pub oraclemcp_error::ReasonCategory::UnbalancedBlock
 pub oraclemcp_error::ReasonCategory::UnprovenSideEffect
 impl core::clone::Clone for oraclemcp_error::ReasonCategory

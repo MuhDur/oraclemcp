@@ -95,6 +95,7 @@ pub struct oraclemcp_guard::classifier::Classifier
 impl oraclemcp_guard::classifier::Classifier
 pub fn oraclemcp_guard::classifier::Classifier::classify(&self, &str) -> oraclemcp_guard::classifier::GuardDecision
 pub fn oraclemcp_guard::classifier::Classifier::new(oraclemcp_guard::classifier::ClassifierConfig) -> Self
+pub fn oraclemcp_guard::classifier::Classifier::served_strict(self) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::with_oracle(self, alloc::sync::Arc<dyn oraclemcp_guard::purity::SideEffectOracle>) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::with_statement_unknown_guarded(self) -> Self
 impl core::default::Default for oraclemcp_guard::classifier::Classifier
@@ -127,8 +128,10 @@ pub type oraclemcp_guard::classifier::Classifier::Output = T
 pub struct oraclemcp_guard::classifier::ClassifierConfig
 impl oraclemcp_guard::classifier::ClassifierConfig
 pub fn oraclemcp_guard::classifier::ClassifierConfig::new() -> Self
+pub fn oraclemcp_guard::classifier::ClassifierConfig::served_strict() -> Self
 pub fn oraclemcp_guard::classifier::ClassifierConfig::with_allow(self, &str) -> Self
 pub fn oraclemcp_guard::classifier::ClassifierConfig::with_block_pattern(self, &str) -> Self
+pub fn oraclemcp_guard::classifier::ClassifierConfig::with_unresolved_qualified_calls_guarded(self) -> Self
 impl core::clone::Clone for oraclemcp_guard::classifier::ClassifierConfig
 pub fn oraclemcp_guard::classifier::ClassifierConfig::clone(&self) -> oraclemcp_guard::classifier::ClassifierConfig
 impl core::default::Default for oraclemcp_guard::classifier::ClassifierConfig
@@ -2366,6 +2369,7 @@ pub struct oraclemcp_guard::Classifier
 impl oraclemcp_guard::classifier::Classifier
 pub fn oraclemcp_guard::classifier::Classifier::classify(&self, &str) -> oraclemcp_guard::classifier::GuardDecision
 pub fn oraclemcp_guard::classifier::Classifier::new(oraclemcp_guard::classifier::ClassifierConfig) -> Self
+pub fn oraclemcp_guard::classifier::Classifier::served_strict(self) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::with_oracle(self, alloc::sync::Arc<dyn oraclemcp_guard::purity::SideEffectOracle>) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::with_statement_unknown_guarded(self) -> Self
 impl core::default::Default for oraclemcp_guard::classifier::Classifier
@@ -2398,8 +2402,10 @@ pub type oraclemcp_guard::classifier::Classifier::Output = T
 pub struct oraclemcp_guard::ClassifierConfig
 impl oraclemcp_guard::classifier::ClassifierConfig
 pub fn oraclemcp_guard::classifier::ClassifierConfig::new() -> Self
+pub fn oraclemcp_guard::classifier::ClassifierConfig::served_strict() -> Self
 pub fn oraclemcp_guard::classifier::ClassifierConfig::with_allow(self, &str) -> Self
 pub fn oraclemcp_guard::classifier::ClassifierConfig::with_block_pattern(self, &str) -> Self
+pub fn oraclemcp_guard::classifier::ClassifierConfig::with_unresolved_qualified_calls_guarded(self) -> Self
 impl core::clone::Clone for oraclemcp_guard::classifier::ClassifierConfig
 pub fn oraclemcp_guard::classifier::ClassifierConfig::clone(&self) -> oraclemcp_guard::classifier::ClassifierConfig
 impl core::default::Default for oraclemcp_guard::classifier::ClassifierConfig

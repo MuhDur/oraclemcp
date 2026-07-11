@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![allow(clippy::result_large_err)]
 
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -9,8 +10,8 @@ use std::time::{Duration, Instant};
 use asupersync::{Cx, Outcome};
 use oraclemcp_core::error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_core::{
-    DispatchContext, DispatchFuture, LaneContext, LaneDispatchFactory, StatefulLaneDispatch,
-    ToolDispatch, block_on_lane_bridge,
+    DispatchContext, DispatchFuture, LaneContext, LaneDispatchFactory, LaneDispatchFactoryBuilder,
+    PreparedLaneDispatch, StatefulLaneDispatch, ToolDispatch, block_on_lane_bridge,
 };
 use oraclemcp_db::{OracleConnectOptions, OraclePool, PoolSettings};
 use parking_lot::Mutex;
@@ -120,7 +121,16 @@ fn phase0_capacity_spike() {
         Arc::clone(&latencies_us),
         Arc::clone(&lane_threads),
     );
-    let registry = Arc::new(StatefulLaneDispatch::with_dispatch_factory(factory, None));
+    let factory_builder: Arc<LaneDispatchFactoryBuilder> = Arc::new(move |_lane_context| {
+        Ok(PreparedLaneDispatch::new(
+            Arc::clone(&factory),
+            oraclemcp_core::DEFAULT_REQUEST_TIMEOUT,
+        ))
+    });
+    let registry = Arc::new(StatefulLaneDispatch::with_dispatch_factory_builder(
+        factory_builder,
+        None,
+    ));
 
     let before = HostSnapshot::capture();
     let started = Instant::now();

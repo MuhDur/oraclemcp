@@ -20,11 +20,13 @@
 //! * exhaustion maps to the timeout-class [`DbError::Cancelled`], preserving the
 //!   `Cancelled`/`Timeout` mapping B1 established (the transport then maps
 //!   `Cancelled` to its `499`-style code; a normal request is unaffected);
-//! * cleanup/finalizers get a SHORT bounded budget ([`Budget::MINIMAL`] met with
-//!   the request budget) so teardown still runs after the request budget is
-//!   spent, but can never itself run away.
+//! * every clone shares one consumed checkpoint quota, so copying a budget into
+//!   nested helpers cannot silently reset the request allowance;
+//! * cleanup/finalizers get a fresh, independent, SHORT bounded budget so
+//!   teardown can still run after the request deadline or cancellation has
+//!   fired, but can never itself run away.
 //!
-//! Against the pinned `oracledb` 0.5.1 driver the budget composes with the
+//! Against the pinned `oracledb` 0.8.2 driver the budget composes with the
 //! adapter's per-call timeout: the seam maps this budget's deadline onto the
 //! driver's `execute_raw` timeout (see `crates/oraclemcp-db/src/connection.rs`).
 //!
@@ -35,65 +37,122 @@
 use std::time::Duration;
 
 use asupersync::{Budget, Cx, Time};
-use oraclemcp_db::DbError;
+use oraclemcp_db::{DbError, DbRequestQuota};
 
 /// The default per-request deadline when a profile does not set
 /// `call_timeout_seconds`. Mirrors `resilience::DEFAULT_CALL_TIMEOUT` (§10) so
 /// the request budget and the per-round-trip timeout agree by default.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// A poll-quota ceiling for a single request. A request that polls more than
-/// this without completing is treated as runaway and bounded. The figure is
-/// generous (a healthy request polls far fewer times) so it never trips a
-/// normal call; it exists to bound a pathological spin that makes no forward
-/// progress against the deadline.
+/// A cooperative-checkpoint ceiling for a single request. Every
+/// [`RequestBudget::enforce`] consumes one shared unit in addition to the
+/// caller [`Cx`]'s own runtime poll accounting. The figure is generous so it
+/// never trips a normal call; it exists to keep explicit nested request/DB
+/// checkpoints from resetting their allowance when the budget is cloned.
 pub const DEFAULT_REQUEST_POLL_QUOTA: u32 = 1_000_000;
 
-/// The poll quota a bounded cleanup/finalize section gets. Matches
-/// [`Budget::MINIMAL`]'s 100-poll allowance — enough to roll back, close
-/// cursors, and release a lease, but not enough to run away.
+/// The cooperative-checkpoint quota a bounded cleanup/finalize section gets.
+/// Matches [`Budget::MINIMAL`]'s 100-poll allowance — enough to roll back,
+/// close cursors, and release a lease, but not enough to run away.
 pub const CLEANUP_POLL_QUOTA: u32 = 100;
+
+/// Wall-clock ceiling for a fresh cleanup/finalizer attempt.
+///
+/// Cleanup runs after the request budget may already be expired, so its
+/// deadline must be anchored to cleanup admission rather than inherited from
+/// the dead request. Five seconds leaves rollback/close enough time for one
+/// bounded network round trip without turning finalization into an unbounded
+/// shutdown path.
+pub const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A per-request resource budget (B6).
 ///
 /// Wraps an asupersync [`Budget`] with the dispatch-boundary policy: how to
 /// derive it from a call timeout, how to bound cleanup, and how exhaustion maps
 /// to the timeout-class [`DbError`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct RequestBudget {
+    admitted_at: Time,
     budget: Budget,
+    shared_quota: DbRequestQuota,
 }
 
 impl RequestBudget {
     /// Derive a request budget from a per-call timeout (or the default when
-    /// `None`), anchored to `now` (the runtime/lab clock — pass `cx.now()`).
+    /// `None`), anchored to the instant the request entered dispatch (the
+    /// runtime/lab clock).
     ///
-    /// The deadline is `now + timeout`; the poll quota is
+    /// The deadline is `admitted_at + timeout`; the poll quota is
     /// [`DEFAULT_REQUEST_POLL_QUOTA`]. A zero timeout is floored to 1ns so the
-    /// deadline is strictly after `now` (a budget with `deadline == now` would
-    /// be born already exhausted).
+    /// deadline is strictly after admission (a budget with
+    /// `deadline == admitted_at` would be born already exhausted).
     #[must_use]
-    pub fn from_call_timeout(now: Time, timeout: Option<Duration>) -> Self {
+    pub fn from_call_timeout(admitted_at: Time, timeout: Option<Duration>) -> Self {
         let timeout = timeout
             .unwrap_or(DEFAULT_REQUEST_TIMEOUT)
             .max(Duration::from_nanos(1));
         let budget = Budget::new()
-            .with_timeout(now, timeout)
+            .with_timeout(admitted_at, timeout)
             .with_poll_quota(DEFAULT_REQUEST_POLL_QUOTA);
-        RequestBudget { budget }
+        Self::from_budget_at(admitted_at, budget)
     }
 
-    /// Wrap an explicit [`Budget`] (e.g. one already carried by a parent `Cx`).
+    /// Wrap an explicit [`Budget`] anchored to request admission.
+    ///
+    /// Keeping the anchor separate from the deadline is intentional: a
+    /// per-tool timeout can later be tightened relative to the original
+    /// admission instant even when the parent budget supplied an earlier
+    /// absolute deadline.
     #[must_use]
-    pub fn from_budget(budget: Budget) -> Self {
-        RequestBudget { budget }
+    pub fn from_budget_at(admitted_at: Time, budget: Budget) -> Self {
+        Self {
+            admitted_at,
+            budget,
+            shared_quota: DbRequestQuota::new(budget),
+        }
     }
 
     /// The underlying asupersync [`Budget`], for attaching to a request `Cx` or
-    /// for `meet`-ing with another budget.
+    /// for `meet`-ing with another budget. The returned quota fields are a
+    /// point-in-time snapshot of the shared remaining allowance.
     #[must_use]
-    pub fn budget(self) -> Budget {
-        self.budget
+    pub fn budget(&self) -> Budget {
+        Budget {
+            deadline: self.budget.deadline,
+            poll_quota: self
+                .budget
+                .poll_quota
+                .min(self.shared_quota.polls_remaining()),
+            cost_quota: match (self.budget.cost_quota, self.shared_quota.cost_remaining()) {
+                (Some(limit), Some(remaining)) => Some(limit.min(remaining)),
+                (limit, None) => limit,
+                (None, remaining) => remaining,
+            },
+            priority: self.budget.priority,
+        }
+    }
+
+    /// Original lane/request admission instant used to derive relative
+    /// timeouts. Queue wait therefore consumes the same total deadline as DB
+    /// work.
+    #[must_use]
+    pub const fn admitted_at(&self) -> Time {
+        self.admitted_at
+    }
+
+    /// Effective absolute request deadline.
+    #[must_use]
+    pub const fn deadline(&self) -> Option<Time> {
+        self.budget.deadline
+    }
+
+    /// Shared quota handle installed on database wire boundaries.
+    ///
+    /// The returned clone charges the same atomics as [`Self::enforce`]; it is
+    /// not a replenished snapshot.
+    #[must_use]
+    pub fn db_quota(&self) -> DbRequestQuota {
+        self.shared_quota.clone()
     }
 
     /// Combine with another budget, taking the tighter constraint
@@ -101,53 +160,72 @@ impl RequestBudget {
     /// no looser than its caller (budget propagation is correctness, not just
     /// tuning).
     #[must_use]
-    pub fn meet(self, other: Budget) -> Self {
-        RequestBudget {
-            budget: self.budget.meet(other),
-        }
+    pub fn meet(mut self, other: Budget) -> Self {
+        self.budget = self.budget.meet(other);
+        self.shared_quota.tighten(self.budget);
+        self
     }
 
-    /// A SHORT bounded cleanup budget for finalizers (rollback, cursor close,
-    /// lease release). It keeps the request deadline (so cleanup cannot outlive
-    /// the request indefinitely) but caps polls at [`CLEANUP_POLL_QUOTA`] — the
-    /// asupersync "give cleanup a bounded budget" rule. Built by `meet`-ing the
-    /// request budget with [`Budget::MINIMAL`], so it is never looser than the
-    /// request.
+    /// Tighten a per-tool timeout relative to the original request admission.
+    ///
+    /// This deliberately does **not** use `cx.now()`: doing so after mailbox
+    /// dequeue would give queued work a fresh timeout window. Clones continue
+    /// sharing the same consumed quota.
     #[must_use]
-    pub fn cleanup(self) -> Budget {
-        self.budget.meet(Budget::MINIMAL)
+    pub fn tighten_timeout(&self, timeout: Duration) -> Self {
+        self.clone().meet(
+            Budget::new().with_timeout(self.admitted_at, timeout.max(Duration::from_nanos(1))),
+        )
+    }
+
+    /// A fresh, independent SHORT budget for finalizers (rollback, cursor
+    /// close, lease release).
+    ///
+    /// It intentionally does not inherit the request deadline, cancellation,
+    /// or spent quota: those may be the reason cleanup is running. The caller
+    /// supplies the cleanup admission time, producing a new absolute deadline
+    /// and a new shared quota bounded by [`CLEANUP_TIMEOUT`] and
+    /// [`CLEANUP_POLL_QUOTA`].
+    #[must_use]
+    pub fn fresh_cleanup(cleanup_admitted_at: Time) -> Self {
+        Self::from_budget_at(
+            cleanup_admitted_at,
+            Budget::new()
+                .with_timeout(cleanup_admitted_at, CLEANUP_TIMEOUT)
+                .with_poll_quota(CLEANUP_POLL_QUOTA),
+        )
     }
 
     /// Whether the budget is already spent at `now`: past its deadline OR out of
     /// poll/cost quota. A non-time check (quota) is independent of `now`.
     #[must_use]
-    pub fn is_exhausted_at(self, now: Time) -> bool {
-        self.budget.is_past_deadline(now) || self.budget.is_exhausted()
+    pub fn is_exhausted_at(&self, now: Time) -> bool {
+        let budget = self.budget();
+        budget.is_past_deadline(now) || budget.is_exhausted()
     }
 
     /// Enforce the budget at `now`, mapping exhaustion to the timeout-class
     /// [`DbError::Cancelled`] (preserving B1's `Cancelled`/`Timeout` mapping).
-    /// A request still within budget returns `Ok(())` and is unaffected.
+    /// A request still within budget consumes one shared cooperative
+    /// checkpoint and returns `Ok(())`.
     ///
     /// This is the dispatch-boundary check woven around DB round trips, the
-    /// budget analogue of the adapter's `db_checkpoint`. It is deliberately a
-    /// pure function of `(budget, now)` so it is deterministic under a lab
-    /// clock.
+    /// budget analogue of the adapter's `db_checkpoint`. Consumption is shared
+    /// by all clones and deterministic under a lab clock.
     ///
     /// # Errors
     /// [`DbError::Cancelled`] when the deadline has passed or a quota is spent.
-    pub fn enforce_at(self, now: Time) -> Result<(), DbError> {
+    pub fn enforce_at(&self, now: Time) -> Result<(), DbError> {
         if self.budget.is_past_deadline(now) {
             return Err(DbError::Cancelled(
                 "request budget exhausted: deadline exceeded".to_owned(),
             ));
         }
-        if self.budget.is_exhausted() {
-            return Err(DbError::Cancelled(
-                "request budget exhausted: poll/cost quota spent".to_owned(),
-            ));
-        }
-        Ok(())
+        self.shared_quota
+            .consume_checkpoint("request budget")
+            .map_err(|_| {
+                DbError::Cancelled("request budget exhausted: poll/cost quota spent".to_owned())
+            })
     }
 
     /// Enforce the budget against a context's clock, AND observe any
@@ -205,7 +283,8 @@ mod tests {
     #[test]
     fn spent_poll_quota_is_cancelled() {
         let now = Time::from_secs(100);
-        let rb = RequestBudget::from_budget(
+        let rb = RequestBudget::from_budget_at(
+            now,
             Budget::new()
                 .with_deadline(Time::from_secs(1_000)) // far away
                 .with_poll_quota(0), // but no polls left
@@ -216,19 +295,25 @@ mod tests {
         assert!(matches!(err, DbError::Cancelled(ref m) if m.contains("quota")));
     }
 
-    // The cleanup budget is bounded and never looser than the request budget.
+    // Cleanup is independently bounded and usable after the request expired.
     #[test]
-    fn cleanup_budget_is_short_and_bounded() {
+    fn cleanup_budget_is_fresh_after_request_expiry() {
         let now = Time::from_secs(100);
-        let rb = RequestBudget::from_call_timeout(now, Some(Duration::from_secs(30)));
-        let cleanup = rb.cleanup();
-        // Cleanup caps polls at the MINIMAL allowance (100), far below the
-        // request's million-poll ceiling.
-        assert_eq!(cleanup.poll_quota, CLEANUP_POLL_QUOTA);
-        // And it keeps the (tighter-or-equal) request deadline.
-        assert_eq!(cleanup.deadline, Some(now + Duration::from_secs(30)));
-        // meet() is monotone: cleanup is never looser than the request.
-        assert!(cleanup.poll_quota <= rb.budget().poll_quota);
+        let request = RequestBudget::from_call_timeout(now, Some(Duration::from_secs(1)));
+        let cleanup_admitted_at = Time::from_secs(102);
+        assert!(request.enforce_at(cleanup_admitted_at).is_err());
+
+        let cleanup = RequestBudget::fresh_cleanup(cleanup_admitted_at);
+        assert_eq!(cleanup.admitted_at(), cleanup_admitted_at);
+        assert_eq!(cleanup.budget().poll_quota, CLEANUP_POLL_QUOTA);
+        assert_eq!(
+            cleanup.deadline(),
+            Some(cleanup_admitted_at + CLEANUP_TIMEOUT)
+        );
+        assert!(
+            cleanup.enforce_at(cleanup_admitted_at).is_ok(),
+            "expired request state must not poison its fresh cleanup budget"
+        );
     }
 
     // meet() tightens: a nested op inherits the stricter of caller/child.
@@ -239,7 +324,7 @@ mod tests {
         let child = Budget::new().with_timeout(now, Duration::from_secs(10));
         let combined = parent.meet(child);
         assert_eq!(
-            combined.budget().deadline,
+            combined.deadline(),
             Some(now + Duration::from_secs(10)),
             "the tighter (10s) deadline wins"
         );
@@ -258,7 +343,7 @@ mod tests {
             .with_timeout(now, Duration::from_secs(7))
             .with_poll_quota(20_000);
 
-        let effective = RequestBudget::from_budget(service_root)
+        let effective = RequestBudget::from_budget_at(now, service_root)
             .meet(profile_ceiling)
             .meet(per_request_deadline)
             .budget();
@@ -271,6 +356,75 @@ mod tests {
                 .meet(profile_ceiling)
                 .meet(per_request_deadline)
         );
+    }
+
+    #[test]
+    fn per_tool_timeout_is_anchored_to_original_admission() {
+        let admitted_at = Time::from_secs(100);
+        let request = RequestBudget::from_call_timeout(admitted_at, Some(Duration::from_secs(30)));
+
+        // Pretend dequeue happened at t=108. Tightening to 10s still expires at
+        // t=110, not at t=118.
+        let tool = request.tighten_timeout(Duration::from_secs(10));
+        assert_eq!(tool.admitted_at(), admitted_at);
+        assert_eq!(tool.deadline(), Some(Time::from_secs(110)));
+        assert!(tool.enforce_at(Time::from_secs(109)).is_ok());
+        assert!(tool.enforce_at(Time::from_secs(111)).is_err());
+    }
+
+    #[test]
+    fn cloned_budgets_share_and_consume_one_quota() {
+        let now = Time::from_secs(100);
+        let request = RequestBudget::from_budget_at(
+            now,
+            Budget::new()
+                .with_deadline(Time::from_secs(1_000))
+                .with_poll_quota(2),
+        );
+        let nested = request.clone();
+
+        assert!(request.enforce_at(now).is_ok());
+        assert_eq!(nested.budget().poll_quota, 1);
+        assert!(nested.enforce_at(now).is_ok());
+        assert_eq!(request.budget().poll_quota, 0);
+        let err = request
+            .enforce_at(now)
+            .expect_err("all clones observe the spent request quota");
+        assert!(matches!(err, DbError::Cancelled(ref message) if message.contains("quota")));
+    }
+
+    #[test]
+    fn later_meet_tightens_shared_quota_for_existing_clones() {
+        let now = Time::from_secs(100);
+        let request = RequestBudget::from_budget_at(
+            now,
+            Budget::new()
+                .with_deadline(Time::from_secs(1_000))
+                .with_poll_quota(10),
+        );
+        let existing = request.clone();
+        let tightened = request.meet(Budget::new().with_poll_quota(2));
+
+        assert_eq!(existing.budget().poll_quota, 2);
+        assert_eq!(tightened.budget().poll_quota, 2);
+    }
+
+    #[test]
+    fn finite_cost_added_by_meet_is_shared_and_consumed() {
+        let now = Time::from_secs(100);
+        let request = RequestBudget::from_budget_at(
+            now,
+            Budget::new()
+                .with_deadline(Time::from_secs(1_000))
+                .with_poll_quota(10),
+        );
+        let existing = request.clone();
+        let tightened = request.meet(Budget::new().with_cost_quota(1));
+
+        assert_eq!(existing.budget().cost_quota, Some(1));
+        assert!(tightened.enforce_at(now).is_ok());
+        assert_eq!(existing.budget().cost_quota, Some(0));
+        assert!(existing.enforce_at(now).is_err());
     }
 
     // A zero timeout is floored so the budget is not born exhausted at `now`.

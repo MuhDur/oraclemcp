@@ -46,16 +46,20 @@ use crate::serialize::SerializeOptions;
 use crate::types::{
     OracleBackend, OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow,
 };
-use asupersync::Cx;
 use asupersync::sync::Mutex as AsyncMutex;
+use asupersync::{Budget, Cx, Time};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "test-utils")]
 use std::collections::VecDeque;
 #[cfg(feature = "test-utils")]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+const CLEANUP_MASKED_POLLS: u32 = 100;
 
 /// The pinned thin `oracledb` driver's own version string, read from the driver
 /// crate's [`oracledb::VERSION`] const (its `CARGO_PKG_VERSION`, resolved at the
@@ -292,6 +296,107 @@ pub fn resolve_wallet_choice(
 pub(crate) fn db_checkpoint<Caps>(cx: &Cx<Caps>, phase: &'static str) -> Result<(), DbError> {
     cx.checkpoint_with(phase)
         .map_err(|err| DbError::Cancelled(format!("{phase}: {err}")))
+}
+
+/// Shared application-level poll/cost allowance for one database request.
+///
+/// Asupersync's `Budget` is still the source of the initial limits and absolute
+/// deadline, but its nonzero quota fields are not self-decrementing. This
+/// handle supplies the explicit accounting seam used by dispatch and by every
+/// thin-driver wire boundary. Clones share the same atomics, so nested helpers,
+/// health subchecks, fetch loops, and row streams cannot reset the allowance.
+#[derive(Clone, Debug)]
+pub struct DbRequestQuota {
+    inner: Arc<DbRequestQuotaInner>,
+}
+
+#[derive(Debug)]
+struct DbRequestQuotaInner {
+    polls_remaining: AtomicU32,
+    // `u64::MAX` is the unbounded sentinel.
+    cost_remaining: AtomicU64,
+}
+
+impl DbRequestQuota {
+    /// Seed a shared allowance from an Asupersync budget snapshot.
+    #[must_use]
+    pub fn new(budget: Budget) -> Self {
+        Self {
+            inner: Arc::new(DbRequestQuotaInner {
+                polls_remaining: AtomicU32::new(budget.poll_quota),
+                cost_remaining: AtomicU64::new(budget.cost_quota.unwrap_or(u64::MAX)),
+            }),
+        }
+    }
+
+    /// Tighten the remaining allowance without ever replenishing it.
+    pub fn tighten(&self, budget: Budget) {
+        self.inner
+            .polls_remaining
+            .fetch_min(budget.poll_quota, Ordering::AcqRel);
+        if let Some(limit) = budget.cost_quota {
+            self.inner.cost_remaining.fetch_min(limit, Ordering::AcqRel);
+        }
+    }
+
+    /// Remaining shared cooperative checkpoints.
+    #[must_use]
+    pub fn polls_remaining(&self) -> u32 {
+        self.inner.polls_remaining.load(Ordering::Acquire)
+    }
+
+    /// Remaining shared cost units, or `None` when cost is unbounded.
+    #[must_use]
+    pub fn cost_remaining(&self) -> Option<u64> {
+        match self.inner.cost_remaining.load(Ordering::Acquire) {
+            u64::MAX => None,
+            remaining => Some(remaining),
+        }
+    }
+
+    /// Whether two handles charge the exact same request allowance.
+    #[must_use]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// Charge one cooperative checkpoint.
+    ///
+    /// # Errors
+    /// Returns [`DbError::Cancelled`] before the protected operation when the
+    /// shared poll or cost allowance is exhausted.
+    pub fn consume_checkpoint(&self, phase: &'static str) -> Result<(), DbError> {
+        if self
+            .inner
+            .polls_remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_err()
+        {
+            return Err(DbError::Cancelled(format!(
+                "{phase}: request poll quota exhausted"
+            )));
+        }
+
+        if self
+            .inner
+            .cost_remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                if remaining == u64::MAX {
+                    Some(u64::MAX)
+                } else {
+                    remaining.checked_sub(1)
+                }
+            })
+            .is_err()
+        {
+            return Err(DbError::Cancelled(format!(
+                "{phase}: request cost quota exhausted"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Bounded `DBMS_OUTPUT` lines captured from a single Oracle session.
@@ -735,6 +840,46 @@ pub trait OracleConnection: Send + Sync {
         Ok(())
     }
 
+    /// Current absolute deadline for the whole request using this connection.
+    ///
+    /// This is separate from [`OracleConnection::call_timeout`]: the latter is
+    /// a relative cap applied afresh to each Oracle round trip, while this
+    /// deadline is anchored once at request admission and must only shrink as
+    /// a multi-round-trip request progresses. Backends that do not support an
+    /// adapter-owned absolute deadline may retain the default `None` value.
+    fn request_deadline(&self, cx: &Cx) -> Result<Option<Time>, DbError> {
+        let _ = cx;
+        Ok(None)
+    }
+
+    /// Set the absolute whole-request deadline used to cap every subsequent
+    /// Oracle round trip. `None` clears the request-scoped cap.
+    ///
+    /// Callers must scope changes and restore the previous value on drop. A
+    /// cleanup/finalizer may temporarily replace an expired request deadline
+    /// with its own fresh bounded deadline so rollback and session teardown are
+    /// not skipped merely because the primary request budget elapsed.
+    fn set_request_deadline(&self, cx: &Cx, deadline: Option<Time>) -> Result<(), DbError> {
+        let _ = (cx, deadline);
+        Ok(())
+    }
+
+    /// Current shared application-level request quota, when supported.
+    fn request_quota(&self, cx: &Cx) -> Result<Option<DbRequestQuota>, DbError> {
+        let _ = cx;
+        Ok(None)
+    }
+
+    /// Install or clear the shared application-level request quota.
+    ///
+    /// Like [`OracleConnection::set_request_deadline`], callers must scope this
+    /// setting and restore the prior handle. Cleanup deliberately clears the
+    /// primary quota and uses its own fresh bounded allowance.
+    fn set_request_quota(&self, cx: &Cx, quota: Option<DbRequestQuota>) -> Result<(), DbError> {
+        let _ = (cx, quota);
+        Ok(())
+    }
+
     /// Enable `DBMS_OUTPUT` for this session. `buffer_bytes` is passed through
     /// to Oracle; callers should keep it bounded.
     async fn enable_dbms_output(&self, cx: &Cx, buffer_bytes: Option<u32>) -> Result<(), DbError> {
@@ -825,10 +970,61 @@ const DBMS_FLASHBACK_DISABLE: &str = "BEGIN DBMS_FLASHBACK.DISABLE; END;";
 pub struct RustOracleConnection {
     opts: OracleConnectOptions,
     inner: Arc<AsyncMutex<RustOracleConnectionSlot>>,
-    /// Per-round-trip call timeout. A plain `std::sync::Mutex` is fine here: it
-    /// is only ever locked-and-dropped synchronously (never held across an
-    /// `.await`), so it cannot deadlock the cooperative scheduler.
-    call_timeout: Mutex<Option<Duration>>,
+    /// Relative per-round-trip timeout plus the absolute whole-request
+    /// deadline. A plain `std::sync::Mutex` is fine here: it is only ever
+    /// locked-and-dropped synchronously (never held across an `.await`), so it
+    /// cannot deadlock the cooperative scheduler. Keeping both limits behind
+    /// one lock also makes each wire-call snapshot internally coherent.
+    wire_limits: Mutex<WireLimits>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct WireLimits {
+    call_timeout: Option<Duration>,
+    request_deadline: Option<Time>,
+    request_quota: Option<DbRequestQuota>,
+}
+
+impl WireLimits {
+    fn effective_timeout_ms(&self, cx: &Cx, phase: &'static str) -> Result<Option<u32>, DbError> {
+        if let Some(quota) = &self.request_quota {
+            quota.consume_checkpoint(phase)?;
+        }
+        self.effective_timeout_ms_at(cx.now(), cx.budget().deadline, phase)
+    }
+
+    fn effective_timeout_ms_at(
+        &self,
+        now: Time,
+        cx_deadline: Option<Time>,
+        phase: &'static str,
+    ) -> Result<Option<u32>, DbError> {
+        let mut remaining = self.call_timeout;
+        for (kind, deadline) in [("request", self.request_deadline), ("context", cx_deadline)] {
+            let Some(deadline) = deadline else {
+                continue;
+            };
+            if now >= deadline {
+                return Err(DbError::Cancelled(format!(
+                    "{phase}: {kind} deadline exceeded"
+                )));
+            }
+            let until_deadline =
+                Duration::from_nanos(deadline.as_nanos().saturating_sub(now.as_nanos()));
+            remaining = Some(remaining.map_or(until_deadline, |cap| cap.min(until_deadline)));
+        }
+        Ok(remaining.map(duration_to_millis))
+    }
+
+    /// A cleanup round trip must not inherit the request/caller deadline that
+    /// caused cleanup to run. It gets one fresh short ceiling, still tightened
+    /// by any operator-configured per-wire cap.
+    fn cleanup_timeout_ms(self) -> u32 {
+        duration_to_millis(
+            self.call_timeout
+                .map_or(CLEANUP_TIMEOUT, |timeout| timeout.min(CLEANUP_TIMEOUT)),
+        )
+    }
 }
 
 struct RustOracleConnectionSlot {
@@ -880,11 +1076,11 @@ impl RustOracleConnection {
         Ok(RustOracleConnectionGuard { guard })
     }
 
-    fn timeout_ms(&self) -> Result<Option<u32>, DbError> {
-        self.call_timeout
+    fn wire_limits(&self) -> Result<WireLimits, DbError> {
+        self.wire_limits
             .lock()
-            .map(|timeout| timeout.map(duration_to_millis))
-            .map_err(|err| DbError::Internal(format!("call-timeout lock poisoned: {err}")))
+            .map(|limits| limits.clone())
+            .map_err(|err| DbError::Internal(format!("wire-limits lock poisoned: {err}")))
     }
 
     /// The options this connection was opened with.
@@ -932,7 +1128,15 @@ impl RustOracleConnection {
 }
 
 fn duration_to_millis(duration: Duration) -> u32 {
-    let millis = duration.as_millis().min(u128::from(u32::MAX));
+    // Oracle's public timeout is integer milliseconds and treats zero as
+    // unbounded. Round a positive sub-millisecond remainder up so an absolute
+    // deadline can never accidentally disable the timeout at its boundary.
+    let millis = duration
+        .as_nanos()
+        .saturating_add(999_999)
+        .checked_div(1_000_000)
+        .unwrap_or(u128::MAX)
+        .min(u128::from(u32::MAX));
     u32::try_from(millis).unwrap_or(u32::MAX)
 }
 
@@ -949,6 +1153,7 @@ mod driver {
         OracleRow, OracleSessionIdentity,
     };
     use asupersync::Cx;
+    use asupersync::combinator::try_commit_section;
     use asupersync::sync::Mutex as AsyncMutex;
     use futures_core::Stream;
     use oracledb::protocol::thin::{CursorValue, LobValue, ObjectValue};
@@ -1019,7 +1224,11 @@ mod driver {
             inner: Arc::new(AsyncMutex::new(super::RustOracleConnectionSlot {
                 connection: Some(inner),
             })),
-            call_timeout: SyncMutex::new(call_timeout),
+            wire_limits: SyncMutex::new(super::WireLimits {
+                call_timeout,
+                request_deadline: None,
+                request_quota: None,
+            }),
         })
     }
 
@@ -1427,8 +1636,21 @@ mod driver {
         } else {
             vec![binds.to_vec()]
         };
+        let timeout_ms = super::WireLimits {
+            call_timeout: opts.call_timeout,
+            request_deadline: None,
+            request_quota: None,
+        }
+        .effective_timeout_ms(cx, context)?;
         inner
-            .execute_raw(cx, sql, 0, &bind_rows, ExecuteOptions::default(), None)
+            .execute_raw(
+                cx,
+                sql,
+                0,
+                &bind_rows,
+                ExecuteOptions::default(),
+                timeout_ms,
+            )
             .await
             .map_err(|err| {
                 DbError::Execute(format!("{context}: {}", sanitize_driver_error(err, opts)))
@@ -1442,7 +1664,7 @@ mod driver {
         sql: &str,
         prefetch_rows: u32,
         binds: &[BindValue],
-        timeout_ms: Option<u32>,
+        limits: super::WireLimits,
         opts: &OracleConnectOptions,
         context: &'static str,
     ) -> Result<QueryResult, DbError> {
@@ -1451,6 +1673,7 @@ mod driver {
         } else {
             vec![binds.to_vec()]
         };
+        let timeout_ms = limits.effective_timeout_ms(cx, context)?;
         inner
             .execute_raw(
                 cx,
@@ -1554,7 +1777,7 @@ mod driver {
         args: &[OracleRoutineArg],
         opts: &OracleConnectOptions,
         serialize_opts: &SerializeOptions,
-        timeout_ms: Option<u32>,
+        limits: super::WireLimits,
     ) -> Result<Vec<OracleCell>, DbError> {
         let output_args: Vec<(usize, &OracleRoutineArg)> = args
             .iter()
@@ -1573,7 +1796,7 @@ mod driver {
                     value,
                     opts,
                     serialize_opts,
-                    timeout_ms,
+                    limits.clone(),
                     0,
                 )
                 .await?,
@@ -1676,7 +1899,7 @@ mod driver {
         mut result: QueryResult,
         opts: &OracleConnectOptions,
         serialize_opts: &SerializeOptions,
-        timeout_ms: Option<u32>,
+        limits: super::WireLimits,
     ) -> Result<Vec<OracleRow>, DbError> {
         let cursor_id = result.cursor_id;
         let implicit_resultsets = result.implicit_resultsets.take();
@@ -1689,6 +1912,14 @@ mod driver {
             && cursor_id != 0
             && columns_require_define(&columns)
         {
+            let timeout_ms =
+                match limits.effective_timeout_ms(cx, "oracle_db.query_rows.define_fetch") {
+                    Ok(timeout_ms) => timeout_ms,
+                    Err(err) => {
+                        inner.release_cursor(cursor_id);
+                        return Err(err);
+                    }
+                };
             let fetch_result = bounded_fetch_batch(
                 timeout_ms,
                 inner.define_and_fetch_rows_with_columns(
@@ -1715,6 +1946,13 @@ mod driver {
             result.more_rows = fetched.more_rows;
         }
         while has_parent_result && result.more_rows && cursor_id != 0 {
+            let timeout_ms = match limits.effective_timeout_ms(cx, "oracle_db.query_rows.fetch") {
+                Ok(timeout_ms) => timeout_ms,
+                Err(err) => {
+                    inner.release_cursor(cursor_id);
+                    return Err(err);
+                }
+            };
             let fetch_result = if columns_require_define(&columns) {
                 bounded_fetch_batch(
                     timeout_ms,
@@ -1761,7 +1999,7 @@ mod driver {
             rows,
             opts,
             serialize_opts,
-            timeout_ms,
+            limits.clone(),
             0,
         )
         .await?;
@@ -1772,7 +2010,7 @@ mod driver {
                 implicit_resultsets,
                 opts,
                 serialize_opts,
-                timeout_ms,
+                limits,
             )
             .await?
         {
@@ -1812,6 +2050,29 @@ mod driver {
         }
     }
 
+    async fn bounded_recovery_cancel(
+        cx: &Cx,
+        inner: &mut oracledb::Connection,
+        opts: &OracleConnectOptions,
+        context: &'static str,
+    ) -> Result<(), String> {
+        let timeout_ms = super::duration_to_millis(super::CLEANUP_TIMEOUT);
+        let result = try_commit_section(cx, super::CLEANUP_MASKED_POLLS, async {
+            bounded_fetch_batch(Some(timeout_ms), inner.cancel(cx)).await
+        })
+        .await;
+        match result {
+            Ok(()) => Ok(()),
+            Err(FetchBatchError::Driver(error)) => Err(format!(
+                "{context} recovery failed: {}",
+                sanitize_driver_error(error, opts)
+            )),
+            Err(FetchBatchError::Timeout(_)) => Err(format!(
+                "{context} recovery exceeded its independent {timeout_ms} ms cleanup deadline"
+            )),
+        }
+    }
+
     async fn resolve_fetch_batch<T>(
         cx: &Cx,
         inner: &mut oracledb::Connection,
@@ -1823,16 +2084,43 @@ mod driver {
             Err(FetchBatchError::Driver(err)) => {
                 Err(DbError::Query(sanitize_driver_error(err, opts)))
             }
-            Err(FetchBatchError::Timeout(timeout_ms)) => match inner.cancel(cx).await {
-                Ok(()) => Err(fetch_batch_call_timeout(timeout_ms)),
-                // Recovery cancel failed: the session is definitively dirty. Use
-                // the structurally-uncertain `Cancelled` variant so quarantine
-                // never rides on message-text matching.
-                Err(err) => Err(DbError::Cancelled(format!(
-                    "fetch loop: call timeout of {timeout_ms} ms exceeded; recovery failed: {}",
-                    sanitize_driver_error(err, opts)
-                ))),
-            },
+            Err(FetchBatchError::Timeout(timeout_ms)) => {
+                match bounded_recovery_cancel(cx, inner, opts, "fetch loop").await {
+                    Ok(()) => Err(fetch_batch_call_timeout(timeout_ms)),
+                    // Recovery cancel failed: the session is definitively dirty. Use
+                    // the structurally-uncertain `Cancelled` variant so quarantine
+                    // never rides on message-text matching.
+                    Err(error) => Err(DbError::Cancelled(format!(
+                        "fetch loop: call timeout of {timeout_ms} ms exceeded; {error}"
+                    ))),
+                }
+            }
+        }
+    }
+
+    async fn resolve_execute_round_trip<T>(
+        cx: &Cx,
+        inner: &mut oracledb::Connection,
+        result: Result<T, FetchBatchError<oracledb::Error>>,
+        opts: &OracleConnectOptions,
+        context: &'static str,
+    ) -> Result<T, DbError> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(FetchBatchError::Driver(err)) => Err(DbError::Execute(format!(
+                "{context}: {}",
+                sanitize_driver_error(err, opts)
+            ))),
+            Err(FetchBatchError::Timeout(timeout_ms)) => {
+                match bounded_recovery_cancel(cx, inner, opts, context).await {
+                    Ok(()) => Err(DbError::Cancelled(format!(
+                        "{context}: call timeout of {timeout_ms} ms exceeded"
+                    ))),
+                    Err(error) => Err(DbError::Cancelled(format!(
+                        "{context}: call timeout of {timeout_ms} ms exceeded; {error}"
+                    ))),
+                }
+            }
         }
     }
 
@@ -1897,6 +2185,7 @@ mod driver {
         metadata: Vec<ColumnMetadata>,
         columns: Vec<String>,
         serialize_opts: SerializeOptions,
+        limits: super::WireLimits,
     }
 
     impl RustOracleRowStream {
@@ -1907,10 +2196,27 @@ mod driver {
 
         pub(super) async fn next_row(&mut self, cx: &Cx) -> Result<Option<OracleRow>, DbError> {
             super::db_checkpoint(cx, "oracle_db.query_row_stream.next.before")?;
+            let timeout_ms = self
+                .limits
+                .effective_timeout_ms(cx, "oracle_db.query_row_stream.next")?;
             let stream = self.stream.as_mut().ok_or_else(|| {
                 DbError::Internal("owned row stream has already been recovered".to_owned())
             })?;
-            let next = poll_fn(|task_cx| Stream::poll_next(Pin::new(&mut *stream), task_cx)).await;
+            let next = match bounded_fetch_batch(timeout_ms, async {
+                Ok::<_, std::convert::Infallible>(
+                    poll_fn(|task_cx| Stream::poll_next(Pin::new(&mut *stream), task_cx)).await,
+                )
+            })
+            .await
+            {
+                Ok(next) => next,
+                Err(FetchBatchError::Driver(never)) => match never {},
+                Err(FetchBatchError::Timeout(timeout_ms)) => {
+                    return Err(DbError::Cancelled(format!(
+                        "owned row stream: call timeout of {timeout_ms} ms exceeded"
+                    )));
+                }
+            };
             let Some(row) = next else {
                 super::db_checkpoint(cx, "oracle_db.query_row_stream.next.eof")?;
                 return Ok(None);
@@ -1922,21 +2228,24 @@ mod driver {
         }
 
         pub(super) async fn recover(mut self, cx: &Cx) -> Result<(), DbError> {
-            let stream = self.stream.take().ok_or_else(|| {
-                DbError::Internal("owned row stream has already been recovered".to_owned())
-            })?;
-            let connection = stream
-                .into_connection()
-                .map_err(|err| DbError::Quarantined {
-                    outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
-                    message: format!(
-                        "owned row stream could not recover its connection: {}",
-                        sanitize_driver_error(err, &self.opts)
-                    ),
+            try_commit_section(cx, super::CLEANUP_MASKED_POLLS, async {
+                let stream = self.stream.take().ok_or_else(|| {
+                    DbError::Internal("owned row stream has already been recovered".to_owned())
                 })?;
-            replace_connection_slot(&self.inner, cx, connection).await?;
-            super::db_checkpoint(cx, "oracle_db.query_row_stream.recovered")?;
-            Ok(())
+                let connection = stream
+                    .into_connection()
+                    .map_err(|err| DbError::Quarantined {
+                        outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                        message: format!(
+                            "owned row stream could not recover its connection: {}",
+                            sanitize_driver_error(err, &self.opts)
+                        ),
+                    })?;
+                replace_connection_slot(&self.inner, cx, connection).await?;
+                super::db_checkpoint(cx, "oracle_db.query_row_stream.recovered")?;
+                Ok(())
+            })
+            .await
         }
     }
 
@@ -2070,7 +2379,7 @@ mod driver {
         rows: Vec<Vec<Option<QueryValue>>>,
         opts: &'a OracleConnectOptions,
         serialize_opts: &'a SerializeOptions,
-        timeout_ms: Option<u32>,
+        limits: super::WireLimits,
         depth: usize,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<OracleRow>, DbError>> + 'a>>
     {
@@ -2089,7 +2398,7 @@ mod driver {
                             value,
                             opts,
                             serialize_opts,
-                            timeout_ms,
+                            limits.clone(),
                             depth,
                         )
                         .await?,
@@ -2109,7 +2418,7 @@ mod driver {
         value: Option<QueryValue>,
         opts: &'a OracleConnectOptions,
         serialize_opts: &'a SerializeOptions,
-        timeout_ms: Option<u32>,
+        limits: super::WireLimits,
         depth: usize,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<OracleCell, DbError>> + 'a>>
     {
@@ -2191,7 +2500,7 @@ mod driver {
                         &cursor,
                         opts,
                         serialize_opts,
-                        timeout_ms,
+                        limits,
                         depth,
                     )
                     .await;
@@ -2200,7 +2509,7 @@ mod driver {
                     OracleCell::structured(oracle_type, structured_object_marker(&value))
                 }
                 Some(QueryValue::Lob(value)) => {
-                    let limits = LobReadLimits::from(serialize_opts);
+                    let lob_limits = LobReadLimits::from(serialize_opts);
                     // The native-async LOB read happens HERE, before the pure
                     // `materialize_lob_cell` runs: `read_lob_plan` computes the one
                     // `(offset, amount)` the materializer would have requested, we
@@ -2208,17 +2517,27 @@ mod driver {
                     // sync closure that just replays the captured bytes. This keeps
                     // `materialize_lob_cell` (and its unit tests) callback-shaped
                     // and pure while the actual round trip is `.await`-ed.
-                    let prefetched = match read_lob_plan(&value, limits) {
-                        Some((offset, amount)) => inner
-                            .read_lob_with_timeout(cx, &value.locator, offset, amount, timeout_ms)
-                            .await
-                            .map(|result| result.data.unwrap_or_default())
-                            .map_err(|err| {
-                                DbError::Query(format!(
-                                    "LOB locator read failed: {}",
-                                    sanitize_driver_error(err, opts)
-                                ))
-                            })?,
+                    let prefetched = match read_lob_plan(&value, lob_limits) {
+                        Some((offset, amount)) => {
+                            let timeout_ms =
+                                limits.effective_timeout_ms(cx, "oracle_db.query_rows.lob_read")?;
+                            inner
+                                .read_lob_with_timeout(
+                                    cx,
+                                    &value.locator,
+                                    offset,
+                                    amount,
+                                    timeout_ms,
+                                )
+                                .await
+                                .map(|result| result.data.unwrap_or_default())
+                                .map_err(|err| {
+                                    DbError::Query(format!(
+                                        "LOB locator read failed: {}",
+                                        sanitize_driver_error(err, opts)
+                                    ))
+                                })?
+                        }
                         None => Vec::new(),
                     };
                     let mut read_lob = |_locator: &[u8], _offset: u64, _amount: u64| {
@@ -2226,7 +2545,7 @@ mod driver {
                             data: Some(prefetched.clone()),
                         })
                     };
-                    return materialize_lob_cell(oracle_type, &value, limits, &mut read_lob);
+                    return materialize_lob_cell(oracle_type, &value, lob_limits, &mut read_lob);
                 }
                 Some(QueryValue::Vector(value)) => OracleCell::structured(
                     oracle_type,
@@ -2945,7 +3264,7 @@ mod driver {
         values: Vec<QueryValue>,
         opts: &'a OracleConnectOptions,
         serialize_opts: &'a SerializeOptions,
-        timeout_ms: Option<u32>,
+        limits: super::WireLimits,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<OracleRow>, DbError>> + 'a>>
     {
         Box::pin(async move {
@@ -2961,7 +3280,7 @@ mod driver {
                             &cursor,
                             opts,
                             serialize_opts,
-                            timeout_ms,
+                            limits.clone(),
                             0,
                         )
                         .await?
@@ -2992,7 +3311,7 @@ mod driver {
         cursor: &'a CursorValue,
         opts: &'a OracleConnectOptions,
         serialize_opts: &'a SerializeOptions,
-        timeout_ms: Option<u32>,
+        limits: super::WireLimits,
         depth: usize,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<OracleCell, DbError>> + 'a>>
     {
@@ -3009,14 +3328,26 @@ mod driver {
                 ));
             }
             let (row_cap, fetch_limit, cell_limited) = cursor_caps(cursor, serialize_opts);
-            let result = match inner.fetch_cursor(cx, cursor, fetch_limit).await {
+            let timeout_ms =
+                match limits.effective_timeout_ms(cx, "oracle_db.query_rows.ref_cursor_fetch") {
+                    Ok(timeout_ms) => timeout_ms,
+                    Err(err) => {
+                        inner.release_cursor(cursor.cursor_id);
+                        return Err(err);
+                    }
+                };
+            let fetch_result =
+                bounded_fetch_batch(timeout_ms, inner.fetch_cursor(cx, cursor, fetch_limit)).await;
+            let result = match resolve_fetch_batch(cx, inner, fetch_result, opts).await {
                 Ok(result) => result,
                 Err(err) => {
                     inner.release_cursor(cursor.cursor_id);
-                    return Err(DbError::Query(format!(
-                        "REF CURSOR fetch failed: {}",
-                        sanitize_driver_error(err, opts)
-                    )));
+                    return Err(match err {
+                        DbError::Query(message) => {
+                            DbError::Query(format!("REF CURSOR fetch failed: {message}"))
+                        }
+                        other => other,
+                    });
                 }
             };
             let mut rows = result.rows;
@@ -3035,7 +3366,7 @@ mod driver {
                 rows,
                 opts,
                 serialize_opts,
-                timeout_ms,
+                limits.clone(),
                 depth + 1,
             )
             .await?;
@@ -3642,7 +3973,7 @@ mod driver {
                     &invalid_cursor,
                     &opts,
                     &SerializeOptions::default(),
-                    None,
+                    super::super::WireLimits::default(),
                     0,
                 )
                 .await
@@ -3733,7 +4064,11 @@ mod driver {
                     result,
                     &opts,
                     &SerializeOptions::default(),
-                    Some(10),
+                    super::super::WireLimits {
+                        call_timeout: Some(Duration::from_millis(10)),
+                        request_deadline: None,
+                        request_quota: None,
+                    },
                 )
                 .await
                 .expect_err("slow continuation fetch must time out");
@@ -4267,8 +4602,9 @@ mod driver {
 
         async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
             super::db_checkpoint(cx, "oracle_db.ping.before")?;
-            let timeout = self.timeout_ms()?;
+            let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
+            let timeout = limits.effective_timeout_ms(cx, "oracle_db.ping")?;
             let result = match timeout {
                 Some(timeout) => inner.ping_with_timeout(cx, timeout).await,
                 None => inner.ping(cx).await,
@@ -4482,36 +4818,21 @@ mod driver {
         ) -> Result<Vec<OracleRow>, DbError> {
             super::db_checkpoint(cx, "oracle_db.query_rows.before")?;
             let binds: Vec<BindValue> = binds.iter().map(to_bind).collect();
-            let timeout = self.timeout_ms()?;
+            let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
-            let result = if binds.is_empty() && timeout.is_none() {
-                inner
-                    .execute_raw(
-                        cx,
-                        sql,
-                        prefetch_rows_for_statement(sql),
-                        &[],
-                        ExecuteOptions::default(),
-                        None,
-                    )
-                    .await
-                    .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?
-            } else {
-                execute_with_timeout(
-                    cx,
-                    &mut inner,
-                    sql,
-                    prefetch_rows_for_statement(sql),
-                    &binds,
-                    timeout,
-                    &self.opts,
-                    "query",
-                )
-                .await?
-            };
-            let rows =
-                collect_all_rows(cx, &mut inner, result, &self.opts, serialize_opts, timeout)
-                    .await?;
+            let result = execute_with_timeout(
+                cx,
+                &mut inner,
+                sql,
+                prefetch_rows_for_statement(sql),
+                &binds,
+                limits.clone(),
+                &self.opts,
+                "query",
+            )
+            .await?;
+            let rows = collect_all_rows(cx, &mut inner, result, &self.opts, serialize_opts, limits)
+                .await?;
             drop(inner);
             super::db_checkpoint(cx, "oracle_db.query_rows.after")?;
             Ok(rows)
@@ -4529,18 +4850,15 @@ mod driver {
             let driver_binds: Vec<BindValue> = binds.iter().map(to_bind).collect();
             let arraysize = arraysize.clamp(1, u32::MAX as usize) as u32;
             let arraysize = NonZeroU32::new(arraysize).expect("arraysize clamped to non-zero");
-            let timeout = self
-                .call_timeout
-                .lock()
-                .map(|timeout| *timeout)
-                .map_err(|err| DbError::Internal(format!("call-timeout lock poisoned: {err}")))?;
+            let limits = self.wire_limits()?;
+            let timeout_ms = limits.effective_timeout_ms(cx, "oracle_db.query_row_stream.start")?;
             let connection = self.take_connection(cx).await?;
             let mut query = oracledb::Query::new(sql)
                 .bind(&driver_binds)
                 .arraysize(arraysize)
                 .prefetch(arraysize.get());
-            if let Some(timeout) = timeout {
-                query = query.timeout(timeout);
+            if let Some(timeout_ms) = timeout_ms {
+                query = query.timeout(Duration::from_millis(u64::from(timeout_ms)));
             }
             let stream = connection.into_row_stream(cx, query).await.map_err(|err| {
                 DbError::Quarantined {
@@ -4578,6 +4896,7 @@ mod driver {
                     metadata,
                     columns,
                     serialize_opts: *serialize_opts,
+                    limits,
                 },
             )))
         }
@@ -4609,51 +4928,26 @@ mod driver {
                 .iter()
                 .map(|(name, bind)| (name.clone(), to_bind(bind)))
                 .collect();
-            let timeout = self.timeout_ms()?;
+            let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
-            let result = if binds.is_empty() {
-                if timeout.is_none() {
-                    inner
-                        .execute_raw(
-                            cx,
-                            sql,
-                            prefetch_rows_for_statement(sql),
-                            &[],
-                            ExecuteOptions::default(),
-                            None,
-                        )
-                        .await
-                        .map_err(|err| DbError::Query(sanitize_driver_error(err, &self.opts)))?
-                } else {
-                    execute_with_timeout(
-                        cx,
-                        &mut inner,
-                        sql,
-                        prefetch_rows_for_statement(sql),
-                        &[],
-                        timeout,
-                        &self.opts,
-                        "query named",
-                    )
-                    .await?
-                }
+            let ordered_binds = if binds.is_empty() {
+                Vec::new()
             } else {
-                let ordered_binds = order_named_binds_for_driver(sql, binds);
-                execute_with_timeout(
-                    cx,
-                    &mut inner,
-                    sql,
-                    prefetch_rows_for_statement(sql),
-                    &ordered_binds,
-                    timeout,
-                    &self.opts,
-                    "query named",
-                )
-                .await?
+                order_named_binds_for_driver(sql, binds)
             };
-            let rows =
-                collect_all_rows(cx, &mut inner, result, &self.opts, serialize_opts, timeout)
-                    .await?;
+            let result = execute_with_timeout(
+                cx,
+                &mut inner,
+                sql,
+                prefetch_rows_for_statement(sql),
+                &ordered_binds,
+                limits.clone(),
+                &self.opts,
+                "query named",
+            )
+            .await?;
+            let rows = collect_all_rows(cx, &mut inner, result, &self.opts, serialize_opts, limits)
+                .await?;
             drop(inner);
             super::db_checkpoint(cx, "oracle_db.query_rows_named.after")?;
             Ok(rows)
@@ -4662,10 +4956,10 @@ mod driver {
         async fn execute(&self, cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
             super::db_checkpoint(cx, "oracle_db.execute.before")?;
             let binds: Vec<BindValue> = binds.iter().map(to_bind).collect();
-            let timeout = self.timeout_ms()?;
+            let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
             let result = execute_with_timeout(
-                cx, &mut inner, sql, 0, &binds, timeout, &self.opts, "execute",
+                cx, &mut inner, sql, 0, &binds, limits, &self.opts, "execute",
             )
             .await
             .map_err(|err| match err {
@@ -4689,7 +4983,7 @@ mod driver {
                 .cloned()
                 .map(OracleRoutineArg::into_driver_bind)
                 .collect();
-            let timeout = self.timeout_ms()?;
+            let limits = self.wire_limits()?;
             let serialize_opts = SerializeOptions::default();
             let mut inner = self.lock_inner(cx).await?;
             let result = execute_with_timeout(
@@ -4698,7 +4992,7 @@ mod driver {
                 plsql_block,
                 0,
                 &binds,
-                timeout,
+                limits.clone(),
                 &self.opts,
                 "routine",
             )
@@ -4715,7 +5009,7 @@ mod driver {
                 args,
                 &self.opts,
                 &serialize_opts,
-                timeout,
+                limits,
             )
             .await?;
             drop(inner);
@@ -4724,18 +5018,62 @@ mod driver {
         }
 
         fn call_timeout(&self) -> Result<Option<std::time::Duration>, DbError> {
-            self.call_timeout
+            self.wire_limits
                 .lock()
-                .map(|timeout| *timeout)
-                .map_err(|err| DbError::Internal(format!("call-timeout lock poisoned: {err}")))
+                .map(|limits| limits.call_timeout)
+                .map_err(|err| DbError::Internal(format!("wire-limits lock poisoned: {err}")))
         }
 
         fn set_call_timeout(&self, timeout: Option<std::time::Duration>) -> Result<(), DbError> {
             let mut guard = self
-                .call_timeout
+                .wire_limits
                 .lock()
-                .map_err(|err| DbError::Internal(format!("call-timeout lock poisoned: {err}")))?;
-            *guard = timeout;
+                .map_err(|err| DbError::Internal(format!("wire-limits lock poisoned: {err}")))?;
+            guard.call_timeout = timeout;
+            Ok(())
+        }
+
+        fn request_deadline(&self, cx: &Cx) -> Result<Option<asupersync::Time>, DbError> {
+            let _ = cx;
+            self.wire_limits
+                .lock()
+                .map(|limits| limits.request_deadline)
+                .map_err(|err| DbError::Internal(format!("wire-limits lock poisoned: {err}")))
+        }
+
+        fn set_request_deadline(
+            &self,
+            cx: &Cx,
+            deadline: Option<asupersync::Time>,
+        ) -> Result<(), DbError> {
+            let _ = cx;
+            let mut guard = self
+                .wire_limits
+                .lock()
+                .map_err(|err| DbError::Internal(format!("wire-limits lock poisoned: {err}")))?;
+            guard.request_deadline = deadline;
+            Ok(())
+        }
+
+        fn request_quota(&self, cx: &Cx) -> Result<Option<super::DbRequestQuota>, DbError> {
+            let _ = cx;
+            self.wire_limits
+                .lock()
+                .map(|limits| limits.request_quota.clone())
+                .map_err(|err| DbError::Internal(format!("wire-limits lock poisoned: {err}")))
+        }
+
+        fn set_request_quota(
+            &self,
+            cx: &Cx,
+            quota: Option<super::DbRequestQuota>,
+        ) -> Result<(), DbError> {
+            let _ = cx;
+            let mut guard = self
+                .wire_limits
+                .lock()
+                .map_err(|err| DbError::Internal(format!("wire-limits lock poisoned: {err}")))?;
+            guard.request_quota = quota;
             Ok(())
         }
 
@@ -4746,12 +5084,14 @@ mod driver {
             max_chars: usize,
         ) -> Result<DbmsOutput, DbError> {
             super::db_checkpoint(cx, "oracle_db.read_dbms_output.before")?;
-            let timeout = self.timeout_ms()?;
+            let limits = self.wire_limits()?;
             let mut lines = Vec::new();
             let mut char_count = 0usize;
             let mut truncated = false;
             let mut inner = self.lock_inner(cx).await?;
             for _ in 0..max_lines {
+                let timeout =
+                    limits.effective_timeout_ms(cx, "oracle_db.read_dbms_output.get_line")?;
                 let result = inner
                     .execute_raw(
                         cx,
@@ -4815,24 +5155,26 @@ mod driver {
             // No post-commit checkpoint: once Oracle commits, cancellation
             // cannot undo it.
             super::db_checkpoint(cx, "oracle_db.commit.before")?;
+            let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
-            inner
-                .commit(cx)
-                .await
-                .map_err(|err| DbError::Execute(sanitize_driver_error(err, &self.opts)))
+            let timeout = limits.effective_timeout_ms(cx, "oracle_db.commit")?;
+            let result = bounded_fetch_batch(timeout, inner.commit(cx)).await;
+            resolve_execute_round_trip(cx, &mut inner, result, &self.opts, "commit").await
         }
 
         async fn rollback(&self, cx: &Cx) -> Result<(), DbError> {
-            // Rollback is cleanup. Do not add an adapter-level pre-checkpoint
-            // here: a cancellation observed after DML must not make this layer
-            // skip cleanup before the driver even sees the rollback request.
-            // The wire round trip remains bounded by the connection's
-            // configured Oracle call timeout.
-            let mut inner = self.lock_inner(cx).await?;
-            inner
-                .rollback(cx)
-                .await
-                .map_err(|err| DbError::Execute(sanitize_driver_error(err, &self.opts)))
+            // Rollback is a finalizer. Mask the dead request's cancellation for
+            // a bounded number of polls and use a fresh five-second wire cap;
+            // inheriting the expired request deadline would skip the cleanup
+            // that makes this pinned session safe to reuse.
+            try_commit_section(cx, super::CLEANUP_MASKED_POLLS, async {
+                let limits = self.wire_limits()?;
+                let mut inner = self.lock_inner(cx).await?;
+                let timeout = Some(limits.cleanup_timeout_ms());
+                let result = bounded_fetch_batch(timeout, inner.rollback(cx)).await;
+                resolve_execute_round_trip(cx, &mut inner, result, &self.opts, "rollback").await
+            })
+            .await
         }
 
         async fn flashback_disable(&self, cx: &Cx) -> Result<(), DbError> {
@@ -4842,20 +5184,28 @@ mod driver {
             // would pre-checkpoint and, under cancellation, skip the DISABLE —
             // leaving the pinned session reading a stale snapshot). The wire
             // round trip stays bounded by the configured Oracle call timeout.
-            let timeout = self.timeout_ms()?;
-            let mut inner = self.lock_inner(cx).await?;
-            execute_with_timeout(
-                cx,
-                &mut inner,
-                super::DBMS_FLASHBACK_DISABLE,
-                0,
-                &[],
-                timeout,
-                &self.opts,
-                "flashback_disable",
-            )
+            try_commit_section(cx, super::CLEANUP_MASKED_POLLS, async {
+                let timeout = Some(self.wire_limits()?.cleanup_timeout_ms());
+                let mut inner = self.lock_inner(cx).await?;
+                inner
+                    .execute_raw(
+                        cx,
+                        super::DBMS_FLASHBACK_DISABLE,
+                        0,
+                        &[],
+                        ExecuteOptions::default(),
+                        timeout,
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| {
+                        DbError::Execute(format!(
+                            "flashback_disable: {}",
+                            sanitize_driver_error(err, &self.opts)
+                        ))
+                    })
+            })
             .await
-            .map(|_| ())
         }
     }
 }
@@ -4887,7 +5237,202 @@ mod tests {
     #[test]
     fn duration_to_millis_saturates() {
         assert_eq!(duration_to_millis(Duration::from_millis(42)), 42);
+        assert_eq!(duration_to_millis(Duration::from_nanos(1)), 1);
+        assert_eq!(duration_to_millis(Duration::from_micros(1_001)), 2);
         assert_eq!(duration_to_millis(Duration::from_secs(u64::MAX)), u32::MAX);
+    }
+
+    #[test]
+    fn wire_limits_recompute_one_absolute_deadline_per_round_trip() {
+        let start = Time::from_secs(100);
+        let limits = WireLimits {
+            call_timeout: Some(Duration::from_secs(30)),
+            request_deadline: Some(start + Duration::from_secs(10)),
+            request_quota: None,
+        };
+
+        assert_eq!(
+            limits
+                .effective_timeout_ms_at(start, Some(start + Duration::from_secs(20)), "test",)
+                .expect("initial wire limit"),
+            Some(10_000),
+        );
+        assert_eq!(
+            limits
+                .effective_timeout_ms_at(
+                    start + Duration::from_secs(6),
+                    Some(start + Duration::from_secs(20)),
+                    "test",
+                )
+                .expect("later wire limit"),
+            Some(4_000),
+        );
+    }
+
+    #[test]
+    fn two_sixty_ms_round_trips_share_one_hundred_ms_ceiling() {
+        let start = Time::from_secs(100);
+        let limits = WireLimits {
+            call_timeout: Some(Duration::from_millis(60)),
+            request_deadline: Some(start + Duration::from_millis(100)),
+            request_quota: None,
+        };
+
+        assert_eq!(
+            limits
+                .effective_timeout_ms_at(start, None, "first operation")
+                .expect("first operation starts with its 60ms per-wire cap"),
+            Some(60),
+        );
+        assert_eq!(
+            limits
+                .effective_timeout_ms_at(
+                    start + Duration::from_millis(60),
+                    None,
+                    "second operation",
+                )
+                .expect("second operation inherits only the request remainder"),
+            Some(40),
+            "the second round trip must not receive a fresh 60ms window",
+        );
+        let error = limits
+            .effective_timeout_ms_at(
+                start + Duration::from_millis(100),
+                None,
+                "second operation completion",
+            )
+            .expect_err("the shared 100ms request ceiling is terminal");
+        assert!(matches!(error, DbError::Cancelled(_)));
+        assert!(error.to_string().contains("request deadline"));
+    }
+
+    #[test]
+    fn wire_limits_take_tightest_relative_request_and_context_cap() {
+        let now = Time::from_secs(50);
+        let limits = WireLimits {
+            call_timeout: Some(Duration::from_secs(8)),
+            request_deadline: Some(now + Duration::from_secs(6)),
+            request_quota: None,
+        };
+
+        assert_eq!(
+            limits
+                .effective_timeout_ms_at(now, Some(now + Duration::from_millis(2_500)), "test",)
+                .expect("context deadline is tightest"),
+            Some(2_500),
+        );
+        assert_eq!(
+            WireLimits::default()
+                .effective_timeout_ms_at(now, None, "test")
+                .expect("unbounded limits"),
+            None,
+        );
+    }
+
+    #[test]
+    fn expired_deadlines_fail_closed_instead_of_becoming_unbounded() {
+        let now = Time::from_secs(75);
+        let request_expired = WireLimits {
+            call_timeout: None,
+            request_deadline: Some(now),
+            request_quota: None,
+        }
+        .effective_timeout_ms_at(now, None, "request phase")
+        .expect_err("expired request deadline");
+        assert!(matches!(request_expired, DbError::Cancelled(_)));
+        assert!(request_expired.to_string().contains("request deadline"));
+
+        let context_expired = WireLimits::default()
+            .effective_timeout_ms_at(now, Some(now), "context phase")
+            .expect_err("expired context deadline");
+        assert!(matches!(context_expired, DbError::Cancelled(_)));
+        assert!(context_expired.to_string().contains("context deadline"));
+    }
+
+    #[test]
+    fn fresh_cleanup_limits_can_replace_an_expired_request() {
+        let now = Time::from_secs(200);
+        let expired = WireLimits {
+            call_timeout: Some(Duration::from_secs(30)),
+            request_deadline: Some(Time::from_secs(199)),
+            request_quota: None,
+        };
+        assert!(
+            expired
+                .effective_timeout_ms_at(now, Some(now), "primary")
+                .is_err()
+        );
+
+        let cleanup = WireLimits {
+            request_deadline: Some(now + Duration::from_secs(2)),
+            ..expired.clone()
+        };
+        assert_eq!(
+            cleanup
+                .effective_timeout_ms_at(now, Some(now + Duration::from_secs(3)), "cleanup",)
+                .expect("fresh cleanup deadline"),
+            Some(2_000),
+        );
+
+        // Restoring the primary snapshot re-establishes its expired boundary;
+        // a cleanup override cannot accidentally make the next request looser.
+        assert!(
+            expired
+                .effective_timeout_ms_at(now, Some(now), "restored primary")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cleanup_timeout_is_fresh_bounded_and_ignores_expired_request_deadline() {
+        let expired_request = WireLimits {
+            call_timeout: Some(Duration::from_secs(30)),
+            request_deadline: Some(Time::from_secs(99)),
+            request_quota: None,
+        };
+        assert_eq!(
+            expired_request.cleanup_timeout_ms(),
+            5_000,
+            "cleanup gets a fresh five-second ceiling instead of the dead request deadline"
+        );
+
+        let tighter_operator_cap = WireLimits {
+            call_timeout: Some(Duration::from_millis(750)),
+            request_deadline: Some(Time::from_secs(99)),
+            request_quota: None,
+        };
+        assert_eq!(
+            tighter_operator_cap.cleanup_timeout_ms(),
+            750,
+            "cleanup never widens an existing per-wire cap"
+        );
+    }
+
+    #[test]
+    fn every_wire_timeout_snapshot_charges_the_shared_request_quota() {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            let quota = DbRequestQuota::new(Budget::new().with_poll_quota(1));
+            let limits = WireLimits {
+                request_quota: Some(quota),
+                ..WireLimits::default()
+            };
+
+            assert_eq!(
+                limits
+                    .effective_timeout_ms(&cx, "first wire operation")
+                    .expect("first wire operation is admitted"),
+                None
+            );
+            let error = limits
+                .effective_timeout_ms(&cx, "second wire operation")
+                .expect_err("the second operation must not reset the shared quota");
+            assert!(matches!(error, DbError::Cancelled(_)));
+            assert!(error.to_string().contains("poll quota"));
+        });
     }
 
     #[test]

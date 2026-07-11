@@ -16,8 +16,9 @@ use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex as SyncMutex};
 use std::time::{Duration, Instant};
 
+use asupersync::combinator::try_commit_section;
 use asupersync::sync::Mutex as AsyncMutex;
-use asupersync::{Budget, CancelReason, Cx, Outcome};
+use asupersync::{CancelReason, Cx, Outcome, Time};
 use oraclemcp_audit::{
     AuditCancel, AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor, DbEvidence,
 };
@@ -26,16 +27,17 @@ use oraclemcp_config::{
     ConfigReloadPlan, OracleMcpConfig, ProfileMetadata, ReloadProfileAction, ReloadProfileReason,
 };
 use oraclemcp_core::{
-    ConnectionStatus, CustomToolCatalog, CustomToolExecutor, DEFAULT_REQUEST_TIMEOUT,
-    DispatchCloseFuture, DispatchCloseReason, DispatchContext, DispatchFuture, McpSurfaceDetail,
-    McpSurfaceFuture, McpSurfaceState, RequestBudget, ToolBody, ToolDispatch, ToolStreamFrame,
-    ToolStreamSender, WriteIntent, WriteIntentDetails, WriteIntentError, WriteIntentLog,
-    WriteIntentOutcome, execute_custom_tool, narrow_to_read_path, sign_token, verify_token,
+    CLEANUP_POLL_QUOTA, ConnectionStatus, CustomToolCatalog, CustomToolExecutor,
+    DEFAULT_REQUEST_TIMEOUT, DispatchCloseFuture, DispatchCloseReason, DispatchContext,
+    DispatchFuture, McpSurfaceDetail, McpSurfaceFuture, McpSurfaceState, RequestBudget, ToolBody,
+    ToolDispatch, ToolStreamFrame, ToolStreamSender, WriteIntent, WriteIntentDetails,
+    WriteIntentError, WriteIntentLog, WriteIntentOutcome, execute_custom_tool, narrow_to_read_path,
+    sign_token, verify_token,
 };
 use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
-    AsOf, DbError, DbmsOutput, DependentObject, DependentsProbe, OracleBackend, OracleBind,
-    OracleConnection, OracleConnectionInfo, OracleRow, QuarantineOutcome, QueryCaps,
+    AsOf, DbError, DbRequestQuota, DbmsOutput, DependentObject, DependentsProbe, OracleBackend,
+    OracleBind, OracleConnection, OracleConnectionInfo, OracleRow, QuarantineOutcome, QueryCaps,
     QueryRowStream, QueryRowStreamStart, SerializeOptions, StructuredDecodeCaps, compile_errors,
     compile_object_statements, describe_columns, describe_constraints, describe_index,
     describe_trigger, describe_view, execute_immediate_audit, explain_plan,
@@ -643,9 +645,19 @@ impl OracleDispatcher {
         Ok(())
     }
 
-    fn dispatch_request_budget(&self, cx: &Cx) -> Result<RequestBudget, ErrorEnvelope> {
+    fn dispatch_request_budget(
+        &self,
+        cx: &Cx,
+        context: DispatchContext<'_>,
+    ) -> Result<RequestBudget, ErrorEnvelope> {
         let timeout = self.request_timeout()?;
-        let budget = RequestBudget::from_call_timeout(cx.now(), timeout).meet(cx.budget());
+        let admitted_at = context.admitted_at().unwrap_or_else(|| cx.now());
+        let budget = if let Some(lane_budget) = context.request_budget() {
+            lane_budget.tighten_timeout(timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT))
+        } else {
+            let caller_budget = context.caller_budget().unwrap_or_else(|| cx.budget());
+            RequestBudget::from_call_timeout(admitted_at, timeout).meet(caller_budget)
+        };
         budget.enforce(cx).map_err(DbError::into_envelope)?;
         Ok(budget)
     }
@@ -2245,51 +2257,328 @@ fn call_timeout_duration(seconds: Option<u64>) -> Result<Option<Duration>, Error
     )))
 }
 
-/// Apply the per-call Oracle round-trip timeout around an async DB body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompletionPolicy {
+    /// The body is a read or preview. A deadline observed after it completes
+    /// still wins because replay cannot duplicate a persistent effect.
+    EnforceDeadlineAfterBody,
+    /// A successful body proves a persistent effect completed. A deadline
+    /// observed afterwards is reported in-band, never as a retryable timeout.
+    PreserveSuccessfulEffect,
+}
+
+/// Synchronous scope guard for connection-local wire limits.
 ///
-/// `set_call_timeout` / `call_timeout` are synchronous interior-mutability
-/// accessors (no `.await`), so the timeout is set, the future `f` is awaited,
-/// and the previous value is restored — even on error/cancel.
+/// `Drop` is the cancellation/panic backstop. Normal completion calls
+/// [`Self::restore`] so restoration failures can quarantine the session.
+struct ConnectionLimitGuard<'a> {
+    cx: &'a Cx,
+    conn: &'a dyn OracleConnection,
+    quarantine: Option<&'a SyncMutex<Option<ConnectionQuarantine>>>,
+    previous_call_timeout: Option<Duration>,
+    previous_request_deadline: Option<Time>,
+    previous_request_quota: Option<DbRequestQuota>,
+    call_timeout_changed: bool,
+    request_deadline_changed: bool,
+    request_quota_changed: bool,
+    active: bool,
+}
+
+impl<'a> ConnectionLimitGuard<'a> {
+    fn install(
+        cx: &'a Cx,
+        conn: &'a dyn OracleConnection,
+        quarantine: Option<&'a SyncMutex<Option<ConnectionQuarantine>>>,
+        call_timeout: Option<Duration>,
+        request_deadline: Option<Time>,
+        request_quota: Option<DbRequestQuota>,
+    ) -> Result<Self, DbError> {
+        let previous_call_timeout = conn.call_timeout()?;
+        let previous_request_deadline = conn.request_deadline(cx)?;
+        let previous_request_quota = conn.request_quota(cx)?;
+        let effective_call_timeout = match (previous_call_timeout, call_timeout) {
+            (Some(previous), Some(requested)) => Some(previous.min(requested)),
+            (previous, None) => previous,
+            (None, requested) => requested,
+        };
+        let effective_request_deadline = match (previous_request_deadline, request_deadline) {
+            (Some(previous), Some(requested)) => Some(previous.min(requested)),
+            (previous, None) => previous,
+            (None, requested) => requested,
+        };
+        // A nested scope must never replace an already-installed shared quota
+        // with a fresh counter. The outer handle already represents the
+        // tighter inherited request and is retained until its owner restores.
+        let effective_request_quota = previous_request_quota.clone().or(request_quota);
+
+        let call_timeout_changed = effective_call_timeout != previous_call_timeout;
+        let request_deadline_changed = effective_request_deadline != previous_request_deadline;
+        let request_quota_changed = match (&previous_request_quota, &effective_request_quota) {
+            (Some(previous), Some(requested)) => !previous.ptr_eq(requested),
+            (None, None) => false,
+            _ => true,
+        };
+        if call_timeout_changed {
+            conn.set_call_timeout(effective_call_timeout)?;
+        }
+        if request_deadline_changed
+            && let Err(err) = conn.set_request_deadline(cx, effective_request_deadline)
+        {
+            if call_timeout_changed
+                && let Err(restore_err) = conn.set_call_timeout(previous_call_timeout)
+            {
+                record_limit_restore_uncertainty(
+                    quarantine,
+                    "request-deadline installation failed and call-timeout rollback failed",
+                    &restore_err,
+                );
+                return Err(DbError::Internal(format!(
+                    "request-deadline installation failed: {err}; call-timeout rollback also failed: {restore_err}"
+                )));
+            }
+            return Err(err);
+        }
+        if request_quota_changed
+            && let Err(err) = conn.set_request_quota(cx, effective_request_quota)
+        {
+            let mut restore_errors = Vec::new();
+            if request_deadline_changed
+                && let Err(restore_err) = conn.set_request_deadline(cx, previous_request_deadline)
+            {
+                restore_errors.push(format!("request deadline: {restore_err}"));
+            }
+            if call_timeout_changed
+                && let Err(restore_err) = conn.set_call_timeout(previous_call_timeout)
+            {
+                restore_errors.push(format!("call timeout: {restore_err}"));
+            }
+            if !restore_errors.is_empty() {
+                let restore_summary = restore_errors.join("; ");
+                record_limit_restore_uncertainty(
+                    quarantine,
+                    "request-quota installation failed and prior limits could not be restored",
+                    &DbError::Internal(restore_summary.clone()),
+                );
+                return Err(DbError::Internal(format!(
+                    "request-quota installation failed: {err}; limit rollback also failed: {restore_summary}"
+                )));
+            }
+            return Err(err);
+        }
+        Ok(Self {
+            cx,
+            conn,
+            quarantine,
+            previous_call_timeout,
+            previous_request_deadline,
+            previous_request_quota,
+            call_timeout_changed,
+            request_deadline_changed,
+            request_quota_changed,
+            active: true,
+        })
+    }
+
+    fn restore(mut self) -> Result<(), DbError> {
+        let quota_restore = if self.request_quota_changed {
+            self.conn
+                .set_request_quota(self.cx, self.previous_request_quota.clone())
+        } else {
+            Ok(())
+        };
+        let deadline_restore = if self.request_deadline_changed {
+            self.conn
+                .set_request_deadline(self.cx, self.previous_request_deadline)
+        } else {
+            Ok(())
+        };
+        let timeout_restore = if self.call_timeout_changed {
+            self.conn.set_call_timeout(self.previous_call_timeout)
+        } else {
+            Ok(())
+        };
+        self.active = false;
+        quota_restore.and(deadline_restore).and(timeout_restore)
+    }
+}
+
+impl Drop for ConnectionLimitGuard<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut restore_errors = Vec::new();
+        if self.request_quota_changed
+            && let Err(err) = self
+                .conn
+                .set_request_quota(self.cx, self.previous_request_quota.clone())
+        {
+            tracing::error!(error = %err, "failed to restore Oracle request quota during drop");
+            restore_errors.push(format!("request quota: {err}"));
+        }
+        if self.request_deadline_changed
+            && let Err(err) = self
+                .conn
+                .set_request_deadline(self.cx, self.previous_request_deadline)
+        {
+            tracing::error!(error = %err, "failed to restore Oracle request deadline during drop");
+            restore_errors.push(format!("request deadline: {err}"));
+        }
+        if self.call_timeout_changed
+            && let Err(err) = self.conn.set_call_timeout(self.previous_call_timeout)
+        {
+            tracing::error!(error = %err, "failed to restore Oracle call timeout during drop");
+            restore_errors.push(format!("call timeout: {err}"));
+        }
+        if !restore_errors.is_empty() {
+            record_limit_restore_uncertainty(
+                self.quarantine,
+                "request-limit guard was dropped before explicit finalization",
+                &DbError::Internal(restore_errors.join("; ")),
+            );
+        }
+    }
+}
+
+fn record_limit_restore_uncertainty(
+    quarantine: Option<&SyncMutex<Option<ConnectionQuarantine>>>,
+    context: &str,
+    error: &DbError,
+) {
+    let message = format!("{context}: {error}");
+    tracing::error!(error = %error, context, "Oracle request limits are in an uncertain state");
+    if let Some(quarantine) = quarantine
+        && let Err(mark_error) =
+            mark_connection_quarantined(quarantine, AuditOutcome::UnknownDiscarded, message)
+    {
+        tracing::error!(error = %mark_error.message, "failed to quarantine uncertain Oracle request limits");
+    }
+}
+
+fn limit_restore_failure(
+    quarantine: &SyncMutex<Option<ConnectionQuarantine>>,
+    effect_succeeded: bool,
+    err: DbError,
+) -> ErrorEnvelope {
+    let outcome = if effect_succeeded {
+        AuditOutcome::Succeeded
+    } else {
+        AuditOutcome::UnknownDiscarded
+    };
+    let message = if effect_succeeded {
+        format!(
+            "database effect succeeded, but request-limit finalization failed; do not retry the operation: {err}"
+        )
+    } else {
+        format!(
+            "request completed, but connection request-limit restoration failed; the session was quarantined: {err}"
+        )
+    };
+    if let Err(lock_err) = mark_connection_quarantined(quarantine, outcome, message.clone()) {
+        return lock_err;
+    }
+    ErrorEnvelope::new(ErrorClass::RuntimeStateRequired, message)
+        .with_next_step("switch to a fresh profile connection or restart the server")
+        .with_next_step(if effect_succeeded {
+            "verify the completed database effect before issuing any retry"
+        } else {
+            "do not reuse the quarantined session"
+        })
+}
+
+trait DeadlineAnnotation {
+    fn annotate_deadline_after_effect(&mut self);
+}
+
+impl DeadlineAnnotation for Value {
+    fn annotate_deadline_after_effect(&mut self) {
+        if let Value::Object(map) = self {
+            map.insert(
+                "deadline_observed_after_effect".to_owned(),
+                Value::Bool(true),
+            );
+            map.insert(
+                "deadline_note".to_owned(),
+                json!("the requested effect completed; do not retry solely because the request deadline elapsed during finalization"),
+            );
+        }
+    }
+}
+
+impl DeadlineAnnotation for (Value, Option<PatchPreviewEntry>) {
+    fn annotate_deadline_after_effect(&mut self) {
+        self.0.annotate_deadline_after_effect();
+    }
+}
+
+/// Apply one absolute whole-request deadline plus an optional relative Oracle
+/// round-trip cap around an async DB body.
 async fn with_call_timeout<T, Fut>(
     cx: &Cx,
     conn: &dyn OracleConnection,
+    quarantine: &SyncMutex<Option<ConnectionQuarantine>>,
     request_budget: RequestBudget,
     timeout_seconds: Option<u64>,
+    completion: CompletionPolicy,
     f: impl FnOnce() -> Fut,
 ) -> Result<T, ErrorEnvelope>
 where
+    T: DeadlineAnnotation,
     Fut: Future<Output = Result<T, ErrorEnvelope>>,
 {
     dispatch_checkpoint(cx, "oraclemcp.dispatch.call_timeout.before")?;
     let timeout = call_timeout_duration(timeout_seconds)?;
     let request_budget = match timeout {
-        Some(timeout) => request_budget.meet(Budget::new().with_timeout(cx.now(), timeout)),
+        Some(timeout) => request_budget.tighten_timeout(timeout),
         None => request_budget,
     };
     request_budget.enforce(cx).map_err(DbError::into_envelope)?;
-    let Some(timeout) = timeout else {
-        let result = f().await;
-        let budget_after = request_budget.enforce(cx).map_err(DbError::into_envelope);
-        return match (result, budget_after) {
-            (Ok(value), Ok(())) => Ok(value),
-            (Err(err), _) => Err(err),
-            (Ok(_), Err(err)) => Err(err),
-        };
-    };
-    let previous = conn.call_timeout().map_err(DbError::into_envelope)?;
-    let effective_timeout = previous.map_or(timeout, |current| current.min(timeout));
-    conn.set_call_timeout(Some(effective_timeout))
-        .map_err(DbError::into_envelope)?;
+    let limits = ConnectionLimitGuard::install(
+        cx,
+        conn,
+        Some(quarantine),
+        timeout,
+        request_budget.deadline(),
+        Some(request_budget.db_quota()),
+    )
+    .map_err(DbError::into_envelope)?;
     let result = f().await;
     let budget_after = request_budget.enforce(cx).map_err(DbError::into_envelope);
-    let restore = conn
-        .set_call_timeout(previous)
-        .map_err(DbError::into_envelope);
-    match (result, budget_after, restore) {
-        (Ok(value), Ok(()), Ok(())) => Ok(value),
-        (Err(err), _, _) => Err(err),
-        (Ok(_), Err(err), _) => Err(err),
-        (Ok(_), Ok(()), Err(err)) => Err(err),
+    let restore_error = limits.restore().err();
+
+    // The body error is primary. In particular, a structured quarantined
+    // CommitInDoubt/UnknownDiscarded result must never be overwritten by a late
+    // timeout or a secondary local restoration error.
+    let mut value = match result {
+        Ok(value) => value,
+        Err(primary) => {
+            if let Some(restore_err) = restore_error.as_ref() {
+                let _ = mark_connection_quarantined(
+                    quarantine,
+                    AuditOutcome::UnknownDiscarded,
+                    format!(
+                        "database operation failed and request-limit restoration also failed: {restore_err}"
+                    ),
+                );
+            }
+            return Err(primary);
+        }
+    };
+    if let Some(err) = restore_error {
+        return Err(limit_restore_failure(
+            quarantine,
+            completion == CompletionPolicy::PreserveSuccessfulEffect,
+            err,
+        ));
+    }
+    match budget_after {
+        Ok(()) => Ok(value),
+        Err(err) if completion == CompletionPolicy::PreserveSuccessfulEffect => {
+            value.annotate_deadline_after_effect();
+            tracing::warn!(error = %err.message, "request deadline observed after a completed database effect");
+            Ok(value)
+        }
+        Err(err) => Err(err),
     }
 }
 
@@ -2320,6 +2609,87 @@ async fn execute_conn(
 
 async fn commit_conn(cx: &Cx, conn: &dyn OracleConnection) -> Result<(), DbError> {
     conn.commit(cx).await
+}
+
+async fn run_cleanup_with_budget<T, Fut>(
+    cx: &Cx,
+    cleanup_budget: &RequestBudget,
+    future: Fut,
+) -> Result<T, DbError>
+where
+    Fut: Future<Output = Result<T, DbError>>,
+{
+    let mut masked = std::pin::pin!(try_commit_section(cx, CLEANUP_POLL_QUOTA, future));
+    let driven = std::future::poll_fn(|task_cx| {
+        // Cleanup intentionally ignores the dead primary Cx cancellation, but
+        // charges a fresh independent application quota and deadline.
+        if let Err(error) = cleanup_budget.enforce_at(cx.now()) {
+            return std::task::Poll::Ready(Err(error));
+        }
+        masked.as_mut().poll(task_cx)
+    });
+    match cleanup_budget.deadline() {
+        Some(deadline) => asupersync::time::timeout_at(deadline, driven)
+            .await
+            .map_err(|_| {
+                DbError::Cancelled(
+                    "cleanup finalizer exceeded its fresh bounded deadline".to_owned(),
+                )
+            })?,
+        None => driven.await,
+    }
+}
+
+/// Run rollback as a bounded cancellation-masked finalizer. The real thin
+/// adapter additionally applies its independent five-second wire ceiling; the
+/// mask also keeps cancellation-aware test/backends from skipping cleanup.
+async fn rollback_conn_cleanup(cx: &Cx, conn: &dyn OracleConnection) -> Result<(), DbError> {
+    let cleanup_budget = RequestBudget::fresh_cleanup(cx.now());
+    run_cleanup_with_budget(cx, &cleanup_budget, conn.rollback(cx)).await
+}
+
+async fn recover_row_stream_cleanup(cx: &Cx, stream: QueryRowStream) -> Result<(), DbError> {
+    let cleanup_budget = RequestBudget::fresh_cleanup(cx.now());
+    run_cleanup_with_budget(cx, &cleanup_budget, stream.recover(cx)).await
+}
+
+async fn ensure_read_only_backstop_bounded(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    backstop: &mut read_only_backstop::ReadOnlyBackstop,
+    level: &SessionLevelState,
+    request_budget: &RequestBudget,
+    quarantine: &SyncMutex<Option<ConnectionQuarantine>>,
+) -> Result<(), ErrorEnvelope> {
+    request_budget.enforce(cx).map_err(DbError::into_envelope)?;
+    let limits = ConnectionLimitGuard::install(
+        cx,
+        conn,
+        Some(quarantine),
+        None,
+        request_budget.deadline(),
+        Some(request_budget.db_quota()),
+    )
+    .map_err(DbError::into_envelope)?;
+    let result = backstop.ensure_armed(cx, conn, level).await;
+    let budget_after = request_budget.enforce(cx).map_err(DbError::into_envelope);
+    let restore_error = limits.restore().err();
+    if let Err(primary) = result {
+        if let Some(restore_err) = restore_error {
+            let _ = mark_connection_quarantined(
+                quarantine,
+                AuditOutcome::UnknownDiscarded,
+                format!(
+                    "read-only transaction backstop failed and request-limit restoration also failed: {restore_err}"
+                ),
+            );
+        }
+        return Err(primary);
+    }
+    if let Some(restore_err) = restore_error {
+        return Err(limit_restore_failure(quarantine, false, restore_err));
+    }
+    budget_after
 }
 
 async fn enable_dbms_output_conn(
@@ -3760,7 +4130,7 @@ struct AuditEntryCtx<'a> {
     db_evidence: Option<&'a DbEvidence>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct DbToolCtx<'a> {
     cx: &'a Cx,
     conn: &'a dyn OracleConnection,
@@ -3830,6 +4200,92 @@ async fn collect_audit_db_evidence(
         Ok(info) => Some(db_evidence_from_connection_info(info)),
         Err(_) => Some(DbEvidence::unavailable("describe_failed")),
     }
+}
+
+/// Mutation preflight may degrade an ordinary metadata/privilege failure, but
+/// cancellation or a structurally uncertain session cannot be relabelled as
+/// harmless "evidence unavailable" and followed by a write.
+async fn collect_effect_audit_db_evidence(
+    ctx: &DbToolCtx<'_>,
+) -> Result<Option<DbEvidence>, ErrorEnvelope> {
+    collect_effect_audit_db_evidence_for_conn(ctx.cx, ctx.audit.auditor, ctx.conn, ctx.quarantine)
+        .await
+}
+
+async fn collect_effect_audit_db_evidence_for_conn(
+    cx: &Cx,
+    auditor: Option<&Auditor>,
+    conn: &dyn OracleConnection,
+    quarantine: &SyncMutex<Option<ConnectionQuarantine>>,
+) -> Result<Option<DbEvidence>, ErrorEnvelope> {
+    let Some(_) = auditor else {
+        return Ok(None);
+    };
+    match conn.describe(cx).await {
+        Ok(info) => Ok(Some(db_evidence_from_connection_info(info))),
+        Err(err) if err.is_uncertain_session_state() => {
+            let message = format!(
+                "database audit-evidence preflight failed at an uncertain boundary; no statement was executed: {err}"
+            );
+            mark_connection_quarantined(
+                quarantine,
+                AuditOutcome::UnknownDiscarded,
+                message.clone(),
+            )?;
+            Err(quarantined_db_error(QuarantineOutcome::UnknownDiscarded, message).into_envelope())
+        }
+        Err(_) => Ok(Some(DbEvidence::unavailable("describe_failed"))),
+    }
+}
+
+/// Capture pre-effect audit identity under the same absolute request deadline
+/// and shared quota as the operation it governs. This is needed by early
+/// session-state arms, which return before the dispatch-wide connection guards
+/// are installed.
+async fn collect_effect_audit_db_evidence_bounded(
+    cx: &Cx,
+    auditor: Option<&Auditor>,
+    conn: &dyn OracleConnection,
+    request_budget: &RequestBudget,
+    quarantine: &SyncMutex<Option<ConnectionQuarantine>>,
+) -> Result<Option<DbEvidence>, ErrorEnvelope> {
+    if auditor.is_none() {
+        return Ok(None);
+    }
+    request_budget.enforce(cx).map_err(DbError::into_envelope)?;
+    let limits = ConnectionLimitGuard::install(
+        cx,
+        conn,
+        Some(quarantine),
+        None,
+        request_budget.deadline(),
+        Some(request_budget.db_quota()),
+    )
+    .map_err(DbError::into_envelope)?;
+    let result = collect_effect_audit_db_evidence_for_conn(cx, auditor, conn, quarantine).await;
+    let budget_after = request_budget.enforce(cx).map_err(DbError::into_envelope);
+    let restore_error = limits.restore().err();
+
+    let evidence = match result {
+        Ok(evidence) => evidence,
+        Err(primary) => {
+            if let Some(restore_error) = restore_error {
+                let _ = mark_connection_quarantined(
+                    quarantine,
+                    AuditOutcome::UnknownDiscarded,
+                    format!(
+                        "audit-evidence preflight failed and request-limit restoration also failed: {restore_error}"
+                    ),
+                );
+            }
+            return Err(primary);
+        }
+    };
+    if let Some(restore_error) = restore_error {
+        return Err(limit_restore_failure(quarantine, false, restore_error));
+    }
+    budget_after?;
+    Ok(evidence)
 }
 
 fn audit_danger_string(danger: DangerLevel) -> String {
@@ -4165,7 +4621,7 @@ impl OracleConnection for GuardedGeneratedReadConn<'_> {
 fn close_reason_cancel(reason: DispatchCloseReason) -> AuditCancel {
     let kind = match reason {
         DispatchCloseReason::SessionDelete | DispatchCloseReason::OperatorCancel => "User",
-        DispatchCloseReason::Timeout => "Timeout",
+        DispatchCloseReason::Timeout | DispatchCloseReason::RequestFinalizationTimeout => "Timeout",
         DispatchCloseReason::ServerShutdown | DispatchCloseReason::RuntimeDrop => "Shutdown",
     };
     AuditCancel::new(kind, reason.as_str())
@@ -4258,20 +4714,20 @@ fn resolve_write_intent_after_db(
     ctx: &DbToolCtx<'_>,
     intent_id: Option<&str>,
     outcome: WriteIntentOutcome,
+    db_outcome: AuditOutcome,
     boundary: &str,
 ) -> Result<(), ErrorEnvelope> {
     if let Err(err) = resolve_write_intent(ctx, intent_id, outcome) {
         let message = format!(
-            "{boundary}; durable write-intent resolution failed: {}",
+            "{boundary}; database outcome is {}, but durable write-intent resolution failed; do not retry the database operation: {}",
+            audit_outcome_label(db_outcome),
             err.message
         );
-        mark_connection_quarantined(
-            ctx.quarantine,
-            AuditOutcome::UnknownDiscarded,
-            message.clone(),
-        )?;
+        mark_connection_quarantined(ctx.quarantine, db_outcome, message.clone())?;
         return Err(
-            quarantined_db_error(QuarantineOutcome::UnknownDiscarded, message).into_envelope(),
+            ErrorEnvelope::new(ErrorClass::RuntimeStateRequired, message)
+                .with_next_step("switch to a fresh profile connection or restart the server")
+                .with_next_step("verify the recorded database outcome before issuing any retry"),
         );
     }
     Ok(())
@@ -4290,6 +4746,33 @@ fn audit_outcome_label(outcome: AuditOutcome) -> &'static str {
     }
 }
 
+fn append_terminal_audit(
+    ctx: &DbToolCtx<'_>,
+    audit_entry: AuditEntryCtx<'_>,
+    tool: &str,
+    sql: &str,
+    danger_level: &str,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+) -> Result<(), ErrorEnvelope> {
+    if let Err(err) = append_audit(audit_entry, tool, sql, danger_level, rows_affected, outcome) {
+        let message = format!(
+            "database outcome is {}, but mandatory terminal audit finalization failed; do not retry the database operation: {}",
+            audit_outcome_label(outcome),
+            err.message
+        );
+        mark_connection_quarantined(ctx.quarantine, outcome, message.clone())?;
+        return Err(
+            ErrorEnvelope::new(ErrorClass::RuntimeStateRequired, message)
+                .with_next_step("switch to a fresh profile connection or restart the server")
+                .with_next_step(
+                    "verify the database outcome and repair the audit sink before retrying",
+                ),
+        );
+    }
+    Ok(())
+}
+
 fn mark_connection_quarantined(
     quarantine: &SyncMutex<Option<ConnectionQuarantine>>,
     outcome: AuditOutcome,
@@ -4301,10 +4784,25 @@ fn mark_connection_quarantined(
             format!("connection-quarantine mutex lock failed: {err}"),
         )
     })?;
-    *guard = Some(ConnectionQuarantine {
-        outcome,
-        message: message.into(),
-    });
+    let message = message.into();
+    if let Some(existing) = guard.as_mut() {
+        let preserve_existing = match existing.outcome {
+            // These outcomes all forbid retry and carry stronger/more specific
+            // terminal knowledge than a later cleanup, restore, or audit-sink
+            // failure. Never downgrade them with a secondary `Failed` or
+            // `RolledBack` classification.
+            AuditOutcome::CommitInDoubt | AuditOutcome::Succeeded => true,
+            AuditOutcome::UnknownDiscarded => outcome != AuditOutcome::CommitInDoubt,
+            _ => false,
+        };
+        if preserve_existing {
+            existing
+                .message
+                .push_str(&format!("; additional quarantine evidence: {message}"));
+            return Ok(());
+        }
+    }
+    *guard = Some(ConnectionQuarantine { outcome, message });
     Ok(())
 }
 
@@ -4315,17 +4813,46 @@ fn quarantined_db_error(outcome: QuarantineOutcome, message: impl Into<String>) 
     }
 }
 
+fn quarantine_uncertain_optional_diagnostic(
+    quarantine: &SyncMutex<Option<ConnectionQuarantine>>,
+    label: &str,
+    completed_outcome: AuditOutcome,
+    err: &DbError,
+) {
+    if !err.is_uncertain_session_state() {
+        return;
+    }
+    let message = format!(
+        "database outcome is {}, but optional {label} failed at an uncertain session boundary: {err}",
+        audit_outcome_label(completed_outcome)
+    );
+    if let Err(lock_err) = mark_connection_quarantined(quarantine, completed_outcome, message) {
+        tracing::error!(error = %lock_err.message, "could not record quarantine after optional diagnostic failure");
+    }
+}
+
 async fn execute_sql(
     ctx: DbToolCtx<'_>,
     audit_tool: &str,
     args: ExecuteArgs,
 ) -> Result<Value, ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
+    let completion = if args.commit
+        || DEFAULT_CLASSIFIER
+            .classify(&args.sql)
+            .non_transactional_effect
+    {
+        CompletionPolicy::PreserveSuccessfulEffect
+    } else {
+        CompletionPolicy::EnforceDeadlineAfterBody
+    };
     with_call_timeout(
         ctx.cx,
         ctx.conn,
-        ctx.request_budget,
+        ctx.quarantine,
+        ctx.request_budget.clone(),
         timeout_seconds,
+        completion,
         || execute_sql_inner(ctx, audit_tool, args),
     )
     .await
@@ -4426,7 +4953,19 @@ async fn execute_sql_inner(
         Some(key) => append_write_intent(&ctx, audit_tool, &executed_sql, required_level, key)?,
         None => None,
     };
-    let db_evidence = collect_audit_db_evidence(cx, audit.auditor, conn).await;
+    let db_evidence = match collect_effect_audit_db_evidence(&ctx).await {
+        Ok(evidence) => evidence,
+        Err(primary) => {
+            resolve_write_intent_after_db(
+                &ctx,
+                write_intent_id.as_deref(),
+                WriteIntentOutcome::AbortedBeforeExecute,
+                AuditOutcome::UnknownDiscarded,
+                "audit-evidence preflight failed before execute",
+            )?;
+            return Err(primary);
+        }
+    };
     let audit_entry = AuditEntryCtx {
         auditor: audit.auditor,
         subject: audit.subject,
@@ -4454,18 +4993,65 @@ async fn execute_sql_inner(
 
     let dbms_output_limits = if args.capture_dbms_output {
         let (max_lines, max_chars, buffer_bytes) = dbms_output_limits(&args);
-        enable_dbms_output_conn(cx, conn, Some(buffer_bytes))
-            .await
-            .map_err(DbError::into_envelope)?;
+        if let Err(error) = enable_dbms_output_conn(cx, conn, Some(buffer_bytes)).await {
+            let outcome = if error.is_uncertain_session_state() {
+                mark_connection_quarantined(
+                    ctx.quarantine,
+                    AuditOutcome::UnknownDiscarded,
+                    format!(
+                        "DBMS_OUTPUT setup failed at an uncertain boundary before the approved statement executed: {error}"
+                    ),
+                )?;
+                AuditOutcome::UnknownDiscarded
+            } else {
+                AuditOutcome::Failed
+            };
+            let terminal_audit = append_terminal_audit(
+                &ctx,
+                audit_entry,
+                audit_tool,
+                &executed_sql,
+                &danger_str,
+                None,
+                outcome,
+            );
+            if outcome == AuditOutcome::Failed {
+                terminal_audit?;
+            } else if let Err(audit_error) = terminal_audit {
+                tracing::error!(error = %audit_error.message, "terminal audit failed after uncertain DBMS_OUTPUT setup");
+            }
+            resolve_write_intent_after_db(
+                &ctx,
+                write_intent_id.as_deref(),
+                WriteIntentOutcome::AbortedBeforeExecute,
+                outcome,
+                "DBMS_OUTPUT setup failed before the approved statement executed",
+            )?;
+            if outcome == AuditOutcome::UnknownDiscarded {
+                return Err(quarantined_db_error(
+                    QuarantineOutcome::UnknownDiscarded,
+                    format!(
+                        "DBMS_OUTPUT setup failed at an uncertain boundary; the approved statement was not executed: {error}"
+                    ),
+                )
+                .into_envelope());
+            }
+            return Err(DbError::into_envelope(error));
+        }
         Some((max_lines, max_chars))
     } else {
         None
     };
+    // Oracle DDL/Admin implicitly commits and can survive rollback even when
+    // the adapter observes an error after the wire response. Treat that class
+    // like explicit non-transactional effects for outcome accounting.
+    let effect_may_survive_rollback =
+        decision.non_transactional_effect || required_level >= OperatingLevel::Ddl;
     let rows_affected = match execute_conn(cx, conn, &executed_sql, &binds).await {
         Ok(rows) => rows,
         Err(e) => {
-            let rollback = conn.rollback(cx).await;
-            let outcome = if rollback.is_ok() && !decision.non_transactional_effect {
+            let rollback = rollback_conn_cleanup(cx, conn).await;
+            let outcome = if rollback.is_ok() && !effect_may_survive_rollback {
                 AuditOutcome::RolledBack
             } else {
                 let message = if rollback.is_ok() {
@@ -4482,10 +5068,7 @@ async fn execute_sql_inner(
                 )?;
                 AuditOutcome::UnknownDiscarded
             };
-            if e.is_uncertain_session_state()
-                && rollback.is_ok()
-                && !decision.non_transactional_effect
-            {
+            if e.is_uncertain_session_state() && rollback.is_ok() && !effect_may_survive_rollback {
                 mark_connection_quarantined(
                     ctx.quarantine,
                     AuditOutcome::RolledBack,
@@ -4494,27 +5077,42 @@ async fn execute_sql_inner(
                     ),
                 )?;
             }
-            // Durably log the failed outcome before propagating.
-            append_audit(
+            // Durably log the terminal DB outcome. If the audit sink is also
+            // broken, an uncertain/quarantined DB result remains primary.
+            let terminal_audit = append_terminal_audit(
+                &ctx,
                 audit_entry,
                 audit_tool,
                 &executed_sql,
                 &danger_str,
                 None,
                 outcome,
-            )?;
+            );
             if outcome == AuditOutcome::RolledBack {
+                terminal_audit?;
                 resolve_write_intent_after_db(
                     &ctx,
                     write_intent_id.as_deref(),
                     WriteIntentOutcome::RolledBack,
+                    AuditOutcome::RolledBack,
                     "execute failed and rollback completed",
                 )?;
+            } else if let Err(audit_err) = terminal_audit {
+                tracing::error!(error = %audit_err.message, "terminal audit failed after an uncertain execute outcome");
             }
             if let Err(cleanup_err) = rollback {
                 return Err(quarantined_db_error(
                     QuarantineOutcome::UnknownDiscarded,
                     format!("execute failed and rollback cleanup failed: {cleanup_err}"),
+                )
+                .into_envelope());
+            }
+            if outcome == AuditOutcome::UnknownDiscarded {
+                return Err(quarantined_db_error(
+                    QuarantineOutcome::UnknownDiscarded,
+                    format!(
+                        "execute failed after a non-transactional or otherwise uncertain boundary; rollback could not prove the effect absent: {e}"
+                    ),
                 )
                 .into_envelope());
             }
@@ -4528,14 +5126,17 @@ async fn execute_sql_inner(
                 AuditOutcome::CommitInDoubt,
                 format!("commit failed after {rows_affected} affected row(s): {e}"),
             )?;
-            append_audit(
+            if let Err(audit_err) = append_terminal_audit(
+                &ctx,
                 audit_entry,
                 audit_tool,
                 &executed_sql,
                 &danger_str,
                 Some(rows_affected),
                 AuditOutcome::CommitInDoubt,
-            )?;
+            ) {
+                tracing::error!(error = %audit_err.message, "terminal audit failed after commit-in-doubt");
+            }
             return Err(quarantined_db_error(
                 QuarantineOutcome::CommitInDoubt,
                 format!("commit failed after {rows_affected} affected row(s): {e}"),
@@ -4543,7 +5144,7 @@ async fn execute_sql_inner(
             .into_envelope());
         }
     } else {
-        if let Err(e) = conn.rollback(cx).await {
+        if let Err(e) = rollback_conn_cleanup(cx, conn).await {
             mark_connection_quarantined(
                 ctx.quarantine,
                 AuditOutcome::UnknownDiscarded,
@@ -4551,14 +5152,17 @@ async fn execute_sql_inner(
                     "rollback preview cleanup failed after {rows_affected} affected row(s): {e}"
                 ),
             )?;
-            append_audit(
+            if let Err(audit_err) = append_terminal_audit(
+                &ctx,
                 audit_entry,
                 audit_tool,
                 &executed_sql,
                 &danger_str,
                 Some(rows_affected),
                 AuditOutcome::UnknownDiscarded,
-            )?;
+            ) {
+                tracing::error!(error = %audit_err.message, "terminal audit failed after rollback cleanup failure");
+            }
             return Err(quarantined_db_error(
                 QuarantineOutcome::UnknownDiscarded,
                 format!(
@@ -4577,7 +5181,8 @@ async fn execute_sql_inner(
     } else {
         AuditOutcome::RolledBack
     };
-    append_audit(
+    append_terminal_audit(
+        &ctx,
         audit_entry,
         audit_tool,
         &executed_sql,
@@ -4590,6 +5195,7 @@ async fn execute_sql_inner(
             &ctx,
             write_intent_id.as_deref(),
             WriteIntentOutcome::Succeeded,
+            outcome,
             if args.commit {
                 "commit completed"
             } else {
@@ -4597,14 +5203,31 @@ async fn execute_sql_inner(
             },
         )?;
     }
-    let dbms_output = match dbms_output_limits {
-        Some((max_lines, max_chars)) => Some(
-            read_dbms_output_conn(cx, conn, max_lines, max_chars)
-                .await
-                .map_err(DbError::into_envelope)
-                .map(|out| dbms_output_json(&out, max_lines, max_chars))?,
-        ),
-        None => None,
+    // DBMS_OUTPUT is optional diagnostics. Once commit/rollback, durable audit,
+    // and write-intent resolution have completed, a late timeout while draining
+    // lines must not replace the terminal mutation outcome with a retryable
+    // error. Surface the diagnostic loss in-band instead.
+    let (dbms_output, dbms_output_unavailable) = match dbms_output_limits {
+        Some((max_lines, max_chars)) => {
+            match read_dbms_output_conn(cx, conn, max_lines, max_chars).await {
+                Ok(out) => (Some(dbms_output_json(&out, max_lines, max_chars)), None),
+                Err(err) => {
+                    quarantine_uncertain_optional_diagnostic(
+                        ctx.quarantine,
+                        "DBMS_OUTPUT drain",
+                        outcome,
+                        &err,
+                    );
+                    (
+                        None,
+                        Some(format!(
+                            "DBMS_OUTPUT unavailable after the terminal database outcome: {err}"
+                        )),
+                    )
+                }
+            }
+        }
+        None => (None, None),
     };
 
     let mut response = json!({
@@ -4620,6 +5243,9 @@ async fn execute_sql_inner(
     });
     if let Some(dbms_output) = dbms_output {
         response["dbms_output"] = dbms_output;
+    }
+    if let Some(reason) = dbms_output_unavailable {
+        response["dbms_output_unavailable"] = json!(reason);
     }
     Ok(response)
 }
@@ -4750,11 +5376,18 @@ async fn compile_object(
     args: CompileObjectArgs,
 ) -> Result<Value, ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
+    let completion = if args.execute {
+        CompletionPolicy::PreserveSuccessfulEffect
+    } else {
+        CompletionPolicy::EnforceDeadlineAfterBody
+    };
     with_call_timeout(
         ctx.cx,
         ctx.conn,
-        ctx.request_budget,
+        ctx.quarantine,
+        ctx.request_budget.clone(),
         timeout_seconds,
+        completion,
         || compile_object_inner(ctx, tool_name, args),
     )
     .await
@@ -4853,7 +5486,19 @@ async fn compile_object_inner(
         OperatingLevel::Ddl,
         &raw_confirm,
     )?;
-    let db_evidence = collect_audit_db_evidence(cx, audit.auditor, conn).await;
+    let db_evidence = match collect_effect_audit_db_evidence(&ctx).await {
+        Ok(evidence) => evidence,
+        Err(primary) => {
+            resolve_write_intent_after_db(
+                &ctx,
+                write_intent_id.as_deref(),
+                WriteIntentOutcome::AbortedBeforeExecute,
+                AuditOutcome::UnknownDiscarded,
+                "audit-evidence preflight failed before compile",
+            )?;
+            return Err(primary);
+        }
+    };
     let audit_entry = AuditEntryCtx {
         auditor: audit.auditor,
         subject: audit.subject,
@@ -4889,28 +5534,39 @@ async fn compile_object_inner(
                 } else {
                     AuditOutcome::Failed
                 };
-                append_audit(
+                let terminal_audit = append_terminal_audit(
+                    &ctx,
                     audit_entry,
                     tool_name,
                     &audited_sql,
                     &danger_str,
                     None,
                     outcome,
-                )?;
+                );
                 if outcome == AuditOutcome::Failed {
+                    terminal_audit?;
                     resolve_write_intent_after_db(
                         &ctx,
                         write_intent_id.as_deref(),
                         WriteIntentOutcome::Failed,
+                        AuditOutcome::Failed,
                         "compile execution failed before a commit boundary",
                     )?;
+                } else if let Err(audit_err) = terminal_audit {
+                    tracing::error!(error = %audit_err.message, "terminal audit failed after uncertain compile outcome");
+                    return Err(quarantined_db_error(
+                        QuarantineOutcome::UnknownDiscarded,
+                        format!("compile execution failed after an uncertain DB boundary: {e}"),
+                    )
+                    .into_envelope());
                 }
                 return Err(DbError::into_envelope(e));
             }
         }
     }
     let rows_affected_total = rows_affected.iter().copied().sum::<u64>();
-    append_audit(
+    append_terminal_audit(
+        &ctx,
         audit_entry,
         tool_name,
         &audited_sql,
@@ -4922,14 +5578,44 @@ async fn compile_object_inner(
         &ctx,
         write_intent_id.as_deref(),
         WriteIntentOutcome::Succeeded,
+        AuditOutcome::Succeeded,
         "compile execution completed",
     )?;
-    dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.before")?;
-    let errors = compile_errors(cx, conn, &owner, Some(&object_name))
-        .await
-        .map_err(DbError::into_envelope)?;
-    dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.after")?;
-    let (error_count, warning_count) = compile_diagnostic_counts(&errors);
+    // DDL has already taken effect and its audit/intent are terminal. Compile
+    // diagnostics are observational; deadline/cancellation here degrades the
+    // response instead of turning a successful DDL into a retryable timeout.
+    let diagnostics = async {
+        dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.before")?;
+        let errors = match compile_errors(cx, conn, &owner, Some(&object_name)).await {
+            Ok(errors) => errors,
+            Err(err) => {
+                quarantine_uncertain_optional_diagnostic(
+                    ctx.quarantine,
+                    "compile diagnostics",
+                    AuditOutcome::Succeeded,
+                    &err,
+                );
+                return Err(DbError::into_envelope(err));
+            }
+        };
+        dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.after")?;
+        Ok::<_, ErrorEnvelope>(errors)
+    }
+    .await;
+    let (errors, diagnostics_unavailable) = match diagnostics {
+        Ok(errors) => (Some(errors), None),
+        Err(err) => (
+            None,
+            Some(format!(
+                "compile diagnostics unavailable after DDL completion: {}",
+                err.message
+            )),
+        ),
+    };
+    let (error_count, warning_count) = errors
+        .as_deref()
+        .map(compile_diagnostic_counts)
+        .unwrap_or((0, 0));
     Ok(json!({
         "compiled": true,
         "preview": false,
@@ -4941,10 +5627,11 @@ async fn compile_object_inner(
         "required_level": OperatingLevel::Ddl,
         "statements_executed": statements,
         "rows_affected": rows_affected,
-        "errors": rows_to_json(&errors),
-        "diagnostic_count": errors.len(),
-        "error_count": error_count,
-        "warning_count": warning_count,
+        "errors": errors.as_ref().map(|rows| rows_to_json(rows)),
+        "diagnostic_count": errors.as_ref().map(Vec::len),
+        "error_count": errors.as_ref().map(|_| error_count),
+        "warning_count": errors.as_ref().map(|_| warning_count),
+        "diagnostics_unavailable": diagnostics_unavailable,
     }))
 }
 
@@ -5567,11 +6254,18 @@ async fn patch_source(
     args: PatchSourceArgs,
 ) -> Result<(Value, Option<PatchPreviewEntry>), ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
+    let completion = if args.execute {
+        CompletionPolicy::PreserveSuccessfulEffect
+    } else {
+        CompletionPolicy::EnforceDeadlineAfterBody
+    };
     with_call_timeout(
         ctx.cx,
         ctx.conn,
-        ctx.request_budget,
+        ctx.quarantine,
+        ctx.request_budget.clone(),
         timeout_seconds,
+        completion,
         || patch_source_inner(ctx, tool_name, args),
     )
     .await
@@ -5727,7 +6421,19 @@ async fn patch_source_inner(
     let danger_str = audit_danger_string(decision.danger);
     let write_intent_id =
         append_write_intent(&ctx, tool_name, &patched_ddl, required_level, &raw_confirm)?;
-    let db_evidence = collect_audit_db_evidence(cx, audit.auditor, conn).await;
+    let db_evidence = match collect_effect_audit_db_evidence(&ctx).await {
+        Ok(evidence) => evidence,
+        Err(primary) => {
+            resolve_write_intent_after_db(
+                &ctx,
+                write_intent_id.as_deref(),
+                WriteIntentOutcome::AbortedBeforeExecute,
+                AuditOutcome::UnknownDiscarded,
+                "audit-evidence preflight failed before source patch",
+            )?;
+            return Err(primary);
+        }
+    };
     let audit_entry = AuditEntryCtx {
         auditor: audit.auditor,
         subject: audit.subject,
@@ -5751,37 +6457,60 @@ async fn patch_source_inner(
     let rows_affected = match execute_conn(cx, conn, &patched_ddl, &[]).await {
         Ok(rows) => rows,
         Err(e) => {
-            let rollback = conn.rollback(cx).await;
-            let outcome = if rollback.is_ok() {
-                AuditOutcome::RolledBack
+            let rollback = rollback_conn_cleanup(cx, conn).await;
+            let outcome = if !e.is_uncertain_session_state() && rollback.is_ok() {
+                // A definite Oracle DDL failure means the requested object
+                // change did not complete. It is Failed, never RolledBack:
+                // Oracle DDL is not transactionally undoable.
+                AuditOutcome::Failed
             } else {
                 mark_connection_quarantined(
                     ctx.quarantine,
                     AuditOutcome::UnknownDiscarded,
-                    format!("patch execution failed and rollback cleanup failed: {e}"),
+                    if rollback.is_ok() {
+                        format!(
+                            "patch execution failed after an uncertain DDL boundary; rollback cannot prove the implicit-commit effect absent: {e}"
+                        )
+                    } else {
+                        format!("patch execution failed and rollback cleanup failed: {e}")
+                    },
                 )?;
                 AuditOutcome::UnknownDiscarded
             };
-            append_audit(
+            let terminal_audit = append_terminal_audit(
+                &ctx,
                 audit_entry,
                 tool_name,
                 &patched_ddl,
                 &danger_str,
                 None,
                 outcome,
-            )?;
-            if outcome == AuditOutcome::RolledBack {
+            );
+            if outcome == AuditOutcome::Failed {
+                terminal_audit?;
                 resolve_write_intent_after_db(
                     &ctx,
                     write_intent_id.as_deref(),
-                    WriteIntentOutcome::RolledBack,
-                    "patch execution failed and rollback completed",
+                    WriteIntentOutcome::Failed,
+                    AuditOutcome::Failed,
+                    "patch DDL failed before any persistent object change completed",
                 )?;
+            } else if let Err(audit_err) = terminal_audit {
+                tracing::error!(error = %audit_err.message, "terminal audit failed after uncertain patch outcome");
             }
             if let Err(cleanup_err) = rollback {
                 return Err(quarantined_db_error(
                     QuarantineOutcome::UnknownDiscarded,
                     format!("patch execution failed and rollback cleanup failed: {cleanup_err}"),
+                )
+                .into_envelope());
+            }
+            if outcome == AuditOutcome::UnknownDiscarded {
+                return Err(quarantined_db_error(
+                    QuarantineOutcome::UnknownDiscarded,
+                    format!(
+                        "patch execution crossed an uncertain DDL boundary; rollback cannot prove the implicit-commit effect absent: {e}"
+                    ),
                 )
                 .into_envelope());
             }
@@ -5794,21 +6523,25 @@ async fn patch_source_inner(
             AuditOutcome::CommitInDoubt,
             format!("patch commit failed after {rows_affected} affected row(s): {e}"),
         )?;
-        append_audit(
+        if let Err(audit_err) = append_terminal_audit(
+            &ctx,
             audit_entry,
             tool_name,
             &patched_ddl,
             &danger_str,
             Some(rows_affected),
             AuditOutcome::CommitInDoubt,
-        )?;
+        ) {
+            tracing::error!(error = %audit_err.message, "terminal audit failed after patch commit-in-doubt");
+        }
         return Err(quarantined_db_error(
             QuarantineOutcome::CommitInDoubt,
             format!("patch commit failed after {rows_affected} affected row(s): {e}"),
         )
         .into_envelope());
     }
-    append_audit(
+    append_terminal_audit(
+        &ctx,
         audit_entry,
         tool_name,
         &patched_ddl,
@@ -5820,22 +6553,43 @@ async fn patch_source_inner(
         &ctx,
         write_intent_id.as_deref(),
         WriteIntentOutcome::Succeeded,
+        AuditOutcome::Succeeded,
         "patch commit completed",
     )?;
     let include_errors = args.include_errors.unwrap_or(true);
-    let errors = if include_errors {
-        dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.compile_errors.before")?;
-        Some(
-            compile_errors(cx, conn, &owner, Some(&object_name))
-                .await
-                .map_err(DbError::into_envelope)?,
-        )
+    let diagnostics = if include_errors {
+        async {
+            dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.compile_errors.before")?;
+            let rows = match compile_errors(cx, conn, &owner, Some(&object_name)).await {
+                Ok(rows) => rows,
+                Err(err) => {
+                    quarantine_uncertain_optional_diagnostic(
+                        ctx.quarantine,
+                        "patch compile diagnostics",
+                        AuditOutcome::Succeeded,
+                        &err,
+                    );
+                    return Err(DbError::into_envelope(err));
+                }
+            };
+            dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.compile_errors.after")?;
+            Ok::<_, ErrorEnvelope>(rows)
+        }
+        .await
+        .map(Some)
     } else {
-        None
+        Ok(None)
     };
-    if include_errors {
-        dispatch_checkpoint(cx, "oraclemcp.dispatch.patch.compile_errors.after")?;
-    }
+    let (errors, diagnostics_unavailable) = match diagnostics {
+        Ok(errors) => (errors, None),
+        Err(err) => (
+            None,
+            Some(format!(
+                "compile diagnostics unavailable after patch commit: {}",
+                err.message
+            )),
+        ),
+    };
     Ok((
         json!({
             "applied": true,
@@ -5856,6 +6610,7 @@ async fn patch_source_inner(
             "diff": patch_diff_json(&document.text, match_idx, &old_text, &new_text),
             "errors": errors.as_ref().map(|rows| rows_to_json(rows)),
             "error_count": errors.as_ref().map(Vec::len),
+            "diagnostics_unavailable": diagnostics_unavailable,
         }),
         None,
     ))
@@ -5870,11 +6625,18 @@ async fn create_or_replace(
     args: CreateOrReplaceArgs,
 ) -> Result<Value, ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
+    let completion = if args.execute {
+        CompletionPolicy::PreserveSuccessfulEffect
+    } else {
+        CompletionPolicy::EnforceDeadlineAfterBody
+    };
     with_call_timeout(
         ctx.cx,
         ctx.conn,
-        ctx.request_budget,
+        ctx.quarantine,
+        ctx.request_budget.clone(),
         timeout_seconds,
+        completion,
         || create_or_replace_inner(ctx, tool_name, args),
     )
     .await
@@ -5958,6 +6720,7 @@ async fn create_or_replace_inner(
     if !matches!(gate, LevelDecision::Allow) {
         return Err(execute_gate_error(&decision, gate, session));
     }
+    let diagnostic_quarantine = ctx.quarantine;
     let mut executed = execute_sql(
         ctx,
         canonical_tool_name(tool_name),
@@ -5983,19 +6746,48 @@ async fn create_or_replace_inner(
         );
         if include_errors {
             if let Some(hint) = detected.as_ref() {
-                dispatch_checkpoint(
-                    cx,
-                    "oraclemcp.dispatch.create_or_replace.compile_errors.before",
-                )?;
-                let errors = compile_errors(cx, conn, &hint.owner, Some(&hint.name))
-                    .await
-                    .map_err(DbError::into_envelope)?;
-                dispatch_checkpoint(
-                    cx,
-                    "oraclemcp.dispatch.create_or_replace.compile_errors.after",
-                )?;
-                map.insert("errors".to_owned(), rows_to_json(&errors));
-                map.insert("error_count".to_owned(), json!(errors.len()));
+                let diagnostics = async {
+                    dispatch_checkpoint(
+                        cx,
+                        "oraclemcp.dispatch.create_or_replace.compile_errors.before",
+                    )?;
+                    let errors = match compile_errors(cx, conn, &hint.owner, Some(&hint.name)).await
+                    {
+                        Ok(errors) => errors,
+                        Err(err) => {
+                            quarantine_uncertain_optional_diagnostic(
+                                diagnostic_quarantine,
+                                "CREATE OR REPLACE compile diagnostics",
+                                AuditOutcome::Succeeded,
+                                &err,
+                            );
+                            return Err(DbError::into_envelope(err));
+                        }
+                    };
+                    dispatch_checkpoint(
+                        cx,
+                        "oraclemcp.dispatch.create_or_replace.compile_errors.after",
+                    )?;
+                    Ok::<_, ErrorEnvelope>(errors)
+                }
+                .await;
+                match diagnostics {
+                    Ok(errors) => {
+                        map.insert("errors".to_owned(), rows_to_json(&errors));
+                        map.insert("error_count".to_owned(), json!(errors.len()));
+                    }
+                    Err(err) => {
+                        map.insert("errors".to_owned(), Value::Null);
+                        map.insert("error_count".to_owned(), Value::Null);
+                        map.insert(
+                            "diagnostics_unavailable".to_owned(),
+                            json!(format!(
+                                "compile diagnostics unavailable after CREATE OR REPLACE commit: {}",
+                                err.message
+                            )),
+                        );
+                    }
+                }
             } else {
                 map.insert("errors".to_owned(), Value::Null);
                 map.insert("error_count".to_owned(), Value::Null);
@@ -6011,11 +6803,18 @@ async fn create_or_replace_inner(
 
 async fn deploy_ddl(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Value, ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
+    let completion = if args.execute {
+        CompletionPolicy::PreserveSuccessfulEffect
+    } else {
+        CompletionPolicy::EnforceDeadlineAfterBody
+    };
     with_call_timeout(
         ctx.cx,
         ctx.conn,
-        ctx.request_budget,
+        ctx.quarantine,
+        ctx.request_budget.clone(),
         timeout_seconds,
+        completion,
         || deploy_ddl_inner(ctx, args),
     )
     .await
@@ -6341,7 +7140,31 @@ fn canonical_tool_name(name: &str) -> &str {
     }
 }
 
+/// Decide from the actual successful response, not just the tool name. The
+/// same mutation tools also serve previews, and those must remain cancellable.
+fn response_reports_terminal_effect(name: &str, value: &Value) -> bool {
+    let bool_field = |field| value.get(field).and_then(Value::as_bool) == Some(true);
+    match canonical_tool_name(name) {
+        "oracle_switch_profile" => true,
+        "oracle_set_session_level" => bool_field("changed"),
+        "oracle_compile_object" => bool_field("compiled"),
+        "oracle_patch_source" | "oracle_create_or_replace" | "deploy_ddl" => bool_field("applied"),
+        "oracle_execute" | "execute_approved" => {
+            bool_field("executed")
+                && (bool_field("committed") || bool_field("non_transactional_effect"))
+        }
+        _ => false,
+    }
+}
+
 impl ToolDispatch for OracleDispatcher {
+    fn request_timeout_ceiling(&self) -> Result<Duration, ErrorEnvelope> {
+        // `None` is the operator's driver-call-timeout opt-out; the documented
+        // whole-request safety default remains active. A poisoned policy lock
+        // fails before the lane polls any dispatcher work.
+        Ok(self.request_timeout()?.unwrap_or(DEFAULT_REQUEST_TIMEOUT))
+    }
+
     fn dispatch<'a>(
         &'a self,
         cx: &'a Cx,
@@ -6356,7 +7179,11 @@ impl ToolDispatch for OracleDispatcher {
                 );
             }
             let result = self.dispatch_with_cx_inner(cx, context, name, args).await;
-            if cx.is_cancel_requested() {
+            let terminal_result = match &result {
+                Ok(value) => response_reports_terminal_effect(name, value),
+                Err(_) => self.connection_quarantine().ok().flatten().is_some(),
+            };
+            if cx.is_cancel_requested() && !terminal_result {
                 Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(CancelReason::timeout))
             } else {
                 result.into()
@@ -6384,7 +7211,11 @@ impl ToolDispatch for OracleDispatcher {
             } else {
                 self.dispatch_with_cx_inner(cx, context, name, args).await
             };
-            if cx.is_cancel_requested() {
+            let terminal_result = match &result {
+                Ok(value) => response_reports_terminal_effect(name, value),
+                Err(_) => self.connection_quarantine().ok().flatten().is_some(),
+            };
+            if cx.is_cancel_requested() && !terminal_result {
                 Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(CancelReason::timeout))
             } else {
                 result.into()
@@ -6559,9 +7390,58 @@ impl OracleDispatcher {
         state.patch_previews.clear();
         state.read_only_backstop.reset();
 
+        if reason == DispatchCloseReason::RequestFinalizationTimeout {
+            // The command's own terminal-finalization grace already expired.
+            // Record the known-unknown outcome before attempting any more
+            // Oracle I/O: a hung describe or rollback must not consume the
+            // lane-close budget and erase the durable lifecycle evidence.
+            let message =
+                "request terminal finalization timed out; the lane was discarded and the database outcome requires verification"
+                    .to_owned();
+            mark_connection_quarantined(&self.quarantine, AuditOutcome::UnknownDiscarded, message)?;
+            state.profile_generation.take();
+            let unavailable_evidence = self
+                .auditor
+                .as_ref()
+                .map(|_| DbEvidence::unavailable("request_finalization_timeout"));
+            let audit_result = append_lifecycle_audit(
+                self.auditor.as_deref(),
+                &subject,
+                unavailable_evidence.as_ref(),
+                reason,
+                AuditOutcome::UnknownDiscarded,
+            );
+            let rollback_result = rollback_conn_cleanup(cx, state.conn.as_ref()).await;
+            match rollback_result {
+                Ok(()) => tracing::info!(
+                    close_reason = reason.as_str(),
+                    active_profile = active_profile.as_deref().unwrap_or(""),
+                    outcome = audit_outcome_label(AuditOutcome::UnknownDiscarded),
+                    "bounded rollback completed after finalization timeout; prior DDL or commit remains outcome-unknown"
+                ),
+                Err(error) => {
+                    mark_connection_quarantined(
+                        &self.quarantine,
+                        AuditOutcome::UnknownDiscarded,
+                        format!(
+                            "bounded rollback after request finalization timeout also failed: {error}"
+                        ),
+                    )?;
+                    tracing::warn!(
+                        close_reason = reason.as_str(),
+                        active_profile = active_profile.as_deref().unwrap_or(""),
+                        error = %error,
+                        "bounded rollback failed after finalization timeout"
+                    );
+                }
+            }
+            audit_result?;
+            return Ok(());
+        }
+
         let db_evidence =
             collect_audit_db_evidence(cx, self.auditor.as_deref(), state.conn.as_ref()).await;
-        let rollback_result = state.conn.rollback(cx).await;
+        let rollback_result = rollback_conn_cleanup(cx, state.conn.as_ref()).await;
         let outcome = match rollback_result {
             Ok(()) => AuditOutcome::RolledBack,
             Err(err) => {
@@ -6643,7 +7523,17 @@ impl OracleDispatcher {
         name: &str,
         args: Value,
     ) -> Result<Value, ErrorEnvelope> {
-        let request_budget = self.dispatch_request_budget(cx)?;
+        let mut request_budget = self.dispatch_request_budget(cx, context)?;
+        if let Some(timeout_seconds) = args
+            .get("timeout_seconds")
+            .and_then(Value::as_u64)
+            .filter(|seconds| *seconds > 0)
+        {
+            request_budget = request_budget.tighten_timeout(Duration::from_secs(
+                timeout_seconds.min(MAX_CALL_TIMEOUT_SECONDS),
+            ));
+            request_budget.enforce(cx).map_err(DbError::into_envelope)?;
+        }
         let tool = canonical_tool_name(name);
         if tool == "oracle_switch_profile" {
             {
@@ -6686,6 +7576,29 @@ impl OracleDispatcher {
                 .await
                 .map_err(DbError::into_envelope)?
                 .into_parts();
+            let primary_limits = ConnectionLimitGuard::install(
+                cx,
+                conn.as_ref(),
+                None,
+                None,
+                request_budget.deadline(),
+                Some(request_budget.db_quota()),
+            )
+            .map_err(DbError::into_envelope)?;
+            let stateless_limits = match stateless_conn.as_deref() {
+                Some(stateless) if !std::ptr::eq(conn.as_ref(), stateless) => Some(
+                    ConnectionLimitGuard::install(
+                        cx,
+                        stateless,
+                        None,
+                        None,
+                        request_budget.deadline(),
+                        Some(request_budget.db_quota()),
+                    )
+                    .map_err(DbError::into_envelope)?,
+                ),
+                _ => None,
+            };
             let mut response = connection_info_json(
                 Some(profile.clone()),
                 describe_conn(cx, conn.as_ref()).await,
@@ -6698,7 +7611,13 @@ impl OracleDispatcher {
                     connection_strategy_json(cx, stateless_conn.as_ref()).await,
                 );
             }
-            request_budget.enforce(cx).map_err(DbError::into_envelope)?;
+            let budget_after_prepare = request_budget.enforce(cx).map_err(DbError::into_envelope);
+            let stateless_restore = stateless_limits.and_then(|limits| limits.restore().err());
+            let primary_restore = primary_limits.restore().err();
+            if let Some(error) = stateless_restore.or(primary_restore) {
+                return Err(DbError::into_envelope(error));
+            }
+            budget_after_prepare?;
             let new_policy = profile_dispatch_policy(&profile_generation)?;
             let new_level = new_policy.level;
             let new_custom_catalog = match &self.custom_loader {
@@ -6723,6 +7642,7 @@ impl OracleDispatcher {
             let mut state = self.state.lock(cx).await.map_err(|_| {
                 ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
             })?;
+            request_budget.enforce(cx).map_err(DbError::into_envelope)?;
             let old_request_timeout = self.request_timeout()?;
             let PreparedProfileSwitch {
                 profile,
@@ -6743,7 +7663,7 @@ impl OracleDispatcher {
             // generation reference.
             let mut pending_profile_generation = Some(profile_generation);
             let mut retired_generation = None;
-            let response = self
+            let mut response = self
                 .profile_drain
                 .commit_generation(&profile, generation, || {
                     self.set_request_timeout(request_timeout)?;
@@ -6791,6 +7711,15 @@ impl OracleDispatcher {
             if let Some(notifications) = &self.notifications {
                 notifications.enqueue_tools_list_changed();
             }
+            if let Err(error) = request_budget.enforce(cx) {
+                response.annotate_deadline_after_effect();
+                tracing::warn!(
+                    error = %error,
+                    profile = profile.as_str(),
+                    generation,
+                    "request deadline observed after a completed profile switch"
+                );
+            }
             return Ok(response);
         }
 
@@ -6816,6 +7745,9 @@ impl OracleDispatcher {
         let mut state = self.state.lock(cx).await.map_err(|_| {
             ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
         })?;
+        // Mutex wait is part of the same total request budget. Re-check before
+        // any arm can mint/consume authority or mutate lane-local state.
+        request_budget.enforce(cx).map_err(DbError::into_envelope)?;
         let request_subject = audit_subject(context, &self.default_audit_subject);
         let scoped_level = scoped_session_level(&state.level, context);
         let scoped = context.scope_grant().is_some();
@@ -6836,48 +7768,49 @@ impl OracleDispatcher {
             let active_profile = state.active_profile.clone();
             let grant_binding = grant_binding_for_context(&state, context);
             let before = state.level.effective_level();
-            let result = {
-                let DispatcherState {
-                    level,
-                    execute_grants,
-                    ..
-                } = &mut *state;
-                set_session_level_with_scope(
-                    level,
-                    &scoped_level,
-                    SessionGrantContext {
-                        active_profile: active_profile.as_deref(),
-                        grants: execute_grants,
-                        binding: &grant_binding,
-                    },
-                    name,
-                    a,
-                    scoped,
-                )
-            };
-            let mut changed = false;
-            let after = state.level.effective_level();
-            if let Ok(value) = &result {
-                changed = value.get("changed").and_then(Value::as_bool) == Some(true);
-                if changed {
-                    state.grant_generation = state.grant_generation.saturating_add(1);
-                    state.execute_grants.clear();
-                    state.execute_approved_tokens.clear();
-                }
-            }
+            request_budget.enforce(cx).map_err(DbError::into_envelope)?;
+
+            // Prepare the transition on a detached state. The audit-evidence
+            // lookup below is cancellable and the lane may drop this future at
+            // its hard finalization bound; live authorization must therefore
+            // remain untouched until every fallible/awaiting precondition has
+            // completed. The submitted confirmation grant stays single-use if
+            // preparation succeeds, even when later evidence/audit fails.
+            let mut staged_level = state.level.clone();
+            let mut value = set_session_level_with_scope(
+                &mut staged_level,
+                &scoped_level,
+                SessionGrantContext {
+                    active_profile: active_profile.as_deref(),
+                    grants: &state.execute_grants,
+                    binding: &grant_binding,
+                },
+                name,
+                a,
+                scoped,
+            )?;
+            let changed = value.get("changed").and_then(Value::as_bool) == Some(true);
+            let after = staged_level.effective_level();
+            let mut db_evidence = None;
             // Audit a successful level INCREASE (step-up approval). De-escalation
             // and status reads are not escalations and are not chained.
             if changed
                 && after > before
                 && let Some(auditor) = self.auditor.as_deref()
             {
-                let after = state.level.effective_level();
                 let subject = request_subject.clone();
-                let db_evidence =
-                    collect_audit_db_evidence(cx, Some(auditor), state.conn.as_ref()).await;
+                db_evidence = collect_effect_audit_db_evidence_bounded(
+                    cx,
+                    Some(auditor),
+                    state.conn.as_ref(),
+                    &request_budget,
+                    &self.quarantine,
+                )
+                .await?;
+                request_budget.enforce(cx).map_err(DbError::into_envelope)?;
                 let draft = AuditEntryDraft {
                     subject,
-                    db_evidence,
+                    db_evidence: db_evidence.clone(),
                     cancel: None,
                     tool: "oracle_set_session_level".to_owned(),
                     sql: format!("ESCALATE {} -> {}", before.as_str(), after.as_str()),
@@ -6890,7 +7823,30 @@ impl OracleDispatcher {
                     .append(&draft, audit_timestamp(), true)
                     .map_err(audit_error_to_envelope)?;
             }
-            return result;
+            if changed {
+                // Commit point: no await or fallible state operation may occur
+                // between the live authorization swap and the response.
+                state.level = staged_level;
+                state.grant_generation = state.grant_generation.saturating_add(1);
+                state.execute_grants.clear();
+                state.execute_approved_tokens.clear();
+                state.patch_previews.clear();
+            }
+            match request_budget.enforce(cx) {
+                Ok(()) => {}
+                Err(error) if changed => {
+                    value.annotate_deadline_after_effect();
+                    tracing::warn!(
+                        error = %error,
+                        before = before.as_str(),
+                        after = after.as_str(),
+                        evidence = db_evidence.is_some(),
+                        "request deadline observed after a completed session-level transition"
+                    );
+                }
+                Err(error) => return Err(DbError::into_envelope(error)),
+            }
+            return Ok(value);
         }
         if tool == "oracle_preview_sql" {
             let a: PreviewSqlArgs = parse_args(name, args)?;
@@ -7047,9 +8003,15 @@ impl OracleDispatcher {
                     // (scoped_level folds in any OAuth scope, which can only
                     // LOWER the level — so this arms at least as often as the
                     // unscoped level, never less).
-                    read_only_backstop
-                        .ensure_armed(cx, conn.as_ref(), &scoped_level)
-                        .await?;
+                    ensure_read_only_backstop_bounded(
+                        cx,
+                        conn.as_ref(),
+                        read_only_backstop,
+                        &scoped_level,
+                        &request_budget,
+                        &self.quarantine,
+                    )
+                    .await?;
                 }
             }
 
@@ -7078,9 +8040,15 @@ impl OracleDispatcher {
                 read_only_backstop,
                 ..
             } = &mut *state;
-            read_only_backstop
-                .ensure_armed(cx, conn.as_ref(), &scoped_level)
-                .await?;
+            ensure_read_only_backstop_bounded(
+                cx,
+                conn.as_ref(),
+                read_only_backstop,
+                &scoped_level,
+                &request_budget,
+                &self.quarantine,
+            )
+            .await?;
         }
 
         let conn: &dyn OracleConnection = state.conn.as_ref();
@@ -7088,6 +8056,31 @@ impl OracleDispatcher {
             .stateless_conn
             .as_deref()
             .unwrap_or_else(|| state.conn.as_ref());
+        let final_budget = request_budget.clone();
+        let primary_limits = ConnectionLimitGuard::install(
+            cx,
+            conn,
+            Some(&self.quarantine),
+            None,
+            request_budget.deadline(),
+            Some(request_budget.db_quota()),
+        )
+        .map_err(DbError::into_envelope)?;
+        let metadata_limits = if std::ptr::eq(conn, metadata_conn) {
+            None
+        } else {
+            Some(
+                ConnectionLimitGuard::install(
+                    cx,
+                    metadata_conn,
+                    Some(&self.quarantine),
+                    None,
+                    request_budget.deadline(),
+                    Some(request_budget.db_quota()),
+                )
+                .map_err(DbError::into_envelope)?,
+            )
+        };
         let generated_read_subject = system_generated_read_subject();
         let generated_read_db_evidence = if generated_read {
             collect_audit_db_evidence(cx, self.auditor.as_deref(), conn).await
@@ -7111,7 +8104,9 @@ impl OracleDispatcher {
             audit: generated_read_audit,
         };
 
-        let result: Result<Value, ErrorEnvelope> = match tool {
+        let mut patch_preview_to_remember = None;
+        let result: Result<Value, ErrorEnvelope> = async {
+            match tool {
             #[cfg(feature = "plsql-intelligence")]
             tool if crate::plsql_tools::is_static_tool(tool) => {
                 crate::plsql_tools::dispatch_static(tool, args)
@@ -7207,10 +8202,10 @@ impl OracleDispatcher {
                     quarantine: &self.quarantine,
                 };
                 let (value, preview_entry) = patch_source(tool_ctx, name, a).await?;
-                if let Some(preview_entry) = preview_entry {
-                    remember_patch_preview(&mut state, preview_entry);
-                }
-                return Ok(value);
+                // Mutate the state-owned preview log only after the connection
+                // borrows end and both request-limit guards restore explicitly.
+                patch_preview_to_remember = preview_entry;
+                Ok(value)
             }
             "oracle_list_profiles" => {
                 ensure_no_args(name, args)?;
@@ -7547,21 +8542,30 @@ impl OracleDispatcher {
                 // by default; AWR only when the Diagnostics Pack is licensed, else
                 // Statspack, else a structured-unavailable error), build the ranked
                 // SQL, and run it as a bounded read.
-                return with_call_timeout(cx, conn, request_budget, timeout_seconds, || async {
-                    let source =
-                        oraclemcp_db::resolve_top_sql_source(cx, &guarded_conn, historical).await;
-                    let sql = oraclemcp_db::top_sql_query(source, metric, top_n, min_pct)?;
-                    let rows = guarded_conn
-                        .query_rows(cx, &sql, &[])
-                        .await
-                        .map_err(DbError::into_envelope)?;
-                    Ok(json!({
-                        "source": serde_json::to_value(source).unwrap_or(Value::Null),
-                        "metric": serde_json::to_value(metric).unwrap_or(Value::Null),
-                        "rows": rows_to_json(&rows),
-                        "row_count": rows.len(),
-                    }))
-                })
+                return with_call_timeout(
+                    cx,
+                    conn,
+                    &self.quarantine,
+                    request_budget,
+                    timeout_seconds,
+                    CompletionPolicy::EnforceDeadlineAfterBody,
+                    || async {
+                        let source =
+                            oraclemcp_db::resolve_top_sql_source(cx, &guarded_conn, historical)
+                                .await;
+                        let sql = oraclemcp_db::top_sql_query(source, metric, top_n, min_pct)?;
+                        let rows = guarded_conn
+                            .query_rows(cx, &sql, &[])
+                            .await
+                            .map_err(DbError::into_envelope)?;
+                        Ok(json!({
+                            "source": serde_json::to_value(source).unwrap_or(Value::Null),
+                            "metric": serde_json::to_value(metric).unwrap_or(Value::Null),
+                            "rows": rows_to_json(&rows),
+                            "row_count": rows.len(),
+                        }))
+                    },
+                )
                 .await;
             }
             "oracle_db_health" => {
@@ -7574,7 +8578,14 @@ impl OracleDispatcher {
                 // any per-subcheck failure becomes a structured `skipped` finding
                 // rather than failing the whole call. Unknown subcheck names are
                 // reported, never fatal.
-                return with_call_timeout(cx, conn, request_budget, timeout_seconds, || async {
+                return with_call_timeout(
+                    cx,
+                    conn,
+                    &self.quarantine,
+                    request_budget,
+                    timeout_seconds,
+                    CompletionPolicy::EnforceDeadlineAfterBody,
+                    || async {
                     let findings = match oraclemcp_db::run_health(
                         cx,
                         &guarded_conn,
@@ -7624,7 +8635,8 @@ impl OracleDispatcher {
                         "checks_failed": checks_failed,
                         "unknown_checks": request.unknown,
                     }))
-                })
+                    },
+                )
                 .await;
             }
             "oracle_read_clob" => {
@@ -7753,10 +8765,27 @@ impl OracleDispatcher {
                 ensure_read_only(&a.sql)?;
                 ensure_explain_plan_write_allowed(&a, &scoped_level)?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.before")?;
-                let rows = explain_plan(cx, conn, &a.sql, a.read_only_standby)
-                    .await
-                    .map_err(DbError::into_envelope)?;
-                dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.after")?;
+                let rows = match explain_plan(cx, conn, &a.sql, a.read_only_standby).await {
+                    Ok(rows) => rows,
+                    Err(primary) => {
+                        if let Err(cleanup_err) = rollback_conn_cleanup(cx, conn).await {
+                            let message = format!(
+                                "EXPLAIN PLAN failed and PLAN_TABLE rollback cleanup failed: {cleanup_err}"
+                            );
+                            mark_connection_quarantined(
+                                &self.quarantine,
+                                AuditOutcome::UnknownDiscarded,
+                                message.clone(),
+                            )?;
+                            return Err(quarantined_db_error(
+                                QuarantineOutcome::UnknownDiscarded,
+                                message,
+                            )
+                            .into_envelope());
+                        }
+                        return Err(DbError::into_envelope(primary));
+                    }
+                };
                 let mut response = json!({
                     "plan": rows_to_json(&rows),
                     "diagnostic_write": {
@@ -7764,6 +8793,7 @@ impl OracleDispatcher {
                         "writes": "PLAN_TABLE",
                         "required_level": OperatingLevel::ReadWrite,
                         "explicitly_allowed": a.allow_plan_table_write,
+                        "rolled_back": true,
                     },
                 });
                 // ADDITIVE / observational: surface the optimizer's relative
@@ -7786,20 +8816,79 @@ impl OracleDispatcher {
                             json!(format!("cost estimate unavailable: {err}"));
                     }
                 }
+                if let Err(cleanup_err) = rollback_conn_cleanup(cx, conn).await {
+                    let message = format!(
+                        "EXPLAIN PLAN completed, but PLAN_TABLE rollback cleanup failed: {cleanup_err}"
+                    );
+                    mark_connection_quarantined(
+                        &self.quarantine,
+                        AuditOutcome::UnknownDiscarded,
+                        message.clone(),
+                    )?;
+                    return Err(
+                        quarantined_db_error(QuarantineOutcome::UnknownDiscarded, message)
+                            .into_envelope(),
+                    );
+                }
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.after")?;
                 Ok(response)
             }
             other => {
                 if let Some(loaded) = state.custom_catalog.get(other) {
                     let executor = ReadOnlyCustomToolExecutor { cx, conn };
-                    return execute_custom_tool(loaded, &args, &executor).await;
+                    execute_custom_tool(loaded, &args, &executor).await
+                } else {
+                    Err(invalid_args(format!(
+                        "unknown tool: {other:?} (call oracle_capabilities for the tool surface)"
+                    )))
                 }
-                return Err(invalid_args(format!(
-                    "unknown tool: {other:?} (call oracle_capabilities for the tool surface)"
-                )));
             }
-        };
+            }
+        }
+        .await;
 
-        result
+        let budget_after = final_budget.enforce(cx).map_err(DbError::into_envelope);
+        let metadata_restore_error = metadata_limits.and_then(|limits| limits.restore().err());
+        let primary_restore_error = primary_limits.restore().err();
+        let restore_error = metadata_restore_error.or(primary_restore_error);
+        match result {
+            Err(primary) => {
+                if let Some(restore_err) = restore_error {
+                    let _ = mark_connection_quarantined(
+                        &self.quarantine,
+                        AuditOutcome::UnknownDiscarded,
+                        format!(
+                            "database operation failed and request-limit restoration also failed: {restore_err}"
+                        ),
+                    );
+                }
+                Err(primary)
+            }
+            Ok(mut value) => {
+                let effect_succeeded = response_reports_terminal_effect(tool, &value);
+                if let Some(restore_err) = restore_error {
+                    return Err(limit_restore_failure(
+                        &self.quarantine,
+                        effect_succeeded,
+                        restore_err,
+                    ));
+                }
+                match budget_after {
+                    Ok(()) => {
+                        if let Some(preview_entry) = patch_preview_to_remember {
+                            remember_patch_preview(&mut state, preview_entry);
+                        }
+                        Ok(value)
+                    }
+                    Err(err) if effect_succeeded => {
+                        value.annotate_deadline_after_effect();
+                        tracing::warn!(error = %err.message, "request deadline observed after a completed database effect");
+                        Ok(value)
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+        }
     }
 
     /// Run an oracle_query whose args were parsed and whose SQL was marked +
@@ -7823,6 +8912,7 @@ impl OracleDispatcher {
         } = prepared;
         let timeout_seconds = a.timeout_seconds;
         let exports = self.exports.clone();
+        let body_budget = request_budget.clone();
         // A9: narrow the handler context to the read-path capability row
         // (TIME + IO; no SPAWN / REMOTE / RANDOM). The pure handler work below —
         // gate, bind conversion, cursor decode, serialization — runs under this
@@ -7830,110 +8920,119 @@ impl OracleDispatcher {
         // object-safe and takes the full `&Cx`) is handed the full `cx`, the one
         // documented IO exception.
         let read_cx = narrow_to_read_path(cx);
-        with_call_timeout(cx, conn, request_budget, timeout_seconds, || async {
-            dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.query.before")?;
-            // The read-only gate was computed ONCE up front (classified ==
-            // executed); reuse the same verdict here. `executed_sql` is the
-            // marked text that gate was computed against.
-            gate?;
-            let binds = a
-                .binds
-                .iter()
-                .map(json_to_bind)
-                .collect::<Result<Vec<_>, _>>()?;
-            // E2: the page cursor is an opaque, tamper-evident token bound to
-            // THIS statement + active profile, decoded to a raw offset here (a
-            // forged/cross-statement cursor fails closed).
-            let offset =
-                decode_query_cursor(a.cursor.as_deref(), &a.sql, active_profile.as_deref())?;
-            // K10: streaming delivery. The classifier already proved this read
-            // (`gate?` above); streaming only changes how the SAME rows are
-            // DELIVERED — as an ordered, resumable `chunks` array driven by
-            // successive cursor pages, byte-identical to a manual cursor resume.
-            if a.streaming {
-                if a.export {
-                    return Err(invalid_args(
-                        "streaming and export are mutually exclusive: choose incremental \
+        with_call_timeout(
+            cx,
+            conn,
+            &self.quarantine,
+            request_budget,
+            timeout_seconds,
+            CompletionPolicy::EnforceDeadlineAfterBody,
+            || async {
+                dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.query.before")?;
+                // The read-only gate was computed ONCE up front (classified ==
+                // executed); reuse the same verdict here. `executed_sql` is the
+                // marked text that gate was computed against.
+                gate?;
+                let binds = a
+                    .binds
+                    .iter()
+                    .map(json_to_bind)
+                    .collect::<Result<Vec<_>, _>>()?;
+                // E2: the page cursor is an opaque, tamper-evident token bound to
+                // THIS statement + active profile, decoded to a raw offset here (a
+                // forged/cross-statement cursor fails closed).
+                let offset =
+                    decode_query_cursor(a.cursor.as_deref(), &a.sql, active_profile.as_deref())?;
+                // K10: streaming delivery. The classifier already proved this read
+                // (`gate?` above); streaming only changes how the SAME rows are
+                // DELIVERED — as an ordered, resumable `chunks` array driven by
+                // successive cursor pages, byte-identical to a manual cursor resume.
+                if a.streaming {
+                    if a.export {
+                        return Err(invalid_args(
+                            "streaming and export are mutually exclusive: choose incremental \
                          chunks (streaming=true) OR a single export resource (export=true)",
-                    )
-                    .with_next_step("re-run with exactly one of streaming / export"));
-                }
-                if as_of.is_some() {
-                    return Err(invalid_args(
-                        "streaming and as_of are mutually exclusive: a flashback read is \
+                        )
+                        .with_next_step("re-run with exactly one of streaming / export"));
+                    }
+                    if as_of.is_some() {
+                        return Err(invalid_args(
+                            "streaming and as_of are mutually exclusive: a flashback read is \
                          delivered as a single page — resume it with the returned cursor",
+                        )
+                        .with_next_step("drop streaming, or page the as_of read with cursor"));
+                    }
+                    let caps = query_caps_from_args(&a);
+                    let serialize_opts = query_serialize_options_from_args(&a);
+                    return Self::stream_query_response(
+                        cx,
+                        conn,
+                        &body_budget,
+                        &executed_sql,
+                        &a.sql,
+                        &binds,
+                        caps,
+                        offset,
+                        &serialize_opts,
+                        active_profile.as_deref(),
                     )
-                    .with_next_step("drop streaming, or page the as_of read with cursor"));
+                    .await;
                 }
+                // E3b: when the caller opts into export, materialize the bounded full
+                // result as an oracle-export://{id} resource and return a
+                // resource_link instead of inlining the rows.
+                if a.export {
+                    return export_query_to_resource(
+                        cx,
+                        conn,
+                        &executed_sql,
+                        &a,
+                        &binds,
+                        offset,
+                        active_profile.as_deref(),
+                        export_scopes.as_deref(),
+                        exports.as_deref(),
+                        as_of.as_ref(),
+                    )
+                    .await;
+                }
+                // K9: when a flashback target is set, run the SAME proven SQL inside
+                // a bounded DBMS_FLASHBACK window (`read_query_as_of`); otherwise the
+                // plain read path. Both take the identical proven `executed_sql`.
                 let caps = query_caps_from_args(&a);
                 let serialize_opts = query_serialize_options_from_args(&a);
-                return Self::stream_query_response(
-                    cx,
-                    conn,
-                    &executed_sql,
-                    &a.sql,
-                    &binds,
-                    caps,
-                    offset,
-                    &serialize_opts,
-                    active_profile.as_deref(),
-                )
-                .await;
-            }
-            // E3b: when the caller opts into export, materialize the bounded full
-            // result as an oracle-export://{id} resource and return a
-            // resource_link instead of inlining the rows.
-            if a.export {
-                return export_query_to_resource(
-                    cx,
-                    conn,
-                    &executed_sql,
-                    &a,
-                    &binds,
-                    offset,
-                    active_profile.as_deref(),
-                    export_scopes.as_deref(),
-                    exports.as_deref(),
-                    as_of.as_ref(),
-                )
-                .await;
-            }
-            // K9: when a flashback target is set, run the SAME proven SQL inside
-            // a bounded DBMS_FLASHBACK window (`read_query_as_of`); otherwise the
-            // plain read path. Both take the identical proven `executed_sql`.
-            let caps = query_caps_from_args(&a);
-            let serialize_opts = query_serialize_options_from_args(&a);
-            let read = match as_of.as_ref() {
-                Some(as_of) => {
-                    read_query_as_of(
-                        cx,
-                        conn,
-                        &executed_sql,
-                        &binds,
-                        caps,
-                        offset,
-                        &serialize_opts,
-                        as_of,
-                    )
-                    .await
-                }
-                None => {
-                    read_query(
-                        cx,
-                        conn,
-                        &executed_sql,
-                        &binds,
-                        caps,
-                        offset,
-                        &serialize_opts,
-                    )
-                    .await
-                }
-            };
-            read.map(|resp| serde_json::to_value(resp).unwrap_or(Value::Null))
-                .map(|resp| reseal_query_cursor(resp, &a.sql, active_profile.as_deref()))
-                .map_err(DbError::into_envelope)
-        })
+                let read = match as_of.as_ref() {
+                    Some(as_of) => {
+                        read_query_as_of(
+                            cx,
+                            conn,
+                            &executed_sql,
+                            &binds,
+                            caps,
+                            offset,
+                            &serialize_opts,
+                            as_of,
+                        )
+                        .await
+                    }
+                    None => {
+                        read_query(
+                            cx,
+                            conn,
+                            &executed_sql,
+                            &binds,
+                            caps,
+                            offset,
+                            &serialize_opts,
+                        )
+                        .await
+                    }
+                };
+                read.map(|resp| serde_json::to_value(resp).unwrap_or(Value::Null))
+                    .map(|resp| reseal_query_cursor(resp, &a.sql, active_profile.as_deref()))
+                    .map_err(DbError::into_envelope)
+            },
+        )
         .await
     }
 
@@ -7945,7 +9044,17 @@ impl OracleDispatcher {
         args: Value,
         frames: ToolStreamSender,
     ) -> Result<Value, ErrorEnvelope> {
-        let request_budget = self.dispatch_request_budget(cx)?;
+        let mut request_budget = self.dispatch_request_budget(cx, context)?;
+        if let Some(timeout_seconds) = args
+            .get("timeout_seconds")
+            .and_then(Value::as_u64)
+            .filter(|seconds| *seconds > 0)
+        {
+            request_budget = request_budget.tighten_timeout(Duration::from_secs(
+                timeout_seconds.min(MAX_CALL_TIMEOUT_SECONDS),
+            ));
+            request_budget.enforce(cx).map_err(DbError::into_envelope)?;
+        }
         if let Some(quarantine) = self.connection_quarantine()? {
             return Err(ErrorEnvelope::new(
                 ErrorClass::RuntimeStateRequired,
@@ -8003,9 +9112,15 @@ impl OracleDispatcher {
                         read_only_backstop,
                         ..
                     } = &mut *state;
-                    read_only_backstop
-                        .ensure_armed(cx, conn.as_ref(), &scoped_level)
-                        .await?;
+                    ensure_read_only_backstop_bounded(
+                        cx,
+                        conn.as_ref(),
+                        read_only_backstop,
+                        &scoped_level,
+                        &request_budget,
+                        &self.quarantine,
+                    )
+                    .await?;
                 }
             }
 
@@ -8063,17 +9178,19 @@ impl OracleDispatcher {
         let serialize_opts = query_serialize_options_from_args(&a);
         let timeout = call_timeout_duration(a.timeout_seconds)?;
         let stream_budget = match timeout {
-            Some(timeout) => request_budget.meet(Budget::new().with_timeout(cx.now(), timeout)),
+            Some(timeout) => request_budget.tighten_timeout(timeout),
             None => request_budget,
         };
         stream_budget.enforce(cx).map_err(DbError::into_envelope)?;
-        let previous_timeout = conn.call_timeout().map_err(DbError::into_envelope)?;
-        let effective_timeout =
-            timeout.map(|timeout| previous_timeout.map_or(timeout, |current| current.min(timeout)));
-        if let Some(timeout) = effective_timeout {
-            conn.set_call_timeout(Some(timeout))
-                .map_err(DbError::into_envelope)?;
-        }
+        let limits = ConnectionLimitGuard::install(
+            cx,
+            conn,
+            Some(&self.quarantine),
+            timeout,
+            stream_budget.deadline(),
+            Some(stream_budget.db_quota()),
+        )
+        .map_err(DbError::into_envelope)?;
         let fetch_rows = MAX_QUERY_STREAM_ROWS.saturating_add(1);
         let wrapped_sql = paginated_sql(&executed_sql, offset, fetch_rows);
         let stream_start = conn
@@ -8086,20 +9203,19 @@ impl OracleDispatcher {
             )
             .await
             .map_err(|err| self.stream_db_error_envelope(err));
-        let restore = conn
-            .set_call_timeout(previous_timeout)
-            .map_err(DbError::into_envelope);
+        let restore = limits.restore();
         let stream_start = match (stream_start, restore) {
             (Ok(value), Ok(())) => value,
             (Err(err), _) => return Err(err),
             (Ok(QueryRowStreamStart::Stream(stream)), Err(err)) => {
-                stream
-                    .recover(cx)
+                recover_row_stream_cleanup(cx, stream)
                     .await
                     .map_err(|recover_err| self.stream_db_error_envelope(recover_err))?;
-                return Err(err);
+                return Err(limit_restore_failure(&self.quarantine, false, err));
             }
-            (Ok(_), Err(err)) => return Err(err),
+            (Ok(_), Err(err)) => {
+                return Err(limit_restore_failure(&self.quarantine, false, err));
+            }
         };
         match stream_start {
             QueryRowStreamStart::Stream(stream) => {
@@ -8119,9 +9235,23 @@ impl OracleDispatcher {
                     fallback_reason = %reason,
                     "oracle_query row streaming fell back to cursor chunks"
                 );
+                // `query_row_stream` returned after the first guard was
+                // restored. Reinstall the exact same absolute deadline and
+                // shared quota for the entire multi-page fallback; otherwise
+                // every page would receive a fresh relative timeout.
+                let fallback_limits = ConnectionLimitGuard::install(
+                    cx,
+                    conn,
+                    Some(&self.quarantine),
+                    timeout,
+                    stream_budget.deadline(),
+                    Some(stream_budget.db_quota()),
+                )
+                .map_err(DbError::into_envelope)?;
                 let response = Self::stream_query_response(
                     cx,
                     conn,
+                    &stream_budget,
                     &executed_sql,
                     &a.sql,
                     &binds,
@@ -8130,7 +9260,30 @@ impl OracleDispatcher {
                     &serialize_opts,
                     active_profile.as_deref(),
                 )
-                .await?;
+                .await;
+                let restore_error = fallback_limits.restore().err();
+                let response = match response {
+                    Ok(response) => response,
+                    Err(primary) => {
+                        if let Some(restore_error) = restore_error {
+                            let _ = mark_connection_quarantined(
+                                &self.quarantine,
+                                AuditOutcome::UnknownDiscarded,
+                                format!(
+                                    "chunked stream fallback failed and request-limit restoration also failed: {restore_error}"
+                                ),
+                            );
+                        }
+                        return Err(primary);
+                    }
+                };
+                if let Some(restore_error) = restore_error {
+                    return Err(limit_restore_failure(
+                        &self.quarantine,
+                        false,
+                        restore_error,
+                    ));
+                }
                 Ok(QueryStreamDelivery::Chunked(response))
             }
         }
@@ -8186,9 +9339,7 @@ impl OracleDispatcher {
             }
             row_count = row_count.saturating_add(1);
         }
-        let recover = plan
-            .stream
-            .recover(cx)
+        let recover = recover_row_stream_cleanup(cx, plan.stream)
             .await
             .map_err(|err| self.stream_db_error_envelope(err));
         recover?;
@@ -8273,6 +9424,7 @@ impl OracleDispatcher {
     async fn stream_query_response(
         cx: &Cx,
         conn: &dyn OracleConnection,
+        request_budget: &RequestBudget,
         executed_sql: &str,
         cursor_sql: &str,
         binds: &[OracleBind],
@@ -8294,9 +9446,11 @@ impl OracleDispatcher {
             // backpressure signal for the walk (A9-narrowed cx is sufficient;
             // only the DB round trip inside read_query needs the full row).
             dispatch_checkpoint(cx, "oraclemcp.dispatch.query.stream.chunk")?;
+            request_budget.enforce(cx).map_err(DbError::into_envelope)?;
             let page = read_query(cx, conn, executed_sql, binds, caps, offset, serialize_opts)
                 .await
                 .map_err(DbError::into_envelope)?;
+            request_budget.enforce(cx).map_err(DbError::into_envelope)?;
             if seq == 0 {
                 columns = page.columns.clone();
             }

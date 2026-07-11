@@ -6025,7 +6025,7 @@ fn tool_stream_response_frames_each_row_before_final_result() {
         "principal-test".to_owned(),
         json!(7),
         frames_rx,
-        reply_rx,
+        reply_rx.into(),
     )
     .into_buffered_response();
     assert_eq!(response.status, 200);

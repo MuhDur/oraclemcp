@@ -69,19 +69,19 @@ use oraclemcp_core::{
     ClientCredentialIssueRequest, ClientCredentialLifecycle, ClientCredentialStore,
     ConfigApplyOutcome, ConfigDraftPreview, ConfigOpsBackend, ConfigOpsError, ConfigOpsService,
     ConfigOpsStatus, ConfigReloadApplier, ConfigReloadApplyReport, CustomToolCatalog,
-    CustomToolDef, DashboardAuth, DashboardAuthError, DispatchCloseReason, DispatchContext,
-    DispatchFuture, DispatchOutcome, DoctorAuthCapabilities, DoctorAuthModeKind, DoctorContext,
-    DoctorLevelCaps, DoctorProfileCaps, DoctorStateLayout, ExportRegistry, FeatureTiers,
-    HttpSessionLifecycle, HttpTransportConfig, LaneContext, LaneDispatchFactory, LaneRuntime,
-    MCP_PATH, McpSurfaceDetail, McpSurfaceFuture, MtlsClientRegistry, OAuthEnforcement,
-    ObservabilityState, OperatorAuthorityPolicy, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH,
-    ServiceTransport, ShutdownCoordinator, SiemFormat, SiemHttpForwarder, SourceHistoryStore,
-    StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial, TlsServerConfig, ToolDispatch,
-    WriteIntentLog, apply_legacy_state_migration, build_server_config,
-    default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
-    mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file,
-    probe_dashboard_http_service, requires_mtls, run_doctor, service_app_doctor_snapshot, sign,
-    start_oraclemcp_service_app_with_transport,
+    CustomToolDef, DEFAULT_REQUEST_TIMEOUT, DashboardAuth, DashboardAuthError, DispatchCloseReason,
+    DispatchContext, DispatchFuture, DispatchOutcome, DoctorAuthCapabilities, DoctorAuthModeKind,
+    DoctorContext, DoctorLevelCaps, DoctorProfileCaps, DoctorStateLayout, ExportRegistry,
+    FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext, LaneDispatchFactory,
+    LaneDispatchFactoryBuilder, LaneRuntime, MCP_PATH, McpSurfaceDetail, McpSurfaceFuture,
+    MtlsClientRegistry, OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy,
+    OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, PreparedLaneDispatch, ServiceTransport,
+    ShutdownCoordinator, SiemFormat, SiemHttpForwarder, SourceHistoryStore, StatefulLaneDispatch,
+    StdioAuthPolicy, TlsMaterial, TlsServerConfig, ToolDispatch, WriteIntentLog,
+    apply_legacy_state_migration, build_server_config, default_dashboard_ticket_dir, load_tools,
+    load_tools_for_profile, mint_dashboard_pairing_ticket, operator_subject_id_hash,
+    parse_tools_file, probe_dashboard_http_service, requires_mtls, run_doctor,
+    service_app_doctor_snapshot, sign, start_oraclemcp_service_app_with_transport,
 };
 use oraclemcp_db::{
     DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
@@ -1633,6 +1633,13 @@ struct DispatcherWiring {
     notifications: Arc<oraclemcp_core::NotificationHub>,
 }
 
+fn whole_request_timeout(call_timeout_seconds: Option<u64>) -> std::time::Duration {
+    match call_timeout_seconds {
+        Some(0) | None => DEFAULT_REQUEST_TIMEOUT,
+        Some(seconds) => std::time::Duration::from_secs(seconds),
+    }
+}
+
 fn apply_selected_profile_to_wiring(
     wiring: &mut DispatcherWiring,
     selected: SelectedRuntimeProfile,
@@ -1766,6 +1773,10 @@ impl MetricsDispatch {
 }
 
 impl ToolDispatch for MetricsDispatch {
+    fn request_timeout_ceiling(&self) -> Result<std::time::Duration, ErrorEnvelope> {
+        self.inner.request_timeout_ceiling()
+    }
+
     fn dispatch<'a>(
         &'a self,
         cx: &'a Cx,
@@ -1882,71 +1893,100 @@ fn maybe_wrap_metrics_dispatch(
     }
 }
 
-fn stateful_lane_factory(
+fn stateful_lane_factory_builder(
     wiring: DispatcherWiring,
     metrics: Option<Arc<Metrics>>,
-) -> Arc<LaneDispatchFactory> {
-    Arc::new(move |cx: &Cx, lane_context: &LaneContext| {
-        let wiring = wiring.clone();
-        let metrics = metrics.clone();
-        let principal_key = lane_context.principal_key().to_owned();
-        Box::pin(async move {
-            let profile_generation = match wiring.active_profile.as_deref() {
-                Some(active_profile) => {
-                    match wiring.profile_drain.admit_mcp_profile(active_profile, true) {
-                        ProfileGenerationAdmission::Ready(lease) => Some(lease),
-                        ProfileGenerationAdmission::NotExposed => {
-                            return Err(profile_not_available(active_profile));
-                        }
-                        ProfileGenerationAdmission::Draining => {
-                            return Err(profile_draining_error(active_profile));
-                        }
+) -> Arc<LaneDispatchFactoryBuilder> {
+    Arc::new(move |lane_context: &LaneContext| {
+        let profile_generation = match wiring.active_profile.as_deref() {
+            Some(active_profile) => {
+                match wiring.profile_drain.admit_mcp_profile(active_profile, true) {
+                    ProfileGenerationAdmission::Ready(lease) => Some(lease),
+                    ProfileGenerationAdmission::NotExposed => {
+                        return Err(profile_not_available(active_profile));
+                    }
+                    ProfileGenerationAdmission::Draining => {
+                        return Err(profile_draining_error(active_profile));
                     }
                 }
-                None => None,
-            };
-            let opened = open_lane_runtime_connections(
-                cx,
-                wiring.active_profile.as_deref(),
-                profile_generation.as_ref().and_then(|lease| lease.config()),
-                wiring.secret_resolver.as_ref(),
-            )
-            .await
-            .map_err(DbError::into_envelope)?;
-            if profile_generation
-                .as_ref()
-                .is_some_and(oraclemcp::dispatch::ProfileGenerationLease::is_draining)
-            {
-                return Err(profile_draining_error(
-                    wiring.active_profile.as_deref().unwrap_or(""),
-                ));
             }
-            let mut wiring = wiring;
-            if let Some(selected) = opened.selected_profile {
-                wiring.custom_catalog =
-                    load_custom_catalog_with_requirement(selected.require_signed_tools)?;
-                apply_selected_profile_to_wiring(&mut wiring, selected);
-            }
-            let dispatcher = build_oracle_dispatcher(
-                opened.connections.session,
-                opened.connections.stateless,
-                &wiring,
-            );
-            let dispatcher = match profile_generation {
-                Some(lease) => {
-                    dispatcher.with_profile_generation_lease(wiring.profile_drain.clone(), lease)
+            None => None,
+        };
+        let request_timeout = profile_generation
+            .as_ref()
+            .and_then(|lease| lease.config()?.profile(lease.profile()))
+            .map(|profile| whole_request_timeout(profile.call_timeout_seconds))
+            .unwrap_or_else(|| wiring.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT));
+        let prepared_generation = Arc::new(Mutex::new(Some(profile_generation)));
+        let factory_wiring = wiring.clone();
+        let factory_metrics = metrics.clone();
+        let principal_key = lane_context.principal_key().to_owned();
+        let factory: Arc<LaneDispatchFactory> = Arc::new(move |cx, _lane_context| {
+            let prepared_generation = Arc::clone(&prepared_generation);
+            let mut wiring = factory_wiring.clone();
+            let metrics = factory_metrics.clone();
+            let principal_key = principal_key.clone();
+            Box::pin(async move {
+                // Do not consume the one-shot generation reservation merely by
+                // constructing this future. A caller cancelled before its
+                // first poll must leave the prepared lane reusable.
+                let profile_generation = prepared_generation
+                    .lock()
+                    .map_err(|error| {
+                        ErrorEnvelope::new(
+                            ErrorClass::Internal,
+                            format!("prepared profile-generation lock failed: {error}"),
+                        )
+                    })?
+                    .take()
+                    .ok_or_else(|| {
+                        ErrorEnvelope::new(
+                            ErrorClass::RuntimeStateRequired,
+                            "prepared lane dispatcher factory was already consumed",
+                        )
+                    })?;
+                let opened = open_lane_runtime_connections(
+                    cx,
+                    wiring.active_profile.as_deref(),
+                    profile_generation.as_ref().and_then(|lease| lease.config()),
+                    wiring.secret_resolver.as_ref(),
+                )
+                .await
+                .map_err(DbError::into_envelope)?;
+                if profile_generation
+                    .as_ref()
+                    .is_some_and(oraclemcp::dispatch::ProfileGenerationLease::is_draining)
+                {
+                    return Err(profile_draining_error(
+                        wiring.active_profile.as_deref().unwrap_or(""),
+                    ));
                 }
-                None => Ok(dispatcher),
-            }?
-            .with_default_audit_subject(audit_subject_from_principal_key(&principal_key));
-            let dispatcher: Arc<dyn ToolDispatch> = Arc::new(dispatcher);
-            Ok(maybe_wrap_metrics_dispatch(dispatcher, metrics.as_ref()))
-        })
+                if let Some(selected) = opened.selected_profile {
+                    wiring.custom_catalog =
+                        load_custom_catalog_with_requirement(selected.require_signed_tools)?;
+                    apply_selected_profile_to_wiring(&mut wiring, selected);
+                }
+                let dispatcher = build_oracle_dispatcher(
+                    opened.connections.session,
+                    opened.connections.stateless,
+                    &wiring,
+                );
+                let dispatcher = match profile_generation {
+                    Some(lease) => dispatcher
+                        .with_profile_generation_lease(wiring.profile_drain.clone(), lease),
+                    None => Ok(dispatcher),
+                }?
+                .with_default_audit_subject(audit_subject_from_principal_key(&principal_key));
+                let dispatcher: Arc<dyn ToolDispatch> = Arc::new(dispatcher);
+                Ok(maybe_wrap_metrics_dispatch(dispatcher, metrics.as_ref()))
+            })
+        });
+        Ok(PreparedLaneDispatch::new(factory, request_timeout))
     })
 }
 
 type ReadWorkerFactoryBuilder =
-    dyn Fn(Option<String>) -> Arc<LaneDispatchFactory> + Send + Sync + 'static;
+    dyn Fn(Option<String>) -> Result<PreparedLaneDispatch, ErrorEnvelope> + Send + Sync + 'static;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ReadWorkerKey {
@@ -1999,7 +2039,17 @@ impl HttpStatelessReadDispatch {
             .expect("stateless read active_profile mutex not poisoned") = active_profile;
     }
 
-    fn read_lane_for(&self, context: DispatchContext<'_>) -> LaneRuntime {
+    fn read_lane_for(
+        &self,
+        cx: &Cx,
+        context: DispatchContext<'_>,
+    ) -> Result<LaneRuntime, ErrorEnvelope> {
+        cx.checkpoint().map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorClass::Timeout,
+                "stateless read-worker resolution was cancelled before admission",
+            )
+        })?;
         let key = ReadWorkerKey {
             principal_key: context
                 .principal_key()
@@ -2007,41 +2057,100 @@ impl HttpStatelessReadDispatch {
                 .to_owned(),
             active_profile: self.active_profile(),
         };
+        let (existing, stale_lanes) = {
+            let mut lanes = self
+                .read_lanes
+                .lock()
+                .expect("stateless read lane registry mutex not poisoned");
+            let mut stale_lanes = Vec::new();
+            let existing = if let Some(bucket) = lanes.get_mut(&key) {
+                let mut index = 0;
+                while index < bucket.lanes.len() {
+                    if bucket.lanes[index].accepts_commands() {
+                        index += 1;
+                    } else {
+                        stale_lanes.push(bucket.lanes.swap_remove(index));
+                    }
+                }
+                if bucket.lanes.len() >= self.width_per_key {
+                    let index = bucket.next % bucket.lanes.len();
+                    bucket.next = bucket.next.wrapping_add(1);
+                    Some(bucket.lanes[index].clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            (existing, stale_lanes)
+        };
+        // A dead read lane can still own a generation-bound lazy factory.
+        // Release it outside the read-worker registry lock.
+        drop(stale_lanes);
+        if let Some(existing) = existing {
+            return Ok(existing);
+        }
+
+        // Reserve the exact profile generation and timeout before taking the
+        // read-worker registry lock. A concurrent winner may make this
+        // preparation unnecessary; dropping it then releases its lease.
+        let mut prepared = Some((self.read_factory)(key.active_profile.clone())?);
+        if cx.checkpoint().is_err() {
+            drop(prepared);
+            return Err(ErrorEnvelope::new(
+                ErrorClass::Timeout,
+                "stateless read-worker preparation exhausted the caller budget",
+            ));
+        }
+        let lane_number = self.next_lane_id.fetch_add(1, Ordering::SeqCst);
+        let lane_id = format!("stateless-read-{lane_number}");
+        let lane_context = LaneContext::new(
+            lane_id.clone(),
+            "stateless-read",
+            key.principal_key.clone(),
+            1,
+        );
         let mut lanes = self
             .read_lanes
             .lock()
             .expect("stateless read lane registry mutex not poisoned");
-        let bucket = lanes
-            .entry(key.clone())
-            .or_insert_with(|| ReadWorkerBucket {
-                next: 0,
-                lanes: Vec::new(),
-            });
+        let bucket = lanes.entry(key).or_insert_with(|| ReadWorkerBucket {
+            next: 0,
+            lanes: Vec::new(),
+        });
+        let mut stale_lanes = Vec::new();
+        let mut index = 0;
+        while index < bucket.lanes.len() {
+            if bucket.lanes[index].accepts_commands() {
+                index += 1;
+            } else {
+                stale_lanes.push(bucket.lanes.swap_remove(index));
+            }
+        }
         if bucket.lanes.len() < self.width_per_key {
-            let lane_number = self.next_lane_id.fetch_add(1, Ordering::SeqCst);
-            let lane_id = format!("stateless-read-{lane_number}");
-            let lane_context = LaneContext::new(
-                lane_id.clone(),
-                "stateless-read",
-                key.principal_key.clone(),
-                1,
-            );
-            let factory = (self.read_factory)(key.active_profile.clone());
-            let lane = LaneRuntime::spawn_with_dispatch_factory(
+            let prepared = prepared
+                .take()
+                .expect("prepared read worker is consumed once");
+            bucket.lanes.push(LaneRuntime::spawn_prepared_dispatch(
                 lane_id,
                 lane_context,
-                factory,
+                prepared,
                 oraclemcp_core::DEFAULT_LANE_MAILBOX_CAPACITY,
                 None,
-            );
-            bucket.lanes.push(lane);
+            ));
         }
         let index = bucket.next % bucket.lanes.len();
         bucket.next = bucket.next.wrapping_add(1);
         // SAFETY: the read-worker registry stores only `LaneRuntime` handles.
         // The caller sends to the returned lane after this mutex guard is gone,
         // mirroring the core stateful registry's copy-handle-before-send rule.
-        bucket.lanes[index].clone()
+        let lane = bucket.lanes[index].clone();
+        drop(lanes);
+        drop(stale_lanes);
+        // A concurrent winner may already have filled the bucket. Release this
+        // unused generation reservation only after leaving the registry lock.
+        drop(prepared);
+        Ok(lane)
     }
 
     fn close_read_lanes(&self, reason: DispatchCloseReason) {
@@ -2058,6 +2167,16 @@ impl HttpStatelessReadDispatch {
             }
         }
     }
+
+    #[cfg(test)]
+    fn read_lane_count(&self) -> usize {
+        self.read_lanes
+            .lock()
+            .expect("stateless read lane registry mutex not poisoned")
+            .values()
+            .map(|bucket| bucket.lanes.len())
+            .sum()
+    }
 }
 
 impl ToolDispatch for HttpStatelessReadDispatch {
@@ -2069,8 +2188,19 @@ impl ToolDispatch for HttpStatelessReadDispatch {
         args: serde_json::Value,
     ) -> DispatchFuture<'a> {
         Box::pin(async move {
+            let context = context.with_request_started_at(Instant::now());
+            if cx.checkpoint().is_err() {
+                return DispatchOutcome::Cancelled(cx.cancel_reason().unwrap_or_else(|| {
+                    asupersync::CancelReason::user(
+                        "stateless HTTP dispatch cancelled before lane admission",
+                    )
+                }));
+            }
             if stateless_read_worker_tool(name) {
-                let lane = self.read_lane_for(context);
+                let lane = match self.read_lane_for(cx, context) {
+                    Ok(lane) => lane,
+                    Err(error) => return DispatchOutcome::Err(error),
+                };
                 return lane.dispatch(cx, context, name, args).await;
             }
 
@@ -2113,75 +2243,104 @@ fn stateless_read_worker_factory_builder(
     metrics: Option<Arc<Metrics>>,
 ) -> Arc<ReadWorkerFactoryBuilder> {
     Arc::new(move |active_profile| {
-        stateless_read_worker_factory(wiring.clone(), metrics.clone(), active_profile)
-    })
-}
-
-fn stateless_read_worker_factory(
-    wiring: DispatcherWiring,
-    metrics: Option<Arc<Metrics>>,
-    active_profile: Option<String>,
-) -> Arc<LaneDispatchFactory> {
-    Arc::new(move |cx: &Cx, lane_context: &LaneContext| {
-        let mut wiring = wiring.clone();
-        let metrics = metrics.clone();
-        let active_profile = active_profile.clone();
-        let principal_key = lane_context.principal_key().to_owned();
-        Box::pin(async move {
-            let requested_profile = active_profile.as_deref().ok_or_else(|| {
-                ErrorEnvelope::new(
-                    ErrorClass::RuntimeStateRequired,
-                    "stateless read-worker lanes require an active connection profile",
-                )
-                .with_next_step("start the server with `oraclemcp serve --profile <name>`")
-            })?;
-            let profile_generation = match wiring
-                .profile_drain
-                .admit_mcp_profile(requested_profile, true)
-            {
-                ProfileGenerationAdmission::Ready(lease) => lease,
-                ProfileGenerationAdmission::NotExposed => {
-                    return Err(profile_not_available(requested_profile));
-                }
-                ProfileGenerationAdmission::Draining => {
-                    return Err(profile_draining_error(requested_profile));
-                }
-            };
-            let config = profile_generation.config().ok_or_else(|| {
-                ErrorEnvelope::new(
-                    ErrorClass::RuntimeStateRequired,
-                    "profile generation has no accepted config snapshot",
-                )
-            })?;
-            let Some(resolved) = resolve_profile_options_from_config_with(
-                config,
-                Some(requested_profile),
-                wiring.secret_resolver.as_ref(),
+        let requested_profile = active_profile.ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorClass::RuntimeStateRequired,
+                "stateless read-worker lanes require an active connection profile",
             )
-            .map_err(DbError::into_envelope)?
-            else {
-                return Err(profile_draining_error(requested_profile));
-            };
-            let profile = resolved.name.clone();
-            let level = resolved.level.clone();
-            let request_timeout = resolved.opts.call_timeout;
-            let require_signed_tools = resolved.require_signed_tools;
-            let conn = try_open_connection(cx, resolved.opts)
-                .await
-                .map_err(DbError::into_envelope)?;
-            if profile_generation.is_draining() {
-                return Err(profile_draining_error(requested_profile));
+            .with_next_step("start the server with `oraclemcp serve --profile <name>`")
+        })?;
+        let profile_generation = match wiring
+            .profile_drain
+            .admit_mcp_profile(&requested_profile, true)
+        {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            ProfileGenerationAdmission::NotExposed => {
+                return Err(profile_not_available(&requested_profile));
             }
-            wiring.active_profile = Some(profile);
-            wiring.level = level;
-            wiring.request_timeout = request_timeout;
-            wiring.custom_catalog = load_custom_catalog_with_requirement(require_signed_tools)?;
-            let dispatcher = build_oracle_dispatcher(conn, None, &wiring)
-                .with_profile_generation_lease(wiring.profile_drain.clone(), profile_generation)?
-                .with_default_audit_subject(audit_subject_from_principal_key(&principal_key));
-            let dispatcher: Arc<dyn ToolDispatch> = Arc::new(dispatcher);
-            Ok(maybe_wrap_metrics_dispatch(dispatcher, metrics.as_ref()))
-        })
+            ProfileGenerationAdmission::Draining => {
+                return Err(profile_draining_error(&requested_profile));
+            }
+        };
+        let request_timeout = profile_generation
+            .config()
+            .and_then(|config| config.profile(profile_generation.profile()))
+            .map(|profile| whole_request_timeout(profile.call_timeout_seconds))
+            .ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    "profile generation has no accepted profile snapshot",
+                )
+            })?;
+        let prepared_generation = Arc::new(Mutex::new(Some(profile_generation)));
+        let factory_wiring = wiring.clone();
+        let factory_metrics = metrics.clone();
+        let factory: Arc<LaneDispatchFactory> =
+            Arc::new(move |cx: &Cx, lane_context: &LaneContext| {
+                let prepared_generation = Arc::clone(&prepared_generation);
+                let mut wiring = factory_wiring.clone();
+                let metrics = factory_metrics.clone();
+                let requested_profile = requested_profile.clone();
+                let principal_key = lane_context.principal_key().to_owned();
+                Box::pin(async move {
+                    let profile_generation = prepared_generation
+                        .lock()
+                        .map_err(|error| {
+                            ErrorEnvelope::new(
+                                ErrorClass::Internal,
+                                format!("prepared profile-generation lock failed: {error}"),
+                            )
+                        })?
+                        .take()
+                        .ok_or_else(|| {
+                            ErrorEnvelope::new(
+                                ErrorClass::RuntimeStateRequired,
+                                "prepared read-worker dispatcher factory was already consumed",
+                            )
+                        })?;
+                    let config = profile_generation.config().ok_or_else(|| {
+                        ErrorEnvelope::new(
+                            ErrorClass::RuntimeStateRequired,
+                            "profile generation has no accepted config snapshot",
+                        )
+                    })?;
+                    let Some(resolved) = resolve_profile_options_from_config_with(
+                        config,
+                        Some(&requested_profile),
+                        wiring.secret_resolver.as_ref(),
+                    )
+                    .map_err(DbError::into_envelope)?
+                    else {
+                        return Err(profile_draining_error(&requested_profile));
+                    };
+                    let profile = resolved.name.clone();
+                    let level = resolved.level.clone();
+                    let request_timeout = resolved.opts.call_timeout;
+                    let require_signed_tools = resolved.require_signed_tools;
+                    let conn = try_open_connection(cx, resolved.opts)
+                        .await
+                        .map_err(DbError::into_envelope)?;
+                    if profile_generation.is_draining() {
+                        return Err(profile_draining_error(&requested_profile));
+                    }
+                    wiring.active_profile = Some(profile);
+                    wiring.level = level;
+                    wiring.request_timeout = request_timeout;
+                    wiring.custom_catalog =
+                        load_custom_catalog_with_requirement(require_signed_tools)?;
+                    let dispatcher = build_oracle_dispatcher(conn, None, &wiring)
+                        .with_profile_generation_lease(
+                            wiring.profile_drain.clone(),
+                            profile_generation,
+                        )?
+                        .with_default_audit_subject(audit_subject_from_principal_key(
+                            &principal_key,
+                        ));
+                    let dispatcher: Arc<dyn ToolDispatch> = Arc::new(dispatcher);
+                    Ok(maybe_wrap_metrics_dispatch(dispatcher, metrics.as_ref()))
+                })
+            });
+        Ok(PreparedLaneDispatch::new(factory, request_timeout))
     })
 }
 
@@ -2281,8 +2440,8 @@ fn build_server_with_lifecycle(
     let dispatcher: Arc<dyn ToolDispatch> = if options.transport.is_http() {
         if matches!(options.transport, ServerTransportMode::HttpStateful) {
             let stateful = Arc::new(
-                StatefulLaneDispatch::with_dispatch_factory(
-                    stateful_lane_factory(wiring.clone(), options.metrics.clone()),
+                StatefulLaneDispatch::with_dispatch_factory_builder(
+                    stateful_lane_factory_builder(wiring.clone(), options.metrics.clone()),
                     wiring.auditor.clone(),
                 )
                 .with_admission_controller(Arc::new(AdmissionController::n4_stateful_defaults())),
@@ -2309,7 +2468,12 @@ fn build_server_with_lifecycle(
         }
     } else {
         let dispatcher = build_oracle_dispatcher(conn, stateless_conn, &wiring);
-        Arc::new(dispatcher)
+        let dispatcher: Arc<dyn ToolDispatch> = Arc::new(dispatcher);
+        Arc::new(LaneRuntime::spawn_default_with_panic_auditor(
+            "served-stdio",
+            dispatcher,
+            wiring.auditor.clone(),
+        ))
     };
     let server = OracleMcpServer::with_exports(version, registry, caps, dispatcher, exports)
         .with_notifications(notifications);

@@ -549,10 +549,18 @@ struct ExecState {
     executed: Mutex<Vec<(String, Vec<OracleBind>)>>,
     diagnostics: Mutex<Vec<OracleRow>>,
     dbms_output: Mutex<DbmsOutput>,
+    describe_calls: AtomicUsize,
+    cancel_on_describe: AtomicUsize,
+    describe_error: Mutex<Option<DbError>>,
+    describe_pending: AtomicUsize,
+    dbms_output_enable_error: Mutex<Option<DbError>>,
+    dbms_output_error: Mutex<Option<DbError>>,
     dbms_output_enabled: AtomicUsize,
     dbms_output_limits: Mutex<Vec<(usize, usize)>>,
     current_call_timeout: Mutex<Option<Duration>>,
     call_timeout_sets: Mutex<Vec<Option<Duration>>>,
+    cancel_on_commit: AtomicUsize,
+    cancel_on_rollback: AtomicUsize,
     commits: AtomicUsize,
     rollbacks: AtomicUsize,
 }
@@ -763,7 +771,23 @@ impl OracleConnection for ExecRecordingMock {
         Ok(())
     }
 
-    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+    async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        self.state.describe_calls.fetch_add(1, Ordering::SeqCst);
+        if self.state.describe_pending.load(Ordering::SeqCst) != 0 {
+            return std::future::pending().await;
+        }
+        if let Some(err) = self
+            .state
+            .describe_error
+            .lock()
+            .expect("describe error mutex")
+            .clone()
+        {
+            return Err(err);
+        }
+        if self.state.cancel_on_describe.load(Ordering::SeqCst) != 0 {
+            cx.set_cancel_requested(true);
+        }
         Ok(OracleConnectionInfo {
             backend: Some(OracleBackend::RustOracle),
             database_role: Some("PRIMARY".to_owned()),
@@ -855,6 +879,15 @@ impl OracleConnection for ExecRecordingMock {
         self.state
             .dbms_output_enabled
             .fetch_add(1, Ordering::SeqCst);
+        if let Some(err) = self
+            .state
+            .dbms_output_enable_error
+            .lock()
+            .expect("DBMS_OUTPUT enable error mutex")
+            .clone()
+        {
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -869,16 +902,31 @@ impl OracleConnection for ExecRecordingMock {
             .lock()
             .expect("output limits mutex")
             .push((max_lines, max_chars));
+        if let Some(err) = self
+            .state
+            .dbms_output_error
+            .lock()
+            .expect("output error mutex")
+            .clone()
+        {
+            return Err(err);
+        }
         Ok(self.state.dbms_output.lock().expect("output mutex").clone())
     }
 
-    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+    async fn commit(&self, cx: &Cx) -> Result<(), DbError> {
         self.state.commits.fetch_add(1, Ordering::SeqCst);
+        if self.state.cancel_on_commit.load(Ordering::SeqCst) != 0 {
+            cx.set_cancel_requested(true);
+        }
         Ok(())
     }
 
-    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+    async fn rollback(&self, cx: &Cx) -> Result<(), DbError> {
         self.state.rollbacks.fetch_add(1, Ordering::SeqCst);
+        if self.state.cancel_on_rollback.load(Ordering::SeqCst) != 0 {
+            cx.set_cancel_requested(true);
+        }
         Ok(())
     }
 }
@@ -3266,6 +3314,292 @@ fn lifecycle_timeout_close_audits_timeout_reason() {
 }
 
 #[test]
+fn finalization_timeout_audits_unknown_before_best_effort_cleanup() {
+    use oraclemcp_audit::{
+        AuditError, AuditOutcome, AuditRecord, AuditSink, Auditor, MemoryAuditSink, SigningKey,
+    };
+
+    struct SharedSink(Arc<MemoryAuditSink>);
+    impl AuditSink for SharedSink {
+        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            self.0.append(record)
+        }
+
+        fn flush(&self) -> Result<(), AuditError> {
+            self.0.flush()
+        }
+    }
+
+    struct FinalizationTimeoutMock {
+        sink: Arc<MemoryAuditSink>,
+        rollbacks: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for FinalizationTimeoutMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            panic!("a known-unknown finalization timeout must audit without awaiting DB evidence")
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            Ok(Vec::new())
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            let records = self.sink.records();
+            assert_eq!(
+                records.len(),
+                1,
+                "durable terminal lifecycle audit must precede best-effort rollback"
+            );
+            assert_eq!(records[0].outcome, AuditOutcome::UnknownDiscarded);
+            self.rollbacks.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let sink = Arc::new(MemoryAuditSink::new());
+    let rollbacks = Arc::new(AtomicUsize::new(0));
+    let auditor = Arc::new(Auditor::new(
+        Box::new(SharedSink(Arc::clone(&sink))),
+        SigningKey::new(
+            "test-key",
+            b"request-finalization-timeout-test-key".to_vec(),
+        ),
+    ));
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(FinalizationTimeoutMock {
+            sink: Arc::clone(&sink),
+            rollbacks: Arc::clone(&rollbacks),
+        }),
+        Some("dev".to_owned()),
+        read_write_level(),
+    )
+    .with_auditor(auditor);
+
+    close_dispatcher_for_test(&dispatcher, DispatchCloseReason::RequestFinalizationTimeout)
+        .expect("known-unknown lifecycle record survives best-effort cleanup");
+
+    assert_eq!(rollbacks.load(Ordering::SeqCst), 1);
+    let records = sink.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].tool, "lane_lifecycle");
+    assert_eq!(records[0].outcome, AuditOutcome::UnknownDiscarded);
+    assert_eq!(
+        records[0]
+            .cancel
+            .as_ref()
+            .map(|cancel| cancel.reason.as_str()),
+        Some("request_finalization_timeout")
+    );
+    assert!(records[0].hash_is_valid());
+    assert_eq!(
+        dispatcher
+            .connection_quarantine()
+            .expect("quarantine lock")
+            .expect("finalization timeout quarantines")
+            .outcome,
+        AuditOutcome::UnknownDiscarded
+    );
+}
+
+#[test]
+fn partial_request_limit_install_failure_quarantines_failed_rollback() {
+    #[derive(Default)]
+    struct LimitState {
+        call_timeout: Mutex<Option<Duration>>,
+        request_deadline: Mutex<Option<Time>>,
+        deadline_restore_attempts: AtomicUsize,
+        timeout_restore_attempts: AtomicUsize,
+    }
+
+    struct LimitInstallFailureMock {
+        state: Arc<LimitState>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for LimitInstallFailureMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            Ok(Vec::new())
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        fn call_timeout(&self) -> Result<Option<Duration>, DbError> {
+            Ok(*self.state.call_timeout.lock().expect("call timeout mutex"))
+        }
+
+        fn set_call_timeout(&self, timeout: Option<Duration>) -> Result<(), DbError> {
+            if timeout.is_none()
+                && self
+                    .state
+                    .call_timeout
+                    .lock()
+                    .expect("call timeout mutex")
+                    .is_some()
+            {
+                self.state
+                    .timeout_restore_attempts
+                    .fetch_add(1, Ordering::SeqCst);
+                return Err(DbError::Internal(
+                    "injected call-timeout rollback failure".to_owned(),
+                ));
+            }
+            *self.state.call_timeout.lock().expect("call timeout mutex") = timeout;
+            Ok(())
+        }
+
+        fn request_deadline(&self, _cx: &Cx) -> Result<Option<Time>, DbError> {
+            Ok(*self
+                .state
+                .request_deadline
+                .lock()
+                .expect("request deadline mutex"))
+        }
+
+        fn set_request_deadline(&self, _cx: &Cx, deadline: Option<Time>) -> Result<(), DbError> {
+            if deadline.is_none()
+                && self
+                    .state
+                    .request_deadline
+                    .lock()
+                    .expect("request deadline mutex")
+                    .is_some()
+            {
+                self.state
+                    .deadline_restore_attempts
+                    .fetch_add(1, Ordering::SeqCst);
+                return Err(DbError::Internal(
+                    "injected request-deadline rollback failure".to_owned(),
+                ));
+            }
+            *self
+                .state
+                .request_deadline
+                .lock()
+                .expect("request deadline mutex") = deadline;
+            Ok(())
+        }
+
+        fn set_request_quota(
+            &self,
+            _cx: &Cx,
+            quota: Option<DbRequestQuota>,
+        ) -> Result<(), DbError> {
+            if quota.is_some() {
+                return Err(DbError::Internal(
+                    "injected request-quota installation failure".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    let state = Arc::new(LimitState::default());
+    let conn = LimitInstallFailureMock {
+        state: Arc::clone(&state),
+    };
+    let quarantine = SyncMutex::new(None);
+    RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds")
+        .block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            let deadline = cx.now() + Duration::from_secs(30);
+            let quota = DbRequestQuota::new(asupersync::Budget::new().with_poll_quota(10));
+            let error = match ConnectionLimitGuard::install(
+                &cx,
+                &conn,
+                Some(&quarantine),
+                Some(Duration::from_secs(5)),
+                Some(deadline),
+                Some(quota),
+            ) {
+                Ok(_) => panic!("request-quota installation should fail"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("limit rollback also failed"));
+        });
+
+    assert_eq!(state.deadline_restore_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(state.timeout_restore_attempts.load(Ordering::SeqCst), 1);
+    let quarantine = quarantine
+        .lock()
+        .expect("quarantine mutex")
+        .clone()
+        .expect("failed limit rollback quarantines");
+    assert_eq!(
+        quarantine.outcome,
+        oraclemcp_audit::AuditOutcome::UnknownDiscarded
+    );
+    assert!(
+        quarantine
+            .message
+            .contains("prior limits could not be restored"),
+        "{}",
+        quarantine.message
+    );
+}
+
+#[test]
 fn writes_ddl_and_dcl_are_refused_before_touching_the_db() {
     let dispatcher = OracleDispatcher::new(Box::new(NoExecMock));
     // Each must be refused fail-closed — and NoExecMock panics if any of
@@ -4700,9 +5034,15 @@ fn query_timeout_override_cannot_widen_profile_timeout() {
         .expect("query with timeout");
     assert_eq!(out["row_count"], json!(0));
     let timeouts = state.call_timeout_sets.lock().expect("timeout sets mutex");
+    assert!(
+        timeouts.is_empty(),
+        "an equal-or-looser override must not churn the existing profile limit"
+    );
+    drop(timeouts);
     assert_eq!(
-        timeouts.as_slice(),
-        &[Some(Duration::from_secs(10)), Some(Duration::from_secs(10))]
+        *state.current_call_timeout.lock().expect("timeout mutex"),
+        Some(Duration::from_secs(10)),
+        "the profile's tighter timeout remains installed"
     );
 }
 
@@ -5636,6 +5976,12 @@ fn explain_plan_executes_only_with_read_write_and_explicit_allow() {
         json!("READ_WRITE")
     );
     assert_eq!(out["diagnostic_write"]["explicitly_allowed"], json!(true));
+    assert_eq!(out["diagnostic_write"]["rolled_back"], json!(true));
+    assert_eq!(
+        state.rollbacks.load(Ordering::SeqCst),
+        1,
+        "PLAN_TABLE diagnostic rows are always rolled back after capture"
+    );
 
     let executed = state.executed.lock().expect("exec mutex");
     assert_eq!(executed.len(), 1);
@@ -5715,6 +6061,670 @@ fn cancellation_after_mutating_execute_rolls_back_dirty_session() {
         0,
         "cancelled dirty session must not commit"
     );
+}
+
+/// QA85: cancellation and secondary-finalization failures at a mutation's
+/// terminal boundary must never invite an unsafe retry or let a preview escape
+/// its request cancellation.
+mod qa85_terminal_boundaries {
+    use super::*;
+    use oraclemcp_audit::{
+        AuditError, AuditOutcome, AuditRecord, AuditSink, Auditor, MemoryAuditSink, SigningKey,
+    };
+    use std::task::Poll;
+
+    struct SharedSink(Arc<MemoryAuditSink>);
+
+    impl AuditSink for SharedSink {
+        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            self.0.append(record)
+        }
+
+        fn flush(&self) -> Result<(), AuditError> {
+            self.0.flush()
+        }
+    }
+
+    fn auditor_with_sink() -> (Arc<Auditor>, Arc<MemoryAuditSink>) {
+        let sink = Arc::new(MemoryAuditSink::new());
+        let auditor = Arc::new(Auditor::new(
+            Box::new(SharedSink(Arc::clone(&sink))),
+            SigningKey::new("qa85-test-key", b"qa85-terminal-boundary-key".to_vec()),
+        ));
+        (auditor, sink)
+    }
+
+    struct FailAfterFirstAppendSink {
+        inner: Arc<MemoryAuditSink>,
+        appends: Arc<AtomicUsize>,
+    }
+
+    impl AuditSink for FailAfterFirstAppendSink {
+        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            let append_index = self.appends.fetch_add(1, Ordering::SeqCst);
+            if append_index > 0 {
+                return Err(AuditError::Io(
+                    "injected terminal audit sink failure".to_owned(),
+                ));
+            }
+            self.inner.append(record)
+        }
+
+        fn flush(&self) -> Result<(), AuditError> {
+            self.inner.flush()
+        }
+    }
+
+    struct CancelOnAppendSink {
+        inner: Arc<MemoryAuditSink>,
+        cx: Cx,
+    }
+
+    impl AuditSink for CancelOnAppendSink {
+        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            self.inner.append(record)?;
+            self.cx.set_cancel_requested(true);
+            Ok(())
+        }
+
+        fn flush(&self) -> Result<(), AuditError> {
+            self.inner.flush()
+        }
+    }
+
+    fn level_and_generation(dispatcher: &OracleDispatcher) -> (OperatingLevel, u64) {
+        RuntimeBuilder::current_thread()
+            .build()
+            .expect("asupersync test runtime builds")
+            .block_on(async {
+                let cx = Cx::current().expect("block_on installs a current Cx");
+                let state = dispatcher
+                    .state
+                    .lock(&cx)
+                    .await
+                    .expect("dispatcher state lock");
+                (state.level.effective_level(), state.grant_generation)
+            })
+    }
+
+    fn assert_uncertain_ddl_preflight_aborts(case: &str, tool: &str, mut args: Value) {
+        let state = Arc::new(ExecState::default());
+        let intents = write_intent_log(case);
+        let (auditor, sink) = auditor_with_sink();
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+            Some("dev".to_owned()),
+            ddl_level(),
+        )
+        .with_auditor(auditor)
+        .with_write_intent_log(Arc::clone(&intents));
+
+        let preview = dispatcher
+            .dispatch(tool, args.clone())
+            .unwrap_or_else(|error| panic!("{case}: preview failed: {error:?}"));
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{case}: preview did not mint confirmation"))
+            .to_owned();
+        *state.describe_error.lock().expect("describe error mutex") = Some(DbError::Cancelled(
+            format!("{case}: injected evidence cancellation"),
+        ));
+        args["execute"] = json!(true);
+        args["confirm"] = json!(confirm);
+
+        let error = match dispatcher.dispatch(tool, args) {
+            Ok(value) => panic!("{case}: uncertain evidence unexpectedly applied: {value}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.error_class, ErrorClass::ConnectionFailed, "{case}");
+        assert!(
+            error.message.contains("unknown_discarded"),
+            "{case}: {error:?}"
+        );
+        assert!(
+            state.executed.lock().expect("exec mutex").is_empty(),
+            "{case}: evidence uncertainty must stop before DDL execution"
+        );
+        assert!(
+            sink.records().is_empty(),
+            "{case}: Pending audit must not be written"
+        );
+        assert!(
+            intents.unresolved().expect("intent snapshot").is_empty(),
+            "{case}: pre-execute failure must resolve the durable intent"
+        );
+        let ledger = std::fs::read_to_string(intents.path().expect("intent path"))
+            .expect("intent ledger is readable");
+        assert!(
+            ledger.contains("ABORTED_BEFORE_EXECUTE"),
+            "{case}: terminal intent resolution must distinguish pre-execute abort: {ledger}"
+        );
+        let quarantine = dispatcher
+            .connection_quarantine()
+            .expect("quarantine lock")
+            .expect("uncertain preflight quarantines");
+        assert_eq!(quarantine.outcome, AuditOutcome::UnknownDiscarded, "{case}");
+    }
+
+    #[test]
+    fn cancelled_profile_prepare_cannot_cross_switch_commit_point() {
+        let candidate = Arc::new(ExecState::default());
+        candidate.cancel_on_describe.store(1, Ordering::SeqCst);
+        let connector_state = Arc::clone(&candidate);
+        let dispatcher = OracleDispatcher::new_switchable(
+            Box::new(OneRowMock),
+            Some("dev".to_owned()),
+            default_read_only_level(),
+            Arc::new(move |_cx, _profile| {
+                let state = Arc::clone(&connector_state);
+                Box::pin(async move { Ok(session_bundle(ExecRecordingMock::new(state))) })
+            }),
+        );
+        let before = level_and_generation(&dispatcher);
+
+        let error = dispatcher
+            .dispatch("oracle_switch_profile", json!({ "profile": "other" }))
+            .expect_err("cancellation during candidate metadata aborts before switch commit");
+        assert_eq!(error.error_class, ErrorClass::Timeout);
+        assert_eq!(level_and_generation(&dispatcher), before);
+        assert_eq!(candidate.describe_calls.load(Ordering::SeqCst), 1);
+
+        let active = dispatcher
+            .dispatch("oracle_connection_info", json!({}))
+            .expect("old profile remains usable after aborted switch");
+        assert_eq!(active["active_profile"], json!("dev"));
+    }
+
+    #[test]
+    fn dropped_elevation_evidence_future_cannot_mutate_live_authority() {
+        let state = Arc::new(ExecState::default());
+        let (auditor, sink) = auditor_with_sink();
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+            Some("dev".to_owned()),
+            SessionLevelState::new(OperatingLevel::ReadWrite, false),
+        )
+        .with_auditor(auditor);
+        let preview = dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({ "level": "READ_WRITE", "ttl_seconds": 60 }),
+            )
+            .expect("preview elevation");
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("elevation grant")
+            .to_owned();
+        let before = level_and_generation(&dispatcher);
+        state.describe_pending.store(1, Ordering::SeqCst);
+
+        RuntimeBuilder::current_thread()
+            .build()
+            .expect("asupersync test runtime builds")
+            .block_on(async {
+                let cx = Cx::current().expect("block_on installs a current Cx");
+                let mut apply = ToolDispatch::dispatch(
+                    &dispatcher,
+                    &cx,
+                    DispatchContext::default(),
+                    "oracle_set_session_level",
+                    json!({
+                        "level": "READ_WRITE",
+                        "ttl_seconds": 60,
+                        "execute": true,
+                        "confirm": confirm,
+                    }),
+                );
+                std::future::poll_fn(|task_cx| match apply.as_mut().poll(task_cx) {
+                    Poll::Ready(outcome) => {
+                        panic!("pending evidence dispatch unexpectedly completed: {outcome:?}")
+                    }
+                    Poll::Pending if state.describe_calls.load(Ordering::SeqCst) > 0 => {
+                        Poll::Ready(())
+                    }
+                    Poll::Pending => {
+                        task_cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                })
+                .await;
+                drop(apply);
+            });
+
+        state.describe_pending.store(0, Ordering::SeqCst);
+        assert_eq!(level_and_generation(&dispatcher), before);
+        assert!(
+            sink.records().is_empty(),
+            "no successful elevation audit exists, so live authority must stay unchanged"
+        );
+        let retry = dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({
+                    "level": "READ_WRITE",
+                    "ttl_seconds": 60,
+                    "execute": true,
+                    "confirm": confirm,
+                }),
+            )
+            .expect_err("a staged transition still consumes its single-use confirmation");
+        assert_eq!(retry.error_class, ErrorClass::ChallengeRequired);
+    }
+
+    #[test]
+    fn uncertain_elevation_evidence_cannot_mutate_level_or_generation() {
+        let state = Arc::new(ExecState::default());
+        let (auditor, sink) = auditor_with_sink();
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+            Some("dev".to_owned()),
+            SessionLevelState::new(OperatingLevel::ReadWrite, false),
+        )
+        .with_auditor(auditor);
+        let preview = dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({ "level": "READ_WRITE", "ttl_seconds": 60 }),
+            )
+            .expect("preview elevation");
+        let confirm = preview["confirmation"]["confirm"]
+            .as_str()
+            .expect("elevation grant")
+            .to_owned();
+        let before = level_and_generation(&dispatcher);
+        *state.describe_error.lock().expect("describe error mutex") = Some(DbError::Cancelled(
+            "injected elevation evidence cancellation".to_owned(),
+        ));
+
+        let error = dispatcher
+            .dispatch(
+                "oracle_set_session_level",
+                json!({
+                    "level": "READ_WRITE",
+                    "ttl_seconds": 60,
+                    "execute": true,
+                    "confirm": confirm,
+                }),
+            )
+            .expect_err("uncertain evidence refuses elevation");
+        assert_eq!(error.error_class, ErrorClass::ConnectionFailed);
+        assert!(error.message.contains("unknown_discarded"), "{error:?}");
+        assert_eq!(level_and_generation(&dispatcher), before);
+        assert!(sink.records().is_empty());
+        assert_eq!(
+            dispatcher
+                .connection_quarantine()
+                .expect("quarantine lock")
+                .expect("uncertain evidence quarantines")
+                .outcome,
+            AuditOutcome::UnknownDiscarded
+        );
+    }
+
+    #[test]
+    fn streaming_dispatch_preserves_durably_audited_elevation_after_late_cancellation() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("asupersync test runtime builds");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            let sink = Arc::new(MemoryAuditSink::new());
+            let auditor = Arc::new(Auditor::new(
+                Box::new(CancelOnAppendSink {
+                    inner: Arc::clone(&sink),
+                    cx: cx.clone(),
+                }),
+                SigningKey::new(
+                    "qa85-test-key",
+                    b"qa85-cancel-after-elevation-audit".to_vec(),
+                ),
+            ));
+            let dispatcher = OracleDispatcher::new_with_profile_level(
+                Box::new(ExecRecordingMock::new(Arc::new(ExecState::default()))),
+                Some("dev".to_owned()),
+                SessionLevelState::new(OperatingLevel::ReadWrite, false),
+            )
+            .with_auditor(auditor);
+            let preview = match ToolDispatch::dispatch(
+                &dispatcher,
+                &cx,
+                DispatchContext::default(),
+                "oracle_set_session_level",
+                json!({ "level": "READ_WRITE", "ttl_seconds": 60 }),
+            )
+            .await
+            {
+                Outcome::Ok(value) => value,
+                other => panic!("elevation preview failed: {other:?}"),
+            };
+            let confirm = preview["confirmation"]["confirm"]
+                .as_str()
+                .expect("elevation grant")
+                .to_owned();
+            let before_generation = dispatcher
+                .state
+                .lock(&cx)
+                .await
+                .expect("dispatcher state lock")
+                .grant_generation;
+            let (frames_tx, _frames_rx) = mpsc::channel(1);
+            let outcome = ToolDispatch::dispatch_stream(
+                &dispatcher,
+                &cx,
+                DispatchContext::default(),
+                "oracle_set_session_level",
+                json!({
+                    "level": "READ_WRITE",
+                    "ttl_seconds": 60,
+                    "execute": true,
+                    "confirm": confirm,
+                }),
+                frames_tx,
+            )
+            .await;
+            let value = match outcome {
+                Outcome::Ok(value) => value,
+                other => panic!("terminal elevation must win late cancellation: {other:?}"),
+            };
+            assert_eq!(value["changed"], json!(true));
+            assert_eq!(value["session"]["current_level"], json!("READ_WRITE"));
+            assert_eq!(value["deadline_observed_after_effect"], json!(true));
+            let records = sink.records();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].outcome, AuditOutcome::Succeeded);
+
+            cx.set_cancel_requested(false);
+            let state = dispatcher
+                .state
+                .lock(&cx)
+                .await
+                .expect("dispatcher state lock after clearing test cancellation");
+            assert_eq!(state.level.effective_level(), OperatingLevel::ReadWrite);
+            assert!(state.grant_generation > before_generation);
+        });
+    }
+
+    #[test]
+    fn ddl_mutators_resolve_uncertain_evidence_as_aborted_before_execute() {
+        assert_uncertain_ddl_preflight_aborts(
+            "qa85-compile-evidence-cancel",
+            "oracle_compile_object",
+            json!({ "owner": "APP", "object_type": "PACKAGE", "name": "EMP_API" }),
+        );
+        assert_uncertain_ddl_preflight_aborts(
+            "qa85-create-evidence-cancel",
+            "oracle_create_or_replace",
+            json!({
+                "source_code": "CREATE OR REPLACE VIEW EMP_V AS SELECT 1 AS ID FROM dual"
+            }),
+        );
+        assert_uncertain_ddl_preflight_aborts(
+            "qa85-patch-evidence-cancel",
+            "oracle_patch_source",
+            json!({
+                "owner": "APP",
+                "name": "EMP_API",
+                "object_type": "PACKAGE_BODY",
+                "old_text": "NULL",
+                "new_text": "1"
+            }),
+        );
+    }
+
+    #[test]
+    fn uncertain_dbms_output_setup_aborts_before_main_execute() {
+        let state = Arc::new(ExecState::default());
+        *state
+            .dbms_output_enable_error
+            .lock()
+            .expect("DBMS_OUTPUT enable error mutex") = Some(DbError::Cancelled(
+            "injected DBMS_OUTPUT setup cancellation".to_owned(),
+        ));
+        let intents = write_intent_log("qa85-dbms-output-enable-cancel");
+        let (auditor, sink) = auditor_with_sink();
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+            Some("dev".to_owned()),
+            read_write_level(),
+        )
+        .with_auditor(auditor)
+        .with_write_intent_log(Arc::clone(&intents));
+        let sql = "BEGIN SYS.DBMS_OUTPUT.PUT_LINE('never-ran'); END;";
+        let confirm = preview_confirm(&dispatcher, sql);
+
+        let error = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({
+                    "sql": sql,
+                    "commit": true,
+                    "confirm": confirm,
+                    "dbms_output": true,
+                }),
+            )
+            .expect_err("uncertain DBMS_OUTPUT setup must fail closed");
+        assert_eq!(error.error_class, ErrorClass::ConnectionFailed);
+        assert!(error.message.contains("unknown_discarded"), "{error:?}");
+        assert_eq!(state.dbms_output_enabled.load(Ordering::SeqCst), 1);
+        assert!(
+            state.executed.lock().expect("exec mutex").is_empty(),
+            "the approved statement must not run after DBMS_OUTPUT setup uncertainty"
+        );
+        assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+        assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+        let records = sink.records();
+        assert_eq!(records.len(), 2, "Pending plus terminal uncertainty");
+        assert_eq!(records[0].outcome, AuditOutcome::Pending);
+        assert_eq!(records[1].outcome, AuditOutcome::UnknownDiscarded);
+        assert!(intents.unresolved().expect("intent snapshot").is_empty());
+        let ledger = std::fs::read_to_string(intents.path().expect("intent path"))
+            .expect("intent ledger is readable");
+        assert!(ledger.contains("ABORTED_BEFORE_EXECUTE"), "{ledger}");
+    }
+
+    #[test]
+    fn confirmed_commit_survives_late_cancellation_and_finalizes_durable_records() {
+        let state = Arc::new(ExecState::default());
+        state.cancel_on_commit.store(1, Ordering::SeqCst);
+        let intents = write_intent_log("qa85-late-cancel-after-commit");
+        let (auditor, sink) = auditor_with_sink();
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+            Some("dev".to_owned()),
+            read_write_level(),
+        )
+        .with_auditor(auditor)
+        .with_write_intent_log(Arc::clone(&intents));
+        let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+        let confirm = preview_confirm(&dispatcher, sql);
+
+        run_with_current_cx(|cx| {
+            let out = dispatcher
+                .dispatch_with_cx(
+                    cx,
+                    "oracle_execute",
+                    json!({ "sql": sql, "commit": true, "confirm": confirm }),
+                )
+                .expect("a confirmed commit remains successful after late cancellation");
+            assert_eq!(out["executed"], json!(true));
+            assert_eq!(out["committed"], json!(true));
+            assert_eq!(out["deadline_observed_after_effect"], json!(true));
+        });
+
+        assert_eq!(state.commits.load(Ordering::SeqCst), 1);
+        assert!(
+            intents.unresolved().expect("intent snapshot").is_empty(),
+            "known commit success resolves the durable write intent"
+        );
+        let records = sink.records();
+        assert_eq!(records.len(), 2, "pending plus terminal audit record");
+        assert_eq!(records[0].outcome, AuditOutcome::Pending);
+        assert_eq!(records[1].outcome, AuditOutcome::Succeeded);
+    }
+
+    #[test]
+    fn rollback_preview_with_late_cancellation_is_not_reported_as_success() {
+        let state = Arc::new(ExecState::default());
+        state.cancel_on_rollback.store(1, Ordering::SeqCst);
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("asupersync test runtime builds");
+        let outcome = runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            ToolDispatch::dispatch(
+                &dispatcher,
+                &cx,
+                DispatchContext::default(),
+                "oracle_execute",
+                json!({
+                    "sql": "UPDATE employees SET name = name WHERE employee_id = 100",
+                    "commit": false,
+                }),
+            )
+            .await
+        });
+
+        assert!(
+            matches!(outcome, Outcome::Cancelled(_)),
+            "rollback-only execution is a cancellable preview, got {outcome:?}"
+        );
+        assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+        assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn commit_in_doubt_remains_primary_when_terminal_audit_also_fails() {
+        let state = Arc::new(ExecState::default());
+        let intents = write_intent_log("qa85-commit-in-doubt-audit-failure");
+        let memory_sink = Arc::new(MemoryAuditSink::new());
+        let append_count = Arc::new(AtomicUsize::new(0));
+        let auditor = Arc::new(Auditor::new(
+            Box::new(FailAfterFirstAppendSink {
+                inner: Arc::clone(&memory_sink),
+                appends: Arc::clone(&append_count),
+            }),
+            SigningKey::new("qa85-test-key", b"qa85-terminal-audit-failure".to_vec()),
+        ));
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(CommitInDoubtMock {
+                state: Arc::clone(&state),
+            }),
+            Some("dev".to_owned()),
+            read_write_level(),
+        )
+        .with_auditor(auditor)
+        .with_write_intent_log(Arc::clone(&intents));
+        let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+        let confirm = preview_confirm(&dispatcher, sql);
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": sql, "commit": true, "confirm": confirm }),
+            )
+            .expect_err("lost commit response remains commit-in-doubt");
+        assert_eq!(err.error_class, ErrorClass::ConnectionFailed);
+        assert!(err.message.contains("commit_in_doubt"), "{}", err.message);
+        assert_eq!(append_count.load(Ordering::SeqCst), 2);
+        assert_eq!(memory_sink.records().len(), 1, "only Pending was durable");
+        assert_eq!(state.commits.load(Ordering::SeqCst), 1);
+        assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            intents.unresolved().expect("intent snapshot").len(),
+            1,
+            "an in-doubt commit must leave its durable intent unresolved"
+        );
+
+        let later = dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect_err("commit-in-doubt quarantines the connection");
+        assert_eq!(later.error_class, ErrorClass::RuntimeStateRequired);
+    }
+
+    #[test]
+    fn cancelled_audit_evidence_preflight_quarantines_before_execute() {
+        let state = Arc::new(ExecState::default());
+        *state.describe_error.lock().expect("describe error mutex") = Some(DbError::Cancelled(
+            "injected audit-evidence cancellation".to_owned(),
+        ));
+        let (auditor, sink) = auditor_with_sink();
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+            Some("dev".to_owned()),
+            read_write_level(),
+        )
+        .with_auditor(auditor);
+        let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+        let confirm = preview_confirm(&dispatcher, sql);
+
+        let err = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": sql, "commit": true, "confirm": confirm }),
+            )
+            .expect_err("uncertain audit evidence must stop before execute");
+        assert_eq!(err.error_class, ErrorClass::ConnectionFailed);
+        assert!(err.message.contains("unknown_discarded"), "{}", err.message);
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
+        assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+        assert!(
+            sink.records().is_empty(),
+            "Pending is not written preflight"
+        );
+
+        let later = dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect_err("uncertain preflight quarantines the connection");
+        assert_eq!(later.error_class, ErrorClass::RuntimeStateRequired);
+    }
+
+    #[test]
+    fn uncertain_dbms_output_after_commit_is_in_band_and_quarantines_reuse() {
+        let state = Arc::new(ExecState::default());
+        *state.dbms_output_error.lock().expect("output error mutex") = Some(DbError::Cancelled(
+            "injected DBMS_OUTPUT drain cancellation".to_owned(),
+        ));
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+        let sql = "BEGIN SYS.DBMS_OUTPUT.PUT_LINE('done'); END;";
+        let confirm = preview_confirm(&dispatcher, sql);
+
+        let out = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({
+                    "sql": sql,
+                    "commit": true,
+                    "confirm": confirm,
+                    "dbms_output": true,
+                }),
+            )
+            .expect("known commit survives optional diagnostic uncertainty");
+        assert_eq!(out["executed"], json!(true));
+        assert_eq!(out["committed"], json!(true));
+        assert!(out.get("dbms_output").is_none());
+        assert!(
+            out["dbms_output_unavailable"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("terminal database outcome")),
+            "optional diagnostic loss is reported in-band: {out}"
+        );
+        assert_eq!(state.commits.load(Ordering::SeqCst), 1);
+
+        let later = dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect_err("uncertain optional diagnostic quarantines later reuse");
+        assert_eq!(later.error_class, ErrorClass::RuntimeStateRequired);
+        assert!(later.message.contains("quarantined"), "{}", later.message);
+    }
 }
 
 /// K7: the read-only gate attaches a "parameterize inline literals" next step
@@ -7719,6 +8729,224 @@ mod dependents_preview {
         assert_eq!(block["count"], json!(0));
         assert_eq!(block["objects"].as_array().unwrap().len(), 0);
         assert_eq!(block["at_risk_of_invalid"].as_array().unwrap().len(), 0);
+    }
+}
+
+/// QA85: a multi-round-trip health request inherits one absolute deadline and
+/// one shared quota handle. Later subchecks cannot get a fresh allowance merely
+/// because they issue a separate database call.
+mod qa85_shared_health_budget {
+    use super::*;
+
+    #[derive(Default)]
+    struct BudgetTrackingState {
+        request_deadline: Mutex<Option<Time>>,
+        request_quota: Mutex<Option<DbRequestQuota>>,
+        observed_deadlines: Mutex<Vec<Time>>,
+        observed_quotas: Mutex<Vec<DbRequestQuota>>,
+        remaining_before_query: Mutex<Vec<u32>>,
+        query_attempts: AtomicUsize,
+        query_completions: AtomicUsize,
+    }
+
+    struct BudgetTrackingHealthMock {
+        state: Arc<BudgetTrackingState>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for BudgetTrackingHealthMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.state.query_attempts.fetch_add(1, Ordering::SeqCst);
+            let deadline = self
+                .state
+                .request_deadline
+                .lock()
+                .expect("request deadline mutex")
+                .expect("dispatch installed an absolute request deadline");
+            let quota = self
+                .state
+                .request_quota
+                .lock()
+                .expect("request quota mutex")
+                .clone()
+                .expect("dispatch installed a shared request quota");
+            self.state
+                .observed_deadlines
+                .lock()
+                .expect("observed deadlines mutex")
+                .push(deadline);
+            self.state
+                .remaining_before_query
+                .lock()
+                .expect("remaining quota mutex")
+                .push(quota.polls_remaining());
+            self.state
+                .observed_quotas
+                .lock()
+                .expect("observed quotas mutex")
+                .push(quota.clone());
+            quota.consume_checkpoint("qa85 health database round trip")?;
+            self.state.query_completions.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        fn request_deadline(&self, _cx: &Cx) -> Result<Option<Time>, DbError> {
+            Ok(*self
+                .state
+                .request_deadline
+                .lock()
+                .expect("request deadline mutex"))
+        }
+
+        fn set_request_deadline(&self, _cx: &Cx, deadline: Option<Time>) -> Result<(), DbError> {
+            *self
+                .state
+                .request_deadline
+                .lock()
+                .expect("request deadline mutex") = deadline;
+            Ok(())
+        }
+
+        fn request_quota(&self, _cx: &Cx) -> Result<Option<DbRequestQuota>, DbError> {
+            Ok(self
+                .state
+                .request_quota
+                .lock()
+                .expect("request quota mutex")
+                .clone())
+        }
+
+        fn set_request_quota(
+            &self,
+            _cx: &Cx,
+            quota: Option<DbRequestQuota>,
+        ) -> Result<(), DbError> {
+            *self
+                .state
+                .request_quota
+                .lock()
+                .expect("request quota mutex") = quota;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn health_subchecks_share_one_installed_deadline_and_exhaust_one_quota() {
+        let state = Arc::new(BudgetTrackingState::default());
+        let dispatcher = OracleDispatcher::new_with_profile(
+            Box::new(BudgetTrackingHealthMock {
+                state: Arc::clone(&state),
+            }),
+            Some("dev".to_owned()),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("asupersync test runtime builds");
+        let outcome = runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            let admitted_at = cx.now();
+            let caller_budget = asupersync::Budget::new()
+                .with_timeout(admitted_at, Duration::from_secs(30))
+                .with_poll_quota(8);
+            let request_budget = RequestBudget::from_budget_at(admitted_at, caller_budget);
+            let context = DispatchContext::default()
+                .with_admitted_at(admitted_at)
+                .with_caller_budget(caller_budget)
+                .with_request_budget(&request_budget);
+            ToolDispatch::dispatch(
+                &dispatcher,
+                &cx,
+                context,
+                "oracle_db_health",
+                json!({ "health_type": "all" }),
+            )
+            .await
+        });
+
+        match outcome {
+            Outcome::Err(error) => assert_eq!(error.error_class, ErrorClass::Timeout),
+            other => panic!("shared quota exhaustion must stop health dispatch: {other:?}"),
+        }
+        assert_eq!(
+            state.query_attempts.load(Ordering::SeqCst),
+            4,
+            "remaining quota observations: {:?}",
+            *state
+                .remaining_before_query
+                .lock()
+                .expect("remaining quota mutex")
+        );
+        assert_eq!(state.query_completions.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            state
+                .remaining_before_query
+                .lock()
+                .expect("remaining quota mutex")
+                .as_slice(),
+            &[3, 2, 1, 0],
+            "each database round trip consumes the same request allowance"
+        );
+        let deadlines = state
+            .observed_deadlines
+            .lock()
+            .expect("observed deadlines mutex");
+        assert_eq!(deadlines.len(), 4);
+        assert!(deadlines.windows(2).all(|pair| pair[0] == pair[1]));
+        drop(deadlines);
+        let quotas = state.observed_quotas.lock().expect("observed quotas mutex");
+        assert_eq!(quotas.len(), 4);
+        assert!(quotas.windows(2).all(|pair| pair[0].ptr_eq(&pair[1])));
+        drop(quotas);
+        assert_eq!(
+            *state
+                .request_deadline
+                .lock()
+                .expect("request deadline mutex"),
+            None,
+            "dispatch restores the connection-scoped deadline"
+        );
+        assert!(
+            state
+                .request_quota
+                .lock()
+                .expect("request quota mutex")
+                .is_none(),
+            "dispatch restores the connection-scoped quota"
+        );
     }
 }
 

@@ -19,13 +19,14 @@
 //! (`acquired`/`released`/`discarded`/`in_use`/`open`) so the zero-leaked-session
 //! invariant (`is_balanced`) and the bound (`is_bounded`) are observable.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use asupersync::Cx;
+use asupersync::{Cx, RegionId, TaskId, Time};
 use async_trait::async_trait;
 
-use crate::connection::{OracleConnection, RustOracleConnection, db_checkpoint};
+use crate::connection::{DbRequestQuota, OracleConnection, RustOracleConnection, db_checkpoint};
 use crate::error::DbError;
 use crate::types::{
     OracleBackend, OracleBind, OracleConnectOptions, OracleConnectionInfo, OracleRow,
@@ -191,15 +192,62 @@ struct PoolState {
     discarded: u64,
 }
 
+#[derive(Clone, Debug, Default)]
+struct PoolRequestLimits {
+    deadline: Option<Time>,
+    quota: Option<DbRequestQuota>,
+}
+
+type PoolRequestKey = (RegionId, TaskId);
+
 /// A small async thin-mode Oracle connection pool.
 #[derive(Clone)]
 pub struct OraclePool {
     manager: OracleConnectionManager,
     settings: PoolSettings,
     state: Arc<Mutex<PoolState>>,
+    /// Request limits are keyed by the explicit Asupersync task identity, not
+    /// stored as one mutable pool-wide value. Concurrent callers therefore
+    /// cannot overwrite or restore each other's absolute deadlines/quotas.
+    request_limits: Arc<Mutex<HashMap<PoolRequestKey, PoolRequestLimits>>>,
 }
 
 impl OraclePool {
+    fn request_key(cx: &Cx) -> PoolRequestKey {
+        (cx.region_id(), cx.task_id())
+    }
+
+    fn request_limits_for(&self, cx: &Cx) -> Result<PoolRequestLimits, DbError> {
+        self.request_limits
+            .lock()
+            .map(|limits| {
+                limits
+                    .get(&Self::request_key(cx))
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .map_err(|err| DbError::Internal(format!("pool request-limits lock poisoned: {err}")))
+    }
+
+    fn update_request_limits(
+        &self,
+        cx: &Cx,
+        update: impl FnOnce(&mut PoolRequestLimits),
+    ) -> Result<(), DbError> {
+        let key = Self::request_key(cx);
+        let mut limits = self.request_limits.lock().map_err(|err| {
+            DbError::Internal(format!("pool request-limits lock poisoned: {err}"))
+        })?;
+        update(limits.entry(key).or_default());
+        if limits
+            .get(&key)
+            .is_some_and(|limits| limits.deadline.is_none() && limits.quota.is_none())
+        {
+            limits.remove(&key);
+        }
+        Ok(())
+    }
+
     /// Build a pool, eagerly establishing `min_idle` connections (so a bad
     /// profile fails fast). Requires a reachable database.
     pub async fn connect(
@@ -228,6 +276,7 @@ impl OraclePool {
                 released: 0,
                 discarded: 0,
             })),
+            request_limits: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -341,11 +390,33 @@ impl OraclePool {
     {
         db_checkpoint(cx, "oracle_pool.checkout.before")?;
         let conn = self.checkout(cx).await?;
-        // A connection is in our hands: the matching check-in below is
-        // UNCONDITIONAL (it runs on every exit path of `f`, success, error, or
-        // cancellation) so the in-use count can never leak.
         self.on_checked_out()?;
-        let result = f(cx, &conn).await;
+        // From this point, future drop is an unconditional dirty discard. The
+        // guard owns both the physical session and the accounting edge, so a
+        // lane hard timeout cannot leak `in_use`/`open_count`.
+        let checkout = CheckedOutConnection::new(conn, Arc::clone(&self.state));
+        let limits = self.request_limits_for(cx)?;
+        let previous_deadline = checkout.connection().request_deadline(cx)?;
+        let previous_quota = checkout.connection().request_quota(cx)?;
+        if let Err(error) = checkout
+            .connection()
+            .set_request_deadline(cx, limits.deadline)
+        {
+            checkout.finish(true)?;
+            return Err(error);
+        }
+        if let Err(error) = checkout
+            .connection()
+            .set_request_quota(cx, limits.quota.clone())
+        {
+            let _ = checkout
+                .connection()
+                .set_request_deadline(cx, previous_deadline);
+            checkout.finish(true)?;
+            return Err(error);
+        }
+
+        let result = f(cx, checkout.connection()).await;
         // A cancelled or errored call may have crossed an Oracle boundary
         // (torn round trip); discard the connection DIRTY rather than returning
         // it to the idle set. A clean call still re-validates with a ping.
@@ -357,10 +428,21 @@ impl OraclePool {
         let broken = if broken {
             true
         } else {
-            self.manager.has_broken(cx, &conn).await
+            self.manager.has_broken(cx, checkout.connection()).await
         };
-        self.checkin(conn, broken)?;
-        result
+        let quota_restore = checkout.connection().set_request_quota(cx, previous_quota);
+        let deadline_restore = checkout
+            .connection()
+            .set_request_deadline(cx, previous_deadline);
+        let restore_error = quota_restore.err().or_else(|| deadline_restore.err());
+        checkout.finish(broken || restore_error.is_some())?;
+        match result {
+            Err(primary) => Err(primary),
+            Ok(value) => match restore_error {
+                Some(error) => Err(error),
+                None => Ok(value),
+            },
+        }
     }
 
     async fn checkout(&self, cx: &Cx) -> Result<RustOracleConnection, DbError> {
@@ -391,17 +473,23 @@ impl OraclePool {
     async fn try_checkout(&self, cx: &Cx) -> Result<Option<RustOracleConnection>, DbError> {
         loop {
             if let Some(conn) = self.take_idle_connection()? {
+                let pending_slot = PendingOpenSlot::new(Arc::clone(&self.state));
                 if self.manager.is_valid(cx, &conn).await.is_ok() {
+                    pending_slot.complete();
                     return Ok(Some(conn));
                 }
-                self.forget_open_connection()?;
+                pending_slot.discard()?;
                 continue;
             }
             if self.reserve_new_connection()? {
+                let pending_slot = PendingOpenSlot::new(Arc::clone(&self.state));
                 match self.manager.connect(cx).await {
-                    Ok(conn) => return Ok(Some(conn)),
+                    Ok(conn) => {
+                        pending_slot.complete();
+                        return Ok(Some(conn));
+                    }
                     Err(err) => {
-                        self.forget_open_connection()?;
+                        pending_slot.discard()?;
                         return Err(err);
                     }
                 }
@@ -431,15 +519,6 @@ impl OraclePool {
         }
     }
 
-    fn forget_open_connection(&self) -> Result<(), DbError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
-        state.open_count = state.open_count.saturating_sub(1);
-        Ok(())
-    }
-
     fn on_checked_out(&self) -> Result<(), DbError> {
         let mut state = self
             .state
@@ -447,21 +526,6 @@ impl OraclePool {
             .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
         state.in_use += 1;
         state.acquired += 1;
-        Ok(())
-    }
-
-    fn checkin(&self, conn: RustOracleConnection, broken: bool) -> Result<(), DbError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
-        if record_checkin(&mut state, broken) {
-            // Clean: returns to the idle set for reuse.
-            state.idle.push(conn);
-        }
-        // Dirty discard (B4): `broken` connection is dropped here (never pushed),
-        // so a torn round trip can never be reused. `record_checkin` already
-        // decremented `open_count` and the in-use count for it.
         Ok(())
     }
 
@@ -484,7 +548,118 @@ impl OraclePool {
                 released: 0,
                 discarded: 0,
             })),
+            request_limits: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+}
+
+/// Tracks an open pool slot while an idle-session validation or a new connect
+/// is awaiting. Dropping either future must release the slot even though the
+/// connection has not yet reached the acquired/in-use accounting phase.
+struct PendingOpenSlot {
+    state: Arc<Mutex<PoolState>>,
+    active: bool,
+}
+
+impl PendingOpenSlot {
+    fn new(state: Arc<Mutex<PoolState>>) -> Self {
+        Self {
+            state,
+            active: true,
+        }
+    }
+
+    fn complete(mut self) {
+        self.active = false;
+    }
+
+    fn discard(mut self) -> Result<(), DbError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
+        state.open_count = state.open_count.saturating_sub(1);
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for PendingOpenSlot {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        match self.state.lock() {
+            Ok(mut state) => {
+                state.open_count = state.open_count.saturating_sub(1);
+            }
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "pending pool open slot dropped after the accounting lock was poisoned"
+                );
+            }
+        }
+    }
+}
+
+/// Owns one successful pool checkout until it is explicitly checked in.
+/// Dropping an in-flight future therefore performs the dirty accounting edge
+/// synchronously and never returns a possibly torn session to the idle set.
+struct CheckedOutConnection<T> {
+    connection: Option<T>,
+    state: Arc<Mutex<PoolState>>,
+}
+
+impl<T> CheckedOutConnection<T> {
+    fn new(connection: T, state: Arc<Mutex<PoolState>>) -> Self {
+        Self {
+            connection: Some(connection),
+            state,
+        }
+    }
+
+    fn connection(&self) -> &T {
+        self.connection
+            .as_ref()
+            .expect("checked-out connection remains owned until finish")
+    }
+}
+
+impl CheckedOutConnection<RustOracleConnection> {
+    fn finish(mut self, broken: bool) -> Result<(), DbError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
+        let connection = self
+            .connection
+            .take()
+            .expect("checked-out connection finishes exactly once");
+        if record_checkin(&mut state, broken) {
+            state.idle.push(connection);
+        }
+        Ok(())
+    }
+}
+
+impl<T> Drop for CheckedOutConnection<T> {
+    fn drop(&mut self) {
+        let Some(connection) = self.connection.take() else {
+            return;
+        };
+        match self.state.lock() {
+            Ok(mut state) => {
+                let _ = record_checkin(&mut state, true);
+            }
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "pool checkout dropped after the accounting lock was poisoned"
+                );
+            }
+        }
+        drop(connection);
     }
 }
 
@@ -512,6 +687,22 @@ fn record_checkin(state: &mut PoolState, broken: bool) -> bool {
 impl OracleConnection for OraclePool {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
+    }
+
+    fn request_deadline(&self, cx: &Cx) -> Result<Option<Time>, DbError> {
+        Ok(self.request_limits_for(cx)?.deadline)
+    }
+
+    fn set_request_deadline(&self, cx: &Cx, deadline: Option<Time>) -> Result<(), DbError> {
+        self.update_request_limits(cx, |limits| limits.deadline = deadline)
+    }
+
+    fn request_quota(&self, cx: &Cx) -> Result<Option<DbRequestQuota>, DbError> {
+        Ok(self.request_limits_for(cx)?.quota)
+    }
+
+    fn set_request_quota(&self, cx: &Cx, quota: Option<DbRequestQuota>) -> Result<(), DbError> {
+        self.update_request_limits(cx, |limits| limits.quota = quota)
     }
 
     async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
@@ -563,6 +754,11 @@ fn should_discard_after_call<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::{Future, pending};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Waker};
+
+    use asupersync::Budget;
     use asupersync::runtime::RuntimeBuilder;
 
     #[test]
@@ -745,6 +941,158 @@ mod tests {
         assert!(metrics.is_bounded());
         assert_eq!(metrics.open, metrics.max_size);
         assert_eq!(metrics.idle, 0, "replacement was reserved, not reused idle");
+    }
+
+    #[test]
+    fn request_limits_are_isolated_by_runtime_task_identity() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let pool = OraclePool::for_test_at_open_count(PoolSettings::default(), 0);
+        let ready = Arc::new(AtomicUsize::new(0));
+
+        let deadline_a = Time::from_secs(11);
+        let quota_a = DbRequestQuota::new(Budget::new().with_poll_quota(3).with_cost_quota(13));
+        let task_a = {
+            let pool = pool.clone();
+            let ready = Arc::clone(&ready);
+            let expected_quota = quota_a.clone();
+            runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("spawned task installs its own Cx");
+                pool.set_request_deadline(&cx, Some(deadline_a))
+                    .expect("task A deadline");
+                pool.set_request_quota(&cx, Some(expected_quota))
+                    .expect("task A quota");
+                ready.fetch_add(1, Ordering::AcqRel);
+                while ready.load(Ordering::Acquire) < 2 {
+                    asupersync::runtime::yield_now().await;
+                }
+                let observed = (
+                    OraclePool::request_key(&cx),
+                    pool.request_deadline(&cx).expect("task A deadline read"),
+                    pool.request_quota(&cx).expect("task A quota read"),
+                );
+                pool.set_request_deadline(&cx, None)
+                    .expect("clear task A deadline");
+                pool.set_request_quota(&cx, None)
+                    .expect("clear task A quota");
+                observed
+            })
+        };
+
+        let deadline_b = Time::from_secs(29);
+        let quota_b = DbRequestQuota::new(Budget::new().with_poll_quota(7).with_cost_quota(31));
+        let task_b = {
+            let pool = pool.clone();
+            let ready = Arc::clone(&ready);
+            let expected_quota = quota_b.clone();
+            runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("spawned task installs its own Cx");
+                pool.set_request_deadline(&cx, Some(deadline_b))
+                    .expect("task B deadline");
+                pool.set_request_quota(&cx, Some(expected_quota))
+                    .expect("task B quota");
+                ready.fetch_add(1, Ordering::AcqRel);
+                while ready.load(Ordering::Acquire) < 2 {
+                    asupersync::runtime::yield_now().await;
+                }
+                let observed = (
+                    OraclePool::request_key(&cx),
+                    pool.request_deadline(&cx).expect("task B deadline read"),
+                    pool.request_quota(&cx).expect("task B quota read"),
+                );
+                pool.set_request_deadline(&cx, None)
+                    .expect("clear task B deadline");
+                pool.set_request_quota(&cx, None)
+                    .expect("clear task B quota");
+                observed
+            })
+        };
+
+        let observed_a = runtime.block_on(task_a);
+        let observed_b = runtime.block_on(task_b);
+        assert_ne!(
+            observed_a.0, observed_b.0,
+            "spawned requests must have distinct pool request-limit keys"
+        );
+        assert_eq!(observed_a.1, Some(deadline_a));
+        assert_eq!(observed_b.1, Some(deadline_b));
+        let observed_quota_a = observed_a.2.expect("task A quota remains installed");
+        let observed_quota_b = observed_b.2.expect("task B quota remains installed");
+        assert!(observed_quota_a.ptr_eq(&quota_a));
+        assert!(!observed_quota_a.ptr_eq(&quota_b));
+        assert_eq!(observed_quota_a.polls_remaining(), 3);
+        assert_eq!(observed_quota_a.cost_remaining(), Some(13));
+        assert!(observed_quota_b.ptr_eq(&quota_b));
+        assert!(!observed_quota_b.ptr_eq(&quota_a));
+        assert_eq!(observed_quota_b.polls_remaining(), 7);
+        assert_eq!(observed_quota_b.cost_remaining(), Some(31));
+        assert!(
+            pool.request_limits
+                .lock()
+                .expect("request limits lock")
+                .is_empty(),
+            "restoring both limits to None removes the per-task map entries"
+        );
+    }
+
+    #[test]
+    fn dropped_checked_out_future_dirty_discards_without_accounting_leak() {
+        let state = Arc::new(Mutex::new(seeded_state(1)));
+        let guard_state = Arc::clone(&state);
+        let mut in_flight = Box::pin(async move {
+            let _checkout = CheckedOutConnection::new((), guard_state);
+            pending::<()>().await;
+        });
+        let mut task_cx = Context::from_waker(Waker::noop());
+        assert!(
+            in_flight.as_mut().poll(&mut task_cx).is_pending(),
+            "future reaches its in-flight wait with the checkout guard alive"
+        );
+
+        drop(in_flight);
+
+        let state = state.lock().expect("pool state lock");
+        assert_eq!(state.open_count, 0, "dirty drop frees the open slot");
+        assert_eq!(state.in_use, 0, "dirty drop closes the in-use edge");
+        assert_eq!(state.discarded, 1);
+        assert_eq!(state.released, 0);
+        assert_eq!(state.acquired, state.released + state.discarded);
+        assert!(state.idle.is_empty(), "a torn checkout is never reused");
+    }
+
+    #[test]
+    fn dropped_pending_open_future_releases_reserved_slot() {
+        let state = Arc::new(Mutex::new(PoolState {
+            idle: Vec::new(),
+            open_count: 1,
+            in_use: 0,
+            acquired: 0,
+            released: 0,
+            discarded: 0,
+        }));
+        let guard_state = Arc::clone(&state);
+        let mut opening = Box::pin(async move {
+            let _pending_slot = PendingOpenSlot::new(guard_state);
+            pending::<()>().await;
+        });
+        let mut task_cx = Context::from_waker(Waker::noop());
+        assert!(
+            opening.as_mut().poll(&mut task_cx).is_pending(),
+            "future reaches its connection wait with the reservation alive"
+        );
+
+        drop(opening);
+
+        let state = state.lock().expect("pool state lock");
+        assert_eq!(
+            state.open_count, 0,
+            "dropping connection establishment releases its reserved capacity"
+        );
+        assert_eq!(state.in_use, 0);
+        assert_eq!(state.acquired, 0);
+        assert_eq!(state.released, 0);
+        assert_eq!(state.discarded, 0);
     }
 
     #[test]

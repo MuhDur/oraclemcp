@@ -223,12 +223,15 @@ impl AdmissionController {
     /// Returns [`OracleMcpError::Busy`] when no capacity is available.
     pub fn try_admit<Caps>(
         &self,
-        _cx: &Cx<Caps>,
+        cx: &Cx<Caps>,
         agent: &str,
     ) -> Result<AdmissionPermit, OracleMcpError>
     where
         Caps: CapSetRuntimeMask,
     {
+        if cx.checkpoint().is_err() {
+            return Err(self.busy_error());
+        }
         if self.is_draining() {
             return Err(OracleMcpError::Busy {
                 retry_after_ms: self.inner.retry_after_ms,
@@ -240,7 +243,7 @@ impl AdmissionController {
             });
         }
         let mut state = self.inner.state.lock();
-        if self.is_draining() {
+        if self.is_draining() || cx.checkpoint().is_err() {
             return Err(OracleMcpError::Busy {
                 retry_after_ms: self.inner.retry_after_ms,
             });
@@ -299,13 +302,13 @@ impl AdmissionController {
     /// bounded wait, queue caps are full, or shutdown drain is active.
     pub fn admit_with_fair_wait<Caps>(
         &self,
-        _cx: &Cx<Caps>,
+        cx: &Cx<Caps>,
         agent: &str,
     ) -> Result<AdmissionPermit, OracleMcpError>
     where
         Caps: CapSetRuntimeMask,
     {
-        if self.is_draining() || self.inner.regular_global_cap == 0 {
+        if cx.checkpoint().is_err() || self.is_draining() || self.inner.regular_global_cap == 0 {
             return Err(self.busy_error());
         }
 
@@ -313,7 +316,7 @@ impl AdmissionController {
             .checked_add(self.inner.fair_wait)
             .unwrap_or_else(Instant::now);
         let mut state = self.inner.state.lock();
-        if self.is_draining() {
+        if self.is_draining() || cx.checkpoint().is_err() {
             return Err(self.busy_error());
         }
         if state.queued_total == 0 && self.subject_can_admit_locked(&state, agent) {
@@ -324,7 +327,7 @@ impl AdmissionController {
         }
 
         loop {
-            if self.is_draining() {
+            if self.is_draining() || cx.checkpoint().is_err() {
                 Self::dequeue_locked(&mut state, agent);
                 drop(state);
                 self.inner.changed.notify_all();
@@ -350,8 +353,17 @@ impl AdmissionController {
                 self.inner.changed.notify_all();
                 return Err(self.busy_error());
             }
-            let wait = self.inner.changed.wait_for(&mut state, remaining);
-            if wait.timed_out() && !self.subject_has_fair_turn_locked(&state, agent) {
+            // Condvar notification cannot observe task cancellation. Wake in
+            // short bounded slices so a cancelled request cannot sit for the
+            // full fair-admission window and then allocate an idle lane.
+            let wait = self
+                .inner
+                .changed
+                .wait_for(&mut state, remaining.min(Duration::from_millis(5)));
+            if wait.timed_out()
+                && deadline <= Instant::now()
+                && !self.subject_has_fair_turn_locked(&state, agent)
+            {
                 Self::dequeue_locked(&mut state, agent);
                 drop(state);
                 self.inner.changed.notify_all();

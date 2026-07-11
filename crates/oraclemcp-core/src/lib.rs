@@ -149,8 +149,9 @@ pub use iam_token::{
 };
 pub use init_token::{InitTokenError, STDIO_TOKEN_ENV, StdioAuthPolicy};
 pub use lane::{
-    DEFAULT_LANE_MAILBOX_CAPACITY, LaneContext, LaneDispatchFactory, LaneRuntime,
-    LaneRuntimeStatus, StatefulLaneDispatch, block_on_lane_bridge,
+    DEFAULT_LANE_MAILBOX_CAPACITY, LaneContext, LaneDispatchFactory, LaneDispatchFactoryBuilder,
+    LaneRuntime, LaneRuntimeStatus, PreparedLaneDispatch, StatefulLaneDispatch,
+    block_on_lane_bridge,
 };
 pub use notifications::{NotificationHub, progress_token_from_params};
 pub use operator_protocol::{

@@ -90,9 +90,10 @@ pub use catalog_extract::{
     CatalogRowSetName, CatalogSchemaFilter, catalog_extract_rowsets, extract_catalog_rowsets,
 };
 pub use connection::{
-    DRIVER_VERSION, DbmsOutput, ExecuteOutcome, OracleConnection, OracleRoutineArg, QueryRowStream,
-    QueryRowStreamStart, RustOracleConnection, WalletCertValidity, WalletFileChoice,
-    WalletResolutionReport, WalletResolveError, resolve_wallet_choice, wallet_certificate_validity,
+    DRIVER_VERSION, DbRequestQuota, DbmsOutput, ExecuteOutcome, OracleConnection, OracleRoutineArg,
+    QueryRowStream, QueryRowStreamStart, RustOracleConnection, WalletCertValidity,
+    WalletFileChoice, WalletResolutionReport, WalletResolveError, resolve_wallet_choice,
+    wallet_certificate_validity,
 };
 pub use doctor::{OracleDriverPosture, detect_oracle_driver, oracle_driver_compiled};
 pub use drcp::{DrcpConfig, SessionPurity};

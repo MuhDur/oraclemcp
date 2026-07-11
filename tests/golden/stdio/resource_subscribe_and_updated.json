@@ -282,7 +282,7 @@
                   "type": "boolean"
                 },
                 "timeout_seconds": {
-                  "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call.",
+                  "description": "Tightens the profile's total request deadline and each Oracle round-trip cap for this tool call. It cannot widen the profile ceiling.",
                   "maximum": 3600,
                   "minimum": 1,
                   "type": "integer"
@@ -975,7 +975,7 @@
                   "type": "integer"
                 },
                 "timeout_seconds": {
-                  "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call.",
+                  "description": "Tightens the profile's total request deadline and each Oracle round-trip cap for this tool call. It cannot widen the profile ceiling.",
                   "maximum": 3600,
                   "minimum": 1,
                   "type": "integer"
@@ -1009,7 +1009,7 @@
                   "type": "string"
                 },
                 "timeout_seconds": {
-                  "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call.",
+                  "description": "Tightens the profile's total request deadline and each Oracle round-trip cap for this tool call. It cannot widen the profile ceiling.",
                   "maximum": 3600,
                   "minimum": 1,
                   "type": "integer"
@@ -1173,7 +1173,7 @@
                   "type": "boolean"
                 },
                 "timeout_seconds": {
-                  "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call.",
+                  "description": "Tightens the profile's total request deadline and each Oracle round-trip cap for this tool call. It cannot widen the profile ceiling.",
                   "maximum": 3600,
                   "minimum": 1,
                   "type": "integer"

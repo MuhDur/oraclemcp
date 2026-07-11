@@ -119,7 +119,7 @@ fn props_with(base: Value, fragments: &[Value]) -> Value {
 /// every live-DB tool schema.
 fn timeout_seconds_prop() -> Value {
     json!({
-        "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary Oracle per-round-trip call timeout for this tool call. Overrides the profile default only for this call." }
+        "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Tightens the profile's total request deadline and each Oracle round-trip cap for this tool call. It cannot widen the profile ceiling." }
     })
 }
 

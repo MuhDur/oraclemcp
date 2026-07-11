@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -15,8 +17,8 @@ use oraclemcp_core::http::{
 };
 use oraclemcp_core::{
     DispatchContext, DispatchFuture, HttpTransportConfig, LaneDispatchFactory, LaneRuntime,
-    MCP_PATH, OAuthEnforcement, ObservabilityState, OracleMcpServer, StatefulLaneDispatch,
-    ToolDispatch,
+    MCP_PATH, OAuthEnforcement, ObservabilityState, OracleMcpServer, PreparedLaneDispatch,
+    StatefulLaneDispatch, ToolDispatch,
 };
 use oraclemcp_db::{
     DbError, OracleBackend, OracleBind, OracleConnection, OracleConnectionInfo, OracleRow,
@@ -269,7 +271,15 @@ fn per_lane_dispatcher_server(max_level: OperatingLevel) -> OracleMcpServer {
         env!("CARGO_PKG_VERSION"),
         registry,
         capabilities(env!("CARGO_PKG_VERSION"), true, false),
-        Arc::new(StatefulLaneDispatch::with_dispatch_factory(factory, None)),
+        Arc::new(StatefulLaneDispatch::with_dispatch_factory_builder(
+            Arc::new(move |_lane_context| {
+                Ok(PreparedLaneDispatch::new(
+                    Arc::clone(&factory),
+                    oraclemcp_core::DEFAULT_REQUEST_TIMEOUT,
+                ))
+            }),
+            None,
+        )),
     )
 }
 
@@ -302,7 +312,15 @@ fn per_lane_profile_switch_server() -> OracleMcpServer {
         env!("CARGO_PKG_VERSION"),
         registry,
         capabilities(env!("CARGO_PKG_VERSION"), true, false),
-        Arc::new(StatefulLaneDispatch::with_dispatch_factory(factory, None)),
+        Arc::new(StatefulLaneDispatch::with_dispatch_factory_builder(
+            Arc::new(move |_lane_context| {
+                Ok(PreparedLaneDispatch::new(
+                    Arc::clone(&factory),
+                    oraclemcp_core::DEFAULT_REQUEST_TIMEOUT,
+                ))
+            }),
+            None,
+        )),
     )
 }
 

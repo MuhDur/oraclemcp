@@ -5,18 +5,24 @@
 //! transports do not need ambient runtime handles to preserve the fail-closed
 //! tool surface.
 
+use std::fmt;
 use std::future::Future;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
+use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use asupersync::channel::{mpsc, oneshot};
-use asupersync::{CancelReason, Cx, Outcome, PanicPayload};
+use asupersync::{Budget, CancelReason, Cx, Outcome, PanicPayload, Time};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use serde_json::{Map, Value, json};
 
 use crate::capabilities::{CapabilitiesReport, ConnectionStatus, OperatingLevelReport};
 use crate::init_token::StdioAuthPolicy;
+use crate::request_budget::{
+    CLEANUP_POLL_QUOTA, CLEANUP_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, RequestBudget,
+};
 use crate::resources::{
     PromptMessage, ResourceContents, ResourceUri, prompt_catalog, render_prompt, resource_templates,
 };
@@ -62,7 +68,200 @@ pub enum ToolStreamFrame {
 
 pub type ToolStreamSender = mpsc::Sender<ToolStreamFrame>;
 
-pub type DispatchReplyReceiver = oneshot::Receiver<DispatchOutcome>;
+type DispatchReplyCancelHook = Arc<dyn Fn(CancelReason) + Send + Sync>;
+type DispatchReplyExpiryHook = Arc<dyn Fn(CancelReason) -> DispatchOutcome + Send + Sync>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TerminalReplyWaitError {
+    Closed,
+    Expired,
+}
+
+/// After caller cancellation has been forwarded to a stateful lane, keep the
+/// cancel-safe oneshot alive for one bounded finalization window and recover
+/// the lane's authoritative terminal classification.
+pub(crate) async fn recv_terminal_after_cancel<T>(
+    cx: &Cx,
+    receiver: &mut oneshot::Receiver<T>,
+) -> Result<T, TerminalReplyWaitError> {
+    let now = cx.now();
+    let wait_timeout = CLEANUP_TIMEOUT
+        .checked_add(Duration::from_secs(1))
+        .unwrap_or(CLEANUP_TIMEOUT);
+    let budget = RequestBudget::from_budget_at(
+        now,
+        Budget::new()
+            .with_timeout(now, wait_timeout)
+            .with_poll_quota(CLEANUP_POLL_QUOTA),
+    );
+    recv_terminal_after_cancel_with_budget(cx, receiver, budget).await
+}
+
+async fn recv_terminal_after_cancel_with_budget<T>(
+    cx: &Cx,
+    receiver: &mut oneshot::Receiver<T>,
+    budget: RequestBudget,
+) -> Result<T, TerminalReplyWaitError> {
+    let deadline = budget
+        .deadline()
+        .expect("terminal reply wait always has a deadline");
+    // A cancelled asupersync oneshot receive is explicitly cancel-safe. Build
+    // a fresh receive future after the first one returned Cancelled.
+    let mut receive = std::pin::pin!(receiver.recv(cx));
+    let driven = std::future::poll_fn(|task_cx| {
+        // Mask only this short poll so the fresh receive can register its
+        // normal value waker even though caller cancellation is already set.
+        let receive_poll = cx.masked(|| match receive.as_mut().poll(task_cx) {
+            Poll::Ready(Ok(value)) => Poll::Ready(Ok(value)),
+            Poll::Ready(Err(oneshot::RecvError::Closed)) => {
+                Poll::Ready(Err(TerminalReplyWaitError::Closed))
+            }
+            Poll::Ready(Err(_)) => Poll::Ready(Err(TerminalReplyWaitError::Expired)),
+            Poll::Pending => Poll::Pending,
+        });
+        match receive_poll {
+            ready @ Poll::Ready(_) => ready,
+            Poll::Pending if budget.enforce_at(cx.now()).is_err() => {
+                Poll::Ready(Err(TerminalReplyWaitError::Expired))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    });
+    match asupersync::time::timeout_at(deadline, driven).await {
+        Ok(result) => result,
+        Err(_) => Err(TerminalReplyWaitError::Expired),
+    }
+}
+
+fn terminal_reply_wait_expired_outcome() -> DispatchOutcome {
+    Outcome::Err(
+        ErrorEnvelope::new(
+            ErrorClass::RuntimeStateRequired,
+            "caller cancellation was delivered, but the stateful lane did not return a terminal classification within its bounded finalization window",
+        )
+        .with_next_step("do not retry non-idempotent work until its audit and write-intent outcome is verified"),
+    )
+}
+
+/// Final-result receiver for an incremental dispatch.
+///
+/// Besides the underlying oneshot, this may own a cancellation hook installed
+/// by a stateful lane. Dropping the HTTP/SSE stream or cancelling its final
+/// receive then wakes the lane command instead of orphaning database work after
+/// the transport has gone away.
+pub struct DispatchReplyReceiver {
+    inner: oneshot::Receiver<DispatchOutcome>,
+    cancel_hook: Option<DispatchReplyCancelHook>,
+    expiry_hook: Option<DispatchReplyExpiryHook>,
+}
+
+impl DispatchReplyReceiver {
+    /// Wrap a final-result receiver without a transport-lifetime hook.
+    #[must_use]
+    pub fn new(inner: oneshot::Receiver<DispatchOutcome>) -> Self {
+        Self {
+            inner,
+            cancel_hook: None,
+            expiry_hook: None,
+        }
+    }
+
+    pub(crate) fn with_cancel_hooks(
+        inner: oneshot::Receiver<DispatchOutcome>,
+        cancel_hook: DispatchReplyCancelHook,
+        expiry_hook: DispatchReplyExpiryHook,
+    ) -> Self {
+        Self {
+            inner,
+            cancel_hook: Some(cancel_hook),
+            expiry_hook: Some(expiry_hook),
+        }
+    }
+
+    /// Wait for the final streaming outcome.
+    ///
+    /// A cancelled receive forwards its attributed reason through the lane
+    /// hook. A completed or closed receiver disarms the hook because no live
+    /// lane operation remains to cancel.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying oneshot receive error if the sender closes or
+    /// the supplied context is cancelled.
+    pub async fn recv(&mut self, cx: &Cx) -> Result<DispatchOutcome, oneshot::RecvError> {
+        match self.inner.recv(cx).await {
+            Ok(outcome) => {
+                self.cancel_hook.take();
+                self.expiry_hook.take();
+                Ok(outcome)
+            }
+            Err(oneshot::RecvError::Cancelled) => {
+                if self.cancel_hook.is_none() {
+                    return Err(oneshot::RecvError::Cancelled);
+                }
+                self.cancel(cx.cancel_reason().unwrap_or_else(|| {
+                    CancelReason::user("streaming final-result receive cancelled")
+                }));
+                match recv_terminal_after_cancel(cx, &mut self.inner).await {
+                    Ok(outcome) => {
+                        self.expiry_hook.take();
+                        Ok(outcome)
+                    }
+                    Err(TerminalReplyWaitError::Closed) => {
+                        self.expiry_hook.take();
+                        Err(oneshot::RecvError::Closed)
+                    }
+                    Err(TerminalReplyWaitError::Expired) => Ok(self.expire_terminal_wait(
+                        cx.cancel_reason().unwrap_or_else(|| {
+                            CancelReason::user("streaming terminal-result finalization expired")
+                        }),
+                    )),
+                }
+            }
+            Err(error) => {
+                self.cancel_hook.take();
+                self.expiry_hook.take();
+                Err(error)
+            }
+        }
+    }
+
+    fn cancel(&mut self, fallback: CancelReason) {
+        if let Some(cancel_hook) = self.cancel_hook.take() {
+            cancel_hook(fallback);
+        }
+    }
+
+    fn expire_terminal_wait(&mut self, reason: CancelReason) -> DispatchOutcome {
+        self.expiry_hook
+            .take()
+            .map_or_else(terminal_reply_wait_expired_outcome, |hook| hook(reason))
+    }
+}
+
+impl From<oneshot::Receiver<DispatchOutcome>> for DispatchReplyReceiver {
+    fn from(inner: oneshot::Receiver<DispatchOutcome>) -> Self {
+        Self::new(inner)
+    }
+}
+
+impl fmt::Debug for DispatchReplyReceiver {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DispatchReplyReceiver")
+            .field("has_cancel_hook", &self.cancel_hook.is_some())
+            .field("has_expiry_hook", &self.expiry_hook.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for DispatchReplyReceiver {
+    fn drop(&mut self) {
+        self.cancel(CancelReason::user(
+            "streaming final-result receiver dropped before completion",
+        ));
+    }
+}
 
 pub type DispatchStreamStartFuture<'a> =
     Pin<Box<dyn Future<Output = Outcome<DispatchReplyReceiver, ErrorEnvelope>> + 'a>>;
@@ -137,6 +336,10 @@ pub enum DispatchCloseReason {
     /// (`POST /operator/v1/lanes/cancel`). The lane's connection, elevation
     /// window, and single-use grants are dropped fail-closed.
     OperatorCancel,
+    /// A cancelled/expired request did not finish its bounded terminal
+    /// finalization window. The lane must be discarded as outcome-unknown;
+    /// rollback success cannot prove that a DDL or commit did not survive.
+    RequestFinalizationTimeout,
 }
 
 impl DispatchCloseReason {
@@ -149,11 +352,12 @@ impl DispatchCloseReason {
             Self::ServerShutdown => "server_shutdown",
             Self::RuntimeDrop => "runtime_drop",
             Self::OperatorCancel => "operator_cancel",
+            Self::RequestFinalizationTimeout => "request_finalization_timeout",
         }
     }
 }
 
-/// Per-request authorization context supplied by transports.
+/// Per-request transport context supplied to dispatch.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DispatchContext<'a> {
     scope_grant: Option<&'a crate::http::ScopeGrant>,
@@ -161,6 +365,10 @@ pub struct DispatchContext<'a> {
     principal_key: Option<&'a str>,
     lane_id: Option<&'a str>,
     lane_generation: Option<u64>,
+    request_started_at: Option<Instant>,
+    admitted_at: Option<Time>,
+    caller_budget: Option<Budget>,
+    request_budget: Option<&'a RequestBudget>,
 }
 
 impl<'a> DispatchContext<'a> {
@@ -195,6 +403,48 @@ impl<'a> DispatchContext<'a> {
         self
     }
 
+    /// Record the transport-side start of a request before synchronous lane
+    /// resolution, capacity admission, or profile-generation preparation.
+    /// The lane uses this monotonic timestamp so those phases consume the same
+    /// profile timeout as mailbox and database work.
+    #[must_use]
+    pub fn with_request_started_at(mut self, request_started_at: Instant) -> Self {
+        self.request_started_at = Some(request_started_at);
+        self
+    }
+
+    /// Record when the request entered the dispatch lane. Profile-level total
+    /// timeouts are anchored here so mailbox wait consumes the same deadline as
+    /// database work instead of starting a fresh window after dequeue.
+    #[must_use]
+    pub fn with_admitted_at(mut self, admitted_at: Time) -> Self {
+        self.admitted_at = Some(admitted_at);
+        self
+    }
+
+    /// Attach the caller's remaining budget, rebased onto the execution
+    /// runtime's clock when a lane boundary is crossed.
+    ///
+    /// The lane must not pass the caller's task-specific [`Cx`] to another
+    /// task. This immutable snapshot carries only deadline/quota policy; live
+    /// cancellation travels through the lane's explicit cancellation bridge.
+    #[must_use]
+    pub fn with_caller_budget(mut self, caller_budget: Budget) -> Self {
+        self.caller_budget = Some(caller_budget);
+        self
+    }
+
+    /// Attach the shared application request budget created at lane admission.
+    ///
+    /// Unlike the immutable caller budget snapshot, clones of this value share
+    /// already-consumed poll/cost counters across factory work, dispatch, and
+    /// database wire boundaries.
+    #[must_use]
+    pub fn with_request_budget(mut self, request_budget: &'a RequestBudget) -> Self {
+        self.request_budget = Some(request_budget);
+        self
+    }
+
     /// The validated OAuth scopes for this request, if any.
     #[must_use]
     pub fn scope_grant(self) -> Option<&'a crate::http::ScopeGrant> {
@@ -225,6 +475,31 @@ impl<'a> DispatchContext<'a> {
         self.lane_generation
     }
 
+    /// Transport-side monotonic request start, when a wrapper performed work
+    /// before crossing the lane mailbox.
+    #[must_use]
+    pub fn request_started_at(self) -> Option<Instant> {
+        self.request_started_at
+    }
+
+    /// The lane-admission instant, or `None` for direct non-lane dispatch.
+    #[must_use]
+    pub fn admitted_at(self) -> Option<Time> {
+        self.admitted_at
+    }
+
+    /// The caller's budget snapshot in this execution context's clock domain.
+    #[must_use]
+    pub fn caller_budget(self) -> Option<Budget> {
+        self.caller_budget
+    }
+
+    /// Shared application request budget, when the request crossed a lane.
+    #[must_use]
+    pub fn request_budget(self) -> Option<&'a RequestBudget> {
+        self.request_budget
+    }
+
     /// Clone request-local borrowed authorization into a mailbox-safe context.
     #[must_use]
     pub fn to_owned_context(self) -> OwnedDispatchContext {
@@ -234,6 +509,10 @@ impl<'a> DispatchContext<'a> {
             principal_key: self.principal_key.map(str::to_owned),
             lane_id: self.lane_id.map(str::to_owned),
             lane_generation: self.lane_generation,
+            request_started_at: self.request_started_at,
+            admitted_at: self.admitted_at,
+            caller_budget: self.caller_budget,
+            request_budget: self.request_budget.cloned(),
         }
     }
 }
@@ -241,13 +520,17 @@ impl<'a> DispatchContext<'a> {
 /// Owned transport authorization context used when a dispatch crosses a lane
 /// mailbox. The stored values are already validated and redacted where needed;
 /// no raw bearer token or unverified identity material is carried here.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct OwnedDispatchContext {
     scope_grant: Option<crate::http::ScopeGrant>,
     http_session_id: Option<String>,
     principal_key: Option<String>,
     lane_id: Option<String>,
     lane_generation: Option<u64>,
+    request_started_at: Option<Instant>,
+    admitted_at: Option<Time>,
+    caller_budget: Option<Budget>,
+    request_budget: Option<RequestBudget>,
 }
 
 impl OwnedDispatchContext {
@@ -260,6 +543,10 @@ impl OwnedDispatchContext {
             principal_key: self.principal_key.as_deref(),
             lane_id: self.lane_id.as_deref(),
             lane_generation: self.lane_generation,
+            request_started_at: self.request_started_at,
+            admitted_at: self.admitted_at,
+            caller_budget: self.caller_budget,
+            request_budget: self.request_budget.as_ref(),
         }
     }
 }
@@ -267,6 +554,17 @@ impl OwnedDispatchContext {
 /// Cx-aware tool dispatch, injected by the engine/operator side. Returns the
 /// tool's structured JSON or an [`ErrorEnvelope`].
 pub trait ToolDispatch: Send + Sync + 'static {
+    /// Whole-request timeout the owning lane must apply before polling this
+    /// dispatcher.
+    ///
+    /// The lane needs this synchronously: deriving the profile deadline only
+    /// inside [`Self::dispatch`] is too late for the outer hard timer to bound a
+    /// mutex wait, connector, or otherwise uncooperative future. Dispatchers
+    /// without profile policy retain the service's 30-second default.
+    fn request_timeout_ceiling(&self) -> Result<Duration, ErrorEnvelope> {
+        Ok(DEFAULT_REQUEST_TIMEOUT)
+    }
+
     /// Dispatch a tool call by name with JSON arguments in the supplied
     /// Asupersync context.
     fn dispatch<'a>(
@@ -2119,6 +2417,103 @@ mod tests {
     use oraclemcp_guard::OperatingLevel;
     use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn owned_dispatch_context_preserves_lane_time_and_caller_budget() {
+        let request_started_at = Instant::now();
+        let admitted_at = Time::from_secs(100);
+        let caller_budget = Budget::new()
+            .with_deadline(Time::from_secs(130))
+            .with_poll_quota(321)
+            .with_cost_quota(654);
+        let request_budget = RequestBudget::from_budget_at(admitted_at, caller_budget);
+        let owned = DispatchContext::default()
+            .with_http_session_id("session-1")
+            .with_principal_key("principal-1")
+            .with_lane_identity("lane-1", 7)
+            .with_request_started_at(request_started_at)
+            .with_admitted_at(admitted_at)
+            .with_caller_budget(caller_budget)
+            .with_request_budget(&request_budget)
+            .to_owned_context();
+        let borrowed = owned.as_dispatch_context();
+
+        assert_eq!(borrowed.http_session_id(), Some("session-1"));
+        assert_eq!(borrowed.principal_key(), Some("principal-1"));
+        assert_eq!(borrowed.lane_id(), Some("lane-1"));
+        assert_eq!(borrowed.lane_generation(), Some(7));
+        assert_eq!(borrowed.request_started_at(), Some(request_started_at));
+        assert_eq!(borrowed.admitted_at(), Some(admitted_at));
+        assert_eq!(borrowed.caller_budget(), Some(caller_budget));
+        assert!(
+            borrowed
+                .request_budget()
+                .expect("request budget round-trips")
+                .db_quota()
+                .ptr_eq(&request_budget.db_quota()),
+            "owned context clones must share consumed quota"
+        );
+    }
+
+    #[test]
+    fn streaming_terminal_wait_expiry_uses_lane_safety_hook() {
+        let (_sender, receiver) = oneshot::channel();
+        let expired = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&expired);
+        let mut receiver = DispatchReplyReceiver::with_cancel_hooks(
+            receiver,
+            Arc::new(|_reason| {}),
+            Arc::new(move |_reason| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Outcome::Err(ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    "lane expiry hook ran before outward reply",
+                ))
+            }),
+        );
+        receiver.cancel(CancelReason::user("test cancellation"));
+
+        match receiver.expire_terminal_wait(CancelReason::timeout()) {
+            Outcome::Err(error) => assert!(error.message.contains("lane expiry hook ran")),
+            other => panic!("expiry hook must provide the terminal error: {other:?}"),
+        }
+        assert_eq!(expired.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn ready_terminal_value_wins_when_wait_quota_was_just_spent() {
+        let result = crate::lane::block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs Cx");
+            cx.set_cancel_requested(true);
+            let now = cx.now();
+            let budget = RequestBudget::from_budget_at(
+                now,
+                Budget::new()
+                    .with_timeout(now, Duration::from_secs(1))
+                    .with_poll_quota(1),
+            );
+            let (sender, mut receiver) = oneshot::channel();
+            let mut wait = std::pin::pin!(recv_terminal_after_cancel_with_budget(
+                &cx,
+                &mut receiver,
+                budget,
+            ));
+
+            std::future::poll_fn(|task_cx| match wait.as_mut().poll(task_cx) {
+                Poll::Pending => Poll::Ready(()),
+                Poll::Ready(result) => {
+                    panic!("terminal wait unexpectedly completed before send: {result:?}")
+                }
+            })
+            .await;
+            sender
+                .send_blocking("authoritative-terminal")
+                .expect("receiver remains live after its first pending poll");
+            wait.await
+        });
+
+        assert_eq!(result, Ok("authoritative-terminal"));
+    }
 
     struct EchoDispatcher;
     impl ToolDispatch for EchoDispatcher {

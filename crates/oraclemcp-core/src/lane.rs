@@ -9,7 +9,7 @@
 
 #[cfg(debug_assertions)]
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
@@ -17,34 +17,40 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::task::{Poll, Waker};
 use std::thread::{self, JoinHandle};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use asupersync::channel::{
     mpsc::{self, SendError},
     oneshot,
 };
-use asupersync::runtime::RuntimeBuilder;
-use asupersync::{CancelReason, Cx, Outcome, PanicPayload};
+use asupersync::runtime::{Runtime, RuntimeBuilder};
+use asupersync::{Budget, CancelReason, Cx, Outcome, PanicPayload, Time};
 use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use serde_json::Value;
 
 use crate::admission::{
-    AdmissionController, AdmissionPermit, CapacitySnapshot, DEFAULT_RETRY_AFTER_MS,
+    AdmissionController, AdmissionPermit, CapacitySnapshot, DEFAULT_FAIR_ADMISSION_WAIT_MS,
+    DEFAULT_RETRY_AFTER_MS,
 };
 use crate::capability::narrow_to_lane;
 use crate::http::{HttpLaneBinding, HttpLaneSnapshot, HttpSessionLifecycle};
 use crate::operator_protocol::operator_subject_id_hash;
+use crate::request_budget::{DEFAULT_REQUEST_POLL_QUOTA, DEFAULT_REQUEST_TIMEOUT, RequestBudget};
 use crate::server::{
     DispatchCloseReason, DispatchContext, DispatchFuture, DispatchOutcome, DispatchReplyReceiver,
     DispatchStreamStartFuture, McpSurfaceDetail, McpSurfaceFuture, McpSurfaceOutcome,
-    OwnedDispatchContext, ToolDispatch, ToolStreamSender,
+    OwnedDispatchContext, TerminalReplyWaitError, ToolDispatch, ToolStreamSender,
+    recv_terminal_after_cancel,
 };
 
 /// Default number of queued dispatch commands accepted by one lane.
 pub const DEFAULT_LANE_MAILBOX_CAPACITY: usize = 64;
+
+const MAX_TOOL_TIMEOUT_SECONDS: u64 = 3_600;
 
 const STATUS_STARTING: u8 = 0;
 const STATUS_RUNNING: u8 = 1;
@@ -107,6 +113,37 @@ pub type LaneDispatchFactory = dyn for<'a> Fn(
     + Send
     + Sync
     + 'static;
+
+/// A generation-bound lazy dispatcher factory plus the exact whole-request
+/// ceiling from the same policy snapshot.
+pub struct PreparedLaneDispatch {
+    factory: Arc<LaneDispatchFactory>,
+    request_timeout: Duration,
+}
+
+impl PreparedLaneDispatch {
+    /// Bind a lazy factory to the request timeout from the same immutable
+    /// profile generation it will open.
+    #[must_use]
+    pub fn new(factory: Arc<LaneDispatchFactory>, request_timeout: Duration) -> Self {
+        Self {
+            factory,
+            request_timeout,
+        }
+    }
+
+    /// Consume the atomic preparation into its factory and matching timeout.
+    #[must_use]
+    pub fn into_parts(self) -> (Arc<LaneDispatchFactory>, Duration) {
+        (self.factory, self.request_timeout)
+    }
+}
+
+/// Prepares one new stateful lane outside the lane-registry lock. Production
+/// builders atomically reserve the profile generation and return its timeout
+/// together with a factory that consumes that exact reservation.
+pub type LaneDispatchFactoryBuilder =
+    dyn Fn(&LaneContext) -> Result<PreparedLaneDispatch, ErrorEnvelope> + Send + Sync + 'static;
 
 /// The identity and immutable metadata for one stateful HTTP lane.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,12 +248,16 @@ impl LaneRuntimeStatus {
 
 enum LaneCommand {
     Dispatch {
+        caller: Arc<LaneCallerSignal>,
+        enqueued_at: Instant,
         context: OwnedDispatchContext,
         name: String,
         args: Value,
         reply: oneshot::Sender<DispatchOutcome>,
     },
     DispatchStream {
+        caller: Arc<LaneCallerSignal>,
+        enqueued_at: Instant,
         context: OwnedDispatchContext,
         name: String,
         args: Value,
@@ -224,10 +265,163 @@ enum LaneCommand {
         reply: oneshot::Sender<DispatchOutcome>,
     },
     SurfaceState {
+        caller: Arc<LaneCallerSignal>,
+        enqueued_at: Instant,
         context: OwnedDispatchContext,
         detail: McpSurfaceDetail,
         reply: oneshot::Sender<McpSurfaceOutcome>,
     },
+}
+
+/// Cross-task cancellation edge for one lane command.
+///
+/// Asupersync's `Cx` is `Send + Sync`, but its documented semantic contract is
+/// task-local. A caller Cx must therefore never become the lane dispatch Cx.
+/// This bridge carries only a cancellation reason and a waker: the caller side
+/// signals it when its wait is cancelled/dropped, and the lane side forwards
+/// that signal into the fresh lane-owned Cx for this command.
+struct LaneCallerSignal {
+    cancelled: AtomicBool,
+    reason: Mutex<Option<CancelReason>>,
+    lane_waker: Mutex<Option<Waker>>,
+    budget: LaneCallerBudget,
+}
+
+/// Caller budget expressed without an absolute runtime-local timestamp.
+///
+/// `Time` is process-shared in production but virtual/runtime-local in labs.
+/// Carrying the raw caller deadline into another runtime would therefore be a
+/// clock-domain bug. Store remaining time at admission and rebase it onto the
+/// lane clock after subtracting mailbox wait.
+#[derive(Clone, Copy)]
+struct LaneCallerBudget {
+    deadline_after_admission: Option<std::time::Duration>,
+    poll_quota: u32,
+    cost_quota: Option<u64>,
+    priority: u8,
+}
+
+impl LaneCallerBudget {
+    fn capture(cx: &Cx) -> Self {
+        let budget = cx.budget();
+        Self {
+            deadline_after_admission: budget
+                .deadline
+                .map(|deadline| std::time::Duration::from_nanos(deadline.duration_since(cx.now()))),
+            poll_quota: budget.poll_quota,
+            cost_quota: budget.cost_quota,
+            priority: budget.priority,
+        }
+    }
+
+    fn rebase(self, lane_now: Time, queue_wait: std::time::Duration) -> Budget {
+        Budget {
+            deadline: self
+                .deadline_after_admission
+                .map(|remaining| lane_now + remaining.saturating_sub(queue_wait)),
+            poll_quota: self.poll_quota,
+            cost_quota: self.cost_quota,
+            priority: self.priority,
+        }
+    }
+}
+
+fn tool_request_timeout_ceiling(profile_ceiling: Duration, args: &Value) -> Duration {
+    args.get("timeout_seconds")
+        .and_then(Value::as_u64)
+        .filter(|seconds| *seconds > 0)
+        .map(|seconds| Duration::from_secs(seconds.min(MAX_TOOL_TIMEOUT_SECONDS)))
+        .map_or(profile_ceiling, |tool_ceiling| {
+            profile_ceiling.min(tool_ceiling)
+        })
+}
+
+impl LaneCallerSignal {
+    fn new(cx: &Cx) -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            reason: Mutex::new(None),
+            lane_waker: Mutex::new(None),
+            budget: LaneCallerBudget::capture(cx),
+        }
+    }
+
+    fn budget_for_lane(&self, lane_now: Time, queue_wait: std::time::Duration) -> Budget {
+        self.budget.rebase(lane_now, queue_wait)
+    }
+
+    fn cancel(&self, reason: CancelReason) {
+        if !self.cancelled.load(Ordering::Acquire) {
+            let mut stored = self.reason.lock();
+            if stored.is_none() {
+                *stored = Some(reason);
+            }
+            self.cancelled.store(true, Ordering::Release);
+        }
+        if let Some(waker) = self.lane_waker.lock().take() {
+            waker.wake();
+        }
+    }
+
+    fn reason(&self) -> Option<CancelReason> {
+        if self.cancelled.load(Ordering::Acquire) {
+            self.reason.lock().clone()
+        } else {
+            None
+        }
+    }
+
+    fn register_lane_waker(&self, waker: &Waker) {
+        if self.cancelled.load(Ordering::Acquire) {
+            waker.wake_by_ref();
+            return;
+        }
+        let mut slot = self.lane_waker.lock();
+        if !slot
+            .as_ref()
+            .is_some_and(|current| current.will_wake(waker))
+        {
+            *slot = Some(waker.clone());
+        }
+        drop(slot);
+        if self.cancelled.load(Ordering::Acquire)
+            && let Some(waker) = self.lane_waker.lock().take()
+        {
+            waker.wake();
+        }
+    }
+}
+
+struct LaneCallerGuard {
+    signal: Arc<LaneCallerSignal>,
+    armed: bool,
+}
+
+impl LaneCallerGuard {
+    fn new(signal: Arc<LaneCallerSignal>) -> Self {
+        Self {
+            signal,
+            armed: true,
+        }
+    }
+
+    fn complete(mut self) {
+        self.armed = false;
+    }
+
+    fn signal_cancel(&self, reason: CancelReason) {
+        self.signal.cancel(reason);
+    }
+}
+
+impl Drop for LaneCallerGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.signal.cancel(CancelReason::user(
+                "dispatch caller dropped before lane reply",
+            ));
+        }
+    }
 }
 
 struct LaneCloseState {
@@ -278,6 +472,7 @@ struct LaneRuntimeInner {
     close_state: Arc<LaneCloseState>,
     sender: Mutex<Option<mpsc::Sender<LaneCommand>>>,
     join: Mutex<Option<JoinHandle<()>>>,
+    panic_auditor: Option<Arc<Auditor>>,
     _capacity_permit: Option<AdmissionPermit>,
 }
 
@@ -343,6 +538,7 @@ impl LaneRuntime {
             lane_name.clone(),
             LaneContext::process_shared(lane_name),
             factory,
+            DEFAULT_REQUEST_TIMEOUT,
             mailbox_capacity,
             panic_auditor,
         )
@@ -355,6 +551,7 @@ impl LaneRuntime {
         name: impl Into<String>,
         lane_context: LaneContext,
         factory: Arc<LaneDispatchFactory>,
+        factory_request_timeout: Duration,
         mailbox_capacity: usize,
         panic_auditor: Option<Arc<Auditor>>,
     ) -> Self {
@@ -362,6 +559,7 @@ impl LaneRuntime {
             name,
             lane_context,
             factory,
+            factory_request_timeout,
             mailbox_capacity,
             panic_auditor,
             None,
@@ -374,9 +572,76 @@ impl LaneRuntime {
         name: impl Into<String>,
         lane_context: LaneContext,
         factory: Arc<LaneDispatchFactory>,
+        factory_request_timeout: Duration,
         mailbox_capacity: usize,
         panic_auditor: Option<Arc<Auditor>>,
         capacity_permit: Option<AdmissionPermit>,
+    ) -> Self {
+        Self::spawn_with_factory_policy(
+            name,
+            lane_context,
+            factory,
+            factory_request_timeout,
+            mailbox_capacity,
+            panic_auditor,
+            capacity_permit,
+            false,
+        )
+    }
+
+    /// Spawn a lane from one atomic, generation-bound preparation.
+    ///
+    /// Unlike a reusable raw factory, a prepared factory is consumed by its
+    /// first initialization attempt. If that attempt fails the lane stops so a
+    /// registry can rebuild it from a fresh policy generation.
+    #[must_use]
+    pub fn spawn_prepared_dispatch(
+        name: impl Into<String>,
+        lane_context: LaneContext,
+        prepared: PreparedLaneDispatch,
+        mailbox_capacity: usize,
+        panic_auditor: Option<Arc<Auditor>>,
+    ) -> Self {
+        Self::spawn_prepared_dispatch_with_capacity(
+            name,
+            lane_context,
+            prepared,
+            mailbox_capacity,
+            panic_auditor,
+            None,
+        )
+    }
+
+    fn spawn_prepared_dispatch_with_capacity(
+        name: impl Into<String>,
+        lane_context: LaneContext,
+        prepared: PreparedLaneDispatch,
+        mailbox_capacity: usize,
+        panic_auditor: Option<Arc<Auditor>>,
+        capacity_permit: Option<AdmissionPermit>,
+    ) -> Self {
+        Self::spawn_with_factory_policy(
+            name,
+            lane_context,
+            prepared.factory,
+            prepared.request_timeout,
+            mailbox_capacity,
+            panic_auditor,
+            capacity_permit,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_with_factory_policy(
+        name: impl Into<String>,
+        lane_context: LaneContext,
+        factory: Arc<LaneDispatchFactory>,
+        factory_request_timeout: Duration,
+        mailbox_capacity: usize,
+        panic_auditor: Option<Arc<Auditor>>,
+        capacity_permit: Option<AdmissionPermit>,
+        factory_error_is_terminal: bool,
     ) -> Self {
         let name = name.into();
         let capacity = mailbox_capacity.max(1);
@@ -386,19 +651,21 @@ impl LaneRuntime {
         let close_state = Arc::new(LaneCloseState::new());
         let thread_close_state = Arc::clone(&close_state);
         let thread_name = format!("oraclemcp-lane-{name}");
-        let lane_name = name.clone();
+        let thread_auditor = panic_auditor.clone();
+        let thread_config = LaneThreadConfig {
+            name: name.clone(),
+            lane_context,
+            factory,
+            factory_request_timeout,
+            factory_error_is_terminal,
+            status: thread_status,
+            close_state: thread_close_state,
+            panic_auditor: thread_auditor,
+        };
         let join = thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
-                run_lane_thread_with_factory(
-                    lane_name,
-                    lane_context,
-                    receiver,
-                    factory,
-                    thread_status,
-                    thread_close_state,
-                    panic_auditor,
-                );
+                run_lane_thread_with_factory(receiver, thread_config);
             })
             .expect("dedicated Oracle MCP lane thread spawns");
 
@@ -410,6 +677,7 @@ impl LaneRuntime {
                 close_state,
                 sender: Mutex::new(Some(sender)),
                 join: Mutex::new(Some(join)),
+                panic_auditor,
                 _capacity_permit: capacity_permit,
             }),
         }
@@ -460,6 +728,19 @@ impl LaneRuntime {
     #[must_use]
     pub fn status(&self) -> LaneRuntimeStatus {
         LaneRuntimeStatus::from_raw(self.inner.status.load(Ordering::Acquire))
+    }
+
+    /// Whether the lane can still accept a new command.
+    ///
+    /// A lane may briefly remain `Running` while its owning thread drains a
+    /// terminal close request, so lifecycle status alone is not sufficient for
+    /// registries deciding whether to reuse the handle.
+    #[must_use]
+    pub fn accepts_commands(&self) -> bool {
+        matches!(
+            self.status(),
+            LaneRuntimeStatus::Starting | LaneRuntimeStatus::Running
+        ) && !self.inner.close_state.is_requested()
     }
 
     fn sender(&self) -> Result<mpsc::Sender<LaneCommand>, ErrorEnvelope> {
@@ -531,7 +812,10 @@ impl ToolDispatch for LaneRuntime {
             let (reply_tx, mut reply_rx) = oneshot::channel();
             let lane_generation = self.generation();
             let context = context.with_lane_identity(self.name(), lane_generation);
+            let caller = Arc::new(LaneCallerSignal::new(cx));
             let command = LaneCommand::Dispatch {
+                caller: Arc::clone(&caller),
+                enqueued_at: Instant::now(),
                 context: context.to_owned_context(),
                 name: name.to_owned(),
                 args,
@@ -544,23 +828,55 @@ impl ToolDispatch for LaneRuntime {
             if let Err(error) = permit.try_send(command) {
                 return lane_send_error_outcome(self.name(), error, cx);
             }
-            match reply_rx.recv(cx).await {
-                Ok(outcome) => outcome,
-                Err(oneshot::RecvError::Cancelled) => Outcome::Cancelled(cancel_reason_from_cx(
-                    cx,
-                    "dispatch lane receive cancelled before reply",
-                )),
+            let caller_guard = LaneCallerGuard::new(caller);
+            match recv_lane_reply(cx, &mut reply_rx).await {
+                Ok(outcome) => {
+                    caller_guard.complete();
+                    outcome
+                }
+                Err(oneshot::RecvError::Cancelled) => {
+                    let reason =
+                        cancel_reason_from_cx(cx, "dispatch lane receive cancelled before reply");
+                    caller_guard.signal_cancel(reason.clone());
+                    match recv_terminal_after_cancel(cx, &mut reply_rx).await {
+                        Ok(outcome) => {
+                            caller_guard.complete();
+                            outcome
+                        }
+                        Err(TerminalReplyWaitError::Closed) => {
+                            caller_guard.complete();
+                            if self.inner.close_state.is_requested() {
+                                Outcome::Err(lane_stopped_before_reply(self.name()))
+                            } else {
+                                Outcome::Panicked(lane_panic_payload(self.name()))
+                            }
+                        }
+                        Err(TerminalReplyWaitError::Expired) => {
+                            caller_guard.complete();
+                            terminal_reply_wait_expired_outcome(
+                                self.name(),
+                                &self.inner.close_state,
+                                self.inner.panic_auditor.as_deref(),
+                                reason,
+                            )
+                        }
+                    }
+                }
                 Err(oneshot::RecvError::Closed) => {
+                    caller_guard.complete();
                     if self.inner.close_state.is_requested() {
                         Outcome::Err(lane_stopped_before_reply(self.name()))
                     } else {
                         Outcome::Panicked(lane_panic_payload(self.name()))
                     }
                 }
-                Err(_) => Outcome::Err(ErrorEnvelope::new(
-                    ErrorClass::RuntimeStateRequired,
-                    format!("dispatch lane {} stopped before replying", self.name()),
-                )),
+                Err(_) => {
+                    caller_guard.complete();
+                    Outcome::Err(ErrorEnvelope::new(
+                        ErrorClass::RuntimeStateRequired,
+                        format!("dispatch lane {} stopped before replying", self.name()),
+                    ))
+                }
             }
         })
     }
@@ -591,7 +907,10 @@ impl ToolDispatch for LaneRuntime {
             let (reply_tx, reply_rx) = oneshot::channel();
             let lane_generation = self.generation();
             let context = context.with_lane_identity(self.name(), lane_generation);
+            let caller = Arc::new(LaneCallerSignal::new(cx));
             let command = LaneCommand::DispatchStream {
+                caller: Arc::clone(&caller),
+                enqueued_at: Instant::now(),
                 context: context.to_owned_context(),
                 name: name.to_owned(),
                 args,
@@ -605,7 +924,22 @@ impl ToolDispatch for LaneRuntime {
             if let Err(error) = permit.try_send(command) {
                 return lane_stream_start_error_outcome(self.name(), error, cx);
             }
-            Outcome::Ok(reply_rx)
+            let cancel_caller = Arc::clone(&caller);
+            let expiry_close_state = Arc::clone(&self.inner.close_state);
+            let expiry_auditor = self.inner.panic_auditor.clone();
+            let expiry_lane_name = self.name().to_owned();
+            Outcome::Ok(DispatchReplyReceiver::with_cancel_hooks(
+                reply_rx,
+                Arc::new(move |reason| cancel_caller.cancel(reason)),
+                Arc::new(move |reason| {
+                    terminal_reply_wait_expired_outcome(
+                        &expiry_lane_name,
+                        &expiry_close_state,
+                        expiry_auditor.as_deref(),
+                        reason,
+                    )
+                }),
+            ))
         })
     }
 
@@ -633,7 +967,10 @@ impl ToolDispatch for LaneRuntime {
             let (reply_tx, mut reply_rx) = oneshot::channel();
             let lane_generation = self.generation();
             let context = context.with_lane_identity(self.name(), lane_generation);
+            let caller = Arc::new(LaneCallerSignal::new(cx));
             let command = LaneCommand::SurfaceState {
+                caller: Arc::clone(&caller),
+                enqueued_at: Instant::now(),
                 context: context.to_owned_context(),
                 detail,
                 reply: reply_tx,
@@ -645,23 +982,57 @@ impl ToolDispatch for LaneRuntime {
             if let Err(error) = permit.try_send(command) {
                 return lane_send_error_surface_outcome(self.name(), error, cx);
             }
-            match reply_rx.recv(cx).await {
-                Ok(outcome) => outcome,
-                Err(oneshot::RecvError::Cancelled) => Outcome::Cancelled(cancel_reason_from_cx(
-                    cx,
-                    "dispatch lane surface-state receive cancelled before reply",
-                )),
+            let caller_guard = LaneCallerGuard::new(caller);
+            match recv_lane_reply(cx, &mut reply_rx).await {
+                Ok(outcome) => {
+                    caller_guard.complete();
+                    outcome
+                }
+                Err(oneshot::RecvError::Cancelled) => {
+                    let reason = cancel_reason_from_cx(
+                        cx,
+                        "dispatch lane surface-state receive cancelled before reply",
+                    );
+                    caller_guard.signal_cancel(reason.clone());
+                    match recv_terminal_after_cancel(cx, &mut reply_rx).await {
+                        Ok(outcome) => {
+                            caller_guard.complete();
+                            outcome
+                        }
+                        Err(TerminalReplyWaitError::Closed) => {
+                            caller_guard.complete();
+                            if self.inner.close_state.is_requested() {
+                                Outcome::Err(lane_stopped_before_reply(self.name()))
+                            } else {
+                                Outcome::Panicked(lane_panic_payload(self.name()))
+                            }
+                        }
+                        Err(TerminalReplyWaitError::Expired) => {
+                            caller_guard.complete();
+                            terminal_reply_wait_expired_outcome(
+                                self.name(),
+                                &self.inner.close_state,
+                                self.inner.panic_auditor.as_deref(),
+                                reason,
+                            )
+                        }
+                    }
+                }
                 Err(oneshot::RecvError::Closed) => {
+                    caller_guard.complete();
                     if self.inner.close_state.is_requested() {
                         Outcome::Err(lane_stopped_before_reply(self.name()))
                     } else {
                         Outcome::Panicked(lane_panic_payload(self.name()))
                     }
                 }
-                Err(_) => Outcome::Err(ErrorEnvelope::new(
-                    ErrorClass::RuntimeStateRequired,
-                    format!("dispatch lane {} stopped before replying", self.name()),
-                )),
+                Err(_) => {
+                    caller_guard.complete();
+                    Outcome::Err(ErrorEnvelope::new(
+                        ErrorClass::RuntimeStateRequired,
+                        format!("dispatch lane {} stopped before replying", self.name()),
+                    ))
+                }
             }
         })
     }
@@ -674,12 +1045,35 @@ impl ToolDispatch for LaneRuntime {
 /// stateful served dispatch cannot accidentally fall through to shared
 /// dispatcher state unless HTTP resolved a session-bound [`DispatchContext`].
 pub struct StatefulLaneDispatch {
-    factory: Arc<LaneDispatchFactory>,
+    factory_builder: Arc<LaneDispatchFactoryBuilder>,
     panic_auditor: Option<Arc<Auditor>>,
     admission: Option<Arc<AdmissionController>>,
     mailbox_capacity: usize,
     next_lane_id: AtomicU64,
     lanes: Mutex<HashMap<LaneKey, LaneRuntime>>,
+    creating_lanes: Mutex<HashSet<LaneKey>>,
+    creation_changed: Condvar,
+}
+
+struct LaneCreationGuard<'a> {
+    key: Option<LaneKey>,
+    creating_lanes: &'a Mutex<HashSet<LaneKey>>,
+    creation_changed: &'a Condvar,
+}
+
+impl Drop for LaneCreationGuard<'_> {
+    fn drop(&mut self) {
+        let Some(key) = self.key.take() else {
+            return;
+        };
+        self.creating_lanes.lock().remove(&key);
+        self.creation_changed.notify_all();
+    }
+}
+
+enum LaneCreationTurn<'a> {
+    Existing(LaneRuntime),
+    Create(LaneCreationGuard<'a>),
 }
 
 struct LaneRegistryGuard<'a> {
@@ -722,27 +1116,33 @@ impl StatefulLaneDispatch {
     #[must_use]
     pub fn new(inner: Arc<dyn ToolDispatch>) -> Self {
         let shared = Arc::clone(&inner);
-        let factory: Arc<LaneDispatchFactory> = Arc::new(move |_cx, _lane_context| {
-            let inner = Arc::clone(&shared);
-            Box::pin(async move { Ok(inner) })
+        let factory_builder: Arc<LaneDispatchFactoryBuilder> = Arc::new(move |_lane_context| {
+            let shared = Arc::clone(&shared);
+            let factory: Arc<LaneDispatchFactory> = Arc::new(move |_cx, _lane_context| {
+                let inner = Arc::clone(&shared);
+                Box::pin(async move { Ok(inner) })
+            });
+            Ok(PreparedLaneDispatch::new(factory, DEFAULT_REQUEST_TIMEOUT))
         });
-        Self::with_dispatch_factory(factory, None)
+        Self::with_dispatch_factory_builder(factory_builder, None)
     }
 
     /// Build a stateful lane registry whose concrete dispatchers are created on
     /// each lane's own runtime.
     #[must_use]
-    pub fn with_dispatch_factory(
-        factory: Arc<LaneDispatchFactory>,
+    pub fn with_dispatch_factory_builder(
+        factory_builder: Arc<LaneDispatchFactoryBuilder>,
         panic_auditor: Option<Arc<Auditor>>,
     ) -> Self {
         Self {
-            factory,
+            factory_builder,
             panic_auditor,
             admission: None,
             mailbox_capacity: DEFAULT_LANE_MAILBOX_CAPACITY,
             next_lane_id: AtomicU64::new(1),
             lanes: Mutex::new(HashMap::new()),
+            creating_lanes: Mutex::new(HashSet::new()),
+            creation_changed: Condvar::new(),
         }
     }
 
@@ -760,52 +1160,110 @@ impl StatefulLaneDispatch {
         LaneRegistryGuard { inner }
     }
 
+    fn reusable_lane(&self, key: &LaneKey) -> Option<LaneRuntime> {
+        let (lane, stale) = {
+            let mut lanes = self.lock_lanes();
+            match lanes.get(key).cloned() {
+                Some(lane) if lane.accepts_commands() => (Some(lane), None),
+                Some(_) => (None, lanes.remove(key)),
+                None => (None, None),
+            }
+        };
+        // Dropping a stale lane can release its generation-bound factory. Do
+        // that only after the registry lock is gone (Config -> Registry order).
+        drop(stale);
+        lane
+    }
+
+    fn acquire_creation_turn<'a>(
+        &'a self,
+        cx: &Cx,
+        key: &LaneKey,
+    ) -> Result<LaneCreationTurn<'a>, ErrorEnvelope> {
+        let wait_deadline = Instant::now()
+            .checked_add(Duration::from_millis(DEFAULT_FAIR_ADMISSION_WAIT_MS))
+            .unwrap_or_else(Instant::now);
+        loop {
+            cx.checkpoint()
+                .map_err(|_| lane_resolution_cancelled_error())?;
+            if let Some(lane) = self.reusable_lane(key) {
+                return Ok(LaneCreationTurn::Existing(lane));
+            }
+            let mut creating = self.creating_lanes.lock();
+            if creating.insert(key.clone()) {
+                drop(creating);
+                let guard = LaneCreationGuard {
+                    key: Some(key.clone()),
+                    creating_lanes: &self.creating_lanes,
+                    creation_changed: &self.creation_changed,
+                };
+                // Close the Registry-miss -> marker-acquire race with a
+                // concurrent owner that inserted just before releasing its
+                // marker.
+                if let Some(lane) = self.reusable_lane(key) {
+                    drop(guard);
+                    return Ok(LaneCreationTurn::Existing(lane));
+                }
+                return Ok(LaneCreationTurn::Create(guard));
+            }
+            let Some(remaining) = wait_deadline.checked_duration_since(Instant::now()) else {
+                return Err(ErrorEnvelope::new(
+                    ErrorClass::Busy,
+                    "timed out waiting for concurrent construction of the same stateful lane",
+                )
+                .with_retry_after_ms(DEFAULT_RETRY_AFTER_MS));
+            };
+            self.creation_changed
+                .wait_for(&mut creating, remaining.min(Duration::from_millis(5)));
+            drop(creating);
+        }
+    }
+
     fn resolve_lane(
         &self,
         cx: &Cx,
         context: DispatchContext<'_>,
     ) -> Result<LaneRuntime, ErrorEnvelope> {
+        cx.checkpoint()
+            .map_err(|_| lane_resolution_cancelled_error())?;
         let session_id = context.http_session_id().ok_or_else(lease_required)?;
         let principal_key = context.principal_key().unwrap_or("anonymous-http");
         let key = LaneKey::new(session_id, principal_key);
-        if let Some(lane) = self.lock_lanes().get(&key).cloned() {
+        if let Some(lane) = self.reusable_lane(&key) {
             return Ok(lane);
         }
+        let _creation_guard = match self.acquire_creation_turn(cx, &key)? {
+            LaneCreationTurn::Existing(lane) => return Ok(lane),
+            LaneCreationTurn::Create(guard) => guard,
+        };
 
-        let mut lanes = self.lock_lanes();
-        if let Some(lane) = lanes.get(&key).cloned() {
-            return Ok(lane);
-        }
         let capacity_permit = if let Some(admission) = self.admission.as_ref() {
             match admission.try_admit(cx, principal_key) {
                 Ok(permit) => Some(permit),
-                Err(_) => {
-                    drop(lanes);
-                    let permit = admission.admit_capacity_with_fair_wait(
-                        cx,
-                        principal_key,
-                        "stateful_lane",
-                    )?;
-                    let mut lanes = self.lock_lanes();
-                    if let Some(lane) = lanes.get(&key).cloned() {
-                        drop(permit);
-                        return Ok(lane);
+                Err(_) => match admission.admit_capacity_with_fair_wait(
+                    cx,
+                    principal_key,
+                    "stateful_lane",
+                ) {
+                    Ok(permit) => Some(permit),
+                    Err(error) => {
+                        if cx.checkpoint().is_err() {
+                            return Err(lane_resolution_cancelled_error());
+                        }
+                        // Another request for the same key can consume the last
+                        // permit while constructing the one lane both callers
+                        // should share. Reuse that concurrent winner before
+                        // surfacing a false capacity refusal.
+                        if let Some(lane) = self.reusable_lane(&key) {
+                            return Ok(lane);
+                        }
+                        return Err(error);
                     }
-                    return Ok(self.spawn_lane_locked(&mut lanes, key, Some(permit)));
-                }
+                },
             }
         } else {
             None
         };
-        Ok(self.spawn_lane_locked(&mut lanes, key, capacity_permit))
-    }
-
-    fn spawn_lane_locked(
-        &self,
-        lanes: &mut LaneRegistryGuard<'_>,
-        key: LaneKey,
-        capacity_permit: Option<AdmissionPermit>,
-    ) -> LaneRuntime {
         let lane_number = self.next_lane_id.fetch_add(1, Ordering::SeqCst);
         let lane_id = format!("http-lane-{lane_number}");
         let lane_context = LaneContext::new(
@@ -814,10 +1272,56 @@ impl StatefulLaneDispatch {
             key.principal_key.clone(),
             1,
         );
-        let lane = LaneRuntime::spawn_with_dispatch_factory_and_capacity(
+        // Config/profile generation preparation happens before the lane
+        // registry lock. This both preserves the canonical Config -> Registry
+        // order and binds factory + timeout to one atomic generation lease.
+        let prepared = (self.factory_builder)(&lane_context)?;
+        if cx.checkpoint().is_err() {
+            drop(prepared);
+            drop(capacity_permit);
+            return Err(lane_resolution_cancelled_error());
+        }
+
+        let mut lanes = self.lock_lanes();
+        if let Some(lane) = lanes
+            .get(&key)
+            .filter(|lane| lane.accepts_commands())
+            .cloned()
+        {
+            // Prepared dispatches own profile-generation leases. Release those
+            // only after leaving the registry lock.
+            drop(lanes);
+            drop(prepared);
+            drop(capacity_permit);
+            return Ok(lane);
+        }
+        let stale = lanes.remove(&key);
+        let lane = self.spawn_lane_locked(
+            &mut lanes,
+            key,
             lane_id,
             lane_context,
-            Arc::clone(&self.factory),
+            prepared,
+            capacity_permit,
+        );
+        drop(lanes);
+        drop(stale);
+        Ok(lane)
+    }
+
+    fn spawn_lane_locked(
+        &self,
+        lanes: &mut LaneRegistryGuard<'_>,
+        key: LaneKey,
+        lane_id: String,
+        lane_context: LaneContext,
+        prepared: PreparedLaneDispatch,
+        capacity_permit: Option<AdmissionPermit>,
+    ) -> LaneRuntime {
+        let lane = LaneRuntime::spawn_prepared_dispatch_with_capacity(
+            lane_id,
+            lane_context,
+            prepared,
             self.mailbox_capacity,
             self.panic_auditor.clone(),
             capacity_permit,
@@ -947,6 +1451,13 @@ impl ToolDispatch for StatefulLaneDispatch {
         args: Value,
     ) -> DispatchFuture<'a> {
         Box::pin(async move {
+            let context = context.with_request_started_at(Instant::now());
+            if cx.checkpoint().is_err() {
+                return Outcome::Cancelled(cancel_reason_from_cx(
+                    cx,
+                    "stateful lane resolution cancelled before admission",
+                ));
+            }
             let lane = self.resolve_lane(cx, context)?;
             lane.dispatch(cx, context, name, args).await
         })
@@ -961,6 +1472,13 @@ impl ToolDispatch for StatefulLaneDispatch {
         frames: ToolStreamSender,
     ) -> DispatchStreamStartFuture<'a> {
         Box::pin(async move {
+            let context = context.with_request_started_at(Instant::now());
+            if cx.checkpoint().is_err() {
+                return Outcome::Cancelled(cancel_reason_from_cx(
+                    cx,
+                    "stateful streaming lane resolution cancelled before admission",
+                ));
+            }
             let lane = self.resolve_lane(cx, context)?;
             lane.dispatch_stream_start(cx, context, name, args, frames)
                 .await
@@ -974,6 +1492,13 @@ impl ToolDispatch for StatefulLaneDispatch {
         detail: McpSurfaceDetail,
     ) -> McpSurfaceFuture<'a> {
         Box::pin(async move {
+            let context = context.with_request_started_at(Instant::now());
+            if cx.checkpoint().is_err() {
+                return Outcome::Cancelled(cancel_reason_from_cx(
+                    cx,
+                    "stateful surface resolution cancelled before admission",
+                ));
+            }
             let lane = self.resolve_lane(cx, context)?;
             lane.mcp_surface_state(cx, context, detail).await
         })
@@ -986,6 +1511,14 @@ fn lease_required() -> ErrorEnvelope {
         "stateful HTTP dispatch requires an MCP-session-bound lane context",
     )
     .with_next_step("initialize the Streamable HTTP session before calling tools")
+}
+
+fn lane_resolution_cancelled_error() -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::Timeout,
+        "stateful lane resolution was cancelled or exhausted its caller budget",
+    )
+    .with_next_step("retry only if the original operation was safe to retry")
 }
 
 fn lane_send_error<T>(name: &str, error: SendError<T>) -> ErrorEnvelope {
@@ -1050,6 +1583,27 @@ fn cancel_reason_from_cx(cx: &Cx, fallback: &'static str) -> CancelReason {
         .unwrap_or_else(|| CancelReason::user(fallback))
 }
 
+async fn recv_lane_reply<T>(
+    cx: &Cx,
+    reply: &mut oneshot::Receiver<T>,
+) -> Result<T, oneshot::RecvError> {
+    let mut receive = std::pin::pin!(reply.recv(cx));
+    std::future::poll_fn(|task_cx| {
+        // A ready lane reply may carry the only safe terminal classification
+        // for a commit/DDL/elevation. Preserve it even when caller cancellation
+        // became visible in the same scheduling turn; returning a generic
+        // cancellation here would invite an unsafe retry after a real effect.
+        match receive.as_mut().poll(task_cx) {
+            Poll::Ready(result) => Poll::Ready(result),
+            Poll::Pending if cx.checkpoint().is_err() => {
+                Poll::Ready(Err(oneshot::RecvError::Cancelled))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    })
+    .await
+}
+
 fn lane_panic_payload(name: &str) -> PanicPayload {
     PanicPayload::new(format!("dispatch lane {name} panicked before replying"))
 }
@@ -1061,15 +1615,18 @@ fn lane_stopped_before_reply(name: &str) -> ErrorEnvelope {
     )
 }
 
-fn run_lane_thread_with_factory(
+struct LaneThreadConfig {
     name: String,
     lane_context: LaneContext,
-    receiver: mpsc::Receiver<LaneCommand>,
     factory: Arc<LaneDispatchFactory>,
+    factory_request_timeout: Duration,
+    factory_error_is_terminal: bool,
     status: Arc<AtomicU8>,
     close_state: Arc<LaneCloseState>,
     panic_auditor: Option<Arc<Auditor>>,
-) {
+}
+
+fn run_lane_thread_with_factory(receiver: mpsc::Receiver<LaneCommand>, config: LaneThreadConfig) {
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         let reactor = asupersync::runtime::reactor::create_reactor()
             .expect("Asupersync native reactor builds for lane dispatch");
@@ -1077,26 +1634,20 @@ fn run_lane_thread_with_factory(
             .with_reactor(reactor)
             .build()
             .expect("Asupersync current-thread runtime builds for lane dispatch");
-        status.store(STATUS_RUNNING, Ordering::Release);
-        // block-on-boundary: sanctioned lane runtime on a dedicated OS thread.
-        runtime.block_on(run_lane_loop_with_factory(
-            receiver,
-            lane_context,
-            factory,
-            close_state,
-        ));
+        config.status.store(STATUS_RUNNING, Ordering::Release);
+        run_lane_loop_with_factory(&runtime, receiver, &config);
     }));
     match outcome {
-        Ok(()) => status.store(STATUS_STOPPED, Ordering::Release),
+        Ok(()) => config.status.store(STATUS_STOPPED, Ordering::Release),
         Err(_) => {
-            audit_lane_panic(&name, panic_auditor.as_deref());
+            audit_lane_panic(&config.name, config.panic_auditor.as_deref());
             tracing::error!(
-                lane = %name,
+                lane = %config.name,
                 audit_event = "lane_panic_unknown_discarded",
                 outcome = "unknown_discarded",
                 "oraclemcp lane panicked; quarantined lane and discarded unknown in-flight DB state"
             );
-            status.store(STATUS_QUARANTINED, Ordering::Release);
+            config.status.store(STATUS_QUARANTINED, Ordering::Release);
         }
     }
 }
@@ -1125,6 +1676,34 @@ fn audit_lane_panic(name: &str, auditor: Option<&Auditor>) {
     }
 }
 
+fn audit_lane_finalization_timeout(name: &str, auditor: Option<&Auditor>) -> bool {
+    let Some(auditor) = auditor else {
+        return true;
+    };
+    let draft = AuditEntryDraft {
+        subject: AuditSubject::new("lane", name),
+        db_evidence: None,
+        cancel: None,
+        tool: "lane_runtime".to_owned(),
+        sql: "LANE_FINALIZATION_TIMEOUT_UNKNOWN_DISCARDED".to_owned(),
+        danger_level: "UNKNOWN".to_owned(),
+        decision: AuditDecision::Blocked,
+        rows_affected: None,
+        outcome: AuditOutcome::UnknownDiscarded,
+    };
+    match auditor.append(&draft, audit_timestamp(), true) {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::error!(
+                lane = %name,
+                error = %error,
+                "failed to append durable lane finalization-timeout audit record"
+            );
+            false
+        }
+    }
+}
+
 fn audit_timestamp() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1133,122 +1712,586 @@ fn audit_timestamp() -> String {
     format!("unix:{secs}")
 }
 
-// SAFETY: This is the sanctioned N0a block_on boundary. It is entered only by
-// `run_lane_thread_with_factory`, where `Runtime::block_on` is the outermost
-// operation on a dedicated OS thread. The concrete dispatcher and its Oracle
-// connection are constructed inside that thread; callers interact through
-// bounded `mpsc` commands and oneshot replies carrying owned, Send values.
-async fn run_lane_loop_with_factory(
+// SAFETY: These are the sanctioned N0a block_on boundaries. They are entered
+// only by `run_lane_thread_with_factory` on its dedicated OS thread. Mailbox
+// receive, each command, and close each get a fresh lane-runtime Cx; the
+// concrete dispatcher and Oracle connection remain owned by this thread.
+// Callers interact only through bounded commands and owned reply values.
+fn run_lane_loop_with_factory(
+    runtime: &Runtime,
     mut receiver: mpsc::Receiver<LaneCommand>,
-    lane_context: LaneContext,
-    factory: Arc<LaneDispatchFactory>,
-    close_state: Arc<LaneCloseState>,
+    config: &LaneThreadConfig,
 ) {
-    let Some(cx) = Cx::current() else {
-        return;
-    };
-    // A9: lane-shell checkpoints and mailbox receives use TIME+IO only. The
-    // dispatcher/DB trait calls below keep the full Cx as the documented
-    // object-safe IO exception.
-    let lane_cx = narrow_to_lane(&cx);
     let mut dispatcher: Option<Arc<dyn ToolDispatch>> = None;
+    let lane_context = &config.lane_context;
+    let close_state = &config.close_state;
+    let panic_auditor = config.panic_auditor.as_deref();
 
     loop {
         if let Some(reason) = close_state.requested_reason() {
-            close_lane_dispatcher(dispatcher.as_deref(), &cx, &lane_context, reason).await;
-            break;
-        }
-        if lane_cx.checkpoint().is_err() {
+            close_lane_dispatcher_on_runtime(runtime, dispatcher.as_deref(), lane_context, reason);
             break;
         }
 
-        let command = match receiver.recv(&lane_cx).await {
-            Ok(command) => command,
-            Err(_) => {
-                if let Some(reason) = close_state.requested_reason() {
-                    close_lane_dispatcher(dispatcher.as_deref(), &cx, &lane_context, reason).await;
-                }
-                break;
+        // block-on-boundary: one fresh lane-runtime Cx owns this mailbox wait.
+        let command = runtime.block_on(async {
+            let cx = Cx::current().expect("lane runtime installs a mailbox Cx");
+            // A9: the lane shell needs TIME+IO only. Dispatcher/DB calls below
+            // keep the full, lane-owned Cx as the object-safe IO exception.
+            let lane_cx = narrow_to_lane(&cx);
+            if lane_cx.checkpoint().is_err() {
+                return None;
             }
+            receiver.recv(&lane_cx).await.ok()
+        });
+        let Some(command) = command else {
+            if let Some(reason) = close_state.requested_reason() {
+                close_lane_dispatcher_on_runtime(
+                    runtime,
+                    dispatcher.as_deref(),
+                    lane_context,
+                    reason,
+                );
+            }
+            break;
         };
 
         if let Some(reason) = close_state.requested_reason() {
-            close_lane_dispatcher(dispatcher.as_deref(), &cx, &lane_context, reason).await;
+            close_lane_dispatcher_on_runtime(runtime, dispatcher.as_deref(), lane_context, reason);
             break;
         }
 
         match command {
             LaneCommand::Dispatch {
+                caller,
+                enqueued_at,
                 context,
                 name,
                 args,
                 reply,
             } => {
-                if dispatcher.is_none() {
-                    match factory(&cx, &lane_context).await {
-                        Ok(created) => dispatcher = Some(created),
-                        Err(err) => {
-                            let _ = reply.send_blocking(Outcome::Err(err));
-                            continue;
+                // block-on-boundary: each command gets a fresh lane-owned Cx.
+                runtime.block_on(async {
+                    let cx = Cx::current().expect("lane runtime installs a command Cx");
+                    let context = lane_command_context(&cx, &caller, enqueued_at, &context);
+                    let request_budget = context
+                        .as_dispatch_context()
+                        .request_budget()
+                        .cloned()
+                        .expect("lane command installs a shared request budget");
+                    let factory_budget = request_budget.tighten_timeout(
+                        tool_request_timeout_ceiling(config.factory_request_timeout, &args),
+                    );
+                    if let Some(reason) = caller.reason() {
+                        let _ = reply.send_blocking(Outcome::Cancelled(reason));
+                        return;
+                    }
+                    if dispatcher.is_none() {
+                        match run_with_caller_signal(
+                            &cx,
+                            &caller,
+                            &factory_budget,
+                            (config.factory)(&cx, lane_context),
+                        )
+                        .await
+                        {
+                            Ok(Ok(created)) => dispatcher = Some(created),
+                            Ok(Err(err)) => {
+                                // Prepared factories are generation-bound and
+                                // one-shot. Stop this lane so the owning
+                                // registry rebuilds it from a fresh generation
+                                // on the next request instead of reusing a
+                                // consumed factory forever.
+                                if config.factory_error_is_terminal {
+                                    close_state.request(DispatchCloseReason::RuntimeDrop);
+                                }
+                                let _ = reply.send_blocking(Outcome::Err(err));
+                                return;
+                            }
+                            Err(error) => {
+                                let outcome = request_run_error_outcome(
+                                    error,
+                                    close_state,
+                                    lane_context,
+                                    panic_auditor,
+                                );
+                                let _ = reply.send_blocking(outcome);
+                                return;
+                            }
+                        }
+                        if let Some(reason) = caller.reason().or_else(|| cx.cancel_reason()) {
+                            close_state.request(DispatchCloseReason::OperatorCancel);
+                            let _ = reply.send_blocking(Outcome::Cancelled(reason));
+                            return;
                         }
                     }
-                }
-                let borrowed_context = context.as_dispatch_context();
-                let result = dispatcher
-                    .as_ref()
-                    .expect("dispatcher initialized above")
-                    .dispatch(&cx, borrowed_context, name.as_str(), args)
-                    .await;
-                let _ = reply.send_blocking(result);
+                    let dispatcher = dispatcher.as_ref().expect("dispatcher initialized above");
+                    let profile_timeout = match dispatcher.request_timeout_ceiling() {
+                        Ok(timeout) => timeout,
+                        Err(error) => {
+                            let _ = reply.send_blocking(Outcome::Err(error));
+                            return;
+                        }
+                    };
+                    let dispatch_budget = request_budget
+                        .tighten_timeout(tool_request_timeout_ceiling(profile_timeout, &args));
+                    let borrowed_context = context
+                        .as_dispatch_context()
+                        .with_request_budget(&dispatch_budget);
+                    let result = match run_with_caller_signal(
+                        &cx,
+                        &caller,
+                        &dispatch_budget,
+                        dispatcher.dispatch(&cx, borrowed_context, name.as_str(), args),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => request_run_error_outcome(
+                            error,
+                            close_state,
+                            lane_context,
+                            panic_auditor,
+                        ),
+                    };
+                    let _ = reply.send_blocking(result);
+                });
             }
             LaneCommand::DispatchStream {
+                caller,
+                enqueued_at,
                 context,
                 name,
                 args,
                 frames,
                 reply,
             } => {
-                if dispatcher.is_none() {
-                    match factory(&cx, &lane_context).await {
-                        Ok(created) => dispatcher = Some(created),
-                        Err(err) => {
-                            let _ = reply.send_blocking(Outcome::Err(err));
-                            continue;
+                runtime.block_on(async {
+                    let cx = Cx::current().expect("lane runtime installs a stream command Cx");
+                    let context = lane_command_context(&cx, &caller, enqueued_at, &context);
+                    let request_budget = context
+                        .as_dispatch_context()
+                        .request_budget()
+                        .cloned()
+                        .expect("lane stream command installs a shared request budget");
+                    let factory_budget = request_budget.tighten_timeout(
+                        tool_request_timeout_ceiling(config.factory_request_timeout, &args),
+                    );
+                    if let Some(reason) = caller.reason() {
+                        let _ = reply.send_blocking(Outcome::Cancelled(reason));
+                        return;
+                    }
+                    if dispatcher.is_none() {
+                        match run_with_caller_signal(
+                            &cx,
+                            &caller,
+                            &factory_budget,
+                            (config.factory)(&cx, lane_context),
+                        )
+                        .await
+                        {
+                            Ok(Ok(created)) => dispatcher = Some(created),
+                            Ok(Err(err)) => {
+                                if config.factory_error_is_terminal {
+                                    close_state.request(DispatchCloseReason::RuntimeDrop);
+                                }
+                                let _ = reply.send_blocking(Outcome::Err(err));
+                                return;
+                            }
+                            Err(error) => {
+                                let outcome = request_run_error_outcome(
+                                    error,
+                                    close_state,
+                                    lane_context,
+                                    panic_auditor,
+                                );
+                                let _ = reply.send_blocking(outcome);
+                                return;
+                            }
+                        }
+                        if let Some(reason) = caller.reason().or_else(|| cx.cancel_reason()) {
+                            close_state.request(DispatchCloseReason::OperatorCancel);
+                            let _ = reply.send_blocking(Outcome::Cancelled(reason));
+                            return;
                         }
                     }
-                }
-                let borrowed_context = context.as_dispatch_context();
-                let result = dispatcher
-                    .as_ref()
-                    .expect("dispatcher initialized above")
-                    .dispatch_stream(&cx, borrowed_context, name.as_str(), args, frames)
-                    .await;
-                let _ = reply.send_blocking(result);
+                    let dispatcher = dispatcher.as_ref().expect("dispatcher initialized above");
+                    let profile_timeout = match dispatcher.request_timeout_ceiling() {
+                        Ok(timeout) => timeout,
+                        Err(error) => {
+                            let _ = reply.send_blocking(Outcome::Err(error));
+                            return;
+                        }
+                    };
+                    let dispatch_budget = request_budget
+                        .tighten_timeout(tool_request_timeout_ceiling(profile_timeout, &args));
+                    let borrowed_context = context
+                        .as_dispatch_context()
+                        .with_request_budget(&dispatch_budget);
+                    let result = match run_with_caller_signal(
+                        &cx,
+                        &caller,
+                        &dispatch_budget,
+                        dispatcher.dispatch_stream(
+                            &cx,
+                            borrowed_context,
+                            name.as_str(),
+                            args,
+                            frames,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => request_run_error_outcome(
+                            error,
+                            close_state,
+                            lane_context,
+                            panic_auditor,
+                        ),
+                    };
+                    let _ = reply.send_blocking(result);
+                });
             }
             LaneCommand::SurfaceState {
+                caller,
+                enqueued_at,
                 context,
                 detail,
                 reply,
             } => {
-                if dispatcher.is_none() {
-                    match factory(&cx, &lane_context).await {
-                        Ok(created) => dispatcher = Some(created),
-                        Err(err) => {
-                            let _ = reply.send_blocking(Outcome::Err(err));
-                            continue;
+                runtime.block_on(async {
+                    let cx = Cx::current().expect("lane runtime installs a surface command Cx");
+                    let context = lane_command_context(&cx, &caller, enqueued_at, &context);
+                    let request_budget = context
+                        .as_dispatch_context()
+                        .request_budget()
+                        .cloned()
+                        .expect("lane surface command installs a shared request budget");
+                    let factory_budget =
+                        request_budget.tighten_timeout(config.factory_request_timeout);
+                    if let Some(reason) = caller.reason() {
+                        let _ = reply.send_blocking(Outcome::Cancelled(reason));
+                        return;
+                    }
+                    if dispatcher.is_none() {
+                        match run_with_caller_signal(
+                            &cx,
+                            &caller,
+                            &factory_budget,
+                            (config.factory)(&cx, lane_context),
+                        )
+                        .await
+                        {
+                            Ok(Ok(created)) => dispatcher = Some(created),
+                            Ok(Err(err)) => {
+                                if config.factory_error_is_terminal {
+                                    close_state.request(DispatchCloseReason::RuntimeDrop);
+                                }
+                                let _ = reply.send_blocking(Outcome::Err(err));
+                                return;
+                            }
+                            Err(error) => {
+                                let outcome = request_run_error_outcome(
+                                    error,
+                                    close_state,
+                                    lane_context,
+                                    panic_auditor,
+                                );
+                                let _ = reply.send_blocking(outcome);
+                                return;
+                            }
+                        }
+                        if let Some(reason) = caller.reason().or_else(|| cx.cancel_reason()) {
+                            close_state.request(DispatchCloseReason::OperatorCancel);
+                            let _ = reply.send_blocking(Outcome::Cancelled(reason));
+                            return;
                         }
                     }
-                }
-                let borrowed_context = context.as_dispatch_context();
-                let result = dispatcher
-                    .as_ref()
-                    .expect("dispatcher initialized above")
-                    .mcp_surface_state(&cx, borrowed_context, detail)
-                    .await;
-                let _ = reply.send_blocking(result);
+                    let dispatcher = dispatcher.as_ref().expect("dispatcher initialized above");
+                    let profile_timeout = match dispatcher.request_timeout_ceiling() {
+                        Ok(timeout) => timeout,
+                        Err(error) => {
+                            let _ = reply.send_blocking(Outcome::Err(error));
+                            return;
+                        }
+                    };
+                    let dispatch_budget = request_budget.tighten_timeout(profile_timeout);
+                    let borrowed_context = context
+                        .as_dispatch_context()
+                        .with_request_budget(&dispatch_budget);
+                    let result = match run_with_caller_signal(
+                        &cx,
+                        &caller,
+                        &dispatch_budget,
+                        dispatcher.mcp_surface_state(&cx, borrowed_context, detail),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => request_run_error_outcome(
+                            error,
+                            close_state,
+                            lane_context,
+                            panic_auditor,
+                        ),
+                    };
+                    let _ = reply.send_blocking(result);
+                });
             }
         }
     }
+}
+
+fn lane_command_context(
+    cx: &Cx,
+    caller: &LaneCallerSignal,
+    enqueued_at: Instant,
+    context: &OwnedDispatchContext,
+) -> OwnedDispatchContext {
+    let queue_wait = enqueued_at.elapsed();
+    let total_wait = context
+        .as_dispatch_context()
+        .request_started_at()
+        .map_or(queue_wait, |started_at| started_at.elapsed());
+    let lane_now = cx.now();
+    let elapsed_nanos = total_wait.as_nanos().min(u128::from(u64::MAX)) as u64;
+    let admitted_at = lane_now.saturating_sub_nanos(elapsed_nanos);
+    let caller_budget = caller.budget_for_lane(lane_now, queue_wait);
+    // One shared application budget spans lazy dispatcher construction and
+    // the eventual tool call. Admission carries the caller's deadline and the
+    // service quota, but deliberately does not pre-apply the 30-second default:
+    // the concrete dispatcher owns the active profile timeout and must be able
+    // to select a configured ceiling above 30 seconds. Lane-owned factory and
+    // surface work apply the default explicitly at their call sites below.
+    let request_budget = RequestBudget::from_budget_at(
+        admitted_at,
+        Budget::new().with_poll_quota(DEFAULT_REQUEST_POLL_QUOTA),
+    )
+    .meet(caller_budget);
+    context
+        .as_dispatch_context()
+        .with_admitted_at(admitted_at)
+        .with_caller_budget(caller_budget)
+        .with_request_budget(&request_budget)
+        .to_owned_context()
+}
+
+async fn run_with_request_budget<F>(
+    lane_cx: &Cx,
+    budget: &RequestBudget,
+    caller: Option<&LaneCallerSignal>,
+    future: F,
+) -> Result<F::Output, RequestRunError>
+where
+    F: Future,
+{
+    run_with_request_budget_and_finalization_budget(
+        lane_cx,
+        budget,
+        caller,
+        future,
+        RequestBudget::fresh_cleanup,
+    )
+    .await
+}
+
+async fn run_with_request_budget_and_finalization_budget<F, B>(
+    lane_cx: &Cx,
+    budget: &RequestBudget,
+    caller: Option<&LaneCallerSignal>,
+    future: F,
+    make_finalization_budget: B,
+) -> Result<F::Output, RequestRunError>
+where
+    F: Future,
+    B: FnOnce(Time) -> RequestBudget,
+{
+    let mut future = std::pin::pin!(future);
+    let mut future_was_polled = false;
+    let initial = {
+        let driven = std::future::poll_fn(|task_cx| {
+            if let Some(caller) = caller {
+                caller.register_lane_waker(task_cx.waker());
+                // Close the check/register race: cancellation after the first
+                // check either appears here or wakes the registered lane waker.
+                if let Some(reason) = caller.reason() {
+                    if lane_cx.cancel_reason().is_none() {
+                        lane_cx.set_cancel_reason(reason.clone());
+                    }
+                    return Poll::Ready(Err(reason));
+                }
+            }
+            // Asupersync 0.3.5 does not decrement nonzero Cx poll/cost fields.
+            // Charge the shared application quota explicitly on every poll.
+            // Interruption ends only the normal phase; the same pinned future
+            // is retained below for bounded terminal finalization.
+            if budget.enforce(lane_cx).is_err() {
+                let reason = lane_cx
+                    .cancel_reason()
+                    .unwrap_or_else(CancelReason::timeout);
+                if lane_cx.cancel_reason().is_none() {
+                    lane_cx.set_cancel_reason(reason.clone());
+                }
+                return Poll::Ready(Err(reason));
+            }
+            future_was_polled = true;
+            match future.as_mut().poll(task_cx) {
+                Poll::Ready(output) => Poll::Ready(Ok(output)),
+                Poll::Pending => Poll::Pending,
+            }
+        });
+
+        match budget.deadline() {
+            Some(deadline) => match asupersync::time::timeout_at(deadline, driven).await {
+                Ok(result) => result,
+                Err(_) => Err(CancelReason::timeout()),
+            },
+            None => driven.await,
+        }
+    };
+
+    let reason = match initial {
+        Ok(output) => return Ok(output),
+        Err(reason) => reason,
+    };
+    if lane_cx.cancel_reason().is_none() {
+        lane_cx.set_cancel_reason(reason.clone());
+    }
+
+    if !future_was_polled {
+        return Err(RequestRunError::InterruptedBeforeStart { reason });
+    }
+
+    // Dropping the future at the request deadline can strand a commit/DDL
+    // between its database effect and terminal audit/intent record. Give the
+    // already-cancelled future one fresh, short finalization window. It cannot
+    // start another request-budgeted wire operation, but its masked rollback,
+    // driver drain, durable terminal record, and response classification can
+    // complete. Close cleanup itself already owns a fresh budget and must not
+    // recursively gain another window.
+    if caller.is_none() {
+        return Err(RequestRunError::FinalizationTimeout { reason });
+    }
+    let finalization_budget = make_finalization_budget(lane_cx.now());
+    let finalize = std::future::poll_fn(|task_cx| {
+        if finalization_budget.enforce_at(lane_cx.now()).is_err() {
+            return Poll::Ready(None);
+        }
+        match future.as_mut().poll(task_cx) {
+            Poll::Ready(output) => Poll::Ready(Some(output)),
+            Poll::Pending => Poll::Pending,
+        }
+    });
+    match finalization_budget.deadline() {
+        Some(deadline) => match asupersync::time::timeout_at(deadline, finalize).await {
+            Ok(Some(output)) => Ok(output),
+            Ok(None) | Err(_) => Err(RequestRunError::FinalizationTimeout { reason }),
+        },
+        None => finalize
+            .await
+            .ok_or(RequestRunError::FinalizationTimeout { reason }),
+    }
+}
+
+#[derive(Debug)]
+enum RequestRunError {
+    InterruptedBeforeStart { reason: CancelReason },
+    FinalizationTimeout { reason: CancelReason },
+}
+
+fn request_run_error_outcome<T>(
+    error: RequestRunError,
+    close_state: &LaneCloseState,
+    lane_context: &LaneContext,
+    auditor: Option<&Auditor>,
+) -> Outcome<T, ErrorEnvelope> {
+    match error {
+        RequestRunError::InterruptedBeforeStart { reason } => Outcome::Cancelled(reason),
+        RequestRunError::FinalizationTimeout { reason } => {
+            close_state.request(DispatchCloseReason::RequestFinalizationTimeout);
+            // The outward reply must never outrun the durable unknown-outcome
+            // record. Dispatcher-specific lifecycle cleanup runs afterward and
+            // may add richer evidence, but this generic record covers factory
+            // timeouts where no dispatcher exists yet.
+            let audit_succeeded = audit_lane_finalization_timeout(lane_context.lane_id(), auditor);
+            finalization_timeout_outcome(reason, !audit_succeeded)
+        }
+    }
+}
+
+fn terminal_reply_wait_expired_outcome<T>(
+    lane_name: &str,
+    close_state: &LaneCloseState,
+    auditor: Option<&Auditor>,
+    reason: CancelReason,
+) -> Outcome<T, ErrorEnvelope> {
+    close_state.request(DispatchCloseReason::RequestFinalizationTimeout);
+    let audit_succeeded = audit_lane_finalization_timeout(lane_name, auditor);
+    finalization_timeout_outcome(reason, !audit_succeeded)
+}
+
+fn finalization_timeout_outcome<T>(
+    reason: CancelReason,
+    audit_failed: bool,
+) -> Outcome<T, ErrorEnvelope> {
+    let mut envelope = ErrorEnvelope::new(
+        ErrorClass::RuntimeStateRequired,
+        format!(
+            "request cancellation could not safely finalize the active Oracle operation: {reason}"
+        ),
+    )
+    .with_next_step("the stateful lane was discarded and must not be reused")
+    .with_next_step(
+        "do not retry non-idempotent work until its audit and write-intent outcome is verified",
+    );
+    if audit_failed {
+        envelope = envelope.with_next_step(
+            "the durable lane audit append also failed; verify database and audit storage manually",
+        );
+    }
+    Outcome::Err(envelope)
+}
+
+async fn run_with_caller_signal<F>(
+    lane_cx: &Cx,
+    caller: &LaneCallerSignal,
+    budget: &RequestBudget,
+    future: F,
+) -> Result<F::Output, RequestRunError>
+where
+    F: Future,
+{
+    run_with_request_budget(lane_cx, budget, Some(caller), future).await
+}
+
+fn close_lane_dispatcher_on_runtime(
+    runtime: &Runtime,
+    dispatcher: Option<&dyn ToolDispatch>,
+    lane_context: &LaneContext,
+    reason: DispatchCloseReason,
+) {
+    // block-on-boundary: cleanup receives a fresh lane-owned Cx independent of
+    // any cancelled/expired request command.
+    runtime.block_on(async {
+        let cx = Cx::current().expect("lane runtime installs a cleanup Cx");
+        let cleanup_budget = RequestBudget::fresh_cleanup(cx.now());
+        if run_with_request_budget(
+            &cx,
+            &cleanup_budget,
+            None,
+            close_lane_dispatcher(dispatcher, &cx, lane_context, reason),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                lane = %lane_context.lane_id(),
+                close_reason = reason.as_str(),
+                "stateful lane dispatcher cleanup exceeded its fresh bounded budget; lane state will be discarded"
+            );
+        }
+    });
 }
 
 async fn close_lane_dispatcher(
@@ -1292,6 +2335,7 @@ mod tests {
     use std::sync::mpsc as std_mpsc;
     use std::time::{Duration, Instant};
 
+    use asupersync::Budget;
     use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, MemoryAuditSink, SigningKey};
     use serde_json::json;
 
@@ -1464,6 +2508,221 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct CallerContextRecord {
+        task_id: String,
+        explicit_deadline: Option<Time>,
+        ambient_deadline: Option<Time>,
+        admitted_at: Option<Time>,
+        caller_budget: Option<Budget>,
+    }
+
+    struct CallerContextDispatch {
+        records: std_mpsc::Sender<CallerContextRecord>,
+    }
+
+    impl ToolDispatch for CallerContextDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            cx: &'a Cx,
+            context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            Box::pin(async move {
+                self.records
+                    .send(CallerContextRecord {
+                        task_id: format!("{:?}", cx.task_id()),
+                        explicit_deadline: cx.budget().deadline,
+                        ambient_deadline: Cx::current()
+                            .and_then(|ambient| ambient.budget().deadline),
+                        admitted_at: context.admitted_at(),
+                        caller_budget: context.caller_budget(),
+                    })
+                    .expect("test waits for caller context record");
+                Outcome::Ok(json!({ "entered": true }))
+            })
+        }
+    }
+
+    struct QueueTimingDispatch {
+        first_entered: std_mpsc::Sender<()>,
+        release_first: Mutex<std_mpsc::Receiver<()>>,
+        queue_timing: std_mpsc::Sender<(u64, u64)>,
+    }
+
+    impl ToolDispatch for QueueTimingDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            cx: &'a Cx,
+            context: DispatchContext<'a>,
+            name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            Box::pin(async move {
+                if name == "first" {
+                    self.first_entered
+                        .send(())
+                        .expect("test coordinator waits for first lane command");
+                    self.release_first
+                        .lock()
+                        .recv()
+                        .expect("test coordinator releases first lane command");
+                } else {
+                    let admitted_at = context
+                        .admitted_at()
+                        .expect("lane stamps each admitted command");
+                    let lane_now = cx.now();
+                    let deadline_remaining = context
+                        .caller_budget()
+                        .and_then(|budget| budget.deadline)
+                        .expect("queued test caller has a deadline")
+                        .duration_since(lane_now);
+                    self.queue_timing
+                        .send((lane_now.duration_since(admitted_at), deadline_remaining))
+                        .expect("test coordinator waits for queue duration");
+                }
+                Outcome::Ok(json!({ "name": name }))
+            })
+        }
+    }
+
+    struct MidFlightCancellationDispatch {
+        entered: std_mpsc::Sender<()>,
+        release: Mutex<Option<oneshot::Receiver<()>>>,
+        observed_cancel: std_mpsc::Sender<bool>,
+    }
+
+    struct LateTerminalCancellationDispatch {
+        entered: std_mpsc::Sender<()>,
+        finalized: std_mpsc::Sender<()>,
+    }
+
+    impl ToolDispatch for LateTerminalCancellationDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            if name == "healthy-after-terminal" {
+                return Box::pin(async { Outcome::Ok(json!({ "healthy": true })) });
+            }
+            let mut started = false;
+            Box::pin(std::future::poll_fn(move |_task_cx| {
+                if !started {
+                    started = true;
+                    self.entered
+                        .send(())
+                        .expect("test waits for late-terminal dispatcher entry");
+                    return Poll::Pending;
+                }
+                self.finalized
+                    .send(())
+                    .expect("test waits for late terminal classification");
+                Poll::Ready(Outcome::Ok(json!({
+                    "committed": true,
+                    "audited": true
+                })))
+            }))
+        }
+    }
+
+    struct AdmissionTimingDispatch {
+        observed: std_mpsc::Sender<u64>,
+    }
+
+    struct NeverFinalizesDispatch {
+        entered: std_mpsc::Sender<()>,
+    }
+
+    impl ToolDispatch for NeverFinalizesDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            let mut started = false;
+            Box::pin(std::future::poll_fn(move |task_cx| {
+                if !started {
+                    started = true;
+                    self.entered
+                        .send(())
+                        .expect("test waits for uncooperative operation start");
+                    return Poll::Pending;
+                }
+                task_cx.waker().wake_by_ref();
+                Poll::Pending
+            }))
+        }
+    }
+
+    impl ToolDispatch for AdmissionTimingDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            cx: &'a Cx,
+            context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            Box::pin(async move {
+                let admitted_at = context
+                    .admitted_at()
+                    .expect("stateful wrapper carries its pre-resolution start");
+                self.observed
+                    .send(cx.now().duration_since(admitted_at))
+                    .expect("test waits for admission timing");
+                Outcome::Ok(json!({ "timed": true }))
+            })
+        }
+    }
+
+    impl ToolDispatch for MidFlightCancellationDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            Box::pin(async move {
+                if name != "cancel-midflight" {
+                    return match cx.checkpoint() {
+                        Ok(()) => Outcome::Ok(json!({ "healthy": true })),
+                        Err(_) => Outcome::Cancelled(cancel_reason_from_cx(
+                            cx,
+                            "fresh lane command unexpectedly cancelled",
+                        )),
+                    };
+                }
+                self.entered
+                    .send(())
+                    .expect("test waits for dispatcher entry");
+                let mut release = self
+                    .release
+                    .lock()
+                    .take()
+                    .expect("one cancellation probe per dispatcher");
+                let _ = release.recv(cx).await;
+                let cancelled = cx.checkpoint().is_err();
+                self.observed_cancel
+                    .send(cancelled)
+                    .expect("test waits for dispatcher cancellation observation");
+                if cancelled {
+                    Outcome::Cancelled(cancel_reason_from_cx(
+                        cx,
+                        "caller cancelled during lane execution",
+                    ))
+                } else {
+                    Outcome::Ok(json!({ "cancelled": false }))
+                }
+            })
+        }
+    }
+
     struct PanicDispatch;
 
     impl ToolDispatch for PanicDispatch {
@@ -1515,6 +2774,450 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("lane close request was not published");
+    }
+
+    fn testing_cx_with_timeout(timeout: Duration) -> Cx {
+        let clock = Cx::for_testing();
+        Cx::for_testing_with_budget(
+            Budget::new()
+                .with_timeout(clock.now(), timeout)
+                .with_poll_quota(10_000),
+        )
+    }
+
+    #[test]
+    fn ready_terminal_reply_wins_simultaneous_caller_cancellation() {
+        let received = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs a caller Cx");
+            let (reply_tx, mut reply_rx) = oneshot::channel();
+            reply_tx
+                .send_blocking("terminal-outcome")
+                .expect("lane terminal reply is buffered");
+            cx.set_cancel_requested(true);
+
+            recv_lane_reply(&cx, &mut reply_rx).await
+        });
+
+        assert_eq!(
+            received.expect("a ready terminal result outranks simultaneous cancellation"),
+            "terminal-outcome"
+        );
+    }
+
+    #[test]
+    fn lane_admission_does_not_preclamp_longer_profile_timeout() {
+        let caller_cx = testing_cx_with_timeout(Duration::from_secs(60));
+        let lane_cx = Cx::for_testing();
+        let caller = LaneCallerSignal::new(&caller_cx);
+        let context = lane_command_context(
+            &lane_cx,
+            &caller,
+            Instant::now(),
+            &OwnedDispatchContext::default(),
+        );
+        let admitted_at = context
+            .as_dispatch_context()
+            .admitted_at()
+            .expect("lane stamps request admission");
+        let root = context
+            .as_dispatch_context()
+            .request_budget()
+            .expect("lane installs a shared root budget")
+            .clone();
+
+        let root_deadline = root.deadline().expect("caller deadline reaches the lane");
+        assert!(
+            root_deadline.duration_since(admitted_at) >= 59_000_000_000,
+            "lane admission preserves the approximately 60s caller ceiling instead of pre-clamping every profile to 30s"
+        );
+        let factory = root.tighten_timeout(Duration::from_secs(60));
+        assert_eq!(
+            factory.deadline(),
+            Some(root_deadline),
+            "a resolved 60s profile also governs lazy factory work without a hidden 30s clamp"
+        );
+
+        let quota_before_factory = root.budget().poll_quota;
+        factory
+            .enforce_at(admitted_at)
+            .expect("factory consumes one shared checkpoint");
+        let profile = root.tighten_timeout(Duration::from_secs(60));
+        assert_eq!(
+            profile.deadline(),
+            Some(root_deadline),
+            "a 60s active profile remains selectable up to the caller's slightly earlier captured deadline"
+        );
+        assert_eq!(
+            profile.budget().poll_quota,
+            quota_before_factory - 1,
+            "factory and tool budgets must consume the same shared request quota"
+        );
+    }
+
+    #[test]
+    fn per_tool_timeout_tightens_profile_ceiling_before_factory_or_dispatch() {
+        let args = serde_json::json!({ "timeout_seconds": 7 });
+        assert_eq!(
+            tool_request_timeout_ceiling(Duration::from_secs(60), &args),
+            Duration::from_secs(7),
+        );
+        assert_eq!(
+            tool_request_timeout_ceiling(Duration::from_secs(3), &args),
+            Duration::from_secs(3),
+            "a tool override cannot widen the active profile ceiling",
+        );
+        assert_eq!(
+            tool_request_timeout_ceiling(
+                Duration::from_secs(60),
+                &serde_json::json!({ "timeout_seconds": 99_999 }),
+            ),
+            Duration::from_secs(60),
+            "a clamped tool override still cannot widen the active profile ceiling",
+        );
+    }
+
+    #[test]
+    fn interrupted_request_retains_same_future_through_terminal_completion() {
+        let (terminal, poll_count) = block_on_lane_bridge(async {
+            let lane_cx = Cx::current().expect("bridge installs a lane Cx");
+            let caller = Arc::new(LaneCallerSignal::new(&lane_cx));
+            let request_budget =
+                RequestBudget::from_call_timeout(lane_cx.now(), Some(Duration::from_secs(1)));
+            let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let future_polls = Arc::clone(&polls);
+            let interrupt = Arc::clone(&caller);
+
+            let terminal = match run_with_caller_signal(
+                &lane_cx,
+                &caller,
+                &request_budget,
+                std::future::poll_fn(move |_task_cx| {
+                    if future_polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        interrupt.cancel(CancelReason::user(
+                            "test interruption after the operation started",
+                        ));
+                        Poll::Pending
+                    } else {
+                        Poll::Ready("durable-terminal-outcome")
+                    }
+                }),
+            )
+            .await
+            {
+                Ok(terminal) => terminal,
+                Err(_) => {
+                    panic!("the retained future must complete inside its finalization window")
+                }
+            };
+
+            (terminal, polls.load(Ordering::SeqCst))
+        });
+
+        assert_eq!(terminal, "durable-terminal-outcome");
+        assert_eq!(
+            poll_count, 2,
+            "the operation is polled once before interruption and the same future once more to finalize"
+        );
+    }
+
+    #[test]
+    fn interruption_before_first_poll_never_starts_the_future() {
+        let cancelled_polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cancelled_observer = Arc::clone(&cancelled_polls);
+        let cancelled = block_on_lane_bridge(async {
+            let lane_cx = Cx::current().expect("bridge installs a lane Cx");
+            let caller = Arc::new(LaneCallerSignal::new(&lane_cx));
+            caller.cancel(CancelReason::user("cancelled before operation start"));
+            let request_budget =
+                RequestBudget::from_call_timeout(lane_cx.now(), Some(Duration::from_secs(1)));
+            run_with_caller_signal(
+                &lane_cx,
+                &caller,
+                &request_budget,
+                std::future::poll_fn(move |_task_cx| {
+                    cancelled_observer.fetch_add(1, Ordering::SeqCst);
+                    Poll::Ready(())
+                }),
+            )
+            .await
+        });
+        assert!(matches!(
+            cancelled,
+            Err(RequestRunError::InterruptedBeforeStart { .. })
+        ));
+        assert_eq!(cancelled_polls.load(Ordering::SeqCst), 0);
+
+        let exhausted_polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let exhausted_observer = Arc::clone(&exhausted_polls);
+        let exhausted = block_on_lane_bridge(async {
+            let lane_cx = Cx::current().expect("bridge installs a lane Cx");
+            let caller = Arc::new(LaneCallerSignal::new(&lane_cx));
+            let request_budget =
+                RequestBudget::from_budget_at(lane_cx.now(), Budget::new().with_poll_quota(0));
+            run_with_caller_signal(
+                &lane_cx,
+                &caller,
+                &request_budget,
+                std::future::poll_fn(move |_task_cx| {
+                    exhausted_observer.fetch_add(1, Ordering::SeqCst);
+                    Poll::Ready(())
+                }),
+            )
+            .await
+        });
+        assert!(matches!(
+            exhausted,
+            Err(RequestRunError::InterruptedBeforeStart { .. })
+        ));
+        assert_eq!(exhausted_polls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn factory_budget_exhaustion_does_not_poison_next_lane_command() {
+        let factory_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first_factory_polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted_runs = Arc::clone(&factory_runs);
+        let counted_polls = Arc::clone(&first_factory_polls);
+        let factory: Arc<LaneDispatchFactory> = Arc::new(move |cx, _lane_context| {
+            let attempt = counted_runs.fetch_add(1, Ordering::SeqCst);
+            let counted_polls = Arc::clone(&counted_polls);
+            Box::pin(async move {
+                if attempt == 0 {
+                    return std::future::poll_fn(move |task_cx| {
+                        counted_polls.fetch_add(1, Ordering::SeqCst);
+                        if cx.checkpoint().is_err() {
+                            Poll::Ready(Err(ErrorEnvelope::new(
+                                ErrorClass::RuntimeStateRequired,
+                                "factory observed request-budget cancellation",
+                            )))
+                        } else {
+                            task_cx.waker().wake_by_ref();
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                }
+                Ok(Arc::new(EchoThreadDispatch) as Arc<dyn ToolDispatch>)
+            })
+        });
+        let lane = LaneRuntime::spawn_with_dispatch_factory(
+            "factory-budget-recovery",
+            LaneContext::process_shared("factory-budget-recovery"),
+            factory,
+            DEFAULT_REQUEST_TIMEOUT,
+            4,
+            None,
+        );
+        let constrained_cx = Cx::for_testing_with_budget(Budget::new().with_poll_quota(4));
+
+        let first = block_on_lane_bridge(async {
+            lane.dispatch(
+                &constrained_cx,
+                DispatchContext::default(),
+                "first",
+                Value::Null,
+            )
+            .await
+        });
+        match first {
+            Outcome::Err(error) => assert_eq!(error.error_class, ErrorClass::RuntimeStateRequired),
+            other => panic!("the exhausted factory request must terminate explicitly: {other:?}"),
+        }
+        assert!(
+            first_factory_polls.load(Ordering::SeqCst) >= 2,
+            "the first factory must start before its shared request budget interrupts it"
+        );
+
+        let second = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs an independent caller Cx");
+            lane.dispatch(&cx, DispatchContext::default(), "second", Value::Null)
+                .await
+        });
+        assert!(
+            matches!(second, Outcome::Ok(_)),
+            "a fresh command must receive a fresh lane Cx after factory interruption: {second:?}"
+        );
+        assert_eq!(factory_runs.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn uncooperative_finalizer_is_runtime_state_required_and_requests_unknown_lane_close() {
+        let (outcome, requested_reason, close_reasons) = block_on_lane_bridge(async {
+            let lane_cx = Cx::current().expect("bridge installs a lane Cx");
+            let caller = Arc::new(LaneCallerSignal::new(&lane_cx));
+            let request_budget =
+                RequestBudget::from_call_timeout(lane_cx.now(), Some(Duration::from_secs(1)));
+            let cancel_after_start = Arc::clone(&caller);
+
+            let timeout = run_with_request_budget_and_finalization_budget(
+                &lane_cx,
+                &request_budget,
+                Some(&caller),
+                std::future::poll_fn(move |task_cx| {
+                    cancel_after_start
+                        .cancel(CancelReason::user("test caller disconnected after start"));
+                    task_cx.waker().wake_by_ref();
+                    Poll::<()>::Pending
+                }),
+                |now| RequestBudget::from_call_timeout(now, Some(Duration::from_millis(10))),
+            )
+            .await
+            .expect_err("an uncooperative finalizer must hit its independent hard bound");
+
+            let close_state = LaneCloseState::new();
+            close_state.request(DispatchCloseReason::RequestFinalizationTimeout);
+            let close_reasons = Arc::new(Mutex::new(Vec::new()));
+            let dispatcher = CloseRecordingDispatch {
+                close_reasons: Arc::clone(&close_reasons),
+            };
+            close_lane_dispatcher(
+                Some(&dispatcher),
+                &lane_cx,
+                &LaneContext::process_shared("finalization-timeout-test"),
+                DispatchCloseReason::RequestFinalizationTimeout,
+            )
+            .await;
+
+            let RequestRunError::FinalizationTimeout { reason } = timeout else {
+                panic!("the already-started operation must enter bounded finalization")
+            };
+            (
+                finalization_timeout_outcome::<Value>(reason, false),
+                close_state.requested_reason(),
+                close_reasons.lock().clone(),
+            )
+        });
+
+        match outcome {
+            Outcome::Err(error) => {
+                assert_eq!(error.error_class, ErrorClass::RuntimeStateRequired);
+                assert!(
+                    error.message.contains("could not safely finalize"),
+                    "terminal error must explain that outcome classification is unavailable: {error:?}"
+                );
+                assert!(
+                    error
+                        .next_steps
+                        .iter()
+                        .any(|step| step.contains("do not retry non-idempotent work")),
+                    "unsafe automatic retries must be explicitly refused: {error:?}"
+                );
+            }
+            other => panic!("uncooperative finalization must fail closed, got {other:?}"),
+        }
+        assert_eq!(
+            requested_reason,
+            Some(DispatchCloseReason::RequestFinalizationTimeout)
+        );
+        assert_eq!(
+            close_reasons,
+            vec![DispatchCloseReason::RequestFinalizationTimeout],
+            "the concrete dispatcher receives the reason that forces unknown/discarded handling"
+        );
+    }
+
+    #[test]
+    fn terminal_finalization_charges_its_fresh_poll_quota() {
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_polls = Arc::clone(&polls);
+        let started = Instant::now();
+        let result = block_on_lane_bridge(async {
+            let lane_cx = Cx::current().expect("bridge installs a lane Cx");
+            let caller = Arc::new(LaneCallerSignal::new(&lane_cx));
+            let request_budget =
+                RequestBudget::from_call_timeout(lane_cx.now(), Some(Duration::from_secs(1)));
+            let cancel_after_start = Arc::clone(&caller);
+
+            run_with_request_budget_and_finalization_budget(
+                &lane_cx,
+                &request_budget,
+                Some(&caller),
+                std::future::poll_fn(move |task_cx| {
+                    if observed_polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        cancel_after_start.cancel(CancelReason::user(
+                            "test caller disconnected after operation start",
+                        ));
+                    }
+                    task_cx.waker().wake_by_ref();
+                    Poll::Pending::<()>
+                }),
+                |now| {
+                    RequestBudget::from_budget_at(
+                        now,
+                        Budget::new()
+                            .with_timeout(now, Duration::from_secs(1))
+                            .with_poll_quota(1),
+                    )
+                },
+            )
+            .await
+        });
+
+        assert!(result.is_err(), "spent finalization quota is a hard stop");
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            2,
+            "one initial poll starts the operation and the one-unit fresh quota permits exactly one finalization poll",
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "quota exhaustion must stop a self-waking finalizer before its one-second wall deadline",
+        );
+    }
+
+    #[test]
+    fn finalization_timeout_audit_is_flushed_before_caller_receives_error() {
+        let memory_sink = Arc::new(MemoryAuditSink::new());
+        let auditor = Arc::new(Auditor::new(
+            Box::new(SharedAuditSink(Arc::clone(&memory_sink))),
+            SigningKey::new("test-key", b"test-secret-for-finalization-timeout".to_vec()),
+        ));
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let lane = LaneRuntime::spawn_default_with_panic_auditor(
+            "finalization-audit-order",
+            Arc::new(NeverFinalizesDispatch {
+                entered: entered_tx,
+            }),
+            Some(auditor),
+        );
+        let caller_cx = Cx::for_testing();
+        let thread_cx = caller_cx.clone();
+        let thread_lane = lane.clone();
+        let call = thread::spawn(move || {
+            block_on_lane_bridge(async move {
+                thread_lane
+                    .dispatch(
+                        &thread_cx,
+                        DispatchContext::default(),
+                        "never-finalizes",
+                        Value::Null,
+                    )
+                    .await
+            })
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("operation starts before cancellation");
+        caller_cx.set_cancel_requested(true);
+        call.thread().unpark();
+        match call.join().expect("caller receives terminal error") {
+            Outcome::Err(error) => {
+                assert_eq!(error.error_class, ErrorClass::RuntimeStateRequired);
+                assert!(error.message.contains("could not safely finalize"));
+            }
+            other => panic!("hard finalization failure must be explicit: {other:?}"),
+        }
+
+        let records = memory_sink.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(memory_sink.flush_count(), 1);
+        assert_eq!(records[0].agent_identity, "lane:finalization-audit-order");
+        assert_eq!(
+            records[0].sql_preview,
+            "LANE_FINALIZATION_TIMEOUT_UNKNOWN_DISCARDED",
+        );
+        assert_eq!(records[0].outcome, AuditOutcome::UnknownDiscarded);
     }
 
     #[test]
@@ -1788,6 +3491,421 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lane_mints_fresh_task_local_context_for_each_command() {
+        let (records_tx, records_rx) = std_mpsc::channel();
+        let lane = LaneRuntime::spawn(
+            "caller-budget-isolation",
+            Arc::new(CallerContextDispatch {
+                records: records_tx,
+            }),
+            4,
+        );
+        let first_cx = testing_cx_with_timeout(Duration::from_secs(5));
+        let second_cx = testing_cx_with_timeout(Duration::from_secs(30));
+        let first_deadline = first_cx.budget().deadline;
+        let second_deadline = second_cx.budget().deadline;
+        assert_ne!(first_deadline, second_deadline);
+
+        let first = block_on_lane_bridge(async {
+            lane.dispatch(&first_cx, DispatchContext::default(), "first", Value::Null)
+                .await
+        });
+        let second = block_on_lane_bridge(async {
+            lane.dispatch(
+                &second_cx,
+                DispatchContext::default(),
+                "second",
+                Value::Null,
+            )
+            .await
+        });
+        assert!(matches!(first, Outcome::Ok(_)));
+        assert!(matches!(second, Outcome::Ok(_)));
+
+        let first_record = records_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first command records its caller context");
+        let second_record = records_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("second command records its caller context");
+        assert_ne!(
+            first_record.task_id, second_record.task_id,
+            "consecutive lane commands must not share task identity or cancellation state"
+        );
+        assert_eq!(first_record.explicit_deadline, None);
+        assert_eq!(second_record.explicit_deadline, None);
+        assert_eq!(first_record.ambient_deadline, None);
+        assert_eq!(second_record.ambient_deadline, None);
+        let first_admitted_at = first_record.admitted_at.expect("first lane admission time");
+        let second_admitted_at = second_record
+            .admitted_at
+            .expect("second lane admission time");
+        let first_budget = first_record
+            .caller_budget
+            .expect("first caller budget reaches lane execution");
+        let second_budget = second_record
+            .caller_budget
+            .expect("second caller budget reaches lane execution");
+        assert_eq!(first_budget.poll_quota, 10_000);
+        assert_eq!(second_budget.poll_quota, 10_000);
+        assert!(
+            first_budget
+                .deadline
+                .expect("first caller deadline")
+                .duration_since(first_admitted_at)
+                >= 4_000_000_000
+        );
+        assert!(
+            second_budget
+                .deadline
+                .expect("second caller deadline")
+                .duration_since(second_admitted_at)
+                >= 29_000_000_000
+        );
+    }
+
+    #[test]
+    fn caller_cancellation_during_lane_execution_reaches_dispatcher() {
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let (_release_tx, release_rx) = oneshot::channel();
+        let (observed_tx, observed_rx) = std_mpsc::channel();
+        let lane = LaneRuntime::spawn(
+            "caller-midflight-cancel",
+            Arc::new(MidFlightCancellationDispatch {
+                entered: entered_tx,
+                release: Mutex::new(Some(release_rx)),
+                observed_cancel: observed_tx,
+            }),
+            4,
+        );
+        let caller_cx = Cx::for_testing();
+        let thread_cx = caller_cx.clone();
+        let thread_lane = lane.clone();
+        let call = thread::spawn(move || {
+            block_on_lane_bridge(async move {
+                thread_lane
+                    .dispatch(
+                        &thread_cx,
+                        DispatchContext::default(),
+                        "cancel-midflight",
+                        Value::Null,
+                    )
+                    .await
+            })
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("caller command entered the dispatcher");
+        caller_cx.set_cancel_requested(true);
+        // `block_on_lane_bridge` polls its root future directly rather than as
+        // a scheduler-owned task, so its synthetic test Cx has no scheduler
+        // cancellation wake edge. Unpark once to model the wake a real runtime
+        // task receives when its region is cancelled.
+        call.thread().unpark();
+        assert!(
+            observed_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("dispatcher reports whether it observed cancellation"),
+            "lane dispatcher must receive the caller's cancellation through the task-local bridge"
+        );
+        assert!(matches!(
+            call.join().expect("caller thread joined"),
+            Outcome::Cancelled(_)
+        ));
+
+        let healthy = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs a fresh caller Cx");
+            lane.dispatch(
+                &cx,
+                DispatchContext::default(),
+                "healthy-after-cancel",
+                Value::Null,
+            )
+            .await
+        });
+        assert!(
+            matches!(healthy, Outcome::Ok(_)),
+            "one command's cancellation must not poison the next lane command: {healthy:?}"
+        );
+    }
+
+    #[test]
+    fn caller_cancellation_waits_for_late_terminal_classification() {
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let (finalized_tx, finalized_rx) = std_mpsc::channel();
+        let lane = LaneRuntime::spawn(
+            "late-terminal-cancel",
+            Arc::new(LateTerminalCancellationDispatch {
+                entered: entered_tx,
+                finalized: finalized_tx,
+            }),
+            4,
+        );
+        let caller_cx = Cx::for_testing();
+        let thread_cx = caller_cx.clone();
+        let thread_lane = lane.clone();
+        let call = thread::spawn(move || {
+            block_on_lane_bridge(async move {
+                thread_lane
+                    .dispatch(
+                        &thread_cx,
+                        DispatchContext::default(),
+                        "late-terminal",
+                        Value::Null,
+                    )
+                    .await
+            })
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("operation starts before caller cancellation");
+        caller_cx.set_cancel_requested(true);
+        call.thread().unpark();
+        finalized_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the retained future reaches its terminal classification");
+        assert_eq!(
+            call.join().expect("late-terminal caller joined"),
+            Outcome::Ok(json!({ "committed": true, "audited": true })),
+            "the authoritative terminal result must replace generic caller cancellation",
+        );
+
+        let healthy = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs a fresh caller Cx");
+            lane.dispatch(
+                &cx,
+                DispatchContext::default(),
+                "healthy-after-terminal",
+                Value::Null,
+            )
+            .await
+        });
+        assert_eq!(healthy, Outcome::Ok(json!({ "healthy": true })));
+    }
+
+    #[test]
+    fn streaming_receive_cancellation_waits_for_late_terminal_classification() {
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let (finalized_tx, finalized_rx) = std_mpsc::channel();
+        let lane = LaneRuntime::spawn(
+            "late-stream-terminal-cancel",
+            Arc::new(LateTerminalCancellationDispatch {
+                entered: entered_tx,
+                finalized: finalized_tx,
+            }),
+            4,
+        );
+        let (frames_tx, _frames_rx) = mpsc::channel(1);
+        let reply = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs stream admission Cx");
+            lane.dispatch_stream_start(
+                &cx,
+                DispatchContext::default(),
+                "late-terminal-stream",
+                Value::Null,
+                frames_tx,
+            )
+            .await
+            .expect("stream command admitted")
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("stream operation starts before receive cancellation");
+
+        let receive_cx = Cx::for_testing();
+        let thread_cx = receive_cx.clone();
+        let receive = thread::spawn(move || {
+            let mut reply = reply;
+            block_on_lane_bridge(async move { reply.recv(&thread_cx).await })
+        });
+        receive_cx.set_cancel_requested(true);
+        receive.thread().unpark();
+        finalized_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("stream future reaches its terminal classification");
+        assert_eq!(
+            receive.join().expect("stream receiver joined"),
+            Ok(Outcome::Ok(json!({ "committed": true, "audited": true }))),
+        );
+    }
+
+    #[test]
+    fn dropping_stream_reply_receiver_cancels_lane_execution() {
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let (_release_tx, release_rx) = oneshot::channel();
+        let (observed_tx, observed_rx) = std_mpsc::channel();
+        let lane = LaneRuntime::spawn(
+            "stream-receiver-drop-cancel",
+            Arc::new(MidFlightCancellationDispatch {
+                entered: entered_tx,
+                release: Mutex::new(Some(release_rx)),
+                observed_cancel: observed_tx,
+            }),
+            4,
+        );
+        let (frames_tx, _frames_rx) = mpsc::channel(1);
+        let reply_rx = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs stream caller Cx");
+            lane.dispatch_stream_start(
+                &cx,
+                DispatchContext::default(),
+                "cancel-midflight",
+                Value::Null,
+                frames_tx,
+            )
+            .await
+            .expect("stream command admitted")
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("stream command entered dispatcher");
+        drop(reply_rx);
+        assert!(
+            observed_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("dispatcher observes stream receiver drop"),
+            "dropping the final-result receiver must cancel orphaned stream work"
+        );
+    }
+
+    #[test]
+    fn caller_cancellation_while_queued_prevents_dispatcher_entry() {
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let lane = LaneRuntime::spawn(
+            "caller-queue-cancel",
+            Arc::new(BlockingDispatch {
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+            }),
+            1,
+        );
+
+        let first_lane = lane.clone();
+        let first = thread::spawn(move || {
+            block_on_lane_bridge(async move {
+                let cx = Cx::current().expect("bridge installs Cx");
+                first_lane
+                    .dispatch(&cx, DispatchContext::default(), "first", Value::Null)
+                    .await
+            })
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first command blocks the lane");
+
+        let queued_cx = Cx::for_testing();
+        let queued_thread_cx = queued_cx.clone();
+        let queued_lane = lane.clone();
+        let queued = thread::spawn(move || {
+            block_on_lane_bridge(async move {
+                queued_lane
+                    .dispatch(
+                        &queued_thread_cx,
+                        DispatchContext::default(),
+                        "queued",
+                        Value::Null,
+                    )
+                    .await
+            })
+        });
+        wait_for_queued_lane_command(&lane);
+        queued_cx.set_cancel_requested(true);
+        queued.thread().unpark();
+        // The caller now waits for the lane's authoritative acknowledgement
+        // instead of dropping the reply channel on generic cancellation.
+        release_tx.send(()).expect("release first command");
+        assert!(matches!(
+            queued.join().expect("queued caller joined"),
+            Outcome::Cancelled(_)
+        ));
+
+        assert!(matches!(
+            first.join().expect("first caller joined"),
+            Outcome::Ok(_)
+        ));
+
+        let unexpected_entry = entered_rx.recv_timeout(Duration::from_millis(250));
+        if unexpected_entry.is_ok() {
+            let _ = release_tx.send(());
+        }
+        assert!(
+            unexpected_entry.is_err(),
+            "caller-cancelled queued command must fail before entering the dispatcher"
+        );
+    }
+
+    #[test]
+    fn lane_admission_timestamp_includes_mailbox_wait() {
+        let (first_entered_tx, first_entered_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let (queue_wait_tx, queue_wait_rx) = std_mpsc::channel();
+        let lane = LaneRuntime::spawn(
+            "mailbox-wait-budget",
+            Arc::new(QueueTimingDispatch {
+                first_entered: first_entered_tx,
+                release_first: Mutex::new(release_rx),
+                queue_timing: queue_wait_tx,
+            }),
+            1,
+        );
+
+        let first_lane = lane.clone();
+        let first = thread::spawn(move || {
+            block_on_lane_bridge(async move {
+                let cx = Cx::current().expect("bridge installs first caller Cx");
+                first_lane
+                    .dispatch(&cx, DispatchContext::default(), "first", Value::Null)
+                    .await
+            })
+        });
+        first_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first command blocks the lane");
+
+        let queued_lane = lane.clone();
+        let queued_cx = testing_cx_with_timeout(Duration::from_millis(250));
+        let queued = thread::spawn(move || {
+            block_on_lane_bridge(async move {
+                queued_lane
+                    .dispatch(
+                        &queued_cx,
+                        DispatchContext::default(),
+                        "queued",
+                        Value::Null,
+                    )
+                    .await
+            })
+        });
+        wait_for_queued_lane_command(&lane);
+        std::thread::sleep(Duration::from_millis(100));
+        release_tx.send(()).expect("release first command");
+
+        assert!(matches!(
+            first.join().expect("first caller joined"),
+            Outcome::Ok(_)
+        ));
+        assert!(matches!(
+            queued.join().expect("queued caller joined"),
+            Outcome::Ok(_)
+        ));
+        let (queue_wait_nanos, deadline_remaining_nanos) = queue_wait_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("queued command reports lane-relative admission age");
+        assert!(
+            queue_wait_nanos >= 75_000_000,
+            "mailbox wait must consume the request window; observed only {queue_wait_nanos}ns"
+        );
+        assert!(
+            deadline_remaining_nanos <= 175_000_000,
+            "rebased caller deadline must lose mailbox time; {deadline_remaining_nanos}ns remained"
+        );
+    }
+
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic(
@@ -1846,6 +3964,175 @@ mod tests {
     }
 
     #[test]
+    fn pre_cancelled_stateful_request_allocates_no_lane_or_capacity() {
+        let builder_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted_runs = Arc::clone(&builder_runs);
+        let factory_builder: Arc<LaneDispatchFactoryBuilder> = Arc::new(move |_lane_context| {
+            counted_runs.fetch_add(1, Ordering::SeqCst);
+            let factory: Arc<LaneDispatchFactory> = Arc::new(move |_cx, _lane_context| {
+                Box::pin(async { Ok(Arc::new(EchoThreadDispatch) as Arc<dyn ToolDispatch>) })
+            });
+            Ok(PreparedLaneDispatch::new(factory, DEFAULT_REQUEST_TIMEOUT))
+        });
+        let admission = Arc::new(AdmissionController::with_reserved(2, 10, 1, 0));
+        let registry = StatefulLaneDispatch::with_dispatch_factory_builder(factory_builder, None)
+            .with_admission_controller(Arc::clone(&admission));
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+
+        let outcome = block_on_lane_bridge(async {
+            registry
+                .dispatch(
+                    &cx,
+                    DispatchContext::default()
+                        .with_http_session_id("cancelled-session")
+                        .with_principal_key("cancelled-principal"),
+                    "cancelled",
+                    Value::Null,
+                )
+                .await
+        });
+
+        assert!(matches!(outcome, Outcome::Cancelled(_)));
+        assert_eq!(registry.lane_count(), 0);
+        assert_eq!(builder_runs.load(Ordering::SeqCst), 0);
+        assert_eq!(admission.available_global(), admission.regular_global_cap(),);
+    }
+
+    #[test]
+    fn stateful_factory_preparation_consumes_the_total_request_window() {
+        let (observed_tx, observed_rx) = std_mpsc::channel();
+        let factory_builder: Arc<LaneDispatchFactoryBuilder> = Arc::new(move |_lane_context| {
+            std::thread::sleep(Duration::from_millis(40));
+            let observed = observed_tx.clone();
+            let factory: Arc<LaneDispatchFactory> = Arc::new(move |_cx, _lane_context| {
+                let dispatch: Arc<dyn ToolDispatch> = Arc::new(AdmissionTimingDispatch {
+                    observed: observed.clone(),
+                });
+                Box::pin(async move { Ok(dispatch) })
+            });
+            Ok(PreparedLaneDispatch::new(factory, DEFAULT_REQUEST_TIMEOUT))
+        });
+        let registry = StatefulLaneDispatch::with_dispatch_factory_builder(factory_builder, None);
+
+        let outcome = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs Cx");
+            registry
+                .dispatch(
+                    &cx,
+                    DispatchContext::default()
+                        .with_http_session_id("timed-session")
+                        .with_principal_key("timed-principal"),
+                    "timed",
+                    Value::Null,
+                )
+                .await
+        });
+        assert!(matches!(outcome, Outcome::Ok(_)));
+        assert!(
+            observed_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("dispatcher reports total pre-lane elapsed time")
+                >= 30_000_000,
+            "synchronous capacity/profile preparation must consume the profile timeout",
+        );
+    }
+
+    #[test]
+    fn failed_prepared_factory_is_rebuilt_on_the_next_stateful_request() {
+        let builder_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted_runs = Arc::clone(&builder_runs);
+        let factory_builder: Arc<LaneDispatchFactoryBuilder> = Arc::new(move |_lane_context| {
+            let attempt = counted_runs.fetch_add(1, Ordering::SeqCst);
+            let factory: Arc<LaneDispatchFactory> = Arc::new(move |_cx, _lane_context| {
+                Box::pin(async move {
+                    if attempt == 0 {
+                        Err(ErrorEnvelope::new(
+                            ErrorClass::ConnectionFailed,
+                            "transient first lane initialization failure",
+                        ))
+                    } else {
+                        Ok(Arc::new(EchoThreadDispatch) as Arc<dyn ToolDispatch>)
+                    }
+                })
+            });
+            Ok(PreparedLaneDispatch::new(factory, DEFAULT_REQUEST_TIMEOUT))
+        });
+        let registry = StatefulLaneDispatch::with_dispatch_factory_builder(factory_builder, None);
+        let call = || {
+            block_on_lane_bridge(async {
+                let cx = Cx::current().expect("bridge installs Cx");
+                registry
+                    .dispatch(
+                        &cx,
+                        DispatchContext::default()
+                            .with_http_session_id("retry-session")
+                            .with_principal_key("retry-principal"),
+                        "retry",
+                        Value::Null,
+                    )
+                    .await
+            })
+        };
+
+        assert!(matches!(call(), Outcome::Err(_)));
+        assert!(matches!(call(), Outcome::Ok(_)));
+        assert_eq!(builder_runs.load(Ordering::SeqCst), 2);
+        assert_eq!(registry.lane_count(), 1);
+    }
+
+    #[test]
+    fn concurrent_first_calls_for_same_key_share_one_capacity_permit() {
+        let builder_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted_runs = Arc::clone(&builder_runs);
+        let factory_builder: Arc<LaneDispatchFactoryBuilder> = Arc::new(move |_lane_context| {
+            counted_runs.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(5));
+            let factory: Arc<LaneDispatchFactory> = Arc::new(move |_cx, _lane_context| {
+                Box::pin(async { Ok(Arc::new(EchoThreadDispatch) as Arc<dyn ToolDispatch>) })
+            });
+            Ok(PreparedLaneDispatch::new(factory, DEFAULT_REQUEST_TIMEOUT))
+        });
+        let admission = Arc::new(AdmissionController::with_reserved(2, 10, 1, 0));
+        let registry = Arc::new(
+            StatefulLaneDispatch::with_dispatch_factory_builder(factory_builder, None)
+                .with_admission_controller(Arc::clone(&admission)),
+        );
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut callers = Vec::new();
+        for _ in 0..2 {
+            let registry = Arc::clone(&registry);
+            let barrier = Arc::clone(&barrier);
+            callers.push(thread::spawn(move || {
+                barrier.wait();
+                block_on_lane_bridge(async {
+                    let cx = Cx::current().expect("bridge installs Cx");
+                    registry
+                        .dispatch(
+                            &cx,
+                            DispatchContext::default()
+                                .with_http_session_id("shared-session")
+                                .with_principal_key("shared-principal"),
+                            "shared",
+                            Value::Null,
+                        )
+                        .await
+                })
+            }));
+        }
+        barrier.wait();
+        for caller in callers {
+            assert!(matches!(
+                caller.join().expect("caller joined"),
+                Outcome::Ok(_)
+            ));
+        }
+        assert_eq!(builder_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(registry.lane_count(), 1);
+        assert_eq!(admission.available_global(), 0);
+    }
+
+    #[test]
     fn stateful_lane_dispatch_keys_lanes_by_session_and_principal() {
         fn call(registry: &StatefulLaneDispatch, session: &str, principal: &str) -> Value {
             block_on_lane_bridge(async {
@@ -1892,7 +4179,13 @@ mod tests {
             counted_runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async move { Ok(Arc::new(EchoThreadDispatch) as Arc<dyn ToolDispatch>) })
         });
-        let registry = StatefulLaneDispatch::with_dispatch_factory(factory, None)
+        let factory_builder: Arc<LaneDispatchFactoryBuilder> = Arc::new(move |_lane_context| {
+            Ok(PreparedLaneDispatch::new(
+                Arc::clone(&factory),
+                DEFAULT_REQUEST_TIMEOUT,
+            ))
+        });
+        let registry = StatefulLaneDispatch::with_dispatch_factory_builder(factory_builder, None)
             .with_admission_controller(Arc::new(AdmissionController::with_reserved(2, 10, 1, 0)));
 
         let first = block_on_lane_bridge(async {
@@ -1958,7 +4251,13 @@ mod tests {
             })
         });
         let admission = Arc::new(AdmissionController::with_reserved(2, 10, 1, 0));
-        let registry = StatefulLaneDispatch::with_dispatch_factory(factory, None)
+        let factory_builder: Arc<LaneDispatchFactoryBuilder> = Arc::new(move |_lane_context| {
+            Ok(PreparedLaneDispatch::new(
+                Arc::clone(&factory),
+                DEFAULT_REQUEST_TIMEOUT,
+            ))
+        });
+        let registry = StatefulLaneDispatch::with_dispatch_factory_builder(factory_builder, None)
             .with_admission_controller(Arc::clone(&admission));
 
         let first = block_on_lane_bridge(async {
@@ -2022,6 +4321,38 @@ mod tests {
         );
         assert_eq!(registry.lane_count(), 0);
         assert_eq!(admission.available_global(), admission.regular_global_cap());
+    }
+
+    #[test]
+    fn outstanding_stream_receiver_does_not_pin_closed_lane_capacity() {
+        let admission = Arc::new(AdmissionController::with_reserved(2, 10, 1, 0));
+        let registry = StatefulLaneDispatch::new(Arc::new(EchoThreadDispatch))
+            .with_admission_controller(Arc::clone(&admission));
+        let (frames_tx, _frames_rx) = mpsc::channel(1);
+        let reply = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs Cx");
+            registry
+                .dispatch_stream_start(
+                    &cx,
+                    DispatchContext::default()
+                        .with_http_session_id("stream-session")
+                        .with_principal_key("stream-principal"),
+                    "stream",
+                    Value::Null,
+                    frames_tx,
+                )
+                .await
+                .expect("stream command admitted")
+        });
+        assert_eq!(admission.available_global(), 0);
+
+        assert!(registry.close_session("stream-session", "stream-principal"));
+        assert_eq!(
+            admission.available_global(),
+            admission.regular_global_cap(),
+            "receiver safety hooks must not retain the lane capacity permit",
+        );
+        drop(reply);
     }
 
     #[test]

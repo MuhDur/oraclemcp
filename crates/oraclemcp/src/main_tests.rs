@@ -523,13 +523,18 @@ fn stateless_http_read_workers_do_not_head_of_line_block() {
         move |_profile| {
             let started = started_tx.clone();
             let release = Arc::clone(&release);
-            Arc::new(move |_cx: &Cx, _lane_context: &LaneContext| {
-                let dispatch: Arc<dyn ToolDispatch> = Arc::new(BlockingReadDispatch {
-                    started: started.clone(),
-                    release: Arc::clone(&release),
+            let factory: Arc<LaneDispatchFactory> =
+                Arc::new(move |_cx: &Cx, _lane_context: &LaneContext| {
+                    let dispatch: Arc<dyn ToolDispatch> = Arc::new(BlockingReadDispatch {
+                        started: started.clone(),
+                        release: Arc::clone(&release),
+                    });
+                    Box::pin(async move { Ok(dispatch) })
                 });
-                Box::pin(async move { Ok(dispatch) })
-            })
+            Ok(PreparedLaneDispatch::new(
+                factory,
+                oraclemcp_core::DEFAULT_REQUEST_TIMEOUT,
+            ))
         }
     });
     let control_lane = LaneRuntime::spawn("test-stateless-control", Arc::new(ControlDispatch), 4);
@@ -576,6 +581,150 @@ fn stateless_http_read_workers_do_not_head_of_line_block() {
     for handle in handles {
         handle.join().expect("read worker caller joins");
     }
+}
+
+#[test]
+fn stateless_http_rebuilds_a_failed_prepared_read_worker() {
+    struct ControlDispatch;
+
+    impl ToolDispatch for ControlDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: oraclemcp_core::DispatchContext<'a>,
+            _name: &'a str,
+            _args: serde_json::Value,
+        ) -> DispatchFuture<'a> {
+            Box::pin(async { DispatchOutcome::Ok(serde_json::json!({ "control": true })) })
+        }
+    }
+
+    struct ReadOkDispatch;
+
+    impl ToolDispatch for ReadOkDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: oraclemcp_core::DispatchContext<'a>,
+            _name: &'a str,
+            _args: serde_json::Value,
+        ) -> DispatchFuture<'a> {
+            Box::pin(async { DispatchOutcome::Ok(serde_json::json!({ "schemas": [] })) })
+        }
+    }
+
+    let builder_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted_runs = Arc::clone(&builder_runs);
+    let read_factory: Arc<ReadWorkerFactoryBuilder> = Arc::new(move |_profile| {
+        let attempt = counted_runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let factory: Arc<LaneDispatchFactory> = Arc::new(move |_cx, _lane_context| {
+            Box::pin(async move {
+                if attempt == 0 {
+                    Err(ErrorEnvelope::new(
+                        ErrorClass::ConnectionFailed,
+                        "transient first read-worker initialization failure",
+                    ))
+                } else {
+                    Ok(Arc::new(ReadOkDispatch) as Arc<dyn ToolDispatch>)
+                }
+            })
+        });
+        Ok(PreparedLaneDispatch::new(
+            factory,
+            oraclemcp_core::DEFAULT_REQUEST_TIMEOUT,
+        ))
+    });
+    let dispatch = HttpStatelessReadDispatch::new(
+        LaneRuntime::spawn(
+            "test-stateless-rebuild-control",
+            Arc::new(ControlDispatch),
+            4,
+        ),
+        Some("dev".to_owned()),
+        1,
+        read_factory,
+    );
+    let call = || {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("test runtime builds");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("test runtime installs Cx");
+            dispatch
+                .dispatch(
+                    &cx,
+                    oraclemcp_core::DispatchContext::default().with_principal_key("oauth:reader"),
+                    "oracle_list_schemas",
+                    serde_json::json!({ "max_rows": 1 }),
+                )
+                .await
+        })
+    };
+
+    assert!(matches!(call(), DispatchOutcome::Err(_)));
+    assert!(matches!(call(), DispatchOutcome::Ok(_)));
+    assert_eq!(builder_runs.load(std::sync::atomic::Ordering::SeqCst), 2,);
+}
+
+#[test]
+fn pre_cancelled_stateless_read_allocates_no_worker_or_factory() {
+    struct ControlDispatch;
+
+    impl ToolDispatch for ControlDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: oraclemcp_core::DispatchContext<'a>,
+            _name: &'a str,
+            _args: serde_json::Value,
+        ) -> DispatchFuture<'a> {
+            Box::pin(async { DispatchOutcome::Ok(serde_json::json!({ "control": true })) })
+        }
+    }
+
+    let builder_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted_runs = Arc::clone(&builder_runs);
+    let read_factory: Arc<ReadWorkerFactoryBuilder> = Arc::new(move |_profile| {
+        counted_runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let factory: Arc<LaneDispatchFactory> = Arc::new(move |_cx, _lane_context| {
+            Box::pin(async { Ok(Arc::new(ControlDispatch) as Arc<dyn ToolDispatch>) })
+        });
+        Ok(PreparedLaneDispatch::new(
+            factory,
+            oraclemcp_core::DEFAULT_REQUEST_TIMEOUT,
+        ))
+    });
+    let dispatch = HttpStatelessReadDispatch::new(
+        LaneRuntime::spawn(
+            "test-stateless-pre-cancel-control",
+            Arc::new(ControlDispatch),
+            4,
+        ),
+        Some("dev".to_owned()),
+        1,
+        read_factory,
+    );
+    let outcome = {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("test runtime builds");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("test runtime installs Cx");
+            cx.set_cancel_requested(true);
+            dispatch
+                .dispatch(
+                    &cx,
+                    oraclemcp_core::DispatchContext::default().with_principal_key("oauth:reader"),
+                    "oracle_list_schemas",
+                    serde_json::json!({ "max_rows": 1 }),
+                )
+                .await
+        })
+    };
+
+    assert!(matches!(outcome, DispatchOutcome::Cancelled(_)));
+    assert_eq!(builder_runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(dispatch.read_lane_count(), 0);
 }
 
 #[test]
@@ -645,14 +794,19 @@ fn stateless_http_profile_switch_closes_read_workers() {
     let read_factory: Arc<ReadWorkerFactoryBuilder> = Arc::new(move |profile| {
         let seen = profile_tx.clone();
         let closed = closed_tx.clone();
-        Arc::new(move |_cx: &Cx, _lane_context: &LaneContext| {
-            let dispatch: Arc<dyn ToolDispatch> = Arc::new(ProfileReadDispatch {
-                profile: profile.clone(),
-                seen: seen.clone(),
-                closed: closed.clone(),
+        let factory: Arc<LaneDispatchFactory> =
+            Arc::new(move |_cx: &Cx, _lane_context: &LaneContext| {
+                let dispatch: Arc<dyn ToolDispatch> = Arc::new(ProfileReadDispatch {
+                    profile: profile.clone(),
+                    seen: seen.clone(),
+                    closed: closed.clone(),
+                });
+                Box::pin(async move { Ok(dispatch) })
             });
-            Box::pin(async move { Ok(dispatch) })
-        })
+        Ok(PreparedLaneDispatch::new(
+            factory,
+            oraclemcp_core::DEFAULT_REQUEST_TIMEOUT,
+        ))
     });
     let control_lane = LaneRuntime::spawn(
         "test-stateless-switch-control",
