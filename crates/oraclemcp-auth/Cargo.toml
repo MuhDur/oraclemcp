@@ -13,11 +13,15 @@ categories.workspace = true
 oraclemcp-error = { path = "../oraclemcp-error", version = "0.8.0" }
 oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.8.0" }
 oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.8.0" }
+# Keyring helpers run in a POSIX process group / Windows Job Object so one
+# deadline owns the complete process tree and descendant-held pipes.
+command-group = "5.0.1"
 serde.workspace = true
 zeroize = { version = "1", features = ["alloc"] }
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+wait-timeout = "0.2"
 
 [lints]
 workspace = true

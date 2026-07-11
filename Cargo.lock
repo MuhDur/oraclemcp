@@ -1918,6 +1918,7 @@ dependencies = [
 name = "oraclemcp-auth"
 version = "0.8.0"
 dependencies = [
+ "command-group",
  "oraclemcp-audit",
  "oraclemcp-error",
  "oraclemcp-guard",
@@ -1925,6 +1926,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
+ "wait-timeout",
  "zeroize",
 ]
 
