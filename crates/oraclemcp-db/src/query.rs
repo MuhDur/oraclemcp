@@ -13,7 +13,7 @@ use asupersync::Cx;
 // a read handler running under a narrowed `Cx<ReadPathCaps>` (A9) checkpoints
 // exactly like one under the full row — no `SPAWN`/`REMOTE`/`RANDOM` needed.
 use crate::connection::{OracleConnection, db_checkpoint};
-use crate::error::DbError;
+use crate::error::{DbError, QuarantineOutcome};
 use crate::serialize::{PageColumnCache, SerializeOptions, json_byte_len};
 use crate::types::OracleBind;
 
@@ -210,15 +210,30 @@ pub async fn read_query_as_of(
     let read = read_query(cx, conn, sql, binds, caps, offset, serialize_opts).await;
     let disable = conn.flashback_disable(cx).await;
     // End the flashback read transaction so the next statement starts clean.
-    let _ = conn.rollback(cx).await;
+    let rollback = conn.rollback(cx).await;
 
-    match (read, disable) {
-        (Ok(response), Ok(())) => Ok(response),
-        // The read error is the primary signal.
-        (Err(read_err), _) => Err(read_err),
-        // Read succeeded but the session could not leave Flashback mode — surface
-        // it: a silently-flashback session would serve stale data to later reads.
-        (Ok(_), Err(disable_err)) => Err(disable_err),
+    match (disable, rollback) {
+        (Ok(()), Ok(())) => read,
+        (disable, rollback) => {
+            let primary = match &read {
+                Ok(_) => "flashback read succeeded".to_owned(),
+                Err(read_err) => format!("flashback read failed: {read_err}"),
+            };
+            let mut cleanup_failures = Vec::with_capacity(2);
+            if let Err(disable_err) = disable {
+                cleanup_failures.push(format!("DBMS_FLASHBACK.DISABLE failed: {disable_err}"));
+            }
+            if let Err(rollback_err) = rollback {
+                cleanup_failures.push(format!("final rollback failed: {rollback_err}"));
+            }
+            Err(DbError::Quarantined {
+                outcome: QuarantineOutcome::UnknownDiscarded,
+                message: format!(
+                    "{primary}; teardown could not prove the session clean: {}",
+                    cleanup_failures.join("; ")
+                ),
+            })
+        }
     }
 }
 
@@ -567,6 +582,10 @@ mod tests {
     struct FlashbackRecorder {
         events: std::sync::Mutex<Vec<String>>,
         fail_read: bool,
+        fail_disable_call: Option<usize>,
+        fail_rollback_call: Option<usize>,
+        disable_calls: std::sync::atomic::AtomicUsize,
+        rollback_calls: std::sync::atomic::AtomicUsize,
     }
     #[async_trait::async_trait(?Send)]
     impl OracleConnection for FlashbackRecorder {
@@ -601,6 +620,15 @@ mod tests {
                 .lock()
                 .expect("events")
                 .push(format!("exec[{}]:{sql}", binds.len()));
+            if sql == crate::connection::DBMS_FLASHBACK_DISABLE {
+                let call = self
+                    .disable_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    + 1;
+                if self.fail_disable_call == Some(call) {
+                    return Err(DbError::Execute(format!("disable failure on call {call}")));
+                }
+            }
             Ok(0)
         }
         async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -611,6 +639,13 @@ mod tests {
                 .lock()
                 .expect("events")
                 .push("rollback".to_owned());
+            let call = self
+                .rollback_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            if self.fail_rollback_call == Some(call) {
+                return Err(DbError::Execute(format!("rollback failure on call {call}")));
+            }
             Ok(())
         }
     }
@@ -867,8 +902,8 @@ mod tests {
             (err, conn.events.into_inner().expect("events"))
         });
         assert!(
-            matches!(err, DbError::Query(_)),
-            "the read error is the surfaced signal: {err:?}"
+            matches!(&err, DbError::Query(message) if message == "boom"),
+            "successful teardown preserves the exact read error: {err:?}"
         );
         // The window is torn down AFTER the failed read: DISABLE + rollback follow "query".
         let after_query: Vec<_> = events
@@ -885,5 +920,90 @@ mod tests {
             ],
             "flashback is disabled and the read transaction ended even when the read errors"
         );
+    }
+
+    #[test]
+    fn read_error_plus_disable_error_is_structurally_quarantined() {
+        let conn = FlashbackRecorder {
+            fail_read: true,
+            // Call 1 is the defensive pre-enable DISABLE; call 2 is teardown.
+            fail_disable_call: Some(2),
+            ..Default::default()
+        };
+        let (error, events) = run_with_cx(|cx| async move {
+            let error = read_query_as_of(
+                &cx,
+                &conn,
+                "SELECT 1 FROM t",
+                &[],
+                QueryCaps::default(),
+                0,
+                &SerializeOptions::default(),
+                &AsOf::Scn(42),
+            )
+            .await
+            .expect_err("failed teardown quarantines the session");
+            (error, conn.events.into_inner().expect("events"))
+        });
+
+        match error {
+            DbError::Quarantined { outcome, message } => {
+                assert_eq!(outcome, QuarantineOutcome::UnknownDiscarded);
+                assert!(
+                    message.contains("flashback read failed: oracle query failed: boom"),
+                    "primary read diagnostic is retained: {message}"
+                );
+                assert!(
+                    message.contains("DBMS_FLASHBACK.DISABLE failed")
+                        && message.contains("disable failure on call 2"),
+                    "failed teardown is identified: {message}"
+                );
+            }
+            other => panic!("expected structural quarantine, got {other:?}"),
+        }
+        assert_eq!(
+            events.last().map(String::as_str),
+            Some("rollback"),
+            "rollback is still attempted after DISABLE fails"
+        );
+    }
+
+    #[test]
+    fn successful_read_plus_final_rollback_error_is_structurally_quarantined() {
+        let conn = FlashbackRecorder {
+            // Call 1 clears startup state; call 2 ends the flashback read txn.
+            fail_rollback_call: Some(2),
+            ..Default::default()
+        };
+        let error = run_with_cx(|cx| async move {
+            read_query_as_of(
+                &cx,
+                &conn,
+                "SELECT 1 FROM t",
+                &[],
+                QueryCaps::default(),
+                0,
+                &SerializeOptions::default(),
+                &AsOf::Scn(42),
+            )
+            .await
+            .expect_err("failed rollback quarantines the session")
+        });
+
+        match error {
+            DbError::Quarantined { outcome, message } => {
+                assert_eq!(outcome, QuarantineOutcome::UnknownDiscarded);
+                assert!(
+                    message.contains("flashback read succeeded"),
+                    "the primary operation outcome is retained: {message}"
+                );
+                assert!(
+                    message.contains("final rollback failed")
+                        && message.contains("rollback failure on call 2"),
+                    "failed final rollback is identified: {message}"
+                );
+            }
+            other => panic!("expected structural quarantine, got {other:?}"),
+        }
     }
 }

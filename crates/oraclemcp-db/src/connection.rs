@@ -952,7 +952,7 @@ pub trait OracleConnection: Send + Sync {
 /// The idempotent teardown for a `DBMS_FLASHBACK` session read-snapshot window
 /// (K9). A no-op when flashback is not enabled, so it is safe to call
 /// unconditionally as cleanup.
-const DBMS_FLASHBACK_DISABLE: &str = "BEGIN DBMS_FLASHBACK.DISABLE; END;";
+pub(crate) const DBMS_FLASHBACK_DISABLE: &str = "BEGIN DBMS_FLASHBACK.DISABLE; END;";
 
 /// Thin pure-Rust Oracle connection wrapper over the native-async
 /// [`oracledb::Connection`] (B1).
@@ -1029,10 +1029,23 @@ impl WireLimits {
 
 struct RustOracleConnectionSlot {
     connection: Option<oracledb::Connection>,
+    quarantine_reason: Option<String>,
 }
 
 struct RustOracleConnectionGuard<'a> {
     guard: asupersync::sync::MutexGuard<'a, RustOracleConnectionSlot>,
+}
+
+impl RustOracleConnectionGuard<'_> {
+    /// Permanently remove a connection whose cleanup boundary failed. Merely
+    /// returning an uncertain error is not sufficient for a pinned session:
+    /// the same adapter could otherwise be called again after the caller lost
+    /// the diagnostic. Dropping the driver connection makes reuse impossible,
+    /// while the retained reason keeps subsequent failures structural.
+    fn quarantine(mut self, reason: String) {
+        self.guard.quarantine_reason = Some(reason);
+        drop(self.guard.connection.take());
+    }
 }
 
 impl std::ops::Deref for RustOracleConnectionGuard<'_> {
@@ -1067,6 +1080,12 @@ impl RustOracleConnection {
             .lock(cx)
             .await
             .map_err(|err| DbError::Internal(format!("thin connection lock failed: {err}")))?;
+        if let Some(reason) = guard.quarantine_reason.as_deref() {
+            return Err(DbError::Quarantined {
+                outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                message: reason.to_owned(),
+            });
+        }
         if guard.connection.is_none() {
             return Err(DbError::Internal(
                 "thin connection is temporarily unavailable while an owned row stream is active"
@@ -1095,6 +1114,12 @@ impl RustOracleConnection {
             .lock(cx)
             .await
             .map_err(|err| DbError::Internal(format!("thin connection lock failed: {err}")))?;
+        if let Some(reason) = guard.quarantine_reason.as_deref() {
+            return Err(DbError::Quarantined {
+                outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                message: reason.to_owned(),
+            });
+        }
         guard.connection.take().ok_or_else(|| {
             DbError::Internal("thin connection is already owned by an active row stream".to_owned())
         })
@@ -1110,6 +1135,12 @@ impl RustOracleConnection {
             .lock(cx)
             .await
             .map_err(|err| DbError::Internal(format!("thin connection lock failed: {err}")))?;
+        if let Some(reason) = guard.quarantine_reason.as_deref() {
+            return Err(DbError::Quarantined {
+                outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                message: reason.to_owned(),
+            });
+        }
         if guard.connection.replace(connection).is_some() {
             return Err(DbError::Internal(
                 "thin connection slot was unexpectedly occupied during row-stream recovery"
@@ -1223,6 +1254,7 @@ mod driver {
             opts,
             inner: Arc::new(AsyncMutex::new(super::RustOracleConnectionSlot {
                 connection: Some(inner),
+                quarantine_reason: None,
             })),
             wire_limits: SyncMutex::new(super::WireLimits {
                 call_timeout,
@@ -2169,6 +2201,12 @@ mod driver {
             .lock(cx)
             .await
             .map_err(|err| DbError::Internal(format!("thin connection lock failed: {err}")))?;
+        if let Some(reason) = guard.quarantine_reason.as_deref() {
+            return Err(DbError::Quarantined {
+                outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                message: reason.to_owned(),
+            });
+        }
         if guard.connection.replace(connection).is_some() {
             return Err(DbError::Internal(
                 "thin connection slot was unexpectedly occupied during row-stream recovery"
@@ -5172,7 +5210,21 @@ mod driver {
                 let mut inner = self.lock_inner(cx).await?;
                 let timeout = Some(limits.cleanup_timeout_ms());
                 let result = bounded_fetch_batch(timeout, inner.rollback(cx)).await;
-                resolve_execute_round_trip(cx, &mut inner, result, &self.opts, "rollback").await
+                match resolve_execute_round_trip(cx, &mut inner, result, &self.opts, "rollback")
+                    .await
+                {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        let message = format!(
+                            "rollback cleanup failed; the thin connection was discarded: {error}"
+                        );
+                        inner.quarantine(message.clone());
+                        Err(DbError::Quarantined {
+                            outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                            message,
+                        })
+                    }
+                }
             })
             .await
         }
@@ -5187,7 +5239,7 @@ mod driver {
             try_commit_section(cx, super::CLEANUP_MASKED_POLLS, async {
                 let timeout = Some(self.wire_limits()?.cleanup_timeout_ms());
                 let mut inner = self.lock_inner(cx).await?;
-                inner
+                let result = inner
                     .execute_raw(
                         cx,
                         super::DBMS_FLASHBACK_DISABLE,
@@ -5196,14 +5248,21 @@ mod driver {
                         ExecuteOptions::default(),
                         timeout,
                     )
-                    .await
-                    .map(|_| ())
-                    .map_err(|err| {
-                        DbError::Execute(format!(
-                            "flashback_disable: {}",
-                            sanitize_driver_error(err, &self.opts)
-                        ))
-                    })
+                    .await;
+                match result {
+                    Ok(_) => Ok(()),
+                    Err(error) => {
+                        let message = format!(
+                            "DBMS_FLASHBACK.DISABLE cleanup failed; the thin connection was discarded: {}",
+                            sanitize_driver_error(error, &self.opts)
+                        );
+                        inner.quarantine(message.clone());
+                        Err(DbError::Quarantined {
+                            outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                            message,
+                        })
+                    }
+                }
             })
             .await
         }
@@ -5240,6 +5299,40 @@ mod tests {
         assert_eq!(duration_to_millis(Duration::from_nanos(1)), 1);
         assert_eq!(duration_to_millis(Duration::from_micros(1_001)), 2);
         assert_eq!(duration_to_millis(Duration::from_secs(u64::MAX)), u32::MAX);
+    }
+
+    #[test]
+    fn quarantined_thin_connection_refuses_subsequent_use() {
+        use asupersync::runtime::RuntimeBuilder;
+
+        let conn = RustOracleConnection {
+            opts: OracleConnectOptions::default(),
+            inner: Arc::new(AsyncMutex::new(RustOracleConnectionSlot {
+                connection: None,
+                quarantine_reason: Some("flashback teardown failed".to_owned()),
+            })),
+            wire_limits: Mutex::new(WireLimits::default()),
+        };
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let error = runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            conn.ping(&cx)
+                .await
+                .expect_err("quarantined connection cannot serve a later DB operation")
+        });
+
+        assert!(
+            matches!(
+                error,
+                DbError::Quarantined {
+                    outcome: crate::error::QuarantineOutcome::UnknownDiscarded,
+                    ref message,
+                } if message == "flashback teardown failed"
+            ),
+            "subsequent use remains structurally quarantined: {error:?}"
+        );
     }
 
     #[test]
