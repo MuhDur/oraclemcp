@@ -9528,3 +9528,146 @@ mod qa106_uncertain_read_ownership {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }
+
+/// QA107: best-effort connection metadata may degrade ordinary adapter or
+/// privilege failures, but it must never hide cancellation/connection loss on
+/// a retained session or install an uncertain switch candidate.
+mod qa107_describe_uncertainty {
+    use super::*;
+    use std::sync::Arc;
+
+    struct UncertainDescribeMock {
+        describe_calls: Arc<AtomicUsize>,
+        query_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for UncertainDescribeMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            self.describe_calls.fetch_add(1, Ordering::SeqCst);
+            Err(DbError::Cancelled(
+                "injected uncertain describe boundary".to_owned(),
+            ))
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.query_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![OracleRow {
+                columns: vec![(
+                    "VALUE".to_owned(),
+                    OracleCell::new("NUMBER", Some("1".to_owned())),
+                )],
+            }])
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn uncertain_connection_info_quarantines_retained_primary_before_reuse() {
+        let describe_calls = Arc::new(AtomicUsize::new(0));
+        let query_calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher = OracleDispatcher::new_with_profile(
+            Box::new(UncertainDescribeMock {
+                describe_calls: Arc::clone(&describe_calls),
+                query_calls: Arc::clone(&query_calls),
+            }),
+            Some("dev".to_owned()),
+        );
+
+        let first = dispatcher
+            .dispatch("oracle_connection_info", json!({}))
+            .expect_err("uncertain describe must not become disconnected metadata");
+        assert_eq!(first.error_class, ErrorClass::Timeout);
+        assert_eq!(describe_calls.load(Ordering::SeqCst), 1);
+        let quarantine = dispatcher
+            .connection_quarantine()
+            .expect("quarantine lock")
+            .expect("retained primary describe quarantines uncertainty");
+        assert_eq!(quarantine.outcome, AuditOutcome::UnknownDiscarded);
+
+        let retry = dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect_err("quarantined primary must refuse later work");
+        assert_eq!(retry.error_class, ErrorClass::RuntimeStateRequired);
+        assert_eq!(
+            query_calls.load(Ordering::SeqCst),
+            0,
+            "retry refusal must precede database I/O"
+        );
+    }
+
+    #[test]
+    fn uncertain_switch_candidate_is_dropped_without_poisoning_active_session() {
+        let candidate_describes = Arc::new(AtomicUsize::new(0));
+        let candidate_queries = Arc::new(AtomicUsize::new(0));
+        let connector_describes = Arc::clone(&candidate_describes);
+        let connector_queries = Arc::clone(&candidate_queries);
+        let dispatcher = OracleDispatcher::new_switchable(
+            Box::new(OneRowMock),
+            Some("dev".to_owned()),
+            default_read_only_level(),
+            Arc::new(move |_cx, _profile| {
+                let describe_calls = Arc::clone(&connector_describes);
+                let query_calls = Arc::clone(&connector_queries);
+                Box::pin(async move {
+                    Ok(session_bundle(UncertainDescribeMock {
+                        describe_calls,
+                        query_calls,
+                    }))
+                })
+            }),
+        );
+
+        let error = dispatcher
+            .dispatch("oracle_switch_profile", json!({ "profile": "uncertain" }))
+            .expect_err("uncertain candidate metadata must abort the switch");
+        assert_eq!(error.error_class, ErrorClass::Timeout);
+        assert_eq!(candidate_describes.load(Ordering::SeqCst), 1);
+        assert_eq!(candidate_queries.load(Ordering::SeqCst), 0);
+        assert!(
+            dispatcher
+                .connection_quarantine()
+                .expect("quarantine lock")
+                .is_none(),
+            "candidate uncertainty must not poison the unrelated active primary"
+        );
+
+        let current = dispatcher
+            .dispatch("oracle_connection_info", json!({}))
+            .expect("active session remains usable after candidate rejection");
+        assert_eq!(current["active_profile"], json!("dev"));
+        assert_eq!(current["connected"], json!(true));
+        dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("active primary still serves reads");
+    }
+}

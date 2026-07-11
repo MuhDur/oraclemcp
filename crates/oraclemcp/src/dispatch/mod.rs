@@ -4236,6 +4236,26 @@ async fn collect_audit_db_evidence(
     }
 }
 
+/// Collect identity evidence for a read path without erasing an uncertain
+/// session boundary. Ordinary metadata/privilege failures remain observational
+/// and degrade to an unavailable marker; cancellation or connection ambiguity
+/// must stop the active call so its ownership-aware wrapper can quarantine the
+/// retained physical session.
+async fn collect_read_audit_db_evidence(
+    cx: &Cx,
+    auditor: Option<&Auditor>,
+    conn: &dyn OracleConnection,
+) -> Result<Option<DbEvidence>, ErrorEnvelope> {
+    let Some(_) = auditor else {
+        return Ok(None);
+    };
+    match conn.describe(cx).await {
+        Ok(info) => Ok(Some(db_evidence_from_connection_info(info))),
+        Err(err) if err.is_uncertain_session_state() => Err(DbError::into_envelope(err)),
+        Err(_) => Ok(Some(DbEvidence::unavailable("describe_failed"))),
+    }
+}
+
 /// Mutation preflight may degrade an ordinary metadata/privilege failure, but
 /// cancellation or a structurally uncertain session cannot be relabelled as
 /// harmless "evidence unavailable" and followed by a write.
@@ -7707,16 +7727,26 @@ impl OracleDispatcher {
             read_only_standby: false,
             server_features: None,
         };
-        if detail == McpSurfaceDetail::Connection
-            && let Ok(info) = describe_conn(cx, state.conn.as_ref()).await
-        {
-            connection.connected = true;
-            connection.read_only_standby = info.is_read_only_standby();
-            connection.server_version = info.server_version;
-            // K2: additive server-capability block. `describe` populates it only
-            // for a live thin connection, so mocks/degraded backends leave it
-            // `None` and the field is omitted from the report.
-            connection.server_features = info.server_features;
+        if detail == McpSurfaceDetail::Connection {
+            let observed_conn = ReadUncertaintyConn {
+                inner: state.conn.as_ref(),
+                quarantine: Some(&self.quarantine),
+            };
+            match describe_conn(cx, &observed_conn).await {
+                Ok(info) => {
+                    connection.connected = true;
+                    connection.read_only_standby = info.is_read_only_standby();
+                    connection.server_version = info.server_version;
+                    // K2: additive server-capability block. `describe` populates it only
+                    // for a live thin connection, so mocks/degraded backends leave it
+                    // `None` and the field is omitted from the report.
+                    connection.server_features = info.server_features;
+                }
+                Err(err) if err.is_uncertain_session_state() => {
+                    return Err(DbError::into_envelope(err));
+                }
+                Err(_) => {}
+            }
         }
         Ok(McpSurfaceState {
             current_level: scoped_level.effective_level(),
@@ -7811,11 +7841,16 @@ impl OracleDispatcher {
                 ),
                 _ => None,
             };
-            let mut response = connection_info_json(
-                Some(profile.clone()),
-                describe_conn(cx, conn.as_ref()).await,
-            );
-            if let Value::Object(map) = &mut response
+            // Candidate metadata is normally best-effort, but an uncertain
+            // primary describe means this newly opened physical session is not
+            // safe to install. Defer the error until both request-limit guards
+            // restore, then drop the whole candidate bundle without poisoning
+            // the still-active dispatcher session.
+            let mut response = match describe_conn(cx, conn.as_ref()).await {
+                Err(err) if err.is_uncertain_session_state() => Err(err),
+                result => Ok(connection_info_json(Some(profile.clone()), result)),
+            };
+            if let Ok(Value::Object(map)) = &mut response
                 && let Some(stateless_conn) = stateless_conn.as_ref()
             {
                 map.insert(
@@ -7830,6 +7865,7 @@ impl OracleDispatcher {
                 return Err(DbError::into_envelope(error));
             }
             budget_after_prepare?;
+            let response = response.map_err(DbError::into_envelope)?;
             let new_policy = profile_dispatch_policy(&profile_generation)?;
             let new_level = new_policy.level;
             let new_custom_catalog = match &self.custom_loader {
@@ -8263,27 +8299,13 @@ impl OracleDispatcher {
                 ConnectionLimitGuard::install(
                     cx,
                     metadata_conn,
-                    Some(&self.quarantine),
+                    None,
                     None,
                     request_budget.deadline(),
                     Some(request_budget.db_quota()),
                 )
                 .map_err(DbError::into_envelope)?,
             )
-        };
-        let generated_read_subject = system_generated_read_subject();
-        let generated_read_db_evidence = if generated_read {
-            collect_audit_db_evidence(cx, self.auditor.as_deref(), conn).await
-        } else {
-            None
-        };
-        let generated_read_audit = GeneratedReadAuditCtx {
-            entry: AuditEntryCtx {
-                auditor: self.auditor.as_deref(),
-                subject: &generated_read_subject,
-                db_evidence: generated_read_db_evidence.as_ref(),
-            },
-            tool,
         };
         let observed_conn = ReadUncertaintyConn {
             inner: conn,
@@ -8292,6 +8314,24 @@ impl OracleDispatcher {
         let observed_metadata_conn = ReadUncertaintyConn {
             inner: metadata_conn,
             quarantine: std::ptr::eq(conn, metadata_conn).then_some(&self.quarantine),
+        };
+        let generated_read_subject = system_generated_read_subject();
+        let (generated_read_db_evidence, generated_read_evidence_error) = if generated_read {
+            match collect_read_audit_db_evidence(cx, self.auditor.as_deref(), &observed_conn).await
+            {
+                Ok(evidence) => (evidence, None),
+                Err(error) => (None, Some(error)),
+            }
+        } else {
+            (None, None)
+        };
+        let generated_read_audit = GeneratedReadAuditCtx {
+            entry: AuditEntryCtx {
+                auditor: self.auditor.as_deref(),
+                subject: &generated_read_subject,
+                db_evidence: generated_read_db_evidence.as_ref(),
+            },
+            tool,
         };
         let guarded_conn = GuardedGeneratedReadConn {
             inner: &observed_conn,
@@ -8304,6 +8344,9 @@ impl OracleDispatcher {
 
         let mut patch_preview_to_remember = None;
         let result: Result<Value, ErrorEnvelope> = async {
+            if let Some(error) = generated_read_evidence_error {
+                return Err(error);
+            }
             match tool {
             #[cfg(feature = "plsql-intelligence")]
             tool if crate::plsql_tools::is_static_tool(tool) => {
@@ -8311,7 +8354,8 @@ impl OracleDispatcher {
             }
             #[cfg(feature = "plsql-intelligence")]
             "oracle_plsql_live_snapshot" | "oracle_plsql_blast_radius" => {
-                return crate::plsql_tools::dispatch_live(cx, metadata_conn, tool, args).await;
+                return crate::plsql_tools::dispatch_live(cx, &observed_metadata_conn, tool, args)
+                    .await;
             }
             "oracle_execute" => {
                 let a: ExecuteArgs = parse_args(name, args)?;
@@ -8415,10 +8459,12 @@ impl OracleDispatcher {
             }
             "oracle_connection_info" => {
                 ensure_no_args(name, args)?;
-                let mut value = connection_info_json(
-                    state.active_profile.clone(),
-                    describe_conn(cx, conn).await,
-                );
+                let mut value = match describe_conn(cx, &observed_conn).await {
+                    Err(err) if err.is_uncertain_session_state() => {
+                        return Err(DbError::into_envelope(err));
+                    }
+                    result => connection_info_json(state.active_profile.clone(), result),
+                };
                 if let Value::Object(map) = &mut value {
                     if let Some(generation) = state.profile_generation.as_ref() {
                         map.insert("profile_generation_active".to_owned(), json!(true));
@@ -8455,7 +8501,7 @@ impl OracleDispatcher {
                     Some("*") => None,
                     Some(owner) => Some(owner.to_owned()),
                     None => {
-                        let info = describe_conn(cx, metadata_conn)
+                        let info = describe_conn(cx, &observed_metadata_conn)
                             .await
                             .map_err(DbError::into_envelope)?;
                         Some(
@@ -8512,7 +8558,7 @@ impl OracleDispatcher {
                     Some("*") => None,
                     Some(owner) => Some(owner.to_owned()),
                     None => {
-                        let info = describe_conn(cx, metadata_conn)
+                        let info = describe_conn(cx, &observed_metadata_conn)
                             .await
                             .map_err(DbError::into_envelope)?;
                         Some(
@@ -8585,7 +8631,8 @@ impl OracleDispatcher {
                 let a: DescribeArgs = parse_args(name, args)?;
                 let table = required_non_empty_arg(name, "table", a.table)?;
                 let (owner, table) =
-                    owner_and_name_arg(cx, metadata_conn, a.owner, table, "table").await?;
+                    owner_and_name_arg(cx, &observed_metadata_conn, a.owner, table, "table")
+                        .await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_columns.before")?;
                 let columns = describe_columns(cx, &guarded_metadata_conn, &owner, &table)
                     .await
@@ -8605,7 +8652,8 @@ impl OracleDispatcher {
             "oracle_describe_index" => {
                 let a: DescribeIndexArgs = parse_args(name, args)?;
                 let (owner, object_name) =
-                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "index").await?;
+                    owner_and_name_arg(cx, &observed_metadata_conn, a.owner, a.name, "index")
+                        .await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_index.before")?;
                 let desc = describe_index(cx, &guarded_metadata_conn, &owner, &object_name)
                     .await
@@ -8622,7 +8670,8 @@ impl OracleDispatcher {
             "oracle_describe_trigger" => {
                 let a: DescribeTriggerArgs = parse_args(name, args)?;
                 let (owner, object_name) =
-                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "trigger").await?;
+                    owner_and_name_arg(cx, &observed_metadata_conn, a.owner, a.name, "trigger")
+                        .await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_trigger.before")?;
                 let desc = describe_trigger(cx, &guarded_metadata_conn, &owner, &object_name)
                     .await
@@ -8637,7 +8686,8 @@ impl OracleDispatcher {
             "oracle_describe_view" => {
                 let a: DescribeViewArgs = parse_args(name, args)?;
                 let (owner, object_name) =
-                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "view").await?;
+                    owner_and_name_arg(cx, &observed_metadata_conn, a.owner, a.name, "view")
+                        .await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.describe_view.before")?;
                 let desc = describe_view(cx, &guarded_metadata_conn, &owner, &object_name)
                     .await
@@ -8653,7 +8703,8 @@ impl OracleDispatcher {
             "oracle_get_ddl" => {
                 let a: GetDdlArgs = parse_args(name, args)?;
                 let (owner, object_name) =
-                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "name").await?;
+                    owner_and_name_arg(cx, &observed_metadata_conn, a.owner, a.name, "name")
+                        .await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.get_ddl.before")?;
                 let ddl = get_ddl(
                     cx,
@@ -8671,7 +8722,8 @@ impl OracleDispatcher {
                 let a: GetSourceArgs = parse_args(name, args)?;
                 let max_chars = a.max_chars.unwrap_or(DEFAULT_SOURCE_MAX_CHARS);
                 let (owner, object_name) =
-                    owner_and_name_arg(cx, metadata_conn, a.owner, a.name, "name").await?;
+                    owner_and_name_arg(cx, &observed_metadata_conn, a.owner, a.name, "name")
+                        .await?;
                 match a.object_type.as_deref().filter(|s| !s.trim().is_empty()) {
                     Some(object_type) => {
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.get_source.before")?;
@@ -8868,7 +8920,13 @@ impl OracleDispatcher {
                 match object_name {
                     Some(object_name) => {
                         let (owner, object_name) =
-                            owner_and_name_arg(cx, metadata_conn, a.owner, object_name, "name")
+                            owner_and_name_arg(
+                                cx,
+                                &observed_metadata_conn,
+                                a.owner,
+                                object_name,
+                                "name",
+                            )
                                 .await?;
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.before")?;
                         let rows =
@@ -8881,7 +8939,7 @@ impl OracleDispatcher {
                         )
                     }
                     None => {
-                        let owner = owner_or_current_cx(cx, metadata_conn, a.owner)
+                        let owner = owner_or_current_cx(cx, &observed_metadata_conn, a.owner)
                             .await
                             .map_err(DbError::into_envelope)?;
                         dispatch_checkpoint(cx, "oraclemcp.dispatch.compile_errors.before")?;
@@ -8904,7 +8962,7 @@ impl OracleDispatcher {
                     Some("*") => None,
                     Some(owner) => Some(owner.to_ascii_uppercase()),
                     None => Some(
-                        owner_or_current_cx(cx, metadata_conn, None)
+                        owner_or_current_cx(cx, &observed_metadata_conn, None)
                             .await
                             .map_err(DbError::into_envelope)?,
                     ),
@@ -8936,7 +8994,14 @@ impl OracleDispatcher {
                 let a: PlscopeInspectArgs = parse_args(name, args)?;
                 let object_name = required_non_empty_arg(name, "name", a.name)?;
                 let (owner, object_name) =
-                    owner_and_name_arg(cx, metadata_conn, a.owner, object_name, "name").await?;
+                    owner_and_name_arg(
+                        cx,
+                        &observed_metadata_conn,
+                        a.owner,
+                        object_name,
+                        "name",
+                    )
+                    .await?;
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.plscope_identifiers.before")?;
                 let identifiers =
                     plscope_identifiers(cx, &guarded_metadata_conn, &owner, &object_name)
@@ -9055,10 +9120,9 @@ impl OracleDispatcher {
         let budget_after = final_budget.enforce(cx).map_err(DbError::into_envelope);
         let metadata_restore_error = metadata_limits.and_then(|limits| limits.restore().err());
         let primary_restore_error = primary_limits.restore().err();
-        let restore_error = metadata_restore_error.or(primary_restore_error);
         match result {
             Err(primary) => {
-                if let Some(restore_err) = restore_error {
+                if let Some(restore_err) = primary_restore_error {
                     let _ = mark_connection_quarantined(
                         &self.quarantine,
                         AuditOutcome::UnknownDiscarded,
@@ -9067,16 +9131,25 @@ impl OracleDispatcher {
                         ),
                     );
                 }
+                if let Some(restore_err) = metadata_restore_error {
+                    tracing::warn!(
+                        error = %restore_err,
+                        "stateless read request-limit restoration also failed; the active primary session remains independent"
+                    );
+                }
                 Err(primary)
             }
             Ok(mut value) => {
                 let effect_succeeded = response_reports_terminal_effect(tool, &value);
-                if let Some(restore_err) = restore_error {
+                if let Some(restore_err) = primary_restore_error {
                     return Err(limit_restore_failure(
                         &self.quarantine,
                         effect_succeeded,
                         restore_err,
                     ));
+                }
+                if let Some(restore_err) = metadata_restore_error {
+                    return Err(DbError::into_envelope(restore_err));
                 }
                 match budget_after {
                     Ok(()) => {

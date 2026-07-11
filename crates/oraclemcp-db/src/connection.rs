@@ -1150,11 +1150,23 @@ impl RustOracleConnection {
         Ok(())
     }
 
-    async fn query_first_row(&self, cx: &Cx, sql: &str) -> Option<OracleRow> {
-        self.query_rows(cx, sql, &[])
-            .await
-            .ok()
-            .and_then(|rows| rows.into_iter().next())
+    async fn query_first_row(&self, cx: &Cx, sql: &str) -> Result<Option<OracleRow>, DbError> {
+        Ok(self.query_rows(cx, sql, &[]).await?.into_iter().next())
+    }
+
+    async fn describe_first_row(&self, cx: &Cx, sql: &str) -> Result<Option<OracleRow>, DbError> {
+        degrade_describe_probe(self.query_first_row(cx, sql).await)
+    }
+}
+
+/// Preserve cancellation and connection uncertainty from an observational
+/// metadata probe while retaining `describe`'s best-effort contract for an
+/// ordinary Oracle query/privilege failure. Other structural failures are not
+/// proven safe to ignore and therefore propagate as well.
+fn degrade_describe_probe<T>(result: Result<Option<T>, DbError>) -> Result<Option<T>, DbError> {
+    match result {
+        Err(error @ DbError::Query(_)) if !error.is_uncertain_session_state() => Ok(None),
+        result => result,
     }
 }
 
@@ -4661,33 +4673,33 @@ mod driver {
                 ..Default::default()
             };
             if let Some(r) = self
-                .query_first_row(
+                .describe_first_row(
                     cx,
                     "SELECT version_full FROM product_component_version WHERE rownum = 1",
                 )
-                .await
+                .await?
             {
                 info.server_version = r.text("VERSION_FULL").map(str::to_owned);
             }
             if let Some(r) = self
-                .query_first_row(
+                .describe_first_row(
                     cx,
                     "SELECT database_role, open_mode, db_unique_name FROM v$database",
                 )
-                .await
+                .await?
             {
                 info.database_role = r.text("DATABASE_ROLE").map(str::to_owned);
                 info.open_mode = r.text("OPEN_MODE").map(str::to_owned);
                 info.db_unique_name = r.text("DB_UNIQUE_NAME").map(str::to_owned);
             }
             if let Some(r) = self
-                .query_first_row(cx, "SELECT instance_name FROM v$instance")
-                .await
+                .describe_first_row(cx, "SELECT instance_name FROM v$instance")
+                .await?
             {
                 info.instance_name = r.text("INSTANCE_NAME").map(str::to_owned);
             }
             if let Some(r) = self
-                .query_first_row(
+                .describe_first_row(
                     cx,
                     "SELECT \
                     SYS_CONTEXT('USERENV','CURRENT_SCHEMA') AS current_schema, \
@@ -4706,7 +4718,7 @@ mod driver {
                     SYS_CONTEXT('USERENV','TERMINAL') AS terminal \
                  FROM dual",
                 )
-                .await
+                .await?
             {
                 info.current_schema = r.text("CURRENT_SCHEMA").map(str::to_owned);
                 info.current_edition = r.text("CURRENT_EDITION").map(str::to_owned);
@@ -4724,14 +4736,14 @@ mod driver {
                 info.terminal = r.text("TERMINAL").map(str::to_owned);
             }
             if let Some(r) = self
-                .query_first_row(
+                .describe_first_row(
                     cx,
                     "SELECT sid, serial# AS serial_number, service_name, osuser, machine, terminal, program \
                  FROM v$session \
                  WHERE sid = TO_NUMBER(SYS_CONTEXT('USERENV','SID')) \
                  FETCH FIRST 1 ROWS ONLY",
                 )
-                .await
+                .await?
             {
                 info.sid = r.text("SID").map(str::to_owned).or_else(|| info.sid.take());
                 info.serial_number = r.text("SERIAL_NUMBER").map(str::to_owned);
@@ -4751,7 +4763,7 @@ mod driver {
                 info.program = r.text("PROGRAM").map(str::to_owned);
             }
             if let Some(r) = self
-                .query_first_row(
+                .describe_first_row(
                     cx,
                     "SELECT client_driver \
                  FROM v$session_connect_info \
@@ -4759,7 +4771,7 @@ mod driver {
                    AND client_driver IS NOT NULL \
                  FETCH FIRST 1 ROWS ONLY",
                 )
-                .await
+                .await?
             {
                 info.client_driver = r.text("CLIENT_DRIVER").map(str::to_owned);
             }
@@ -4797,10 +4809,12 @@ mod driver {
                 // ONE privilege-degradable dictionary query for edition +
                 // partitioning. `product_component_version` is broadly readable;
                 // `v$option` needs a catalog grant, so a low-privilege account
-                // fails the whole statement — `query_first_row` swallows the
-                // error and both fields degrade to `None` (never fails describe).
+                // fails the whole statement. Ordinary query/privilege errors
+                // degrade both fields to `None`; cancellation or connection
+                // uncertainty still fails `describe` so the owner can discard
+                // the session instead of reusing an indeterminate connection.
                 let (edition, partitioning) = match self
-                    .query_first_row(
+                    .describe_first_row(
                         cx,
                         // `product` is the edition/product descriptor, e.g.
                         // "Oracle Database 21c Enterprise Edition" or the newer
@@ -4813,7 +4827,7 @@ mod driver {
                             WHERE parameter = 'Partitioning') AS partitioning \
                          FROM dual",
                     )
-                    .await
+                    .await?
                 {
                     Some(r) => (
                         r.text("EDITION").map(str::to_owned),
@@ -5299,6 +5313,48 @@ mod tests {
         assert_eq!(duration_to_millis(Duration::from_nanos(1)), 1);
         assert_eq!(duration_to_millis(Duration::from_micros(1_001)), 2);
         assert_eq!(duration_to_millis(Duration::from_secs(u64::MAX)), u32::MAX);
+    }
+
+    #[test]
+    fn describe_probe_propagates_structural_cancellation() {
+        let error = degrade_describe_probe::<OracleRow>(Err(DbError::Cancelled(
+            "describe probe request deadline exceeded".to_owned(),
+        )))
+        .expect_err("cancellation cannot become absent metadata");
+
+        assert!(matches!(error, DbError::Cancelled(_)), "{error:?}");
+        assert!(error.is_uncertain_session_state());
+    }
+
+    #[test]
+    fn describe_probe_propagates_uncertain_oracle_disconnect() {
+        let error = degrade_describe_probe::<OracleRow>(Err(DbError::Query(
+            "ORA-03113: end-of-file on communication channel".to_owned(),
+        )))
+        .expect_err("a lost connection cannot become absent metadata");
+
+        assert!(matches!(error, DbError::Query(_)), "{error:?}");
+        assert!(error.is_uncertain_session_state());
+    }
+
+    #[test]
+    fn describe_probe_degrades_ordinary_dictionary_access_error() {
+        let row = degrade_describe_probe::<OracleRow>(Err(DbError::Query(
+            "ORA-00942: table or view does not exist".to_owned(),
+        )))
+        .expect("ordinary metadata privilege failures remain best-effort");
+
+        assert!(row.is_none());
+    }
+
+    #[test]
+    fn describe_probe_does_not_hide_non_query_adapter_failure() {
+        let error = degrade_describe_probe::<OracleRow>(Err(DbError::Internal(
+            "thin connection lock failed".to_owned(),
+        )))
+        .expect_err("an adapter failure is not a proven privilege miss");
+
+        assert!(matches!(error, DbError::Internal(_)), "{error:?}");
     }
 
     #[test]
