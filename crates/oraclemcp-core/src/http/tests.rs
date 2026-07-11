@@ -2165,6 +2165,98 @@ fn workbench_no_bypass_guard_is_the_feature() {
 }
 
 #[test]
+fn operator_http_200_preserves_mcp_failure_and_partial_apply_contract() {
+    let (auditor, _sink) = operator_auditor();
+    let dir = dashboard_test_dir("operator-semantic-outcome");
+    let proposals = Arc::new(crate::change_proposal::ChangeProposalStore::new(
+        crate::file_store::FileStore::open(dir.join("state")).expect("proposal store"),
+    ));
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        change_proposals: Some(proposals),
+        ..Default::default()
+    };
+    let server = busy_server();
+
+    let forwarded = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/actions/execute",
+            &serde_json::json!({
+                "idempotency_key": "semantic-outcome-workbench",
+                "tool": "oracle_query",
+                "arguments": { "sql": "SELECT 1 FROM dual", "max_rows": 1 }
+            }),
+        ),
+    );
+    assert_eq!(
+        forwarded.status, 200,
+        "JSON-RPC/MCP semantic failures intentionally keep a successful HTTP envelope"
+    );
+    let forwarded_json = response_json(&forwarded);
+    assert_eq!(
+        forwarded_json["data"]["status"],
+        serde_json::json!("forwarded")
+    );
+    assert_eq!(
+        forwarded_json["data"]["mcp_response"]["result"]["isError"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        forwarded_json["data"]["mcp_response"]["result"]["structuredContent"]["error_class"],
+        serde_json::json!("BUSY")
+    );
+
+    let draft = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/change-proposals/draft",
+            &serde_json::json!({
+                "profile": "prod",
+                "author": "human",
+                "title": "Semantic outcome fixture",
+                "statements": [{
+                    "sql_template": "SELECT 1 FROM dual",
+                    "unit": "read"
+                }]
+            }),
+        ),
+    );
+    assert_eq!(draft.status, 200);
+    let proposal_id = response_json(&draft)["data"]["proposal"]["id"]
+        .as_str()
+        .expect("proposal id")
+        .to_owned();
+    let apply = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/change-proposals/apply",
+            &serde_json::json!({
+                "proposal_id": proposal_id,
+                "idempotency_key": "semantic-outcome-proposal"
+            }),
+        ),
+    );
+    assert_eq!(
+        apply.status, 200,
+        "the proposal route reports a terminal domain outcome inside operator.v1"
+    );
+    let apply_json = response_json(&apply);
+    assert_eq!(
+        apply_json["data"]["status"],
+        serde_json::json!("stopped_on_failure")
+    );
+    assert_eq!(
+        apply_json["data"]["results"][0]["action_response"]["data"]["mcp_response"]["result"]["isError"],
+        serde_json::json!(true),
+        "the client decoder must inspect the nested failed statement, not HTTP 200"
+    );
+}
+
+#[test]
 fn operator_execute_allows_read_only_metadata_tools_for_explorer() {
     let (auditor, _sink) = operator_auditor();
     let calls = Arc::new(AtomicUsize::new(0));

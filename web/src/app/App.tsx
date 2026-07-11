@@ -138,6 +138,7 @@ import {
   sessionsProbes,
   cachedExplorerMetadata,
   clearExplorerMetadataCache,
+  decodeOperatorOutcome,
   fetchAuditTail,
   fetchExplorerConnection,
   fetchExplorerDdl,
@@ -147,7 +148,11 @@ import {
   fetchExplorerSourceSearch,
   fetchLaneCapabilities,
   explorerMetadataCacheSummary,
+  operatorOutcomeFromError,
+  operatorResponseFromError,
   ORACLE_METADATA_SERIALIZATION_CONTRACT_VERSION,
+  type OperatorOutcome,
+  type OperatorOutcomeState,
   type WorkbenchActionData,
   type WorkbenchMode,
   type WorkbenchPlsqlTool
@@ -592,7 +597,8 @@ function SessionsPage(): React.ReactElement {
       });
     },
     onSuccess: (response, action) => {
-      setLastResult({ state: "ok", action, response });
+      const outcome = decodeOperatorOutcome(200, response);
+      setLastResult({ state: outcome.state, action, response, outcome });
       const nextConfirm = confirmationFromResponse(response);
       if (action === "preview") {
         setConfirm(nextConfirm ?? "");
@@ -604,10 +610,12 @@ function SessionsPage(): React.ReactElement {
       queryClient.invalidateQueries({ queryKey: ["sessions", "capabilities", selectedLaneKey] });
     },
     onError: (error, action) => {
+      const outcome = operatorOutcomeFromError(error, "session level action failed");
       setLastResult({
-        state: "error",
+        state: outcome.state,
         action,
-        message: error instanceof Error ? error.message : "session level action failed"
+        response: operatorResponseFromError<WorkbenchActionData>(error),
+        outcome
       });
     }
   });
@@ -728,17 +736,12 @@ function SessionsPage(): React.ReactElement {
 
 type SessionLevelControlAction = "preview" | "apply" | "drop";
 
-type SessionLevelResult =
-  | {
-      state: "ok";
-      action: SessionLevelControlAction;
-      response: OperatorResponse<WorkbenchActionData>;
-    }
-  | {
-      state: "error";
-      action: SessionLevelControlAction;
-      message: string;
-    };
+type SessionLevelResult = {
+  state: OperatorOutcomeState;
+  action: SessionLevelControlAction;
+  response: OperatorResponse<WorkbenchActionData> | null;
+  outcome: OperatorOutcome;
+};
 
 const operatingLevels: OperatingLevel[] = ["READ_WRITE", "DDL", "ADMIN"];
 
@@ -1025,7 +1028,10 @@ function SessionLevelControlPanel({
   onTtlChange: (value: number) => void;
   onAction: (action: SessionLevelControlAction) => void;
 }): React.ReactElement {
-  const summary = result?.state === "ok" ? sessionLevelSummary(result.response) : null;
+  const summary =
+    result?.state === "success" && result.response
+      ? sessionLevelSummary(result.response)
+      : null;
   const inputClass =
     "h-10 w-full rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] px-3 text-sm text-[var(--om-text)] outline-none focus:border-[var(--om-gold)] focus:ring-2 focus:ring-[color-mix(in_srgb,var(--om-gold)_35%,transparent)]";
   const labelClass = "mb-2 block text-sm font-semibold text-[var(--om-text)]";
@@ -1101,11 +1107,7 @@ function SessionLevelControlPanel({
         </div>
         {summary ? <ElevationCountdown summary={summary} /> : null}
         {summary ? <SessionLevelSummaryPanel summary={summary} /> : null}
-        {result?.state === "error" ? (
-          <div className="rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_12%,transparent)] p-3 text-sm font-semibold text-[var(--om-copper)]">
-            {result.message}
-          </div>
-        ) : null}
+        {result ? <OperatorOutcomeNotice outcome={result.outcome} /> : null}
       </div>
     </ConsolePanel>
   );
@@ -5104,17 +5106,27 @@ const schemaDiffAfterFixture = JSON.stringify(
   2
 );
 
-type ReviewResult =
-  | {
-      state: "ok";
-      label: string;
-      response: unknown;
-    }
-  | {
-      state: "error";
-      label: string;
-      message: string;
-    };
+type ReviewResult = {
+  state: OperatorOutcomeState;
+  label: string;
+  response: unknown;
+  outcome: OperatorOutcome;
+};
+
+function reviewSuccess(label: string, response: unknown): ReviewResult {
+  const outcome = decodeOperatorOutcome(200, response);
+  return { state: outcome.state, label, response, outcome };
+}
+
+function reviewFailure(label: string, error: unknown, fallback: string): ReviewResult {
+  const outcome = operatorOutcomeFromError(error, fallback);
+  return {
+    state: outcome.state,
+    label,
+    response: operatorResponseFromError(error),
+    outcome
+  };
+}
 
 function ReviewsPage(): React.ReactElement {
   const [filter, setFilter] = React.useState("");
@@ -5192,16 +5204,12 @@ function ReviewsPage(): React.ReactElement {
       });
     },
     onSuccess: (response) => {
-      setLastResult({ state: "ok", label: "Draft", response });
+      setLastResult(reviewSuccess("Draft", response));
       setSelectedId(response.data.proposal.id);
       queryClient.invalidateQueries({ queryKey: ["change-proposals"] });
     },
     onError: (error) => {
-      setLastResult({
-        state: "error",
-        label: "Draft",
-        message: error instanceof Error ? error.message : "proposal draft failed"
-      });
+      setLastResult(reviewFailure("Draft", error, "proposal draft failed"));
     }
   });
 
@@ -5221,18 +5229,14 @@ function ReviewsPage(): React.ReactElement {
       });
     },
     onSuccess: (response) => {
-      setLastResult({ state: "ok", label: "Apply", response });
+      setLastResult(reviewSuccess("Apply", response));
       clearExplorerMetadataCache();
       queryClient.invalidateQueries({ queryKey: ["explorer"] });
       queryClient.invalidateQueries({ queryKey: ["operator-metrics"] });
       queryClient.invalidateQueries({ queryKey: ["audit-tail"] });
     },
     onError: (error) => {
-      setLastResult({
-        state: "error",
-        label: "Apply",
-        message: error instanceof Error ? error.message : "proposal apply failed"
-      });
+      setLastResult(reviewFailure("Apply", error, "proposal apply failed"));
     }
   });
 
@@ -5244,16 +5248,12 @@ function ReviewsPage(): React.ReactElement {
       return draftSourceHistoryRevert(session.data, snapshot.id, snapshot.profile);
     },
     onSuccess: (response) => {
-      setLastResult({ state: "ok", label: "Revert draft", response });
+      setLastResult(reviewSuccess("Revert draft", response));
       setSelectedId(response.data.proposal.id);
       queryClient.invalidateQueries({ queryKey: ["change-proposals"] });
     },
     onError: (error) => {
-      setLastResult({
-        state: "error",
-        label: "Revert draft",
-        message: error instanceof Error ? error.message : "revert draft failed"
-      });
+      setLastResult(reviewFailure("Revert draft", error, "revert draft failed"));
     }
   });
 
@@ -5346,7 +5346,7 @@ function ReviewsPage(): React.ReactElement {
             session={session.data ?? null}
             profile={profile}
             onDrafted={(proposal, response) => {
-              setLastResult({ state: "ok", label: "Migration draft", response });
+              setLastResult(reviewSuccess("Migration draft", response));
               setSelectedId(proposal.id);
               queryClient.invalidateQueries({ queryKey: ["change-proposals"] });
             }}
@@ -5857,6 +5857,66 @@ function SchemaDiffStepTable({ steps }: { steps: SchemaDiffStepView[] }): React.
   );
 }
 
+function operatorOutcomeTone(
+  state: OperatorOutcomeState
+): "ok" | "warn" | "info" | "neutral" {
+  switch (state) {
+    case "success":
+      return "ok";
+    case "refused":
+      return "info";
+    case "partial":
+      return "neutral";
+    case "failed":
+      return "warn";
+  }
+}
+
+export function OperatorOutcomeNotice({
+  outcome
+}: {
+  outcome: OperatorOutcome;
+}): React.ReactElement {
+  const tone = operatorOutcomeTone(outcome.state);
+  const stateClass = {
+    success:
+      "border-[color-mix(in_srgb,var(--om-sage)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-sage)_12%,transparent)] text-[var(--om-sage)]",
+    refused:
+      "border-[color-mix(in_srgb,var(--om-gold)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-gold)_12%,transparent)] text-[var(--om-gold)]",
+    partial:
+      "border-[var(--om-border)] bg-[var(--om-surface-muted)] text-[var(--om-text-bright)]",
+    failed:
+      "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_12%,transparent)] text-[var(--om-copper)]"
+  }[outcome.state];
+  return (
+    <div
+      className={cn("rounded-md border p-3", stateClass)}
+      data-operator-outcome={outcome.state}
+      data-outcome-tone={tone}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm font-semibold">{outcome.message}</p>
+        <Badge tone={tone}>{outcome.state}</Badge>
+      </div>
+      {outcome.errorClass ? (
+        <p className="mt-2 font-mono text-xs">{outcome.errorClass}</p>
+      ) : null}
+      {outcome.nextSteps.length > 0 ? (
+        <div className="mt-3">
+          <p className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)]">
+            Next steps
+          </p>
+          <ul className="mt-1 list-disc space-y-1 pl-5 text-sm">
+            {outcome.nextSteps.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ReviewResultPanel({
   result,
   pending
@@ -5876,20 +5936,15 @@ function ReviewResultPanel({
             {pending ? "request in flight" : result ? result.label : "idle"}
           </p>
         </div>
-        <Badge tone={pending ? "info" : result?.state === "error" ? "warn" : result ? "ok" : "off"}>
+        <Badge tone={pending ? "info" : result ? operatorOutcomeTone(result.state) : "off"}>
           {pending ? "running" : result?.state ?? "empty"}
         </Badge>
       </div>
-      <div className="p-4">
-        {result?.state === "error" ? (
-          <div className="rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_12%,transparent)] p-3 text-sm font-semibold text-[var(--om-copper)]">
-            {result.message}
-          </div>
-        ) : (
-          <pre className={cn(OM_CODE, "max-h-[560px]")}>
-            {result?.state === "ok" ? prettyJson(result.response) : "{}"}
-          </pre>
-        )}
+      <div className="space-y-3 p-4">
+        {result ? <OperatorOutcomeNotice outcome={result.outcome} /> : null}
+        <pre className={cn(OM_CODE, "max-h-[560px]")}>
+          {result?.response ? prettyJson(result.response) : "{}"}
+        </pre>
       </div>
     </ConsolePanel>
   );
@@ -5992,17 +6047,30 @@ type WorkbenchAction = "preview" | "read" | "rollback_preview" | "commit";
 
 type WorkbenchIdeAction = "parse" | "analyze" | "lineage" | "lint" | "docs" | "impact";
 
-type WorkbenchResult =
-  | {
-      state: "ok";
-      label: string;
-      response: OperatorResponse<WorkbenchActionData>;
-    }
-  | {
-      state: "error";
-      label: string;
-      message: string;
-    };
+type WorkbenchResult = {
+  state: OperatorOutcomeState;
+  label: string;
+  response: OperatorResponse<WorkbenchActionData> | null;
+  outcome: OperatorOutcome;
+};
+
+function workbenchSuccess(
+  label: string,
+  response: OperatorResponse<WorkbenchActionData>
+): WorkbenchResult {
+  const outcome = decodeOperatorOutcome(200, response);
+  return { state: outcome.state, label, response, outcome };
+}
+
+function workbenchFailure(label: string, error: unknown, fallback: string): WorkbenchResult {
+  const outcome = operatorOutcomeFromError(error, fallback);
+  return {
+    state: outcome.state,
+    label,
+    response: operatorResponseFromError<WorkbenchActionData>(error),
+    outcome
+  };
+}
 
 type PlsqlPosition = {
   line: number;
@@ -6084,7 +6152,7 @@ function WorkbenchPage(): React.ReactElement {
       });
     },
     onSuccess: (response, kind) => {
-      setLastResult({ state: "ok", label: actionLabel(kind), response });
+      setLastResult(workbenchSuccess(actionLabel(kind), response));
       if (kind === "commit") {
         clearExplorerMetadataCache();
         queryClient.invalidateQueries({ queryKey: ["explorer"] });
@@ -6095,11 +6163,7 @@ function WorkbenchPage(): React.ReactElement {
       }
     },
     onError: (error, kind) => {
-      setLastResult({
-        state: "error",
-        label: actionLabel(kind),
-        message: error instanceof Error ? error.message : "operator action failed"
-      });
+      setLastResult(workbenchFailure(actionLabel(kind), error, "operator action failed"));
     }
   });
 
@@ -6120,14 +6184,10 @@ function WorkbenchPage(): React.ReactElement {
       return runWorkbenchPlsqlTool(session.data, request);
     },
     onSuccess: (response, kind) => {
-      setLastIdeResult({ state: "ok", label: ideActionLabel(kind), response });
+      setLastIdeResult(workbenchSuccess(ideActionLabel(kind), response));
     },
     onError: (error, kind) => {
-      setLastIdeResult({
-        state: "error",
-        label: ideActionLabel(kind),
-        message: error instanceof Error ? error.message : "PL/SQL analysis failed"
-      });
+      setLastIdeResult(workbenchFailure(ideActionLabel(kind), error, "PL/SQL analysis failed"));
     }
   });
 
@@ -6137,7 +6197,8 @@ function WorkbenchPage(): React.ReactElement {
   const confirmReady = confirm.trim().length > 0;
   const sessionTone = session.status === "success" ? "ok" : session.status === "error" ? "warn" : "info";
   const definitions =
-    lastIdeResult?.state === "ok" && lastIdeResult.response.data.mcp_tool === "oracle_plsql_parse"
+    lastIdeResult?.state === "success" &&
+    lastIdeResult.response?.data.mcp_tool === "oracle_plsql_parse"
       ? plsqlDefinitionsFromResponse(lastIdeResult.response)
       : [];
   const usageRows = React.useMemo(
@@ -6386,7 +6447,7 @@ function WorkbenchIdePanel({
             {pending ? "analysis in flight" : result ? result.label : "idle"}
           </p>
         </div>
-        <Badge tone={pending ? "info" : result?.state === "error" ? "warn" : result ? "ok" : "off"}>
+        <Badge tone={pending ? "info" : result ? operatorOutcomeTone(result.state) : "off"}>
           {pending ? "running" : result?.state ?? "empty"}
         </Badge>
       </div>
@@ -6585,15 +6646,10 @@ function WorkbenchIdePanel({
           <pre className={cn(OM_CODE, "mt-3 max-h-40")}>{refactorPreview.preview}</pre>
         </div>
 
-        {result?.state === "error" ? (
-          <div className="rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_12%,transparent)] p-3 text-sm font-semibold text-[var(--om-copper)]">
-            {result.message}
-          </div>
-        ) : (
-          <pre className={cn(OM_CODE, "max-h-[360px]")}>
-            {result?.state === "ok" ? prettyJson(result.response) : "{}"}
-          </pre>
-        )}
+        {result ? <OperatorOutcomeNotice outcome={result.outcome} /> : null}
+        <pre className={cn(OM_CODE, "max-h-[360px]")}>
+          {result?.response ? prettyJson(result.response) : "{}"}
+        </pre>
       </div>
     </ConsolePanel>
   );
@@ -7072,9 +7128,10 @@ function WorkbenchResultPanel({
   result: WorkbenchResult | null;
   pending: boolean;
 }): React.ReactElement {
-  const confirm = result?.state === "ok" ? confirmationFromResponse(result.response) : null;
-  const facts = result?.state === "ok" ? factsFromResponse(result.response) : [];
-  const verdict = result?.state === "ok" ? workbenchVerdictFromResponse(result.response) : null;
+  const successfulResponse = result?.state === "success" ? result.response : null;
+  const confirm = successfulResponse ? confirmationFromResponse(successfulResponse) : null;
+  const facts = successfulResponse ? factsFromResponse(successfulResponse) : [];
+  const verdict = successfulResponse ? workbenchVerdictFromResponse(successfulResponse) : null;
   return (
     <ConsolePanel className="min-h-[520px]">
       <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
@@ -7087,7 +7144,7 @@ function WorkbenchResultPanel({
             {pending ? "request in flight" : result ? result.label : "idle"}
           </p>
         </div>
-        <Badge tone={pending ? "info" : result?.state === "error" ? "warn" : result ? "ok" : "off"}>
+        <Badge tone={pending ? "info" : result ? operatorOutcomeTone(result.state) : "off"}>
           {pending ? "running" : result?.state ?? "empty"}
         </Badge>
       </div>
@@ -7116,15 +7173,10 @@ function WorkbenchResultPanel({
             <p className="mt-2 break-all font-mono text-xs text-[var(--om-sage)]">{confirm}</p>
           </div>
         ) : null}
-        {result?.state === "error" ? (
-          <div className="rounded-md border border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_12%,transparent)] p-3 text-sm font-semibold text-[var(--om-copper)]">
-            {result.message}
-          </div>
-        ) : (
-          <pre className={cn(OM_CODE, "max-h-[620px]")}>
-            {result?.state === "ok" ? prettyJson(result.response) : "{}"}
-          </pre>
-        )}
+        {result ? <OperatorOutcomeNotice outcome={result.outcome} /> : null}
+        <pre className={cn(OM_CODE, "max-h-[620px]")}>
+          {result?.response ? prettyJson(result.response) : "{}"}
+        </pre>
       </div>
     </ConsolePanel>
   );

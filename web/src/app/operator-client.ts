@@ -41,6 +41,265 @@ export type OperatorResponse<T extends Record<string, unknown> = Record<string, 
   data: T;
 };
 
+export type OperatorOutcomeState = "success" | "refused" | "failed" | "partial";
+
+export type OperatorOutcome = {
+  state: OperatorOutcomeState;
+  message: string;
+  nextSteps: string[];
+  errorClass: string | null;
+};
+
+const refusalErrorClasses = new Set([
+  "CHALLENGE_REQUIRED",
+  "FORBIDDEN_STATEMENT",
+  "INSUFFICIENT_PRIVILEGE",
+  "LEASE_REQUIRED",
+  "OPERATING_LEVEL_TOO_LOW",
+  "POLICY_DENIED",
+  "RUNTIME_STATE_REQUIRED"
+]);
+
+/**
+ * A transport-complete operator response whose operation did not succeed.
+ *
+ * JSON-RPC and MCP tool failures intentionally ride HTTP 200. Keeping the
+ * decoded outcome and original redacted response on the error lets React Query
+ * avoid success callbacks without throwing away the operator-facing detail.
+ */
+export class OperatorOutcomeError extends Error {
+  readonly outcome: OperatorOutcome;
+  readonly response: unknown;
+  readonly httpStatus: number;
+
+  constructor(outcome: OperatorOutcome, response: unknown, httpStatus: number) {
+    super(outcome.message);
+    this.name = "OperatorOutcomeError";
+    this.outcome = outcome;
+    this.response = response;
+    this.httpStatus = httpStatus;
+  }
+}
+
+export function operatorOutcomeFromError(error: unknown, fallback: string): OperatorOutcome {
+  if (error instanceof OperatorOutcomeError) {
+    return error.outcome;
+  }
+  return {
+    state: "failed",
+    message: error instanceof Error ? error.message : fallback,
+    nextSteps: [],
+    errorClass: null
+  };
+}
+
+export function operatorResponseFromError<
+  T extends Record<string, unknown> = Record<string, unknown>
+>(error: unknown): OperatorResponse<T> | null {
+  if (!(error instanceof OperatorOutcomeError) || !isOperatorResponse(error.response)) {
+    return null;
+  }
+  return error.response as OperatorResponse<T>;
+}
+
+/** Decode transport, operator-domain, JSON-RPC, and MCP tool outcomes once. */
+export function decodeOperatorOutcome(httpStatus: number, payload: unknown): OperatorOutcome {
+  const envelope = recordValue(payload);
+  const data = recordValue(envelope?.["data"]) ?? envelope;
+  const route = stringValue(envelope?.["route"]);
+
+  if (httpStatus < 200 || httpStatus >= 300) {
+    const error = recordValue(data?.["error"]);
+    const errorData = recordValue(error?.["data"]);
+    const errorClass =
+      stringValue(data?.["error_class"]) ?? stringValue(errorData?.["error_class"]);
+    return outcome(
+      httpStatus === 401 || httpStatus === 403 || isRefusalClass(errorClass)
+        ? "refused"
+        : "failed",
+      messageFrom(data, `operator request failed with HTTP ${httpStatus}`),
+      nextStepsFrom(data),
+      errorClass
+    );
+  }
+
+  if (!data) {
+    return outcome("failed", "operator response was not a JSON object", [], null);
+  }
+
+  if (route === "/operator/v1/change-proposals/apply") {
+    const status = stringValue(data["status"]);
+    if (status === "stopped_on_failure") {
+      const nested = firstFailedProposalOutcome(data);
+      return outcome(
+        "partial",
+        nested
+          ? `Change proposal stopped on a failed statement: ${nested.message}`
+          : "Change proposal stopped on a failed statement",
+        nested?.nextSteps ?? [],
+        nested?.errorClass ?? null
+      );
+    }
+    if (status && status !== "applied") {
+      return outcome(
+        "partial",
+        messageFrom(data, `Change proposal did not complete (${status})`),
+        nextStepsFrom(data),
+        stringValue(data["error_class"])
+      );
+    }
+  }
+
+  const domainError = data["error"];
+  if (domainError !== undefined && domainError !== null) {
+    const errorClass = stringValue(data["error_class"]);
+    return outcome(
+      isRefusalClass(errorClass) ? "refused" : "failed",
+      messageFrom(data, "operator action failed"),
+      nextStepsFrom(data),
+      errorClass
+    );
+  }
+
+  const status = stringValue(data["status"]);
+  if (status === "accepted") {
+    return outcome(
+      "partial",
+      "Operator action was accepted but no terminal MCP result was returned",
+      ["Wait for a terminal result before treating the operation as complete."],
+      null
+    );
+  }
+
+  if (Object.prototype.hasOwnProperty.call(data, "mcp_response")) {
+    const mcpResponse = recordValue(data["mcp_response"]);
+    if (!mcpResponse) {
+      return outcome("failed", "forwarded operator action returned no MCP response", [], null);
+    }
+    return decodeMcpOutcome(mcpResponse);
+  }
+
+  return outcome("success", "Operation completed", [], null);
+}
+
+function decodeMcpOutcome(mcpResponse: Record<string, unknown>): OperatorOutcome {
+  const rpcError = recordValue(mcpResponse["error"]);
+  if (rpcError) {
+    const rpcData = recordValue(rpcError["data"]);
+    const errorClass = stringValue(rpcData?.["error_class"]);
+    return outcome(
+      isRefusalClass(errorClass) ? "refused" : "failed",
+      stringValue(rpcError["message"]) ?? messageFrom(rpcData, "JSON-RPC request failed"),
+      nextStepsFrom(rpcData),
+      errorClass
+    );
+  }
+
+  const result = recordValue(mcpResponse["result"]);
+  if (!result) {
+    return outcome("failed", "MCP response did not include a result", [], null);
+  }
+  if (result["isError"] === true) {
+    const structured = recordValue(result["structuredContent"]) ?? result;
+    const errorClass = stringValue(structured["error_class"]);
+    return outcome(
+      isRefusalClass(errorClass) ? "refused" : "failed",
+      messageFrom(structured, "MCP tool call failed"),
+      nextStepsFrom(structured),
+      errorClass
+    );
+  }
+
+  return outcome("success", "Operation completed", [], null);
+}
+
+function firstFailedProposalOutcome(data: Record<string, unknown>): OperatorOutcome | null {
+  const results = Array.isArray(data["results"]) ? data["results"] : [];
+  for (const item of results) {
+    const result = recordValue(item);
+    const actionResponse = result?.["action_response"];
+    if (actionResponse === undefined) {
+      continue;
+    }
+    const actionStatus = numberValue(result?.["action_status"]) ?? 200;
+    const nested = decodeOperatorOutcome(actionStatus, actionResponse);
+    if (nested.state !== "success") {
+      return nested;
+    }
+  }
+  return null;
+}
+
+function outcome(
+  state: OperatorOutcomeState,
+  message: string,
+  nextSteps: string[],
+  errorClass: string | null
+): OperatorOutcome {
+  return { state, message, nextSteps, errorClass };
+}
+
+function isRefusalClass(value: string | null): boolean {
+  return value !== null && refusalErrorClasses.has(value);
+}
+
+function messageFrom(value: Record<string, unknown> | null, fallback: string): string {
+  if (!value) {
+    return fallback;
+  }
+  const message = stringValue(value["message"]);
+  if (message) {
+    return message;
+  }
+  const error = value["error"];
+  if (typeof error === "string" && error.trim()) {
+    return error;
+  }
+  const errorRecord = recordValue(error);
+  return stringValue(errorRecord?.["message"]) ?? fallback;
+}
+
+function nextStepsFrom(value: Record<string, unknown> | null): string[] {
+  if (!value) {
+    return [];
+  }
+  const steps = Array.isArray(value["next_steps"])
+    ? value["next_steps"].filter(
+        (step): step is string => typeof step === "string" && Boolean(step.trim())
+      )
+    : [];
+  const single = stringValue(value["next_step"]);
+  if (single) {
+    steps.push(single);
+  }
+  const suggestedTool = stringValue(value["suggested_tool"]);
+  if (suggestedTool) {
+    steps.push(`Use ${suggestedTool}.`);
+  }
+  return [...new Set(steps)];
+}
+
+function isOperatorResponse(value: unknown): value is OperatorResponse {
+  const response = recordValue(value);
+  return (
+    response?.["protocol_version"] === "operator.v1" && recordValue(response["data"]) !== null
+  );
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 export type WorkbenchMode = "classify_only" | "read_query" | "dml_preview_confirm" | "ddl_plan_confirm";
 
 export type OperatingLevel = "READ_ONLY" | "READ_WRITE" | "DDL" | "ADMIN";
@@ -1254,10 +1513,7 @@ async function operatorGet<T extends Record<string, unknown>>(
     credentials: "same-origin"
   });
   const parsed = (await response.json()) as unknown;
-  if (!response.ok) {
-    throw new Error(errorMessage(parsed, response.status));
-  }
-  return parsed as OperatorResponse<T>;
+  return requireSuccessfulOperatorResponse<T>(response.status, parsed);
 }
 
 function setOptionalParam(params: URLSearchParams, key: string, value: string): void {
@@ -1351,8 +1607,23 @@ async function operatorPost<T extends Record<string, unknown>>(
     body: JSON.stringify(body)
   });
   const parsed = (await response.json()) as unknown;
-  if (!response.ok) {
-    throw new Error(errorMessage(parsed, response.status));
+  return requireSuccessfulOperatorResponse<T>(response.status, parsed);
+}
+
+function requireSuccessfulOperatorResponse<T extends Record<string, unknown>>(
+  httpStatus: number,
+  parsed: unknown
+): OperatorResponse<T> {
+  const decoded = decodeOperatorOutcome(httpStatus, parsed);
+  if (decoded.state !== "success") {
+    throw new OperatorOutcomeError(decoded, parsed, httpStatus);
+  }
+  if (!isOperatorResponse(parsed)) {
+    throw new OperatorOutcomeError(
+      outcome("failed", "operator response did not match operator.v1", [], null),
+      parsed,
+      httpStatus
+    );
   }
   return parsed as OperatorResponse<T>;
 }
