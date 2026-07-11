@@ -15,8 +15,8 @@ use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::task::{Poll, Waker};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -58,7 +58,7 @@ const STATUS_STOPPED: u8 = 2;
 const STATUS_QUARANTINED: u8 = 3;
 
 // DL-4 canonical lock rank for the served lane path:
-// Config watch snapshot/read -> lane registry -> lane handle/status ->
+// Config watch snapshot/read -> lifecycle generation -> lane registry -> lane handle/status ->
 // lease state -> grants -> audit-chain writer -> metadata cache.
 //
 // The high-risk AB-BA edge is Registry -> Lane mailbox. The registry may copy
@@ -1051,13 +1051,122 @@ pub struct StatefulLaneDispatch {
     mailbox_capacity: usize,
     next_lane_id: AtomicU64,
     lanes: Mutex<HashMap<LaneKey, LaneRuntime>>,
-    creating_lanes: Mutex<HashSet<LaneKey>>,
+    lifecycle: Mutex<LaneLifecycleState>,
     creation_changed: Condvar,
+}
+
+struct LaneLifecycleState {
+    creating_lanes: HashSet<LaneKey>,
+    key_tokens: HashMap<LaneKey, Weak<LaneCloseState>>,
+    principal_tokens: HashMap<String, Weak<LaneCloseState>>,
+    global_token: Arc<LaneCloseState>,
+}
+
+impl LaneLifecycleState {
+    fn new() -> Self {
+        Self {
+            creating_lanes: HashSet::new(),
+            key_tokens: HashMap::new(),
+            principal_tokens: HashMap::new(),
+            global_token: Arc::new(LaneCloseState::new()),
+        }
+    }
+
+    fn key_token(&mut self, key: &LaneKey) -> Arc<LaneCloseState> {
+        if let Some(token) = self.key_tokens.get(key).and_then(Weak::upgrade)
+            && !token.is_requested()
+        {
+            return token;
+        }
+        let token = Arc::new(LaneCloseState::new());
+        self.key_tokens.insert(key.clone(), Arc::downgrade(&token));
+        token
+    }
+
+    fn principal_token(&mut self, principal_key: &str) -> Arc<LaneCloseState> {
+        if let Some(token) = self
+            .principal_tokens
+            .get(principal_key)
+            .and_then(Weak::upgrade)
+            && !token.is_requested()
+        {
+            return token;
+        }
+        let token = Arc::new(LaneCloseState::new());
+        self.principal_tokens
+            .insert(principal_key.to_owned(), Arc::downgrade(&token));
+        token
+    }
+}
+
+/// Strong generation tokens held by one lane-resolution attempt.
+///
+/// Lifecycle closure removes and invalidates the current weak token for its
+/// scope. Requests already inside resolution retain the invalidated generation,
+/// while a later, valid HTTP reinitialization receives a fresh generation. The
+/// weak registry entries are removed by the final ticket, so abandoned session
+/// ids cannot accumulate as lifecycle tombstones.
+struct LaneResolutionTicket<'a> {
+    lifecycle: &'a Mutex<LaneLifecycleState>,
+    key: LaneKey,
+    key_token: Arc<LaneCloseState>,
+    principal_token: Arc<LaneCloseState>,
+    global_token: Arc<LaneCloseState>,
+}
+
+impl LaneResolutionTicket<'_> {
+    fn remains_current(&self, state: &LaneLifecycleState) -> bool {
+        let key_is_current = state
+            .key_tokens
+            .get(&self.key)
+            .and_then(Weak::upgrade)
+            .is_some_and(|token| Arc::ptr_eq(&token, &self.key_token));
+        let principal_is_current = state
+            .principal_tokens
+            .get(&self.key.principal_key)
+            .and_then(Weak::upgrade)
+            .is_some_and(|token| Arc::ptr_eq(&token, &self.principal_token));
+        key_is_current
+            && principal_is_current
+            && Arc::ptr_eq(&state.global_token, &self.global_token)
+            && self.closed_reason().is_none()
+    }
+
+    fn closed_reason(&self) -> Option<DispatchCloseReason> {
+        self.key_token
+            .requested_reason()
+            .or_else(|| self.principal_token.requested_reason())
+            .or_else(|| self.global_token.requested_reason())
+    }
+}
+
+impl Drop for LaneResolutionTicket<'_> {
+    fn drop(&mut self) {
+        let mut state = self.lifecycle.lock();
+        if Arc::strong_count(&self.key_token) == 1
+            && state
+                .key_tokens
+                .get(&self.key)
+                .and_then(Weak::upgrade)
+                .is_some_and(|token| Arc::ptr_eq(&token, &self.key_token))
+        {
+            state.key_tokens.remove(&self.key);
+        }
+        if Arc::strong_count(&self.principal_token) == 1
+            && state
+                .principal_tokens
+                .get(&self.key.principal_key)
+                .and_then(Weak::upgrade)
+                .is_some_and(|token| Arc::ptr_eq(&token, &self.principal_token))
+        {
+            state.principal_tokens.remove(&self.key.principal_key);
+        }
+    }
 }
 
 struct LaneCreationGuard<'a> {
     key: Option<LaneKey>,
-    creating_lanes: &'a Mutex<HashSet<LaneKey>>,
+    lifecycle: &'a Mutex<LaneLifecycleState>,
     creation_changed: &'a Condvar,
 }
 
@@ -1066,7 +1175,7 @@ impl Drop for LaneCreationGuard<'_> {
         let Some(key) = self.key.take() else {
             return;
         };
-        self.creating_lanes.lock().remove(&key);
+        self.lifecycle.lock().creating_lanes.remove(&key);
         self.creation_changed.notify_all();
     }
 }
@@ -1141,7 +1250,7 @@ impl StatefulLaneDispatch {
             mailbox_capacity: DEFAULT_LANE_MAILBOX_CAPACITY,
             next_lane_id: AtomicU64::new(1),
             lanes: Mutex::new(HashMap::new()),
-            creating_lanes: Mutex::new(HashSet::new()),
+            lifecycle: Mutex::new(LaneLifecycleState::new()),
             creation_changed: Condvar::new(),
         }
     }
@@ -1175,10 +1284,26 @@ impl StatefulLaneDispatch {
         lane
     }
 
+    fn begin_lane_resolution(&self, key: LaneKey) -> LaneResolutionTicket<'_> {
+        let mut state = self.lifecycle.lock();
+        let key_token = state.key_token(&key);
+        let principal_token = state.principal_token(&key.principal_key);
+        let global_token = Arc::clone(&state.global_token);
+        drop(state);
+        LaneResolutionTicket {
+            lifecycle: &self.lifecycle,
+            key,
+            key_token,
+            principal_token,
+            global_token,
+        }
+    }
+
     fn acquire_creation_turn<'a>(
         &'a self,
         cx: &Cx,
         key: &LaneKey,
+        ticket: &LaneResolutionTicket<'_>,
     ) -> Result<LaneCreationTurn<'a>, ErrorEnvelope> {
         let wait_deadline = Instant::now()
             .checked_add(Duration::from_millis(DEFAULT_FAIR_ADMISSION_WAIT_MS))
@@ -1186,15 +1311,24 @@ impl StatefulLaneDispatch {
         loop {
             cx.checkpoint()
                 .map_err(|_| lane_resolution_cancelled_error())?;
+            if let Some(reason) = ticket.closed_reason() {
+                return Err(lane_lifecycle_closed_error(reason));
+            }
             if let Some(lane) = self.reusable_lane(key) {
                 return Ok(LaneCreationTurn::Existing(lane));
             }
-            let mut creating = self.creating_lanes.lock();
-            if creating.insert(key.clone()) {
-                drop(creating);
+            let mut lifecycle = self.lifecycle.lock();
+            if !ticket.remains_current(&lifecycle) {
+                let reason = ticket
+                    .closed_reason()
+                    .unwrap_or(DispatchCloseReason::RuntimeDrop);
+                return Err(lane_lifecycle_closed_error(reason));
+            }
+            if lifecycle.creating_lanes.insert(key.clone()) {
+                drop(lifecycle);
                 let guard = LaneCreationGuard {
                     key: Some(key.clone()),
-                    creating_lanes: &self.creating_lanes,
+                    lifecycle: &self.lifecycle,
                     creation_changed: &self.creation_changed,
                 };
                 // Close the Registry-miss -> marker-acquire race with a
@@ -1214,8 +1348,8 @@ impl StatefulLaneDispatch {
                 .with_retry_after_ms(DEFAULT_RETRY_AFTER_MS));
             };
             self.creation_changed
-                .wait_for(&mut creating, remaining.min(Duration::from_millis(5)));
-            drop(creating);
+                .wait_for(&mut lifecycle, remaining.min(Duration::from_millis(5)));
+            drop(lifecycle);
         }
     }
 
@@ -1229,10 +1363,11 @@ impl StatefulLaneDispatch {
         let session_id = context.http_session_id().ok_or_else(lease_required)?;
         let principal_key = context.principal_key().unwrap_or("anonymous-http");
         let key = LaneKey::new(session_id, principal_key);
+        let lifecycle_ticket = self.begin_lane_resolution(key.clone());
         if let Some(lane) = self.reusable_lane(&key) {
             return Ok(lane);
         }
-        let _creation_guard = match self.acquire_creation_turn(cx, &key)? {
+        let _creation_guard = match self.acquire_creation_turn(cx, &key, &lifecycle_ticket)? {
             LaneCreationTurn::Existing(lane) => return Ok(lane),
             LaneCreationTurn::Create(guard) => guard,
         };
@@ -1281,57 +1416,64 @@ impl StatefulLaneDispatch {
             drop(capacity_permit);
             return Err(lane_resolution_cancelled_error());
         }
+        if let Some(reason) = lifecycle_ticket.closed_reason() {
+            drop(prepared);
+            drop(capacity_permit);
+            return Err(lane_lifecycle_closed_error(reason));
+        }
 
+        // Spawn the inert candidate outside both lifecycle and registry locks.
+        // Its dispatcher factory remains lazy until the first command, so a
+        // lifecycle invalidation can still discard it without touching Oracle.
+        let candidate = self.spawn_lane_candidate(lane_id, lane_context, prepared, capacity_permit);
+
+        // SAFETY: lifecycle closure takes these locks in the same
+        // Lifecycle -> Registry order. Holding the lifecycle lock from final
+        // generation validation through insertion makes the close/insert race
+        // linearizable; no closure can return and then observe a late insert.
+        let lifecycle = self.lifecycle.lock();
+        if !lifecycle_ticket.remains_current(&lifecycle) {
+            let reason = lifecycle_ticket
+                .closed_reason()
+                .unwrap_or(DispatchCloseReason::RuntimeDrop);
+            drop(lifecycle);
+            candidate.close_with_reason(reason);
+            return Err(lane_lifecycle_closed_error(reason));
+        }
         let mut lanes = self.lock_lanes();
         if let Some(lane) = lanes
             .get(&key)
             .filter(|lane| lane.accepts_commands())
             .cloned()
         {
-            // Prepared dispatches own profile-generation leases. Release those
-            // only after leaving the registry lock.
             drop(lanes);
-            drop(prepared);
-            drop(capacity_permit);
+            drop(lifecycle);
+            candidate.close_with_reason(DispatchCloseReason::RuntimeDrop);
             return Ok(lane);
         }
         let stale = lanes.remove(&key);
-        let lane = self.spawn_lane_locked(
-            &mut lanes,
-            key,
-            lane_id,
-            lane_context,
-            prepared,
-            capacity_permit,
-        );
+        lanes.insert(key, candidate.clone());
         drop(lanes);
+        drop(lifecycle);
         drop(stale);
-        Ok(lane)
+        Ok(candidate)
     }
 
-    fn spawn_lane_locked(
+    fn spawn_lane_candidate(
         &self,
-        lanes: &mut LaneRegistryGuard<'_>,
-        key: LaneKey,
         lane_id: String,
         lane_context: LaneContext,
         prepared: PreparedLaneDispatch,
         capacity_permit: Option<AdmissionPermit>,
     ) -> LaneRuntime {
-        let lane = LaneRuntime::spawn_prepared_dispatch_with_capacity(
+        LaneRuntime::spawn_prepared_dispatch_with_capacity(
             lane_id,
             lane_context,
             prepared,
             self.mailbox_capacity,
             self.panic_auditor.clone(),
             capacity_permit,
-        );
-        // SAFETY: DL-4 allows the registry to hold only lane handles and
-        // metadata. This insertion stores a Send handle; the actual mailbox
-        // send happens after `resolve_lane` returns and the registry guard has
-        // been dropped. Debug assertions in `LaneRuntime` enforce that rule.
-        lanes.insert(key, lane.clone());
-        lane
+        )
     }
 
     /// Close and forget the lane bound to one MCP session/principal pair.
@@ -1340,21 +1482,63 @@ impl StatefulLaneDispatch {
     /// initialize a fresh MCP session because the HTTP session store is removed
     /// by the caller before this is invoked.
     pub fn close_session(&self, session_id: &str, principal_key: &str) -> bool {
-        let lane = self
-            .lock_lanes()
-            .remove(&LaneKey::new(session_id, principal_key));
+        self.close_session_with_lifecycle_reason(
+            session_id,
+            principal_key,
+            DispatchCloseReason::SessionDelete,
+        )
+    }
+
+    fn close_session_with_lifecycle_reason(
+        &self,
+        session_id: &str,
+        principal_key: &str,
+        reason: DispatchCloseReason,
+    ) -> bool {
+        let key = LaneKey::new(session_id, principal_key);
+        let (lane, cancelled_creation) = {
+            let mut lifecycle = self.lifecycle.lock();
+            let token = lifecycle
+                .key_tokens
+                .remove(&key)
+                .and_then(|token| token.upgrade());
+            let cancelled_creation = token.is_some();
+            if let Some(token) = token {
+                token.request(reason);
+            }
+            let lane = self.lock_lanes().remove(&key);
+            (lane, cancelled_creation)
+        };
+        self.creation_changed.notify_all();
         if let Some(lane) = lane {
-            lane.close();
+            lane.close_with_reason(reason);
             true
         } else {
-            false
+            cancelled_creation
         }
     }
 
     /// Close every registered lane and return how many were present.
     pub fn close_all_sessions(&self) -> usize {
-        let lanes: Vec<LaneRuntime> = self.lock_lanes().drain().map(|(_, lane)| lane).collect();
-        let count = lanes.len();
+        let (lanes, count) = {
+            let mut lifecycle = self.lifecycle.lock();
+            let invalidated =
+                std::mem::replace(&mut lifecycle.global_token, Arc::new(LaneCloseState::new()));
+            invalidated.request(DispatchCloseReason::ServerShutdown);
+            let creating = lifecycle.creating_lanes.clone();
+            let mut registered = self.lock_lanes();
+            let count = registered
+                .keys()
+                .chain(creating.iter())
+                .collect::<HashSet<_>>()
+                .len();
+            let lanes = registered
+                .drain()
+                .map(|(_, lane)| lane)
+                .collect::<Vec<LaneRuntime>>();
+            (lanes, count)
+        };
+        self.creation_changed.notify_all();
         for lane in lanes {
             lane.close_with_reason(DispatchCloseReason::ServerShutdown);
         }
@@ -1378,15 +1562,7 @@ impl HttpSessionLifecycle for StatefulLaneDispatch {
         principal_key: &str,
         reason: DispatchCloseReason,
     ) -> bool {
-        let lane = self
-            .lock_lanes()
-            .remove(&LaneKey::new(session_id, principal_key));
-        if let Some(lane) = lane {
-            lane.close_with_reason(reason);
-            true
-        } else {
-            false
-        }
+        self.close_session_with_lifecycle_reason(session_id, principal_key, reason)
     }
 
     fn close_all_sessions(&self) {
@@ -1394,18 +1570,39 @@ impl HttpSessionLifecycle for StatefulLaneDispatch {
     }
 
     fn close_principal_sessions(&self, principal_key: &str, reason: DispatchCloseReason) -> usize {
-        let lanes = {
+        let (lanes, count) = {
+            let mut lifecycle = self.lifecycle.lock();
+            if let Some(token) = lifecycle
+                .principal_tokens
+                .remove(principal_key)
+                .and_then(|token| token.upgrade())
+            {
+                token.request(reason);
+            }
+            let creating = lifecycle
+                .creating_lanes
+                .iter()
+                .filter(|key| key.principal_key == principal_key)
+                .cloned()
+                .collect::<HashSet<_>>();
             let mut registered = self.lock_lanes();
             let keys = registered
                 .keys()
                 .filter(|key| key.principal_key == principal_key)
                 .cloned()
                 .collect::<Vec<_>>();
-            keys.into_iter()
+            let count = keys
+                .iter()
+                .chain(creating.iter())
+                .collect::<HashSet<_>>()
+                .len();
+            let lanes = keys
+                .into_iter()
                 .filter_map(|key| registered.remove(&key))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (lanes, count)
         };
-        let count = lanes.len();
+        self.creation_changed.notify_all();
         for lane in lanes {
             lane.close_with_reason(reason);
         }
@@ -1519,6 +1716,17 @@ fn lane_resolution_cancelled_error() -> ErrorEnvelope {
         "stateful lane resolution was cancelled or exhausted its caller budget",
     )
     .with_next_step("retry only if the original operation was safe to retry")
+}
+
+fn lane_lifecycle_closed_error(reason: DispatchCloseReason) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::RuntimeStateRequired,
+        format!(
+            "stateful lane creation was invalidated by {} lifecycle closure",
+            reason.as_str()
+        ),
+    )
+    .with_next_step("initialize a fresh MCP session after the lifecycle transition before retrying")
 }
 
 fn lane_send_error<T>(name: &str, error: SendError<T>) -> ErrorEnvelope {
@@ -2631,6 +2839,127 @@ mod tests {
 
     struct AdmissionTimingDispatch {
         observed: std_mpsc::Sender<u64>,
+    }
+
+    struct LifecycleRaceDispatch {
+        executions: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ToolDispatch for LifecycleRaceDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Outcome::Ok(json!({ "executed": true })) })
+        }
+    }
+
+    struct LifecycleRaceHarness {
+        registry: Arc<StatefulLaneDispatch>,
+        builder_entered: Arc<std::sync::Barrier>,
+        release_builder: Arc<std::sync::Barrier>,
+        admission: Arc<AdmissionController>,
+        builder_runs: Arc<std::sync::atomic::AtomicUsize>,
+        factory_runs: Arc<std::sync::atomic::AtomicUsize>,
+        dispatch_runs: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl LifecycleRaceHarness {
+        fn new() -> Self {
+            let builder_entered = Arc::new(std::sync::Barrier::new(2));
+            let release_builder = Arc::new(std::sync::Barrier::new(2));
+            let builder_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let factory_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let dispatch_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let entered = Arc::clone(&builder_entered);
+            let release = Arc::clone(&release_builder);
+            let counted_builders = Arc::clone(&builder_runs);
+            let counted_factories = Arc::clone(&factory_runs);
+            let counted_dispatches = Arc::clone(&dispatch_runs);
+            let factory_builder: Arc<LaneDispatchFactoryBuilder> = Arc::new(move |_lane_context| {
+                let attempt = counted_builders.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    entered.wait();
+                    release.wait();
+                }
+                let factory_runs = Arc::clone(&counted_factories);
+                let dispatch_runs = Arc::clone(&counted_dispatches);
+                let factory: Arc<LaneDispatchFactory> = Arc::new(move |_cx, _lane_context| {
+                    factory_runs.fetch_add(1, Ordering::SeqCst);
+                    let dispatcher: Arc<dyn ToolDispatch> = Arc::new(LifecycleRaceDispatch {
+                        executions: Arc::clone(&dispatch_runs),
+                    });
+                    Box::pin(async move { Ok(dispatcher) })
+                });
+                Ok(PreparedLaneDispatch::new(factory, DEFAULT_REQUEST_TIMEOUT))
+            });
+            let admission = Arc::new(AdmissionController::with_reserved(2, 10, 1, 0));
+            let registry = Arc::new(
+                StatefulLaneDispatch::with_dispatch_factory_builder(factory_builder, None)
+                    .with_admission_controller(Arc::clone(&admission)),
+            );
+            Self {
+                registry,
+                builder_entered,
+                release_builder,
+                admission,
+                builder_runs,
+                factory_runs,
+                dispatch_runs,
+            }
+        }
+
+        fn spawn_dispatch(
+            &self,
+            session_id: &str,
+            principal_key: &str,
+        ) -> JoinHandle<DispatchOutcome> {
+            let registry = Arc::clone(&self.registry);
+            let session_id = session_id.to_owned();
+            let principal_key = principal_key.to_owned();
+            thread::spawn(move || {
+                block_on_lane_bridge(async {
+                    let cx = Cx::current().expect("bridge installs Cx");
+                    registry
+                        .dispatch(
+                            &cx,
+                            DispatchContext::default()
+                                .with_http_session_id(&session_id)
+                                .with_principal_key(&principal_key),
+                            "lifecycle-race",
+                            Value::Null,
+                        )
+                        .await
+                })
+            })
+        }
+
+        fn assert_invalidated(
+            &self,
+            caller: JoinHandle<DispatchOutcome>,
+            reason: DispatchCloseReason,
+        ) {
+            self.release_builder.wait();
+            let outcome = caller.join().expect("lane resolution caller joined");
+            let Outcome::Err(error) = outcome else {
+                panic!("lifecycle-closed resolution must fail: {outcome:?}");
+            };
+            assert_eq!(error.error_class, ErrorClass::RuntimeStateRequired);
+            assert!(error.message.contains(reason.as_str()), "{error:?}");
+            assert_eq!(self.registry.lane_count(), 0);
+            assert_eq!(self.builder_runs.load(Ordering::SeqCst), 1);
+            assert_eq!(self.factory_runs.load(Ordering::SeqCst), 0);
+            assert_eq!(self.dispatch_runs.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                self.admission.available_global(),
+                self.admission.regular_global_cap(),
+                "invalidated creation must release its capacity permit",
+            );
+        }
     }
 
     struct NeverFinalizesDispatch {
@@ -3997,6 +4326,113 @@ mod tests {
         assert_eq!(registry.lane_count(), 0);
         assert_eq!(builder_runs.load(Ordering::SeqCst), 0);
         assert_eq!(admission.available_global(), admission.regular_global_cap(),);
+    }
+
+    #[test]
+    fn session_delete_invalidates_inflight_lane_creation_before_execution() {
+        let harness = LifecycleRaceHarness::new();
+        let caller = harness.spawn_dispatch("deleted-session", "session-principal");
+        harness.builder_entered.wait();
+
+        assert!(
+            harness
+                .registry
+                .close_session("deleted-session", "session-principal"),
+            "an in-flight creation is a live lifecycle resource",
+        );
+        harness.assert_invalidated(caller, DispatchCloseReason::SessionDelete);
+    }
+
+    #[test]
+    fn principal_revocation_invalidates_inflight_lane_creation_before_execution() {
+        let harness = LifecycleRaceHarness::new();
+        let caller = harness.spawn_dispatch("revoked-session", "revoked-principal");
+        harness.builder_entered.wait();
+
+        assert_eq!(
+            HttpSessionLifecycle::close_principal_sessions(
+                harness.registry.as_ref(),
+                "revoked-principal",
+                DispatchCloseReason::SessionDelete,
+            ),
+            1,
+            "the principal close reports its in-flight lane creation",
+        );
+        harness.assert_invalidated(caller, DispatchCloseReason::SessionDelete);
+    }
+
+    #[test]
+    fn shutdown_invalidates_inflight_lane_creation_before_execution() {
+        let harness = LifecycleRaceHarness::new();
+        let caller = harness.spawn_dispatch("shutdown-session", "shutdown-principal");
+        harness.builder_entered.wait();
+
+        assert_eq!(
+            harness.registry.close_all_sessions(),
+            1,
+            "shutdown reports its in-flight lane creation",
+        );
+        harness.assert_invalidated(caller, DispatchCloseReason::ServerShutdown);
+    }
+
+    #[test]
+    fn lifecycle_close_allows_exactly_one_fresh_same_key_reinitialization() {
+        let harness = LifecycleRaceHarness::new();
+        let stale = harness.spawn_dispatch("reinitialized-session", "rotated-principal");
+        harness.builder_entered.wait();
+        assert_eq!(
+            HttpSessionLifecycle::close_principal_sessions(
+                harness.registry.as_ref(),
+                "rotated-principal",
+                DispatchCloseReason::SessionDelete,
+            ),
+            1,
+        );
+        harness.assert_invalidated(stale, DispatchCloseReason::SessionDelete);
+
+        let start_fresh = Arc::new(std::sync::Barrier::new(3));
+        let mut fresh_callers = Vec::new();
+        for _ in 0..2 {
+            let start_fresh = Arc::clone(&start_fresh);
+            let registry = Arc::clone(&harness.registry);
+            fresh_callers.push(thread::spawn(move || {
+                start_fresh.wait();
+                block_on_lane_bridge(async {
+                    let cx = Cx::current().expect("bridge installs Cx");
+                    registry
+                        .dispatch(
+                            &cx,
+                            DispatchContext::default()
+                                .with_http_session_id("reinitialized-session")
+                                .with_principal_key("rotated-principal"),
+                            "fresh-generation",
+                            Value::Null,
+                        )
+                        .await
+                })
+            }));
+        }
+        start_fresh.wait();
+        for caller in fresh_callers {
+            assert!(matches!(
+                caller.join().expect("fresh caller joined"),
+                Outcome::Ok(_)
+            ));
+        }
+
+        assert_eq!(harness.registry.lane_count(), 1);
+        assert_eq!(
+            harness.builder_runs.load(Ordering::SeqCst),
+            2,
+            "one invalid generation plus exactly one fresh generation",
+        );
+        assert_eq!(harness.factory_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.dispatch_runs.load(Ordering::SeqCst), 2);
+        assert!(
+            harness
+                .registry
+                .close_session("reinitialized-session", "rotated-principal")
+        );
     }
 
     #[test]
