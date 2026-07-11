@@ -1240,6 +1240,122 @@ fn pre_cancelled_stateless_read_allocates_no_worker_or_factory() {
 }
 
 #[test]
+fn qa45_stateless_http_discovery_and_custom_execution_share_the_control_catalog() {
+    struct CatalogDispatch {
+        tool_name: &'static str,
+    }
+
+    impl ToolDispatch for CatalogDispatch {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: oraclemcp_core::DispatchContext<'a>,
+            name: &'a str,
+            _args: serde_json::Value,
+        ) -> DispatchFuture<'a> {
+            let allowed = name == self.tool_name || name == "oracle_list_schemas";
+            Box::pin(async move {
+                if allowed {
+                    DispatchOutcome::Ok(serde_json::json!({"executed": name}))
+                } else {
+                    DispatchOutcome::Err(ErrorEnvelope::new(
+                        ErrorClass::InvalidArguments,
+                        "tool is absent from this dispatch catalog",
+                    ))
+                }
+            })
+        }
+
+        fn mcp_surface_state<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: oraclemcp_core::DispatchContext<'a>,
+            _detail: McpSurfaceDetail,
+        ) -> McpSurfaceFuture<'a> {
+            let descriptor = oraclemcp_core::ToolDescriptor::new(
+                self.tool_name,
+                oraclemcp_core::ToolTier::FoundationLiveDb,
+                "stateless catalog marker",
+            );
+            Box::pin(async move {
+                asupersync::Outcome::Ok(Some(oraclemcp_core::McpSurfaceState {
+                    current_level: OperatingLevel::ReadOnly,
+                    effective_ceiling: OperatingLevel::ReadOnly,
+                    max_level: OperatingLevel::ReadOnly,
+                    protected: false,
+                    active_profile: Some("dev".to_owned()),
+                    custom_catalog: oraclemcp_core::McpToolCatalogSnapshot {
+                        generation: 7,
+                        tools: vec![descriptor].into(),
+                    },
+                    connection: oraclemcp_core::ConnectionStatus::default(),
+                }))
+            })
+        }
+    }
+
+    let read_factory: Arc<ReadWorkerFactoryBuilder> = Arc::new(|_profile| {
+        let factory: Arc<LaneDispatchFactory> = Arc::new(|_cx, _lane| {
+            let dispatch: Arc<dyn ToolDispatch> = Arc::new(CatalogDispatch {
+                tool_name: "custom_read_worker_only",
+            });
+            Box::pin(async move { Ok(dispatch) })
+        });
+        Ok(PreparedLaneDispatch::new(
+            factory,
+            oraclemcp_core::DEFAULT_REQUEST_TIMEOUT,
+        ))
+    });
+    let dispatch = HttpStatelessReadDispatch::new(
+        LaneRuntime::spawn(
+            "qa45-stateless-control",
+            Arc::new(CatalogDispatch {
+                tool_name: "custom_control",
+            }),
+            4,
+        ),
+        Some("dev".to_owned()),
+        1,
+        read_factory,
+    );
+
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("test runtime builds");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("test runtime installs Cx");
+        let context =
+            oraclemcp_core::DispatchContext::default().with_principal_key("oauth:stateless-reader");
+        let before = dispatch
+            .mcp_surface_state(&cx, context, McpSurfaceDetail::LevelOnly)
+            .await
+            .expect("control surface succeeds")
+            .expect("control surface is present");
+        assert_eq!(before.custom_catalog.generation, 7);
+        assert_eq!(before.custom_catalog.tools[0].name, "custom_control");
+
+        dispatch
+            .dispatch(&cx, context, "oracle_list_schemas", serde_json::json!({}))
+            .await
+            .expect("read worker is created");
+        let after = dispatch
+            .mcp_surface_state(&cx, context, McpSurfaceDetail::LevelOnly)
+            .await
+            .expect("control surface succeeds")
+            .expect("control surface is present");
+        assert_eq!(after.custom_catalog.tools[0].name, "custom_control");
+        assert_ne!(
+            after.custom_catalog.tools[0].name, "custom_read_worker_only",
+            "read-worker catalogs must not replace stateless control discovery"
+        );
+        dispatch
+            .dispatch(&cx, context, "custom_control", serde_json::json!({}))
+            .await
+            .expect("advertised custom tool executes on the control lane");
+    });
+}
+
+#[test]
 fn stateless_http_profile_switch_closes_read_workers() {
     struct SwitchControlDispatch;
 
@@ -3028,7 +3144,24 @@ fn reloaded_generation_enforces_its_own_custom_tool_signature_policy() {
 }
 
 #[test]
-fn build_server_advertises_the_registered_tools_plus_capabilities() {
+fn build_server_advertises_the_active_custom_catalog_plus_capabilities() {
+    let defs = oraclemcp_core::parse_tools_file(
+        r#"
+            [[tool]]
+            name = "startup_custom"
+            description = "Startup catalog marker"
+            sql = "SELECT 1 FROM dual"
+        "#,
+    )
+    .expect("custom tool parses");
+    let custom_catalog = CustomToolCatalog::new(
+        oraclemcp_core::load_tools(
+            &defs,
+            &Classifier::new(ClassifierConfig::new()),
+            OperatingLevel::ReadOnly,
+        )
+        .expect("custom tool loads"),
+    );
     let conn = open_connection(OracleConnectOptions::default());
     let server = build_server(
         conn,
@@ -3037,7 +3170,7 @@ fn build_server_advertises_the_registered_tools_plus_capabilities() {
         default_read_only_level(),
         ServerBuildOptions {
             transport: ServerTransportMode::Stdio,
-            custom_catalog: CustomToolCatalog::default(),
+            custom_catalog,
             auditor: None,
             write_intents: None,
             secret_resolver: Arc::new(SystemSecretResolver),
@@ -3049,6 +3182,20 @@ fn build_server_advertises_the_registered_tools_plus_capabilities() {
     // The capabilities report carries the registry's tools.
     let caps = registry::capabilities(env!("CARGO_PKG_VERSION"), LIVE_DB, false);
     assert_eq!(caps.tools.len(), registry::tool_names().len());
+    let listed = server
+        .handle_jsonrpc_request(
+            serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"tools/list"}),
+            None,
+        )
+        .expect("tools/list response");
+    assert!(
+        listed["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .any(|tool| tool["name"] == serde_json::json!("startup_custom")),
+        "startup custom catalog must come from the dispatch surface"
+    );
     // Smoke: the server clones (it is Clone) — proves it is fully built.
     let _ = server.clone();
 }

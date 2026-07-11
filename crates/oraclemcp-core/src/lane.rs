@@ -2562,9 +2562,13 @@ mod tests {
 
     use asupersync::Budget;
     use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, MemoryAuditSink, SigningKey};
+    use oraclemcp_config::OperatingLevel;
     use serde_json::json;
 
     use super::*;
+    use crate::{
+        ConnectionStatus, McpSurfaceState, McpToolCatalogSnapshot, ToolDescriptor, ToolTier,
+    };
 
     struct SharedAuditSink(Arc<MemoryAuditSink>);
 
@@ -4732,6 +4736,135 @@ mod tests {
         assert_eq!(thread(&a1), thread(&a2), "same key reuses its lane");
         assert_ne!(thread(&a1), thread(&b), "different session gets a lane");
         assert_ne!(thread(&a1), thread(&c), "different principal gets a lane");
+        assert_eq!(registry.lane_count(), 3);
+    }
+
+    #[test]
+    fn qa45_stateful_surface_catalog_is_isolated_by_session_and_principal_lane() {
+        struct CatalogSurfaceDispatch {
+            tool_name: String,
+        }
+
+        impl ToolDispatch for CatalogSurfaceDispatch {
+            fn dispatch<'a>(
+                &'a self,
+                _cx: &'a Cx,
+                _context: DispatchContext<'a>,
+                name: &'a str,
+                _args: Value,
+            ) -> DispatchFuture<'a> {
+                let allowed = name == self.tool_name;
+                Box::pin(async move {
+                    if allowed {
+                        Outcome::Ok(json!({"executed": name}))
+                    } else {
+                        Outcome::Err(ErrorEnvelope::new(
+                            ErrorClass::InvalidArguments,
+                            "tool is not in this lane's active catalog",
+                        ))
+                    }
+                })
+            }
+
+            fn mcp_surface_state<'a>(
+                &'a self,
+                _cx: &'a Cx,
+                _context: DispatchContext<'a>,
+                _detail: McpSurfaceDetail,
+            ) -> McpSurfaceFuture<'a> {
+                let descriptor = ToolDescriptor::new(
+                    self.tool_name.clone(),
+                    ToolTier::FoundationLiveDb,
+                    "lane-local custom tool",
+                );
+                Box::pin(async move {
+                    Outcome::Ok(Some(McpSurfaceState {
+                        current_level: OperatingLevel::ReadOnly,
+                        effective_ceiling: OperatingLevel::ReadOnly,
+                        max_level: OperatingLevel::ReadOnly,
+                        protected: false,
+                        active_profile: None,
+                        custom_catalog: McpToolCatalogSnapshot {
+                            generation: 1,
+                            tools: vec![descriptor].into(),
+                        },
+                        connection: ConnectionStatus::default(),
+                    }))
+                })
+            }
+        }
+
+        let factory_builder: Arc<LaneDispatchFactoryBuilder> = Arc::new(|lane| {
+            let tool_name = format!(
+                "custom_{}_{}",
+                lane.mcp_session_id().replace('-', "_"),
+                lane.principal_key().replace('-', "_")
+            );
+            let factory: Arc<LaneDispatchFactory> = Arc::new(move |_cx, _lane| {
+                let dispatcher: Arc<dyn ToolDispatch> = Arc::new(CatalogSurfaceDispatch {
+                    tool_name: tool_name.clone(),
+                });
+                Box::pin(async move { Ok(dispatcher) })
+            });
+            Ok(PreparedLaneDispatch::new(factory, DEFAULT_REQUEST_TIMEOUT))
+        });
+        let registry = StatefulLaneDispatch::with_dispatch_factory_builder(factory_builder, None);
+
+        let surface = |session: &str, principal: &str| {
+            block_on_lane_bridge(async {
+                let cx = Cx::current().expect("bridge installs Cx");
+                registry
+                    .mcp_surface_state(
+                        &cx,
+                        DispatchContext::default()
+                            .with_http_session_id(session)
+                            .with_principal_key(principal),
+                        McpSurfaceDetail::LevelOnly,
+                    )
+                    .await
+                    .expect("surface state succeeds")
+                    .expect("stateful lane returns a surface")
+            })
+        };
+
+        let a = surface("session-a", "principal-a");
+        let b = surface("session-b", "principal-a");
+        let c = surface("session-a", "principal-b");
+        assert_eq!(
+            a.custom_catalog.tools[0].name,
+            "custom_session_a_principal_a"
+        );
+        assert_eq!(
+            b.custom_catalog.tools[0].name,
+            "custom_session_b_principal_a"
+        );
+        assert_eq!(
+            c.custom_catalog.tools[0].name,
+            "custom_session_a_principal_b"
+        );
+        let call = |session: &str, principal: &str, tool: &str| {
+            block_on_lane_bridge(async {
+                let cx = Cx::current().expect("bridge installs Cx");
+                registry
+                    .dispatch(
+                        &cx,
+                        DispatchContext::default()
+                            .with_http_session_id(session)
+                            .with_principal_key(principal),
+                        tool,
+                        Value::Null,
+                    )
+                    .await
+            })
+        };
+        assert!(matches!(
+            call("session-a", "principal-a", "custom_session_a_principal_a"),
+            Outcome::Ok(_)
+        ));
+        assert!(matches!(
+            call("session-a", "principal-a", "custom_session_b_principal_a"),
+            Outcome::Err(_)
+        ));
         assert_eq!(registry.lane_count(), 3);
     }
 

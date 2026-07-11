@@ -269,15 +269,27 @@ pub type DispatchStreamStartFuture<'a> =
 /// How much dynamic MCP surface state the caller needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum McpSurfaceDetail {
-    /// Only session/profile level state is needed. Used for `tools/list`, where
-    /// the server must not do extra DB metadata work just to render a catalog.
+    /// Session/profile level plus the immutable active custom catalog. Used for
+    /// `tools/list`, where the server must not do extra DB metadata work just
+    /// to render discovery.
     LevelOnly,
     /// Include best-effort connection metadata for `oracle_capabilities`.
     Connection,
 }
 
+/// Immutable custom-tool discovery snapshot for one dispatch-lane generation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpToolCatalogSnapshot {
+    /// Monotonic generation assigned by the owning dispatch lane.
+    pub generation: u64,
+    /// First-class descriptors derived from the exact immutable catalog used
+    /// by dispatch for this generation. SQL bodies and other operator secrets
+    /// never cross the discovery boundary.
+    pub tools: Arc<[ToolDescriptor]>,
+}
+
 /// Calling-lane MCP surface state used to narrow discovery responses.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct McpSurfaceState {
     /// Current effective session level after request-local scope narrowing.
     pub current_level: OperatingLevel,
@@ -289,6 +301,8 @@ pub struct McpSurfaceState {
     pub protected: bool,
     /// Active profile name, if one is selected.
     pub active_profile: Option<String>,
+    /// Profile-scoped custom-tool snapshot used by both discovery and dispatch.
+    pub custom_catalog: McpToolCatalogSnapshot,
     /// Best-effort connection metadata for the calling lane.
     pub connection: ConnectionStatus,
 }
@@ -979,12 +993,17 @@ impl OracleMcpServer {
     }
 
     fn visible_tool_descriptors(&self, surface: &McpSurfaceState) -> Vec<ToolDescriptor> {
-        self.registry
+        let mut descriptors = self
+            .registry
             .tools
             .iter()
+            .chain(surface.custom_catalog.tools.iter())
             .filter(|descriptor| descriptor_visible_for_surface(descriptor, surface))
             .cloned()
-            .collect()
+            .collect::<Vec<_>>();
+        let mut seen = std::collections::HashSet::new();
+        descriptors.retain(|descriptor| seen.insert(descriptor.name.clone()));
+        descriptors
     }
 
     fn advertises_tool(&self, name: &str) -> bool {

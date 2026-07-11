@@ -29,10 +29,10 @@ use oraclemcp_config::{
 use oraclemcp_core::{
     CLEANUP_POLL_QUOTA, ConnectionStatus, CustomToolCatalog, CustomToolExecutor,
     DEFAULT_REQUEST_TIMEOUT, DispatchCloseFuture, DispatchCloseReason, DispatchContext,
-    DispatchFuture, McpSurfaceDetail, McpSurfaceFuture, McpSurfaceState, RequestBudget, ToolBody,
-    ToolDispatch, ToolStreamFrame, ToolStreamSender, WriteIntent, WriteIntentDetails,
-    WriteIntentError, WriteIntentLog, WriteIntentOutcome, execute_custom_tool, narrow_to_read_path,
-    sign_token, verify_token,
+    DispatchFuture, McpSurfaceDetail, McpSurfaceFuture, McpSurfaceState, McpToolCatalogSnapshot,
+    RequestBudget, ToolBody, ToolDispatch, ToolRegistry, ToolStreamFrame, ToolStreamSender,
+    WriteIntent, WriteIntentDetails, WriteIntentError, WriteIntentLog, WriteIntentOutcome,
+    execute_custom_tool, narrow_to_read_path, sign_token, verify_token,
 };
 use oraclemcp_db::SearchDetailLevel;
 use oraclemcp_db::{
@@ -261,13 +261,39 @@ fn profile_dispatch_policy(
     })
 }
 
+#[derive(Clone, Debug)]
+struct ActiveCustomCatalog {
+    generation: u64,
+    catalog: Arc<CustomToolCatalog>,
+    descriptors: Arc<[oraclemcp_core::ToolDescriptor]>,
+}
+
+impl ActiveCustomCatalog {
+    fn new(generation: u64, catalog: CustomToolCatalog) -> Self {
+        let mut registry = ToolRegistry::new();
+        catalog.register_first_class(&mut registry);
+        Self {
+            generation,
+            catalog: Arc::new(catalog),
+            descriptors: registry.tools.into(),
+        }
+    }
+
+    fn snapshot(&self) -> McpToolCatalogSnapshot {
+        McpToolCatalogSnapshot {
+            generation: self.generation,
+            tools: Arc::clone(&self.descriptors),
+        }
+    }
+}
+
 struct DispatcherState {
     conn: Box<dyn OracleConnection>,
     stateless_conn: Option<Box<dyn OracleConnection>>,
     active_profile: Option<String>,
     profile_generation: Option<ProfileGenerationLease>,
     level: SessionLevelState,
-    custom_catalog: CustomToolCatalog,
+    custom_catalog: ActiveCustomCatalog,
     execute_grants: ExecGrantStore,
     grant_generation: u64,
     execute_approved_tokens: HashMap<String, ExecuteApprovedGrant>,
@@ -378,7 +404,7 @@ impl OracleDispatcher {
                 active_profile,
                 profile_generation,
                 level,
-                custom_catalog: CustomToolCatalog::default(),
+                custom_catalog: ActiveCustomCatalog::new(1, CustomToolCatalog::default()),
                 execute_grants: ExecGrantStore::new(),
                 grant_generation: 1,
                 execute_approved_tokens: HashMap::new(),
@@ -458,7 +484,7 @@ impl OracleDispatcher {
                 active_profile,
                 profile_generation,
                 level,
-                custom_catalog,
+                custom_catalog: ActiveCustomCatalog::new(1, custom_catalog),
                 execute_grants: ExecGrantStore::new(),
                 grant_generation: 1,
                 execute_approved_tokens: HashMap::new(),
@@ -7723,6 +7749,7 @@ impl OracleDispatcher {
             max_level: scoped_level.max_level(),
             protected: scoped_level.is_protected(),
             active_profile,
+            custom_catalog: state.custom_catalog.snapshot(),
             connection,
         })
     }
@@ -7872,6 +7899,10 @@ impl OracleDispatcher {
                 mut response,
             } = prepared;
             let generation = profile_generation.generation();
+            let custom_catalog = ActiveCustomCatalog::new(
+                state.custom_catalog.generation.saturating_add(1),
+                custom_catalog,
+            );
             // Keep the lease outside the generation-locked closure until every
             // fallible setup step has succeeded. If the closure captured the
             // lease by value, an early `?` would drop it while
@@ -7912,7 +7943,11 @@ impl OracleDispatcher {
                     if let Value::Object(map) = &mut response {
                         map.insert(
                             "custom_tool_count".to_owned(),
-                            json!(state.custom_catalog.len()),
+                            json!(state.custom_catalog.catalog.len()),
+                        );
+                        map.insert(
+                            "custom_catalog_generation".to_owned(),
+                            json!(state.custom_catalog.generation),
                         );
                         map.insert("profile_generation".to_owned(), json!(generation));
                     }
@@ -9078,7 +9113,7 @@ impl OracleDispatcher {
                 Ok(response)
             }
             other => {
-                if let Some(loaded) = state.custom_catalog.get(other) {
+                if let Some(loaded) = state.custom_catalog.catalog.get(other) {
                     let executor = ReadOnlyCustomToolExecutor {
                         cx,
                         conn: &observed_conn,

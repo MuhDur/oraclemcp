@@ -2512,8 +2512,10 @@ fn build_server_with_lifecycle(
     options: ServerBuildOptions,
 ) -> BuiltServer {
     let version = env!("CARGO_PKG_VERSION");
-    let mut registry = registry::tool_registry();
-    options.custom_catalog.register_first_class(&mut registry);
+    // Keep the server registry immutable and built-in-only. Profile-scoped
+    // custom descriptors come from the dispatcher's active catalog snapshot,
+    // so discovery and execution swap the same lane-local generation.
+    let registry = registry::tool_registry();
     let caps = CapabilitiesReport::new(
         version,
         registry.tools.clone(),

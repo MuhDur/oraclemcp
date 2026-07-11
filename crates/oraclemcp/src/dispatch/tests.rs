@@ -2780,6 +2780,190 @@ fn custom_read_only_tool_dispatches_with_named_binds() {
 }
 
 #[test]
+fn qa45_profile_switch_refreshes_every_discovery_surface_and_execution() {
+    fn catalog(name: &str) -> CustomToolCatalog {
+        let source = format!(
+            r#"
+                [[tool]]
+                name = "{name}"
+                description = "Profile-scoped {name}"
+                sql = "SELECT :id AS value FROM dual"
+                output_mode = "rows"
+
+                [[tool.params]]
+                name = "id"
+                type = "integer"
+                required = true
+            "#,
+        );
+        let defs = oraclemcp_core::parse_tools_file(&source).expect("custom tool parses");
+        CustomToolCatalog::new(
+            oraclemcp_core::load_tools(
+                &defs,
+                &Classifier::new(ClassifierConfig::new()),
+                OperatingLevel::ReadOnly,
+            )
+            .expect("custom tool loads"),
+        )
+    }
+
+    let catalog_a = catalog("custom_a");
+    let loader: Arc<CustomToolLoader> = Arc::new(move |profile, _level| match profile.profile() {
+        "profile_b" => Ok(catalog("custom_b")),
+        "broken" => Err(ErrorEnvelope::new(
+            ErrorClass::AtCapacity,
+            "injected catalog-load refusal",
+        )),
+        other => panic!("unexpected profile {other}"),
+    });
+    let notifications = Arc::new(oraclemcp_core::NotificationHub::new());
+    let dispatcher = Arc::new(
+        OracleDispatcher::new_switchable_with_custom_tools(
+            Box::new(OneRowMock),
+            Some("profile_a".to_owned()),
+            default_read_only_level(),
+            Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
+            catalog_a.clone(),
+            Some(loader),
+        )
+        .with_notifications(Arc::clone(&notifications)),
+    );
+    let registry = crate::registry::tool_registry();
+    let capabilities = oraclemcp_core::CapabilitiesReport::new(
+        "test",
+        registry.tools.clone(),
+        OperatingLevel::ReadOnly,
+        oraclemcp_core::FeatureTiers {
+            live_db: true,
+            engine: false,
+            http_transport: false,
+        },
+    );
+    let server =
+        oraclemcp_core::OracleMcpServer::new("test", registry, capabilities, dispatcher.clone())
+            .with_notifications(Arc::clone(&notifications));
+
+    run_with_current_cx(|_| {
+        let before = server
+            .handle_jsonrpc_request(
+                json!({"jsonrpc":"2.0", "id":1, "method":"tools/list"}),
+                None,
+            )
+            .expect("tools/list response");
+        let before_names: Vec<&str> = before["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(before_names.contains(&"custom_a"));
+        assert!(!before_names.contains(&"custom_b"));
+
+        let switch = dispatcher
+            .dispatch("oracle_switch_profile", json!({"profile":"profile_b"}))
+            .expect("profile switch");
+        assert_eq!(switch["custom_catalog_generation"], json!(2));
+        let changed = server.drain_server_notifications();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(
+            changed[0]["method"],
+            json!("notifications/tools/list_changed")
+        );
+
+        let after = server
+            .handle_jsonrpc_request(
+                json!({"jsonrpc":"2.0", "id":2, "method":"tools/list"}),
+                None,
+            )
+            .expect("tools/list response");
+        let after_names: Vec<&str> = after["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(!after_names.contains(&"custom_a"));
+        assert!(after_names.contains(&"custom_b"));
+
+        let capabilities = server
+            .handle_jsonrpc_request(
+                json!({
+                    "jsonrpc":"2.0",
+                    "id":3,
+                    "method":"tools/call",
+                    "params":{"name":"oracle_capabilities", "arguments":{}}
+                }),
+                None,
+            )
+            .expect("capabilities response");
+        let capabilities = &capabilities["result"]["structuredContent"];
+        let capability_names: Vec<&str> = capabilities["tools"]
+            .as_array()
+            .expect("capabilities tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(!capability_names.contains(&"custom_a"));
+        assert!(capability_names.contains(&"custom_b"));
+
+        let resource = server
+            .handle_jsonrpc_request(
+                json!({
+                    "jsonrpc":"2.0",
+                    "id":4,
+                    "method":"resources/read",
+                    "params":{"uri":"oracle://tools"}
+                }),
+                None,
+            )
+            .expect("tools resource response");
+        let resource: Value = serde_json::from_str(
+            resource["result"]["contents"][0]["text"]
+                .as_str()
+                .expect("resource text"),
+        )
+        .expect("tools resource JSON");
+        let resource_names: Vec<&str> = resource["tools"]
+            .as_array()
+            .expect("resource tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(resource_names, after_names);
+
+        dispatcher
+            .dispatch("custom_b", json!({"id":7}))
+            .expect("newly advertised custom tool executes");
+        let stale = dispatcher
+            .dispatch("custom_a", json!({}))
+            .expect_err("removed custom tool refuses");
+        assert_eq!(stale.error_class, ErrorClass::InvalidArguments);
+
+        let failed = dispatcher
+            .dispatch("oracle_switch_profile", json!({"profile":"broken"}))
+            .expect_err("catalog refusal aborts switch");
+        assert_eq!(failed.error_class, ErrorClass::AtCapacity);
+        assert!(server.drain_server_notifications().is_empty());
+        let after_failed = server
+            .handle_jsonrpc_request(
+                json!({"jsonrpc":"2.0", "id":5, "method":"tools/list"}),
+                None,
+            )
+            .expect("tools/list after failed switch");
+        let after_failed_names: Vec<&str> = after_failed["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(after_failed_names, after_names);
+        dispatcher
+            .dispatch("custom_b", json!({"id":7}))
+            .expect("failed switch preserves executable catalog");
+    });
+}
+
+#[test]
 fn malformed_args_are_invalid_arguments_not_a_panic() {
     let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
     // Missing required `table`.
