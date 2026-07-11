@@ -208,7 +208,7 @@ routing.
 |---|---|---|---|
 | `max_size` | integer | `16` | Maximum pooled connections. Must be ≥ 1. This static default is the documented ceiling; the runtime clamps to `min(configured, cpu*2+1)`. |
 | `min_idle` | integer | `2` | Minimum idle connections kept warm. Must be ≤ `max_size`. |
-| `acquire_timeout_secs` | integer | `5` | Seconds to wait for a checkout before returning `BUSY`. Must be ≥ 1. |
+| `acquire_timeout_secs` | integer | `5` | Seconds to wait for a checkout before returning `BUSY`. Range: 1–3600. |
 | `statement_cache_size` | integer | `50` | Per-connection statement-cache size passed to the thin driver. |
 
 #### `[profiles.proxy_auth]`

@@ -77,6 +77,9 @@ pub struct PoolSettings {
     pub statement_cache_size: u32,
 }
 
+/// Largest supported pool-checkout wait, matching the strict config contract.
+const MAX_POOL_ACQUIRE_TIMEOUT_SECS: u64 = 60 * 60;
+
 impl Default for PoolSettings {
     fn default() -> Self {
         PoolSettings {
@@ -430,7 +433,7 @@ impl OraclePool {
     }
 
     async fn checkout(&self, cx: &Cx) -> Result<RustOracleConnection, DbError> {
-        let deadline = Instant::now() + Duration::from_secs(self.settings.acquire_timeout_secs);
+        let deadline = checkout_deadline(Instant::now(), self.settings.acquire_timeout_secs)?;
         loop {
             db_checkpoint(cx, "oracle_pool.checkout.loop")?;
             if let Some(conn) = self.try_checkout(cx).await? {
@@ -535,6 +538,18 @@ impl OraclePool {
             request_limits: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+}
+
+fn checkout_deadline(now: Instant, acquire_timeout_secs: u64) -> Result<Instant, DbError> {
+    if acquire_timeout_secs > MAX_POOL_ACQUIRE_TIMEOUT_SECS {
+        return Err(DbError::Pool(format!(
+            "acquire_timeout_secs must be at most {MAX_POOL_ACQUIRE_TIMEOUT_SECS}"
+        )));
+    }
+    now.checked_add(Duration::from_secs(acquire_timeout_secs))
+        .ok_or_else(|| {
+            DbError::Pool("acquire_timeout_secs cannot be represented by this platform".to_owned())
+        })
 }
 
 /// Tracks an open pool slot while an idle-session validation or a new connect
@@ -752,6 +767,29 @@ mod tests {
         assert_eq!(s.min_idle, 2);
         assert_eq!(s.acquire_timeout_secs, 5);
         assert_eq!(s.statement_cache_size, 50);
+    }
+
+    #[test]
+    fn checkout_deadline_rejects_every_out_of_contract_boundary_without_panicking() {
+        let now = Instant::now();
+        for timeout in [
+            0,
+            1,
+            MAX_POOL_ACQUIRE_TIMEOUT_SECS,
+            MAX_POOL_ACQUIRE_TIMEOUT_SECS + 1,
+            u64::MAX,
+        ] {
+            let result = std::panic::catch_unwind(|| checkout_deadline(now, timeout));
+            let result = result.expect("checkout deadline construction must never panic");
+            if timeout <= MAX_POOL_ACQUIRE_TIMEOUT_SECS {
+                assert!(result.is_ok(), "accepted timeout {timeout}: {result:?}");
+            } else {
+                assert!(
+                    matches!(result, Err(DbError::Pool(_))),
+                    "rejected timeout {timeout}: {result:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -25,9 +25,9 @@ use thiserror::Error;
 pub use oraclemcp_error as error;
 pub use oraclemcp_guard::OperatingLevel;
 pub use profile::{
-    AppContextConfig, ConnectionProfile, DrcpRoutingConfig, DrcpSessionPurity, OciConfig,
-    PoolConfig, PoolMetadata, ProfileMetadata, ProxyAuthConfig, SessionIdentityConfig,
-    resolve_inheritance,
+    AppContextConfig, ConnectionProfile, DrcpRoutingConfig, DrcpSessionPurity,
+    MAX_POOL_ACQUIRE_TIMEOUT_SECS, OciConfig, PoolConfig, PoolMetadata, ProfileMetadata,
+    ProxyAuthConfig, SessionIdentityConfig, resolve_inheritance,
 };
 
 /// The config schema version this build understands. A config declaring a

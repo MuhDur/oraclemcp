@@ -263,7 +263,7 @@ purity = "reuse"
 # [profiles.pool]
 # max_size = 4                  # Default: 16 (also the documented ceiling; clamped to min(configured, cpu*2+1))
 # min_idle = 1                  # Default: 2. Must be <= max_size.
-# acquire_timeout_secs = 5      # Default: 5. Must be >= 1.
+# acquire_timeout_secs = 5      # Default: 5. Range: 1..=3600.
 # statement_cache_size = 50     # Default: 50.
 
 # [profiles.proxy_auth] — thin proxy authentication. Optional. When set,

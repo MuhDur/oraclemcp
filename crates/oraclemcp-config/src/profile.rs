@@ -23,6 +23,12 @@ const SDU_MIN_BYTES: u32 = 512;
 const SDU_MAX_BYTES: u32 = u16::MAX as u32;
 const DRCP_CONNECTION_CLASS_MAX_CHARS: usize = 128;
 
+/// Largest supported wait for a pooled connection checkout.
+///
+/// One hour is already far beyond an interactive MCP request budget and keeps
+/// every accepted duration operationally meaningful and representable.
+pub const MAX_POOL_ACQUIRE_TIMEOUT_SECS: u64 = 60 * 60;
+
 /// Thin session-pool settings (plan §10). Concrete with documented defaults.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -73,6 +79,13 @@ impl PoolConfig {
                 profile: profile.to_owned(),
                 field: "acquire_timeout_secs",
                 reason: "must be at least 1",
+            });
+        }
+        if self.acquire_timeout_secs > MAX_POOL_ACQUIRE_TIMEOUT_SECS {
+            return Err(ConfigError::InvalidPool {
+                profile: profile.to_owned(),
+                field: "acquire_timeout_secs",
+                reason: "must be at most 3600",
             });
         }
         Ok(())
@@ -1253,6 +1266,61 @@ mod tests {
                 ..
             }
         ));
+
+        let err = crate::OracleMcpConfig::from_toml_str(&format!(
+            r#"
+            [[profiles]]
+            name = "bad_pool"
+            connect_string = "localhost:1521/FREEPDB1"
+
+            [profiles.pool]
+            acquire_timeout_secs = {}
+            "#,
+            MAX_POOL_ACQUIRE_TIMEOUT_SECS + 1
+        ))
+        .expect_err("oversized acquire timeout is rejected");
+        assert!(matches!(
+            err,
+            ConfigError::InvalidPool {
+                field: "acquire_timeout_secs",
+                reason: "must be at most 3600",
+                ..
+            }
+        ));
+
+        let direct = PoolConfig {
+            acquire_timeout_secs: u64::MAX,
+            ..PoolConfig::default()
+        };
+        assert!(matches!(
+            direct.validate("bad_pool"),
+            Err(ConfigError::InvalidPool {
+                field: "acquire_timeout_secs",
+                reason: "must be at most 3600",
+                ..
+            })
+        ));
+
+        let accepted = crate::OracleMcpConfig::from_toml_str(&format!(
+            r#"
+            [[profiles]]
+            name = "max_pool_timeout"
+            connect_string = "localhost:1521/FREEPDB1"
+
+            [profiles.pool]
+            acquire_timeout_secs = {}
+            "#,
+            MAX_POOL_ACQUIRE_TIMEOUT_SECS
+        ))
+        .expect("documented maximum acquire timeout is accepted");
+        assert_eq!(
+            accepted.profiles[0]
+                .pool
+                .as_ref()
+                .expect("pool")
+                .acquire_timeout_secs,
+            MAX_POOL_ACQUIRE_TIMEOUT_SECS
+        );
 
         let err = crate::OracleMcpConfig::from_toml_str(
             r#"

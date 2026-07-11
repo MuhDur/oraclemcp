@@ -559,7 +559,7 @@ own reactor and Oracle connection. The local pool's operating posture:
   connections are opened eagerly so a bad profile fails fast. `min_idle` is
   clamped to the resolved `max_size`.
 - **Acquire timeout.** A checkout waits up to `acquire_timeout_secs` (default
-  5s) for a free or newly-openable connection. If none is available within the
+  5s, accepted range 1–3600s) for a free or newly-openable connection. If none is available within the
   window — the pool is at `max_size` and all connections are in use — the
   checkout returns a `Pool` (BUSY) error rather than blocking forever. The
   per-DB session ceiling (admission layer) caps concurrent leases at the same
