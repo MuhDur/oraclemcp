@@ -27,6 +27,8 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - name: Validate workflow dependency policy
+        run: bash scripts/workflow_supply_chain_check.sh
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -51,7 +53,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
@@ -69,11 +71,11 @@ jobs:
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy -p oraclemcp-core --all-targets --features dashboard-bundle -- -D warnings
       - run: cargo clippy -p oraclemcp --all-targets --features dashboard-bundle -- -D warnings
@@ -90,10 +92,10 @@ jobs:
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: cargo test --workspace --all-targets
         run: |
           set -euo pipefail
@@ -146,12 +148,12 @@ jobs:
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
         with:
           tool: cargo-hack
       - run: bash scripts/oraclemcp_feature_powerset.sh
@@ -163,10 +165,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: bash scripts/oraclemcp_ergonomics_lint.sh
 
   installer:
@@ -182,11 +184,11 @@ jobs:
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: x86_64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install installer lint tools
         run: |
           sudo apt-get update
@@ -263,10 +265,10 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
         working-directory: web
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: bash scripts/release_acceptance_ci_suite.sh --skip-feature-powerset
 
   # The thin-native line is pinned to nightly because asupersync requires
@@ -285,10 +287,10 @@ jobs:
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo build --workspace
       - run: cargo build -p oraclemcp --features dashboard-bundle
 
@@ -316,11 +318,11 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.toolchain }}
       - run: cargo +${{ matrix.toolchain }} build --workspace
@@ -333,10 +335,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # Ensure the docs build; intra-doc-link lints are not gated (some target
       # feature-gated items that are absent in the default-feature doc build).
       - run: cargo doc --workspace --no-deps
@@ -356,7 +358,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - run: bash scripts/oraclemcp_boundary_lint.sh
@@ -395,11 +397,11 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
         with:
           tool: cargo-public-api,cargo-semver-checks
       # Exact public-API surface lock against the committed baselines.
@@ -427,7 +429,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
         working-directory: web
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - run: bash scripts/release_preflight.sh
@@ -439,10 +441,12 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: taiki-e/install-action@cargo-deny
+      - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
+        with:
+          tool: cargo-deny
       - run: cargo deny check
       - run: cargo deny --features oraclemcp/dashboard-bundle,oraclemcp-core/dashboard-bundle check
 
@@ -460,10 +464,10 @@ jobs:
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo build -p oraclemcp --features dashboard-bundle
 
   # No deployment-specific identifiers or secrets may reach the public repo.
@@ -491,11 +495,11 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
         with:
           tool: cargo-fuzz
         # Pin the gnu target: cargo-fuzz otherwise defaults to musl here, whose

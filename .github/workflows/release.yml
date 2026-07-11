@@ -69,17 +69,20 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
         working-directory: web
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Validate release metadata
         env:
           RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           RELEASE_REQUIRE_MAIN: ${{ startsWith(github.ref, 'refs/tags/') }}
         run: bash scripts/release_preflight.sh
+
+      - name: Validate workflow dependency policy
+        run: bash scripts/workflow_supply_chain_check.sh
 
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -98,7 +101,9 @@ jobs:
       - run: bash scripts/oraclemcp_agent_surface_lint.sh
       - run: bash scripts/oraclemcp_concurrency_lint.sh
       - run: bash scripts/secret_scan.sh
-      - uses: taiki-e/install-action@cargo-deny
+      - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
+        with:
+          tool: cargo-deny
       - run: cargo deny check
       - run: cargo deny --features oraclemcp/dashboard-bundle,oraclemcp-core/dashboard-bundle check
       - run: cargo build -p oraclemcp --features dashboard-bundle
@@ -123,10 +128,10 @@ jobs:
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo build --workspace
       - run: cargo build -p oraclemcp --features dashboard-bundle
 
@@ -162,12 +167,12 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
         working-directory: web
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
         with:
           tool: cargo-hack
       - run: bash scripts/release_acceptance_ci_suite.sh
@@ -217,23 +222,23 @@ jobs:
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.target }}
 
       - name: Install Zig (aarch64 musl)
         if: matrix.build_tool == 'cargo-zigbuild'
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.14.1
 
       - name: Install cargo-zigbuild (aarch64 musl)
         if: matrix.build_tool == 'cargo-zigbuild'
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
         with:
           tool: cargo-zigbuild
 
@@ -374,7 +379,7 @@ jobs:
       # dashboard SPA so operators (and a third party) can enumerate exactly
       # what each release artifact was built from.
       - name: Install CycloneDX SBOM generator
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
         with:
           tool: cargo-cyclonedx@0.5.9
       - name: Generate Rust CycloneDX SBOM
@@ -405,7 +410,7 @@ jobs:
             artifacts/oraclemcp-${{ steps.version.outputs.version }}.cdx.json
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3.10.1
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
       # Downloadable cosign blob attestations for the installer and for
       # operators who want a cosign-only archive verification path. The GitHub
       # attestation above remains the canonical hosted provenance record.
@@ -478,7 +483,7 @@ jobs:
         run: bash scripts/render_distribution_manifests.sh artifacts
 
       - name: Publish release with checksums, SBOM, and signatures
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
         with:
           name: ${{ github.ref_name }}
           files: |
@@ -515,10 +520,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Publish crates in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -564,16 +569,16 @@ jobs:
             fi
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           target: runtime
@@ -593,7 +598,7 @@ jobs:
           push-to-registry: true
       # Keyless cosign signature over the image digest (not a mutable tag).
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3.10.1
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
       - name: Sign image (keyless)
         env:
           COSIGN_YES: "true"
@@ -667,12 +672,20 @@ jobs:
         with:
           persist-credentials: false
       - name: Install mcp-publisher
-        run: |
-          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+        run: bash scripts/install_mcp_publisher.sh
       - name: Authenticate to the MCP Registry (GitHub OIDC)
         run: ./mcp-publisher login github-oidc
       - name: Publish server.json
         run: ./mcp-publisher publish
+
+  verify-mcp-registry:
+    name: verify MCP registry entry
+    needs: publish-mcp-registry
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
       - name: Verify MCP registry listing
         shell: bash
         run: |

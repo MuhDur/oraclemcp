@@ -16,9 +16,30 @@ env:
   RUST_TOOLCHAIN: nightly-2026-05-11
 
 jobs:
+  validate:
+    name: validate server.json
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Validate workflow dependency policy
+        run: bash scripts/workflow_supply_chain_check.sh
+      - name: Validate release metadata
+        run: bash scripts/release_preflight.sh
+
   publish:
     name: publish server.json
+    needs: validate
     runs-on: ubuntu-latest
+    environment: mcp-registry
+    timeout-minutes: 10
     permissions:
       id-token: write # required for GitHub OIDC authentication
       contents: read
@@ -26,18 +47,24 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - name: Validate release metadata
-        run: bash scripts/release_preflight.sh
       - name: Install mcp-publisher
-        run: |
-          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+        run: bash scripts/install_mcp_publisher.sh
       - name: Authenticate to the MCP Registry (GitHub OIDC)
         run: ./mcp-publisher login github-oidc
       - name: Publish server.json
         run: ./mcp-publisher publish
+
+  verify:
+    name: verify registry listing
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Verify MCP registry listing
         shell: bash
         run: |
