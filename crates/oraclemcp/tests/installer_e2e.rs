@@ -578,6 +578,41 @@ fn npx_verifies_binary_no_postinstall_side_effects() {
         "npm publish workflow must use an npm CLI new enough for OIDC publishing"
     );
     assert!(
+        !npm_workflow.contains("checkout_ref:"),
+        "npm publishing must never accept an arbitrary source ref"
+    );
+    assert!(
+        npm_workflow.contains("ref: ${{ steps.inputs.outputs.tag }}")
+            && npm_workflow.contains("ref: ${{ needs.validate.outputs.tag }}")
+            && npm_workflow.contains("VALIDATED_COMMIT: ${{ needs.validate.outputs.tag_commit }}"),
+        "validation and publication must bind to the exact validated release tag commit"
+    );
+
+    let lines = npm_workflow.lines().collect::<Vec<_>>();
+    for (index, line) in lines.iter().enumerate() {
+        if line.trim_start().starts_with("run:") {
+            assert!(
+                !line.contains("${{ inputs."),
+                "workflow-dispatch inputs must not be interpolated into a run directive: {line}"
+            );
+        }
+        if line.trim() != "run: |" {
+            continue;
+        }
+        let indentation = line.len() - line.trim_start().len();
+        for body_line in &lines[index + 1..] {
+            if !body_line.trim().is_empty()
+                && body_line.len() - body_line.trim_start().len() <= indentation
+            {
+                break;
+            }
+            assert!(
+                !body_line.contains("${{ inputs."),
+                "workflow-dispatch inputs must enter shell through env, never source: {body_line}"
+            );
+        }
+    }
+    assert!(
         npm_workflow.contains("NODE_VERSION: 22.17.0"),
         "npm publish workflow must use a Node version new enough for trusted publishing"
     );
@@ -652,6 +687,63 @@ fn npx_verifies_binary_no_postinstall_side_effects() {
         assert!(
             !wrapper_text.contains(forbidden),
             "npm wrapper must not mutate service/client state via {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn npm_publish_dispatch_validator_rejects_injection_and_maps_dist_tags() {
+    let root = repo_root();
+    let validator = root.join("scripts/validate_npm_publish_input.sh");
+
+    for (version, expected_tag) in [
+        ("0.8.0", "latest"),
+        ("0.9.0-rc.1", "next"),
+        ("1.2.3+build-meta", "latest"),
+    ] {
+        let output = Command::new("bash")
+            .arg(&validator)
+            .env("REQUESTED_VERSION", version)
+            .env("REQUESTED_AUTH_MODE", "oidc")
+            .output()
+            .expect("run npm dispatch validator");
+        assert!(
+            output.status.success(),
+            "valid version rejected: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(&format!("version={version}\n")));
+        assert!(stdout.contains(&format!("tag=v{version}\n")));
+        assert!(stdout.contains(&format!("dist_tag={expected_tag}\n")));
+    }
+
+    let marker = root.join("target/qa39-input-injection-marker");
+    assert!(!marker.exists(), "QA39 marker unexpectedly pre-exists");
+    for version in [
+        "v0.8.0",
+        "01.2.3",
+        "1.2.3-01",
+        "1.2",
+        "1.2.3; touch target/qa39-input-injection-marker",
+        "1.2.3$(touch target/qa39-input-injection-marker)",
+        "1.2.3\n0.0.0",
+        "1.2.3'",
+    ] {
+        let output = Command::new("bash")
+            .arg(&validator)
+            .env("REQUESTED_VERSION", version)
+            .env("REQUESTED_AUTH_MODE", "auto")
+            .current_dir(&root)
+            .output()
+            .expect("run npm dispatch validator");
+        assert!(
+            !output.status.success(),
+            "malicious version passed: {version:?}"
+        );
+        assert!(
+            !marker.exists(),
+            "version executed shell syntax: {version:?}"
         );
     }
 }

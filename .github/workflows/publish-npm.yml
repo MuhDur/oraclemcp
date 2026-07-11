@@ -7,10 +7,6 @@ on:
         description: "Package version to publish, without the leading v"
         required: true
         type: string
-      checkout_ref:
-        description: "Git ref to package; defaults to v<version>"
-        required: false
-        type: string
       auth_mode:
         description: "npm auth mode: auto uses NPM_TOKEN when present; oidc ignores NPM_TOKEN for trusted publishing"
         required: false
@@ -23,55 +19,114 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 env:
   NODE_VERSION: 22.17.0
 
 jobs:
-  publish:
-    name: publish npm wrapper
+  validate:
+    name: validate exact npm release tag
     runs-on: ubuntu-latest
-    environment: npm
     timeout-minutes: 10
+    outputs:
+      version: ${{ steps.inputs.outputs.version }}
+      tag: ${{ steps.inputs.outputs.tag }}
+      tag_commit: ${{ steps.provenance.outputs.tag_commit }}
+      dist_tag: ${{ steps.inputs.outputs.dist_tag }}
+      auth_mode: ${{ steps.inputs.outputs.auth_mode }}
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-          ref: ${{ inputs.checkout_ref || format('v{0}', inputs.version) }}
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Validate dispatch inputs as data
+        id: inputs
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_AUTH_MODE: ${{ inputs.auth_mode }}
+        run: bash scripts/validate_npm_publish_input.sh
+      - name: Check out the exact immutable release tag
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ steps.inputs.outputs.tag }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://registry.npmjs.org
+      - name: Verify tag provenance and npm wrapper
+        id: provenance
+        env:
+          RELEASE_TAG: ${{ steps.inputs.outputs.tag }}
+          VERSION: ${{ steps.inputs.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse --verify "${RELEASE_TAG}^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          if [ "$head_commit" != "$tag_commit" ]; then
+            echo "checked-out commit $head_commit does not match release tag $RELEASE_TAG ($tag_commit)" >&2
+            exit 1
+          fi
+          package_version="$(node -p "require('./npm/oraclemcp/package.json').version")"
+          if [ "$package_version" != "$VERSION" ]; then
+            echo "npm package version $package_version does not match release tag $RELEASE_TAG" >&2
+            exit 1
+          fi
+          npm --prefix npm/oraclemcp test
+          npm pack ./npm/oraclemcp --dry-run
+          printf 'tag_commit=%s\n' "$tag_commit" >>"$GITHUB_OUTPUT"
+
+  publish:
+    name: publish npm wrapper
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: npm
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the validated release tag
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ needs.validate.outputs.tag }}
+      - name: Refuse tag movement after validation
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          VALIDATED_COMMIT: ${{ needs.validate.outputs.tag_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse --verify "${RELEASE_TAG}^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          if [ "$head_commit" != "$VALIDATED_COMMIT" ] || [ "$tag_commit" != "$VALIDATED_COMMIT" ]; then
+            echo "release tag moved or checkout provenance changed after validation" >&2
+            exit 1
+          fi
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: https://registry.npmjs.org
       - name: Use npm with OIDC publishing support
         run: npm install -g npm@11.5.1
-      - name: Validate npm wrapper
-        shell: bash
-        run: |
-          set -euo pipefail
-          package_version="$(node -p "require('./npm/oraclemcp/package.json').version")"
-          if [ "$package_version" != "${{ inputs.version }}" ]; then
-            echo "npm package version $package_version does not match requested ${{ inputs.version }}" >&2
-            exit 1
-          fi
-          npm --prefix npm/oraclemcp test
       - name: Publish npm package with provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          DIST_TAG: ${{ needs.validate.outputs.dist_tag }}
+          AUTH_MODE: ${{ needs.validate.outputs.auth_mode }}
         shell: bash
         run: |
           set -euo pipefail
-          version="${{ inputs.version }}"
-          if npm view "oraclemcp@$version" version >/dev/null 2>&1; then
-            echo "oraclemcp@$version is already published on npm; skipping"
+          if npm view "oraclemcp@$VERSION" version >/dev/null 2>&1; then
+            echo "oraclemcp@$VERSION is already published on npm; skipping"
             exit 0
           fi
-          dist_tag="latest"
-          if [[ "$version" == *-* ]]; then
-            dist_tag="next"
-          fi
-          auth_mode="${{ inputs.auth_mode || 'auto' }}"
-          case "$auth_mode" in
+          case "$AUTH_MODE" in
             auto)
               if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
                 echo "npm publish auth: token from npm environment NPM_TOKEN"
@@ -94,13 +149,13 @@ jobs:
               unset NODE_AUTH_TOKEN NPM_CONFIG_USERCONFIG
               ;;
             *)
-              echo "::error::unsupported auth_mode '$auth_mode'" >&2
+              echo "::error::unsupported auth_mode '$AUTH_MODE'" >&2
               exit 1
               ;;
           esac
 
           set +e
-          publish_output="$(npm publish ./npm/oraclemcp --provenance --access public --tag "$dist_tag" 2>&1)"
+          publish_output="$(npm publish ./npm/oraclemcp --provenance --access public --tag "$DIST_TAG" 2>&1)"
           publish_status=$?
           set -e
           printf '%s\n' "$publish_output"
