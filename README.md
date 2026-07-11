@@ -169,8 +169,11 @@ Open the operator dashboard through the paired browser flow:
 om dashboard
 ```
 
-The dashboard uses a one-time loopback pairing ticket, then an HttpOnly
-SameSite=Strict cookie plus CSRF and route-scoped action tickets. Browser
+The dashboard uses a one-time loopback pairing ticket, then an HttpOnly,
+SameSite=Strict cookie plus CSRF and route-scoped action tickets. The cookie is
+`Secure` under native TLS or explicit trusted HTTPS termination; the only
+non-Secure exception is server-observed loopback HTTP, and remote plaintext
+requests never receive privileged browser cookies. Browser
 requests do not supply the database Subject: the server derives the Subject from
 the authenticated transport principal, session, and lane context. Authenticated
 HTTP sessions run on isolated per-principal lanes with their own Oracle
@@ -382,7 +385,11 @@ metadata instead of silently taking over another port or socket.
 The browser dashboard is paired separately even on loopback. `oraclemcp
 dashboard` creates a 0600 one-time ticket under the user runtime directory,
 opens `/dashboard/pair?ticket=...`, and the server immediately exchanges it for
-an HttpOnly, SameSite=Strict dashboard cookie. The ticket expires in 60 seconds
+an HttpOnly, SameSite=Strict dashboard cookie. The cookie is `Secure` under
+native TLS or `[http].trusted_https_termination = true`; non-Secure cookies are
+limited to server-observed loopback HTTP. Forwarded scheme headers are ignored,
+and remote plaintext requests do not receive privileged browser cookies. The
+ticket expires in 60 seconds
 and is single-use; dashboard POSTs also require same-origin headers, a CSRF
 token, and a route-scoped action ticket.
 

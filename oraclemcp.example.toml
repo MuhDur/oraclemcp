@@ -57,6 +57,11 @@ json_response = true
 stateful = false
 # Idle TTL for stateful sessions, in seconds. Default: 900. Set 0 to disable.
 stateful_idle_ttl_seconds = 900
+# Assert that every external client reaches this plaintext listener only through
+# a trusted HTTPS terminator. Default: false. Enable only when direct access to
+# the backend listener is prevented. Forwarded/X-Forwarded-* headers are never
+# trusted, and this setting does not relax authentication or remote-bind guards.
+# trusted_https_termination = false
 # Release gate for the browser Safe SQL Workbench. Default: false. Even when
 # enabled, all SQL still routes through the normal classifier, profile ceiling,
 # confirmation-token, rollback/audit, and idempotency path.
@@ -66,7 +71,10 @@ dashboard_workbench = false
 # allow_remote = false
 # The embedded browser dashboard still requires local pairing even on loopback:
 # run `oraclemcp dashboard` to mint a 60s one-time ticket that becomes an
-# HttpOnly SameSite=Strict cookie. Dashboard POSTs require CSRF + action tickets.
+# HttpOnly SameSite=Strict cookie. Cookies are Secure under native or asserted
+# HTTPS; non-Secure cookies are limited to loopback HTTP development. Remote
+# plaintext requests never receive privileged browser cookies. Dashboard POSTs
+# require CSRF + action tickets.
 
 # [http.oauth] — OAuth 2.1 resource-server protection for /mcp. Optional;
 # omit for an unauthenticated dev listener (which then requires --allow-no-auth).

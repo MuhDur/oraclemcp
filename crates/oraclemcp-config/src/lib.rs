@@ -267,6 +267,12 @@ pub struct HttpConfig {
     /// disabled unless this is explicitly enabled and the runtime profile
     /// ceiling still admits the requested operation.
     pub dashboard_workbench: bool,
+    /// Assert that every external client reaches this plaintext listener only
+    /// through a trusted HTTPS terminator. This affects cookie transport
+    /// security only; it never trusts `Forwarded`/`X-Forwarded-*` headers and
+    /// does not relax authentication or remote-bind policy.
+    #[serde(default)]
+    pub trusted_https_termination: bool,
     /// Allow binding to non-loopback addresses without auth/TLS when combined
     /// with `serve --allow-no-auth`. Default `false` (fail-closed). Can also be
     /// enabled at serve time via `ORACLEMCP_HTTP_ALLOW_REMOTE=1` (ignored during
@@ -288,6 +294,7 @@ impl Default for HttpConfig {
             tls: None,
             operator: HttpOperatorConfig::default(),
             dashboard_workbench: false,
+            trusted_https_termination: false,
             allow_remote: false,
         }
     }
@@ -1169,6 +1176,21 @@ mod tests {
 
         let default_cfg = OracleMcpConfig::from_toml_str("").expect("empty loads");
         assert!(!default_cfg.http.allow_remote);
+    }
+
+    #[test]
+    fn trusted_https_termination_is_explicit_and_defaults_off() {
+        let cfg = OracleMcpConfig::from_toml_str(
+            r#"
+            [http]
+            trusted_https_termination = true
+            "#,
+        )
+        .expect("trusted HTTPS termination loads");
+        assert!(cfg.http.trusted_https_termination);
+
+        let default_cfg = OracleMcpConfig::from_toml_str("").expect("empty loads");
+        assert!(!default_cfg.http.trusted_https_termination);
     }
 
     #[test]

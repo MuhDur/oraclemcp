@@ -581,6 +581,33 @@ fn http_cli_oauth_builds_enforced_transport_config() {
 }
 
 #[test]
+fn trusted_https_termination_sets_effective_scheme_without_native_tls() {
+    let cfg = http_transport_config_from_merged(
+        HttpConfig {
+            trusted_https_termination: true,
+            ..Default::default()
+        },
+        false,
+        &SystemSecretResolver,
+    )
+    .expect("trusted HTTPS termination resolves");
+
+    assert_eq!(cfg.transport.effective_scheme, EffectiveHttpScheme::Https);
+    assert!(
+        cfg.tls.is_none(),
+        "trusted termination is not native rustls"
+    );
+
+    let default_cfg =
+        http_transport_config_from_merged(HttpConfig::default(), false, &SystemSecretResolver)
+            .expect("default HTTP resolves");
+    assert_eq!(
+        default_cfg.transport.effective_scheme,
+        EffectiveHttpScheme::Http
+    );
+}
+
+#[test]
 fn http_oauth_literal_secret_is_rejected_for_protected_profiles() {
     let http = HttpConfig {
         oauth: Some(HttpOAuthConfig {

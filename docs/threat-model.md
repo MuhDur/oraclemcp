@@ -325,7 +325,11 @@ write-capable SQL shell.
 *Mitigation.* Loopback alone is not dashboard authentication. `oraclemcp
 dashboard` mints a 0600 one-time pairing ticket in the user's runtime
 directory; `/dashboard/pair` requires loopback, consumes the ticket once, and
-sets an HttpOnly, SameSite=Strict session cookie. Dashboard GETs and POSTs
+sets an HttpOnly, SameSite=Strict session cookie. Native TLS and the explicit
+`trusted_https_termination` assertion add `Secure`; non-Secure cookies are
+limited to server-observed loopback HTTP, while remote plaintext requests never
+receive privileged browser cookies. Forwarded scheme headers are ignored, so
+they cannot forge the cookie policy. Dashboard GETs and POSTs
 enforce same-origin checks; POST actions also require a CSRF token and
 route-scoped action ticket. The Workbench exposes no PTY, SQLcl shell, or
 alternate SQL path: preview routes through `oracle_preview_sql`, reads through
@@ -340,6 +344,9 @@ route, so a stale stored proposal verdict cannot authorize execution.
 *Evidence (green; CI):*
 - `crates/oraclemcp-core/src/http/mod.rs` tests —
   `dashboard_pairing_sets_strict_cookie_and_session_view`,
+  `dashboard_pairing_uses_secure_cookie_on_effective_https`,
+  `native_https_forces_secure_stateful_session_cookie`,
+  `remote_plaintext_initialize_suppresses_cookie_despite_forwarding_headers`,
   `malicious_page_cannot_trigger_dashboard_gated_action`,
   `dashboard_workbench_ddl_apply_is_release_gated`,
   `cp_apply_reclassifies_never_trusts_stored_verdict`, and

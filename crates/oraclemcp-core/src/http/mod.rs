@@ -347,6 +347,23 @@ struct HttpRequestRateLimitRejection {
     bucket_count: usize,
 }
 
+/// Server-observed effective scheme for security-sensitive response behavior.
+/// Native rustls listeners force [`Https`](Self::Https); plaintext listeners
+/// remain [`Http`](Self::Http) unless startup config explicitly asserts trusted
+/// external HTTPS termination. Request forwarding headers never influence it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EffectiveHttpScheme {
+    #[default]
+    Http,
+    Https,
+}
+
+impl EffectiveHttpScheme {
+    fn is_https(self) -> bool {
+        self == Self::Https
+    }
+}
+
 /// Operator configuration for the HTTP transport.
 #[derive(Clone)]
 pub struct HttpTransportConfig {
@@ -360,6 +377,10 @@ pub struct HttpTransportConfig {
     pub json_response: bool,
     /// Stateful session mode (SSE priming + session-bound requests).
     pub stateful: bool,
+    /// Effective external request scheme, derived only from the native listener
+    /// or explicit trusted-termination config. Never derived from request
+    /// headers.
+    pub effective_scheme: EffectiveHttpScheme,
     /// Idle timeout for stateful sessions. A zero duration disables the
     /// watchdog. The watchdog closes stale lanes through [`HttpSessionLifecycle`]
     /// and never touches dispatcher/connection state directly.
@@ -449,6 +470,7 @@ impl std::fmt::Debug for HttpTransportConfig {
             .field("allowed_origins", &self.allowed_origins)
             .field("json_response", &self.json_response)
             .field("stateful", &self.stateful)
+            .field("effective_scheme", &self.effective_scheme)
             .field("stateful_idle_ttl", &self.stateful_idle_ttl)
             .field(
                 "transport_regular_global_cap",
@@ -497,6 +519,7 @@ impl Default for HttpTransportConfig {
             allowed_origins: Vec::new(),
             json_response: false,
             stateful: false,
+            effective_scheme: EffectiveHttpScheme::Http,
             stateful_idle_ttl: Duration::from_secs(DEFAULT_STATEFUL_IDLE_TTL_SECONDS),
             transport_admission: default_transport_admission(),
             sse_admission: default_sse_admission(),
@@ -1572,8 +1595,51 @@ fn stateful_session_id(request: &HttpRequest, allow_cookie: bool) -> Option<&str
     })
 }
 
-fn stateful_session_cookie_header(session_id: &str) -> String {
-    format!("{STATEFUL_SESSION_COOKIE}={session_id}; Path={MCP_PATH}; HttpOnly; SameSite=Strict")
+fn stateful_session_cookie_header(session_id: &str, secure: bool) -> String {
+    stateful_session_cookie_header_with_max_age(session_id, None, secure)
+}
+
+fn stateful_session_cookie_header_with_max_age(
+    session_id: &str,
+    max_age: Option<u64>,
+    secure: bool,
+) -> String {
+    let mut header = format!("{STATEFUL_SESSION_COOKIE}={session_id}; Path={MCP_PATH}");
+    if let Some(max_age) = max_age {
+        header.push_str(&format!("; Max-Age={max_age}"));
+    }
+    header.push_str("; HttpOnly; SameSite=Strict");
+    if secure {
+        header.push_str("; Secure");
+    }
+    header
+}
+
+fn expired_stateful_session_cookie_header(secure: bool) -> String {
+    stateful_session_cookie_header_with_max_age("", Some(0), secure)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrivilegedCookiePolicy {
+    Secure,
+    LoopbackHttp,
+    Suppress,
+}
+
+impl PrivilegedCookiePolicy {
+    fn for_request(config: &HttpTransportConfig, request: &HttpRequest) -> Self {
+        if config.effective_scheme.is_https() {
+            Self::Secure
+        } else if request.peer_is_loopback {
+            Self::LoopbackHttp
+        } else {
+            Self::Suppress
+        }
+    }
+
+    fn secure(self) -> bool {
+        self == Self::Secure
+    }
 }
 
 fn cookie_get_requires_origin(request: &HttpRequest) -> Option<HttpResponse> {
@@ -1868,7 +1934,11 @@ fn handle_dashboard_pairing_route(
     else {
         return dashboard_pairing_auth_required_response();
     };
-    match auth.exchange_ticket(ticket) {
+    let cookie_policy = PrivilegedCookiePolicy::for_request(config, request);
+    if cookie_policy == PrivilegedCookiePolicy::Suppress {
+        return dashboard_auth_error_response(403, "dashboard_pairing_requires_secure_transport");
+    }
+    match auth.exchange_ticket(ticket, cookie_policy.secure()) {
         Ok(login) => with_dashboard_security_headers(
             empty_response(303)
                 .with_header("location", "/")
@@ -5123,7 +5193,16 @@ fn handle_mcp_delete(
                 if let Some(lifecycle) = &config.session_lifecycle {
                     lifecycle.close_session(session_id, &session.principal_key);
                 }
-                empty_response(202)
+                let cookie_policy = PrivilegedCookiePolicy::for_request(config, request);
+                let response = empty_response(202);
+                if cookie_policy == PrivilegedCookiePolicy::Suppress {
+                    response
+                } else {
+                    response.with_header(
+                        "set-cookie",
+                        &expired_stateful_session_cookie_header(cookie_policy.secure()),
+                    )
+                }
             }
             Err(response) => response,
         };
@@ -5284,6 +5363,7 @@ fn handle_mcp_post_exchange(
                     .map(|store| store.append_response(&session_id, response.clone()));
                 return HttpExchange::Buffered(sse_response(
                     config,
+                    request,
                     method.as_deref(),
                     response,
                     http_session_id,
@@ -5330,6 +5410,7 @@ fn handle_mcp_post_exchange(
         };
         return HttpExchange::Buffered(sse_response(
             config,
+            request,
             method.as_deref(),
             response,
             http_session_id,
@@ -5900,6 +5981,7 @@ fn streaming_query_chunks(response: &Value) -> Option<&Vec<Value>> {
 
 fn sse_response(
     config: &HttpTransportConfig,
+    request: &HttpRequest,
     method: Option<&str>,
     response: Value,
     initialized_session_id: Option<String>,
@@ -5955,10 +6037,13 @@ fn sse_response(
             store.ensure_session(&session_id);
         }
         headers.push(("mcp-session-id".to_owned(), session_id.clone()));
-        headers.push((
-            "set-cookie".to_owned(),
-            stateful_session_cookie_header(&session_id),
-        ));
+        let cookie_policy = PrivilegedCookiePolicy::for_request(config, request);
+        if cookie_policy != PrivilegedCookiePolicy::Suppress {
+            headers.push((
+                "set-cookie".to_owned(),
+                stateful_session_cookie_header(&session_id, cookie_policy.secure()),
+            ));
+        }
     }
     HttpResponse {
         status: 200,
@@ -6025,7 +6110,7 @@ pub fn serve_http_until(
     shutdown: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
     listener.set_nonblocking(true)?;
-    let config = Arc::new(listener_config(config));
+    let config = Arc::new(listener_config(config, EffectiveHttpScheme::Http));
     let mut last_idle_reap = Instant::now();
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
     while !shutdown.load(Ordering::SeqCst) {
@@ -6106,7 +6191,7 @@ pub fn serve_https_until(
     shutdown: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
     listener.set_nonblocking(true)?;
-    let config = Arc::new(listener_config(config));
+    let config = Arc::new(listener_config(config, EffectiveHttpScheme::Https));
     let mut last_idle_reap = Instant::now();
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
     while !shutdown.load(Ordering::SeqCst) {
@@ -6164,8 +6249,14 @@ fn reap_finished_workers(workers: &mut Vec<JoinHandle<()>>) {
     }
 }
 
-fn listener_config(config: &HttpTransportConfig) -> HttpTransportConfig {
+fn listener_config(
+    config: &HttpTransportConfig,
+    native_scheme: EffectiveHttpScheme,
+) -> HttpTransportConfig {
     let mut config = config.clone();
+    if native_scheme.is_https() {
+        config.effective_scheme = EffectiveHttpScheme::Https;
+    }
     if config.stateful && config.session_store.is_none() {
         config.session_store = Some(Arc::new(HttpSessionStore::default()));
     }

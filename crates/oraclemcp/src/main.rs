@@ -71,17 +71,18 @@ use oraclemcp_core::{
     ConfigOpsStatus, ConfigReloadApplier, ConfigReloadApplyReport, CustomToolCatalog,
     CustomToolDef, DEFAULT_REQUEST_TIMEOUT, DashboardAuth, DashboardAuthError, DispatchCloseReason,
     DispatchContext, DispatchFuture, DispatchOutcome, DoctorAuthCapabilities, DoctorAuthModeKind,
-    DoctorContext, DoctorLevelCaps, DoctorProfileCaps, DoctorStateLayout, ExportRegistry,
-    FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext, LaneDispatchFactory,
-    LaneDispatchFactoryBuilder, LaneRuntime, MCP_PATH, McpSurfaceDetail, McpSurfaceFuture,
-    MtlsClientRegistry, OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy,
-    OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, PreparedLaneDispatch, ServiceTransport,
-    ShutdownCoordinator, SiemFormat, SiemHttpForwarder, SourceHistoryStore, StatefulLaneDispatch,
-    StdioAuthPolicy, TlsMaterial, TlsServerConfig, ToolDispatch, ToolStreamSender, WriteIntentLog,
-    apply_legacy_state_migration, build_server_config, default_dashboard_ticket_dir, load_tools,
-    load_tools_for_profile, mint_dashboard_pairing_ticket, operator_subject_id_hash,
-    parse_tools_file, probe_dashboard_http_service, requires_mtls, run_doctor,
-    service_app_doctor_snapshot, sign, start_oraclemcp_service_app_with_transport,
+    DoctorContext, DoctorLevelCaps, DoctorProfileCaps, DoctorStateLayout, EffectiveHttpScheme,
+    ExportRegistry, FeatureTiers, HttpSessionLifecycle, HttpTransportConfig, LaneContext,
+    LaneDispatchFactory, LaneDispatchFactoryBuilder, LaneRuntime, MCP_PATH, McpSurfaceDetail,
+    McpSurfaceFuture, MtlsClientRegistry, OAuthEnforcement, ObservabilityState,
+    OperatorAuthorityPolicy, OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH,
+    PreparedLaneDispatch, ServiceTransport, ShutdownCoordinator, SiemFormat, SiemHttpForwarder,
+    SourceHistoryStore, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial, TlsServerConfig,
+    ToolDispatch, ToolStreamSender, WriteIntentLog, apply_legacy_state_migration,
+    build_server_config, default_dashboard_ticket_dir, load_tools, load_tools_for_profile,
+    mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file,
+    probe_dashboard_http_service, requires_mtls, run_doctor, service_app_doctor_snapshot, sign,
+    start_oraclemcp_service_app_with_transport,
 };
 use oraclemcp_db::{
     DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, RustOracleConnection,
@@ -2796,6 +2797,11 @@ fn http_transport_config_from_merged(
         allowed_origins: http.allowed_origins,
         json_response: http.json_response,
         stateful: http.stateful,
+        effective_scheme: if http.trusted_https_termination {
+            EffectiveHttpScheme::Https
+        } else {
+            EffectiveHttpScheme::Http
+        },
         stateful_idle_ttl: std::time::Duration::from_secs(http.stateful_idle_ttl_seconds),
         resource_metadata,
         oauth,
@@ -3060,6 +3066,8 @@ fn run_serve(
             }
             let oauth_enabled = resolved_http.transport.oauth.is_some();
             let tls_enabled = resolved_http.tls.is_some();
+            let effective_https = tls_enabled
+                || resolved_http.transport.effective_scheme == EffectiveHttpScheme::Https;
             let client_credentials_enabled = resolved_http.transport.client_credentials.is_some();
             let auth_enabled =
                 oauth_enabled || resolved_http.mtls_required || client_credentials_enabled;
@@ -3091,6 +3099,18 @@ fn run_serve(
                     eprintln!(
                         "oraclemcp serve: WARNING — HTTPS transport on {addr} has TLS \
                          encryption but no per-client credential, OAuth, or mTLS client authentication."
+                    );
+                }
+            } else if effective_https {
+                eprintln!(
+                    "oraclemcp serve: plaintext HTTP backend on {addr} is configured behind \
+                     trusted external HTTPS termination. Forwarded scheme headers are ignored."
+                );
+                if !oauth_enabled && !client_credentials_enabled {
+                    eprintln!(
+                        "oraclemcp serve: WARNING — trusted HTTPS termination does not provide \
+                         per-client authentication; configure OAuth or client credentials unless \
+                         this is intentional local development."
                     );
                 }
             } else if oauth_enabled {

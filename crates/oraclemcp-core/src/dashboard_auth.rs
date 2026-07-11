@@ -182,7 +182,11 @@ impl DashboardAuth {
     }
 
     /// Consume one local pairing ticket and mint an HttpOnly dashboard cookie.
-    pub fn exchange_ticket(&self, token: &str) -> Result<DashboardLogin, DashboardAuthError> {
+    pub fn exchange_ticket(
+        &self,
+        token: &str,
+        secure_cookie: bool,
+    ) -> Result<DashboardLogin, DashboardAuthError> {
         let token = token.trim();
         if token.is_empty() {
             return Err(DashboardAuthError::MissingTicket);
@@ -215,7 +219,11 @@ impl DashboardAuth {
         };
         self.sessions.lock().insert(id.clone(), session);
         Ok(DashboardLogin {
-            session_cookie: dashboard_session_cookie_header(&id, self.session_ttl.as_secs()),
+            session_cookie: dashboard_session_cookie_header(
+                &id,
+                self.session_ttl.as_secs(),
+                secure_cookie,
+            ),
             expires_unix,
         })
     }
@@ -428,10 +436,14 @@ fn session_view(session: &DashboardSession) -> DashboardSessionView {
     }
 }
 
-fn dashboard_session_cookie_header(session_id: &str, max_age_seconds: u64) -> String {
-    format!(
+fn dashboard_session_cookie_header(session_id: &str, max_age_seconds: u64, secure: bool) -> String {
+    let mut header = format!(
         "{DASHBOARD_SESSION_COOKIE}={session_id}; Path=/; Max-Age={max_age_seconds}; HttpOnly; SameSite=Strict"
-    )
+    );
+    if secure {
+        header.push_str("; Secure");
+    }
+    header
 }
 
 fn action_ticket_for(session: &DashboardSession, method: &str, path: &str) -> String {
@@ -528,13 +540,15 @@ mod tests {
         );
 
         let auth = DashboardAuth::new(dir);
-        let login = auth.exchange_ticket(token).expect("first exchange works");
+        let login = auth
+            .exchange_ticket(token, false)
+            .expect("first exchange works");
         assert!(
             login.session_cookie.contains("HttpOnly")
                 && login.session_cookie.contains("SameSite=Strict")
         );
         assert!(matches!(
-            auth.exchange_ticket(token),
+            auth.exchange_ticket(token, false),
             Err(DashboardAuthError::InvalidTicket)
         ));
     }
@@ -546,7 +560,7 @@ mod tests {
             mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1:7070").expect("ticket mints");
         let token = token_from_url(&ticket.url);
         let auth = DashboardAuth::new(dir);
-        let login = auth.exchange_ticket(token).expect("login works");
+        let login = auth.exchange_ticket(token, false).expect("login works");
         let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
         let view = auth
             .session_view(Some(cookie_pair))

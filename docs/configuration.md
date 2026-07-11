@@ -404,10 +404,23 @@ Stateless `DELETE /mcp` is rejected with 405 rather than pretending a session
 was closed. `/mcp` also honors `MCP-Protocol-Version`; an unsupported header is
 rejected before JSON-RPC dispatch with typed JSON `400 unsupported_protocol_version`.
 
+Native TLS automatically marks stateful MCP and dashboard session cookies
+`Secure`. If a plaintext backend listener is reachable only through an HTTPS
+terminator, set `[http].trusted_https_termination = true` as an explicit
+operator assertion. The backend must not be directly reachable by clients:
+oraclemcp deliberately ignores `Forwarded` and `X-Forwarded-*` scheme headers,
+and this setting does not relax authentication, host/origin, or remote-bind
+guards. Plaintext non-Secure session cookies are permitted only for a
+server-observed loopback peer, preserving local development. A remote plaintext
+MCP initialize still returns `Mcp-Session-Id` for non-browser clients but does
+not mint a privileged browser cookie.
+
 The browser dashboard is never authenticated by loopback alone. `oraclemcp
 dashboard` mints a 0600 one-time ticket in the user runtime directory and opens
 `/dashboard/pair?ticket=...`; the server consumes that ticket once, within 60
 seconds, and returns an HttpOnly, SameSite=Strict dashboard session cookie.
+That cookie is `Secure` under native TLS or asserted trusted HTTPS termination;
+the only plaintext exception is the loopback pairing flow.
 Dashboard session details are fetched from `/dashboard/session` and are kept out
 of browser storage. Dashboard-originated `/operator/v1` POSTs additionally
 require exact same-origin headers, a CSRF token, and a route-scoped action

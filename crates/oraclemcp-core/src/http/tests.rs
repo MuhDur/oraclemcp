@@ -2261,7 +2261,7 @@ fn dashboard_workbench_ddl_apply_is_release_gated() {
     let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
         .expect("ticket mints");
     let login = auth
-        .exchange_ticket(ticket_from_pairing_url(&ticket.url))
+        .exchange_ticket(ticket_from_pairing_url(&ticket.url), false)
         .expect("login works");
     let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
     let view = auth
@@ -2768,6 +2768,7 @@ fn dashboard_pairing_sets_strict_cookie_and_session_view() {
     let cookie = pair.header("set-cookie").expect("dashboard cookie");
     assert!(cookie.contains("HttpOnly"));
     assert!(cookie.contains("SameSite=Strict"));
+    assert!(!cookie.contains("Secure"), "loopback HTTP remains usable");
     let cookie_pair = cookie.split(';').next().expect("cookie pair");
 
     let replay = handle_http_request(
@@ -2837,6 +2838,40 @@ fn dashboard_pairing_sets_strict_cookie_and_session_view() {
             .iter()
             .any(|ticket| ticket["path"] == "/operator/v1/config/apply")
     );
+}
+
+#[test]
+fn dashboard_pairing_uses_secure_cookie_on_effective_https() {
+    let dir = dashboard_test_dir("pairing-secure");
+    let cfg = HttpTransportConfig {
+        effective_scheme: EffectiveHttpScheme::Https,
+        dashboard_auth: Some(Arc::new(DashboardAuth::new(dir.clone()))),
+        ..Default::default()
+    };
+    let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "https://127.0.0.1")
+        .expect("ticket mints");
+    let token = ticket_from_pairing_url(&ticket.url);
+    let pair = handle_http_request(
+        &test_server(),
+        &cfg,
+        HttpRequest::new(
+            "GET",
+            format!("{DASHBOARD_PAIR_PATH}?ticket={token}"),
+            [
+                ("host", "127.0.0.1"),
+                ("accept", "text/html"),
+                ("x-forwarded-proto", "http"),
+            ],
+            Vec::new(),
+        )
+        .with_peer_loopback(true),
+    );
+
+    assert_eq!(pair.status, 303);
+    let cookie = pair.header("set-cookie").expect("dashboard cookie");
+    assert!(cookie.contains("HttpOnly"));
+    assert!(cookie.contains("SameSite=Strict"));
+    assert!(cookie.contains("Secure"));
 }
 
 #[test]
@@ -2964,7 +2999,7 @@ fn malicious_page_cannot_trigger_dashboard_gated_action() {
     let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
         .expect("ticket mints");
     let login = auth
-        .exchange_ticket(ticket_from_pairing_url(&ticket.url))
+        .exchange_ticket(ticket_from_pairing_url(&ticket.url), false)
         .expect("login works");
     let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
     let view = auth
@@ -4168,7 +4203,11 @@ fn initialize_over_streamable_http_returns_json() {
         stateful: false,
         ..Default::default()
     };
-    let response = handle_http_request(&test_server(), &cfg, post(&init_body()));
+    let response = handle_http_request(
+        &test_server(),
+        &cfg,
+        post(&init_body()).with_peer_loopback(true),
+    );
     assert_eq!(response.status, 200);
     assert_eq!(response.header("content-type"), Some("application/json"));
     let body = response_json(&response);
@@ -4203,7 +4242,11 @@ fn stateful_initialize_sets_strict_session_cookie() {
         result_store: Some(Arc::new(HttpResultStore::new())),
         ..Default::default()
     };
-    let response = handle_http_request(&test_server(), &cfg, post(&init_body()));
+    let response = handle_http_request(
+        &test_server(),
+        &cfg,
+        post(&init_body()).with_peer_loopback(true),
+    );
     let session_id = response
         .header("mcp-session-id")
         .expect("initialize returns mcp-session-id");
@@ -4214,6 +4257,137 @@ fn stateful_initialize_sets_strict_session_cookie() {
     assert!(cookie.contains("Path=/mcp"));
     assert!(cookie.contains("HttpOnly"));
     assert!(cookie.contains("SameSite=Strict"));
+    assert!(
+        !cookie.contains("Secure"),
+        "explicit loopback HTTP compatibility stays available"
+    );
+}
+
+#[test]
+fn remote_plaintext_initialize_suppresses_cookie_despite_forwarding_headers() {
+    let cfg = HttpTransportConfig {
+        json_response: true,
+        stateful: true,
+        session_store: Some(Arc::new(HttpSessionStore::default())),
+        result_store: Some(Arc::new(HttpResultStore::new())),
+        ..Default::default()
+    };
+    let request = HttpRequest::new(
+        "POST",
+        MCP_PATH,
+        [
+            ("host", "mcp.example.com"),
+            ("content-type", "application/json"),
+            ("accept", "application/json, text/event-stream"),
+            ("forwarded", "for=192.0.2.10;proto=https"),
+            ("x-forwarded-proto", "https"),
+        ],
+        init_body().to_string().into_bytes(),
+    );
+    let cfg = HttpTransportConfig {
+        allowed_hosts: vec!["mcp.example.com".to_owned()],
+        ..cfg
+    };
+
+    let response = handle_http_request(&test_server(), &cfg, request);
+    assert_eq!(response.status, 200);
+    assert!(
+        response.header("mcp-session-id").is_some(),
+        "non-browser MCP clients retain the explicit session header"
+    );
+    assert_eq!(
+        response.header("set-cookie"),
+        None,
+        "remote plaintext must not mint a privileged browser cookie, and spoofed forwarding headers cannot override the server-observed scheme"
+    );
+}
+
+#[test]
+fn explicit_effective_https_sets_secure_cookie_and_ignores_forwarded_http() {
+    let cfg = HttpTransportConfig {
+        allowed_hosts: vec!["mcp.example.com".to_owned()],
+        json_response: true,
+        stateful: true,
+        effective_scheme: EffectiveHttpScheme::Https,
+        session_store: Some(Arc::new(HttpSessionStore::default())),
+        result_store: Some(Arc::new(HttpResultStore::new())),
+        ..Default::default()
+    };
+    let request = HttpRequest::new(
+        "POST",
+        MCP_PATH,
+        [
+            ("host", "mcp.example.com"),
+            ("content-type", "application/json"),
+            ("accept", "application/json, text/event-stream"),
+            ("forwarded", "for=192.0.2.10;proto=http"),
+            ("x-forwarded-proto", "http"),
+        ],
+        init_body().to_string().into_bytes(),
+    );
+
+    let response = handle_http_request(&test_server(), &cfg, request);
+    let cookie = response
+        .header("set-cookie")
+        .expect("explicit effective HTTPS mints a browser cookie");
+    assert!(cookie.contains("Secure"));
+}
+
+#[test]
+fn stateful_cookie_expiry_matches_transport_and_scope_attributes() {
+    let secure = expired_stateful_session_cookie_header(true);
+    for attribute in ["Path=/mcp", "Max-Age=0", "HttpOnly", "SameSite=Strict"] {
+        assert!(secure.contains(attribute), "missing {attribute}: {secure}");
+    }
+    assert!(secure.contains("Secure"));
+
+    let loopback_http = expired_stateful_session_cookie_header(false);
+    assert!(loopback_http.contains("Max-Age=0"));
+    assert!(!loopback_http.contains("Secure"));
+}
+
+#[test]
+fn effective_https_delete_expires_cookie_with_secure_matching_attributes() {
+    let cfg = HttpTransportConfig {
+        json_response: true,
+        stateful: true,
+        effective_scheme: EffectiveHttpScheme::Https,
+        session_store: Some(Arc::new(HttpSessionStore::default())),
+        result_store: Some(Arc::new(HttpResultStore::new())),
+        ..Default::default()
+    };
+    let init = handle_http_request(&test_server(), &cfg, post(&init_body()));
+    let session_id = init
+        .header("mcp-session-id")
+        .expect("HTTPS initialize returns session id");
+    assert!(
+        init.header("set-cookie")
+            .is_some_and(|cookie| cookie.contains("Secure")),
+        "HTTPS initialize cookie is Secure"
+    );
+    let delete = HttpRequest::new(
+        "DELETE",
+        MCP_PATH,
+        [("host", "127.0.0.1"), ("mcp-session-id", session_id)],
+        Vec::new(),
+    );
+    let response = handle_http_request(&test_server(), &cfg, delete);
+    assert_eq!(response.status, 202);
+    let expired = response
+        .header("set-cookie")
+        .expect("HTTPS DELETE expires the cookie");
+    for attribute in [
+        "Path=/mcp",
+        "Max-Age=0",
+        "HttpOnly",
+        "SameSite=Strict",
+        "Secure",
+    ] {
+        assert!(
+            expired.contains(attribute),
+            "missing {attribute}: {expired}"
+        );
+    }
 }
 
 #[test]
@@ -4223,6 +4397,7 @@ fn oauth_stateful_get_accepts_strict_cookie_with_origin_only() {
     let cfg = HttpTransportConfig {
         json_response: true,
         stateful: true,
+        effective_scheme: EffectiveHttpScheme::Https,
         allowed_origins: vec!["https://app.example".to_owned()],
         oauth: Some(Arc::new(OAuthEnforcement {
             config: ResourceServerConfig {
@@ -4265,6 +4440,11 @@ fn oauth_stateful_get_accepts_strict_cookie_with_origin_only() {
         .and_then(|cookie| cookie.split(';').next())
         .expect("initialize returns cookie pair")
         .to_owned();
+    assert!(
+        init.header("set-cookie")
+            .is_some_and(|cookie| cookie.contains("Secure")),
+        "effective HTTPS must secure the OAuth session cookie"
+    );
     result_store.append_response(session_id, serde_json::json!({ "seq": 1 }));
 
     let cookie_get = handle_http_request(
@@ -4430,9 +4610,19 @@ fn stateful_requests_require_a_known_session_id_after_initialize() {
             ("mcp-session-id", session_id.as_str()),
         ],
         Vec::new(),
-    );
+    )
+    .with_peer_loopback(true);
     let deleted = handle_http_request(&test_server(), &cfg, delete);
     assert_eq!(deleted.status, 202);
+    let expired_cookie = deleted
+        .header("set-cookie")
+        .expect("successful loopback DELETE clears the browser session cookie");
+    assert!(expired_cookie.starts_with(&format!("{STATEFUL_SESSION_COOKIE}=;")));
+    assert!(expired_cookie.contains("Path=/mcp"));
+    assert!(expired_cookie.contains("Max-Age=0"));
+    assert!(expired_cookie.contains("HttpOnly"));
+    assert!(expired_cookie.contains("SameSite=Strict"));
+    assert!(!expired_cookie.contains("Secure"));
     assert_eq!(
         lifecycle
             .closed
@@ -5001,6 +5191,43 @@ fn serve_https_accepts_tls_handshake() {
 }
 
 #[test]
+fn native_https_forces_secure_stateful_session_cookie() {
+    let (cert, key) = self_signed_cert();
+    let tls = crate::tls::build_server_config(&crate::tls::TlsMaterial {
+        cert_chain_pem: cert.clone(),
+        private_key_pem: key,
+        client_ca_pem: None,
+    })
+    .expect("server-only TLS config builds");
+    let (addr, shutdown, handle) = spawn_https_with(
+        tls,
+        test_server(),
+        HttpTransportConfig {
+            json_response: true,
+            stateful: true,
+            ..Default::default()
+        },
+    );
+    let body = init_body().to_string();
+    let response =
+        https_post(addr, tls_client_config(&cert, None), &body).expect("HTTPS initialize request");
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(
+        response.lines().any(|line| {
+            line.to_ascii_lowercase().starts_with("set-cookie:")
+                && line.contains("HttpOnly")
+                && line.contains("SameSite=Strict")
+                && line.contains("Secure")
+        }),
+        "native rustls must force Secure on the stateful cookie: {response}"
+    );
+
+    shutdown.store(true, Ordering::SeqCst);
+    handle.join().expect("HTTPS server thread joins");
+}
+
+#[test]
 fn serve_https_requires_client_certificate_when_mtls_is_configured() {
     let (server_cert, server_key) = self_signed_cert();
     let (client_ca, client_ca_key) = ca_cert();
@@ -5508,7 +5735,7 @@ fn operator_client_credentials_screen_lists_rotates_revokes_without_token_leak()
     let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
         .expect("ticket mints");
     let login = auth
-        .exchange_ticket(ticket_from_pairing_url(&ticket.url))
+        .exchange_ticket(ticket_from_pairing_url(&ticket.url), false)
         .expect("login works");
     let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
     let view = auth
@@ -5745,7 +5972,7 @@ fn uniform_auth_errors_no_enumeration_oracle() {
     let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
         .expect("ticket mints");
     let login = auth
-        .exchange_ticket(ticket_from_pairing_url(&ticket.url))
+        .exchange_ticket(ticket_from_pairing_url(&ticket.url), false)
         .expect("login works");
     let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
     let view = auth
@@ -6067,8 +6294,10 @@ fn sse_response_emits_chunk_frames_before_the_authoritative_result() {
     // a plain client still reads the final result; a streaming-aware client
     // renders chunks progressively.
     let cfg = HttpTransportConfig::default();
+    let request = post(&init_body()).with_peer_loopback(true);
     let response = sse_response(
         &cfg,
+        &request,
         Some("tools/call"),
         streaming_query_response(),
         None,
@@ -6099,6 +6328,7 @@ fn sse_response_emits_chunk_frames_before_the_authoritative_result() {
     });
     let plain = sse_response(
         &cfg,
+        &request,
         Some("tools/call"),
         inline,
         None,
