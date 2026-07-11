@@ -2826,6 +2826,128 @@ fn dashboard_workbench_ddl_apply_is_release_gated() {
         operator_auditor: Some(auditor),
         ..Default::default()
     };
+    let cases = [
+        (
+            "oracle_execute",
+            serde_json::json!({
+                "sql": "CREATE TABLE dashboard_apply_blocked (id NUMBER)",
+                "commit": true,
+                "confirm": "opaque-preview-grant"
+            }),
+        ),
+        (
+            "oracle_compile_object",
+            serde_json::json!({
+                "owner": "APP",
+                "object_type": "PACKAGE",
+                "name": "P",
+                "execute": true,
+                "confirm": "opaque-preview-grant"
+            }),
+        ),
+        (
+            "oracle_create_or_replace",
+            serde_json::json!({
+                "source_code": "CREATE OR REPLACE VIEW v AS SELECT 1 x FROM dual",
+                "execute": true,
+                "confirm": "opaque-preview-grant"
+            }),
+        ),
+        (
+            "oracle_patch_source",
+            serde_json::json!({
+                "owner": "APP",
+                "object_type": "PACKAGE BODY",
+                "name": "P",
+                "patch": "@@ -1 +1 @@",
+                "execute": true,
+                "confirm": "opaque-preview-grant"
+            }),
+        ),
+    ];
+    let routes = [
+        "/operator/v1/actions/confirm",
+        "/operator/v1/actions/execute",
+    ];
+    for (case_index, (tool, arguments)) in cases.iter().enumerate() {
+        for (route_index, path) in routes.iter().enumerate() {
+            let ticket =
+                crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
+                    .expect("ticket mints");
+            let login = auth
+                .exchange_ticket(ticket_from_pairing_url(&ticket.url), false)
+                .expect("login works");
+            let cookie_pair = login.session_cookie.split(';').next().expect("cookie pair");
+            let view = auth
+                .session_view(Some(cookie_pair))
+                .expect("session view works");
+            let action_ticket = view
+                .action_tickets
+                .iter()
+                .find(|ticket| ticket.path == *path)
+                .expect("route action ticket")
+                .ticket
+                .clone();
+            let response = handle_http_request(
+                &server,
+                &cfg,
+                HttpRequest::new(
+                    "POST",
+                    *path,
+                    [
+                        ("host", "127.0.0.1"),
+                        ("origin", "http://127.0.0.1"),
+                        ("sec-fetch-site", "same-origin"),
+                        ("content-type", "application/json"),
+                        ("accept", "application/json"),
+                        ("cookie", cookie_pair),
+                        (DASHBOARD_CSRF_HEADER, view.csrf_token.as_str()),
+                        (DASHBOARD_ACTION_TICKET_HEADER, action_ticket.as_str()),
+                    ],
+                    serde_json::json!({
+                        "idempotency_key": format!("ddl-gate-{case_index}-{route_index}"),
+                        "tool": tool,
+                        "arguments": arguments,
+                    })
+                    .to_string()
+                    .into_bytes(),
+                )
+                .with_peer_loopback(true),
+            );
+            assert_eq!(response.status, 403, "{path} must release-gate {tool}");
+            assert_eq!(
+                response_json(&response)["data"]["error"],
+                serde_json::json!("dashboard_ddl_workbench_disabled"),
+                "{path} must release-gate {tool}"
+            );
+        }
+    }
+    assert_eq!(
+        calls.load(AtomicOrdering::SeqCst),
+        0,
+        "every browser DDL apply target must fail before MCP dispatch"
+    );
+    let records = sink.records();
+    assert_eq!(records.len(), cases.len() * routes.len() * 2);
+    for pair in records.chunks_exact(2) {
+        assert_operator_audit_pair(pair, AuditDecision::Blocked, AuditOutcome::Failed);
+    }
+}
+
+#[test]
+fn dashboard_structured_ddl_preview_remains_available() {
+    let (auditor, sink) = operator_auditor();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = server_with_dispatch(Arc::new(WorkbenchDispatch {
+        calls: Arc::clone(&calls),
+    }));
+    let dir = dashboard_test_dir("ddl-preview");
+    let auth = Arc::new(DashboardAuth::new(dir.clone()));
+    let cfg = HttpTransportConfig {
+        dashboard_auth: Some(Arc::clone(&auth)),
+        operator_auditor: Some(auditor),
+        ..Default::default()
+    };
     let ticket = crate::dashboard_auth::mint_dashboard_pairing_ticket(&dir, "http://127.0.0.1")
         .expect("ticket mints");
     let login = auth
@@ -2835,20 +2957,17 @@ fn dashboard_workbench_ddl_apply_is_release_gated() {
     let view = auth
         .session_view(Some(cookie_pair))
         .expect("session view works");
-    let execute_ticket = view
+    let preview_ticket = view
         .action_tickets
         .iter()
-        .find(|ticket| ticket.path == "/operator/v1/actions/execute")
-        .expect("execute action ticket")
-        .ticket
-        .clone();
-
+        .find(|ticket| ticket.path == "/operator/v1/actions/preview")
+        .expect("preview action ticket");
     let response = handle_http_request(
         &server,
         &cfg,
         HttpRequest::new(
             "POST",
-            "/operator/v1/actions/execute",
+            "/operator/v1/actions/preview",
             [
                 ("host", "127.0.0.1"),
                 ("origin", "http://127.0.0.1"),
@@ -2857,14 +2976,19 @@ fn dashboard_workbench_ddl_apply_is_release_gated() {
                 ("accept", "application/json"),
                 ("cookie", cookie_pair),
                 (DASHBOARD_CSRF_HEADER, view.csrf_token.as_str()),
-                (DASHBOARD_ACTION_TICKET_HEADER, execute_ticket.as_str()),
+                (
+                    DASHBOARD_ACTION_TICKET_HEADER,
+                    preview_ticket.ticket.as_str(),
+                ),
             ],
             serde_json::json!({
-                "tool": "oracle_execute",
+                "idempotency_key": "ddl-preview-compile",
+                "tool": "oracle_compile_object",
                 "arguments": {
-                    "sql": "CREATE TABLE dashboard_apply_blocked (id NUMBER)",
-                    "commit": true,
-                    "confirm": "opaque-preview-grant"
+                    "owner": "APP",
+                    "object_type": "PACKAGE",
+                    "name": "P",
+                    "execute": true
                 }
             })
             .to_string()
@@ -2872,20 +2996,120 @@ fn dashboard_workbench_ddl_apply_is_release_gated() {
         )
         .with_peer_loopback(true),
     );
-    assert_eq!(response.status, 403);
+    assert_eq!(response.status, 200);
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
     assert_eq!(
-        response_json(&response)["data"]["error"],
-        serde_json::json!("dashboard_ddl_workbench_disabled")
-    );
-    assert_eq!(
-        calls.load(AtomicOrdering::SeqCst),
-        0,
-        "browser DDL apply must fail before MCP dispatch"
+        response_json(&response)["data"]["mcp_response"]["result"]["structuredContent"]["args"]["execute"],
+        serde_json::json!(false),
+        "preview route must force the structured tool into non-executing mode"
     );
     assert_operator_audit_pair(
         &sink.records(),
-        AuditDecision::Blocked,
-        AuditOutcome::Failed,
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+}
+
+#[test]
+fn non_browser_operator_keeps_structured_ddl_dispatch_path() {
+    let (auditor, sink) = operator_auditor();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = server_with_dispatch(Arc::new(WorkbenchDispatch {
+        calls: Arc::clone(&calls),
+    }));
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        ..Default::default()
+    };
+    let response = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/actions/execute",
+            &serde_json::json!({
+                "idempotency_key": "non-browser-create-or-replace",
+                "tool": "oracle_create_or_replace",
+                "arguments": {
+                    "source_code": "CREATE OR REPLACE VIEW v AS SELECT 1 x FROM dual",
+                    "execute": true,
+                    "confirm": "opaque-preview-grant"
+                }
+            }),
+        ),
+    );
+
+    assert_eq!(response.status, 200);
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    assert_operator_audit_pair(
+        &sink.records(),
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+}
+
+#[test]
+fn every_browser_action_tool_has_an_explicit_release_policy() {
+    let mut names = std::collections::BTreeSet::new();
+    for policy in OPERATOR_ACTION_TOOL_POLICIES {
+        assert!(
+            names.insert(policy.tool),
+            "duplicate policy for {}",
+            policy.tool
+        );
+        assert_ne!(policy.routes, 0, "{} has no allowed route", policy.tool);
+    }
+    for tool in [
+        "oracle_compile_object",
+        "oracle_create_or_replace",
+        "oracle_patch_source",
+    ] {
+        assert_eq!(
+            operator_action_tool_policy(tool).map(|policy| policy.browser_apply),
+            Some(BrowserApplyPolicy::DdlMutation),
+            "structured mutation tool must be explicitly release-gated: {tool}"
+        );
+    }
+    assert_eq!(
+        operator_action_tool_policy("oracle_execute").map(|policy| policy.browser_apply),
+        Some(BrowserApplyPolicy::ClassifySql)
+    );
+    let admin = dashboard_workbench_release_gate(
+        OperatorRouteKind::ActionConfirm,
+        "oracle_execute",
+        &serde_json::json!({"sql": "GRANT SELECT ON app.orders TO reporting"}),
+    )
+    .expect("browser Admin SQL must be release-gated");
+    assert_eq!(
+        admin["required_level"],
+        serde_json::json!(oraclemcp_guard::OperatingLevel::Admin)
+    );
+    assert!(
+        dashboard_workbench_release_gate(
+            OperatorRouteKind::ActionExecute,
+            "oracle_execute",
+            &serde_json::json!({"sql": "UPDATE t SET x = 1 WHERE id = 2"}),
+        )
+        .is_none(),
+        "ordinary DML behavior must not be changed by the DDL release gate"
+    );
+    assert!(
+        dashboard_workbench_release_gate(
+            OperatorRouteKind::ActionExecute,
+            "oracle_query",
+            &serde_json::json!({"sql": "SELECT 1 FROM dual"}),
+        )
+        .is_none(),
+        "read tools remain browser-allowed"
+    );
+    let unresolved = dashboard_workbench_release_gate(
+        OperatorRouteKind::ActionExecute,
+        "oracle_execute",
+        &serde_json::json!({}),
+    )
+    .expect("unclassifiable browser SQL must fail closed");
+    assert_eq!(
+        unresolved["error"],
+        serde_json::json!("dashboard_action_policy_unresolved")
     );
 }
 
