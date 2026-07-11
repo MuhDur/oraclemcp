@@ -7,14 +7,35 @@ import {
   applyChangeProposal,
   cachedExplorerMetadata,
   clearExplorerMetadataCache,
+  coalesceAuditTimelineRecords,
   decodeOperatorOutcome,
   executeWorkbenchSql,
   explorerMetadataCacheSummary,
+  type AuditTailRecord,
   type DashboardSession,
   type ExplorerMetadataCacheKey,
   type OperatorResponse,
   type WorkbenchActionData
 } from "./operator-client";
+
+function auditRecord(
+  seq: number,
+  outcome: string,
+  correlation?: AuditTailRecord["correlation"]
+): AuditTailRecord {
+  return {
+    schema_version: 7,
+    seq,
+    timestamp: "unix:1",
+    subject_id_hash: "subject-sha256:test",
+    tool: "operator_api",
+    danger_level: "OPERATOR",
+    decision: outcome === "FAILED" ? "BLOCKED" : "ALLOWED",
+    outcome,
+    correlation,
+    sql_sha256: "sha256:route"
+  };
+}
 
 const session: DashboardSession = {
   csrf_token: "csrf",
@@ -308,6 +329,38 @@ describe("operator outcome decoder", () => {
         response("/operator/v1/actions/execute", { status: "accepted", mcp_response: null })
       ).state
     ).toBe("partial");
+  });
+});
+
+describe("audit timeline action correlation", () => {
+  it("shows one terminal action per completed pair and keeps unmatched pending attempts", () => {
+    const records = [
+      auditRecord(1, "PENDING", {
+        request_sha256: "sha256:complete"
+      }),
+      auditRecord(2, "FAILED", {
+        request_sha256: "sha256:complete",
+        parent_seq: 1
+      }),
+      auditRecord(3, "PENDING", {
+        request_sha256: "sha256:crash-window"
+      }),
+      auditRecord(4, "SUCCEEDED")
+    ];
+
+    expect(coalesceAuditTimelineRecords(records).map((record) => record.seq)).toEqual([2, 3, 4]);
+  });
+
+  it("does not coalesce a mismatched or dangling parent link", () => {
+    const records = [
+      auditRecord(10, "PENDING", { request_sha256: "sha256:a" }),
+      auditRecord(11, "FAILED", {
+        request_sha256: "sha256:b",
+        parent_seq: 10
+      })
+    ];
+
+    expect(coalesceAuditTimelineRecords(records)).toHaveLength(2);
   });
 });
 

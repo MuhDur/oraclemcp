@@ -11,9 +11,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -26,8 +27,8 @@ use asupersync::time::wall_now;
 use asupersync::types::Time;
 use asupersync::{Cx, Outcome};
 use oraclemcp_audit::{
-    AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord, AuditSubject, Auditor, DbEvidence,
-    GENESIS_HASH,
+    AuditCancel, AuditCorrelation, AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord,
+    AuditSubject, Auditor, DbEvidence, GENESIS_HASH,
 };
 use oraclemcp_auth::{
     HttpGuardError, HttpGuardPolicy, ResourceServerConfig, SignatureVerifier, TokenError,
@@ -106,6 +107,7 @@ const HTTP_RATE_LIMIT_SCOPE_MCP: &str = "http_mcp_request_rate";
 const HTTP_RATE_LIMIT_SCOPE_OPERATOR: &str = "http_operator_request_rate";
 const HTTP_REQUEST_RATE_POLICY_NAME: &str = "http_principal_request_rate";
 const HTTP_REQUEST_RATE_COST: u32 = 1;
+static NEXT_OPERATOR_AUDIT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 /// Default per-principal HTTP request-rate limit.
 ///
@@ -2007,28 +2009,43 @@ fn handle_http_exchange(
             else {
                 return HttpExchange::Buffered(operator_authority_required_response());
             };
+            let operator_audit = match begin_operator_audit(config, &operator_subject, &request) {
+                Ok(attempt) => attempt,
+                Err(response) => return HttpExchange::Buffered(response),
+            };
             if let Err(response) = try_admit_http_request_rate(
                 &config.request_rate_limits,
                 HTTP_RATE_LIMIT_SCOPE_OPERATOR,
                 &operator_subject.legacy_agent_identity(),
                 "retry after retry_after_ms, or reduce operator API request rate for this subject",
             ) {
-                return HttpExchange::Buffered(response);
+                return HttpExchange::Buffered(complete_operator_audit(
+                    config,
+                    &operator_subject,
+                    &request,
+                    &operator_audit,
+                    response,
+                ));
             }
-            let operator_audit_seq =
-                match append_operator_audit(config, &operator_subject, &request) {
-                    Ok(seq) => seq,
-                    Err(response) => return HttpExchange::Buffered(response),
-                };
             let dashboard_browser = config.dashboard_auth.is_some() && principal_key.is_none();
-            let response = handle_operator_api_route(
-                server,
+            let response = catch_unwind(AssertUnwindSafe(|| {
+                handle_operator_api_route(
+                    server,
+                    config,
+                    &request,
+                    &operator_subject,
+                    operator_route,
+                    operator_audit.seq,
+                    dashboard_browser,
+                )
+            }))
+            .unwrap_or_else(|_| operator_route_panicked_response());
+            let response = complete_operator_audit(
                 config,
-                &request,
                 &operator_subject,
-                operator_route,
-                operator_audit_seq,
-                dashboard_browser,
+                &request,
+                &operator_audit,
+                response,
             );
             return HttpExchange::Buffered(if dashboard_browser {
                 with_dashboard_security_headers(response)
@@ -2311,6 +2328,37 @@ fn operator_audit_failed_response() -> HttpResponse {
     )
 }
 
+fn operator_route_panicked_response() -> HttpResponse {
+    json_response(
+        500,
+        &json!({
+            "error": "operator_route_panicked",
+            "message": "operator route panicked; the owning lane was contained and the request failed",
+            "outcome": "failed",
+            "next_step": "inspect the audit correlation and service logs before retrying",
+        }),
+    )
+}
+
+fn operator_terminal_audit_failed_response(
+    attempt: &OperatorAuditAttempt,
+    original_http_status: u16,
+) -> HttpResponse {
+    json_response(
+        500,
+        &json!({
+            "error": "operator_terminal_audit_failed",
+            "message": "operator request returned but its terminal audit record could not be durably appended",
+            "outcome": "indeterminate",
+            "pending_audit_seq": attempt.seq,
+            "request_sha256": attempt.request_sha256,
+            "original_http_status": original_http_status,
+            "side_effects": "may_have_occurred",
+            "next_step": "do not retry blindly; verify target state and repair the audit sink using the pending record correlation",
+        }),
+    )
+}
+
 /// Post-initialize `MCP-Protocol-Version` header requirement (bead
 /// oraclemcp-s693). The 2025-06-18 Streamable HTTP spec makes the header
 /// mandatory on every request after `initialize`; sessions that negotiated an
@@ -2386,14 +2434,21 @@ fn audit_timestamp() -> String {
     format!("unix:{secs}")
 }
 
-fn append_operator_audit(
+#[derive(Clone, Debug)]
+struct OperatorAuditAttempt {
+    seq: u64,
+    request_sha256: String,
+}
+
+fn begin_operator_audit(
     config: &HttpTransportConfig,
     subject: &AuditSubject,
     request: &HttpRequest,
-) -> Result<u64, HttpResponse> {
+) -> Result<OperatorAuditAttempt, HttpResponse> {
     let Some(auditor) = &config.operator_auditor else {
         return Err(operator_audit_required_response());
     };
+    let request_sha256 = operator_audit_request_sha256(subject, request);
     let draft = AuditEntryDraft {
         subject: subject.clone(),
         db_evidence: None,
@@ -2403,12 +2458,186 @@ fn append_operator_audit(
         danger_level: "OPERATOR".to_owned(),
         decision: AuditDecision::Allowed,
         rows_affected: None,
-        outcome: AuditOutcome::Succeeded,
+        outcome: AuditOutcome::Pending,
     };
     auditor
-        .append(&draft, audit_timestamp(), true)
-        .map(|record| record.seq)
+        .append_correlated(
+            &draft,
+            audit_timestamp(),
+            true,
+            Some(AuditCorrelation::attempt(request_sha256.clone())),
+        )
+        .map(|record| OperatorAuditAttempt {
+            seq: record.seq,
+            request_sha256,
+        })
         .map_err(|_| operator_audit_failed_response())
+}
+
+fn operator_audit_request_sha256(subject: &AuditSubject, request: &HttpRequest) -> String {
+    let nonce = NEXT_OPERATOR_AUDIT_REQUEST.fetch_add(1, Ordering::Relaxed);
+    let observed_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let material = format!(
+        "oraclemcp-operator-audit-request-v1\0{}\0{}\0{}\0{observed_nanos}\0{nonce}",
+        subject.legacy_agent_identity(),
+        request.method,
+        request.path,
+    );
+    oraclemcp_audit::sha256_hex(material.as_bytes())
+}
+
+#[derive(Clone, Debug)]
+struct OperatorAuditTerminal {
+    decision: AuditDecision,
+    outcome: AuditOutcome,
+    cancel: Option<AuditCancel>,
+}
+
+fn complete_operator_audit(
+    config: &HttpTransportConfig,
+    subject: &AuditSubject,
+    request: &HttpRequest,
+    attempt: &OperatorAuditAttempt,
+    response: HttpResponse,
+) -> HttpResponse {
+    let terminal = operator_audit_terminal(&response);
+    let draft = AuditEntryDraft {
+        subject: subject.clone(),
+        db_evidence: None,
+        cancel: terminal.cancel,
+        tool: "operator_api".to_owned(),
+        sql: format!("{} {}", request.method, request.path),
+        danger_level: "OPERATOR".to_owned(),
+        decision: terminal.decision,
+        rows_affected: None,
+        outcome: terminal.outcome,
+    };
+    let appended = config.operator_auditor.as_ref().is_some_and(|auditor| {
+        auditor
+            .append_correlated(
+                &draft,
+                audit_timestamp(),
+                true,
+                Some(AuditCorrelation::terminal(
+                    attempt.request_sha256.clone(),
+                    attempt.seq,
+                )),
+            )
+            .is_ok()
+    });
+    if appended {
+        response
+    } else {
+        operator_terminal_audit_failed_response(attempt, response.status)
+    }
+}
+
+fn operator_audit_terminal(response: &HttpResponse) -> OperatorAuditTerminal {
+    if response.status == 499 {
+        return OperatorAuditTerminal {
+            decision: AuditDecision::Allowed,
+            outcome: AuditOutcome::Failed,
+            cancel: Some(AuditCancel::new(
+                "Transport",
+                "operator_request_cancelled_before_terminal_result",
+            )),
+        };
+    }
+    if (400..500).contains(&response.status) {
+        return OperatorAuditTerminal {
+            decision: AuditDecision::Blocked,
+            outcome: AuditOutcome::Failed,
+            cancel: None,
+        };
+    }
+    if response.status >= 500 {
+        return OperatorAuditTerminal {
+            decision: AuditDecision::Allowed,
+            outcome: AuditOutcome::Failed,
+            cancel: None,
+        };
+    }
+    if let Ok(body) = serde_json::from_slice::<Value>(&response.body)
+        && let Some(refused) = operator_semantic_failure(&body)
+    {
+        return OperatorAuditTerminal {
+            decision: if refused {
+                AuditDecision::Blocked
+            } else {
+                AuditDecision::Allowed
+            },
+            outcome: AuditOutcome::Failed,
+            cancel: None,
+        };
+    }
+    OperatorAuditTerminal {
+        decision: AuditDecision::Allowed,
+        outcome: AuditOutcome::Succeeded,
+        cancel: None,
+    }
+}
+
+/// Return `Some(refused)` for a terminal semantic failure carried inside a 2xx
+/// operator response. MCP/JSON-RPC errors deliberately use HTTP 200, so status
+/// alone cannot decide the audit outcome.
+fn operator_semantic_failure(body: &Value) -> Option<bool> {
+    let data = body.get("data").unwrap_or(body);
+    if data.get("error").is_some_and(|error| !error.is_null()) {
+        return Some(operator_error_class(data).is_some_and(operator_error_class_is_refusal));
+    }
+    if data
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| {
+            matches!(
+                status,
+                "accepted" | "stopped_on_failure" | "not_started" | "partial"
+            )
+        })
+    {
+        return Some(false);
+    }
+    let mcp_response = data.get("mcp_response")?;
+    let Some(mcp_response) = mcp_response.as_object() else {
+        return Some(false);
+    };
+    if let Some(error) = mcp_response.get("error") {
+        return Some(
+            operator_error_class(error)
+                .or_else(|| operator_error_class(data))
+                .is_some_and(operator_error_class_is_refusal),
+        );
+    }
+    let Some(result) = mcp_response.get("result").and_then(Value::as_object) else {
+        return Some(false);
+    };
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        let structured = result.get("structuredContent").unwrap_or(&Value::Null);
+        return Some(operator_error_class(structured).is_some_and(operator_error_class_is_refusal));
+    }
+    None
+}
+
+fn operator_error_class(value: &Value) -> Option<&str> {
+    value
+        .get("error_class")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/data/error_class").and_then(Value::as_str))
+}
+
+fn operator_error_class_is_refusal(error_class: &str) -> bool {
+    matches!(
+        error_class,
+        "CHALLENGE_REQUIRED"
+            | "FORBIDDEN_STATEMENT"
+            | "INSUFFICIENT_PRIVILEGE"
+            | "LEASE_REQUIRED"
+            | "OPERATING_LEVEL_TOO_LOW"
+            | "POLICY_DENIED"
+            | "RUNTIME_STATE_REQUIRED"
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2884,8 +3113,9 @@ fn operator_active_lanes_data(config: &HttpTransportConfig) -> Value {
 ///
 /// Fail-closed control action, not a data path: the caller has already cleared
 /// [`OperatorAuthorityPolicy::authorize`] (Subject is server-derived from the
-/// transport, never browser-supplied) and the request is already recorded in
-/// the operator audit hash-chain by [`append_operator_audit`] before dispatch.
+/// transport, never browser-supplied) and the request has a durable Pending
+/// record from [`begin_operator_audit`] before dispatch; the caller appends the
+/// correlated terminal outcome after this route returns.
 /// This route only resolves the lane id to its server-internal binding and
 /// drops the lane through the lifecycle hook — the lane's connection, elevation
 /// window, and single-use grants go away. It never runs SQL, so it cannot
@@ -4530,6 +4760,7 @@ fn redacted_audit_record(record: &AuditRecord) -> Value {
         "danger_level": record.danger_level,
         "decision": record.decision,
         "outcome": record.outcome,
+        "correlation": record.correlation,
         "rows_affected": record.rows_affected,
         "sql_sha256": record.sql_sha256,
         "sql_normalized_sha256": record.sql_normalized_sha256,
@@ -4953,7 +5184,28 @@ fn handle_operator_action_route(
             "arguments": arguments,
         }
     });
-    let response = server.handle_jsonrpc_request_with_context(rpc, None, context);
+    let response = match server.handle_jsonrpc_request_with_context_outcome(rpc, None, context) {
+        Outcome::Ok(response) => response,
+        Outcome::Err(error) => Some(error.into_response()),
+        Outcome::Cancelled(reason) => {
+            let response = dispatch_cancelled_response(&reason);
+            let completed_facts = idempotency_facts.completed(audit_timestamp());
+            return config.operator_idempotency.complete(
+                idempotency_lease,
+                completed_facts,
+                response,
+            );
+        }
+        Outcome::Panicked(payload) => {
+            let response = dispatch_panicked_response(&payload);
+            let completed_facts = idempotency_facts.completed(audit_timestamp());
+            return config.operator_idempotency.complete(
+                idempotency_lease,
+                completed_facts,
+                response,
+            );
+        }
+    };
     let status = if response.is_some() {
         "forwarded"
     } else {

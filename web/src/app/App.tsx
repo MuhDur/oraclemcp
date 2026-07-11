@@ -77,6 +77,7 @@ import {
   executeWorkbenchSql,
   applyConfigDraft,
   cancelLane,
+  coalesceAuditTimelineRecords,
   parseClassifierLadder,
   fetchActiveLanes,
   fetchClientCredentials,
@@ -6830,14 +6831,17 @@ function AuditFactTile({
 }
 
 function AuditTimelineTable({ records }: { records: AuditTailRecord[] }): React.ReactElement {
+  const actions = coalesceAuditTimelineRecords(records);
   return (
     <Surface className="overflow-hidden">
       <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
         <div>
           <h3 className="text-base font-bold text-[var(--om-text-bright)]">Timeline</h3>
-          <p className="mt-1 text-sm text-[var(--om-text-muted)]">{records.length} records</p>
+          <p className="mt-1 text-sm text-[var(--om-text-muted)]">
+            {actions.length} actions · {records.length} signed records
+          </p>
         </div>
-        <Badge tone={records.length > 0 ? "ok" : "off"}>{records.length > 0 ? "ready" : "empty"}</Badge>
+        <Badge tone={actions.length > 0 ? "ok" : "off"}>{actions.length > 0 ? "ready" : "empty"}</Badge>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[1080px] border-collapse text-left">
@@ -6852,14 +6856,14 @@ function AuditTimelineTable({ records }: { records: AuditTailRecord[] }): React.
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--om-border)]">
-            {records.length === 0 ? (
+            {actions.length === 0 ? (
               <tr>
                 <td className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]" colSpan={6}>
                   No audit records
                 </td>
               </tr>
             ) : (
-              records.map((record) => (
+              actions.map((record) => (
                 <tr key={`${record.seq}-${record.sql_sha256}`} className="bg-[var(--om-surface)]">
                   <td className="px-4 py-4 align-top font-mono text-sm text-[var(--om-text-bright)]">{record.seq}</td>
                   <td className="px-4 py-4 align-top text-sm text-[var(--om-text)]">
@@ -6872,8 +6876,18 @@ function AuditTimelineTable({ records }: { records: AuditTailRecord[] }): React.
                     <p className="font-semibold text-[var(--om-text-bright)]">{record.tool}</p>
                     <div className="mt-2 flex flex-wrap gap-2">
                       <Badge tone="info">{record.danger_level}</Badge>
-                      <Badge tone={record.outcome === "SUCCEEDED" ? "ok" : "warn"}>{record.outcome}</Badge>
+                      <Badge tone={record.outcome === "SUCCEEDED" ? "ok" : record.outcome === "PENDING" ? "info" : "warn"}>
+                        {record.outcome}
+                      </Badge>
+                      <Badge tone={record.decision === "BLOCKED" ? "warn" : "neutral"}>{record.decision}</Badge>
                     </div>
+                    {record.correlation ? (
+                      <p className="mt-2 font-mono text-xs text-[var(--om-text-muted)]">
+                        {typeof record.correlation.parent_seq === "number"
+                          ? `terminal for #${record.correlation.parent_seq}`
+                          : "pending terminal outcome"}
+                      </p>
+                    ) : null}
                   </td>
                   <td className="px-4 py-4 align-top text-sm">
                     <p className="max-w-[360px] break-words font-mono text-xs leading-5 text-[var(--om-text-bright)]">

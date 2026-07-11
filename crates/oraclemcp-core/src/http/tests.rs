@@ -59,6 +59,24 @@ impl ToolDispatch for AtCapacityDispatch {
     }
 }
 
+struct PolicyDeniedDispatch;
+impl ToolDispatch for PolicyDeniedDispatch {
+    fn dispatch<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        _context: DispatchContext<'a>,
+        _name: &'a str,
+        _args: Value,
+    ) -> DispatchFuture<'a> {
+        Box::pin(async {
+            Outcome::Err(ErrorEnvelope::new(
+                ErrorClass::PolicyDenied,
+                "test policy denied the operator action",
+            ))
+        })
+    }
+}
+
 struct CancelledDispatch;
 impl ToolDispatch for CancelledDispatch {
     fn dispatch<'a>(
@@ -565,6 +583,80 @@ fn operator_auditor() -> (Arc<Auditor>, Arc<oraclemcp_audit::MemoryAuditSink>) {
     (auditor, sink)
 }
 
+fn assert_operator_audit_pair(
+    records: &[AuditRecord],
+    expected_decision: AuditDecision,
+    expected_outcome: AuditOutcome,
+) {
+    assert_eq!(records.len(), 2, "one request emits attempt + terminal");
+    let attempt = &records[0];
+    let terminal = &records[1];
+    assert_eq!(attempt.tool, "operator_api");
+    assert_eq!(terminal.tool, "operator_api");
+    assert_eq!(attempt.outcome, AuditOutcome::Pending);
+    assert_eq!(attempt.decision, AuditDecision::Allowed);
+    assert_eq!(terminal.decision, expected_decision);
+    assert_eq!(terminal.outcome, expected_outcome);
+    assert_eq!(attempt.sql_sha256, terminal.sql_sha256);
+    let attempt_correlation = attempt.correlation.as_ref().expect("attempt correlation");
+    let terminal_correlation = terminal.correlation.as_ref().expect("terminal correlation");
+    assert_eq!(attempt_correlation.parent_seq, None);
+    assert_eq!(terminal_correlation.parent_seq, Some(attempt.seq));
+    assert_eq!(
+        terminal_correlation.request_sha256,
+        attempt_correlation.request_sha256
+    );
+    assert!(attempt.hash_is_valid());
+    assert!(terminal.hash_is_valid());
+}
+
+#[derive(Default)]
+struct FailTerminalAuditSink {
+    appends: AtomicUsize,
+    records: Mutex<Vec<AuditRecord>>,
+}
+
+impl oraclemcp_audit::AuditSink for FailTerminalAuditSink {
+    fn append(&self, record: &AuditRecord) -> Result<(), oraclemcp_audit::AuditError> {
+        if self.appends.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+            self.records.lock().push(record.clone());
+            Ok(())
+        } else {
+            Err(oraclemcp_audit::AuditError::Io(
+                "forced terminal append failure".to_owned(),
+            ))
+        }
+    }
+
+    fn flush(&self) -> Result<(), oraclemcp_audit::AuditError> {
+        Ok(())
+    }
+}
+
+fn terminal_failing_operator_auditor() -> (Arc<Auditor>, Arc<FailTerminalAuditSink>) {
+    struct SharedSink(Arc<FailTerminalAuditSink>);
+    impl oraclemcp_audit::AuditSink for SharedSink {
+        fn append(&self, record: &AuditRecord) -> Result<(), oraclemcp_audit::AuditError> {
+            self.0.append(record)
+        }
+
+        fn flush(&self) -> Result<(), oraclemcp_audit::AuditError> {
+            self.0.flush()
+        }
+    }
+
+    let sink = Arc::new(FailTerminalAuditSink::default());
+    let key = oraclemcp_audit::SigningKey::new(
+        "operator-terminal-failure-test",
+        b"0123456789abcdef0123456789abcdef".to_vec(),
+    )
+    .expect("valid test key");
+    (
+        Arc::new(Auditor::new(Box::new(SharedSink(Arc::clone(&sink))), key)),
+        sink,
+    )
+}
+
 fn audit_tail_fixture_path(name: &str) -> PathBuf {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     dir.push("../../target/tmp/operator-audit-tail-tests");
@@ -737,8 +829,7 @@ fn operator_api_routes_are_typed_json_404_and_parse_query() {
         serde_json::json!("prod")
     );
     let records = sink.records();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].tool, "operator_api");
+    assert_operator_audit_pair(&records, AuditDecision::Blocked, AuditOutcome::Failed);
     assert_eq!(
         records[0].sql_preview,
         "<sql text redacted; see sql_sha256>"
@@ -764,6 +855,115 @@ fn operator_api_routes_are_typed_json_404_and_parse_query() {
         .with_peer_loopback(true),
     );
     assert_eq!(bad_host.status, 403);
+}
+
+#[test]
+fn operator_malformed_body_and_rate_limit_emit_blocked_terminal_records() {
+    let (auditor, sink) = operator_auditor();
+    let limiters = Arc::new(HttpRequestRateLimiters::new(HttpRequestRateLimitConfig {
+        rate_per_second: 1,
+        burst: 2,
+        max_buckets: 8,
+    }));
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        request_rate_limits: Arc::clone(&limiters),
+        ..Default::default()
+    };
+
+    let malformed = handle_http_request(
+        &test_server(),
+        &cfg,
+        operator_json_post(
+            "/operator/v1/lanes/cancel",
+            &serde_json::json!(["not", "an", "object"]),
+        ),
+    );
+    assert_eq!(malformed.status, 400);
+
+    let first_health = handle_http_request(
+        &test_server(),
+        &cfg,
+        operator_json_get("/operator/v1/health"),
+    );
+    assert_eq!(first_health.status, 200);
+    let throttled = handle_http_request(
+        &test_server(),
+        &cfg,
+        operator_json_get("/operator/v1/health"),
+    );
+    assert_eq!(throttled.status, 429);
+
+    let records = sink.records();
+    assert_eq!(records.len(), 6);
+    assert_operator_audit_pair(&records[0..2], AuditDecision::Blocked, AuditOutcome::Failed);
+    assert_operator_audit_pair(
+        &records[2..4],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(&records[4..6], AuditDecision::Blocked, AuditOutcome::Failed);
+    assert_ne!(
+        records[2].correlation.as_ref().unwrap().request_sha256,
+        records[4].correlation.as_ref().unwrap().request_sha256,
+        "identical repeated routes must still have unique correlation ids"
+    );
+}
+
+#[test]
+fn operator_conflict_and_provider_failure_never_emit_success_terminals() {
+    let (auditor, sink) = operator_auditor();
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        ..Default::default()
+    };
+
+    let conflict = handle_http_request(
+        &test_server(),
+        &cfg,
+        operator_json_post(
+            "/operator/v1/lanes/cancel",
+            &serde_json::json!({ "lane_id": "lane-a" }),
+        ),
+    );
+    assert_eq!(conflict.status, 409);
+    let unavailable = handle_http_request(
+        &test_server(),
+        &cfg,
+        operator_json_get("/operator/v1/config"),
+    );
+    assert_eq!(unavailable.status, 503);
+
+    let records = sink.records();
+    assert_eq!(records.len(), 4);
+    assert_operator_audit_pair(&records[0..2], AuditDecision::Blocked, AuditOutcome::Failed);
+    assert_operator_audit_pair(&records[2..4], AuditDecision::Allowed, AuditOutcome::Failed);
+}
+
+#[test]
+fn interrupted_operator_request_leaves_only_an_honest_pending_attempt() {
+    let (auditor, sink) = operator_auditor();
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        ..Default::default()
+    };
+    let request = operator_json_post(
+        "/operator/v1/actions/execute",
+        &serde_json::json!({ "tool": "oracle_query" }),
+    );
+    let subject = AuditSubject::new("local-owner", "process-owner").with_authn_method("loopback");
+
+    let attempt = begin_operator_audit(&cfg, &subject, &request).expect("durable attempt");
+    let records = sink.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].seq, attempt.seq);
+    assert_eq!(records[0].outcome, AuditOutcome::Pending);
+    assert_eq!(records[0].correlation.as_ref().unwrap().parent_seq, None);
+    assert_eq!(
+        records[0].correlation.as_ref().unwrap().request_sha256,
+        attempt.request_sha256
+    );
+    assert!(records[0].hash_is_valid());
 }
 
 #[test]
@@ -1086,8 +1286,7 @@ fn operator_lane_cancel_is_operator_gated_and_audited() {
     }
 
     let records = sink.records();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].tool, "operator_api");
+    assert_operator_audit_pair(&records, AuditDecision::Allowed, AuditOutcome::Succeeded);
     assert_eq!(
         records[0].sql_preview,
         "<sql text redacted; see sql_sha256>"
@@ -1109,6 +1308,109 @@ fn operator_lane_cancel_is_operator_gated_and_audited() {
         1,
         "unknown lane must not terminate anything"
     );
+    let records = sink.records();
+    assert_eq!(records.len(), 4);
+    assert_operator_audit_pair(&records[2..], AuditDecision::Blocked, AuditOutcome::Failed);
+}
+
+#[test]
+fn operator_dispatch_cancellation_is_terminal_failure_with_cancel_evidence() {
+    let (auditor, sink) = operator_auditor();
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        ..Default::default()
+    };
+    let response = handle_http_request(
+        &cancelled_server(),
+        &cfg,
+        operator_json_post(
+            "/operator/v1/actions/execute",
+            &serde_json::json!({
+                "idempotency_key": "cancelled-operator-action",
+                "tool": "oracle_query",
+                "arguments": { "sql": "SELECT 1 FROM dual" }
+            }),
+        ),
+    );
+
+    assert_eq!(response.status, 499);
+    assert_eq!(
+        response_json(&response)["outcome"],
+        serde_json::json!("cancelled")
+    );
+    let records = sink.records();
+    assert_operator_audit_pair(&records, AuditDecision::Allowed, AuditOutcome::Failed);
+    assert_eq!(
+        records[1].cancel,
+        Some(AuditCancel::new(
+            "Transport",
+            "operator_request_cancelled_before_terminal_result"
+        ))
+    );
+
+    let panicked = handle_http_request(
+        &panicked_server(),
+        &cfg,
+        operator_json_post(
+            "/operator/v1/actions/execute",
+            &serde_json::json!({
+                "idempotency_key": "panicked-operator-action",
+                "tool": "oracle_query",
+                "arguments": { "sql": "SELECT 1 FROM dual" }
+            }),
+        ),
+    );
+    assert_eq!(panicked.status, 500);
+    assert_eq!(
+        response_json(&panicked)["outcome"],
+        serde_json::json!("panicked")
+    );
+    let records = sink.records();
+    assert_eq!(records.len(), 4);
+    assert_operator_audit_pair(&records[2..], AuditDecision::Allowed, AuditOutcome::Failed);
+    assert_eq!(records[3].cancel, None);
+}
+
+#[test]
+fn terminal_audit_failure_surfaces_indeterminate_after_control_side_effect() {
+    let (auditor, sink) = terminal_failing_operator_auditor();
+    let lifecycle = Arc::new(CancelRecordingLifecycle::default());
+    let cfg = HttpTransportConfig {
+        stateful: true,
+        operator_auditor: Some(auditor),
+        session_lifecycle: Some(Arc::clone(&lifecycle) as Arc<dyn HttpSessionLifecycle>),
+        ..Default::default()
+    };
+    let response = handle_http_request(
+        &test_server(),
+        &cfg,
+        operator_json_post(
+            "/operator/v1/lanes/cancel",
+            &serde_json::json!({ "lane_id": "lane-a" }),
+        ),
+    );
+
+    assert_eq!(response.status, 500);
+    let body = response_json(&response);
+    assert_eq!(
+        body["error"],
+        serde_json::json!("operator_terminal_audit_failed")
+    );
+    assert_eq!(body["outcome"], serde_json::json!("indeterminate"));
+    assert_eq!(body["side_effects"], serde_json::json!("may_have_occurred"));
+    assert_eq!(body["original_http_status"], serde_json::json!(200));
+    assert!(body["request_sha256"].as_str().is_some_and(|value| {
+        value.starts_with("sha256:") && value.len() == "sha256:".len() + 64
+    }));
+    assert_eq!(
+        lifecycle.closed.lock().expect("cancel lock").len(),
+        1,
+        "the response must not falsely claim rollback after the side effect"
+    );
+    let records = sink.records.lock().clone();
+    assert_eq!(records.len(), 1, "only the durable Pending record exists");
+    assert_eq!(records[0].outcome, AuditOutcome::Pending);
+    assert_eq!(body["pending_audit_seq"], serde_json::json!(records[0].seq));
 }
 
 fn classifier_ladder_draft(
@@ -1449,21 +1751,22 @@ fn operator_v1_serves_schema_health_events_and_action_mapping() {
 
     let records = sink.records();
     assert!(
-        records.len() >= 5,
+        records.len() >= 10,
         "schema, health, metrics, events, and action routes are audited"
     );
-    for record in records.iter().take(5) {
+    for record in records.iter().take(10) {
         assert_eq!(record.sql_preview, "<sql text redacted; see sql_sha256>");
     }
-    for (record, action) in records.iter().zip([
+    for (pair, action) in records.chunks_exact(2).zip([
         "GET /operator/v1/schema",
         "GET /operator/v1/health",
         "GET /operator/v1/metrics",
         "GET /operator/v1/events",
         "POST /operator/v1/actions/preview",
     ]) {
+        assert_operator_audit_pair(pair, AuditDecision::Allowed, AuditOutcome::Succeeded);
         assert_eq!(
-            record.sql_sha256,
+            pair[0].sql_sha256,
             oraclemcp_audit::sha256_hex(action.as_bytes())
         );
     }
@@ -1569,6 +1872,40 @@ fn audit_tail_filters_exports_redacted_proof_bundle() {
         subject_filter_body["data"]["records"][0]["subject_id_hash"],
         serde_json::json!(subject_id_hash)
     );
+}
+
+#[test]
+fn audit_tail_projects_hash_covered_operator_correlation() {
+    let key = oraclemcp_audit::SigningKey::new(
+        "tail-correlation",
+        b"0123456789abcdef0123456789abcdef".to_vec(),
+    )
+    .expect("valid key");
+    let draft = audit_tail_draft(
+        "operator",
+        "operator_api",
+        "POST /operator/v1/actions/execute",
+        "OPERATOR",
+        AuditOutcome::Failed,
+        None,
+    );
+    let record = AuditRecord::chained_signed_correlated(
+        &draft,
+        9,
+        GENESIS_HASH,
+        "unix:1".to_owned(),
+        &key,
+        Some(AuditCorrelation::terminal("sha256:request-9", 8)),
+    );
+
+    let redacted = redacted_audit_record(&record);
+    assert_eq!(
+        redacted["correlation"]["request_sha256"],
+        serde_json::json!("sha256:request-9")
+    );
+    assert_eq!(redacted["correlation"]["parent_seq"], serde_json::json!(8));
+    assert_eq!(redacted["outcome"], serde_json::json!("FAILED"));
+    assert!(record.hash_is_valid());
 }
 
 #[test]
@@ -2209,7 +2546,7 @@ fn workbench_no_bypass_guard_is_the_feature() {
 
 #[test]
 fn operator_http_200_preserves_mcp_failure_and_partial_apply_contract() {
-    let (auditor, _sink) = operator_auditor();
+    let (auditor, sink) = operator_auditor();
     let dir = dashboard_test_dir("operator-semantic-outcome");
     let proposals = Arc::new(crate::change_proposal::ChangeProposalStore::new(
         crate::file_store::FileStore::open(dir.join("state")).expect("proposal store"),
@@ -2296,6 +2633,49 @@ fn operator_http_200_preserves_mcp_failure_and_partial_apply_contract() {
         apply_json["data"]["results"][0]["action_response"]["data"]["mcp_response"]["result"]["isError"],
         serde_json::json!(true),
         "the client decoder must inspect the nested failed statement, not HTTP 200"
+    );
+
+    let records = sink.records();
+    assert_eq!(records.len(), 6);
+    assert_operator_audit_pair(&records[0..2], AuditDecision::Allowed, AuditOutcome::Failed);
+    assert_operator_audit_pair(
+        &records[2..4],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(&records[4..6], AuditDecision::Allowed, AuditOutcome::Failed);
+}
+
+#[test]
+fn operator_http_200_mcp_policy_refusal_is_a_blocked_terminal() {
+    let (auditor, sink) = operator_auditor();
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        ..Default::default()
+    };
+    let server = server_with_dispatch(Arc::new(PolicyDeniedDispatch));
+    let response = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/actions/execute",
+            &serde_json::json!({
+                "idempotency_key": "semantic-policy-refusal",
+                "tool": "oracle_query",
+                "arguments": { "sql": "SELECT 1 FROM dual" }
+            }),
+        ),
+    );
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response_json(&response)["data"]["mcp_response"]["result"]["structuredContent"]["error_class"],
+        serde_json::json!("POLICY_DENIED")
+    );
+    assert_operator_audit_pair(
+        &sink.records(),
+        AuditDecision::Blocked,
+        AuditOutcome::Failed,
     );
 }
 
@@ -2434,7 +2814,7 @@ fn operator_execute_allows_read_only_metadata_tools_for_explorer() {
 
 #[test]
 fn dashboard_workbench_ddl_apply_is_release_gated() {
-    let (auditor, _sink) = operator_auditor();
+    let (auditor, sink) = operator_auditor();
     let calls = Arc::new(AtomicUsize::new(0));
     let server = server_with_dispatch(Arc::new(WorkbenchDispatch {
         calls: Arc::clone(&calls),
@@ -2501,6 +2881,11 @@ fn dashboard_workbench_ddl_apply_is_release_gated() {
         calls.load(AtomicOrdering::SeqCst),
         0,
         "browser DDL apply must fail before MCP dispatch"
+    );
+    assert_operator_audit_pair(
+        &sink.records(),
+        AuditDecision::Blocked,
+        AuditOutcome::Failed,
     );
 }
 
@@ -6824,7 +7209,7 @@ fn scoped_principal_cannot_act_as_operator_without_allowlist_and_operator_action
     let allowed = handle_http_request(&test_server(), &allowed_cfg, request());
     assert_eq!(allowed.status, 404);
     let records = sink.records();
-    assert_eq!(records.len(), 1);
+    assert_operator_audit_pair(&records, AuditDecision::Blocked, AuditOutcome::Failed);
     let (_, stable_id) = principal_key.split_once(':').expect("principal key");
     assert_eq!(
         records[0].subject,

@@ -29,8 +29,9 @@ pub use hmac::{
     hmac_sha256_hex,
 };
 pub use record::{
-    AUDIT_SCHEMA_VERSION, AuditCancel, AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord,
-    AuditSubject, DbEvidence, GENESIS_HASH, SigningKey, normalized_sql_sha256, sha256_hex,
+    AUDIT_SCHEMA_VERSION, AuditCancel, AuditCorrelation, AuditDecision, AuditEntryDraft,
+    AuditOutcome, AuditRecord, AuditSubject, DbEvidence, GENESIS_HASH, SigningKey,
+    normalized_sql_sha256, sha256_hex,
 };
 pub use shipping::{
     ShippingAuditSink, ShippingError, ShippingForwarder, WormFileForwarder, cef_line, syslog_line,

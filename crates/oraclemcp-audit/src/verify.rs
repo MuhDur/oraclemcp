@@ -368,6 +368,7 @@ mod tests {
             subject: AuditSubject::default(),
             db_evidence: None,
             cancel: None,
+            correlation: None,
             tool: "oracle_execute".to_owned(),
             sql_sha256,
             sql_normalized_sha256: String::new(),

@@ -275,7 +275,7 @@ impl AuditSink for ShippingAuditSink {
 /// The extension carries the chain-integrity fields (`seq`, `prev`/`entry`
 /// hash, `key_id`, `signature`) so a SIEM can detect a gap or a re-signed
 /// record, plus the decision/outcome and schema-versioned `sql_preview` field.
-/// Current v6 records carry only a fixed redaction marker in that field;
+/// Current v6+ records carry only a fixed redaction marker in that field;
 /// historical v1-v5 records retain their signed bytes. Extension values are
 /// escaped per the CEF spec (`\`, `=`, and newlines).
 #[must_use]
@@ -293,6 +293,12 @@ pub fn cef_line(record: &AuditRecord) -> String {
     push_cef_kv(&mut ext, "cs1", &record.seq.to_string());
     push_cef_kv(&mut ext, "act", &format!("{:?}", record.decision));
     push_cef_kv(&mut ext, "outcome", &format!("{:?}", record.outcome));
+    if let Some(correlation) = record.correlation.as_ref() {
+        push_cef_kv(&mut ext, "requestSha256", &correlation.request_sha256);
+        if let Some(parent_seq) = correlation.parent_seq {
+            push_cef_kv(&mut ext, "parentSeq", &parent_seq.to_string());
+        }
+    }
     push_cef_kv(&mut ext, "msg", &record.sql_preview);
     push_cef_kv(&mut ext, "sqlSha256", &record.sql_sha256);
     push_cef_kv(&mut ext, "prevHash", &record.prev_hash);
@@ -336,6 +342,12 @@ pub fn syslog_line(record: &AuditRecord) -> String {
     push_sd_param(&mut sd, "subjectStableId", &record.subject.stable_id);
     push_sd_param(&mut sd, "decision", &format!("{:?}", record.decision));
     push_sd_param(&mut sd, "outcome", &format!("{:?}", record.outcome));
+    if let Some(correlation) = record.correlation.as_ref() {
+        push_sd_param(&mut sd, "requestSha256", &correlation.request_sha256);
+        if let Some(parent_seq) = correlation.parent_seq {
+            push_sd_param(&mut sd, "parentSeq", &parent_seq.to_string());
+        }
+    }
     push_sd_param(&mut sd, "danger", &record.danger_level);
     push_sd_param(&mut sd, "sqlSha256", &record.sql_sha256);
     push_sd_param(&mut sd, "prevHash", &record.prev_hash);
@@ -472,7 +484,7 @@ fn push_sd_param(sd: &mut String, key: &str, value: &str) {
 mod tests {
     use super::*;
     use crate::record::{
-        AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, SigningKey,
+        AuditCorrelation, AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, SigningKey,
         compute_entry_hash_v1,
     };
     use crate::sink::{Auditor, MemoryAuditSink};
@@ -527,6 +539,7 @@ mod tests {
             subject: AuditSubject::default(),
             db_evidence: None,
             cancel: None,
+            correlation: None,
             tool: tool.to_owned(),
             sql_sha256,
             sql_normalized_sha256: String::new(),
@@ -871,6 +884,34 @@ mod tests {
         );
         // The '=' inside the preview value is escaped in the extension.
         assert!(line.contains("\\="), "extension '=' is escaped");
+    }
+
+    #[test]
+    fn siem_formats_carry_attempt_terminal_correlation_and_truthful_severity() {
+        let mut failed = draft("POST /operator/v1/lanes/cancel", "OPERATOR");
+        failed.decision = AuditDecision::Blocked;
+        failed.outcome = AuditOutcome::Failed;
+        failed.rows_affected = None;
+        let record = AuditRecord::chained_signed_correlated(
+            &failed,
+            12,
+            crate::record::GENESIS_HASH,
+            "2026-07-11T00:00:00Z".to_owned(),
+            &key(),
+            Some(AuditCorrelation::terminal("sha256:request-12", 11)),
+        );
+
+        let cef = cef_line(&record);
+        assert!(cef.contains("|8|"), "blocked CEF outcome is high severity");
+        assert!(cef.contains("outcome=Failed"));
+        assert!(cef.contains("requestSha256=sha256:request-12"));
+        assert!(cef.contains("parentSeq=11"));
+
+        let syslog = syslog_line(&record);
+        assert!(syslog.starts_with("<132>1 "), "local0.warning PRI");
+        assert!(syslog.contains("outcome=\"Failed\""));
+        assert!(syslog.contains("requestSha256=\"sha256:request-12\""));
+        assert!(syslog.contains("parentSeq=\"11\""));
     }
 
     #[test]

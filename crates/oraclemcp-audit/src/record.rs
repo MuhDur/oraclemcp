@@ -14,18 +14,19 @@ use crate::hmac::{HmacSha256Key, HmacSha256KeyError};
 
 const AUDIT_SCHEMA_V5: u16 = 5;
 const AUDIT_SCHEMA_V6: u16 = 6;
+const AUDIT_SCHEMA_V7: u16 = 7;
 
 /// Stable, non-secret replacement for the historical raw-SQL preview field.
 ///
 /// The serialized field remains present so old readers and mixed-version audit
-/// chains keep working, but every newly constructed v6 record stores only this
+/// chains keep working, but every newly constructed v6+ record stores only this
 /// constant. A constant is deliberately used instead of a best-effort SQL
 /// scrubber: malformed Oracle quoting, comments, or PL/SQL can never make source
 /// text escape into the signed record.
 pub(crate) const REDACTED_SQL_PREVIEW: &str = "<sql text redacted; see sql_sha256>";
 
 /// Current on-disk audit record schema.
-pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V6;
+pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V7;
 
 /// The guard decision being audited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +261,41 @@ impl AuditCancel {
     }
 }
 
+/// Correlation metadata linking a pre-execution attempt to its terminal record.
+///
+/// `request_sha256` is an opaque server-generated request identifier, not a
+/// hash of the request body (which may contain confirmation tokens or other
+/// low-entropy sensitive values). The terminal record names the durable
+/// attempt's sequence in `parent_seq`; the attempt itself leaves it absent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditCorrelation {
+    /// Opaque, non-secret correlation identifier (`sha256:<hex>`).
+    pub request_sha256: String,
+    /// Sequence of the corresponding durable attempt record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_seq: Option<u64>,
+}
+
+impl AuditCorrelation {
+    /// Create correlation metadata for a pre-execution attempt.
+    #[must_use]
+    pub fn attempt(request_sha256: impl Into<String>) -> Self {
+        Self {
+            request_sha256: request_sha256.into(),
+            parent_seq: None,
+        }
+    }
+
+    /// Create correlation metadata for a terminal record linked to `parent_seq`.
+    #[must_use]
+    pub fn terminal(request_sha256: impl Into<String>, parent_seq: u64) -> Self {
+        Self {
+            request_sha256: request_sha256.into(),
+            parent_seq: Some(parent_seq),
+        }
+    }
+}
+
 /// One audit entry. `seq` + `prev_hash` + `entry_hash` form the tamper-evident
 /// chain; `entry_hash` covers the seq and all content fields — including the
 /// schema-versioned `sql_preview` field — so any edit or reorder breaks
@@ -286,6 +322,10 @@ pub struct AuditRecord {
     /// Optional structured cancellation/lifecycle reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel: Option<AuditCancel>,
+    /// Optional attempt/terminal correlation metadata. Present on operator API
+    /// records from schema v7 onward; absent on historical records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation: Option<AuditCorrelation>,
     /// The tool invoked.
     pub tool: String,
     /// `sha256:<hex>` of the exact SQL bytes (never the bind values).
@@ -296,7 +336,7 @@ pub struct AuditRecord {
     /// v1–v3 records that predate the field; covered by the v4 chain hash.
     #[serde(default)]
     pub sql_normalized_sha256: String,
-    /// Historical SQL-preview field. New v6 records always contain a fixed
+    /// Historical SQL-preview field. New v6+ records always contain a fixed
     /// redaction marker; v1-v5 records may contain a truncated raw preview.
     pub sql_preview: String,
     /// The classifier danger tier (as a string, to avoid a guard dep).
@@ -334,6 +374,7 @@ impl std::fmt::Debug for AuditRecord {
             .field("subject", &self.subject)
             .field("db_evidence", &self.db_evidence)
             .field("cancel", &self.cancel)
+            .field("correlation", &self.correlation)
             .field("tool", &self.tool)
             .field("sql_sha256", &self.sql_sha256)
             .field("sql_normalized_sha256", &self.sql_normalized_sha256)
@@ -454,7 +495,21 @@ impl AuditRecord {
         timestamp: String,
         key: &SigningKey,
     ) -> Self {
-        let mut record = Self::chained_unsigned(draft, seq, prev_hash, timestamp);
+        Self::chained_signed_correlated(draft, seq, prev_hash, timestamp, key, None)
+    }
+
+    /// Build a signed v7 record with optional attempt/terminal correlation.
+    #[must_use]
+    pub fn chained_signed_correlated(
+        draft: &AuditEntryDraft,
+        seq: u64,
+        prev_hash: &str,
+        timestamp: String,
+        key: &SigningKey,
+        correlation: Option<AuditCorrelation>,
+    ) -> Self {
+        let mut record =
+            Self::chained_unsigned_correlated(draft, seq, prev_hash, timestamp, correlation);
         record.signature = Some(key.sign(&record.entry_hash));
         record.key_id = Some(key.key_id().to_owned());
         record
@@ -469,17 +524,30 @@ impl AuditRecord {
         prev_hash: &str,
         timestamp: String,
     ) -> Self {
+        Self::chained_unsigned_correlated(draft, seq, prev_hash, timestamp, None)
+    }
+
+    /// Build an unsigned v7 record with optional attempt/terminal correlation.
+    #[must_use]
+    pub fn chained_unsigned_correlated(
+        draft: &AuditEntryDraft,
+        seq: u64,
+        prev_hash: &str,
+        timestamp: String,
+        correlation: Option<AuditCorrelation>,
+    ) -> Self {
         let sql_sha256 = sha256_hex(draft.sql.as_bytes());
         let sql_normalized_sha256 = normalized_sql_sha256(&draft.sql);
         let sql_preview = REDACTED_SQL_PREVIEW.to_owned();
         let agent_identity = draft.subject.legacy_agent_identity();
-        let entry_hash = compute_entry_hash_v6(
+        let entry_hash = compute_entry_hash_v7(
             seq,
             &timestamp,
             &agent_identity,
             &draft.subject,
             draft.db_evidence.as_ref(),
             draft.cancel.as_ref(),
+            correlation.as_ref(),
             &draft.tool,
             &sql_sha256,
             &sql_normalized_sha256,
@@ -498,6 +566,7 @@ impl AuditRecord {
             subject: draft.subject.clone(),
             db_evidence: draft.db_evidence.clone(),
             cancel: draft.cancel.clone(),
+            correlation,
             tool: draft.tool.clone(),
             sql_sha256,
             sql_normalized_sha256,
@@ -611,6 +680,25 @@ impl AuditRecord {
                 &self.subject,
                 self.db_evidence.as_ref(),
                 self.cancel.as_ref(),
+                &self.tool,
+                &self.sql_sha256,
+                &self.sql_normalized_sha256,
+                &self.sql_preview,
+                &self.danger_level,
+                self.decision,
+                self.rows_affected,
+                self.outcome,
+                &self.prev_hash,
+            )
+        } else if self.schema_version == AUDIT_SCHEMA_V7 {
+            compute_entry_hash_v7(
+                self.seq,
+                &self.timestamp,
+                &self.agent_identity,
+                &self.subject,
+                self.db_evidence.as_ref(),
+                self.cancel.as_ref(),
+                self.correlation.as_ref(),
                 &self.tool,
                 &self.sql_sha256,
                 &self.sql_normalized_sha256,
@@ -962,6 +1050,22 @@ fn canonical_push_cancel(out: &mut Vec<u8>, cancel: Option<&AuditCancel>) {
     canonical_push_str(out, &cancel.reason);
 }
 
+fn canonical_push_correlation(out: &mut Vec<u8>, correlation: Option<&AuditCorrelation>) {
+    let Some(correlation) = correlation else {
+        out.push(0);
+        return;
+    };
+    out.push(1);
+    canonical_push_str(out, &correlation.request_sha256);
+    match correlation.parent_seq {
+        Some(parent_seq) => {
+            out.push(1);
+            out.extend_from_slice(&parent_seq.to_be_bytes());
+        }
+        None => out.push(0),
+    }
+}
+
 fn canonical_push_rows_affected(out: &mut Vec<u8>, rows_affected: Option<u64>) {
     match rows_affected {
         Some(rows) => {
@@ -1157,6 +1261,49 @@ fn compute_entry_hash_v6(
     ))
 }
 
+/// Deterministically hash a v7 entry, extending the injective v5+ framing with
+/// optional attempt/terminal correlation metadata.
+#[allow(clippy::too_many_arguments)]
+fn compute_entry_hash_v7(
+    seq: u64,
+    timestamp: &str,
+    agent_identity: &str,
+    subject: &AuditSubject,
+    db_evidence: Option<&DbEvidence>,
+    cancel: Option<&AuditCancel>,
+    correlation: Option<&AuditCorrelation>,
+    tool: &str,
+    sql_sha256: &str,
+    sql_normalized_sha256: &str,
+    sql_preview: &str,
+    danger_level: &str,
+    decision: AuditDecision,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+    prev_hash: &str,
+) -> String {
+    let mut canonical = canonical_entry(
+        AUDIT_SCHEMA_V7,
+        seq,
+        timestamp,
+        agent_identity,
+        subject,
+        db_evidence,
+        cancel,
+        tool,
+        sql_sha256,
+        sql_normalized_sha256,
+        sql_preview,
+        danger_level,
+        decision,
+        rows_affected,
+        outcome,
+        prev_hash,
+    );
+    canonical_push_correlation(&mut canonical, correlation);
+    sha256_hex(&canonical)
+}
+
 /// The genesis prev-hash for the first entry.
 pub const GENESIS_HASH: &str = "genesis";
 
@@ -1173,6 +1320,7 @@ mod kani_proofs {
             subject: AuditSubject::new("kani", "subject"),
             db_evidence: None,
             cancel: None,
+            correlation: None,
             tool: "oracle_execute".to_owned(),
             sql_sha256: "sha256:sql".to_owned(),
             sql_normalized_sha256: "sha256:sql".to_owned(),
@@ -1389,6 +1537,24 @@ mod tests {
                 d.outcome,
                 prev_hash,
             ),
+            AUDIT_SCHEMA_V7 => compute_entry_hash_v7(
+                seq,
+                &timestamp,
+                &agent_identity,
+                &d.subject,
+                d.db_evidence.as_ref(),
+                d.cancel.as_ref(),
+                None,
+                &d.tool,
+                &sql_sha256,
+                &sql_normalized_sha256,
+                &sql_preview,
+                &d.danger_level,
+                d.decision,
+                d.rows_affected,
+                d.outcome,
+                prev_hash,
+            ),
             other => panic!("unsupported test schema {other}"),
         };
         AuditRecord {
@@ -1399,6 +1565,7 @@ mod tests {
             subject: d.subject.clone(),
             db_evidence: d.db_evidence.clone(),
             cancel: d.cancel.clone(),
+            correlation: None,
             tool: d.tool.clone(),
             sql_sha256,
             sql_normalized_sha256: if schema_version >= 4 {
@@ -1510,6 +1677,7 @@ mod tests {
             subject: d.subject.clone(),
             db_evidence: d.db_evidence.clone(),
             cancel: None,
+            correlation: None,
             tool: d.tool.clone(),
             sql_sha256,
             sql_normalized_sha256: String::new(),
@@ -1561,6 +1729,28 @@ mod tests {
         assert!(
             !r.hash_is_valid(),
             "tampered cancel reason must fail verification"
+        );
+    }
+
+    #[test]
+    fn v7_attempt_terminal_correlation_is_hash_covered() {
+        let correlation = AuditCorrelation::terminal("sha256:request", 41);
+        let mut record = AuditRecord::chained_signed_correlated(
+            &draft(),
+            42,
+            GENESIS_HASH,
+            "2026-07-11T00:00:00Z".to_owned(),
+            &key(),
+            Some(correlation),
+        );
+        assert_eq!(record.schema_version, AUDIT_SCHEMA_V7);
+        assert!(record.hash_is_valid());
+        assert_eq!(record.correlation.as_ref().unwrap().parent_seq, Some(41));
+
+        record.correlation.as_mut().unwrap().parent_seq = Some(40);
+        assert!(
+            !record.hash_is_valid(),
+            "editing the attempt/terminal link must invalidate the chain hash"
         );
     }
 
@@ -1674,7 +1864,7 @@ mod tests {
             let mut d = draft();
             d.sql = sql.to_owned();
             let record = AuditRecord::chained_signed(&d, 1, GENESIS_HASH, "t".to_owned(), &key());
-            assert_eq!(record.schema_version, AUDIT_SCHEMA_V6);
+            assert_eq!(record.schema_version, AUDIT_SCHEMA_VERSION);
             assert_eq!(record.sql_preview, REDACTED_SQL_PREVIEW);
             assert_eq!(record.sql_sha256, sha256_hex(sql.as_bytes()));
             assert_eq!(record.sql_normalized_sha256, normalized_sql_sha256(sql));
@@ -1773,6 +1963,7 @@ mod tests {
             subject: d.subject.clone(),
             db_evidence: None,
             cancel: None,
+            correlation: None,
             tool: d.tool.clone(),
             sql_sha256,
             sql_normalized_sha256: String::new(),
@@ -2301,7 +2492,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_v1_through_v6_rotated_chain_verifies() {
+    fn mixed_v1_through_v7_rotated_chain_verifies() {
         use crate::{VerifyOutcome, verify_records};
 
         let k1 = key();
@@ -2309,7 +2500,7 @@ mod tests {
             .expect("valid rotated key");
         let mut records = Vec::new();
         let mut prev_hash = GENESIS_HASH.to_owned();
-        for schema_version in 1..=AUDIT_SCHEMA_V6 {
+        for schema_version in 1..=AUDIT_SCHEMA_VERSION {
             let signing_key = if schema_version <= 2 { &k1 } else { &k2 };
             let record = signed_record_for_schema(
                 schema_version,
@@ -2322,7 +2513,7 @@ mod tests {
         }
         assert_eq!(
             verify_records(&records, &[k1, k2]),
-            VerifyOutcome::Ok { records: 6 }
+            VerifyOutcome::Ok { records: 7 }
         );
     }
 
@@ -2342,7 +2533,7 @@ mod tests {
             let mut d = draft();
             d.sql = sql.clone();
             let record = AuditRecord::chained_unsigned(&d, 1, GENESIS_HASH, "t".to_owned());
-            prop_assert_eq!(record.schema_version, AUDIT_SCHEMA_V6);
+            prop_assert_eq!(record.schema_version, AUDIT_SCHEMA_VERSION);
             prop_assert_eq!(record.sql_preview.as_str(), REDACTED_SQL_PREVIEW);
             prop_assert_eq!(record.sql_sha256.as_str(), sha256_hex(sql.as_bytes()));
             prop_assert_eq!(
@@ -2404,13 +2595,14 @@ mod tests {
         // Forge the redacted field and recompute the (unkeyed) hash so the
         // bare-hash check would pass — but leave the old MAC in place.
         forged.sql_preview = "SELECT 1".to_owned();
-        forged.entry_hash = compute_entry_hash_v6(
+        forged.entry_hash = compute_entry_hash_v7(
             forged.seq,
             &forged.timestamp,
             &forged.agent_identity,
             &forged.subject,
             forged.db_evidence.as_ref(),
             forged.cancel.as_ref(),
+            forged.correlation.as_ref(),
             &forged.tool,
             &forged.sql_sha256,
             &forged.sql_normalized_sha256,

@@ -18,7 +18,7 @@ use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::anchor::{AnchorFile, ChainAnchor, load_anchor};
-use crate::record::{AuditEntryDraft, AuditRecord, GENESIS_HASH, SigningKey};
+use crate::record::{AuditCorrelation, AuditEntryDraft, AuditRecord, GENESIS_HASH, SigningKey};
 use crate::verify::parse_jsonl;
 
 /// Stable identity of an already-open filesystem object. Comparing identities
@@ -666,6 +666,18 @@ impl Auditor {
         timestamp: String,
         durable: bool,
     ) -> Result<AuditRecord, AuditError> {
+        self.append_correlated(draft, timestamp, durable, None)
+    }
+
+    /// Append a chained record carrying optional attempt/terminal correlation.
+    /// Durability and poisoning semantics are identical to [`Self::append`].
+    pub fn append_correlated(
+        &self,
+        draft: &AuditEntryDraft,
+        timestamp: String,
+        durable: bool,
+        correlation: Option<AuditCorrelation>,
+    ) -> Result<AuditRecord, AuditError> {
         let mut state = self.state.lock();
         // Fail closed: once an append/flush failure or panic may have left a
         // record in the byte stream without advancing state, issuing any further
@@ -674,8 +686,14 @@ impl Auditor {
             return Err(AuditError::Poisoned);
         }
         let seq = state.seq + 1;
-        let record =
-            AuditRecord::chained_signed(draft, seq, &state.last_hash, timestamp, &self.key);
+        let record = AuditRecord::chained_signed_correlated(
+            draft,
+            seq,
+            &state.last_hash,
+            timestamp,
+            &self.key,
+            correlation,
+        );
         match catch_unwind(AssertUnwindSafe(|| self.sink.append(&record))) {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {

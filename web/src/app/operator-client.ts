@@ -903,6 +903,10 @@ export type AuditTailRecord = {
   danger_level: string;
   decision: string;
   outcome: string;
+  correlation?: {
+    request_sha256: string;
+    parent_seq?: number | null;
+  } | null;
   rows_affected?: number | null;
   sql_sha256: string;
   sql_text?: Record<string, unknown>;
@@ -910,6 +914,35 @@ export type AuditTailRecord = {
   proof?: Record<string, unknown>;
   bind_values?: Record<string, unknown>;
 };
+
+/**
+ * Collapse a completed two-phase operator request to its terminal row while
+ * retaining an unmatched Pending row (for example after a crash). Proof
+ * exports still contain every signed record; this is presentation-only action
+ * counting for the timeline.
+ */
+export function coalesceAuditTimelineRecords(records: AuditTailRecord[]): AuditTailRecord[] {
+  const pendingBySeq = new Map<number, AuditTailRecord>();
+  for (const record of records) {
+    if (record.outcome === "PENDING" && record.correlation?.parent_seq == null) {
+      pendingBySeq.set(record.seq, record);
+    }
+  }
+  const supersededPending = new Set<number>();
+  for (const record of records) {
+    const parentSeq = record.correlation?.parent_seq;
+    if (typeof parentSeq !== "number") {
+      continue;
+    }
+    const pending = pendingBySeq.get(parentSeq);
+    if (
+      pending?.correlation?.request_sha256 === record.correlation?.request_sha256
+    ) {
+      supersededPending.add(parentSeq);
+    }
+  }
+  return records.filter((record) => !supersededPending.has(record.seq));
+}
 
 export type AuditTailData = {
   source: string;
