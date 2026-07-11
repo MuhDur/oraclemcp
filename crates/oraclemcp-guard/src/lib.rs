@@ -19,6 +19,7 @@ pub mod exec_grant;
 pub mod levels;
 pub mod policy;
 pub mod purity;
+pub mod resolver;
 pub mod rewrite;
 pub mod stepup;
 pub mod token;
@@ -37,6 +38,11 @@ pub use levels::{
 };
 pub use policy::{DefaultMode, PolicyDecision, SchemaPolicy, SchemaPolicyRaw, SchemaPolicySet};
 pub use purity::{ObjectRef, Purity, SideEffectOracle, UnknownOracle};
+pub use resolver::{
+    CatalogGeneration, CatalogObjectKind, CatalogResolver, QuoteSemantics, RawName, RawNamePart,
+    Resolution, ResolveCtx, ResolvedContainer, ResolvedIdentity, ResolvedObject, ResolvedOverload,
+    StatementScope, SynonymHop, SyntacticRole, UnresolvedCatalogResolver,
+};
 pub use rewrite::suggest_parameterized_form;
 pub use stepup::{
     ChallengeStatus, CiToken, StepUpChallenge, StepUpOption, StepUpRegistry, StepUpResolution,
