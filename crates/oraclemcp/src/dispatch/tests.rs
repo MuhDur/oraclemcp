@@ -4167,6 +4167,96 @@ fn create_or_replace_plsql_procedure_floors_at_ddl_and_mints_own_grant() {
 }
 
 #[test]
+fn create_or_replace_package_spec_preview_is_ddl_and_mints_confirmation() {
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(OneRowMock),
+        Some("dev".to_owned()),
+        ddl_level(),
+    );
+    let source = "CREATE OR REPLACE PACKAGE emp_api AS PROCEDURE run(p_value NUMBER); END emp_api;";
+
+    let preview = dispatcher
+        .dispatch("oracle_create_or_replace", json!({ "source_code": source }))
+        .expect("valid package specification previews");
+
+    assert_eq!(preview["preview"], json!(true));
+    assert_eq!(preview["applied"], json!(false));
+    assert_eq!(preview["danger"], json!("DESTRUCTIVE"));
+    assert_eq!(preview["required_level"], json!("DDL"));
+    assert_eq!(preview["gate_decision"], json!("allow"));
+    assert_eq!(preview["detected_object"]["owner"], json!("APP"));
+    assert_eq!(preview["detected_object"]["name"], json!("EMP_API"));
+    assert_eq!(preview["detected_object"]["object_type"], json!("PACKAGE"));
+    assert_eq!(
+        preview["confirmation"]["tool"],
+        json!("oracle_create_or_replace")
+    );
+    assert!(preview["confirmation"]["confirm"].is_string());
+}
+
+#[test]
+fn create_or_replace_package_spec_apply_uses_preview_grant_once() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        Some("dev".to_owned()),
+        ddl_level(),
+    );
+    let source = "CREATE OR REPLACE PACKAGE emp_api AS PROCEDURE run(p_value NUMBER); END emp_api;";
+    let preview = dispatcher
+        .dispatch("oracle_create_or_replace", json!({ "source_code": source }))
+        .expect("valid package specification previews");
+    let confirm = preview["confirmation"]["confirm"]
+        .as_str()
+        .expect("package preview confirmation");
+
+    let applied = dispatcher
+        .dispatch(
+            "oracle_create_or_replace",
+            json!({ "source_code": source, "execute": true, "confirm": confirm }),
+        )
+        .expect("confirmed package specification applies");
+
+    assert_eq!(applied["applied"], json!(true));
+    assert_eq!(applied["committed"], json!(true));
+    assert_eq!(applied["detected_object"]["object_type"], json!("PACKAGE"));
+    let executed = state.executed.lock().expect("exec mutex");
+    assert_eq!(executed.len(), 1);
+    assert!(executed[0].0.ends_with(source));
+    drop(executed);
+
+    let replay = dispatcher
+        .dispatch(
+            "oracle_create_or_replace",
+            json!({ "source_code": source, "execute": true, "confirm": confirm }),
+        )
+        .expect_err("package preview grant is single-use");
+    assert_eq!(replay.error_class, ErrorClass::ChallengeRequired);
+    assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+}
+
+#[test]
+fn create_or_replace_package_spec_trailing_sql_stays_fail_closed() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        Some("dev".to_owned()),
+        ddl_level(),
+    );
+    let source = "CREATE OR REPLACE PACKAGE p AS PROCEDURE q; END; DROP TABLE t";
+
+    let preview = dispatcher
+        .dispatch("oracle_create_or_replace", json!({ "source_code": source }))
+        .expect("forbidden source remains inspectable as a preview");
+
+    assert_eq!(preview["gate_decision"], json!("blocked"));
+    assert_eq!(preview["blocked_reason"]["type"], json!("forbidden"));
+    assert_eq!(preview["required_level"], Value::Null);
+    assert_eq!(preview["confirmation"], Value::Null);
+    assert!(state.executed.lock().expect("exec mutex").is_empty());
+}
+
+#[test]
 fn create_or_replace_requires_ddl_level_without_executing() {
     let dispatcher = OracleDispatcher::new_with_profile_level(
         Box::new(NoExecMock),

@@ -458,6 +458,46 @@ const PLSQL_BEARING_CREATE_FORMS: &[&str] = &[
     "CREATE OR REPLACE TRIGGER ",
 ];
 
+/// Whether `sql` begins with a `CREATE [OR REPLACE]
+/// [EDITIONABLE|NONEDITIONABLE] PACKAGE` specification rather than a package
+/// body. Package specifications are declaration units: their final `END`
+/// closes the package itself even though no executable `BEGIN` opened it.
+///
+/// Keep this token-aware. Comments and arbitrary whitespace are valid between
+/// header keywords, while quoted identifiers and literals must never be
+/// mistaken for `PACKAGE` / `BODY` keywords.
+fn is_package_spec_create(sql: &str) -> bool {
+    let Ok(tokens) = Tokenizer::new(&OracleDialect {}, sql).tokenize() else {
+        return false;
+    };
+    let tokens: Vec<&Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .collect();
+    let bare_word_is = |idx: usize, expected: &str| {
+        matches!(
+            tokens.get(idx),
+            Some(Token::Word(word))
+                if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(expected)
+        )
+    };
+
+    if !bare_word_is(0, "CREATE") {
+        return false;
+    }
+    let mut idx = 1;
+    if bare_word_is(idx, "OR") {
+        if !bare_word_is(idx + 1, "REPLACE") {
+            return false;
+        }
+        idx += 2;
+    }
+    if bare_word_is(idx, "EDITIONABLE") || bare_word_is(idx, "NONEDITIONABLE") {
+        idx += 1;
+    }
+    bare_word_is(idx, "PACKAGE") && !bare_word_is(idx + 1, "BODY")
+}
+
 /// Whether the statement is a PL/SQL-bearing `CREATE [OR REPLACE]` of a stored
 /// object (PROCEDURE/FUNCTION/PACKAGE/TRIGGER). A pure function of the SQL text
 /// (canonical marker scan + [`PLSQL_BEARING_CREATE_FORMS`]) so `stage_a` (block
@@ -466,6 +506,9 @@ const PLSQL_BEARING_CREATE_FORMS: &[&str] = &[
 /// it through the public `StageA` enum (which would be a breaking API change for
 /// an internal classifier detail).
 fn is_plsql_bearing_create(sql: &str) -> bool {
+    if is_package_spec_create(sql) {
+        return true;
+    }
     let upper = sql.trim_start().to_ascii_uppercase();
     let scan = canonical_marker_scan(&upper);
     let leading = scan.strip_prefix(' ').unwrap_or(&scan);
@@ -673,7 +716,12 @@ pub fn analyze_batch(sql: &str) -> BatchShape {
             saw_top_level_after_block_close: false,
         };
     };
-    let mut depth: i64 = 0;
+    // A package specification is a declaration unit with an implicit outer
+    // scope: member declaration semicolons are internal, and the unit-closing
+    // END balances that scope without a preceding executable BEGIN. Do not
+    // apply this to PACKAGE BODY (or any anonymous/stored executable block),
+    // whose existing BEGIN/END model remains unchanged.
+    let mut depth: i64 = i64::from(is_package_spec_create(sql));
     let mut went_negative = false;
     let mut has_plsql_block = false;
     let mut segment_has_content = false;
@@ -2553,6 +2601,7 @@ impl Classifier {
                 // enum (that would break the crate API for an internal detail).
                 // oracle-p0d6.
                 let plsql_create = is_plsql_bearing_create(sql);
+                let package_spec_create = is_package_spec_create(sql);
                 // Any PL/SQL block is at minimum Guarded; a dangerous
                 // side-effect marker (EXECUTE IMMEDIATE / UTL_FILE / …) is
                 // Forbidden (fail-closed — we cannot prove its purity here).
@@ -2577,6 +2626,23 @@ impl Classifier {
                     .categorized(
                         ReasonCategory::UnbalancedBlock,
                         Some("unbalanced BEGIN/END".to_owned()),
+                    );
+                }
+                // Package specs have no executable BEGIN, so the generic
+                // trailing-after-block-close detector never arms. Their
+                // implicit declaration depth makes one final unit-closing `;`
+                // the sole top-level statement boundary; anything else is a
+                // second statement and must fail closed. This check is essential
+                // to ensure the package-spec balance exception cannot admit
+                // `END; DROP ...` / `END; GRANT ...` suffixes.
+                if package_spec_create && shape.statement_count != 1 {
+                    return forbidden_decision(
+                        "package specification contains trailing or multiple top-level statements — fail-closed"
+                            .to_owned(),
+                    )
+                    .categorized(
+                        ReasonCategory::MultiStatementBatch,
+                        Some("multiple statements around package specification".to_owned()),
                     );
                 }
                 // oracle-lokg.1: a balanced anonymous block followed by trailing
@@ -4450,6 +4516,96 @@ mod tests {
             package.reason_category,
             Some(ReasonCategory::UnprovenSideEffect)
         );
+    }
+
+    #[test]
+    fn package_specifications_balance_as_single_ddl_units() {
+        for sql in [
+            "CREATE OR REPLACE PACKAGE p AS PROCEDURE run(p_value NUMBER); END;",
+            "CREATE OR REPLACE PACKAGE p AUTHID DEFINER AS PROCEDURE a; FUNCTION b RETURN NUMBER; END p;",
+            "create /* header */ or replace package p authid current_user as procedure q; end p;",
+            "CREATE OR REPLACE EDITIONABLE PACKAGE app.p AS PROCEDURE q; END p;",
+            "CREATE NONEDITIONABLE PACKAGE \"MixedCase\" AS PROCEDURE q; END \"MixedCase\";",
+        ] {
+            let shape = analyze_batch(sql);
+            assert!(
+                shape.balanced,
+                "package spec must balance: {sql:?} -> {shape:?}"
+            );
+            assert_eq!(
+                shape.statement_count, 1,
+                "member semicolons stay inside the package unit: {sql:?} -> {shape:?}"
+            );
+
+            let decision = classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Destructive, "{sql:?}");
+            assert_eq!(
+                decision.required_level,
+                Some(OperatingLevel::Ddl),
+                "package replacement must retain the DDL floor: {sql:?}"
+            );
+            assert_eq!(
+                decision.reason_category,
+                Some(ReasonCategory::PlSqlBlock),
+                "{sql:?}"
+            );
+        }
+
+        let mut read_write = SessionLevelState::new(OperatingLevel::Ddl, false);
+        read_write
+            .set_current_level(OperatingLevel::ReadWrite)
+            .expect("raise session to READ_WRITE");
+        let decision = classify("CREATE OR REPLACE PACKAGE p AS PROCEDURE q; END;");
+        assert_eq!(
+            decision.gate(&read_write),
+            LevelDecision::RequireStepUp {
+                target: OperatingLevel::Ddl
+            },
+            "balancing a package spec must not lower its required authority"
+        );
+    }
+
+    #[test]
+    fn package_specification_balance_exception_stays_fail_closed() {
+        for sql in [
+            "CREATE OR REPLACE PACKAGE p AS PROCEDURE q;",
+            "CREATE OR REPLACE PACKAGE p AS PROCEDURE q; END; END;",
+            "CREATE OR REPLACE PACKAGE p AS PROCEDURE q; END; DROP TABLE t",
+            "CREATE OR REPLACE PACKAGE p AS PROCEDURE q; END; / GRANT DBA TO app",
+        ] {
+            let decision = classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Forbidden, "{sql:?}");
+            assert_eq!(decision.required_level, None, "{sql:?}");
+        }
+
+        for sql in [
+            "CREATE OR REPLACE PACKAGE p AS PRAGMA AUTONOMOUS_TRANSACTION; END;",
+            "CREATE OR REPLACE PACKAGE p AS EXECUTE IMMEDIATE 'DROP TABLE t'; END;",
+        ] {
+            let decision = classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Forbidden, "{sql:?}");
+            assert_eq!(
+                decision.reason_category,
+                Some(ReasonCategory::DynamicSql),
+                "the existing dynamic-marker refusal must run before package balancing: {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn package_specification_fix_does_not_change_other_block_shapes() {
+        let body = classify("CREATE OR REPLACE PACKAGE BODY p AS BEGIN NULL; END;");
+        assert_eq!(body.danger, DangerLevel::Destructive);
+        assert_eq!(body.required_level, Some(OperatingLevel::Ddl));
+
+        let anonymous = classify("BEGIN NULL; END;");
+        assert_eq!(anonymous.danger, DangerLevel::Guarded);
+        assert_eq!(anonymous.required_level, Some(OperatingLevel::ReadWrite));
+
+        let object_type =
+            classify("CREATE OR REPLACE TYPE t AS OBJECT (x NUMBER, MEMBER PROCEDURE run);");
+        assert_eq!(object_type.danger, DangerLevel::Destructive);
+        assert_eq!(object_type.required_level, Some(OperatingLevel::Ddl));
     }
 
     #[test]
