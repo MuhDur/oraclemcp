@@ -8,9 +8,9 @@
 //!
 //! The export id is **not** a guessable counter: it is a
 //! [`crate::tamper_token`]-signed handle bound to the originating query's
-//! access context (the active profile + the request's scope-grant fingerprint),
-//! so a client cannot forge an id or read an export that belongs to a different
-//! profile/scope. Exports are **bounded** (a per-export byte cap and a
+//! access context (the server-derived principal + the request's exact
+//! scope-grant fingerprint), so a client cannot forge an id or read an export
+//! that belongs to a different principal/scope. Exports are **bounded** (a
 //! whole-registry cap with FIFO eviction) and **expire** on a timer; a
 //! `resources/read` after expiry fails closed exactly like an unknown id.
 //!
@@ -29,6 +29,11 @@ use crate::tamper_token::{sign_token, verify_token};
 
 /// Tamper-token scope for export ids.
 const EXPORT_SCOPE: &str = "export:id";
+
+/// Canonical principal for the one-process stdio transport. HTTP always
+/// supplies an explicit authenticated principal or `anonymous-http`; therefore
+/// a missing dispatch principal unambiguously means the local stdio process.
+pub const STDIO_EXPORT_PRINCIPAL: &str = "process:stdio";
 
 /// Default time-to-live for a materialized export.
 pub const DEFAULT_EXPORT_TTL: Duration = Duration::from_secs(900);
@@ -74,30 +79,33 @@ impl ExportFormat {
 }
 
 /// The access context an export is bound to. A `resources/read` must present a
-/// matching context (same scope-grant fingerprint), or the read is refused —
-/// the export is access-controlled identically to the originating query.
+/// matching context (same server-derived principal and exact scope-grant
+/// fingerprint), or the read is refused — the export is access-controlled
+/// identically to the originating query.
 ///
-/// The binding is the request's **OAuth scope-grant fingerprint**, which is the
-/// genuine cross-tenant authorization boundary in this server (scopes can only
-/// *lower* the effective level) and is available on BOTH the mint path
+/// Principal identity and scopes are available on BOTH the mint path
 /// (`oracle_query` dispatch) and the read path (`resources/read`). The active
-/// profile is recorded as advisory metadata (it is a per-process connection
-/// property and the per-process token key already isolates one server instance
-/// from another), but it is not part of the unforgeable binding because the
-/// `resources/read` transport does not carry it.
+/// profile is recorded as advisory metadata only: an export is immutable, and
+/// `resources/read` performs no database action under the current profile.
+/// Session/lane identity is intentionally excluded so the same canonical
+/// principal can resume an unexpired resource after token refresh or reconnect.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExportAccess {
     /// The active profile name at mint time (`""` when unconfigured). Advisory.
     pub profile: String,
-    /// A stable fingerprint of the request's scope grant (`""` when none). This
-    /// is the authorization boundary the export id is signed against.
+    /// The validated, server-derived principal key. Never caller supplied and
+    /// never rendered into the export URI or an error response.
+    pub principal_key: String,
+    /// A stable normalized fingerprint of the exact request scope grant (`""`
+    /// when none). This is a ceiling in addition to principal ownership.
     pub scope_fingerprint: String,
 }
 
 impl ExportAccess {
-    /// Build an access context from an optional profile + optional scope list.
+    /// Build an access context from an optional profile, required canonical
+    /// principal key, and optional scope list.
     #[must_use]
-    pub fn new(profile: Option<&str>, scopes: Option<&[String]>) -> Self {
+    pub fn new(profile: Option<&str>, principal_key: &str, scopes: Option<&[String]>) -> Self {
         let scope_fingerprint = scopes
             .map(|scopes| {
                 let mut sorted: Vec<&str> = scopes.iter().map(String::as_str).collect();
@@ -108,14 +116,15 @@ impl ExportAccess {
             .unwrap_or_default();
         ExportAccess {
             profile: profile.unwrap_or("").to_owned(),
+            principal_key: principal_key.to_owned(),
             scope_fingerprint,
         }
     }
 
-    /// The length-prefixed token field binding an id to this context: the scope
-    /// fingerprint, the boundary reproducible on the read path.
-    fn token_fields(&self) -> [String; 1] {
-        [self.scope_fingerprint.clone()]
+    /// Length-prefixed token fields binding an id to both ownership and the
+    /// exact authorization ceiling reproducible on the read path.
+    fn token_fields(&self) -> [String; 2] {
+        [self.principal_key.clone(), self.scope_fingerprint.clone()]
     }
 }
 
@@ -234,29 +243,29 @@ impl ExportRegistry {
 
     /// Read an export by id, enforcing the access binding and expiry. Fails
     /// closed: an unknown id, an expired id, a forged id, or a mismatched
-    /// access context all yield an `ObjectNotFound` / `PolicyDenied` envelope
-    /// (never the bytes).
+    /// access context all yield the same `ObjectNotFound` envelope (never the
+    /// bytes or binding material).
     pub fn read(&self, id: &str, access: &ExportAccess) -> Result<ExportContents, ErrorEnvelope> {
         // The id must verify under the *presented* access context. A forged id,
-        // or a genuine id replayed under a different profile/scope, fails the
-        // MAC check here before any lookup.
+        // or a genuine id replayed under a different principal/scope, fails
+        // the MAC check here before any lookup.
         let field_strings = access.token_fields();
         let fields: Vec<&str> = field_strings.iter().map(String::as_str).collect();
         if verify_token(EXPORT_SCOPE, id, &fields).is_none() {
-            return Err(export_access_denied());
+            return Err(export_unavailable());
         }
 
         let mut inner = self.inner.lock();
         inner.sweep_expired();
         let Some(entry) = inner.by_id.get(id) else {
-            return Err(export_not_found());
+            return Err(export_unavailable());
         };
-        // Defense in depth: the stored scope fingerprint must also match (the
-        // MAC already bound it, but re-checking keeps the invariant explicit and
-        // local). Profile is advisory and not on the read transport, so it is
-        // not part of this check.
-        if entry.access.scope_fingerprint != access.scope_fingerprint {
-            return Err(export_access_denied());
+        // Defense in depth: stored ownership and the exact scope ceiling must
+        // also match. Profile is advisory and not part of authorization.
+        if entry.access.principal_key != access.principal_key
+            || entry.access.scope_fingerprint != access.scope_fingerprint
+        {
+            return Err(export_unavailable());
         }
         Ok(ExportContents {
             uri: export_uri(id),
@@ -312,17 +321,9 @@ pub fn export_uri(id: &str) -> String {
     format!("oracle-export://{id}")
 }
 
-fn export_not_found() -> ErrorEnvelope {
-    ErrorEnvelope::new(
-        ErrorClass::ObjectNotFound,
-        "export resource not found (unknown id, or it expired)",
-    )
-    .with_next_step("re-run the query to materialize a fresh export")
-}
-
-fn export_access_denied() -> ErrorEnvelope {
-    // Deliberately the same shape as not-found so a probing client cannot tell a
-    // forged id from a wrong-context id from a missing id.
+fn export_unavailable() -> ErrorEnvelope {
+    // One response shape for missing, expired, forged, wrong-principal, and
+    // wrong-scope handles prevents the resource registry becoming an oracle.
     ErrorEnvelope::new(
         ErrorClass::ObjectNotFound,
         "export resource not found (unknown id, or it expired)",
@@ -423,8 +424,10 @@ fn render_json(
 mod tests {
     use super::*;
 
+    const PRINCIPAL_A: &str = "oauth:principal-a";
+
     fn access() -> ExportAccess {
-        ExportAccess::new(Some("PROD"), Some(&["oracle:read".to_owned()]))
+        ExportAccess::new(Some("PROD"), PRINCIPAL_A, Some(&["oracle:read".to_owned()]))
     }
 
     fn sample() -> (Vec<String>, Vec<Vec<String>>) {
@@ -489,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn the_authorization_boundary_is_the_scope_not_the_advisory_profile() {
+    fn same_principal_can_resume_across_advisory_profile_changes() {
         let reg = ExportRegistry::new();
         let (cols, rows) = sample();
         let handle = reg.create(
@@ -499,10 +502,9 @@ mod tests {
             access(),
             DEFAULT_EXPORT_TTL,
         );
-        // Same scope, different (advisory) profile: the read succeeds because
-        // the binding is the scope fingerprint, which `resources/read` can
-        // reproduce. The profile is not on the read transport.
-        let same_scope = ExportAccess::new(Some("DEV"), Some(&["oracle:read".to_owned()]));
+        // Profile is source metadata, not authority for reading immutable data.
+        let same_scope =
+            ExportAccess::new(Some("DEV"), PRINCIPAL_A, Some(&["oracle:read".to_owned()]));
         assert!(
             reg.read(&handle.id, &same_scope).is_ok(),
             "advisory profile difference does not deny a same-scope read"
@@ -510,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn a_read_under_a_different_scope_is_refused() {
+    fn a_read_under_a_different_principal_or_scope_is_refused() {
         let reg = ExportRegistry::new();
         let (cols, rows) = sample();
         let handle = reg.create(
@@ -520,11 +522,122 @@ mod tests {
             access(),
             DEFAULT_EXPORT_TTL,
         );
-        let other = ExportAccess::new(Some("PROD"), Some(&["oracle:admin".to_owned()]));
+        let other_principal = ExportAccess::new(
+            Some("PROD"),
+            "oauth:principal-b",
+            Some(&["oracle:read".to_owned()]),
+        );
         let err = reg
-            .read(&handle.id, &other)
+            .read(&handle.id, &other_principal)
+            .expect_err("cross-principal read refused");
+        assert_eq!(err.error_class, ErrorClass::ObjectNotFound);
+
+        let other_scope = ExportAccess::new(
+            Some("PROD"),
+            PRINCIPAL_A,
+            Some(&["oracle:admin".to_owned()]),
+        );
+        let err = reg
+            .read(&handle.id, &other_scope)
             .expect_err("cross-scope read refused");
         assert_eq!(err.error_class, ErrorClass::ObjectNotFound);
+    }
+
+    #[test]
+    fn every_unavailable_case_has_one_non_leaking_error_shape() {
+        let reg = ExportRegistry::new();
+        let (cols, rows) = sample();
+        let handle = reg.create(
+            &cols,
+            &rows,
+            ExportFormat::Csv,
+            access(),
+            DEFAULT_EXPORT_TTL,
+        );
+        let wrong_principal = ExportAccess::new(
+            Some("PROD"),
+            "oauth:principal-b",
+            Some(&["oracle:read".to_owned()]),
+        );
+        let wrong_scope = ExportAccess::new(
+            Some("PROD"),
+            PRINCIPAL_A,
+            Some(&["oracle:admin".to_owned()]),
+        );
+        let wrong_principal_error = reg
+            .read(&handle.id, &wrong_principal)
+            .expect_err("wrong principal");
+        let wrong_scope_error = reg.read(&handle.id, &wrong_scope).expect_err("wrong scope");
+
+        let (_body, tag) = handle.id.rsplit_once('.').expect("id has a tag");
+        let forged_error = reg
+            .read(&format!("exp-forged.{tag}"), &access())
+            .expect_err("forged id");
+
+        let access = access();
+        let field_strings = access.token_fields();
+        let fields: Vec<&str> = field_strings.iter().map(String::as_str).collect();
+        let valid_missing = sign_token(EXPORT_SCOPE, "exp-missing", &fields);
+        let missing_error = reg
+            .read(&valid_missing, &access)
+            .expect_err("valid but unknown id");
+
+        let expired = reg.create(
+            &cols,
+            &rows,
+            ExportFormat::Csv,
+            access.clone(),
+            Duration::from_nanos(1),
+        );
+        std::thread::sleep(Duration::from_millis(5));
+        let expired_error = reg.read(&expired.id, &access).expect_err("expired id");
+
+        let expected = wrong_principal_error.to_json();
+        for actual in [
+            wrong_scope_error.to_json(),
+            forged_error.to_json(),
+            missing_error.to_json(),
+            expired_error.to_json(),
+        ] {
+            assert_eq!(actual, expected);
+        }
+        let public_surfaces = format!("{}{}", handle.uri, expected);
+        for forbidden in [PRINCIPAL_A, "principal-a", "oracle:read"] {
+            assert!(
+                !public_surfaces.contains(forbidden),
+                "export ownership leaked through URI/error: {public_surfaces}"
+            );
+        }
+    }
+
+    #[test]
+    fn stored_binding_mismatch_is_denied_even_when_the_mac_is_valid() {
+        for corrupt in ["principal", "scope"] {
+            let reg = ExportRegistry::new();
+            let (cols, rows) = sample();
+            let owner = access();
+            let handle = reg.create(
+                &cols,
+                &rows,
+                ExportFormat::Csv,
+                owner.clone(),
+                DEFAULT_EXPORT_TTL,
+            );
+            {
+                let mut inner = reg.inner.lock();
+                let entry = inner.by_id.get_mut(&handle.id).expect("stored export");
+                match corrupt {
+                    "principal" => entry.access.principal_key = "oauth:principal-b".to_owned(),
+                    "scope" => entry.access.scope_fingerprint = "oracle:admin".to_owned(),
+                    _ => unreachable!(),
+                }
+            }
+
+            let error = reg
+                .read(&handle.id, &owner)
+                .expect_err("stored binding must agree with the valid token context");
+            assert_eq!(error.to_json(), export_unavailable().to_json());
+        }
     }
 
     #[test]

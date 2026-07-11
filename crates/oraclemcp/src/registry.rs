@@ -191,7 +191,7 @@ fn query_output_schema() -> Value {
             "inlined": { "type": "boolean", "description": "False when the result was materialized as an export resource (export=true) rather than inlined." },
             "export": {
                 "type": "object",
-                "description": "Present when export=true: metadata for the materialized oracle-export://{id} resource.",
+                "description": "Present when export=true: metadata for the materialized oracle-export://{id} resource, readable only by the originating principal under the exact scope grant.",
                 "additionalProperties": true
             },
             "resource_link": {
@@ -889,7 +889,7 @@ pub fn tool_registry() -> ToolRegistry {
                     "max_structured_bytes": { "type": "integer", "minimum": 1, "maximum": 5242880, "description": "Maximum compact JSON bytes decoded from one structured node. Values above the safe default require deep_decode=true." },
                     "max_structured_depth": { "type": "integer", "minimum": 1, "maximum": 32, "description": "Maximum ARRAY/JSON recursion depth decoded inside one structured cell. Values above the safe default require deep_decode=true." },
                     "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible." },
-                    "export": { "type": "boolean", "description": "When true, materialize the bounded full result as an oracle-export://{id} resource and return a resource_link instead of inlining rows." },
+                    "export": { "type": "boolean", "description": "When true, materialize the bounded full result as an oracle-export://{id} resource and return a resource_link instead of inlining rows. The resource is bound to the originating principal and exact scope grant." },
                     "export_format": { "type": "string", "enum": ["csv", "json"], "description": "Export serialization when export=true: csv (default) or json." }
                 }),
                 &[timeout_seconds_prop()],

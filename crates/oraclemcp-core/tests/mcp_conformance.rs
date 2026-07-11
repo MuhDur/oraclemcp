@@ -1810,7 +1810,7 @@ fn an_export_resource_is_served_and_forged_ids_fail_closed() {
 
     // No-scope access (the stdio default): mint an export under the empty
     // scope, then read it back over resources/read.
-    let access = ExportAccess::new(Some("PROD"), None);
+    let access = ExportAccess::new(Some("PROD"), oraclemcp_core::STDIO_EXPORT_PRINCIPAL, None);
     let handle = exports.create(
         &["ID".to_owned(), "NAME".to_owned()],
         &[vec!["1".to_owned(), "alice".to_owned()]],
@@ -1868,7 +1868,7 @@ fn an_export_resource_is_served_and_forged_ids_fail_closed() {
 }
 
 #[test]
-fn an_export_is_access_controlled_by_scope_grant() {
+fn an_export_is_owned_by_principal_and_exact_scope_grant() {
     use oraclemcp_core::export::{ExportAccess, ExportFormat, ExportRegistry};
     use oraclemcp_core::http::ScopeGrant;
     use oraclemcp_core::server::DispatchContext;
@@ -1892,7 +1892,10 @@ fn an_export_is_access_controlled_by_scope_grant() {
     );
 
     // Mint under scope "oracle:read".
-    let minting_access = ExportAccess::new(Some("PROD"), Some(&["oracle:read".to_owned()]));
+    let principal_a = "oauth:principal-a";
+    let principal_b = "oauth:principal-b";
+    let minting_access =
+        ExportAccess::new(Some("PROD"), principal_a, Some(&["oracle:read".to_owned()]));
     let handle = exports.create(
         &["ID".to_owned()],
         &[vec!["1".to_owned()]],
@@ -1911,7 +1914,7 @@ fn an_export_is_access_controlled_by_scope_grant() {
             "params": { "uri": handle.uri.clone() },
         }),
         None,
-        DispatchContext::with_scope_grant(&wrong_grant),
+        DispatchContext::with_scope_grant(&wrong_grant).with_principal_key(principal_a),
     );
     let wrong = wrong.expect("wrong-scope reply");
     assert_eq!(
@@ -1920,8 +1923,29 @@ fn an_export_is_access_controlled_by_scope_grant() {
         "an export is not readable under a different scope grant"
     );
 
-    // Read under the SAME scope grant: served.
+    // The same scope under a different principal is also refused, with the
+    // indistinguishable not-found shape.
     let right_grant = ScopeGrant(vec!["oracle:read".to_owned()]);
+    let cross_principal = server
+        .handle_jsonrpc_request_with_context(
+            json!({
+                "jsonrpc": "2.0",
+                "id": "wrong-principal",
+                "method": "resources/read",
+                "params": { "uri": handle.uri.clone() },
+            }),
+            None,
+            DispatchContext::with_scope_grant(&right_grant).with_principal_key(principal_b),
+        )
+        .expect("wrong-principal reply");
+    assert_eq!(
+        cross_principal["error"]["data"], wrong["error"]["data"],
+        "wrong principal and wrong scope must be indistinguishable"
+    );
+
+    // Same principal + scope is served across a new HTTP session/lane/profile
+    // generation: immutable resource ownership is principal-scoped, not lane-
+    // scoped, so OAuth refresh/reconnect remains resumable.
     let right = server.handle_jsonrpc_request_with_context(
         json!({
             "jsonrpc": "2.0",
@@ -1930,7 +1954,10 @@ fn an_export_is_access_controlled_by_scope_grant() {
             "params": { "uri": handle.uri },
         }),
         None,
-        DispatchContext::with_scope_grant(&right_grant),
+        DispatchContext::with_scope_grant(&right_grant)
+            .with_principal_key(principal_a)
+            .with_http_session_id("fresh-session")
+            .with_lane_identity("fresh-lane", 99),
     );
     let right = right.expect("right-scope reply");
     assert_eq!(

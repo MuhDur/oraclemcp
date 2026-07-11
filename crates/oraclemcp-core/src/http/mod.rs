@@ -5329,14 +5329,10 @@ fn handle_mcp_post_exchange(
     if let Some(session_id) = http_session_id.as_deref() {
         context = context.with_http_session_id(session_id);
     }
-    let dispatch_principal_key = if config.stateful {
-        Some(session_principal_key)
-    } else {
-        principal_key
-    };
-    if let Some(principal_key) = dispatch_principal_key {
-        context = context.with_principal_key(principal_key);
-    }
+    // Every HTTP dispatch has a canonical transport principal. In particular,
+    // stateless unauthenticated HTTP must carry `anonymous-http` explicitly so
+    // a missing principal remains unambiguous for the stdio transport.
+    context = context.with_principal_key(session_principal_key);
     if config.stateful
         && let Some((request_id, name, args)) = streaming_oracle_query_call(&parsed)
         && let Some(session_id) = http_session_id.clone()

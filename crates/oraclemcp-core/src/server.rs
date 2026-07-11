@@ -1640,11 +1640,9 @@ impl OracleMcpServer {
             }
             ResourceUri::Export { id } => {
                 // E3: serve the materialized export iff the read presents the
-                // same access context the export was minted under. The context
-                // is derived from the request's OAuth scope grant (profile is
-                // not on the read transport, so it is bound as "" here and the
-                // export must have been minted with the same; the dispatcher
-                // mints with the active profile + scope fingerprint).
+                // same canonical principal + exact scope grant it was minted
+                // under. Profile/session/lane identity is intentionally not
+                // part of immutable resource ownership.
                 let access = export_access_from_context(context);
                 self.exports
                     .read(&id, &access)
@@ -1947,12 +1945,15 @@ impl OracleMcpServer {
 }
 
 /// Derive the export access context (E3) from a request's authorization
-/// context. The binding is the OAuth scope-grant fingerprint (the same boundary
-/// the originating `oracle_query` enforced); profile is not on the read
-/// transport so it stays advisory/`None` here.
+/// context. HTTP supplies an explicit authenticated/anonymous principal; a
+/// missing principal is therefore the canonical one-process stdio identity.
+/// Profile is advisory and absent from `resources/read`.
 fn export_access_from_context(context: DispatchContext<'_>) -> crate::export::ExportAccess {
     let scopes = context.scope_grant().map(|grant| grant.0.as_slice());
-    crate::export::ExportAccess::new(None, scopes)
+    let principal_key = context
+        .principal_key()
+        .unwrap_or(crate::export::STDIO_EXPORT_PRINCIPAL);
+    crate::export::ExportAccess::new(None, principal_key, scopes)
 }
 
 /// Max completion values returned in one `completion/complete` response (E7),

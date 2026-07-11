@@ -2864,6 +2864,50 @@ fn oversized_first_query_row_propagates_without_cursor_or_result_entry() {
 }
 
 #[test]
+fn query_export_is_minted_for_the_dispatch_principal_and_exact_scopes() {
+    let exports = Arc::new(oraclemcp_core::ExportRegistry::new());
+    let dispatcher =
+        OracleDispatcher::new_with_profile(Box::new(OneRowMock), Some("dev".to_owned()))
+            .with_exports(Arc::clone(&exports));
+    let read = scope_grant("oracle:read");
+    let principal_a = "oauth:principal-a";
+    let output = dispatcher
+        .dispatch_with_context(
+            "oracle_query",
+            json!({
+                "sql": "SELECT object_name FROM user_objects",
+                "export": true,
+                "export_format": "csv",
+            }),
+            DispatchContext::with_scope_grant(&read).with_principal_key(principal_a),
+        )
+        .expect("principal A materializes an export");
+    let uri = output["export"]["uri"].as_str().expect("export URI");
+    let id = uri
+        .strip_prefix("oracle-export://")
+        .expect("export URI scheme");
+
+    let owner = oraclemcp_core::ExportAccess::new(
+        Some("different-advisory-profile"),
+        principal_a,
+        Some(&read.0),
+    );
+    assert!(
+        exports.read(id, &owner).is_ok(),
+        "same principal and scopes can resume independently of profile"
+    );
+    let cross_principal =
+        oraclemcp_core::ExportAccess::new(Some("dev"), "oauth:principal-b", Some(&read.0));
+    let error = exports
+        .read(id, &cross_principal)
+        .expect_err("same scopes do not transfer export ownership");
+    assert_eq!(error.error_class, ErrorClass::ObjectNotFound);
+    let public = format!("{uri}{}", error.to_json());
+    assert!(!public.contains(principal_a));
+    assert!(!public.contains("principal-b"));
+}
+
+#[test]
 fn query_binds_are_accepted_and_typed() {
     let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
     let out = dispatcher

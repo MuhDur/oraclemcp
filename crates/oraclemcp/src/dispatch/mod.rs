@@ -2145,7 +2145,7 @@ async fn export_query_to_resource(
     binds: &[OracleBind],
     offset: usize,
     active_profile: Option<&str>,
-    export_scopes: Option<&[String]>,
+    export_access: &QueryExportAccess,
     exports: Option<&oraclemcp_core::ExportRegistry>,
     as_of: Option<&AsOf>,
 ) -> Result<Value, ErrorEnvelope> {
@@ -2193,7 +2193,11 @@ async fn export_query_to_resource(
     });
 
     let (columns, rows) = query_value_to_export_rows(&response_value);
-    let access = oraclemcp_core::ExportAccess::new(active_profile, export_scopes);
+    let access = oraclemcp_core::ExportAccess::new(
+        active_profile,
+        &export_access.principal_key,
+        export_access.scopes.as_deref(),
+    );
     let handle = exports.create(
         &columns,
         &rows,
@@ -2229,7 +2233,7 @@ async fn export_query_to_resource(
             "uri": handle.uri,
             "name": "oracle_query export",
             "mimeType": handle.mime_type,
-            "description": "Materialized query result. Fetch with resources/read; access-controlled to this session and expires.",
+            "description": "Materialized query result. Fetch with resources/read; bound to the originating principal and exact scope grant, and expires.",
         },
         "columns": columns,
         "row_count": handle.row_count,
@@ -7457,6 +7461,13 @@ struct QueryPrepared {
     as_of: Option<AsOf>,
 }
 
+/// Canonical export ownership copied out of the request context before the
+/// dispatcher borrows its connection state across the async query path.
+struct QueryExportAccess {
+    principal_key: String,
+    scopes: Option<Vec<String>>,
+}
+
 struct QueryRowStreamPlan {
     stream: QueryRowStream,
     columns: Vec<String>,
@@ -8200,9 +8211,16 @@ impl OracleDispatcher {
             }
 
             let active_profile = state.active_profile.clone();
-            // E3/E3b: resolve the export access context (scope fingerprint)
-            // before the immutable conn borrow / read closure.
-            let export_scopes = context.scope_grant().map(|grant| grant.0.clone());
+            // E3/E3b: resolve immutable export ownership before the conn borrow
+            // / read closure. HTTP supplies a canonical transport principal;
+            // missing means the one-process stdio identity.
+            let export_access = QueryExportAccess {
+                principal_key: context
+                    .principal_key()
+                    .unwrap_or(oraclemcp_core::STDIO_EXPORT_PRINCIPAL)
+                    .to_owned(),
+                scopes: context.scope_grant().map(|grant| grant.0.clone()),
+            };
             let conn: &dyn OracleConnection = state.conn.as_ref();
             return self
                 .run_prepared_query(
@@ -8210,7 +8228,7 @@ impl OracleDispatcher {
                     conn,
                     request_budget,
                     active_profile,
-                    export_scopes,
+                    export_access,
                     prepared,
                 )
                 .await;
@@ -9138,7 +9156,7 @@ impl OracleDispatcher {
         conn: &dyn OracleConnection,
         request_budget: RequestBudget,
         active_profile: Option<String>,
-        export_scopes: Option<Vec<String>>,
+        export_access: QueryExportAccess,
         prepared: QueryPrepared,
     ) -> Result<Value, ErrorEnvelope> {
         let QueryPrepared {
@@ -9231,7 +9249,7 @@ impl OracleDispatcher {
                         &binds,
                         offset,
                         active_profile.as_deref(),
-                        export_scopes.as_deref(),
+                        &export_access,
                         exports.as_deref(),
                         as_of.as_ref(),
                     )

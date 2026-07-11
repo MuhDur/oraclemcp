@@ -337,6 +337,35 @@ fn post(body: &Value) -> HttpRequest {
 }
 
 #[test]
+fn stateless_unauthenticated_http_has_an_explicit_anonymous_principal() {
+    let call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {
+            "name": "oracle_preview_sql",
+            "arguments": { "sql": "SELECT 1 FROM dual" }
+        }
+    });
+    let response = handle_http_request(
+        &scope_echo_server(),
+        &HttpTransportConfig {
+            json_response: true,
+            stateful: false,
+            ..Default::default()
+        },
+        post(&call),
+    );
+    assert_eq!(response.status, 200);
+    let body = response_json(&response);
+    assert_eq!(
+        body["result"]["structuredContent"]["principal_key"],
+        serde_json::json!("anonymous-http"),
+        "HTTP must never overload missing principal, which is reserved for process:stdio"
+    );
+}
+
+#[test]
 fn request_rate_limiter_uses_bounded_redacted_principal_buckets() {
     let limiters = HttpRequestRateLimiters::new(HttpRequestRateLimitConfig {
         rate_per_second: 1,
@@ -5383,6 +5412,47 @@ fn jwt_with_scope(scope: &str) -> String {
     });
     let payload = b64url(serde_json::to_string(&claims).unwrap().as_bytes());
     format!("{header}.{payload}.{}", b64url(b"sig"))
+}
+
+#[test]
+fn oauth_principal_is_stable_across_refresh_only_with_a_canonical_subject() {
+    let token = |subject: Option<&str>, generation: u64| {
+        let header = b64url(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let mut claims = serde_json::json!({
+            "iss": "https://idp.example",
+            "aud": "https://oraclemcp.example/mcp",
+            "exp": 9_999_999_999i64,
+            "scope": "oracle:read",
+            "jti": format!("refresh-{generation}"),
+        });
+        if let Some(subject) = subject {
+            claims["sub"] = serde_json::json!(subject);
+        }
+        let payload = b64url(serde_json::to_string(&claims).unwrap().as_bytes());
+        format!(
+            "{header}.{payload}.{}",
+            b64url(format!("sig-{generation}").as_bytes())
+        )
+    };
+
+    let first = token(Some("subject-a"), 1);
+    let refreshed = token(Some("subject-a"), 2);
+    assert_ne!(first, refreshed);
+    assert_eq!(
+        oauth_principal_key_from_validated_token(&first),
+        oauth_principal_key_from_validated_token(&refreshed),
+        "refresh changes token material, not canonical issuer+subject ownership"
+    );
+    assert_ne!(
+        oauth_principal_key_from_validated_token(&first),
+        oauth_principal_key_from_validated_token(&token(Some("subject-b"), 3)),
+        "different subjects must never share export ownership"
+    );
+    assert_ne!(
+        oauth_principal_key_from_validated_token(&token(None, 4)),
+        oauth_principal_key_from_validated_token(&token(None, 5)),
+        "tokens without a stable subject fail safely as token-local principals"
+    );
 }
 
 fn accepting_oauth_enforcement(required_scopes: Vec<String>) -> Arc<OAuthEnforcement> {

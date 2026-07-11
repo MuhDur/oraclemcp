@@ -129,7 +129,8 @@ pub use doctor::{
     DoctorStateLayout, apply_legacy_state_migration, classify_auth_mode, run_doctor,
 };
 pub use export::{
-    ExportAccess, ExportContents, ExportFormat, ExportHandle, ExportRegistry, export_uri,
+    ExportAccess, ExportContents, ExportFormat, ExportHandle, ExportRegistry,
+    STDIO_EXPORT_PRINCIPAL, export_uri,
 };
 pub use file_store::{
     FileStore, FileStoreError, JsonlIndex, JsonlRecord, PruneReport, RecoveryReport,
