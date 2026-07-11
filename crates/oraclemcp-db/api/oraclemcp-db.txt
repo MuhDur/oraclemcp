@@ -492,6 +492,10 @@ pub oraclemcp_db::DbError::Quarantined
 pub oraclemcp_db::DbError::Quarantined::message: alloc::string::String
 pub oraclemcp_db::DbError::Quarantined::outcome: oraclemcp_db::QuarantineOutcome
 pub oraclemcp_db::DbError::Query(alloc::string::String)
+pub oraclemcp_db::DbError::QueryRowTooLarge
+pub oraclemcp_db::DbError::QueryRowTooLarge::max_result_bytes: usize
+pub oraclemcp_db::DbError::QueryRowTooLarge::row_bytes: usize
+pub oraclemcp_db::DbError::QueryRowTooLarge::row_offset: usize
 pub oraclemcp_db::DbError::UnsupportedAuth(alloc::string::String)
 pub oraclemcp_db::DbError::UnsupportedFeature(alloc::string::String)
 impl oraclemcp_db::DbError

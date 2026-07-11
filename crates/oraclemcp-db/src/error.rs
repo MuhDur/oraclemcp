@@ -212,6 +212,20 @@ pub enum DbError {
     /// A query failed.
     #[error("oracle query failed: {0}")]
     Query(String),
+    /// The first row of a query page cannot fit within the configured compact
+    /// row-payload byte budget. The row is not returned or skipped; callers may
+    /// retry the same query/cursor after narrowing the selected payload.
+    #[error(
+        "query row at offset {row_offset} serializes to {row_bytes} bytes, exceeding the max_result_bytes row-payload cap of {max_result_bytes} bytes"
+    )]
+    QueryRowTooLarge {
+        /// Zero-based query offset of the row that could not be represented.
+        row_offset: usize,
+        /// Compact JSON bytes required by the serialized row object.
+        row_bytes: usize,
+        /// Configured compact row-payload byte budget for this page.
+        max_result_bytes: usize,
+    },
     /// A DML/DDL execute failed.
     #[error("oracle execute failed: {0}")]
     Execute(String),
@@ -301,6 +315,22 @@ impl DbError {
                     env
                 }
             }
+            DbError::QueryRowTooLarge {
+                row_offset,
+                row_bytes,
+                max_result_bytes,
+            } => ErrorEnvelope::new(
+                ErrorClass::InvalidArguments,
+                format!(
+                    "query row at offset {row_offset} requires {row_bytes} compact JSON bytes, exceeding the max_result_bytes row-payload cap of {max_result_bytes} bytes"
+                ),
+            )
+            .with_next_step(
+                "retry the same query and cursor after selecting fewer columns or filtering out unneeded wide values",
+            )
+            .with_next_step(
+                "lower max_col_width, max_lob_chars, or max_blob_bytes so each serialized row fits; use an export for larger bounded result delivery",
+            ),
             DbError::BackendNotCompiled { backend } => ErrorEnvelope::new(
                 ErrorClass::RuntimeStateRequired,
                 format!("oracle backend `{backend}` not compiled into this build"),

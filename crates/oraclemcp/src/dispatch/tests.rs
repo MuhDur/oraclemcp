@@ -2834,6 +2834,36 @@ fn db_error_maps_to_a_classified_envelope() {
 }
 
 #[test]
+fn oversized_first_query_row_propagates_without_cursor_or_result_entry() {
+    let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+    let args = json!({
+        "sql": "SELECT object_name, lob_value FROM user_objects",
+        "max_result_bytes": 1,
+    });
+
+    for attempt in 1..=2 {
+        let error = dispatcher
+            .dispatch("oracle_query", args.clone())
+            .expect_err("an oversized first row must remain a typed dispatch error");
+        assert_eq!(error.error_class, ErrorClass::InvalidArguments);
+        assert!(error.message.contains("row at offset 0"));
+        assert!(error.message.contains("row-payload cap"));
+
+        let wire_error = error.to_json();
+        assert!(
+            wire_error.get("next_cursor").is_none()
+                && wire_error.get("rows").is_none()
+                && wire_error.get("result").is_none(),
+            "attempt {attempt} emitted a resumable/result entry for a refused row: {wire_error}"
+        );
+        assert!(
+            wire_error.to_string().len() < 1_024,
+            "dispatch error must stay bounded independently of row contents"
+        );
+    }
+}
+
+#[test]
 fn query_binds_are_accepted_and_typed() {
     let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
     let out = dispatcher

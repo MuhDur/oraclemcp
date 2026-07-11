@@ -14,15 +14,20 @@ use asupersync::Cx;
 // exactly like one under the full row — no `SPAWN`/`REMOTE`/`RANDOM` needed.
 use crate::connection::{OracleConnection, db_checkpoint};
 use crate::error::{DbError, QuarantineOutcome};
-use crate::serialize::{PageColumnCache, SerializeOptions, json_byte_len};
+use crate::serialize::{PageColumnCache, SerializeOptions, checked_byte_budget_add};
 use crate::types::OracleBind;
+
+#[cfg(test)]
+use crate::serialize::json_byte_len;
 
 /// Caps on a single page of results (plan §8.2 / §10).
 #[derive(Clone, Copy, Debug)]
 pub struct QueryCaps {
     /// Max rows per page.
     pub max_rows: usize,
-    /// Max serialized bytes per page (the page truncates before exceeding it).
+    /// Max compact serialized bytes across row objects in one page. Column
+    /// metadata, pagination fields, and outer MCP response framing are excluded.
+    /// The page truncates before this row-payload budget is exceeded.
     pub max_result_bytes: usize,
 }
 
@@ -51,7 +56,8 @@ pub struct QueryResponse {
     /// Opaque cursor for the next page (the next offset), if truncated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
-    /// Serialized byte size of this page.
+    /// Compact serialized bytes across the row objects in this page. Column
+    /// metadata, pagination fields, and outer MCP response framing are excluded.
     pub total_bytes: usize,
 }
 
@@ -261,17 +267,37 @@ fn query_response_from_rows_checked<Caps>(
         if idx % 64 == 0 {
             db_checkpoint(cx, "oracle_query.serialize.rows")?;
         }
-        let value = match &column_cache {
-            Some(cache) => cache.serialize_row(row, serialize_opts),
-            None => crate::serialize::serialize_row(row, serialize_opts),
+        let remaining = caps.max_result_bytes.saturating_sub(total_bytes);
+        let serialized = match &column_cache {
+            Some(cache) => cache.serialize_row_with_budget(row, serialize_opts, remaining),
+            None => PageColumnCache::from_row(row).serialize_row_with_budget(
+                row,
+                serialize_opts,
+                remaining,
+            ),
         };
-        let size = json_byte_len(&value);
-        // Always include at least one row; otherwise stop before exceeding the cap.
-        if !out_rows.is_empty() && total_bytes + size > caps.max_result_bytes {
+        let (value, size) = match serialized {
+            Ok(serialized) => serialized,
+            Err(size) => {
+                if out_rows.is_empty() {
+                    return Err(DbError::QueryRowTooLarge {
+                        row_offset: offset.saturating_add(idx),
+                        row_bytes: size,
+                        max_result_bytes: caps.max_result_bytes,
+                    });
+                }
+                byte_truncated = true;
+                break;
+            }
+        };
+        let Some(next_total) = checked_byte_budget_add(total_bytes, size, caps.max_result_bytes)
+        else {
+            // The row was admitted against the exact remaining budget above;
+            // fail closed if checked aggregate accounting ever disagrees.
             byte_truncated = true;
             break;
-        }
-        total_bytes += size;
+        };
+        total_bytes = next_total;
         out_rows.push(value);
     }
 
@@ -324,9 +350,18 @@ mod tests {
         offset: usize,
         serialize_opts: &SerializeOptions,
     ) -> QueryResponse {
+        try_query_response_from_rows(rows, caps, offset, serialize_opts)
+            .expect("uncancelled query response construction succeeds")
+    }
+
+    fn try_query_response_from_rows(
+        rows: Vec<crate::types::OracleRow>,
+        caps: QueryCaps,
+        offset: usize,
+        serialize_opts: &SerializeOptions,
+    ) -> Result<QueryResponse, DbError> {
         run_with_cx(|cx| async move {
             query_response_from_rows_checked(&cx, rows, caps, offset, serialize_opts)
-                .expect("uncancelled query response construction cannot be cancelled")
         })
     }
 
@@ -466,16 +501,128 @@ mod tests {
     }
 
     #[test]
-    fn byte_cap_truncates_mid_page() {
-        // Tiny byte cap -> only the first (always-included) row fits.
+    fn first_row_above_byte_cap_fails_closed_without_skipping() {
         let caps = QueryCaps {
             max_rows: 100,
             max_result_bytes: 10,
         };
-        let r = run(50, caps);
-        assert_eq!(r.row_count, 1, "always include at least one row, then stop");
-        assert!(r.truncated);
-        assert_eq!(r.next_cursor.as_deref(), Some("1"));
+        let error = run_with_cx(|cx| async move {
+            read_query(
+                &cx,
+                &NRowMock { n: 50 },
+                "SELECT id, name FROM t",
+                &[],
+                caps,
+                0,
+                &SerializeOptions::default(),
+            )
+            .await
+            .expect_err("first oversized row must not bypass the byte cap")
+        });
+        match &error {
+            DbError::QueryRowTooLarge {
+                row_offset,
+                row_bytes,
+                max_result_bytes,
+            } => {
+                assert_eq!(*row_offset, 0, "the oversized row is not skipped");
+                assert!(*row_bytes > 10);
+                assert_eq!(*max_result_bytes, 10);
+            }
+            other => panic!("expected QueryRowTooLarge, got {other:?}"),
+        }
+        let envelope = error.into_envelope();
+        assert_eq!(
+            envelope.error_class,
+            oraclemcp_error::ErrorClass::InvalidArguments
+        );
+        assert!(envelope.message.contains("row at offset 0"));
+        assert!(
+            envelope
+                .next_steps
+                .iter()
+                .any(|step| step.contains("fewer columns"))
+        );
+        assert!(
+            envelope
+                .next_steps
+                .iter()
+                .any(|step| step.contains("max_lob_chars"))
+        );
+        assert!(
+            envelope.to_json().to_string().len() < 1_024,
+            "row-too-large error envelope must remain bounded"
+        );
+    }
+
+    #[test]
+    fn first_row_byte_cap_exact_boundary_and_cap_minus_one() {
+        let opts = SerializeOptions::default();
+        let rows = varied_rows(1);
+        let row_bytes = json_byte_len(&crate::serialize::serialize_row(&rows[0], &opts));
+        let exact = query_response_from_rows(
+            rows.clone(),
+            QueryCaps {
+                max_rows: 1,
+                max_result_bytes: row_bytes,
+            },
+            17,
+            &opts,
+        );
+        assert_eq!(exact.row_count, 1);
+        assert_eq!(exact.total_bytes, row_bytes);
+        assert!(!exact.truncated);
+
+        let error = try_query_response_from_rows(
+            rows,
+            QueryCaps {
+                max_rows: 1,
+                max_result_bytes: row_bytes - 1,
+            },
+            17,
+            &opts,
+        )
+        .expect_err("cap minus one must refuse row zero of this page");
+        assert!(matches!(
+            error,
+            DbError::QueryRowTooLarge {
+                row_offset: 17,
+                row_bytes: actual,
+                max_result_bytes: cap,
+            } if actual == row_bytes && cap == row_bytes - 1
+        ));
+    }
+
+    #[test]
+    fn many_wide_columns_cannot_bypass_first_row_cap() {
+        let wide_row = OracleRow {
+            columns: (0..256)
+                .map(|idx| {
+                    (
+                        format!("COLUMN_{idx}"),
+                        OracleCell::new("VARCHAR2", Some("x".repeat(1024))),
+                    )
+                })
+                .collect(),
+        };
+        let error = try_query_response_from_rows(
+            vec![wide_row],
+            QueryCaps {
+                max_rows: 1,
+                max_result_bytes: 4096,
+            },
+            0,
+            &SerializeOptions::default(),
+        )
+        .expect_err("wide first row must not be included as a progress sentinel");
+        assert!(matches!(
+            error,
+            DbError::QueryRowTooLarge {
+                row_offset: 0,
+                row_bytes,
+                max_result_bytes: 4096,
+            } if row_bytes > 4096
+        ));
     }
 
     #[test]
@@ -493,7 +640,7 @@ mod tests {
         caps: QueryCaps,
         offset: usize,
         opts: &SerializeOptions,
-    ) -> (usize, bool, Option<String>, usize) {
+    ) -> Result<(usize, bool, Option<String>, usize), usize> {
         let more_by_rows = rows.len() > caps.max_rows;
         let page = &rows[..rows.len().min(caps.max_rows)];
         let mut out = 0usize;
@@ -502,16 +649,26 @@ mod tests {
         for row in page {
             let value = crate::serialize::serialize_row(row, opts);
             let size = value.to_string().len();
-            if out != 0 && total + size > caps.max_result_bytes {
+            let Some(next_total) = total.checked_add(size) else {
+                if out == 0 {
+                    return Err(size);
+                }
+                byte_truncated = true;
+                break;
+            };
+            if next_total > caps.max_result_bytes {
+                if out == 0 {
+                    return Err(size);
+                }
                 byte_truncated = true;
                 break;
             }
-            total += size;
+            total = next_total;
             out += 1;
         }
         let truncated = more_by_rows || byte_truncated;
         let cursor = truncated.then(|| (offset + out).to_string());
-        (out, truncated, cursor, total)
+        Ok((out, truncated, cursor, total))
     }
 
     fn varied_rows(n: usize) -> Vec<OracleRow> {
@@ -548,24 +705,36 @@ mod tests {
                     max_result_bytes,
                 };
                 let offset = 7;
-                let got = query_response_from_rows(rows.clone(), caps, offset, &opts);
-                let (rc, trunc, cursor, total) = reference_page(&rows, caps, offset, &opts);
-                assert_eq!(
-                    got.row_count, rc,
-                    "row_count @ {max_rows}/{max_result_bytes}"
-                );
-                assert_eq!(
-                    got.truncated, trunc,
-                    "truncated @ {max_rows}/{max_result_bytes}"
-                );
-                assert_eq!(
-                    got.next_cursor, cursor,
-                    "cursor @ {max_rows}/{max_result_bytes}"
-                );
-                assert_eq!(
-                    got.total_bytes, total,
-                    "total_bytes @ {max_rows}/{max_result_bytes}"
-                );
+                let got = try_query_response_from_rows(rows.clone(), caps, offset, &opts);
+                match reference_page(&rows, caps, offset, &opts) {
+                    Ok((rc, trunc, cursor, total)) => {
+                        let got = got.expect("reference admits this page");
+                        assert_eq!(
+                            got.row_count, rc,
+                            "row_count @ {max_rows}/{max_result_bytes}"
+                        );
+                        assert_eq!(
+                            got.truncated, trunc,
+                            "truncated @ {max_rows}/{max_result_bytes}"
+                        );
+                        assert_eq!(
+                            got.next_cursor, cursor,
+                            "cursor @ {max_rows}/{max_result_bytes}"
+                        );
+                        assert_eq!(
+                            got.total_bytes, total,
+                            "total_bytes @ {max_rows}/{max_result_bytes}"
+                        );
+                    }
+                    Err(row_bytes) => assert!(matches!(
+                        got,
+                        Err(DbError::QueryRowTooLarge {
+                            row_offset: 7,
+                            row_bytes: actual,
+                            max_result_bytes: cap,
+                        }) if actual == row_bytes && cap == max_result_bytes
+                    )),
+                }
             }
         }
     }

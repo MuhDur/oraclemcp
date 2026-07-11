@@ -234,7 +234,7 @@
                   "type": "integer"
                 },
                 "max_result_bytes": {
-                  "description": "Maximum serialized JSON bytes in this page (default 10485760, hard cap 26214400).",
+                  "description": "Maximum compact JSON bytes across row objects in this page (default 10485760, hard cap 26214400; excludes columns, pagination metadata, and the outer MCP envelope).",
                   "maximum": 26214400,
                   "minimum": 1,
                   "type": "integer"
@@ -1125,7 +1125,7 @@
                   "type": "integer"
                 },
                 "max_result_bytes": {
-                  "description": "Maximum serialized JSON bytes in this page.",
+                  "description": "Maximum compact JSON bytes across row objects in this page; excludes columns, pagination metadata, and the outer MCP envelope.",
                   "maximum": 26214400,
                   "minimum": 1,
                   "type": "integer"

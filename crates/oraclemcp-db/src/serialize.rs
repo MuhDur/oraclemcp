@@ -14,6 +14,7 @@
 //!    never silently truncates through `f64`. `numbers_as_float` opts into
 //!    lossy float for callers who accept it.
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 
 use serde::{Deserialize, Serialize};
@@ -29,7 +30,9 @@ struct ByteCounter(usize);
 
 impl Write for ByteCounter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0 += buf.len();
+        // Saturation keeps adversarial accounting fail-closed even on a
+        // hypothetical value whose encoded length approaches `usize::MAX`.
+        self.0 = self.0.saturating_add(buf.len());
         Ok(buf.len())
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -46,6 +49,34 @@ pub(crate) fn json_byte_len(value: &Value) -> usize {
     let _ = serde_json::to_writer(&mut counter, value);
     counter.0
 }
+
+/// The compact-JSON byte length of an object key, including its quotes and any
+/// required escaping, without allocating the encoded string.
+fn json_string_byte_len(value: &str) -> usize {
+    let mut counter = ByteCounter(0);
+    let _ = serde_json::to_writer(&mut counter, value);
+    counter.0
+}
+
+/// Add one compact-JSON payload length to a running byte total without
+/// overflowing and only when the resulting total remains within `max_bytes`.
+/// `None` means either arithmetic overflow or budget exhaustion; callers treat
+/// both identically and fail closed.
+pub(crate) fn checked_byte_budget_add(
+    total_bytes: usize,
+    next_bytes: usize,
+    max_bytes: usize,
+) -> Option<usize> {
+    total_bytes
+        .checked_add(next_bytes)
+        .filter(|total| *total <= max_bytes)
+}
+
+/// Structural allowance for the bounded nested-cursor row-too-large sentinel.
+/// `max_nested_cursor_bytes` governs compact row payload only; when row zero is
+/// too large, this fixed-size metadata replaces the rows/columns payload and is
+/// capped independently so even a 1-byte row budget has a useful typed result.
+const NESTED_CURSOR_ERROR_SENTINEL_MAX_BYTES: usize = 512;
 
 /// `ALTER SESSION` statements that pin canonical, NLS-decoupled output. Applied
 /// once per physical session (at connect / lease acquire).
@@ -143,7 +174,10 @@ pub struct SerializeOptions {
     pub max_nested_cursor_rows: usize,
     /// Max cells fetched from a nested REF CURSOR / implicit result.
     pub max_nested_cursor_cells: usize,
-    /// Max serialized bytes for one nested REF CURSOR / implicit result.
+    /// Max compact serialized bytes across row objects in one nested REF CURSOR
+    /// / implicit result. Columns and structural metadata are excluded. A first
+    /// row that exceeds this budget is replaced by a typed error sentinel of at
+    /// most [`NESTED_CURSOR_ERROR_SENTINEL_MAX_BYTES`] bytes.
     pub max_nested_cursor_bytes: usize,
     /// Max nested cursor depth. A top-level REF CURSOR cell is depth 0.
     pub max_nested_cursor_depth: usize,
@@ -487,17 +521,50 @@ fn serialize_nested_result(
     let mut rows = Vec::with_capacity(nested.rows.len());
     let mut total_bytes = 0usize;
     let mut byte_truncated = false;
-    for row in &nested.rows {
-        let value = match &column_cache {
-            Some(cache) => cache.serialize_row(row, opts),
-            None => serialize_row(row, opts),
+    for (row_index, row) in nested.rows.iter().enumerate() {
+        let remaining = opts.max_nested_cursor_bytes.saturating_sub(total_bytes);
+        let serialized = match &column_cache {
+            Some(cache) => cache.serialize_row_with_budget(row, opts, remaining),
+            None => PageColumnCache::from_row(row).serialize_row_with_budget(row, opts, remaining),
         };
-        let size = json_byte_len(&value);
-        if !rows.is_empty() && total_bytes + size > opts.max_nested_cursor_bytes {
+        let (value, size) = match serialized {
+            Ok(serialized) => serialized,
+            Err(size) => {
+                if rows.is_empty() {
+                    let sentinel = json!({
+                        "error": {
+                            "type": "ROW_TOO_LARGE",
+                            "row_index": row_index,
+                            "row_bytes": size,
+                            "max_row_bytes": opts.max_nested_cursor_bytes,
+                            "message": "nested cursor row exceeds the compact row-payload byte budget",
+                            "next_step": "select fewer nested columns or lower per-cell text/LOB limits"
+                        },
+                        "rows": [],
+                        "row_count": 0,
+                        "fetched_count": nested.fetched_count,
+                        "truncated": true,
+                    });
+                    debug_assert!(
+                        json_byte_len(&sentinel) <= NESTED_CURSOR_ERROR_SENTINEL_MAX_BYTES,
+                        "nested cursor row-too-large sentinel must remain structurally bounded"
+                    );
+                    return sentinel;
+                }
+                byte_truncated = true;
+                break;
+            }
+        };
+        let Some(next_total) =
+            checked_byte_budget_add(total_bytes, size, opts.max_nested_cursor_bytes)
+        else {
+            // `serialize_row_with_budget` admitted this row against the exact
+            // remaining budget, so only an arithmetic/accounting defect could
+            // reach here. Fail closed rather than emitting an oversized page.
             byte_truncated = true;
             break;
-        }
-        total_bytes = total_bytes.saturating_add(size);
+        };
+        total_bytes = next_total;
         rows.push(value);
     }
     let row_count = rows.len();
@@ -553,6 +620,75 @@ impl PageColumnCache {
             map.insert(name.clone(), serialize_cell_classified(cell, col, opts));
         }
         Value::Object(map)
+    }
+
+    /// Serialize one row while retaining its aggregate JSON object only while
+    /// it fits `max_bytes`. Each cell is still serialized independently so its
+    /// exact compact length can be counted, but once the object crosses the
+    /// budget the already-built aggregate is dropped immediately. This avoids
+    /// retaining an unbounded many-column `Value` merely to reject the row.
+    ///
+    /// The returned `Err` is the exact compact row-object length. Duplicate
+    /// column names preserve [`serialize_row`]'s last-wins behavior; if a later
+    /// duplicate shrinks an over-budget object back under the cap, the accepted
+    /// object is reconstructed to preserve byte-identical ordinary pages.
+    pub(crate) fn serialize_row_with_budget(
+        &self,
+        row: &OracleRow,
+        opts: &SerializeOptions,
+        max_bytes: usize,
+    ) -> Result<(Value, usize), usize> {
+        // `{}` is two bytes. Track last-wins value lengths separately from the
+        // retained map so counting can continue after the aggregate is dropped.
+        let mut total_bytes = 2usize;
+        let mut value_sizes: HashMap<&str, usize> = HashMap::with_capacity(row.columns.len());
+        let mut retained = Some(serde_json::Map::with_capacity(row.columns.len()));
+
+        for (idx, (name, cell)) in row.columns.iter().enumerate() {
+            let col = self
+                .columns
+                .get(idx)
+                .copied()
+                .unwrap_or_else(|| ColumnRepr::classify(&cell.oracle_type));
+            let value = serialize_cell_classified(cell, col, opts);
+            let value_bytes = json_byte_len(&value);
+
+            let next_total = if let Some(previous_bytes) = value_sizes.get(name.as_str()).copied() {
+                total_bytes
+                    .checked_sub(previous_bytes)
+                    .and_then(|n| n.checked_add(value_bytes))
+            } else {
+                let comma_bytes = usize::from(!value_sizes.is_empty());
+                total_bytes
+                    .checked_add(comma_bytes)
+                    .and_then(|n| n.checked_add(json_string_byte_len(name)))
+                    .and_then(|n| n.checked_add(1)) // `:`
+                    .and_then(|n| n.checked_add(value_bytes))
+            };
+            let Some(next_total) = next_total else {
+                // A real compact JSON value cannot exceed the address space,
+                // but fail closed if accounting ever reaches that boundary.
+                return Err(usize::MAX);
+            };
+            total_bytes = next_total;
+            value_sizes.insert(name.as_str(), value_bytes);
+
+            if total_bytes <= max_bytes {
+                if let Some(map) = &mut retained {
+                    map.insert(name.clone(), value);
+                }
+            } else {
+                retained = None;
+            }
+        }
+
+        if total_bytes > max_bytes {
+            return Err(total_bytes);
+        }
+
+        let value = retained.map_or_else(|| self.serialize_row(row, opts), Value::Object);
+        debug_assert_eq!(json_byte_len(&value), total_bytes);
+        Ok((value, total_bytes))
     }
 }
 
@@ -863,6 +999,103 @@ mod tests {
         assert_eq!(rendered["row_count"], json!(1));
         assert_eq!(rendered["fetched_count"], json!(2));
         assert_eq!(rendered["truncated"], json!(true));
+    }
+
+    #[test]
+    fn nested_result_first_oversized_row_becomes_bounded_typed_error() {
+        let nested = OracleNestedResult {
+            columns: vec!["TEXT".to_owned()],
+            rows: vec![OracleRow {
+                columns: vec![("TEXT".to_owned(), cell("VARCHAR2", "secret-row-value"))],
+            }],
+            row_count: 1,
+            fetched_count: 1,
+            truncated: false,
+        };
+        let rendered = serialize_cell(
+            &OracleCell::nested_result("REF CURSOR", nested),
+            &SerializeOptions {
+                max_nested_cursor_bytes: 8,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(rendered["rows"], json!([]));
+        assert_eq!(rendered["row_count"], json!(0));
+        assert_eq!(rendered["fetched_count"], json!(1));
+        assert_eq!(rendered["truncated"], json!(true));
+        assert_eq!(rendered["error"]["type"], json!("ROW_TOO_LARGE"));
+        assert_eq!(rendered["error"]["row_index"], json!(0));
+        assert_eq!(rendered["error"]["max_row_bytes"], json!(8));
+        assert!(
+            rendered["error"]["row_bytes"]
+                .as_u64()
+                .is_some_and(|n| n > 8)
+        );
+        let encoded = rendered.to_string();
+        assert!(
+            !encoded.contains("secret-row-value"),
+            "raw oversized row leaked"
+        );
+        assert!(
+            encoded.len() <= NESTED_CURSOR_ERROR_SENTINEL_MAX_BYTES,
+            "typed nested sentinel exceeded its structural allowance: {} bytes",
+            encoded.len()
+        );
+    }
+
+    #[test]
+    fn checked_byte_budget_add_handles_exact_boundary_and_overflow() {
+        assert_eq!(checked_byte_budget_add(7, 5, 12), Some(12));
+        assert_eq!(checked_byte_budget_add(7, 6, 12), None);
+        assert_eq!(checked_byte_budget_add(usize::MAX, 1, usize::MAX), None);
+        assert_eq!(
+            checked_byte_budget_add(usize::MAX - 1, 1, usize::MAX),
+            Some(usize::MAX)
+        );
+    }
+
+    #[test]
+    fn budgeted_row_serializer_is_exact_and_preserves_last_wins_output() {
+        let opts = SerializeOptions::default();
+        let row = OracleRow {
+            columns: vec![
+                ("B".to_owned(), cell("VARCHAR2", "first")),
+                ("A".to_owned(), cell("NUMBER", "42")),
+                ("B".to_owned(), cell("VARCHAR2", "replacement")),
+            ],
+        };
+        let expected = serialize_row(&row, &opts);
+        let expected_bytes = json_byte_len(&expected);
+        let cache = PageColumnCache::from_row(&row);
+
+        let (actual, actual_bytes) = cache
+            .serialize_row_with_budget(&row, &opts, expected_bytes)
+            .expect("exact row budget must be admitted");
+        assert_eq!(actual, expected);
+        assert_eq!(actual_bytes, expected_bytes);
+        assert_eq!(
+            cache.serialize_row_with_budget(&row, &opts, expected_bytes - 1),
+            Err(expected_bytes)
+        );
+    }
+
+    #[test]
+    fn budgeted_row_serializer_counts_many_columns_after_dropping_aggregate() {
+        let opts = SerializeOptions::default();
+        let row = OracleRow {
+            columns: (0..256)
+                .map(|idx| (format!("COLUMN_{idx}"), cell("VARCHAR2", &"x".repeat(1024))))
+                .collect(),
+        };
+        let expected_bytes = json_byte_len(&serialize_row(&row, &opts));
+        let cache = PageColumnCache::from_row(&row);
+
+        assert_eq!(
+            cache.serialize_row_with_budget(&row, &opts, 4096),
+            Err(expected_bytes),
+            "rejected row still reports exact checked size"
+        );
     }
 
     #[test]
