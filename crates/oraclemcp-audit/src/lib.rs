@@ -16,6 +16,7 @@ mod anchor;
 mod hmac;
 mod record;
 mod shipping;
+mod shipping_spool;
 mod sink;
 mod unified;
 mod verify;
@@ -35,6 +36,11 @@ pub use record::{
 };
 pub use shipping::{
     ShippingAuditSink, ShippingError, ShippingForwarder, WormFileForwarder, cef_line, syslog_line,
+};
+pub use shipping_spool::{
+    DEFAULT_SPOOL_MAX_RECORDS, DEFAULT_SPOOL_RETRY_INITIAL, DEFAULT_SPOOL_RETRY_MAX,
+    DurableShippingForwarder, DurableShippingStatus, DurableShippingStatusHandle,
+    DurableSpoolConfig,
 };
 pub use sink::{AuditError, AuditSink, Auditor, FileAuditSink, MemoryAuditSink};
 pub use unified::{UnifiedAuditError, UnifiedAuditPolicy, is_simple_identifier};

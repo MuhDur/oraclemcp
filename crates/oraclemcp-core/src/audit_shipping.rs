@@ -14,11 +14,12 @@
 //!
 //! # Fail-safe by construction
 //!
-//! The forwarder is only ever wrapped by
-//! [`ShippingAuditSink`](oraclemcp_audit::ShippingAuditSink), which calls it
-//! **after** the local durable fsync and treats any error as non-fatal (logged +
-//! counted). So a SIEM outage degrades to "local chain only" — never a lost
-//! record and never a failed audited call.
+//! Production wiring wraps this blocking transport in
+//! [`DurableShippingForwarder`](oraclemcp_audit::DurableShippingForwarder).
+//! The signed record is durably spooled after the authoritative local fsync,
+//! then this transport runs on the spool's dedicated worker without holding the
+//! audit chain mutex. A SIEM outage therefore degrades to an ordered retrying
+//! local spool and never delays or fails the audited call.
 //!
 //! # Off by default
 //!
@@ -153,9 +154,9 @@ impl SiemHttpForwarder {
     }
 
     /// POST one encoded record on a dedicated current-thread asupersync runtime.
-    /// Blocking: the [`ShippingAuditSink`](oraclemcp_audit::ShippingAuditSink)
-    /// calls this after the local fsync, off the request hot path.
-    fn post(&self, body: Vec<u8>) -> Result<(), ShippingError> {
+    /// This is deliberately blocking and must run behind the production
+    /// durable-spool worker, not on an audited request thread.
+    fn post(&self, record: &AuditRecord, body: Vec<u8>) -> Result<(), ShippingError> {
         // The SIEM POST is real network I/O; the forwarder runtime needs a
         // reactor to drive it — without one the POST hangs (release-gre.16).
         let reactor = asupersync::runtime::reactor::create_reactor()
@@ -171,6 +172,14 @@ impl SiemHttpForwarder {
             "Content-Type".to_owned(),
             self.format.content_type().to_owned(),
         )];
+        // Delivery is at least once: a crash can occur after the collector
+        // accepts a POST but before the spool atomically acknowledges it. Give
+        // collectors a stable, non-secret deduplication key for that replay.
+        headers.push((
+            "Idempotency-Key".to_owned(),
+            format!("oraclemcp-audit-{}-{}", record.seq, record.entry_hash),
+        ));
+        headers.push(("X-Oraclemcp-Audit-Seq".to_owned(), record.seq.to_string()));
         headers.extend(self.headers.iter().cloned());
 
         // block-on-boundary: dedicated audit-forwarder runtime after local fsync.
@@ -208,7 +217,7 @@ impl SiemHttpForwarder {
 impl ShippingForwarder for SiemHttpForwarder {
     fn forward(&self, record: &AuditRecord) -> Result<(), ShippingError> {
         let body = self.format.encode(record);
-        self.post(body)
+        self.post(record, body)
     }
 }
 
@@ -339,6 +348,15 @@ mod tests {
                 request[..bytes].starts_with(b"POST /initial HTTP/1.1\r\n"),
                 "unexpected request: {}",
                 String::from_utf8_lossy(&request[..bytes])
+            );
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            assert!(
+                request.contains("Idempotency-Key: oraclemcp-audit-1-sha256:"),
+                "restart-safe idempotency key missing: {request}"
+            );
+            assert!(
+                request.contains("X-Oraclemcp-Audit-Seq: 1"),
+                "audit sequence header missing: {request}"
             );
             write!(
                 stream,

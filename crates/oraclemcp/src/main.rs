@@ -1446,7 +1446,7 @@ fn build_auditor(
     // loses the local record (the decorator logs + counts it).
     let local = match audit.shipping.as_ref() {
         Some(shipping) => {
-            build_shipping_sink(sink, shipping, level.is_protected(), secret_resolver)?
+            build_shipping_sink(sink, shipping, &path, level.is_protected(), secret_resolver)?
         }
         None => Box::new(sink) as Box<dyn AuditSink>,
     };
@@ -1578,10 +1578,14 @@ fn finish_write_intent_log_build(
 fn build_shipping_sink(
     local: FileAuditSink,
     shipping: &oraclemcp_config::AuditShippingConfig,
+    audit_path: &Path,
     protected: bool,
     secret_resolver: &dyn SecretResolver,
 ) -> Result<Box<dyn AuditSink>, (&'static str, String)> {
     let mut forwarders: Vec<Box<dyn ShippingForwarder>> = Vec::new();
+    let mut spool_name = audit_path.as_os_str().to_os_string();
+    spool_name.push(".shipping-spool");
+    let spool_root = PathBuf::from(spool_name);
 
     if let Some(worm_path) = shipping.worm_path.as_deref() {
         if let Some(parent) = worm_path.parent()
@@ -1612,7 +1616,39 @@ fn build_shipping_sink(
                     ),
                 ),
             })?;
-        tracing::info!(worm_path = %worm_path.display(), "audit WORM mirror armed");
+        let normalized_worm = normalized_destination_path(worm_path).map_err(|error| {
+            (
+                "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                format!("cannot normalize WORM destination for durable spooling: {error}"),
+            )
+        })?;
+        let destination_id =
+            oraclemcp_audit::sha256_hex(normalized_worm.to_string_lossy().as_bytes());
+        let destination_slug: String = destination_id
+            .strip_prefix("sha256:")
+            .unwrap_or(&destination_id)
+            .chars()
+            .take(16)
+            .collect();
+        let spool_dir = spool_root.join(format!("worm-{destination_slug}"));
+        let worm = oraclemcp_audit::DurableShippingForwarder::open(
+            oraclemcp_audit::DurableSpoolConfig::new(&spool_dir, destination_id),
+            Box::new(worm),
+        )
+        .map_err(|error| {
+            (
+                "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                format!(
+                    "failed to open durable WORM spool {}: {error}",
+                    spool_dir.display()
+                ),
+            )
+        })?;
+        tracing::info!(
+            worm_path = %worm_path.display(),
+            spool_dir = %spool_dir.display(),
+            "durable asynchronous audit WORM mirror armed"
+        );
         forwarders.push(Box::new(worm));
     }
 
@@ -1648,10 +1684,33 @@ fn build_shipping_sink(
                     )
                 })?;
         }
+        let destination_id =
+            oraclemcp_audit::sha256_hex(format!("{}|{format:?}", endpoint.as_str()).as_bytes());
+        let destination_slug: String = destination_id
+            .strip_prefix("sha256:")
+            .unwrap_or(&destination_id)
+            .chars()
+            .take(16)
+            .collect();
+        let spool_dir = spool_root.join(format!("siem-{destination_slug}"));
+        let forwarder = oraclemcp_audit::DurableShippingForwarder::open(
+            oraclemcp_audit::DurableSpoolConfig::new(&spool_dir, destination_id),
+            Box::new(forwarder),
+        )
+        .map_err(|error| {
+            (
+                "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                format!(
+                    "failed to open durable SIEM spool {}: {error}",
+                    spool_dir.display()
+                ),
+            )
+        })?;
         tracing::info!(
             siem_origin = %endpoint.diagnostic_origin(),
             format = ?format,
-            "audit SIEM forwarder armed"
+            spool_dir = %spool_dir.display(),
+            "durable asynchronous audit SIEM forwarder armed"
         );
         forwarders.push(Box::new(forwarder));
     }

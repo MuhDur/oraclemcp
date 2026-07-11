@@ -17,10 +17,12 @@
 //!    record), and only then mirrors the just-appended records to the
 //!    [`ShippingForwarder`].
 //!
-//! A forwarding failure is **logged and dropped** — it never fails the local
-//! durable path, so a record is never lost because a SIEM was unreachable. This
-//! is the same fail-safe posture the OTLP export pump uses: the security record
-//! of record is the local signed chain; shipping is a mirror, not the primary.
+//! A forwarding/enqueue failure is non-fatal to the authoritative local chain.
+//! Production network destinations are wrapped in
+//! [`DurableShippingForwarder`](crate::DurableShippingForwarder): the decorator
+//! durably enqueues after the local fsync, and a dedicated ordered worker owns
+//! all slow network I/O and retries. A bounded-spool overflow is counted,
+//! logged, and recorded in a durable gap indicator rather than silently lost.
 //!
 //! Because the forwarded stream is the **same signed [`AuditRecord`]** in the
 //! same order, the destination re-verifies under exactly the same
@@ -48,7 +50,7 @@
 //! unless a destination is configured.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -59,7 +61,8 @@ use crate::sink::{AuditError, AuditSink, FileAuditSink, open_file_identity};
 
 /// A shipping (forwarding) failure. Distinct from [`AuditError`] because a
 /// shipping failure is **non-fatal** to the local durable chain: the decorator
-/// records and drops it rather than failing the audited call.
+/// records it rather than failing the audited call. Durable forwarders retain
+/// destination failures for retry; a raw forwarder may drop a failed mirror.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ShippingError {
@@ -92,13 +95,15 @@ impl std::error::Error for ShippingError {}
 /// the local fsync), so a faithful forwarder reproduces a stream that
 /// re-verifies under [`verify_records`](crate::verify_records).
 ///
-/// `forward` is blocking and `Send + Sync`; a network forwarder bridges to its
-/// own runtime internally (as the asupersync-backed `oraclemcp-core` forwarder
-/// does) so this leaf crate needs no async runtime.
+/// `forward` is blocking and `Send + Sync`. Production network/file
+/// destinations are wrapped in [`DurableShippingForwarder`](crate::DurableShippingForwarder),
+/// whose dedicated worker owns this blocking call, so the audit mutex never
+/// spans destination I/O and this leaf crate needs no async runtime.
 pub trait ShippingForwarder: Send + Sync {
     /// Mirror one record to the destination. Errors are surfaced to the
-    /// decorator, which logs and drops them (fail-safe: never fails the local
-    /// durable path).
+    /// decorator, which logs and counts them (fail-safe: never fails the local
+    /// durable path). Network implementations should be placed behind
+    /// [`DurableShippingForwarder`](crate::DurableShippingForwarder).
     fn forward(&self, record: &AuditRecord) -> Result<(), ShippingError>;
 
     /// Flush any buffered forwarded data to the destination. Best-effort;
@@ -120,7 +125,12 @@ pub trait ShippingForwarder: Send + Sync {
 /// future rotation/reopen must construct a new forwarder and therefore repeats
 /// the identity proof before another record can be mirrored.
 pub struct WormFileForwarder {
-    file: Mutex<File>,
+    state: Mutex<WormFileState>,
+}
+
+struct WormFileState {
+    file: File,
+    last: Option<(u64, String)>,
 }
 
 impl WormFileForwarder {
@@ -143,6 +153,7 @@ impl WormFileForwarder {
             .map_err(|error| ShippingError::Transport(error.to_string()))?;
         let file = OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(path)
             .map_err(|e| ShippingError::Transport(e.to_string()))?;
@@ -152,27 +163,85 @@ impl WormFileForwarder {
         if mirror_identity == primary_identity {
             return Err(ShippingError::AliasedPrimaryAuditLog);
         }
+        let mut body = String::new();
+        (&file)
+            .read_to_string(&mut body)
+            .map_err(|e| ShippingError::Transport(e.to_string()))?;
+        let records = crate::parse_jsonl(&body).map_err(|error| {
+            ShippingError::Transport(format!("existing WORM mirror is malformed: {error}"))
+        })?;
+        let mut previous_hash = crate::GENESIS_HASH;
+        for (index, record) in records.iter().enumerate() {
+            let expected_seq = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+            if record.seq != expected_seq
+                || record.prev_hash != previous_hash
+                || !record.hash_is_valid()
+            {
+                return Err(ShippingError::Transport(format!(
+                    "existing WORM mirror has a broken chain at sequence {}",
+                    record.seq
+                )));
+            }
+            previous_hash = &record.entry_hash;
+        }
+        let last = records
+            .last()
+            .map(|record| (record.seq, record.entry_hash.clone()));
         Ok(WormFileForwarder {
-            file: Mutex::new(file),
+            state: Mutex::new(WormFileState { file, last }),
         })
     }
 }
 
 impl ShippingForwarder for WormFileForwarder {
     fn forward(&self, record: &AuditRecord) -> Result<(), ShippingError> {
+        let mut state = self.state.lock();
+        if let Some((last_seq, last_hash)) = state.last.as_ref() {
+            if record.seq == *last_seq && record.entry_hash == *last_hash {
+                // At-least-once spool replay after a crash between destination
+                // acceptance and local acknowledgement. The exact signed tail
+                // is already present; treating it as accepted keeps the WORM
+                // chain byte-identical instead of appending a duplicate.
+                return Ok(());
+            }
+            if record.seq != last_seq.saturating_add(1) || record.prev_hash != *last_hash {
+                return Err(ShippingError::Transport(format!(
+                    "WORM mirror expected sequence {} chained from its current tail, got {}",
+                    last_seq.saturating_add(1),
+                    record.seq
+                )));
+            }
+        } else if record.seq != 1 || record.prev_hash != crate::GENESIS_HASH {
+            return Err(ShippingError::Transport(format!(
+                "empty WORM mirror expected sequence 1 chained from genesis, got {}",
+                record.seq
+            )));
+        }
+        if !record.hash_is_valid() {
+            return Err(ShippingError::Transport(format!(
+                "refusing structurally invalid signed record at sequence {}",
+                record.seq
+            )));
+        }
         let line =
             serde_json::to_string(record).map_err(|e| ShippingError::Transport(e.to_string()))?;
-        let mut f = self.file.lock();
-        f.write_all(line.as_bytes())
+        state
+            .file
+            .write_all(line.as_bytes())
             .map_err(|e| ShippingError::Transport(e.to_string()))?;
-        f.write_all(b"\n")
+        state
+            .file
+            .write_all(b"\n")
             .map_err(|e| ShippingError::Transport(e.to_string()))?;
+        state.last = Some((record.seq, record.entry_hash.clone()));
         Ok(())
     }
 
     fn flush(&self) -> Result<(), ShippingError> {
-        let f = self.file.lock();
-        f.sync_all()
+        let state = self.state.lock();
+        state
+            .file
+            .sync_all()
             .map_err(|e| ShippingError::Transport(e.to_string()))
     }
 }
@@ -800,6 +869,34 @@ mod tests {
             VerifyOutcome::Ok { records: 4 },
             "the WORM mirror re-verifies under the signing key"
         );
+    }
+
+    #[test]
+    fn worm_restart_replay_of_the_exact_tail_is_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary_path = dir.path().join("audit.jsonl");
+        let worm_path = dir.path().join("worm.jsonl");
+        let primary = crate::sink::FileAuditSink::open(&primary_path).expect("open primary");
+        let first = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=1", "DESTRUCTIVE"),
+            1,
+            crate::GENESIS_HASH,
+            "t1".to_owned(),
+            &key(),
+        );
+        {
+            let worm = WormFileForwarder::open_distinct(&worm_path, &primary).expect("open worm");
+            worm.forward(&first).expect("first delivery");
+            worm.flush().expect("durable first delivery");
+        }
+        {
+            let worm = WormFileForwarder::open_distinct(&worm_path, &primary).expect("reopen worm");
+            worm.forward(&first).expect("idempotent replay");
+            worm.flush().expect("flush replay");
+        }
+        let body = std::fs::read_to_string(&worm_path).expect("read worm");
+        let records = parse_jsonl(&body).expect("valid worm chain");
+        assert_eq!(records, vec![first], "replay must not append a duplicate");
     }
 
     #[test]
